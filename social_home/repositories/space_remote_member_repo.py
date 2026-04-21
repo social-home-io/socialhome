@@ -41,13 +41,18 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
     ) -> None: ...
 
     async def remove(
-        self, space_id: str, instance_id: str, user_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
+        user_id: str,
     ) -> None: ...
 
     async def list_for_space(self, space_id: str) -> list[SpaceRemoteMember]: ...
 
     async def list_for_user(
-        self, instance_id: str, user_id: str,
+        self,
+        instance_id: str,
+        user_id: str,
     ) -> list[SpaceRemoteMember]: ...
 
 
@@ -81,7 +86,10 @@ class SqliteSpaceRemoteMemberRepo:
         )
 
     async def remove(
-        self, space_id: str, instance_id: str, user_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
+        user_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM space_remote_members"
@@ -91,18 +99,18 @@ class SqliteSpaceRemoteMemberRepo:
 
     async def list_for_space(self, space_id: str) -> list[SpaceRemoteMember]:
         rows = await self._db.fetchall(
-            "SELECT * FROM space_remote_members WHERE space_id=?"
-            " ORDER BY joined_at",
+            "SELECT * FROM space_remote_members WHERE space_id=? ORDER BY joined_at",
             (space_id,),
         )
         return [_row(r) for r in rows_to_dicts(rows)]
 
     async def list_for_user(
-        self, instance_id: str, user_id: str,
+        self,
+        instance_id: str,
+        user_id: str,
     ) -> list[SpaceRemoteMember]:
         rows = await self._db.fetchall(
-            "SELECT * FROM space_remote_members"
-            " WHERE instance_id=? AND user_id=?",
+            "SELECT * FROM space_remote_members WHERE instance_id=? AND user_id=?",
             (instance_id, user_id),
         )
         return [_row(r) for r in rows_to_dicts(rows)]

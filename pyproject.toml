@@ -15,10 +15,6 @@ dependencies = [
     "python-multipart>=0.0.9",
     "jinja2>=3.1",
     "icalendar>=5.0",
-    # Federation WebRTC DataChannel transport (§4.2.3, §24.12). Primary
-    # SH-to-SH transport — webhook is fallback. Also required by the
-    # Global Federation Server (§24).
-    "libdatachannel>=0.21",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +42,16 @@ global-server = [
     "bcrypt>=4",                 # admin password hashing (spec §24.9)
     "qrcode[pil]>=7",            # public-landing QR code rendering
 ]
+# WebRTC DataChannel transport (§4.2.3, §24.12). The library isn't
+# published to PyPI under the ``libdatachannel`` name — installation
+# requires a wheel you build or fetch separately (see
+# documentation/crypto.md). Without this, the federation service
+# falls back to HTTPS webhook delivery, which is fully functional;
+# DataChannel is a latency optimisation, not a correctness gate.
+# Install with: pip install 'social-home[rtc]'
+rtc = [
+    "libdatachannel>=0.21",
+]
 
 [project.scripts]
 social-home-global-server = "social_home.global_server.server:main"
@@ -53,6 +59,13 @@ social-home-global-server = "social_home.global_server.server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# The ``pq`` optional extra pulls liboqs-python from a git tag — no
+# PyPI release under that name. Hatchling otherwise refuses direct
+# references in ``project.optional-dependencies``. Scoped to the
+# optional extra only; core install stays tag-based.
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

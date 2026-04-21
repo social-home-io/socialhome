@@ -24,13 +24,17 @@ async def test_update_location_spec_compliant_payload_returns_204(client):
     The DB row must carry the 4dp-truncated coordinates so the
     downstream realtime / federation fan-out sees the intended value.
     """
-    r = await client.post("/api/presence/location", json={
-        "username":   "admin",
-        "latitude":   52.37654321,
-        "longitude":  4.89567890,
-        "accuracy_m": 12.5,
-        "zone_name":  "home",
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "latitude": 52.37654321,
+            "longitude": 4.89567890,
+            "accuracy_m": 12.5,
+            "zone_name": "home",
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 204
 
     row = await client._db.fetchone(
@@ -48,24 +52,36 @@ async def test_update_location_spec_compliant_payload_returns_204(client):
 
 async def test_update_location_zone_name_home_derives_home_state(client):
     """zone_name='home' → state='home'."""
-    r = await client.post("/api/presence/location", json={
-        "username": "admin", "zone_name": "home",
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "zone_name": "home",
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 204
     row = await client._db.fetchone(
-        "SELECT state FROM presence WHERE username=?", ("admin",),
+        "SELECT state FROM presence WHERE username=?",
+        ("admin",),
     )
     assert row["state"] == "home"
 
 
 async def test_update_location_named_zone_derives_zone_state(client):
     """Any other non-empty zone_name → state='zone'."""
-    r = await client.post("/api/presence/location", json={
-        "username": "admin", "zone_name": "Makers Space",
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "zone_name": "Makers Space",
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 204
     row = await client._db.fetchone(
-        "SELECT state, zone_name FROM presence WHERE username=?", ("admin",),
+        "SELECT state, zone_name FROM presence WHERE username=?",
+        ("admin",),
     )
     assert row["state"] == "zone"
     assert row["zone_name"] == "Makers Space"
@@ -73,12 +89,18 @@ async def test_update_location_named_zone_derives_zone_state(client):
 
 async def test_update_location_null_zone_derives_away_state(client):
     """zone_name=null → state='away'."""
-    r = await client.post("/api/presence/location", json={
-        "username": "admin", "zone_name": None,
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "zone_name": None,
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 204
     row = await client._db.fetchone(
-        "SELECT state FROM presence WHERE username=?", ("admin",),
+        "SELECT state FROM presence WHERE username=?",
+        ("admin",),
     )
     assert row["state"] == "away"
 
@@ -90,25 +112,36 @@ async def test_update_location_explicit_state_overrides_derivation(client):
     of what zone_name implies. The ha-integration should not send this
     field — but tolerating it keeps operator tools simple.
     """
-    r = await client.post("/api/presence/location", json={
-        "username": "admin", "zone_name": "home", "state": "away",
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "zone_name": "home",
+            "state": "away",
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 204
     row = await client._db.fetchone(
-        "SELECT state FROM presence WHERE username=?", ("admin",),
+        "SELECT state FROM presence WHERE username=?",
+        ("admin",),
     )
     assert row["state"] == "away"
 
 
 async def test_update_location_accuracy_gate_nulls_coords(client):
     """accuracy_m > 500 nulls coordinates but keeps the zone name."""
-    r = await client.post("/api/presence/location", json={
-        "username":   "admin",
-        "latitude":   52.37,
-        "longitude":  4.89,
-        "accuracy_m": 750.0,
-        "zone_name":  "home",
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "latitude": 52.37,
+            "longitude": 4.89,
+            "accuracy_m": 750.0,
+            "zone_name": "home",
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 204
     row = await client._db.fetchone(
         "SELECT latitude, longitude, zone_name FROM presence WHERE username=?",
@@ -121,7 +154,11 @@ async def test_update_location_accuracy_gate_nulls_coords(client):
 
 async def test_update_location_missing_username_422(client):
     """A body without username is a client error — helpful for debugging."""
-    r = await client.post("/api/presence/location", json={
-        "zone_name": "home",
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "zone_name": "home",
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 422

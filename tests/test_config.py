@@ -77,12 +77,12 @@ def test_split_toml_core_and_platform():
 def test_platform_options_loaded_from_toml(tmp_path, monkeypatch):
     """[homeassistant] survives unchanged under config.platform_options."""
     toml_file = tmp_path / "social_home.toml"
-    toml_file.write_text(
-        '[homeassistant]\nai_task_entity_id = "ai_task.openai"\n'
-    )
+    toml_file.write_text('[homeassistant]\nai_task_entity_id = "ai_task.openai"\n')
     monkeypatch.setenv("SH_CONFIG", str(toml_file))
     cfg = Config.from_env()
-    assert cfg.platform_options["homeassistant"]["ai_task_entity_id"] == "ai_task.openai"
+    assert (
+        cfg.platform_options["homeassistant"]["ai_task_entity_id"] == "ai_task.openai"
+    )
 
 
 def test_malformed_toml_ignored(tmp_path, monkeypatch):
@@ -108,6 +108,7 @@ def test_xdg_default_paths():
 
 # ── HA credentials ────────────────────────────────────────────────────────
 
+
 def test_ha_url_default():
     """ha_url defaults to homeassistant.local:8123."""
     cfg = Config()
@@ -128,7 +129,7 @@ def test_ha_creds_from_toml(tmp_path, monkeypatch):
     """[homeassistant] url/token in TOML populate ha_url / ha_token."""
     toml_file = tmp_path / "social_home.toml"
     toml_file.write_text(
-        '[homeassistant]\n'
+        "[homeassistant]\n"
         'url = "http://ha.toml:8123"\n'
         'token = "toml-token"\n'
         'stt_entity_id = "stt.whisper"\n'

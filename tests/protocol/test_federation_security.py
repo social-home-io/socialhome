@@ -48,6 +48,7 @@ pytestmark = pytest.mark.security
 
 # ─── Test environment ────────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def fed(tmp_dir):
     """A FederationService wired against a real SQLite DB + KeyManager."""
@@ -62,25 +63,35 @@ async def fed(tmp_dir):
         (own_iid, own_kp.private_key.hex(), own_kp.public_key.hex(), "aa" * 32),
     )
 
-    fed_repo  = SqliteFederationRepo(db)
-    outbox    = SqliteOutboxRepo(db)
-    bus       = EventBus()
-    key_mgr   = KeyManager.from_data_dir(tmp_dir)
+    fed_repo = SqliteFederationRepo(db)
+    outbox = SqliteOutboxRepo(db)
+    bus = EventBus()
+    key_mgr = KeyManager.from_data_dir(tmp_dir)
 
     svc = FederationService(
-        db=db, federation_repo=fed_repo, outbox_repo=outbox,
-        key_manager=key_mgr, bus=bus,
+        db=db,
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=key_mgr,
+        bus=bus,
         own_instance_id=own_iid,
         own_identity_seed=own_kp.private_key,
         own_identity_pk=own_kp.public_key,
     )
     await svc.warm_replay_cache()
-    yield {"svc": svc, "fed_repo": fed_repo, "db": db, "key_mgr": key_mgr,
-           "own_iid": own_iid, "own_kp": own_kp}
+    yield {
+        "svc": svc,
+        "fed_repo": fed_repo,
+        "db": db,
+        "key_mgr": key_mgr,
+        "own_iid": own_iid,
+        "own_kp": own_kp,
+    }
     await db.shutdown()
 
 
 # ─── §24.11 inbound pipeline ─────────────────────────────────────────────
+
 
 async def test_inbound_rejects_unparseable_json(fed):
     with pytest.raises(ValueError):
@@ -117,6 +128,7 @@ async def test_inbound_rejects_unknown_webhook_id(fed):
 
 # ─── §25.6.2 audit fixes ─────────────────────────────────────────────────
 
+
 async def test_s2_sync_id_is_high_entropy():
     """S-2: 128-bit URL-safe token — no collisions in 1000 samples."""
     samples = {new_sync_id() for _ in range(1000)}
@@ -137,13 +149,17 @@ def test_s7_ice_candidate_validation_rejects_bad_prefix():
 async def test_s13_create_answer_is_distinct_from_set_answer():
     """S-13: requester's create_answer is NOT the provider's set_answer."""
     _requester = SyncRtcSession(
-        sync_id="x", space_id="sp1",
-        requester_instance_id="r", provider_instance_id="p",
+        sync_id="x",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
         role="requester",
     )
     provider = SyncRtcSession(
-        sync_id="y", space_id="sp1",
-        requester_instance_id="r", provider_instance_id="p",
+        sync_id="y",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
         role="provider",
     )
     with pytest.raises(RuntimeError):
@@ -160,25 +176,32 @@ async def test_s14_answer_origin_guard():
 
     mgr = SyncSessionManager(_R())
     await mgr.begin_session(
-        sync_id="s1", space_id="sp1",
-        requester_instance_id="alice", provider_instance_id="me",
+        sync_id="s1",
+        space_id="sp1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
     )
     ok = await mgr.apply_answer(
-        sync_id="s1", sdp_answer="v=0\r\n", from_instance="hostile",
+        sync_id="s1",
+        sdp_answer="v=0\r\n",
+        from_instance="hostile",
     )
     assert ok is False
 
 
 async def test_s15_relay_fallback_uses_new_sync_begin():
     """S-15: trigger_relay_sync emits SPACE_SYNC_BEGIN with prefer_direct=False."""
+
     class _R:
         async def get_instance(self, iid):
             return None
 
     mgr = SyncSessionManager(_R())
     await mgr.begin_session(
-        sync_id="s1", space_id="sp1",
-        requester_instance_id="alice", provider_instance_id="me",
+        sync_id="s1",
+        space_id="sp1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
         sync_mode="initial",
     )
     decision = await mgr.trigger_relay_sync("s1")
@@ -189,8 +212,10 @@ async def test_s15_relay_fallback_uses_new_sync_begin():
 async def test_s16_sync_mode_is_a_formal_field():
     """S-16: sync_mode must be a real constructor field, not a getattr."""
     s = SyncRtcSession(
-        sync_id="x", space_id="sp1",
-        requester_instance_id="r", provider_instance_id="p",
+        sync_id="x",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
         sync_mode="full",
     )
     assert s.sync_mode == "full"
@@ -199,14 +224,17 @@ async def test_s16_sync_mode_is_a_formal_field():
 async def test_s16_invalid_sync_mode_rejected():
     with pytest.raises(ValueError):
         SyncRtcSession(
-            sync_id="x", space_id="sp1",
-            requester_instance_id="r", provider_instance_id="p",
+            sync_id="x",
+            space_id="sp1",
+            requester_instance_id="r",
+            provider_instance_id="p",
             sync_mode="ultra-secret-mode",
         )
 
 
 async def test_s17_instance_sync_status_unknown_sender_silently_ignored():
     """S-17: spaces from an unknown peer are dropped — no abuse vector."""
+
     class _R:
         async def get_instance(self, iid):
             return None
@@ -221,14 +249,19 @@ async def test_s17_instance_sync_status_unknown_sender_silently_ignored():
 
 async def test_s17_instance_sync_status_caps_payload_size():
     """S-17: ≤ 100 spaces per payload — reject larger."""
+
     class _R:
         async def get_instance(self, iid):
             return RemoteInstance(
-                id="alice", display_name="alice",
+                id="alice",
+                display_name="alice",
                 remote_identity_pk="aa" * 32,
-                key_self_to_remote="x", key_remote_to_self="x",
-                remote_webhook_url="https://x", local_webhook_id="wh",
-                status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+                key_self_to_remote="x",
+                key_remote_to_self="x",
+                remote_webhook_url="https://x",
+                local_webhook_id="wh",
+                status=PairingStatus.CONFIRMED,
+                source=InstanceSource.MANUAL,
             )
 
     mgr = SyncSessionManager(_R())
@@ -241,10 +274,14 @@ async def test_s17_instance_sync_status_caps_payload_size():
 
 # ─── §25.8.21 encryption-first ───────────────────────────────────────────
 
+
 async def test_outbound_envelope_has_no_plaintext_payload(fed):
     """Encryption-first: send_event must NEVER include a plaintext payload."""
     svc, fed_repo, key_mgr, own_iid = (
-        fed["svc"], fed["fed_repo"], fed["key_mgr"], fed["own_iid"],
+        fed["svc"],
+        fed["fed_repo"],
+        fed["key_mgr"],
+        fed["own_iid"],
     )
     # Set up a paired peer.
     peer_kp = generate_identity_keypair()
@@ -252,11 +289,14 @@ async def test_outbound_envelope_has_no_plaintext_payload(fed):
     wrapped = key_mgr.encrypt(session_key)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
         remote_webhook_url="https://nonexistent.invalid/wh",
         local_webhook_id="wh-peer",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
 
@@ -297,6 +337,7 @@ async def test_outbound_envelope_has_no_plaintext_payload(fed):
 
 # ─── federation.sdp_signing ─────────────────────────────────────────────
 
+
 def test_signed_sdp_roundtrip():
     """Identity-signed SDPs verify against the same key."""
     kp = generate_identity_keypair()
@@ -309,7 +350,9 @@ def test_signed_sdp_rejects_tampered_sdp():
     kp = generate_identity_keypair()
     signed = sign_rtc_offer("v=0\r\norig\r\n", "offer", identity_seed=kp.private_key)
     tampered = type(signed)(
-        sdp="v=0\r\nMITM\r\n", sdp_type=signed.sdp_type, signature=signed.signature,
+        sdp="v=0\r\nMITM\r\n",
+        sdp_type=signed.sdp_type,
+        signature=signed.signature,
     )
     assert verify_rtc_offer(tampered, remote_public_key=kp.public_key) is False
 

@@ -52,8 +52,11 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-def _space(space_id: str = "sp-1", name: str = "TestSpace",
-           space_type: SpaceType = SpaceType.PRIVATE) -> Space:
+def _space(
+    space_id: str = "sp-1",
+    name: str = "TestSpace",
+    space_type: SpaceType = SpaceType.PRIVATE,
+) -> Space:
     return Space(
         id=space_id,
         name=name,
@@ -67,7 +70,9 @@ def _space(space_id: str = "sp-1", name: str = "TestSpace",
     )
 
 
-def _member(space_id: str, user_id: str = "uid-alice", role: str = "member") -> SpaceMember:
+def _member(
+    space_id: str, user_id: str = "uid-alice", role: str = "member"
+) -> SpaceMember:
     return SpaceMember(
         space_id=space_id,
         user_id=user_id,
@@ -77,6 +82,7 @@ def _member(space_id: str, user_id: str = "uid-alice", role: str = "member") -> 
 
 
 # ── Spaces ─────────────────────────────────────────────────────────────────
+
 
 async def test_save_and_get_space(env):
     """save persists a space; get retrieves it."""
@@ -140,6 +146,7 @@ async def test_increment_config_sequence_concurrent(env):
 
 # ── Members ────────────────────────────────────────────────────────────────
 
+
 async def test_save_and_get_member(env):
     """save_member persists; get_member retrieves a single member row."""
     await env.repo.save(_space("sp-mem"))
@@ -187,6 +194,7 @@ async def test_set_role_invalid_raises(env):
 
 # ── Space instances ────────────────────────────────────────────────────────
 
+
 async def test_add_and_list_space_instances(env):
     """add_space_instance adds an instance link; list_member_instances lists them."""
     await env.repo.save(_space("sp-inst"))
@@ -197,6 +205,7 @@ async def test_add_and_list_space_instances(env):
 
 
 # ── Bans ───────────────────────────────────────────────────────────────────
+
 
 async def test_ban_and_is_banned(env):
     """ban_member bans a user; is_banned returns True."""
@@ -227,6 +236,7 @@ async def test_list_bans(env):
 
 # ── Invite tokens ──────────────────────────────────────────────────────────
 
+
 async def test_create_and_consume_invite_token(env):
     """create_invite_token produces a token that can be consumed once."""
     await env.repo.save(_space("sp-tok"))
@@ -254,11 +264,14 @@ async def test_consume_missing_token_returns_none(env):
 
 # ── Invitations ────────────────────────────────────────────────────────────
 
+
 async def test_save_and_get_invitation(env):
     """save_invitation creates an invitation; get_invitation retrieves it."""
     await env.repo.save(_space("sp-inv"))
     inv_id = await env.repo.save_invitation(
-        "sp-inv", "uid-bob", "uid-alice",
+        "sp-inv",
+        "uid-bob",
+        "uid-alice",
     )
     inv = await env.repo.get_invitation(inv_id)
     assert inv is not None
@@ -276,6 +289,7 @@ async def test_update_invitation_status(env):
 
 # ── Sidebar pins ───────────────────────────────────────────────────────────
 
+
 async def test_pin_and_unpin_sidebar(env):
     """pin_sidebar adds; unpin_sidebar removes a pinned space."""
     await env.repo.save(_space("sp-pin"))
@@ -286,6 +300,7 @@ async def test_pin_and_unpin_sidebar(env):
 
 
 # ── Aliases ────────────────────────────────────────────────────────────────
+
 
 async def test_set_and_get_space_alias(env):
     """set_space_alias stores a personal alias; get_space_alias retrieves it."""

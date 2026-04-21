@@ -61,6 +61,7 @@ class GfsBaseView(web.View):
             return fwd.split(",")[0].strip()
         peer = (
             self.request.transport.get_extra_info("peername")
-            if self.request.transport else None
+            if self.request.transport
+            else None
         )
         return str(peer[0]) if peer else "unknown"

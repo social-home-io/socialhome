@@ -44,7 +44,7 @@ class SupervisorClient:
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self._token}",
-            "Content-Type":  "application/json",
+            "Content-Type": "application/json",
         }
 
     async def get_owner_username(self) -> str | None:
@@ -68,7 +68,8 @@ class SupervisorClient:
         users = data.get("data", data).get("users", [])
         owner = next(
             (
-                u for u in users
+                u
+                for u in users
                 if u.get("is_owner") and not u.get("system_generated", False)
             ),
             None,
@@ -94,7 +95,8 @@ class SupervisorClient:
                 if 200 <= resp.status < 300:
                     return True
                 log.warning(
-                    "supervisor: discovery push returned HTTP %d", resp.status,
+                    "supervisor: discovery push returned HTTP %d",
+                    resp.status,
                 )
                 return False
         except aiohttp.ClientError as exc:

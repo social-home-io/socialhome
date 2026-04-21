@@ -58,9 +58,15 @@ async def test_bazaar_listing_lifecycle(env):
     await _seed_post(env.db, pid)
 
     listing = BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.FIXED, title="Old bike", end_time="2099-01-01T00:00:00",
-        currency="EUR", status=BazaarStatus.ACTIVE, created_at=None, price=5000,
+        post_id=pid,
+        seller_user_id="u1",
+        mode=BazaarMode.FIXED,
+        title="Old bike",
+        end_time="2099-01-01T00:00:00",
+        currency="EUR",
+        status=BazaarStatus.ACTIVE,
+        created_at=None,
+        price=5000,
     )
     saved = await env.bazaar_repo.save_listing(listing)
     assert saved.title == "Old bike"
@@ -82,9 +88,15 @@ async def test_bazaar_bid_state_machine(env):
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
     listing = BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.OFFER, title="Guitar", end_time="2099-01-01T00:00:00",
-        currency="USD", status=BazaarStatus.ACTIVE, created_at=None, price=20000,
+        post_id=pid,
+        seller_user_id="u1",
+        mode=BazaarMode.OFFER,
+        title="Guitar",
+        end_time="2099-01-01T00:00:00",
+        currency="USD",
+        status=BazaarStatus.ACTIVE,
+        created_at=None,
+        price=20000,
     )
     await env.bazaar_repo.save_listing(listing)
 
@@ -113,9 +125,15 @@ async def test_bazaar_reject_offer(env):
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
     listing = BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.OFFER, title="Camera", end_time="2099-01-01T00:00:00",
-        currency="GBP", status=BazaarStatus.ACTIVE, created_at=None, price=30000,
+        post_id=pid,
+        seller_user_id="u1",
+        mode=BazaarMode.OFFER,
+        title="Camera",
+        end_time="2099-01-01T00:00:00",
+        currency="GBP",
+        status=BazaarStatus.ACTIVE,
+        created_at=None,
+        price=30000,
     )
     await env.bazaar_repo.save_listing(listing)
 
@@ -143,11 +161,19 @@ async def test_bazaar_expired_and_cancelled(env):
 
     past_end = "2000-01-01T00:00:00"
     for pid, end in ((pid1, past_end), (pid2, "2099-01-01T00:00:00")):
-        await env.bazaar_repo.save_listing(BazaarListing(
-            post_id=pid, seller_user_id="u1",
-            mode=BazaarMode.FIXED, title="Item", end_time=end,
-            currency="EUR", status=BazaarStatus.ACTIVE, created_at=None, price=100,
-        ))
+        await env.bazaar_repo.save_listing(
+            BazaarListing(
+                post_id=pid,
+                seller_user_id="u1",
+                mode=BazaarMode.FIXED,
+                title="Item",
+                end_time=end,
+                currency="EUR",
+                status=BazaarStatus.ACTIVE,
+                created_at=None,
+                price=100,
+            )
+        )
 
     expired = await env.bazaar_repo.list_expired()
     expired_ids = {lst.post_id for lst in expired}
@@ -166,9 +192,15 @@ async def test_bazaar_currency_validation(env):
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
     listing = BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.FIXED, title="Thing", end_time="2099-01-01T00:00:00",
-        currency="FAKE", status=BazaarStatus.ACTIVE, created_at=None, price=100,
+        post_id=pid,
+        seller_user_id="u1",
+        mode=BazaarMode.FIXED,
+        title="Thing",
+        end_time="2099-01-01T00:00:00",
+        currency="FAKE",
+        status=BazaarStatus.ACTIVE,
+        created_at=None,
+        price=100,
     )
     with pytest.raises(ValueError):
         await env.bazaar_repo.save_listing(listing)
@@ -176,25 +208,36 @@ async def test_bazaar_currency_validation(env):
 
 # ─── §23.15 auction anti-snipe ─────────────────────────────────────────────
 
+
 async def test_auction_antisnipe_extends_end_time(env):
     """Bid within 5 min of close pushes the close-time +5 min."""
     from datetime import datetime, timedelta, timezone
+
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
     # Auction that ends in 60 seconds — squarely inside the snipe window.
-    close_soon = (
-        datetime.now(timezone.utc) + timedelta(seconds=60)
-    ).isoformat()
-    await env.bazaar_repo.save_listing(BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.AUCTION, title="Painting",
-        end_time=close_soon, currency="EUR",
-        status=BazaarStatus.ACTIVE, created_at=None,
-        start_price=100, step_price=10,
-    ))
-    await env.bazaar_repo.place_bid(new_bid(
-        listing_post_id=pid, bidder_user_id="u2", amount=110,
-    ))
+    close_soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    await env.bazaar_repo.save_listing(
+        BazaarListing(
+            post_id=pid,
+            seller_user_id="u1",
+            mode=BazaarMode.AUCTION,
+            title="Painting",
+            end_time=close_soon,
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=None,
+            start_price=100,
+            step_price=10,
+        )
+    )
+    await env.bazaar_repo.place_bid(
+        new_bid(
+            listing_post_id=pid,
+            bidder_user_id="u2",
+            amount=110,
+        )
+    )
     listing = await env.bazaar_repo.get_listing(pid)
     new_end = datetime.fromisoformat(
         listing.end_time.replace("Z", "+00:00"),
@@ -208,21 +251,31 @@ async def test_auction_antisnipe_extends_end_time(env):
 async def test_auction_no_extend_outside_snipe_window(env):
     """Bid when >5 min remain leaves ``end_time`` untouched."""
     from datetime import datetime, timedelta, timezone
+
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
-    original_end = (
-        datetime.now(timezone.utc) + timedelta(hours=1)
-    ).isoformat()
-    await env.bazaar_repo.save_listing(BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.AUCTION, title="Vase",
-        end_time=original_end, currency="EUR",
-        status=BazaarStatus.ACTIVE, created_at=None,
-        start_price=100, step_price=10,
-    ))
-    await env.bazaar_repo.place_bid(new_bid(
-        listing_post_id=pid, bidder_user_id="u2", amount=110,
-    ))
+    original_end = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    await env.bazaar_repo.save_listing(
+        BazaarListing(
+            post_id=pid,
+            seller_user_id="u1",
+            mode=BazaarMode.AUCTION,
+            title="Vase",
+            end_time=original_end,
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=None,
+            start_price=100,
+            step_price=10,
+        )
+    )
+    await env.bazaar_repo.place_bid(
+        new_bid(
+            listing_post_id=pid,
+            bidder_user_id="u2",
+            amount=110,
+        )
+    )
     listing = await env.bazaar_repo.get_listing(pid)
     assert listing.end_time == original_end
 
@@ -230,20 +283,29 @@ async def test_auction_no_extend_outside_snipe_window(env):
 async def test_non_auction_modes_do_not_extend(env):
     """Only AUCTION listings snipe-extend. FIXED / OFFER stay put."""
     from datetime import datetime, timedelta, timezone
+
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
-    close_soon = (
-        datetime.now(timezone.utc) + timedelta(seconds=60)
-    ).isoformat()
-    await env.bazaar_repo.save_listing(BazaarListing(
-        post_id=pid, seller_user_id="u1",
-        mode=BazaarMode.OFFER, title="Clock",
-        end_time=close_soon, currency="EUR",
-        status=BazaarStatus.ACTIVE, created_at=None,
-        price=100,
-    ))
-    await env.bazaar_repo.place_bid(new_bid(
-        listing_post_id=pid, bidder_user_id="u2", amount=100,
-    ))
+    close_soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    await env.bazaar_repo.save_listing(
+        BazaarListing(
+            post_id=pid,
+            seller_user_id="u1",
+            mode=BazaarMode.OFFER,
+            title="Clock",
+            end_time=close_soon,
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=None,
+            price=100,
+        )
+    )
+    await env.bazaar_repo.place_bid(
+        new_bid(
+            listing_post_id=pid,
+            bidder_user_id="u2",
+            amount=100,
+        )
+    )
     listing = await env.bazaar_repo.get_listing(pid)
     assert listing.end_time == close_soon

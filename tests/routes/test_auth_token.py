@@ -6,7 +6,6 @@ from __future__ import annotations
 from social_home.platform.standalone import StandaloneAdapter
 
 
-
 async def _seed_platform_user(client, username: str, password: str):
     hashed = StandaloneAdapter.hash_password(password)
     await client._db.enqueue(
@@ -23,7 +22,8 @@ async def test_token_missing_credentials_422(client):
 
 async def test_token_bad_json_400(client):
     r = await client.post(
-        "/api/auth/token", data="oops",
+        "/api/auth/token",
+        data="oops",
         headers={"Content-Type": "application/json"},
     )
     assert r.status == 400
@@ -66,12 +66,17 @@ async def test_token_is_stored_as_sha256(client):
     )
     data = await r.json()
     row = await client._db.fetchone(
-        "SELECT token_hash FROM platform_tokens WHERE username=?", ("alice",),
+        "SELECT token_hash FROM platform_tokens WHERE username=?",
+        ("alice",),
     )
     import hashlib
-    assert row["token_hash"] == hashlib.sha256(
-        data["token"].encode("utf-8"),
-    ).hexdigest()
+
+    assert (
+        row["token_hash"]
+        == hashlib.sha256(
+            data["token"].encode("utf-8"),
+        ).hexdigest()
+    )
 
 
 def test_hash_password_produces_scrypt_envelope():
@@ -83,7 +88,7 @@ def test_hash_password_produces_scrypt_envelope():
 def test_verify_password_roundtrip():
     h = StandaloneAdapter.hash_password("secret")
     assert StandaloneAdapter._verify_password("secret", h) is True
-    assert StandaloneAdapter._verify_password("nope",   h) is False
+    assert StandaloneAdapter._verify_password("nope", h) is False
 
 
 def test_verify_password_rejects_non_scrypt_stored():
@@ -93,6 +98,7 @@ def test_verify_password_rejects_non_scrypt_stored():
 async def test_auth_token_rate_limit_returns_429_after_budget(client):
     """§25.7 — a 6th login attempt from the same IP returns 429."""
     from social_home.routes.users import AUTH_TOKEN_RATE_LIMIT
+
     # Burn the budget with bad credentials — all should 401, then 429.
     for _ in range(AUTH_TOKEN_RATE_LIMIT):
         r = await client.post(

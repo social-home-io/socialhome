@@ -61,13 +61,16 @@ class PrivateSpaceInviteHandler:
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry  # noqa: SLF001
         registry.register(
-            FederationEventType.SPACE_PRIVATE_INVITE, self._on_invite,
+            FederationEventType.SPACE_PRIVATE_INVITE,
+            self._on_invite,
         )
         registry.register(
-            FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT, self._on_accept,
+            FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
+            self._on_accept,
         )
         registry.register(
-            FederationEventType.SPACE_PRIVATE_INVITE_DECLINE, self._on_decline,
+            FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
+            self._on_decline,
         )
         registry.register(
             FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
@@ -98,15 +101,15 @@ class PrivateSpaceInviteHandler:
             remote_instance_id=event.from_instance,
             remote_user_id=invitee_user_id,
             invite_token=invite_token,
-            space_display_hint=(
-                str(display_hint) if display_hint else None
-            ),
+            space_display_hint=(str(display_hint) if display_hint else None),
         )
-        await self._bus.publish(RemoteSpaceInviteReceived(
-            space_id=space_id,
-            inviter_user_id=inviter_user_id,
-            invitee_user_id=invitee_user_id,
-        ))
+        await self._bus.publish(
+            RemoteSpaceInviteReceived(
+                space_id=space_id,
+                inviter_user_id=inviter_user_id,
+                invitee_user_id=invitee_user_id,
+            )
+        )
 
     async def _on_accept(self, event: "FederationEvent") -> None:
         """Our peer accepted the invite we sent — seat them as a
@@ -133,13 +136,16 @@ class PrivateSpaceInviteHandler:
             display_name=str(invitee_display) if invitee_display else None,
         )
         await self._space_repo.update_invitation_status(
-            invite["id"], "accepted",
+            invite["id"],
+            "accepted",
         )
-        await self._bus.publish(RemoteSpaceInviteAccepted(
-            space_id=invite["space_id"],
-            instance_id=event.from_instance,
-            invitee_user_id=invitee_user_id,
-        ))
+        await self._bus.publish(
+            RemoteSpaceInviteAccepted(
+                space_id=invite["space_id"],
+                instance_id=event.from_instance,
+                invitee_user_id=invitee_user_id,
+            )
+        )
 
     async def _on_decline(self, event: "FederationEvent") -> None:
         p = event.payload
@@ -150,13 +156,16 @@ class PrivateSpaceInviteHandler:
         if invite is None:
             return
         await self._space_repo.update_invitation_status(
-            invite["id"], "declined",
+            invite["id"],
+            "declined",
         )
-        await self._bus.publish(RemoteSpaceInviteDeclined(
-            space_id=invite["space_id"],
-            instance_id=event.from_instance,
-            invitee_user_id=str(p.get("invitee_user_id") or ""),
-        ))
+        await self._bus.publish(
+            RemoteSpaceInviteDeclined(
+                space_id=invite["space_id"],
+                instance_id=event.from_instance,
+                invitee_user_id=str(p.get("invitee_user_id") or ""),
+            )
+        )
 
     async def _on_member_removed(self, event: "FederationEvent") -> None:
         """The host removed us from a private space. Stop expecting new
@@ -167,10 +176,14 @@ class PrivateSpaceInviteHandler:
         if not space_id or not user_id:
             return
         await self._remote_members.remove(
-            space_id, event.from_instance, user_id,
+            space_id,
+            event.from_instance,
+            user_id,
         )
-        await self._bus.publish(RemoteSpaceMemberRemoved(
-            space_id=space_id,
-            instance_id=event.from_instance,
-            user_id=user_id,
-        ))
+        await self._bus.publish(
+            RemoteSpaceMemberRemoved(
+                space_id=space_id,
+                instance_id=event.from_instance,
+                user_id=user_id,
+            )
+        )

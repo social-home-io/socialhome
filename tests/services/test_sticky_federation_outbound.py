@@ -22,7 +22,12 @@ class _FakeFederationService:
         self.sent: list[tuple[str, FederationEventType, dict, str | None]] = []
 
     async def send_event(
-        self, *, to_instance_id, event_type, payload, space_id=None,
+        self,
+        *,
+        to_instance_id,
+        event_type,
+        payload,
+        space_id=None,
     ):
         self.sent.append((to_instance_id, event_type, payload, space_id))
         return None
@@ -40,12 +45,16 @@ class _FakeSpaceRepo:
 def env():
     bus = EventBus()
     fed = _FakeFederationService()
-    repo = _FakeSpaceRepo({
-        "sp-A": ["own-inst", "peer-1", "peer-2"],
-        "sp-B": ["peer-3"],
-    })
+    repo = _FakeSpaceRepo(
+        {
+            "sp-A": ["own-inst", "peer-1", "peer-2"],
+            "sp-B": ["peer-3"],
+        }
+    )
     out = StickyFederationOutbound(
-        bus=bus, federation_service=fed, space_repo=repo,
+        bus=bus,
+        federation_service=fed,
+        space_repo=repo,
     )
     out.wire()
     return bus, fed
@@ -53,19 +62,33 @@ def env():
 
 async def test_household_sticky_is_not_federated(env):
     bus, fed = env
-    await bus.publish(StickyCreated(
-        sticky_id="s1", space_id=None, author="u", content="x",
-        color="#FFF9B1", position_x=0, position_y=0,
-    ))
+    await bus.publish(
+        StickyCreated(
+            sticky_id="s1",
+            space_id=None,
+            author="u",
+            content="x",
+            color="#FFF9B1",
+            position_x=0,
+            position_y=0,
+        )
+    )
     assert fed.sent == []
 
 
 async def test_space_sticky_fanouts_to_peers_excluding_self(env):
     bus, fed = env
-    await bus.publish(StickyCreated(
-        sticky_id="s1", space_id="sp-A", author="u", content="x",
-        color="#FFF9B1", position_x=10, position_y=20,
-    ))
+    await bus.publish(
+        StickyCreated(
+            sticky_id="s1",
+            space_id="sp-A",
+            author="u",
+            content="x",
+            color="#FFF9B1",
+            position_x=10,
+            position_y=20,
+        )
+    )
     # Fan-out to every peer that isn't us.
     recipients = [r[0] for r in fed.sent]
     assert recipients == ["peer-1", "peer-2"]
@@ -82,10 +105,16 @@ async def test_space_sticky_fanouts_to_peers_excluding_self(env):
 
 async def test_sticky_updated_uses_update_event_type(env):
     bus, fed = env
-    await bus.publish(StickyUpdated(
-        sticky_id="s1", space_id="sp-B", content="y",
-        color="#B3FFB3", position_x=5, position_y=5,
-    ))
+    await bus.publish(
+        StickyUpdated(
+            sticky_id="s1",
+            space_id="sp-B",
+            content="y",
+            color="#B3FFB3",
+            position_x=5,
+            position_y=5,
+        )
+    )
     assert [r[1] for r in fed.sent] == [FederationEventType.SPACE_STICKY_UPDATED]
     assert fed.sent[0][0] == "peer-3"
 

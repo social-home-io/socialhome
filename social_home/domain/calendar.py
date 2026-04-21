@@ -16,9 +16,9 @@ from datetime import datetime
 class Calendar:
     id: str
     name: str
-    color: str                           # hex, e.g. "#4a90e2"
+    color: str  # hex, e.g. "#4a90e2"
     owner_username: str
-    calendar_type: str = "personal"      # "personal" | "space"
+    calendar_type: str = "personal"  # "personal" | "space"
 
 
 @dataclass(slots=True, frozen=True)
@@ -28,12 +28,12 @@ class CalendarEvent:
     summary: str
     start: datetime
     end: datetime
-    created_by: str                      # user_id
+    created_by: str  # user_id
 
     description: str | None = None
     all_day: bool = False
-    attendees: tuple[str, ...] = ()      # user_ids
-    mirrored_from: str | None = None     # source event id if this is a mirror
+    attendees: tuple[str, ...] = ()  # user_ids
+    mirrored_from: str | None = None  # source event id if this is a mirror
 
     #: RFC 5545 ``RRULE`` string (e.g. ``FREQ=WEEKLY;BYDAY=MO,WE``).
     #: ``None`` for one-off events. When set, ``start`` / ``end`` define
@@ -74,8 +74,8 @@ class CalendarEventUpdate:
 class RSVPStatus:
     """Canonical RSVP status strings (see migration 0024_add_calendar_rsvp)."""
 
-    GOING    = "going"
-    MAYBE    = "maybe"
+    GOING = "going"
+    MAYBE = "maybe"
     DECLINED = "declined"
 
     ALL = frozenset({GOING, MAYBE, DECLINED})
@@ -85,5 +85,5 @@ class RSVPStatus:
 class CalendarRSVP:
     event_id: str
     user_id: str
-    status: str                          # one of RSVPStatus.ALL
-    updated_at: str                      # ISO-8601
+    status: str  # one of RSVPStatus.ALL
+    updated_at: str  # ISO-8601

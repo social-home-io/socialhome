@@ -42,6 +42,7 @@ class _FakeRepo:
 def _kek() -> KeyManager:
     import tempfile
     from pathlib import Path
+
     return KeyManager.from_data_dir(Path(tempfile.mkdtemp()))
 
 
@@ -49,7 +50,9 @@ async def test_initiate_hybrid_carries_pq_pk_in_qr_payload():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(
-        repo, _kek(), kp.public_key,
+        repo,
+        _kek(),
+        kp.public_key,
         own_pq_pk=b"FAKE-PQ-PK",
         own_sig_suite="ed25519+mldsa65",
     )
@@ -73,8 +76,11 @@ async def test_accept_negotiates_hybrid_when_both_sides_support_it():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(
-        repo, _kek(), kp.public_key,
-        own_pq_pk=b"LOCAL-PQ", own_sig_suite="ed25519+mldsa65",
+        repo,
+        _kek(),
+        kp.public_key,
+        own_pq_pk=b"LOCAL-PQ",
+        own_sig_suite="ed25519+mldsa65",
     )
     # Craft a QR scan payload from a hybrid peer.
     peer_kp = generate_identity_keypair()
@@ -101,8 +107,11 @@ async def test_accept_falls_back_to_classical_when_peer_is_classical():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(
-        repo, _kek(), kp.public_key,
-        own_pq_pk=b"LOCAL-PQ", own_sig_suite="ed25519+mldsa65",
+        repo,
+        _kek(),
+        kp.public_key,
+        own_pq_pk=b"LOCAL-PQ",
+        own_sig_suite="ed25519+mldsa65",
     )
     peer_kp = generate_identity_keypair()
     peer_dh = generate_x25519_keypair()
@@ -126,7 +135,9 @@ async def test_accept_falls_back_when_local_is_classical_peer_hybrid():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(
-        repo, _kek(), kp.public_key,
+        repo,
+        _kek(),
+        kp.public_key,
         own_sig_suite="ed25519",
     )
     peer_kp = generate_identity_keypair()
@@ -154,22 +165,28 @@ async def test_confirm_preserves_pq_material():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(
-        repo, _kek(), kp.public_key,
-        own_pq_pk=b"LOCAL-PQ", own_sig_suite="ed25519+mldsa65",
+        repo,
+        _kek(),
+        kp.public_key,
+        own_pq_pk=b"LOCAL-PQ",
+        own_sig_suite="ed25519+mldsa65",
     )
     peer_kp = generate_identity_keypair()
     peer_dh = generate_x25519_keypair()
-    accept_result = await coord.accept({
-        "token": "tok-4",
-        "identity_pk": peer_kp.public_key.hex(),
-        "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "https://peer/wh",
-        "sig_suite": "ed25519+mldsa65",
-        "pq_algorithm": "mldsa65",
-        "pq_identity_pk": "cc" * 32,
-    })
+    accept_result = await coord.accept(
+        {
+            "token": "tok-4",
+            "identity_pk": peer_kp.public_key.hex(),
+            "dh_pk": peer_dh.public_key.hex(),
+            "webhook_url": "https://peer/wh",
+            "sig_suite": "ed25519+mldsa65",
+            "pq_algorithm": "mldsa65",
+            "pq_identity_pk": "cc" * 32,
+        }
+    )
     confirmed = await coord.confirm(
-        "tok-4", accept_result["verification_code"],
+        "tok-4",
+        accept_result["verification_code"],
     )
     assert confirmed.sig_suite == "ed25519+mldsa65"
     assert confirmed.remote_pq_algorithm == "mldsa65"

@@ -17,7 +17,8 @@ from social_home.global_server.server import create_gfs_app
 
 def _test_config(tmp_dir):
     return GfsConfig(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1",
+        port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
         instance_id="gfs-test",
@@ -31,8 +32,10 @@ async def client(tmp_dir):
         # Seed the admin password via the already-wired admin repo —
         # equivalent to `social-home-global-server --set-password`.
         from social_home.global_server.app_keys import gfs_admin_repo_key
+
         await app[gfs_admin_repo_key].set_config(
-            "admin_password_hash", hash_password("test-pw-123"),
+            "admin_password_hash",
+            hash_password("test-pw-123"),
         )
         yield tc
 

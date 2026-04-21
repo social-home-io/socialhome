@@ -18,9 +18,9 @@ from enum import StrEnum
 
 
 class TaskStatus(StrEnum):
-    TODO        = "todo"
+    TODO = "todo"
     IN_PROGRESS = "in_progress"
-    DONE        = "done"
+    DONE = "done"
 
 
 @dataclass(slots=True, frozen=True)
@@ -45,7 +45,7 @@ class RecurrenceRule:
 class TaskList:
     id: str
     name: str
-    created_by: str                      # user_id
+    created_by: str  # user_id
 
 
 @dataclass(slots=True, frozen=True)
@@ -55,13 +55,13 @@ class Task:
     title: str
     status: TaskStatus
     position: int
-    created_by: str                      # user_id
+    created_by: str  # user_id
     created_at: datetime
     updated_at: datetime
 
     description: str | None = None
     due_date: date | None = None
-    assignees: tuple[str, ...] = ()      # user_ids
+    assignees: tuple[str, ...] = ()  # user_ids
     recurrence: RecurrenceRule | None = None
     recurrence_parent_id: str | None = None
 

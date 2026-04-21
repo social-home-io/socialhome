@@ -33,6 +33,7 @@ async def _seed_gfs(client, gfs_id: str = "gfs-1", *, status: str = "active"):
 
 # ─── GET /api/gfs/connections ────────────────────────────────────────
 
+
 async def test_list_requires_auth(client):
     r = await client.get("/api/gfs/connections")
     assert r.status == 401
@@ -56,6 +57,7 @@ async def test_list_returns_active_connections(client):
 
 
 # ─── POST /api/gfs/connections (pair) ────────────────────────────────
+
 
 async def test_pair_requires_admin(client):
     db = client._db
@@ -88,10 +90,12 @@ async def test_pair_missing_fields_returns_422(client):
 
 # ─── GET /api/gfs/connections/{id} ──────────────────────────────────
 
+
 async def test_detail_returns_connection(client):
     await _seed_gfs(client, "gfs-1")
     r = await client.get(
-        "/api/gfs/connections/gfs-1", headers=_auth(client._tok),
+        "/api/gfs/connections/gfs-1",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.json()
@@ -101,12 +105,14 @@ async def test_detail_returns_connection(client):
 
 async def test_detail_not_found(client):
     r = await client.get(
-        "/api/gfs/connections/nonexistent", headers=_auth(client._tok),
+        "/api/gfs/connections/nonexistent",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
 
 # ─── DELETE /api/gfs/connections/{id} ────────────────────────────────
+
 
 async def test_disconnect_requires_admin(client):
     db = client._db
@@ -122,7 +128,8 @@ async def test_disconnect_requires_admin(client):
     )
     await _seed_gfs(client, "gfs-1")
     r = await client.delete(
-        "/api/gfs/connections/gfs-1", headers=_auth(raw),
+        "/api/gfs/connections/gfs-1",
+        headers=_auth(raw),
     )
     assert r.status == 403
 
@@ -130,24 +137,28 @@ async def test_disconnect_requires_admin(client):
 async def test_disconnect_success(client):
     await _seed_gfs(client, "gfs-1")
     r = await client.delete(
-        "/api/gfs/connections/gfs-1", headers=_auth(client._tok),
+        "/api/gfs/connections/gfs-1",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
     # Verify it's gone.
     r = await client.get(
-        "/api/gfs/connections/gfs-1", headers=_auth(client._tok),
+        "/api/gfs/connections/gfs-1",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
 
 async def test_disconnect_not_found(client):
     r = await client.delete(
-        "/api/gfs/connections/nonexistent", headers=_auth(client._tok),
+        "/api/gfs/connections/nonexistent",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
 
 # ─── POST /api/spaces/{id}/publish/{gfs_id} ─────────────────────────
+
 
 async def test_publish_requires_admin(client):
     db = client._db
@@ -162,7 +173,8 @@ async def test_publish_requires_admin(client):
         (sha256_token_hash(raw),),
     )
     r = await client.post(
-        "/api/spaces/sp-1/publish/gfs-1", headers=_auth(raw),
+        "/api/spaces/sp-1/publish/gfs-1",
+        headers=_auth(raw),
     )
     assert r.status == 403
 
@@ -176,6 +188,7 @@ async def test_publish_gfs_not_found(client):
 
 
 # ─── DELETE /api/spaces/{id}/publish/{gfs_id} ────────────────────────
+
 
 async def test_unpublish_gfs_not_found(client):
     r = await client.delete(

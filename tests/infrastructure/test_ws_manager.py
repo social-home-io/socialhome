@@ -12,7 +12,7 @@ class _FakeWS:
     """Minimal stand-in for aiohttp.web.WebSocketResponse."""
 
     def __init__(self, *, fail: bool = False, closed: bool = False):
-        self.fail   = fail
+        self.fail = fail
         self.closed = closed
         self.sent: list[str] = []
 
@@ -23,6 +23,7 @@ class _FakeWS:
 
 
 # ─── Registry ────────────────────────────────────────────────────────────
+
 
 async def test_register_increments_count():
     mgr = WebSocketManager()
@@ -51,6 +52,7 @@ async def test_unregister_removes_and_cleans_user_when_empty():
 
 
 # ─── Fan-out ──────────────────────────────────────────────────────────────
+
 
 async def test_broadcast_to_user_delivers_to_all_sessions():
     mgr = WebSocketManager()

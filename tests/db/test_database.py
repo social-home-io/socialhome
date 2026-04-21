@@ -20,11 +20,13 @@ async def test_startup_creates_tables(tmp_dir):
     assert row is not None
     await db.shutdown()
 
+
 async def test_enqueue_and_fetchone(tmp_dir):
     """enqueue writes a row that fetchone can retrieve."""
     db = AsyncDatabase(tmp_dir / "test.db", batch_timeout_ms=10)
     await db.startup()
     from social_home.crypto import generate_identity_keypair, derive_instance_id
+
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     await db.enqueue(
@@ -32,19 +34,21 @@ async def test_enqueue_and_fetchone(tmp_dir):
         " identity_public_key, routing_secret) VALUES(?,?,?,?)",
         (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
     )
-    row = await db.fetchone(
-        "SELECT instance_id FROM instance_identity WHERE id='self'"
-    )
+    row = await db.fetchone("SELECT instance_id FROM instance_identity WHERE id='self'")
     assert row is not None
     await db.shutdown()
+
 
 async def test_fetchval_default(tmp_dir):
     """fetchval returns the default when the query produces no row."""
     db = AsyncDatabase(tmp_dir / "test.db", batch_timeout_ms=10)
     await db.startup()
-    val = await db.fetchval("SELECT COUNT(*) FROM users WHERE username='nobody'", default=0)
+    val = await db.fetchval(
+        "SELECT COUNT(*) FROM users WHERE username='nobody'", default=0
+    )
     assert val == 0
     await db.shutdown()
+
 
 async def test_fetchall_empty(tmp_dir):
     """fetchall on an empty result set returns an empty list."""
@@ -61,6 +65,7 @@ def test_discover_empty_directory(tmp_dir):
     d.mkdir()
     assert discover_migrations(d) == []
 
+
 def test_discover_ignores_non_sql_py(tmp_dir):
     """Non .sql/.py files are ignored silently."""
     d = tmp_dir / "mig"
@@ -69,6 +74,7 @@ def test_discover_ignores_non_sql_py(tmp_dir):
     (d / "0001_init.sql").write_text("SELECT 1;")
     ms = discover_migrations(d)
     assert len(ms) == 1
+
 
 def test_duplicate_version_detected(tmp_dir):
     """Duplicate version numbers raise MigrationError."""
@@ -79,6 +85,7 @@ def test_duplicate_version_detected(tmp_dir):
     with pytest.raises(MigrationError, match="Duplicate"):
         discover_migrations(d)
 
+
 def test_bad_filename_raises(tmp_dir):
     """SQL file with bad naming convention raises MigrationError."""
     d = tmp_dir / "mig"
@@ -86,6 +93,7 @@ def test_bad_filename_raises(tmp_dir):
     (d / "bad_name.sql").write_text("SELECT 1;")
     with pytest.raises(MigrationError, match="does not match"):
         discover_migrations(d)
+
 
 def test_python_migration(tmp_dir):
     """Python migration file is discovered and runnable."""
@@ -102,6 +110,7 @@ def test_python_migration(tmp_dir):
 
 
 # ── AsyncDatabase additional paths ────────────────────────────────────────
+
 
 async def test_transact_atomic(tmp_dir):
     """transact runs a function atomically inside BEGIN IMMEDIATE."""
@@ -124,6 +133,7 @@ async def test_transact_atomic(tmp_dir):
 
 
 # ── checkpoint ────────────────────────────────────────────────────────────
+
 
 async def test_checkpoint_returns_three_int_tuple(tmp_dir):
     """PRAGMA wal_checkpoint returns (busy, log_frames, ckpt_frames)."""
@@ -161,6 +171,7 @@ async def test_checkpoint_rejects_invalid_mode(tmp_dir):
 async def test_checkpoint_concurrent_with_writes_consistent(tmp_dir):
     """checkpoint and concurrent writes both succeed without corruption."""
     import asyncio
+
     db = AsyncDatabase(tmp_dir / "ck4.db", batch_timeout_ms=10)
     await db.startup()
     await db.enqueue("CREATE TABLE t(x INTEGER)")
@@ -225,6 +236,7 @@ async def test_operations_before_startup(tmp_dir):
 async def test_batch_write_error_propagates(tmp_dir):
     """A write batch with a constraint error propagates to the caller."""
     import sqlite3 as _sql
+
     db = AsyncDatabase(tmp_dir / "be.db", batch_timeout_ms=10)
     await db.startup()
     await db.enqueue("CREATE TABLE u(id TEXT PRIMARY KEY)")

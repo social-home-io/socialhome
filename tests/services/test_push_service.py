@@ -14,6 +14,7 @@ from social_home.services.push_service import (
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
+
 class _MemRepo:
     def __init__(self) -> None:
         self.subs: dict[str, PushSubscription] = {}
@@ -47,9 +48,11 @@ def _vapid() -> VapidKeyPair:
 
 # ─── PushPayload ──────────────────────────────────────────────────────────
 
+
 def test_payload_drops_none_fields():
     p = PushPayload(title="Hi", click_url=None, space_id="sp-1")
     import json as _json
+
     body = _json.loads(p.to_json())
     assert body == {"title": "Hi", "space_id": "sp-1"}
     assert "click_url" not in body
@@ -63,14 +66,20 @@ def test_payload_omits_body_per_25_3():
 
 # ─── PushService ──────────────────────────────────────────────────────────
 
+
 async def test_push_to_user_returns_delivered_count_in_stub_mode():
     """Without pywebpush installed the dispatcher is a no-op success."""
     repo = _MemRepo()
     svc = PushService(sub_repo=repo, vapid=_vapid())
-    await repo.save(PushSubscription(
-        id="s1", user_id="alice",
-        endpoint="https://x/y", p256dh="p", auth_secret="a",
-    ))
+    await repo.save(
+        PushSubscription(
+            id="s1",
+            user_id="alice",
+            endpoint="https://x/y",
+            p256dh="p",
+            auth_secret="a",
+        )
+    )
     n = await svc.push_to_user("alice", PushPayload(title="Hi"))
     assert n == 1
 
@@ -84,12 +93,24 @@ async def test_push_to_user_no_subscriptions():
 async def test_push_to_users_aggregates():
     repo = _MemRepo()
     svc = PushService(sub_repo=repo, vapid=_vapid())
-    await repo.save(PushSubscription(
-        id="s1", user_id="alice", endpoint="https://x/1", p256dh="p", auth_secret="a",
-    ))
-    await repo.save(PushSubscription(
-        id="s2", user_id="bob", endpoint="https://x/2", p256dh="p", auth_secret="a",
-    ))
+    await repo.save(
+        PushSubscription(
+            id="s1",
+            user_id="alice",
+            endpoint="https://x/1",
+            p256dh="p",
+            auth_secret="a",
+        )
+    )
+    await repo.save(
+        PushSubscription(
+            id="s2",
+            user_id="bob",
+            endpoint="https://x/2",
+            p256dh="p",
+            auth_secret="a",
+        )
+    )
     n = await svc.push_to_users(["alice", "bob"], PushPayload(title="Hi"))
     assert n == 2
 
@@ -103,10 +124,15 @@ async def test_notify_missed_call_fans_out_title_only():
     """Missed-call push: title-only body (§25.3), deep-links to DM thread."""
     repo = _MemRepo()
     svc = PushService(sub_repo=repo, vapid=_vapid())
-    await repo.save(PushSubscription(
-        id="s1", user_id="uid-bob",
-        endpoint="https://x/1", p256dh="p", auth_secret="a",
-    ))
+    await repo.save(
+        PushSubscription(
+            id="s1",
+            user_id="uid-bob",
+            endpoint="https://x/1",
+            p256dh="p",
+            auth_secret="a",
+        )
+    )
     delivered = await svc.notify_missed_call(
         recipient_user_ids=["uid-bob"],
         caller_user_id="uid-alice",
@@ -138,12 +164,14 @@ async def test_notify_missed_call_payload_shape():
     assert p.tag == "call-missed:c1"
     assert p.click_url and "conv-ab" in p.click_url
     import json as _json
+
     body = _json.loads(p.to_json())
     assert "body" not in body
     assert body["title"] == "Missed call"
 
 
 # ─── load_or_create_vapid ─────────────────────────────────────────────────
+
 
 def test_load_or_create_vapid_generates_persistent_keypair(tmp_dir):
     kp1 = load_or_create_vapid(tmp_dir)

@@ -18,12 +18,20 @@ class NotificationCollectionView(BaseView):
         limit = min(max(int(self.request.query.get("limit", 50)), 1), 50)
         repo = self.svc(notification_repo_key)
         notes = await repo.list(ctx.user_id, before=before, limit=limit)
-        return web.json_response([
-            {"id": n.id, "type": n.type, "title": n.title, "body": n.body,
-             "link_url": n.link_url, "read_at": n.read_at,
-             "created_at": n.created_at}
-            for n in notes
-        ])
+        return web.json_response(
+            [
+                {
+                    "id": n.id,
+                    "type": n.type,
+                    "title": n.title,
+                    "body": n.body,
+                    "link_url": n.link_url,
+                    "read_at": n.read_at,
+                    "created_at": n.created_at,
+                }
+                for n in notes
+            ]
+        )
 
 
 class NotificationUnreadCountView(BaseView):
@@ -45,10 +53,12 @@ class NotificationReadView(BaseView):
         repo = self.svc(notification_repo_key)
         bus = self.svc(event_bus_key)
         await repo.mark_read(nid, ctx.user_id)
-        await bus.publish(NotificationReadChanged(
-            user_id=ctx.user_id,
-            unread_count=await repo.count_unread(ctx.user_id),
-        ))
+        await bus.publish(
+            NotificationReadChanged(
+                user_id=ctx.user_id,
+                unread_count=await repo.count_unread(ctx.user_id),
+            )
+        )
         return web.json_response({"ok": True})
 
 
@@ -60,7 +70,10 @@ class NotificationReadAllView(BaseView):
         repo = self.svc(notification_repo_key)
         bus = self.svc(event_bus_key)
         await repo.mark_all_read(ctx.user_id)
-        await bus.publish(NotificationReadChanged(
-            user_id=ctx.user_id, unread_count=0,
-        ))
+        await bus.publish(
+            NotificationReadChanged(
+                user_id=ctx.user_id,
+                unread_count=0,
+            )
+        )
         return web.json_response({"ok": True})

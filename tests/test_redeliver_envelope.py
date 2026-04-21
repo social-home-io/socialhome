@@ -25,6 +25,7 @@ from social_home.repositories import (
 
 # ─── _aiohttp_timeout ────────────────────────────────────────────────────
 
+
 def test_aiohttp_timeout_returns_object():
     t = _aiohttp_timeout(10)
     # aiohttp installed → real ClientTimeout. Either way, no raise.
@@ -32,6 +33,7 @@ def test_aiohttp_timeout_returns_object():
 
 
 # ─── _redeliver_envelope ─────────────────────────────────────────────────
+
 
 class _OutboxEntry:
     def __init__(self, *, id, instance_id, payload_json):
@@ -56,8 +58,11 @@ async def env(tmp_dir):
     bus = EventBus()
     kek = KeyManager.from_data_dir(tmp_dir)
     svc = FederationService(
-        db=db, federation_repo=fed_repo, outbox_repo=outbox,
-        key_manager=kek, bus=bus,
+        db=db,
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=kek,
+        bus=bus,
         own_instance_id=own_iid,
         own_identity_seed=own_kp.private_key,
         own_identity_pk=own_kp.public_key,
@@ -69,7 +74,9 @@ async def env(tmp_dir):
 async def test_redeliver_unknown_instance_returns_false(env):
     svc, fed_repo, _ = env
     entry = _OutboxEntry(
-        id="e1", instance_id="never-paired", payload_json="{}",
+        id="e1",
+        instance_id="never-paired",
+        payload_json="{}",
     )
     ok = await _redeliver_envelope(svc, fed_repo, entry)
     assert ok is False
@@ -81,10 +88,14 @@ async def test_redeliver_2xx_returns_true(env):
     wrapped = kek.encrypt(b"\x01" * 32)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh", local_webhook_id="wh",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
 
@@ -114,10 +125,14 @@ async def test_redeliver_non_2xx_returns_false(env):
     wrapped = kek.encrypt(b"\x02" * 32)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh", local_webhook_id="wh2",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh2",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
 
@@ -136,7 +151,7 @@ async def test_redeliver_non_2xx_returns_false(env):
             return _Resp()
 
     svc._http_client = _Client()
-    entry = _OutboxEntry(id="e2", instance_id=peer.id, payload_json='{}')
+    entry = _OutboxEntry(id="e2", instance_id=peer.id, payload_json="{}")
     ok = await _redeliver_envelope(svc, fed_repo, entry)
     assert ok is False
 
@@ -147,10 +162,14 @@ async def test_redeliver_transport_error_returns_false(env):
     wrapped = kek.encrypt(b"\x03" * 32)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh", local_webhook_id="wh3",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh3",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
 
@@ -159,6 +178,6 @@ async def test_redeliver_transport_error_returns_false(env):
             raise ConnectionError("boom")
 
     svc._http_client = _Client()
-    entry = _OutboxEntry(id="e3", instance_id=peer.id, payload_json='{}')
+    entry = _OutboxEntry(id="e3", instance_id=peer.id, payload_json="{}")
     ok = await _redeliver_envelope(svc, fed_repo, entry)
     assert ok is False

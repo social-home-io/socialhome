@@ -33,8 +33,9 @@ class HaUsersCollectionView(BaseView):
     async def get(self) -> web.Response:
         _require_admin(self)
         if self.svc(config_key).mode != "ha":
-            return error_response(501, "NOT_IMPLEMENTED",
-                                  "HA user sync only available in HA mode")
+            return error_response(
+                501, "NOT_IMPLEMENTED", "HA user sync only available in HA mode"
+            )
         adapter = self.svc(platform_adapter_key)
         users = await adapter.list_external_users()
         user_repo = self.svc(user_repo_key)
@@ -42,17 +43,17 @@ class HaUsersCollectionView(BaseView):
         for ext in users:
             local = await user_repo.get(ext.username)
             synced = (
-                local is not None
-                and local.state == "active"
-                and local.source == "ha"
+                local is not None and local.state == "active" and local.source == "ha"
             )
-            out.append({
-                "username":     ext.username,
-                "display_name": ext.display_name,
-                "picture_url":  ext.picture_url,
-                "is_admin":     bool(local and local.is_admin),
-                "synced":       bool(synced),
-            })
+            out.append(
+                {
+                    "username": ext.username,
+                    "display_name": ext.display_name,
+                    "picture_url": ext.picture_url,
+                    "is_admin": bool(local and local.is_admin),
+                    "synced": bool(synced),
+                }
+            )
         return web.json_response(out)
 
 
@@ -62,34 +63,38 @@ class HaUserProvisionView(BaseView):
     async def post(self) -> web.Response:
         _require_admin(self)
         if self.svc(config_key).mode != "ha":
-            return error_response(501, "NOT_IMPLEMENTED",
-                                  "HA user sync only available in HA mode")
+            return error_response(
+                501, "NOT_IMPLEMENTED", "HA user sync only available in HA mode"
+            )
         adapter = self.svc(platform_adapter_key)
         username = self.match("username")
         ext = await adapter.get_external_user(username)
         if ext is None:
-            return error_response(404, "NOT_FOUND",
-                                  f"HA user {username!r} not found")
+            return error_response(404, "NOT_FOUND", f"HA user {username!r} not found")
         user_service = self.svc(user_service_key)
         user = await user_service.provision(
             username=ext.username,
             display_name=ext.display_name,
-            is_admin=False,                  # promote later via member tools
+            is_admin=False,  # promote later via member tools
             email=ext.email,
             picture_url=ext.picture_url,
             source="ha",
         )
-        return web.json_response({
-            "username": user.username,
-            "user_id":  user.user_id,
-            "synced":   True,
-        }, status=201)
+        return web.json_response(
+            {
+                "username": user.username,
+                "user_id": user.user_id,
+                "synced": True,
+            },
+            status=201,
+        )
 
     async def delete(self) -> web.Response:
         _require_admin(self)
         if self.svc(config_key).mode != "ha":
-            return error_response(501, "NOT_IMPLEMENTED",
-                                  "HA user sync only available in HA mode")
+            return error_response(
+                501, "NOT_IMPLEMENTED", "HA user sync only available in HA mode"
+            )
         username = self.match("username")
         user_service = self.svc(user_service_key)
         try:

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .....repositories.calendar_repo import AbstractSpaceCalendarRepo
 
 
-_WIDE_WINDOW = timedelta(days=3652)   # ~10 years either side
+_WIDE_WINDOW = timedelta(days=3652)  # ~10 years either side
 
 
 class CalendarExporter:

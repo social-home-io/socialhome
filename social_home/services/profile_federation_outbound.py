@@ -54,10 +54,10 @@ class ProfileFederationOutbound:
 
     async def _on_updated(self, event: UserProfileUpdated) -> None:
         payload: dict = {
-            "user_id":      event.user_id,
-            "username":     event.username,
+            "user_id": event.user_id,
+            "username": event.username,
             "display_name": event.display_name,
-            "bio":          event.bio,
+            "bio": event.bio,
             "picture_hash": event.picture_hash,
         }
         if event.picture_webp is not None:
@@ -69,7 +69,7 @@ class ProfileFederationOutbound:
             peers = await self._federation_repo.list_instances(
                 status="paired",
             )
-        except Exception as exc:          # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("profile-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -83,8 +83,9 @@ class ProfileFederationOutbound:
                     event_type=FederationEventType.USER_UPDATED,
                     payload=payload,
                 )
-            except Exception as exc:       # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "profile-outbound: send to %s failed: %s",
-                    instance_id, exc,
+                    instance_id,
+                    exc,
                 )

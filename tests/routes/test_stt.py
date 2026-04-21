@@ -13,8 +13,13 @@ from social_home.app_keys import stt_service_key
 class _FakeSttService:
     """Stand-in for SttService that records audio and returns a preset result."""
 
-    def __init__(self, *, supported: bool = True, text: str = "hello world",
-                 raise_exc: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        supported: bool = True,
+        text: str = "hello world",
+        raise_exc: Exception | None = None,
+    ) -> None:
         self.supported = supported
         self._text = text
         self._raise = raise_exc
@@ -30,8 +35,11 @@ class _FakeSttService:
         sample_rate: int = 16000,
         channels: int = 1,
     ) -> str:
-        self.kwargs = {"language": language, "sample_rate": sample_rate,
-                       "channels": channels}
+        self.kwargs = {
+            "language": language,
+            "sample_rate": sample_rate,
+            "channels": channels,
+        }
         async for chunk in audio_stream:
             self.received.append(chunk)
         self.done.set()
@@ -66,10 +74,16 @@ async def test_happy_path_streams_audio_and_returns_final(client):
 
     ws = await client.ws_connect(f"/api/stt/stream?token={client._tok}")
     try:
-        await ws.send_str(json.dumps({
-            "type": "start", "language": "de",
-            "sample_rate": 22050, "channels": 1,
-        }))
+        await ws.send_str(
+            json.dumps(
+                {
+                    "type": "start",
+                    "language": "de",
+                    "sample_rate": 22050,
+                    "channels": 1,
+                }
+            )
+        )
         await ws.send_bytes(b"PCMFRAME1")
         await ws.send_bytes(b"PCMFRAME2")
         await ws.send_str(json.dumps({"type": "end"}))

@@ -62,11 +62,16 @@ async def test_save_upserts_existing_id(env):
     _, repo, uid = env
     await repo.save(_sub(uid))
     # Same id, different endpoint — should upsert.
-    await repo.save(PushSubscription(
-        id="s1", user_id=uid,
-        endpoint="https://other.example.com/s1",
-        p256dh="dh2", auth_secret="auth2", device_label="Updated",
-    ))
+    await repo.save(
+        PushSubscription(
+            id="s1",
+            user_id=uid,
+            endpoint="https://other.example.com/s1",
+            p256dh="dh2",
+            auth_secret="auth2",
+            device_label="Updated",
+        )
+    )
     got = await repo.get("s1")
     assert got.endpoint == "https://other.example.com/s1"
     assert got.device_label == "Updated"
@@ -104,7 +109,7 @@ async def test_delete_rejects_wrong_user(env):
 async def test_delete_by_endpoint_removes_all_matching(env):
     _, repo, uid = env
     await repo.save(_sub(uid, "s1", "https://a/x"))
-    await repo.save(_sub(uid, "s2", "https://a/x"))   # same endpoint
+    await repo.save(_sub(uid, "s2", "https://a/x"))  # same endpoint
     await repo.save(_sub(uid, "s3", "https://b/x"))
     n = await repo.delete_by_endpoint("https://a/x")
     assert n == 2

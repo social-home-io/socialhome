@@ -18,11 +18,14 @@ class _FakeCalendarRepo:
         self._events = events_by_user
 
     async def list_events_for_user_in_range(
-        self, username, *, start, end,
+        self,
+        username,
+        *,
+        start,
+        end,
     ):
         return [
-            e for e in self._events.get(username, [])
-            if e.start < end and e.end > start
+            e for e in self._events.get(username, []) if e.start < end and e.end > start
         ]
 
 
@@ -45,7 +48,8 @@ class _FakeNotifService:
 
 def _user(username: str) -> User:
     return User(
-        username=username, user_id=f"{username}-id",
+        username=username,
+        user_id=f"{username}-id",
         display_name=username.title(),
     )
 
@@ -53,7 +57,9 @@ def _user(username: str) -> User:
 def _event(eid: str, offset_minutes: int, duration_min: int = 60) -> CalendarEvent:
     now = datetime.now(timezone.utc)
     return CalendarEvent(
-        id=eid, calendar_id="c1", summary=f"Event {eid}",
+        id=eid,
+        calendar_id="c1",
+        summary=f"Event {eid}",
         start=now + timedelta(minutes=offset_minutes),
         end=now + timedelta(minutes=offset_minutes + duration_min),
         created_by="admin",
@@ -65,16 +71,18 @@ def scheduler():
     users = [_user("alice")]
     events = {
         "alice": [
-            _event("in-window", offset_minutes=5),    # fires
-            _event("past",      offset_minutes=-30),  # already started
-            _event("far",       offset_minutes=60),   # outside window
+            _event("in-window", offset_minutes=5),  # fires
+            _event("past", offset_minutes=-30),  # already started
+            _event("far", offset_minutes=60),  # outside window
         ],
     }
     cal_repo = _FakeCalendarRepo(events)
     user_repo = _FakeUserRepo(users)
     notif = _FakeNotifService()
     sched = CalendarReminderScheduler(
-        calendar_repo=cal_repo, user_repo=user_repo, notif_service=notif,
+        calendar_repo=cal_repo,
+        user_repo=user_repo,
+        notif_service=notif,
         reminder_window_minutes=10,
     )
     return sched, notif

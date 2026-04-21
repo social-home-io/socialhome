@@ -33,6 +33,7 @@ from ..domain.federation import RemoteInstance
 
 # ─── Transport ───────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class TransportStrategy(Protocol):
     """Send a fully-built envelope to a paired peer.
@@ -61,6 +62,7 @@ class TransportStrategy(Protocol):
 
 # ─── Encryption ──────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class EncryptionStrategy(Protocol):
     """Encrypt + sign federation envelopes.
@@ -80,11 +82,15 @@ class EncryptionStrategy(Protocol):
     """
 
     def encrypt_payload(
-        self, payload_json: str, session_key: bytes,
+        self,
+        payload_json: str,
+        session_key: bytes,
     ) -> str: ...
 
     def decrypt_payload(
-        self, encrypted: str, session_key: bytes,
+        self,
+        encrypted: str,
+        session_key: bytes,
     ) -> str: ...
 
     def sign_envelope(self, envelope_bytes: bytes) -> str: ...

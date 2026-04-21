@@ -212,7 +212,9 @@ async def _redeliver_envelope(
                 return True
             log.warning(
                 "outbox: %s returned HTTP %d for %s",
-                entry.instance_id, resp.status, entry.id,
+                entry.instance_id,
+                resp.status,
+                entry.id,
             )
             return False
     except Exception as exc:
@@ -381,13 +383,17 @@ def _wire_federation_stack(
     federation_service.attach_typing_service(typing_service)
     typing_service.attach_federation(federation_service, identity.instance_id)
     dm_service.attach_federation(
-        federation_service, federation_repo, identity.instance_id,
+        federation_service,
+        federation_repo,
+        identity.instance_id,
     )
     report_service.attach_federation(
-        federation_service, identity.instance_id,
+        federation_service,
+        identity.instance_id,
     )
     dm_routing_service.attach_federation(
-        federation_service, own_instance_id=identity.instance_id,
+        federation_service,
+        own_instance_id=identity.instance_id,
     )
     federation_service.attach_dm_routing(dm_routing_service)
     federation_service.attach_presence_service(presence_service)
@@ -436,10 +442,12 @@ def _wire_federation_stack(
     app[K.auto_pair_coordinator_key] = auto_pair_coordinator
     app[K.auto_pair_inbox_key] = auto_pair_inbox
     SpaceMembershipInboundHandlers(
-        bus=bus, space_repo=space_repo,
+        bus=bus,
+        space_repo=space_repo,
     ).attach_to(federation_service)
     SpaceInviteInboundHandlers(
-        bus=bus, space_repo=space_repo,
+        bus=bus,
+        space_repo=space_repo,
     ).attach_to(federation_service)
     PeerDirectoryHandler(peer_space_directory_repo).attach_to(federation_service)
     PrivateSpaceInviteHandler(
@@ -458,17 +466,17 @@ def _wire_federation_stack(
 
     # §25.6 Direct Space Sync — content transfer over DataChannel.
     exporters: dict = {
-        "bans":            BansExporter(space_repo),
-        "members":         MembersExporter(space_repo),
-        "posts":           PostsExporter(space_post_repo),
-        "comments":        CommentsExporter(space_post_repo),
-        "tasks":           TasksExporter(space_task_repo),
-        "tasks_archived":  TasksArchivedExporter(space_task_repo),
-        "pages":           PagesExporter(page_repo),
-        "stickies":        StickiesExporter(sticky_repo),
-        "calendar":        CalendarExporter(space_calendar_repo),
-        "gallery":         GalleryExporter(gallery_repo),
-        "polls":           PollsExporter(poll_repo, space_post_repo),
+        "bans": BansExporter(space_repo),
+        "members": MembersExporter(space_repo),
+        "posts": PostsExporter(space_post_repo),
+        "comments": CommentsExporter(space_post_repo),
+        "tasks": TasksExporter(space_task_repo),
+        "tasks_archived": TasksArchivedExporter(space_task_repo),
+        "pages": PagesExporter(page_repo),
+        "stickies": StickiesExporter(sticky_repo),
+        "calendar": CalendarExporter(space_calendar_repo),
+        "gallery": GalleryExporter(gallery_repo),
+        "polls": PollsExporter(poll_repo, space_post_repo),
     }
     chunk_builder = ChunkBuilder(
         encoder=federation_service._encoder,
@@ -493,7 +501,8 @@ def _wire_federation_stack(
         gallery_repo=gallery_repo,
     )
     federation_service.attach_space_sync(
-        service=space_sync_service, receiver=space_sync_receiver,
+        service=space_sync_service,
+        receiver=space_sync_receiver,
     )
     app[K.space_sync_service_key] = space_sync_service
     app[K.space_sync_receiver_key] = space_sync_receiver
@@ -564,12 +573,10 @@ def _wire_federation_stack(
     peer_directory_service.wire()
     app[K.peer_directory_service_key] = peer_directory_service
 
-    space_member_profile_federation_outbound = (
-        SpaceMemberProfileFederationOutbound(
-            bus=bus,
-            federation_service=federation_service,
-            space_repo=space_repo,
-        )
+    space_member_profile_federation_outbound = SpaceMemberProfileFederationOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        space_repo=space_repo,
     )
     space_member_profile_federation_outbound.wire()
 
@@ -583,6 +590,7 @@ def _wire_federation_stack(
         bus=bus,
         federation_service=federation_service,
     )
+
     async def _dm_history_request(event) -> None:
         await dm_history_provider.handle_request(event)
 
@@ -593,16 +601,20 @@ def _wire_federation_stack(
         await dm_history_provider.handle_ack(event)
 
     federation_service._event_registry.register(
-        FederationEventType.DM_HISTORY_REQUEST, _dm_history_request,
+        FederationEventType.DM_HISTORY_REQUEST,
+        _dm_history_request,
     )
     federation_service._event_registry.register(
-        FederationEventType.DM_HISTORY_CHUNK, _dm_history_chunk,
+        FederationEventType.DM_HISTORY_CHUNK,
+        _dm_history_chunk,
     )
     federation_service._event_registry.register(
-        FederationEventType.DM_HISTORY_COMPLETE, dm_history_receiver.handle_complete,
+        FederationEventType.DM_HISTORY_COMPLETE,
+        dm_history_receiver.handle_complete,
     )
     federation_service._event_registry.register(
-        FederationEventType.DM_HISTORY_CHUNK_ACK, _dm_history_chunk_ack,
+        FederationEventType.DM_HISTORY_CHUNK_ACK,
+        _dm_history_chunk_ack,
     )
     dm_history_scheduler = DmHistoryScheduler(
         bus=bus,
@@ -658,19 +670,24 @@ def _build_middleware(config: Config, limiter: RateLimiter):
         # they short-circuit the broader prefix matches that follow.
         limits={
             # Action endpoints (use ``*`` glob so the {id} segment matches).
-            "/api/spaces/*/ban":            (5,  60),  # moderation
-            "/api/calls/*/decline":         (10, 60),
-            "/api/calls/*/hangup":          (30, 60),
+            "/api/spaces/*/ban": (5, 60),  # moderation
+            "/api/calls/*/decline": (10, 60),
+            "/api/calls/*/hangup": (30, 60),
             # Sensitive surfaces — tighter than the 60/min default.
-            "/api/me/tokens":               (10, 60),  # API token create
-            "/api/feed/posts":              (30, 60),  # household posting
-            "/api/presence/location":       (10, 60),  # GPS pings
-            "/api/calls":                   (10, 60),  # initiate / signal
-            "/api/pairing":                 (5,  60),  # pairing handshakes
+            "/api/me/tokens": (10, 60),  # API token create
+            "/api/feed/posts": (30, 60),  # household posting
+            "/api/presence/location": (10, 60),  # GPS pings
+            "/api/calls": (10, 60),  # initiate / signal
+            "/api/pairing": (5, 60),  # pairing handshakes
         },
     )
     security_headers_middleware = build_security_headers_middleware()
-    return security_headers_middleware, body_size_middleware, cors_middleware, rate_middleware
+    return (
+        security_headers_middleware,
+        body_size_middleware,
+        cors_middleware,
+        rate_middleware,
+    )
 
 
 def create_app(config: Config | None = None) -> web.Application:
@@ -703,30 +720,30 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Repositories ─────────────────────────────────────────────────────
     repos = _build_repos(db)
     # Local aliases so the rest of the wiring stays readable.
-    user_repo         = repos.user
-    post_repo         = repos.post
-    space_repo        = repos.space
-    space_post_repo   = repos.space_post
+    user_repo = repos.user
+    post_repo = repos.post
+    space_repo = repos.space
+    space_post_repo = repos.space_post
     notification_repo = repos.notification
     conversation_repo = repos.conversation
-    task_repo         = repos.task
-    space_task_repo   = repos.space_task
-    calendar_repo     = repos.calendar
-    space_cal_repo    = repos.space_cal
-    shopping_repo     = repos.shopping
-    outbox_repo       = repos.outbox
-    federation_repo   = repos.federation
-    page_repo         = repos.page
-    sticky_repo       = repos.sticky
-    dm_contact_repo   = repos.dm_contact
-    bazaar_repo       = repos.bazaar
-    push_sub_repo     = repos.push_sub
-    gallery_repo      = repos.gallery
-    space_key_repo    = repos.space_key
-    search_repo       = repos.search
-    theme_repo        = repos.theme
+    task_repo = repos.task
+    space_task_repo = repos.space_task
+    calendar_repo = repos.calendar
+    space_cal_repo = repos.space_cal
+    shopping_repo = repos.shopping
+    outbox_repo = repos.outbox
+    federation_repo = repos.federation
+    page_repo = repos.page
+    sticky_repo = repos.sticky
+    dm_contact_repo = repos.dm_contact
+    bazaar_repo = repos.bazaar
+    push_sub_repo = repos.push_sub
+    gallery_repo = repos.gallery
+    space_key_repo = repos.space_key
+    search_repo = repos.search
+    theme_repo = repos.theme
     profile_picture_repo = repos.profile_picture
-    space_cover_repo  = repos.space_cover
+    space_cover_repo = repos.space_cover
 
     # ── Event bus ────────────────────────────────────────────────────────
     bus = EventBus()
@@ -744,8 +761,11 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     feed_service = FeedService(post_repo, user_repo, bus)
     space_service = SpaceService(
-        space_repo, space_post_repo, user_repo, bus,
-        own_instance_id="unknown",   # patched on startup
+        space_repo,
+        space_post_repo,
+        user_repo,
+        bus,
+        own_instance_id="unknown",  # patched on startup
     )
     space_service.attach_profile_picture_repo(profile_picture_repo)
     space_service.attach_cover_repo(space_cover_repo)
@@ -754,7 +774,11 @@ def create_app(config: Config | None = None) -> web.Application:
     i18n = Catalog.from_directory(i18n_dir)
 
     notification_service = NotificationService(
-        notification_repo, user_repo, space_repo, bus, i18n=i18n,
+        notification_repo,
+        user_repo,
+        space_repo,
+        bus,
+        i18n=i18n,
     )
     dm_service = DmService(conversation_repo, user_repo, bus)
     report_repo = SqliteReportRepo(db)
@@ -777,7 +801,10 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── WebSocket realtime ────────────────────────────────────────────────
     ws_manager = WebSocketManager()
     realtime_service = RealtimeService(
-        bus, ws_manager, user_repo=user_repo, space_repo=space_repo,
+        bus,
+        ws_manager,
+        user_repo=user_repo,
+        space_repo=space_repo,
     )
     realtime_service.wire()
 
@@ -802,7 +829,8 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Storage quota ─────────────────────────────────────────────────────
     storage_quota = StorageQuotaService(
-        repos.storage_stats, quota_bytes=config.max_storage_bytes,
+        repos.storage_stats,
+        quota_bytes=config.max_storage_bytes,
     )
 
     # ── Backup (HA-mode only) ─────────────────────────────────────────────
@@ -822,12 +850,16 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(
-        repos.public_space, gfs_connection_repo=repos.gfs_connection,
+        repos.public_space,
+        gfs_connection_repo=repos.gfs_connection,
     )
 
     # ── Gallery service ──────────────────────────────────────────────────
     gallery_service = GalleryService(
-        gallery_repo, space_repo, bus, config,
+        gallery_repo,
+        space_repo,
+        bus,
+        config,
     )
 
     # ── Child protection service ────────────────────────────────────────
@@ -866,7 +898,8 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── DM relay routing (§12.5) ────────────────────────────────────────
     dm_routing_service = DmRoutingService(
-        repos.dm_routing, federation_repo,
+        repos.dm_routing,
+        federation_repo,
         child_protection_service=child_protection_service,
     )
 
@@ -925,27 +958,32 @@ def create_app(config: Config | None = None) -> web.Application:
     stt_service = SttService(platform_adapter)
 
     # ── Auth middleware ───────────────────────────────────────────────────
-    bearer_strategy   = BearerTokenStrategy(user_repo)
-    ha_strategy       = HaIngressStrategy(user_repo)
-    chained_strategy  = ChainedStrategy(ha_strategy, bearer_strategy)
-    auth_middleware   = require_auth(chained_strategy)
+    bearer_strategy = BearerTokenStrategy(user_repo)
+    ha_strategy = HaIngressStrategy(user_repo)
+    chained_strategy = ChainedStrategy(ha_strategy, bearer_strategy)
+    auth_middleware = require_auth(chained_strategy)
 
     # ── Rate-limit + hardening middleware (§25.7) ────────────────────────
     limiter = RateLimiter()
-    security_headers_middleware, body_size_middleware, cors_middleware, rate_middleware = (
-        _build_middleware(config, limiter)
-    )
+    (
+        security_headers_middleware,
+        body_size_middleware,
+        cors_middleware,
+        rate_middleware,
+    ) = _build_middleware(config, limiter)
 
     # ── Application ───────────────────────────────────────────────────────
     # Order matters: hardening runs first (cheap rejects), then auth,
     # then per-route rate limiting.
-    app = web.Application(middlewares=[
-        security_headers_middleware,
-        body_size_middleware,
-        cors_middleware,
-        auth_middleware,
-        rate_middleware,
-    ])
+    app = web.Application(
+        middlewares=[
+            security_headers_middleware,
+            body_size_middleware,
+            cors_middleware,
+            auth_middleware,
+            rate_middleware,
+        ]
+    )
 
     # ── Federation infrastructure (KEK + federation + outbox processor) ──
     # The KEK protects the Ed25519 identity seed at rest; the seed is needed
@@ -964,66 +1002,66 @@ def create_app(config: Config | None = None) -> web.Application:
     task_recurrence_scheduler: TaskRecurrenceScheduler | None = None
 
     # Store services / repos in app using typed AppKeys (no warnings)
-    app[K.config_key]              = config
+    app[K.config_key] = config
     # Expose the same limiter so public endpoints (e.g. /api/auth/token)
     # can implement IP-bucket brute-force protection without rebuilding
     # a second instance.
-    app[K.rate_limiter_key]        = limiter
-    app[K.db_key]                  = db
-    app[K.event_bus_key]           = bus
-    app[K.ws_manager_key]          = ws_manager
-    app[K.push_service_key]        = push_service
+    app[K.rate_limiter_key] = limiter
+    app[K.db_key] = db
+    app[K.event_bus_key] = bus
+    app[K.ws_manager_key] = ws_manager
+    app[K.push_service_key] = push_service
     app[K.push_subscription_repo_key] = push_sub_repo
-    app[K.search_service_key]      = search_service
-    app[K.theme_service_key]       = theme_service
+    app[K.search_service_key] = search_service
+    app[K.theme_service_key] = theme_service
     app[K.storage_quota_service_key] = storage_quota
-    app[K.backup_service_key]     = backup_service
-    app[K.idempotency_cache_key]   = idempotency_cache
-    app[K.reconnect_queue_key]     = reconnect_queue
+    app[K.backup_service_key] = backup_service
+    app[K.idempotency_cache_key] = idempotency_cache
+    app[K.reconnect_queue_key] = reconnect_queue
     app[K.gfs_connection_service_key] = gfs_connection_service
-    app[K.gfs_connection_repo_key]    = repos.gfs_connection
+    app[K.gfs_connection_repo_key] = repos.gfs_connection
     app[K.public_space_discovery_key] = public_space_discovery
     app[K.peer_space_directory_repo_key] = repos.peer_space_directory
-    app[K.gallery_service_key]     = gallery_service
-    app[K.gallery_repo_key]        = gallery_repo
+    app[K.gallery_service_key] = gallery_service
+    app[K.gallery_repo_key] = gallery_repo
     app[K.child_protection_service_key] = child_protection_service
-    app[K.typing_service_key]      = typing_service
+    app[K.typing_service_key] = typing_service
     app[K.household_features_service_key] = household_features_service
     app[K.data_export_service_key] = data_export_service
-    app[K.i18n_key]                = i18n
-    app[K.platform_adapter_key]    = platform_adapter
+    app[K.i18n_key] = i18n
+    app[K.platform_adapter_key] = platform_adapter
     app[K.calendar_import_service_key] = calendar_import_service
-    app[K.stt_service_key]         = stt_service
-    app[K.user_service_key]        = user_service
-    app[K.feed_service_key]        = feed_service
-    app[K.space_service_key]       = space_service
+    app[K.stt_service_key] = stt_service
+    app[K.user_service_key] = user_service
+    app[K.feed_service_key] = feed_service
+    app[K.space_service_key] = space_service
     app[K.notification_service_key] = notification_service
-    app[K.dm_service_key]          = dm_service
-    app[K.report_repo_key]         = report_repo
-    app[K.report_service_key]      = report_service
-    app[K.task_service_key]        = task_service
-    app[K.space_task_service_key]  = space_task_service
-    app[K.calendar_service_key]    = calendar_service
-    app[K.space_cal_service_key]   = space_cal_service
-    app[K.shopping_service_key]    = shopping_service
-    app[K.user_repo_key]           = user_repo
+    app[K.dm_service_key] = dm_service
+    app[K.report_repo_key] = report_repo
+    app[K.report_service_key] = report_service
+    app[K.task_service_key] = task_service
+    app[K.space_task_service_key] = space_task_service
+    app[K.calendar_service_key] = calendar_service
+    app[K.space_cal_service_key] = space_cal_service
+    app[K.shopping_service_key] = shopping_service
+    app[K.user_repo_key] = user_repo
     app[K.profile_picture_repo_key] = profile_picture_repo
-    app[K.space_cover_repo_key]    = space_cover_repo
-    app[K.post_repo_key]           = post_repo
-    app[K.space_repo_key]          = space_repo
-    app[K.notification_repo_key]   = notification_repo
-    app[K.conversation_repo_key]   = conversation_repo
-    app[K.outbox_repo_key]         = outbox_repo
-    app[K.federation_repo_key]     = federation_repo
-    app[K.page_repo_key]           = page_repo
+    app[K.space_cover_repo_key] = space_cover_repo
+    app[K.post_repo_key] = post_repo
+    app[K.space_repo_key] = space_repo
+    app[K.notification_repo_key] = notification_repo
+    app[K.conversation_repo_key] = conversation_repo
+    app[K.outbox_repo_key] = outbox_repo
+    app[K.federation_repo_key] = federation_repo
+    app[K.page_repo_key] = page_repo
     app[K.page_conflict_service_key] = page_conflict_service
-    app[K.presence_service_key]    = presence_service
-    app[K.poll_service_key]        = poll_service
-    app[K.bazaar_service_key]      = bazaar_service
-    app[K.corner_service_key]      = corner_service
-    app[K.sticky_repo_key]         = sticky_repo
-    app[K.bazaar_repo_key]         = bazaar_repo
-    app[K.shopping_repo_key]       = shopping_repo
+    app[K.presence_service_key] = presence_service
+    app[K.poll_service_key] = poll_service
+    app[K.bazaar_service_key] = bazaar_service
+    app[K.corner_service_key] = corner_service
+    app[K.sticky_repo_key] = sticky_repo
+    app[K.bazaar_repo_key] = bazaar_repo
+    app[K.shopping_repo_key] = shopping_repo
 
     # ── Mount routes ─────────────────────────────────────────────────────
     setup_routes(app)
@@ -1054,7 +1092,8 @@ def create_app(config: Config | None = None) -> web.Application:
         #    configured sig_suite includes a PQ algorithm the bundle
         #    also carries ML-DSA-65 seed + public key.
         identity = await ensure_instance_identity(
-            db, key_manager,
+            db,
+            key_manager,
             display_name=config.instance_name,
             sig_suite=config.federation_sig_suite,
         )
@@ -1067,7 +1106,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # Report service auto-forwards fraud reports to every paired GFS.
         # Identity seed is the Ed25519 signing key used on /gfs/report.
         report_service.attach_gfs(
-            gfs_connection_service, signing_key=identity_seed,
+            gfs_connection_service,
+            signing_key=identity_seed,
         )
 
         # 3. Replace UserService with one carrying the real public key.
@@ -1081,7 +1121,10 @@ def create_app(config: Config | None = None) -> web.Application:
 
         # 4. Replace SpaceService with one carrying the real instance_id.
         real_space_service = SpaceService(
-            space_repo, space_post_repo, user_repo, bus,
+            space_repo,
+            space_post_repo,
+            user_repo,
+            bus,
             own_instance_id=real_instance_id,
         )
         # §CP.F1: hook child-protection age gate into add_member.
@@ -1144,7 +1187,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # send_event itself — SDP offers/answers/ICE ride on top of the
         # existing signed envelope path.
         async def _signaling_send(
-            to_instance_id: str, event_type, payload,
+            to_instance_id: str,
+            event_type,
+            payload,
         ):
             return await federation_service.send_event(
                 to_instance_id=to_instance_id,
@@ -1238,7 +1283,9 @@ def create_app(config: Config | None = None) -> web.Application:
         await calendar_reminder_scheduler.start()
 
         task_deadline_scheduler = TaskDeadlineScheduler(
-            repo=task_repo, db=db, bus=bus,
+            repo=task_repo,
+            db=db,
+            bus=bus,
         )
         await task_deadline_scheduler.start()
 
@@ -1306,6 +1353,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
 if __name__ == "__main__":
     from .access_log import RedactingAccessLogger
+
     cfg = Config.from_env()
     web.run_app(
         create_app(cfg),

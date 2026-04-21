@@ -25,48 +25,50 @@ from aiohttp import web
 #: The route layer calls :func:`sanitise_for_api` on any dict derived from a
 #: database row before returning it to a client. The federation layer does
 #: the equivalent filter before encrypting event payloads.
-SENSITIVE_FIELDS: frozenset[str] = frozenset({
-    # Cryptographic material
-    "identity_private_key",
-    "key_self_to_remote",
-    "key_remote_to_self",
-    "private_key",
-    "api_token_hash",
-    "routing_secret",
-    "kek",
-    "content_key_hex",
-    "own_dh_private_key",
-    "identity_dh_sk",
-    # Authentication
-    "password_hash",
-    "bcrypt_hash",
-    "token_hash",
-    "session_token",
-    # Personal identifiers — privacy (§25.3)
-    "email",
-    "phone",
-    "date_of_birth",
-    # Device / push tokens — never leave the instance
-    "push_subscription",
-    "push_subscription_json",
-    "device_token",
-    "p256dh",
-    "auth_secret",
-    "endpoint",                # Web Push endpoint URL is sensitive too
-    # Federation envelope material — never echoed in API responses
-    "encrypted_payload",
-    "signature",
-    "signatures",
-    "session_key",
-    # Precise GPS — approximate (4dp-truncated ``lat``/``lon``) is OK
-    "location_lat",
-    "location_lon",
-    # Child-protection flags (§CP) — never shared
-    "declared_age",
-    "is_minor",
-    "guardian_ids",
-    "child_protection_enabled",
-})
+SENSITIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        # Cryptographic material
+        "identity_private_key",
+        "key_self_to_remote",
+        "key_remote_to_self",
+        "private_key",
+        "api_token_hash",
+        "routing_secret",
+        "kek",
+        "content_key_hex",
+        "own_dh_private_key",
+        "identity_dh_sk",
+        # Authentication
+        "password_hash",
+        "bcrypt_hash",
+        "token_hash",
+        "session_token",
+        # Personal identifiers — privacy (§25.3)
+        "email",
+        "phone",
+        "date_of_birth",
+        # Device / push tokens — never leave the instance
+        "push_subscription",
+        "push_subscription_json",
+        "device_token",
+        "p256dh",
+        "auth_secret",
+        "endpoint",  # Web Push endpoint URL is sensitive too
+        # Federation envelope material — never echoed in API responses
+        "encrypted_payload",
+        "signature",
+        "signatures",
+        "session_key",
+        # Precise GPS — approximate (4dp-truncated ``lat``/``lon``) is OK
+        "location_lat",
+        "location_lon",
+        # Child-protection flags (§CP) — never shared
+        "declared_age",
+        "is_minor",
+        "guardian_ids",
+        "child_protection_enabled",
+    }
+)
 
 
 def sanitise_for_api(data: dict[str, Any]) -> dict[str, Any]:
@@ -96,8 +98,11 @@ def sanitise_for_api(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def error_response(
-    status: int, code: str, detail: str = "",
-    *, extra: dict | None = None,
+    status: int,
+    code: str,
+    detail: str = "",
+    *,
+    extra: dict | None = None,
 ) -> web.Response:
     """Canonical error shape for every HTTP route handler.
 

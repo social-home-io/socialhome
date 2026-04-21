@@ -106,17 +106,23 @@ class SearchService:
         return
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
-        await self._index_post(event.post, space_id=event.space_id, scope=SCOPE_SPACE_POST)
+        await self._index_post(
+            event.post, space_id=event.space_id, scope=SCOPE_SPACE_POST
+        )
 
     async def _on_space_post_moderated(self, event: SpacePostModerated) -> None:
         # Moderation deletes the post — drop the index entry too.
         await self._repo.delete(scope=SCOPE_SPACE_POST, ref_id=event.post.id)
 
     async def _on_page_created(self, event: PageCreated) -> None:
-        await self._index_page(event.page_id, event.space_id, event.title, event.content)
+        await self._index_page(
+            event.page_id, event.space_id, event.title, event.content
+        )
 
     async def _on_page_updated(self, event: PageUpdated) -> None:
-        await self._index_page(event.page_id, event.space_id, event.title, event.content)
+        await self._index_page(
+            event.page_id, event.space_id, event.title, event.content
+        )
 
     async def _on_page_deleted(self, event: PageDeleted) -> None:
         await self._repo.delete(scope=SCOPE_PAGE, ref_id=event.page_id)
@@ -124,7 +130,8 @@ class SearchService:
     async def _on_user_provisioned(self, event: UserProvisioned) -> None:
         """Auto-index newly provisioned local users (§23.2)."""
         await self.index_user(
-            user_id=event.user_id, username=event.username,
+            user_id=event.user_id,
+            username=event.username,
             display_name=event.username,  # display_name isn't in the event
         )
 
@@ -153,7 +160,11 @@ class SearchService:
     # services that create / rename users + spaces.
 
     async def index_user(
-        self, *, user_id: str, username: str, display_name: str = "",
+        self,
+        *,
+        user_id: str,
+        username: str,
+        display_name: str = "",
         bio: str | None = None,
     ) -> None:
         """Upsert a user into the search index so "People" queries find them."""
@@ -162,23 +173,33 @@ class SearchService:
         if not body:
             return
         await self._repo.upsert(
-            scope=SCOPE_USER, ref_id=user_id, space_id=None,
-            title=display_name or username, body=body,
+            scope=SCOPE_USER,
+            ref_id=user_id,
+            space_id=None,
+            title=display_name or username,
+            body=body,
         )
 
     async def delete_user(self, user_id: str) -> None:
         await self._repo.delete(scope=SCOPE_USER, ref_id=user_id)
 
     async def index_space(
-        self, *, space_id: str, name: str, description: str = "",
+        self,
+        *,
+        space_id: str,
+        name: str,
+        description: str = "",
     ) -> None:
         """Upsert a space into the search index so "Spaces" queries find it."""
         body = (description or "").strip()
         if not name and not body:
             return
         await self._repo.upsert(
-            scope=SCOPE_SPACE, ref_id=space_id, space_id=space_id,
-            title=name, body=body,
+            scope=SCOPE_SPACE,
+            ref_id=space_id,
+            space_id=space_id,
+            title=name,
+            body=body,
         )
 
     async def delete_space(self, space_id: str) -> None:
@@ -205,15 +226,18 @@ class SearchService:
             return []
         scopes = frozenset({scope}) if scope else None
         return await self._repo.search(
-            q, scopes=scopes, space_id=space_id, limit=limit,
+            q,
+            scopes=scopes,
+            space_id=space_id,
+            limit=limit,
         )
 
     async def search_with_counts(
         self,
         query: str,
         *,
-        scope: str | None = None,   # back-compat: single scope string
-        type_: str | None = None,   # spec: "posts"/"people"/"spaces"/...
+        scope: str | None = None,  # back-compat: single scope string
+        type_: str | None = None,  # spec: "posts"/"people"/"spaces"/...
         space_id: str | None = None,
         caller_user_id: str | None = None,
         caller_username: str | None = None,
@@ -246,8 +270,11 @@ class SearchService:
         # Fetch more than ``limit`` so access filtering doesn't leave
         # the response short — 2× is a fair heuristic.
         raw = await self._repo.search(
-            q, scopes=scopes, space_id=space_id,
-            limit=limit * 2, offset=offset,
+            q,
+            scopes=scopes,
+            space_id=space_id,
+            limit=limit * 2,
+            offset=offset,
         )
         filtered = await self._apply_access_filter(
             raw,
@@ -259,7 +286,9 @@ class SearchService:
 
     # ─── Internals ────────────────────────────────────────────────────────
 
-    async def _index_post(self, post, *, space_id: str | None, scope: str = SCOPE_POST) -> None:
+    async def _index_post(
+        self, post, *, space_id: str | None, scope: str = SCOPE_POST
+    ) -> None:
         # Posts may not have content (file/media posts); skip those — the
         # caption-less file isn't useful in a text index.
         body = (getattr(post, "content", None) or "").strip()
@@ -274,7 +303,11 @@ class SearchService:
         )
 
     async def _index_page(
-        self, page_id: str, space_id: str | None, title: str, content: str,
+        self,
+        page_id: str,
+        space_id: str | None,
+        title: str,
+        content: str,
     ) -> None:
         body = (content or "").strip()
         if not body and not title:

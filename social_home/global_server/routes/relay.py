@@ -22,23 +22,26 @@ class RegisterView(GfsBaseView):
         admin_repo = self.svc(K.gfs_admin_repo_key)
         body = await self.body_or_400()
         try:
-            instance_id  = body["instance_id"]
-            public_key   = body["public_key"]
-            webhook_url  = body["webhook_url"]
+            instance_id = body["instance_id"]
+            public_key = body["public_key"]
+            webhook_url = body["webhook_url"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
         display_name = str(body.get("display_name") or "")
-        auto_accept = (
-            await admin_repo.get_config("auto_accept_clients")
-        ) == "1"
+        auto_accept = (await admin_repo.get_config("auto_accept_clients")) == "1"
         await svc.register_instance(
-            instance_id, public_key, webhook_url,
-            display_name=display_name, auto_accept=auto_accept,
+            instance_id,
+            public_key,
+            webhook_url,
+            display_name=display_name,
+            auto_accept=auto_accept,
         )
-        return web.json_response({
-            "status":      "registered" if auto_accept else "pending",
-            "instance_id": instance_id,
-        })
+        return web.json_response(
+            {
+                "status": "registered" if auto_accept else "pending",
+                "instance_id": instance_id,
+            }
+        )
 
 
 class PublishView(GfsBaseView):
@@ -49,15 +52,19 @@ class PublishView(GfsBaseView):
         session = self.request.app.get(K.gfs_http_session_key)
         body = await self.body_or_400()
         try:
-            space_id      = body["space_id"]
-            event_type    = body["event_type"]
-            payload       = body["payload"]
+            space_id = body["space_id"]
+            event_type = body["event_type"]
+            payload = body["payload"]
             from_instance = body["from_instance"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
         signature = body.get("signature", "")
         delivered = await svc.publish_event(
-            space_id, event_type, payload, from_instance, signature,
+            space_id,
+            event_type,
+            payload,
+            from_instance,
+            signature,
             session=session,
         )
         return web.json_response(
@@ -73,7 +80,7 @@ class SubscribeView(GfsBaseView):
         body = await self.body_or_400()
         try:
             instance_id = body["instance_id"]
-            space_id    = body["space_id"]
+            space_id = body["space_id"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
         action = body.get("action", "subscribe")
@@ -115,7 +122,10 @@ class ReportView(GfsBaseView):
         fed_repo = self.svc(K.gfs_fed_repo_key)
         body = await self.body_or_400()
         required = {
-            "target_type", "target_id", "category", "reporter_instance_id",
+            "target_type",
+            "target_id",
+            "category",
+            "reporter_instance_id",
         }
         if not required.issubset(body):
             return web.json_response(
@@ -128,7 +138,8 @@ class ReportView(GfsBaseView):
         signature = body.pop("signature", "")
         if not verify_report_signature(body, signature, reporter.public_key):
             return web.json_response(
-                {"error": "invalid_signature"}, status=401,
+                {"error": "invalid_signature"},
+                status=401,
             )
         was_new, auto_banned = await admin_svc.record_fraud_report(
             target_type=body["target_type"],
@@ -137,13 +148,15 @@ class ReportView(GfsBaseView):
             notes=body.get("notes"),
             reporter_instance_id=body["reporter_instance_id"],
             reporter_user_id=body.get("reporter_user_id"),
-            signed_body=b"",       # already verified above
+            signed_body=b"",  # already verified above
             signature=signature,
         )
-        return web.json_response({
-            "status":      "recorded" if was_new else "duplicate",
-            "quarantined": auto_banned,
-        })
+        return web.json_response(
+            {
+                "status": "recorded" if was_new else "duplicate",
+                "quarantined": auto_banned,
+            }
+        )
 
 
 class AppealView(GfsBaseView):
@@ -166,7 +179,8 @@ class AppealView(GfsBaseView):
         signature = body.pop("signature", "")
         if not verify_report_signature(body, signature, sender.public_key):
             return web.json_response(
-                {"error": "invalid_signature"}, status=401,
+                {"error": "invalid_signature"},
+                status=401,
             )
         appeal = await admin_svc.record_appeal(
             target_type=str(body["target_type"]),
@@ -174,5 +188,6 @@ class AppealView(GfsBaseView):
             message=str(body.get("message") or ""),
         )
         return web.json_response(
-            {"id": appeal.id, "status": "pending"}, status=201,
+            {"id": appeal.id, "status": "pending"},
+            status=201,
         )

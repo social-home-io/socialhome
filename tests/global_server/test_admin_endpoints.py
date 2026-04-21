@@ -20,7 +20,8 @@ from social_home.global_server.server import create_gfs_app
 
 def _config(tmp_dir):
     return GfsConfig(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1",
+        port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
         instance_id="gfs-test",
@@ -32,7 +33,8 @@ async def client(tmp_dir):
     app = create_gfs_app(_config(tmp_dir))
     async with TestClient(TestServer(app)) as tc:
         await app[gfs_admin_repo_key].set_config(
-            "admin_password_hash", hash_password("admin-pw"),
+            "admin_password_hash",
+            hash_password("admin-pw"),
         )
         login = await tc.post("/admin/login", json={"password": "admin-pw"})
         assert login.status == 200
@@ -41,6 +43,7 @@ async def client(tmp_dir):
 
 
 # ── Overview ───────────────────────────────────────────────────────────
+
 
 async def test_overview_returns_zero_counts_on_empty_db(client):
     resp = await client.get("/admin/api/overview")
@@ -53,14 +56,19 @@ async def test_overview_returns_zero_counts_on_empty_db(client):
 
 # ── Clients ────────────────────────────────────────────────────────────
 
+
 async def test_clients_list_accept_ban_unban(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="pascal.home", display_name="Pascal",
-        public_key="aa" * 32, endpoint_url="http://p.example/wh",
-        status="pending",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="pascal.home",
+            display_name="Pascal",
+            public_key="aa" * 32,
+            endpoint_url="http://p.example/wh",
+            status="pending",
+        )
+    )
     resp = await client.get("/admin/api/clients?status=pending")
     assert resp.status == 200
     assert len((await resp.json())) == 1
@@ -68,15 +76,20 @@ async def test_clients_list_accept_ban_unban(client):
     # Accept → moves to active.
     resp = await client.post("/admin/api/clients/pascal.home/accept")
     assert resp.status == 200
-    assert (await (await client.get("/admin/api/clients?status=active")).json())
+    assert await (await client.get("/admin/api/clients?status=active")).json()
 
     # Ban → moves to banned AND bans owned spaces.
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="space-p", owning_instance="pascal.home",
-        name="Pascal's Space", status="active",
-    ))
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="space-p",
+            owning_instance="pascal.home",
+            name="Pascal's Space",
+            status="active",
+        )
+    )
     resp = await client.post(
-        "/admin/api/clients/pascal.home/ban", json={"reason": "spam"},
+        "/admin/api/clients/pascal.home/ban",
+        json={"reason": "spam"},
     )
     assert resp.status == 200
     # The space is now banned.
@@ -92,24 +105,34 @@ async def test_clients_list_accept_ban_unban(client):
 
 # ── Spaces ─────────────────────────────────────────────────────────────
 
+
 async def test_spaces_accept_reject_ban(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="owner.home", display_name="Owner",
-        public_key="bb" * 32, endpoint_url="http://o.example/wh",
-        status="active",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="space-q", owning_instance="owner.home",
-        name="Makers", status="pending",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="owner.home",
+            display_name="Owner",
+            public_key="bb" * 32,
+            endpoint_url="http://o.example/wh",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="space-q",
+            owning_instance="owner.home",
+            name="Makers",
+            status="pending",
+        )
+    )
     # Accept.
     resp = await client.post("/admin/api/spaces/space-q/accept")
     assert resp.status == 200
     # Ban.
-    resp = await client.post("/admin/api/spaces/space-q/ban",
-                              json={"reason": "off-topic"})
+    resp = await client.post(
+        "/admin/api/spaces/space-q/ban", json={"reason": "off-topic"}
+    )
     assert resp.status == 200
     # Public /gfs/spaces no longer lists it.
     resp = await client.get("/gfs/spaces")
@@ -119,19 +142,22 @@ async def test_spaces_accept_reject_ban(client):
 
 # ── Policy + branding ──────────────────────────────────────────────────
 
+
 async def test_policy_patch_persists(client):
     resp = await client.patch(
         "/admin/api/policy",
-        json={"auto_accept_clients": False,
-              "auto_accept_spaces":  True,
-              "fraud_threshold":     10},
+        json={
+            "auto_accept_clients": False,
+            "auto_accept_spaces": True,
+            "fraud_threshold": 10,
+        },
     )
     assert resp.status == 200
     body = await resp.json()
     assert body == {
         "auto_accept_clients": False,
-        "auto_accept_spaces":  True,
-        "fraud_threshold":     10,
+        "auto_accept_spaces": True,
+        "fraud_threshold": 10,
     }
     # GET reflects the write.
     resp = await client.get("/admin/api/policy")
@@ -141,9 +167,11 @@ async def test_policy_patch_persists(client):
 async def test_branding_patch_persists(client):
     resp = await client.patch(
         "/admin/api/branding",
-        json={"server_name": "Test GFS",
-              "landing_markdown": "# hi",
-              "header_image_file": "hero.webp"},
+        json={
+            "server_name": "Test GFS",
+            "landing_markdown": "# hi",
+            "header_image_file": "hero.webp",
+        },
     )
     assert resp.status == 200
     body = await resp.json()
@@ -153,17 +181,25 @@ async def test_branding_patch_persists(client):
 
 # ── Fraud reports ──────────────────────────────────────────────────────
 
-def _signed_report_body(kp, *, target_type="space", target_id="space-bad",
-                        category="spam", reporter="reporter.home",
-                        reporter_user="u-1", notes=None):
+
+def _signed_report_body(
+    kp,
+    *,
+    target_type="space",
+    target_id="space-bad",
+    category="spam",
+    reporter="reporter.home",
+    reporter_user="u-1",
+    notes=None,
+):
     body = {
-        "target_type":           target_type,
-        "target_id":             target_id,
-        "category":              category,
-        "notes":                 notes,
-        "reporter_instance_id":  reporter,
-        "reporter_user_id":      reporter_user,
-        "created_at":            "2026-04-19T00:00:00Z",
+        "target_type": target_type,
+        "target_id": target_id,
+        "category": category,
+        "notes": notes,
+        "reporter_instance_id": reporter,
+        "reporter_user_id": reporter_user,
+        "created_at": "2026-04-19T00:00:00Z",
     }
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     signature = sign_ed25519(kp.private_key, canonical)
@@ -175,13 +211,16 @@ async def test_fraud_report_happy_path_records_row(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="reporter.home", display_name="Reporter",
-        public_key=kp.public_key.hex(), endpoint_url="http://r.example/wh",
-        status="active",
-    ))
-    resp = await client.post("/gfs/report",
-                              json=_signed_report_body(kp))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="reporter.home",
+            display_name="Reporter",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://r.example/wh",
+            status="active",
+        )
+    )
+    resp = await client.post("/gfs/report", json=_signed_report_body(kp))
     assert resp.status == 200
     body = await resp.json()
     assert body["status"] == "recorded"
@@ -200,13 +239,17 @@ async def test_fraud_report_bad_signature_is_401(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="reporter.home", display_name="Reporter",
-        public_key=kp.public_key.hex(), endpoint_url="http://r.example/wh",
-        status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="reporter.home",
+            display_name="Reporter",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://r.example/wh",
+            status="active",
+        )
+    )
     body = _signed_report_body(kp)
-    body["signature"] = "0" * 88          # bogus
+    body["signature"] = "0" * 88  # bogus
     resp = await client.post("/gfs/report", json=body)
     assert resp.status == 401
 
@@ -219,6 +262,7 @@ async def test_threshold_crossing_auto_bans_space(client):
     await admin_repo.set_config("fraud_threshold", "2")
     # Rebuild the admin service with the new threshold (it cached at init).
     from social_home.global_server.app_keys import gfs_admin_service_key
+
     app[gfs_admin_service_key]._fraud_threshold = 2
 
     # Two reporters cross the threshold.
@@ -226,17 +270,25 @@ async def test_threshold_crossing_auto_bans_space(client):
     for name in ("reporter-a", "reporter-b"):
         kp = generate_identity_keypair()
         keys[name] = kp
-        await fed_repo.upsert_instance(ClientInstance(
-            instance_id=name, display_name=name,
-            public_key=kp.public_key.hex(),
-            endpoint_url=f"http://{name}.example/wh", status="active",
-        ))
+        await fed_repo.upsert_instance(
+            ClientInstance(
+                instance_id=name,
+                display_name=name,
+                public_key=kp.public_key.hex(),
+                endpoint_url=f"http://{name}.example/wh",
+                status="active",
+            )
+        )
 
     # Seed the target space (owner must exist first for FK).
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="space-bad", owning_instance="reporter-a",
-        name="Bad", status="active",
-    ))
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="space-bad",
+            owning_instance="reporter-a",
+            name="Bad",
+            status="active",
+        )
+    )
 
     # Both reporters file — second crosses threshold and auto-bans.
     for name in ("reporter-a", "reporter-b"):
@@ -259,17 +311,21 @@ async def test_report_review_dismiss(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="reporter.home", display_name="R",
-        public_key=kp.public_key.hex(), endpoint_url="http://r/wh",
-        status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="reporter.home",
+            display_name="R",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://r/wh",
+            status="active",
+        )
+    )
     await client.post("/gfs/report", json=_signed_report_body(kp))
-    reports = await (await client.get(
-        "/admin/api/reports?status=pending")).json()
+    reports = await (await client.get("/admin/api/reports?status=pending")).json()
     rid = reports[0]["id"]
     resp = await client.post(
-        f"/admin/api/reports/{rid}/review", json={"action": "dismiss"},
+        f"/admin/api/reports/{rid}/review",
+        json={"action": "dismiss"},
     )
     assert resp.status == 200
     # Now dismissed.
@@ -279,14 +335,19 @@ async def test_report_review_dismiss(client):
 
 # ── Audit log ──────────────────────────────────────────────────────────
 
+
 async def test_audit_log_records_accept_and_ban(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="pascal.home", display_name="Pascal",
-        public_key="aa" * 32, endpoint_url="http://p/wh",
-        status="pending",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="pascal.home",
+            display_name="Pascal",
+            public_key="aa" * 32,
+            endpoint_url="http://p/wh",
+            status="pending",
+        )
+    )
     await client.post("/admin/api/clients/pascal.home/accept")
     await client.post("/admin/api/clients/pascal.home/ban", json={})
     resp = await client.get("/admin/api/audit?limit=10")
@@ -297,25 +358,37 @@ async def test_audit_log_records_accept_and_ban(client):
 
 # ── Appeals ────────────────────────────────────────────────────────────
 
+
 async def test_appeal_roundtrip(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    admin_svc = app[__import__(
-        "social_home.global_server.app_keys", fromlist=["*"]
-    ).gfs_admin_service_key]
+    admin_svc = app[
+        __import__(
+            "social_home.global_server.app_keys", fromlist=["*"]
+        ).gfs_admin_service_key
+    ]
     # Seed a banned space.
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="banned.home", display_name="Banned",
-        public_key="cc" * 32, endpoint_url="http://b/wh",
-        status="banned",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="banned-space", owning_instance="banned.home",
-        name="Banned Space", status="banned",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="banned.home",
+            display_name="Banned",
+            public_key="cc" * 32,
+            endpoint_url="http://b/wh",
+            status="banned",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="banned-space",
+            owning_instance="banned.home",
+            name="Banned Space",
+            status="banned",
+        )
+    )
     # Household files an appeal directly via the service (wire path later).
     appeal = await admin_svc.record_appeal(
-        target_type="space", target_id="banned-space",
+        target_type="space",
+        target_id="banned-space",
         message="false positive, we think",
     )
     # Admin lists + lifts.
@@ -334,18 +407,23 @@ async def test_appeal_roundtrip(client):
 
 async def test_appeal_decide_unknown_is_404(client):
     resp = await client.post(
-        "/admin/api/appeals/missing/decide", json={"action": "lift"},
+        "/admin/api/appeals/missing/decide",
+        json={"action": "lift"},
     )
     assert resp.status == 404
 
 
 async def test_appeal_decide_bad_action_is_422(client):
     app = client._app
-    admin_svc = app[__import__(
-        "social_home.global_server.app_keys", fromlist=["*"]
-    ).gfs_admin_service_key]
+    admin_svc = app[
+        __import__(
+            "social_home.global_server.app_keys", fromlist=["*"]
+        ).gfs_admin_service_key
+    ]
     appeal = await admin_svc.record_appeal(
-        target_type="space", target_id="x", message="",
+        target_type="space",
+        target_id="x",
+        message="",
     )
     resp = await client.post(
         f"/admin/api/appeals/{appeal.id}/decide",
@@ -356,31 +434,38 @@ async def test_appeal_decide_bad_action_is_422(client):
 
 # ── Dismiss + double-review handling ──────────────────────────────────
 
+
 async def test_double_review_returns_409(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="reporter.home", display_name="R",
-        public_key=kp.public_key.hex(), endpoint_url="http://r/wh",
-        status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="reporter.home",
+            display_name="R",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://r/wh",
+            status="active",
+        )
+    )
     await client.post("/gfs/report", json=_signed_report_body(kp))
-    reports = await (await client.get(
-        "/admin/api/reports?status=pending")).json()
+    reports = await (await client.get("/admin/api/reports?status=pending")).json()
     rid = reports[0]["id"]
     await client.post(
-        f"/admin/api/reports/{rid}/review", json={"action": "dismiss"},
+        f"/admin/api/reports/{rid}/review",
+        json={"action": "dismiss"},
     )
     resp = await client.post(
-        f"/admin/api/reports/{rid}/review", json={"action": "dismiss"},
+        f"/admin/api/reports/{rid}/review",
+        json={"action": "dismiss"},
     )
     assert resp.status == 409
 
 
 async def test_review_unknown_report_is_404(client):
     resp = await client.post(
-        "/admin/api/reports/missing/review", json={"action": "dismiss"},
+        "/admin/api/reports/missing/review",
+        json={"action": "dismiss"},
     )
     assert resp.status == 404
 
@@ -389,16 +474,22 @@ async def test_review_bad_action_is_422(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="reporter.home", display_name="R",
-        public_key=kp.public_key.hex(), endpoint_url="http://r/wh",
-        status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="reporter.home",
+            display_name="R",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://r/wh",
+            status="active",
+        )
+    )
     await client.post("/gfs/report", json=_signed_report_body(kp))
-    rid = (await (await client.get(
-        "/admin/api/reports?status=pending")).json())[0]["id"]
+    rid = (await (await client.get("/admin/api/reports?status=pending")).json())[0][
+        "id"
+    ]
     resp = await client.post(
-        f"/admin/api/reports/{rid}/review", json={"action": "bogus"},
+        f"/admin/api/reports/{rid}/review",
+        json={"action": "bogus"},
     )
     assert resp.status == 422
 
@@ -414,26 +505,43 @@ async def test_report_ban_instance_action(client):
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
     # The space we're going to report is owned by a household we want to ban.
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="owner.home", display_name="Owner",
-        public_key="dd" * 32, endpoint_url="http://o/wh",
-        status="active",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="suspect-space", owning_instance="owner.home",
-        name="Suspect", status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="owner.home",
+            display_name="Owner",
+            public_key="dd" * 32,
+            endpoint_url="http://o/wh",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="suspect-space",
+            owning_instance="owner.home",
+            name="Suspect",
+            status="active",
+        )
+    )
     # Reporter (separate instance).
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="reporter.home", display_name="R",
-        public_key=kp.public_key.hex(), endpoint_url="http://r/wh",
-        status="active",
-    ))
-    await client.post("/gfs/report", json=_signed_report_body(
-        kp, target_id="suspect-space",
-    ))
-    rid = (await (await client.get(
-        "/admin/api/reports?status=pending")).json())[0]["id"]
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="reporter.home",
+            display_name="R",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://r/wh",
+            status="active",
+        )
+    )
+    await client.post(
+        "/gfs/report",
+        json=_signed_report_body(
+            kp,
+            target_id="suspect-space",
+        ),
+    )
+    rid = (await (await client.get("/admin/api/reports?status=pending")).json())[0][
+        "id"
+    ]
     resp = await client.post(
         f"/admin/api/reports/{rid}/review",
         json={"action": "ban_instance"},
@@ -445,14 +553,19 @@ async def test_report_ban_instance_action(client):
 
 # ── Public /gfs/spaces filters ─────────────────────────────────────────
 
+
 async def test_client_reject_removes_row(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="rej.home", display_name="Rej",
-        public_key="ff" * 32, endpoint_url="http://rej/wh",
-        status="pending",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="rej.home",
+            display_name="Rej",
+            public_key="ff" * 32,
+            endpoint_url="http://rej/wh",
+            status="pending",
+        )
+    )
     resp = await client.post("/admin/api/clients/rej.home/reject")
     assert resp.status == 200
     assert await fed_repo.get_instance("rej.home") is None
@@ -461,15 +574,23 @@ async def test_client_reject_removes_row(client):
 async def test_space_reject_deletes_row(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="o2.home", display_name="O",
-        public_key="aa" * 32, endpoint_url="http://o2/wh",
-        status="active",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="rej-space", owning_instance="o2.home",
-        name="R", status="pending",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="o2.home",
+            display_name="O",
+            public_key="aa" * 32,
+            endpoint_url="http://o2/wh",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="rej-space",
+            owning_instance="o2.home",
+            name="R",
+            status="pending",
+        )
+    )
     resp = await client.post("/admin/api/spaces/rej-space/reject")
     assert resp.status == 200
     assert await fed_repo.get_space("rej-space") is None
@@ -478,15 +599,23 @@ async def test_space_reject_deletes_row(client):
 async def test_space_unban_sets_pending(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="o3.home", display_name="O",
-        public_key="aa" * 32, endpoint_url="http://o3/wh",
-        status="active",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="ub-space", owning_instance="o3.home",
-        name="UB", status="banned",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="o3.home",
+            display_name="O",
+            public_key="aa" * 32,
+            endpoint_url="http://o3/wh",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="ub-space",
+            owning_instance="o3.home",
+            name="UB",
+            status="banned",
+        )
+    )
     resp = await client.post("/admin/api/spaces/ub-space/unban")
     assert resp.status == 200
     sp = await fed_repo.get_space("ub-space")
@@ -498,11 +627,15 @@ async def test_duplicate_fraud_report_is_duplicate_status(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="dup.home", display_name="D",
-        public_key=kp.public_key.hex(), endpoint_url="http://d/wh",
-        status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="dup.home",
+            display_name="D",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://d/wh",
+            status="active",
+        )
+    )
     body = _signed_report_body(kp, reporter="dup.home")
     resp = await client.post("/gfs/report", json=body)
     assert (await resp.json())["status"] == "recorded"
@@ -516,17 +649,24 @@ async def test_fraud_report_reporter_cap_rate_limits(client, monkeypatch):
     fed_repo = app[gfs_fed_repo_key]
     # Tighten the cap for this test.
     from social_home.global_server import admin_service as _as
+
     monkeypatch.setattr(_as, "MAX_REPORTS_PER_REPORTER_PER_DAY", 2)
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="cap.home", display_name="C",
-        public_key=kp.public_key.hex(), endpoint_url="http://c/wh",
-        status="active",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="cap.home",
+            display_name="C",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://c/wh",
+            status="active",
+        )
+    )
     # Two under the cap succeed.
     for tid in ("t1", "t2"):
         body = _signed_report_body(
-            kp, reporter="cap.home", target_id=tid,
+            kp,
+            reporter="cap.home",
+            target_id=tid,
         )
         resp = await client.post("/gfs/report", json=body)
         assert (await resp.json())["status"] == "recorded"
@@ -538,11 +678,15 @@ async def test_fraud_report_reporter_cap_rate_limits(client, monkeypatch):
 
 async def test_list_appeals_with_status_filter(client):
     app = client._app
-    admin_svc = app[__import__(
-        "social_home.global_server.app_keys", fromlist=["*"]
-    ).gfs_admin_service_key]
+    admin_svc = app[
+        __import__(
+            "social_home.global_server.app_keys", fromlist=["*"]
+        ).gfs_admin_service_key
+    ]
     await admin_svc.record_appeal(
-        target_type="instance", target_id="x", message="m",
+        target_type="instance",
+        target_id="x",
+        message="m",
     )
     # No filter returns the entry.
     resp = await client.get("/admin/api/appeals")
@@ -558,19 +702,25 @@ async def test_appeal_ingress_records_pending_row(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     kp = generate_identity_keypair()
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="banned.home", display_name="B",
-        public_key=kp.public_key.hex(), endpoint_url="http://b/wh",
-        status="banned",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="banned.home",
+            display_name="B",
+            public_key=kp.public_key.hex(),
+            endpoint_url="http://b/wh",
+            status="banned",
+        )
+    )
     body = {
-        "target_type":   "instance",
-        "target_id":     "banned.home",
-        "message":       "false positive",
+        "target_type": "instance",
+        "target_id": "banned.home",
+        "message": "false positive",
         "from_instance": "banned.home",
     }
     canonical = json.dumps(
-        body, separators=(",", ":"), sort_keys=True,
+        body,
+        separators=(",", ":"),
+        sort_keys=True,
     ).encode()
     body["signature"] = b64url_encode(sign_ed25519(kp.private_key, canonical))
     resp = await client.post("/gfs/appeal", json=body)
@@ -582,8 +732,10 @@ async def test_appeal_ingress_records_pending_row(client):
 
 async def test_appeal_ingress_unknown_sender_is_403(client):
     body = {
-        "target_type": "space", "target_id": "sp",
-        "message": "hi", "from_instance": "ghost.home",
+        "target_type": "space",
+        "target_id": "sp",
+        "message": "hi",
+        "from_instance": "ghost.home",
         "signature": "sig",
     }
     resp = await client.post("/gfs/appeal", json=body)
@@ -606,41 +758,55 @@ async def test_header_image_upload_writes_file_and_updates_config(
     img.save(buf, format="JPEG")
     form = aiohttp.FormData()
     form.add_field(
-        "file", buf.getvalue(),
-        filename="hero.jpg", content_type="image/jpeg",
+        "file",
+        buf.getvalue(),
+        filename="hero.jpg",
+        content_type="image/jpeg",
     )
     resp = await client.post(
-        "/admin/api/branding/header-image", data=form,
+        "/admin/api/branding/header-image",
+        data=form,
     )
     assert resp.status == 200
     body = await resp.json()
     assert body["header_image_file"].endswith(".webp")
     from social_home.global_server.app_keys import gfs_config_key
+
     cfg = app[gfs_config_key]
     assert (Path(cfg.media_dir) / body["header_image_file"]).is_file()
-    assert await app[gfs_admin_repo_key].get_config(
-        "header_image_file",
-    ) == body["header_image_file"]
+    assert (
+        await app[gfs_admin_repo_key].get_config(
+            "header_image_file",
+        )
+        == body["header_image_file"]
+    )
 
 
 async def test_header_image_upload_rejects_non_image(client):
     import aiohttp
+
     form = aiohttp.FormData()
-    form.add_field("file", b"not an image",
-                   filename="junk.bin",
-                   content_type="application/octet-stream")
+    form.add_field(
+        "file",
+        b"not an image",
+        filename="junk.bin",
+        content_type="application/octet-stream",
+    )
     resp = await client.post(
-        "/admin/api/branding/header-image", data=form,
+        "/admin/api/branding/header-image",
+        data=form,
     )
     assert resp.status == 415
 
 
 async def test_header_image_upload_rejects_missing_file(client):
     import aiohttp
+
     form = aiohttp.FormData()
     form.add_field("something_else", b"x")
     resp = await client.post(
-        "/admin/api/branding/header-image", data=form,
+        "/admin/api/branding/header-image",
+        data=form,
     )
     assert resp.status == 400
 
@@ -648,23 +814,39 @@ async def test_header_image_upload_rejects_missing_file(client):
 async def test_public_spaces_excludes_pending_and_banned(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
-    await fed_repo.upsert_instance(ClientInstance(
-        instance_id="o.home", display_name="O",
-        public_key="ee" * 32, endpoint_url="http://o/wh",
-        status="active",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="active-one", owning_instance="o.home",
-        name="A", status="active",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="pending-one", owning_instance="o.home",
-        name="P", status="pending",
-    ))
-    await fed_repo.upsert_space(GlobalSpace(
-        space_id="banned-one", owning_instance="o.home",
-        name="B", status="banned",
-    ))
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="o.home",
+            display_name="O",
+            public_key="ee" * 32,
+            endpoint_url="http://o/wh",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="active-one",
+            owning_instance="o.home",
+            name="A",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="pending-one",
+            owning_instance="o.home",
+            name="P",
+            status="pending",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="banned-one",
+            owning_instance="o.home",
+            name="B",
+            status="banned",
+        )
+    )
     resp = await client.get("/gfs/spaces")
     spaces = (await resp.json())["spaces"]
     ids = {s["space_id"] for s in spaces}

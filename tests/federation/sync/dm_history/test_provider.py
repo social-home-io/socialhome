@@ -19,11 +19,13 @@ class _FakeFederation:
         self.sent: list[dict] = []
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
-        self.sent.append({
-            "to": to_instance_id,
-            "type": event_type,
-            "payload": payload,
-        })
+        self.sent.append(
+            {
+                "to": to_instance_id,
+                "type": event_type,
+                "payload": payload,
+            }
+        )
 
 
 class _FakeConvRepo:
@@ -66,11 +68,16 @@ async def test_streams_messages_in_order_and_emits_complete():
         conversation_repo=_FakeConvRepo(messages),
         federation_service=fed,
     )
-    count = await provider.handle_request(_event(
-        "peer-a", {"conversation_id": "c-1", "since": ""},
-    ))
+    count = await provider.handle_request(
+        _event(
+            "peer-a",
+            {"conversation_id": "c-1", "since": ""},
+        )
+    )
     chunks = [s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_CHUNK]
-    completes = [s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_COMPLETE]
+    completes = [
+        s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_COMPLETE
+    ]
     assert count == 1
     assert len(chunks) == 1
     assert [m["id"] for m in chunks[0]["payload"]["messages"]] == ["m-0", "m-1", "m-2"]
@@ -89,9 +96,12 @@ async def test_respects_since_cursor():
         federation_service=fed,
     )
     since = (now + timedelta(minutes=1)).isoformat()
-    await provider.handle_request(_event(
-        "peer-a", {"conversation_id": "c-1", "since": since},
-    ))
+    await provider.handle_request(
+        _event(
+            "peer-a",
+            {"conversation_id": "c-1", "since": since},
+        )
+    )
     assert repo.last_since == since
     chunks = [s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_CHUNK]
     assert [m["id"] for m in chunks[0]["payload"]["messages"]] == ["m-2"]
@@ -105,9 +115,12 @@ async def test_large_history_is_split_into_multiple_chunks():
         conversation_repo=_FakeConvRepo(messages),
         federation_service=fed,
     )
-    await provider.handle_request(_event(
-        "peer-a", {"conversation_id": "c-1", "since": ""},
-    ))
+    await provider.handle_request(
+        _event(
+            "peer-a",
+            {"conversation_id": "c-1", "since": ""},
+        )
+    )
     chunks = [s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_CHUNK]
     assert len(chunks) == 2
     # last chunk flagged
@@ -121,11 +134,15 @@ async def test_empty_history_still_sends_complete():
         conversation_repo=_FakeConvRepo([]),
         federation_service=fed,
     )
-    await provider.handle_request(_event(
-        "peer-a", {"conversation_id": "c-1", "since": ""},
-    ))
-    completes = [s for s in fed.sent
-                 if s["type"] == FederationEventType.DM_HISTORY_COMPLETE]
+    await provider.handle_request(
+        _event(
+            "peer-a",
+            {"conversation_id": "c-1", "since": ""},
+        )
+    )
+    completes = [
+        s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_COMPLETE
+    ]
     assert len(completes) == 1
 
 
@@ -135,8 +152,11 @@ async def test_missing_conversation_id_drops():
         conversation_repo=_FakeConvRepo([]),
         federation_service=fed,
     )
-    count = await provider.handle_request(_event(
-        "peer-a", {"conversation_id": "", "since": ""},
-    ))
+    count = await provider.handle_request(
+        _event(
+            "peer-a",
+            {"conversation_id": "", "since": ""},
+        )
+    )
     assert count == 0
     assert fed.sent == []

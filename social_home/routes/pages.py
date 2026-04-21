@@ -34,19 +34,19 @@ from .base import BaseView
 
 def _page_dict(page) -> dict:
     return {
-        "id":                  page.id,
-        "title":               page.title,
-        "content":             page.content,
-        "created_by":          page.created_by,
-        "created_at":          page.created_at,
-        "updated_at":          page.updated_at,
+        "id": page.id,
+        "title": page.title,
+        "content": page.content,
+        "created_by": page.created_by,
+        "created_at": page.created_at,
+        "updated_at": page.updated_at,
         "last_editor_user_id": page.last_editor_user_id,
-        "last_edited_at":      page.last_edited_at,
-        "space_id":            page.space_id,
-        "cover_image_url":     page.cover_image_url,
-        "locked_by":           page.locked_by,
-        "locked_at":           page.locked_at,
-        "lock_expires_at":     page.lock_expires_at,
+        "last_edited_at": page.last_edited_at,
+        "space_id": page.space_id,
+        "cover_image_url": page.cover_image_url,
+        "locked_by": page.locked_by,
+        "locked_at": page.locked_at,
+        "lock_expires_at": page.lock_expires_at,
     }
 
 
@@ -58,17 +58,19 @@ async def _snapshot_version(repo, *, previous, editor_user_id: str) -> None:
     "what the page looked like before the current live body".
     """
     next_no = await repo.next_version_number(previous.id)
-    await repo.save_version(PageVersion(
-        id=uuid.uuid4().hex,
-        page_id=previous.id,
-        version=next_no,
-        title=previous.title,
-        content=previous.content,
-        edited_by=editor_user_id,
-        edited_at=datetime.now(timezone.utc).isoformat(),
-        space_id=previous.space_id,
-        cover_image_url=previous.cover_image_url,
-    ))
+    await repo.save_version(
+        PageVersion(
+            id=uuid.uuid4().hex,
+            page_id=previous.id,
+            version=next_no,
+            title=previous.title,
+            content=previous.content,
+            edited_by=editor_user_id,
+            edited_at=datetime.now(timezone.utc).isoformat(),
+            space_id=previous.space_id,
+            cover_image_url=previous.cover_image_url,
+        )
+    )
 
 
 class PageCollectionView(BaseView):
@@ -96,10 +98,14 @@ class PageCollectionView(BaseView):
             created_by=ctx.user_id,
         )
         p = await repo.save(p)
-        await bus.publish(PageCreated(
-            page_id=p.id, space_id=p.space_id,
-            title=p.title, content=p.content,
-        ))
+        await bus.publish(
+            PageCreated(
+                page_id=p.id,
+                space_id=p.space_id,
+                title=p.title,
+                content=p.content,
+            )
+        )
         return web.json_response(_page_dict(p), status=201)
 
 
@@ -133,19 +139,23 @@ class PageDetailView(BaseView):
         base = body.get("base_updated_at")
         if base and base != p.updated_at:
             theirs_by = p.last_editor_user_id or p.created_by
-            await bus.publish(PageConflictEmitted(
-                page_id=p.id, space_id=p.space_id,
-                theirs=p.content, theirs_by=theirs_by,
-            ))
+            await bus.publish(
+                PageConflictEmitted(
+                    page_id=p.id,
+                    space_id=p.space_id,
+                    theirs=p.content,
+                    theirs_by=theirs_by,
+                )
+            )
             return web.json_response(
                 {"error": "stale_update", "current": _page_dict(p)},
                 status=409,
             )
         now_iso = datetime.now(timezone.utc).isoformat()
         kwargs: dict = {
-            "updated_at":          now_iso,
+            "updated_at": now_iso,
             "last_editor_user_id": ctx.user_id,
-            "last_edited_at":      now_iso,
+            "last_edited_at": now_iso,
         }
         if "title" in body:
             title = body["title"].strip()
@@ -159,10 +169,14 @@ class PageDetailView(BaseView):
         updated = replace(p, **kwargs)
         updated = await repo.save(updated)
         await _snapshot_version(repo, previous=p, editor_user_id=ctx.user_id)
-        await bus.publish(PageUpdated(
-            page_id=updated.id, space_id=updated.space_id,
-            title=updated.title, content=updated.content,
-        ))
+        await bus.publish(
+            PageUpdated(
+                page_id=updated.id,
+                space_id=updated.space_id,
+                title=updated.title,
+                content=updated.content,
+            )
+        )
         return web.json_response(_page_dict(updated))
 
     async def delete(self) -> web.Response:
@@ -204,12 +218,14 @@ class PageLockView(BaseView):
             return error_response(404, "NOT_FOUND", "Page not found.")
         lock = await repo.get_lock(page_id)
         p = await repo.get(page_id)
-        await bus.publish(PageEditLockAcquired(
-            page_id=page_id,
-            space_id=p.space_id if p else None,
-            locked_by=ctx.user_id,
-            lock_expires_at=(lock or {}).get("lock_expires_at") or "",
-        ))
+        await bus.publish(
+            PageEditLockAcquired(
+                page_id=page_id,
+                space_id=p.space_id if p else None,
+                locked_by=ctx.user_id,
+                lock_expires_at=(lock or {}).get("lock_expires_at") or "",
+            )
+        )
         return web.json_response({"ok": True, "locked_by": ctx.user_id})
 
     async def delete(self) -> web.Response:
@@ -219,10 +235,12 @@ class PageLockView(BaseView):
         page_id = self.match("id")
         p = await repo.get(page_id)
         await repo.release_lock(page_id, ctx.user_id)
-        await bus.publish(PageEditLockReleased(
-            page_id=page_id,
-            space_id=p.space_id if p else None,
-        ))
+        await bus.publish(
+            PageEditLockReleased(
+                page_id=page_id,
+                space_id=p.space_id if p else None,
+            )
+        )
         return web.json_response({"ok": True})
 
 
@@ -258,20 +276,22 @@ class PageVersionView(BaseView):
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
         versions = await repo.list_versions(page_id)
-        return web.json_response([
-            {
-                "id":              v.id,
-                "page_id":         v.page_id,
-                "version":         v.version,
-                "title":           v.title,
-                "content":         v.content,
-                "edited_by":       v.edited_by,
-                "edited_at":       v.edited_at,
-                "space_id":        v.space_id,
-                "cover_image_url": v.cover_image_url,
-            }
-            for v in versions
-        ])
+        return web.json_response(
+            [
+                {
+                    "id": v.id,
+                    "page_id": v.page_id,
+                    "version": v.version,
+                    "title": v.title,
+                    "content": v.content,
+                    "edited_by": v.edited_by,
+                    "edited_at": v.edited_at,
+                    "space_id": v.space_id,
+                    "cover_image_url": v.cover_image_url,
+                }
+                for v in versions
+            ]
+        )
 
 
 class PageRevertView(BaseView):
@@ -281,7 +301,9 @@ class PageRevertView(BaseView):
         ctx = self.user
         if not ctx.is_admin:
             return error_response(
-                403, "FORBIDDEN", "Only household admins can revert a page.",
+                403,
+                "FORBIDDEN",
+                "Only household admins can revert a page.",
             )
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
@@ -289,16 +311,17 @@ class PageRevertView(BaseView):
         body = await self.body()
         try:
             version_num = int(body["version"])
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return error_response(
-                422, "UNPROCESSABLE", "version must be an integer.",
+                422,
+                "UNPROCESSABLE",
+                "version must be an integer.",
             )
         current = await repo.get(page_id)
         if current is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         target = next(
-            (v for v in await repo.list_versions(page_id)
-             if v.version == version_num),
+            (v for v in await repo.list_versions(page_id) if v.version == version_num),
             None,
         )
         if target is None:
@@ -315,10 +338,14 @@ class PageRevertView(BaseView):
             last_edited_at=now_iso,
         )
         await repo.save(reverted)
-        await bus.publish(PageUpdated(
-            page_id=reverted.id, space_id=reverted.space_id,
-            title=reverted.title, content=reverted.content,
-        ))
+        await bus.publish(
+            PageUpdated(
+                page_id=reverted.id,
+                space_id=reverted.space_id,
+                title=reverted.title,
+                content=reverted.content,
+            )
+        )
         return web.json_response(_page_dict(reverted))
 
 
@@ -333,11 +360,13 @@ class PageDeleteRequestView(BaseView):
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         await repo.request_delete(page_id, ctx.user_id)
-        return web.json_response({
-            "ok": True,
-            "requested_by": ctx.user_id,
-            "status": "awaiting_approval",
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "requested_by": ctx.user_id,
+                "status": "awaiting_approval",
+            }
+        )
 
 
 class PageDeleteApproveView(BaseView):
@@ -347,7 +376,9 @@ class PageDeleteApproveView(BaseView):
         ctx = self.user
         if not ctx.is_admin:
             return error_response(
-                403, "FORBIDDEN", "Only household admins can approve a delete.",
+                403,
+                "FORBIDDEN",
+                "Only household admins can approve a delete.",
             )
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
@@ -357,12 +388,14 @@ class PageDeleteApproveView(BaseView):
             return error_response(404, "NOT_FOUND", "Page not found.")
         if p.delete_requested_by is None:
             return error_response(
-                409, "NOT_REQUESTED",
+                409,
+                "NOT_REQUESTED",
                 "No pending delete request for this page.",
             )
         if p.delete_requested_by == ctx.user_id:
             return error_response(
-                409, "SELF_APPROVE",
+                409,
+                "SELF_APPROVE",
                 "The user who requested deletion cannot approve it.",
             )
         await repo.approve_delete(page_id, ctx.user_id)
@@ -384,7 +417,8 @@ class PageDeleteCancelView(BaseView):
         # Only the requester or an admin can cancel.
         if p.delete_requested_by not in (None, ctx.user_id) and not ctx.is_admin:
             return error_response(
-                403, "FORBIDDEN",
+                403,
+                "FORBIDDEN",
                 "Only the requester or an admin can cancel this delete.",
             )
         await repo.clear_delete_request(page_id)
@@ -422,14 +456,20 @@ class SpacePageCollectionView(BaseView):
         if not title:
             return error_response(422, "UNPROCESSABLE", "title is required.")
         p = new_page(
-            title=title, content=content,
-            created_by=ctx.user_id, space_id=space_id,
+            title=title,
+            content=content,
+            created_by=ctx.user_id,
+            space_id=space_id,
         )
         p = await repo.save(p)
-        await bus.publish(PageCreated(
-            page_id=p.id, space_id=p.space_id,
-            title=p.title, content=p.content,
-        ))
+        await bus.publish(
+            PageCreated(
+                page_id=p.id,
+                space_id=p.space_id,
+                title=p.title,
+                content=p.content,
+            )
+        )
         return web.json_response(_page_dict(p), status=201)
 
 
@@ -472,19 +512,23 @@ class SpacePageDetailView(BaseView):
         base = body.get("base_updated_at")
         if base and base != p.updated_at:
             theirs_by = p.last_editor_user_id or p.created_by
-            await bus.publish(PageConflictEmitted(
-                page_id=p.id, space_id=p.space_id,
-                theirs=p.content, theirs_by=theirs_by,
-            ))
+            await bus.publish(
+                PageConflictEmitted(
+                    page_id=p.id,
+                    space_id=p.space_id,
+                    theirs=p.content,
+                    theirs_by=theirs_by,
+                )
+            )
             return web.json_response(
                 {"error": "stale_update", "current": _page_dict(p)},
                 status=409,
             )
         now_iso = datetime.now(timezone.utc).isoformat()
         kwargs: dict = {
-            "updated_at":          now_iso,
+            "updated_at": now_iso,
             "last_editor_user_id": ctx.user_id,
-            "last_edited_at":      now_iso,
+            "last_edited_at": now_iso,
         }
         if "title" in body:
             title = body["title"].strip()
@@ -498,10 +542,14 @@ class SpacePageDetailView(BaseView):
         updated = replace(p, **kwargs)
         updated = await repo.save(updated)
         await _snapshot_version(repo, previous=p, editor_user_id=ctx.user_id)
-        await bus.publish(PageUpdated(
-            page_id=updated.id, space_id=updated.space_id,
-            title=updated.title, content=updated.content,
-        ))
+        await bus.publish(
+            PageUpdated(
+                page_id=updated.id,
+                space_id=updated.space_id,
+                title=updated.title,
+                content=updated.content,
+            )
+        )
         return web.json_response(_page_dict(updated))
 
     async def delete(self) -> web.Response:
@@ -532,17 +580,21 @@ class PageConflictView(BaseView):
         merged = body.get("content")
         if resolution not in ("mine", "theirs", "merged_content"):
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "resolution must be 'mine', 'theirs', or 'merged_content'.",
             )
         if resolution == "merged_content" and not merged:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "content is required when resolution is 'merged_content'.",
             )
         new_body = await conflict_svc.resolve_conflict(
-            space_id=space_id, page_id=page_id,
+            space_id=space_id,
+            page_id=page_id,
             user_id=ctx.user_id,
-            resolution=resolution, merged_content=merged,
+            resolution=resolution,
+            merged_content=merged,
         )
         return web.json_response({"ok": True, "content": new_body})

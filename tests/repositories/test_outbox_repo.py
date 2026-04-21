@@ -109,11 +109,15 @@ async def test_outbox_processor_exception_retry(env):
 
 async def test_outbox_processor_lifecycle(env):
     """OutboxProcessor start and stop do not raise."""
+
     async def noop(entry):
         return True
 
     proc = OutboxProcessor(
-        env.outbox_repo, noop, poll_interval_seconds=0.01, rng=lambda: 0.5,
+        env.outbox_repo,
+        noop,
+        poll_interval_seconds=0.01,
+        rng=lambda: 0.5,
     )
     await proc.start()
     await asyncio.sleep(0.05)

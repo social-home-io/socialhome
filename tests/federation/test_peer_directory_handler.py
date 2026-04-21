@@ -37,11 +37,21 @@ async def repo(tmp_dir):
 
 async def test_snapshot_roundtrip(repo):
     handler = PeerDirectoryHandler(repo)
-    await handler._on_snapshot(_event("peerA", [
-        {"space_id": "s1", "name": "One",  "member_count": 3},
-        {"space_id": "s2", "name": "Two",  "member_count": 7, "join_mode": "open"},
-        {"space_id": "s3", "name": "Tri",  "member_count": 1},
-    ]))
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {"space_id": "s1", "name": "One", "member_count": 3},
+                {
+                    "space_id": "s2",
+                    "name": "Two",
+                    "member_count": 7,
+                    "join_mode": "open",
+                },
+                {"space_id": "s3", "name": "Tri", "member_count": 1},
+            ],
+        )
+    )
     rows = await repo.list_for_instance("peerA")
     assert len(rows) == 3
     names = sorted(r.name for r in rows)
@@ -50,15 +60,25 @@ async def test_snapshot_roundtrip(repo):
 
 async def test_snapshot_replaces_previous_entries(repo):
     handler = PeerDirectoryHandler(repo)
-    await handler._on_snapshot(_event("peerA", [
-        {"space_id": "s1", "name": "One"},
-        {"space_id": "s2", "name": "Two"},
-    ]))
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {"space_id": "s1", "name": "One"},
+                {"space_id": "s2", "name": "Two"},
+            ],
+        )
+    )
     assert len(await repo.list_for_instance("peerA")) == 2
     # Second snapshot drops one space.
-    await handler._on_snapshot(_event("peerA", [
-        {"space_id": "s1", "name": "One"},
-    ]))
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {"space_id": "s1", "name": "One"},
+            ],
+        )
+    )
     rows = await repo.list_for_instance("peerA")
     assert len(rows) == 1
     assert rows[0].space_id == "s1"
@@ -66,12 +86,22 @@ async def test_snapshot_replaces_previous_entries(repo):
 
 async def test_snapshot_scopes_per_instance(repo):
     handler = PeerDirectoryHandler(repo)
-    await handler._on_snapshot(_event("peerA", [
-        {"space_id": "sa", "name": "A"},
-    ]))
-    await handler._on_snapshot(_event("peerB", [
-        {"space_id": "sb", "name": "B"},
-    ]))
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {"space_id": "sa", "name": "A"},
+            ],
+        )
+    )
+    await handler._on_snapshot(
+        _event(
+            "peerB",
+            [
+                {"space_id": "sb", "name": "B"},
+            ],
+        )
+    )
     # Clearing A doesn't touch B.
     await repo.clear_instance("peerA")
     assert await repo.list_for_instance("peerA") == []
@@ -81,8 +111,10 @@ async def test_snapshot_scopes_per_instance(repo):
 async def test_malformed_payload_ignored(repo):
     handler = PeerDirectoryHandler(repo)
     bad = FederationEvent(
-        msg_id="m", event_type=FederationEventType.SPACE_DIRECTORY_SYNC,
-        from_instance="peerA", to_instance="local",
+        msg_id="m",
+        event_type=FederationEventType.SPACE_DIRECTORY_SYNC,
+        from_instance="peerA",
+        to_instance="local",
         timestamp="2026-01-01T00:00:00Z",
         payload={},  # no "spaces" key
     )

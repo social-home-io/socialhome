@@ -80,6 +80,7 @@ INTRO_TTL_SECONDS = 300
 @dataclass(slots=True)
 class _PendingAutoSession:
     """Originator-side (A) record we keep while waiting for C's ack."""
+
     token: str
     target_instance_id: str
     via_instance_id: str
@@ -90,35 +91,67 @@ class _PendingAutoSession:
 
 
 def _vouch_blob(
-    *, a_id: str, a_pk_hex: str, a_webhook: str, a_dh_pk_hex: str,
-    c_id: str, ts: str, nonce: str,
+    *,
+    a_id: str,
+    a_pk_hex: str,
+    a_webhook: str,
+    a_dh_pk_hex: str,
+    c_id: str,
+    ts: str,
+    nonce: str,
 ) -> bytes:
-    return "|".join([
-        "vouch/v1", a_id, a_pk_hex, a_webhook, a_dh_pk_hex,
-        c_id, ts, nonce,
-    ]).encode("utf-8")
+    return "|".join(
+        [
+            "vouch/v1",
+            a_id,
+            a_pk_hex,
+            a_webhook,
+            a_dh_pk_hex,
+            c_id,
+            ts,
+            nonce,
+        ]
+    ).encode("utf-8")
 
 
 def _ack_blob(
-    *, a_id: str, a_dh_pk_hex: str, c_id: str, c_dh_pk_hex: str,
-    ts: str, nonce: str,
+    *,
+    a_id: str,
+    a_dh_pk_hex: str,
+    c_id: str,
+    c_dh_pk_hex: str,
+    ts: str,
+    nonce: str,
 ) -> bytes:
-    return "|".join([
-        "ack/v1", a_id, a_dh_pk_hex, c_id, c_dh_pk_hex, ts, nonce,
-    ]).encode("utf-8")
+    return "|".join(
+        [
+            "ack/v1",
+            a_id,
+            a_dh_pk_hex,
+            c_id,
+            c_dh_pk_hex,
+            ts,
+            nonce,
+        ]
+    ).encode("utf-8")
 
 
 def _derive_session_keys(
-    own_sk: bytes, peer_pk_hex: str,
+    own_sk: bytes,
+    peer_pk_hex: str,
 ) -> tuple[bytes, bytes]:
     """ECDH → HKDF → two directional 32-byte keys."""
     shared = x25519_exchange(own_sk, bytes.fromhex(peer_pk_hex))
 
     def _derive(info: bytes) -> bytes:
         hkdf = HKDF(
-            algorithm=_hashes.SHA256(), length=32, salt=None, info=info,
+            algorithm=_hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=info,
         )
         return hkdf.derive(shared)
+
     return (
         _derive(b"social-home/session/self-to-remote"),
         _derive(b"social-home/session/remote-to-self"),
@@ -129,9 +162,14 @@ class AutoPairCoordinator:
     """Coordinator for the three-party transitive auto-pair flow."""
 
     __slots__ = (
-        "_repo", "_key_manager", "_bus", "_federation",
-        "_own_identity_seed", "_own_identity_pk",
-        "_pending", "_inbox",
+        "_repo",
+        "_key_manager",
+        "_bus",
+        "_federation",
+        "_own_identity_seed",
+        "_own_identity_pk",
+        "_pending",
+        "_inbox",
     )
 
     def __init__(
@@ -210,12 +248,12 @@ class AutoPairCoordinator:
         await self._repo.save_instance(provisional)
 
         payload = {
-            "target_id":  target_instance_id,
-            "a_dh_pk":    dh_kp.public_key.hex(),
-            "a_webhook":  a_webhook,
-            "ts":         ts,
-            "nonce":      nonce,
-            "token":      token,
+            "target_id": target_instance_id,
+            "a_dh_pk": dh_kp.public_key.hex(),
+            "a_webhook": a_webhook,
+            "ts": ts,
+            "nonce": nonce,
+            "token": token,
         }
         await self._federation.send_event(
             to_instance_id=via_instance_id,
@@ -274,17 +312,17 @@ class AutoPairCoordinator:
         )
         via_b_id = derive_instance_id(self._own_identity_pk)
         forward_payload = {
-            "from_a_id":       a.id,
-            "from_a_pk":       a.remote_identity_pk,
-            "from_a_webhook":  a_webhook,
-            "from_a_dh_pk":    a_dh_pk_hex,
-            "from_a_display":  a.display_name,
-            "via_b_id":        via_b_id,
-            "via_b_display":   "",   # C already knows B's display_name
-            "vouch_sig":       vouch_sig.hex(),
-            "ts":              ts,
-            "nonce":           nonce,
-            "token":           token,
+            "from_a_id": a.id,
+            "from_a_pk": a.remote_identity_pk,
+            "from_a_webhook": a_webhook,
+            "from_a_dh_pk": a_dh_pk_hex,
+            "from_a_display": a.display_name,
+            "via_b_id": via_b_id,
+            "via_b_display": "",  # C already knows B's display_name
+            "vouch_sig": vouch_sig.hex(),
+            "ts": ts,
+            "nonce": nonce,
+            "token": token,
         }
         await self._federation.send_event(
             to_instance_id=c.id,
@@ -312,8 +350,19 @@ class AutoPairCoordinator:
         nonce = str(p.get("nonce") or "")
         token = str(p.get("token") or "")
 
-        if not all([a_id, a_pk_hex, a_webhook, a_dh_pk_hex,
-                    via_b_id, vouch_sig_hex, ts, nonce, token]):
+        if not all(
+            [
+                a_id,
+                a_pk_hex,
+                a_webhook,
+                a_dh_pk_hex,
+                via_b_id,
+                vouch_sig_hex,
+                ts,
+                nonce,
+                token,
+            ]
+        ):
             log.debug("PAIRING_INTRO_AUTO target: missing fields")
             return
 
@@ -331,8 +380,13 @@ class AutoPairCoordinator:
             ok = verify_ed25519(
                 bytes.fromhex(b.remote_identity_pk),
                 _vouch_blob(
-                    a_id=a_id, a_pk_hex=a_pk_hex, a_webhook=a_webhook,
-                    a_dh_pk_hex=a_dh_pk_hex, c_id=c_id, ts=ts, nonce=nonce,
+                    a_id=a_id,
+                    a_pk_hex=a_pk_hex,
+                    a_webhook=a_webhook,
+                    a_dh_pk_hex=a_dh_pk_hex,
+                    c_id=c_id,
+                    ts=ts,
+                    nonce=nonce,
                 ),
                 bytes.fromhex(vouch_sig_hex),
             )
@@ -340,7 +394,8 @@ class AutoPairCoordinator:
             ok = False
         if not ok:
             log.warning(
-                "auto-pair: invalid vouch sig from via=%s", via_b_id,
+                "auto-pair: invalid vouch sig from via=%s",
+                via_b_id,
             )
             return
 
@@ -363,13 +418,15 @@ class AutoPairCoordinator:
             from_a_display=a_display,
             via_b_display=b.display_name,
         )
-        await self._bus.publish(AutoPairRequestIncoming(
-            request_id=req.request_id,
-            from_a_id=a_id,
-            via_b_id=via_b_id,
-            from_a_display=req.from_a_display,
-            via_b_display=req.via_b_display,
-        ))
+        await self._bus.publish(
+            AutoPairRequestIncoming(
+                request_id=req.request_id,
+                from_a_id=a_id,
+                via_b_id=via_b_id,
+                from_a_display=req.from_a_display,
+                via_b_display=req.via_b_display,
+            )
+        )
 
     async def finalize_pending(self, request_id: str) -> RemoteInstance:
         """C's admin clicked approve — finish the pair instantly."""
@@ -379,13 +436,13 @@ class AutoPairCoordinator:
 
         dh_kp = generate_x25519_keypair()
         k_self_to_remote, k_remote_to_self = _derive_session_keys(
-            dh_kp.private_key, req.from_a_dh_pk,
+            dh_kp.private_key,
+            req.from_a_dh_pk,
         )
         now = datetime.now(timezone.utc).isoformat()
         existing = await self._repo.get_instance(req.from_a_id)
         webhook_id = (
-            existing.local_webhook_id
-            if existing else secrets.token_urlsafe(24)
+            existing.local_webhook_id if existing else secrets.token_urlsafe(24)
         )
         confirmed = RemoteInstance(
             id=req.from_a_id,
@@ -408,9 +465,12 @@ class AutoPairCoordinator:
         ack_sig = sign_ed25519(
             self._own_identity_seed,
             _ack_blob(
-                a_id=req.from_a_id, a_dh_pk_hex=req.from_a_dh_pk,
-                c_id=c_id, c_dh_pk_hex=dh_kp.public_key.hex(),
-                ts=req.ts, nonce=req.nonce,
+                a_id=req.from_a_id,
+                a_dh_pk_hex=req.from_a_dh_pk,
+                c_id=c_id,
+                c_dh_pk_hex=dh_kp.public_key.hex(),
+                ts=req.ts,
+                nonce=req.nonce,
             ),
         )
         c_webhook = (
@@ -419,17 +479,17 @@ class AutoPairCoordinator:
             else ""
         )
         ack_payload = {
-            "a_id":        req.from_a_id,
-            "c_id":        c_id,
-            "c_pk":        self._own_identity_pk.hex(),
-            "c_webhook":   c_webhook,
-            "c_dh_pk":     dh_kp.public_key.hex(),
-            "via_b_id":    req.via_b_id,
-            "vouch_sig":   req.vouch_sig,
-            "ack_sig":     ack_sig.hex(),
-            "ts":          req.ts,
-            "nonce":       req.nonce,
-            "token":       req.token,
+            "a_id": req.from_a_id,
+            "c_id": c_id,
+            "c_pk": self._own_identity_pk.hex(),
+            "c_webhook": c_webhook,
+            "c_dh_pk": dh_kp.public_key.hex(),
+            "via_b_id": req.via_b_id,
+            "vouch_sig": req.vouch_sig,
+            "ack_sig": ack_sig.hex(),
+            "ts": req.ts,
+            "nonce": req.nonce,
+            "token": req.token,
         }
         await self._federation.send_event(
             to_instance_id=req.from_a_id,
@@ -439,7 +499,10 @@ class AutoPairCoordinator:
         return confirmed
 
     async def decline_pending(
-        self, request_id: str, *, reason: str = "",
+        self,
+        request_id: str,
+        *,
+        reason: str = "",
     ) -> None:
         req = self._inbox.pop(request_id)
         if req is None:
@@ -476,7 +539,8 @@ class AutoPairCoordinator:
         if c_id != session.target_instance_id:
             log.warning(
                 "auto-pair ack: target mismatch session=%s payload=%s",
-                session.target_instance_id, c_id,
+                session.target_instance_id,
+                c_id,
             )
             return
         if via_b_id != session.via_instance_id:
@@ -496,9 +560,13 @@ class AutoPairCoordinator:
             vouch_ok = verify_ed25519(
                 bytes.fromhex(b.remote_identity_pk),
                 _vouch_blob(
-                    a_id=a_id, a_pk_hex=self._own_identity_pk.hex(),
-                    a_webhook=a_webhook, a_dh_pk_hex=session.dh_pk_hex,
-                    c_id=c_id, ts=ts, nonce=nonce,
+                    a_id=a_id,
+                    a_pk_hex=self._own_identity_pk.hex(),
+                    a_webhook=a_webhook,
+                    a_dh_pk_hex=session.dh_pk_hex,
+                    c_id=c_id,
+                    ts=ts,
+                    nonce=nonce,
                 ),
                 bytes.fromhex(vouch_sig_hex),
             )
@@ -511,9 +579,12 @@ class AutoPairCoordinator:
             ack_ok = verify_ed25519(
                 bytes.fromhex(c_pk_hex),
                 _ack_blob(
-                    a_id=a_id, a_dh_pk_hex=session.dh_pk_hex,
-                    c_id=c_id, c_dh_pk_hex=c_dh_pk_hex,
-                    ts=ts, nonce=nonce,
+                    a_id=a_id,
+                    a_dh_pk_hex=session.dh_pk_hex,
+                    c_id=c_id,
+                    c_dh_pk_hex=c_dh_pk_hex,
+                    ts=ts,
+                    nonce=nonce,
                 ),
                 bytes.fromhex(ack_sig_hex),
             )
@@ -524,11 +595,11 @@ class AutoPairCoordinator:
             return
 
         k_self_to_remote, k_remote_to_self = _derive_session_keys(
-            session.dh_sk, c_dh_pk_hex,
+            session.dh_sk,
+            c_dh_pk_hex,
         )
         existing = await self._repo.get_instance(c_id)
-        display_name = (existing.display_name
-                        if existing else c_id[:8])
+        display_name = existing.display_name if existing else c_id[:8]
         confirmed = RemoteInstance(
             id=c_id,
             display_name=display_name,
@@ -536,8 +607,9 @@ class AutoPairCoordinator:
             key_self_to_remote=self._key_manager.encrypt(k_self_to_remote),
             key_remote_to_self=self._key_manager.encrypt(k_remote_to_self),
             remote_webhook_url=c_webhook,
-            local_webhook_id=(existing.local_webhook_id
-                              if existing else secrets.token_urlsafe(24)),
+            local_webhook_id=(
+                existing.local_webhook_id if existing else secrets.token_urlsafe(24)
+            ),
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
             relay_via=via_b_id,

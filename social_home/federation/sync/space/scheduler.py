@@ -43,9 +43,15 @@ class SpaceSyncScheduler:
     """Orchestrates sync initiation across pairs + spaces."""
 
     __slots__ = (
-        "_bus", "_federation", "_federation_repo", "_space_repo",
-        "_queue", "_own_instance_id",
-        "_interval", "_task", "_stop",
+        "_bus",
+        "_federation",
+        "_federation_repo",
+        "_space_repo",
+        "_queue",
+        "_own_instance_id",
+        "_interval",
+        "_task",
+        "_stop",
     )
 
     def __init__(
@@ -85,7 +91,7 @@ class SpaceSyncScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -102,27 +108,30 @@ class SpaceSyncScheduler:
         when the queue worker picks up the task. Callers should not
         await completion.
         """
+
         async def _task() -> None:
             try:
                 await self._federation.send_event(
                     to_instance_id=peer_instance_id,
                     event_type=FederationEventType.SPACE_SYNC_BEGIN,
                     payload={
-                        "sync_id":      uuid.uuid4().hex,
-                        "space_id":     space_id,
-                        "sync_mode":    "initial",
+                        "sync_id": uuid.uuid4().hex,
+                        "space_id": space_id,
+                        "sync_mode": "initial",
                         "prefer_direct": True,
                     },
                     space_id=space_id,
                 )
-            except Exception:                              # pragma: no cover
+            except Exception:  # pragma: no cover
                 log.exception(
                     "space sync enqueue failed: peer=%s space=%s",
-                    peer_instance_id, space_id,
+                    peer_instance_id,
+                    space_id,
                 )
 
         self._queue.enqueue(
-            priority, _task,
+            priority,
+            _task,
             description=f"sync {space_id} → {peer_instance_id}",
         )
 
@@ -152,7 +161,7 @@ class SpaceSyncScheduler:
         while not self._stop.is_set():
             try:
                 await self._tick_once()
-            except Exception:                              # pragma: no cover
+            except Exception:  # pragma: no cover
                 log.exception("SpaceSyncScheduler tick failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
@@ -161,7 +170,8 @@ class SpaceSyncScheduler:
 
     async def _tick_once(self) -> None:
         confirmed = [
-            inst for inst in await self._federation_repo.list_instances()
+            inst
+            for inst in await self._federation_repo.list_instances()
             if inst.status is PairingStatus.CONFIRMED
         ]
         local_spaces = await self._list_local_space_ids()
@@ -179,6 +189,7 @@ class SpaceSyncScheduler:
 
     async def _list_local_space_ids(self) -> list[str]:
         from ....domain.space import SpaceType
+
         spaces = (
             await self._space_repo.list_by_type(SpaceType.HOUSEHOLD)
             + await self._space_repo.list_by_type(SpaceType.PUBLIC)

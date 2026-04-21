@@ -95,9 +95,9 @@ async def test_shopping_publishes_bus_events(env):
     async def _grab(e):
         captured.append(e)
 
-    bus.subscribe(ShoppingItemAdded,    _grab)
-    bus.subscribe(ShoppingItemToggled,  _grab)
-    bus.subscribe(ShoppingItemRemoved,  _grab)
+    bus.subscribe(ShoppingItemAdded, _grab)
+    bus.subscribe(ShoppingItemToggled, _grab)
+    bus.subscribe(ShoppingItemRemoved, _grab)
     bus.subscribe(ShoppingItemsCleared, _grab)
 
     item = await svc.add_item("Bread", created_by="u1")
@@ -154,8 +154,12 @@ async def test_sticky_space_scoped(env):
         (space_id, "StickySpace", env.iid, "owner_s", kp.public_key.hex()),
     )
 
-    household = await env.sticky_repo.add(author="u1", content="Buy milk", space_id=None)
-    space_sticky = await env.sticky_repo.add(author="u1", content="Meeting agenda", space_id=space_id)
+    household = await env.sticky_repo.add(
+        author="u1", content="Buy milk", space_id=None
+    )
+    space_sticky = await env.sticky_repo.add(
+        author="u1", content="Meeting agenda", space_id=space_id
+    )
 
     household_list = await env.sticky_repo.list(space_id=None)
     space_list = await env.sticky_repo.list(space_id=space_id)

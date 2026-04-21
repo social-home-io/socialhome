@@ -50,9 +50,9 @@ class ScheduleFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
             {
-                "post_id":  event.post_id,
-                "slot_id":  event.slot_id,
-                "user_id":  event.user_id,
+                "post_id": event.post_id,
+                "slot_id": event.slot_id,
+                "user_id": event.user_id,
                 "response": event.response,
                 "space_id": event.space_id,
             },
@@ -65,23 +65,26 @@ class ScheduleFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_SCHEDULE_FINALIZED,
             {
-                "post_id":      event.post_id,
-                "slot_id":      event.slot_id,
-                "slot_date":    event.slot_date,
-                "start_time":   event.start_time,
-                "end_time":     event.end_time,
-                "title":        event.title,
+                "post_id": event.post_id,
+                "slot_id": event.slot_id,
+                "slot_date": event.slot_date,
+                "start_time": event.start_time,
+                "end_time": event.end_time,
+                "title": event.title,
                 "finalized_by": event.finalized_by,
-                "space_id":     event.space_id,
+                "space_id": event.space_id,
             },
         )
 
     async def _fan_out(
-        self, space_id: str, event_type: FederationEventType, payload: dict,
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
     ) -> None:
         try:
             peers = await self._space_repo.list_member_instances(space_id)
-        except Exception as exc:              # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("schedule-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -95,7 +98,9 @@ class ScheduleFederationOutbound:
                     payload=payload,
                     space_id=space_id,
                 )
-            except Exception as exc:           # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
-                    "schedule-outbound: send to %s failed: %s", instance_id, exc,
+                    "schedule-outbound: send to %s failed: %s",
+                    instance_id,
+                    exc,
                 )

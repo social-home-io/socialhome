@@ -19,6 +19,7 @@ def test_space_features_roundtrip():
     f2 = SpaceFeatures.from_row(f.to_columns())
     assert f == f2
 
+
 def test_space_features_access_decision():
     """access_decision returns proceed/queue/deny based on access level and admin status."""
     f = SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED)
@@ -26,6 +27,7 @@ def test_space_features_access_decision():
     assert f.access_decision("posts", is_admin=False) == "queue"
     f2 = SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY)
     assert f2.access_decision("posts", is_admin=False) == "deny"
+
 
 def test_space_features_with_allowed_post_types():
     """with_allowed_post_types normalises and stores the set; empty set raises ValueError."""
@@ -47,6 +49,7 @@ def test_permission_error_banned():
     """SpacePermissionError with banned=True exposes the flag and a useful message."""
     e = SpacePermissionError("banned", banned=True)
     assert e.banned and "banned" in str(e)
+
 
 def test_config_gap_error():
     """SpaceConfigGapError includes space_id, have, and need in its string form."""

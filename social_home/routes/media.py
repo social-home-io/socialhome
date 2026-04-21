@@ -101,7 +101,9 @@ class MediaUploadView(BaseView):
                 break
             total += len(chunk)
             if total > _DEFAULT_MAX_UPLOAD_BYTES:
-                return error_response(413, "PAYLOAD_TOO_LARGE", "Upload exceeds size limit.")
+                return error_response(
+                    413, "PAYLOAD_TOO_LARGE", "Upload exceeds size limit."
+                )
             chunks.append(chunk)
 
         data = b"".join(chunks)
@@ -112,10 +114,11 @@ class MediaUploadView(BaseView):
             await quota.check_can_store(total)
         content_type = field.headers.get("Content-Type", "")
 
-        is_video = (
-            content_type in ("video/mp4", "video/webm", "video/quicktime")
-            or filename.lower().endswith((".mp4", ".webm", ".mov"))
-        )
+        is_video = content_type in (
+            "video/mp4",
+            "video/webm",
+            "video/quicktime",
+        ) or filename.lower().endswith((".mp4", ".webm", ".mov"))
 
         try:
             out_bytes: bytes

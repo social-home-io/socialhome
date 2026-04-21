@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-
 from social_home.domain.federation import FederationEventType
 from social_home.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
@@ -15,6 +14,7 @@ from social_home.repositories.outbox_repo import OutboxEntry
 
 
 # ─── Constants ───────────────────────────────────────────────────────────
+
 
 def test_backoff_schedule_monotonic():
     """Backoff intervals must be non-decreasing."""
@@ -35,6 +35,7 @@ def test_jitter_ratio_30_percent():
 
 
 # ─── Lifecycle ───────────────────────────────────────────────────────────
+
 
 class _FakeRepo:
     def __init__(self):
@@ -59,18 +60,24 @@ class _FakeRepo:
         for i, e in enumerate(self.pending):
             if e.id == eid:
                 self.pending[i] = OutboxEntry(
-                    id=e.id, instance_id=e.instance_id,
-                    event_type=e.event_type, payload_json=e.payload_json,
-                    status="pending", attempts=attempts,
-                    next_attempt_at=next_at, created_at=e.created_at,
+                    id=e.id,
+                    instance_id=e.instance_id,
+                    event_type=e.event_type,
+                    payload_json=e.payload_json,
+                    status="pending",
+                    attempts=attempts,
+                    next_attempt_at=next_at,
+                    created_at=e.created_at,
                 )
 
 
 def _entry(eid: str, attempts: int = 0):
     return OutboxEntry(
-        id=eid, instance_id="i1",
+        id=eid,
+        instance_id="i1",
         event_type=FederationEventType.PRESENCE_UPDATED,
-        payload_json="{}", status="pending",
+        payload_json="{}",
+        status="pending",
         attempts=attempts,
         next_attempt_at="2026-04-15T00:00:00+00:00",
         created_at="2026-04-15T00:00:00+00:00",

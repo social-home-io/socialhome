@@ -16,9 +16,14 @@ PresenceState = Literal["home", "zone", "away", "unavailable"]
 
 
 # Allowed string values — useful at runtime for validation.
-PRESENCE_STATES: frozenset[str] = frozenset({
-    "home", "zone", "away", "unavailable",
-})
+PRESENCE_STATES: frozenset[str] = frozenset(
+    {
+        "home",
+        "zone",
+        "away",
+        "unavailable",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -38,13 +43,13 @@ class PersonPresence:
     username: str
     user_id: str
     display_name: str
-    entity_id: str                       # HA person entity_id
+    entity_id: str  # HA person entity_id
     state: PresenceState
 
     picture_url: str | None = None
-    zone_name: str | None = None         # set when ``state == "zone"``
-    latitude: float | None = None        # 4dp-truncated
-    longitude: float | None = None       # 4dp-truncated
+    zone_name: str | None = None  # set when ``state == "zone"``
+    latitude: float | None = None  # 4dp-truncated
+    longitude: float | None = None  # 4dp-truncated
     gps_accuracy_m: float | None = None
 
 

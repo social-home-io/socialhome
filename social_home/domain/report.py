@@ -14,39 +14,39 @@ from enum import StrEnum
 
 
 class ReportCategory(StrEnum):
-    SPAM           = "spam"
-    HARASSMENT     = "harassment"
-    INAPPROPRIATE  = "inappropriate"
+    SPAM = "spam"
+    HARASSMENT = "harassment"
+    INAPPROPRIATE = "inappropriate"
     MISINFORMATION = "misinformation"
-    OTHER          = "other"
+    OTHER = "other"
 
 
 class ReportStatus(StrEnum):
-    PENDING   = "pending"
-    RESOLVED  = "resolved"
+    PENDING = "pending"
+    RESOLVED = "resolved"
     DISMISSED = "dismissed"
 
 
 class ReportTargetType(StrEnum):
-    POST    = "post"
+    POST = "post"
     COMMENT = "comment"
-    USER    = "user"
-    SPACE   = "space"
+    USER = "user"
+    SPACE = "space"
 
 
 @dataclass(slots=True, frozen=True)
 class ContentReport:
-    id:                  str
-    target_type:         ReportTargetType
-    target_id:           str
-    reporter_user_id:    str
-    category:            ReportCategory
-    notes:               str | None
-    status:              ReportStatus
-    created_at:          datetime
+    id: str
+    target_type: ReportTargetType
+    target_id: str
+    reporter_user_id: str
+    category: ReportCategory
+    notes: str | None
+    status: ReportStatus
+    created_at: datetime
     reporter_instance_id: str | None = None
-    resolved_by:         str | None = None
-    resolved_at:         datetime | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
 
 
 class DuplicateReportError(Exception):

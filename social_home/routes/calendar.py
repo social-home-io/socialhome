@@ -18,26 +18,26 @@ from .base import BaseView
 
 def _cal_dict(cal) -> dict:
     return {
-        "id":             cal.id,
-        "name":           cal.name,
-        "color":          cal.color,
+        "id": cal.id,
+        "name": cal.name,
+        "color": cal.color,
         "owner_username": cal.owner_username,
-        "calendar_type":  cal.calendar_type,
+        "calendar_type": cal.calendar_type,
     }
 
 
 def _event_dict(event) -> dict:
     return {
-        "id":          event.id,
+        "id": event.id,
         "calendar_id": event.calendar_id,
-        "summary":     event.summary,
-        "start":       event.start.isoformat() if event.start else None,
-        "end":         event.end.isoformat() if event.end else None,
-        "all_day":     event.all_day,
+        "summary": event.summary,
+        "start": event.start.isoformat() if event.start else None,
+        "end": event.end.isoformat() if event.end else None,
+        "all_day": event.all_day,
         "description": event.description,
-        "attendees":   list(event.attendees),
-        "created_by":  event.created_by,
-        "rrule":       event.rrule,
+        "attendees": list(event.attendees),
+        "created_by": event.created_by,
+        "rrule": event.rrule,
     }
 
 
@@ -77,7 +77,9 @@ class CalendarEventsView(BaseView):
         start = self.request.query.get("start")
         end = self.request.query.get("end")
         if not start or not end:
-            return error_response(422, "UNPROCESSABLE", "Query params 'start' and 'end' are required.")
+            return error_response(
+                422, "UNPROCESSABLE", "Query params 'start' and 'end' are required."
+            )
         svc = self.svc(calendar_service_key)
         events = await svc.list_events_in_range(calendar_id, start=start, end=end)
         return web.json_response([_event_dict(e) for e in events])
@@ -134,18 +136,21 @@ async def _persist_imported_events(view, calendar_id, created_by, events):
     svc = view.svc(calendar_service_key)
     persisted = []
     for ev in events:
-        persisted.append(await svc.create_event(
-            calendar_id=calendar_id,
-            summary=ev.summary,
-            start=ev.start.isoformat(),
-            end=ev.end.isoformat(),
-            created_by=created_by,
-            all_day=ev.all_day,
-            description=ev.description,
-            rrule=ev.rrule,
-        ))
+        persisted.append(
+            await svc.create_event(
+                calendar_id=calendar_id,
+                summary=ev.summary,
+                start=ev.start.isoformat(),
+                end=ev.end.isoformat(),
+                created_by=created_by,
+                all_day=ev.all_day,
+                description=ev.description,
+                rrule=ev.rrule,
+            )
+        )
     return web.json_response(
-        {"events": [_event_dict(e) for e in persisted]}, status=201,
+        {"events": [_event_dict(e) for e in persisted]},
+        status=201,
     )
 
 
@@ -167,7 +172,9 @@ class CalendarImportIcsView(BaseView):
             ics_text = str(payload.get("ics") or "")
             if not ics_text:
                 return error_response(
-                    422, "UNPROCESSABLE", "Missing 'ics' in JSON body",
+                    422,
+                    "UNPROCESSABLE",
+                    "Missing 'ics' in JSON body",
                 )
             ics_bytes = ics_text.encode("utf-8")
         else:
@@ -179,7 +186,10 @@ class CalendarImportIcsView(BaseView):
             return error_response(422, "ICS_PARSE_ERROR", str(exc))
 
         return await _persist_imported_events(
-            self, calendar_id, ctx.user_id, events,
+            self,
+            calendar_id,
+            ctx.user_id,
+            events,
         )
 
 
@@ -206,7 +216,8 @@ class CalendarImportImageView(BaseView):
             caption = caption or payload.get("caption")
             if not data_url.startswith("data:"):
                 return error_response(
-                    422, "UNPROCESSABLE",
+                    422,
+                    "UNPROCESSABLE",
                     "image_data_url must start with 'data:'",
                 )
             try:
@@ -215,7 +226,8 @@ class CalendarImportImageView(BaseView):
                 body = base64.b64decode(b64)
             except Exception as exc:
                 return error_response(
-                    422, "UNPROCESSABLE",
+                    422,
+                    "UNPROCESSABLE",
                     f"Could not decode image_data_url: {exc}",
                 )
 
@@ -232,7 +244,10 @@ class CalendarImportImageView(BaseView):
             return error_response(422, "AI_PARSE_ERROR", str(exc))
 
         return await _persist_imported_events(
-            self, calendar_id, ctx.user_id, events,
+            self,
+            calendar_id,
+            ctx.user_id,
+            events,
         )
 
 
@@ -252,7 +267,9 @@ class CalendarImportPromptView(BaseView):
         prompt = str(payload.get("prompt") or "").strip()
         if not prompt:
             return error_response(
-                422, "UNPROCESSABLE", "Missing 'prompt' in JSON body",
+                422,
+                "UNPROCESSABLE",
+                "Missing 'prompt' in JSON body",
             )
 
         try:
@@ -266,7 +283,10 @@ class CalendarImportPromptView(BaseView):
             return error_response(422, "AI_PARSE_ERROR", str(exc))
 
         return await _persist_imported_events(
-            self, calendar_id, ctx.user_id, events,
+            self,
+            calendar_id,
+            ctx.user_id,
+            events,
         )
 
 
@@ -286,12 +306,15 @@ class SpaceCalendarEventsView(BaseView):
         end = self.request.query.get("end")
         if not start or not end:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "Query params 'start' and 'end' are required.",
             )
         space_cal_svc = self.svc(K.space_cal_service_key)
         events = await space_cal_svc.list_events_in_range(
-            space_id, start=start, end=end,
+            space_id,
+            start=start,
+            end=end,
         )
         return web.json_response([_event_dict(e) for e in events])
 
@@ -348,7 +371,8 @@ class SpaceCalendarEventDetailView(BaseView):
                 description=body.get("description"),
                 attendees=(
                     tuple(body["attendees"])
-                    if body.get("attendees") is not None else None
+                    if body.get("attendees") is not None
+                    else None
                 ),
                 rrule=body.get("rrule"),
             )
@@ -400,7 +424,9 @@ class CalendarEventRsvpView(BaseView):
             return error_response(403, "FORBIDDEN", "Not a space member.")
 
         await space_cal_svc.rsvp(
-            event_id=event_id, user_id=ctx.user_id, status=status,
+            event_id=event_id,
+            user_id=ctx.user_id,
+            status=status,
         )
 
         rsvps = await space_cal_svc.list_rsvps(event_id)
@@ -409,12 +435,15 @@ class CalendarEventRsvpView(BaseView):
             counts[r.status] = counts.get(r.status, 0) + 1
         ws = self.svc(K.ws_manager_key)
         member_ids = await space_repo.list_local_member_user_ids(space_id)
-        await ws.broadcast_to_users(member_ids, {
-            "type":     "calendar.rsvp_updated",
-            "event_id": event_id,
-            "space_id": space_id,
-            "counts":   counts,
-        })
+        await ws.broadcast_to_users(
+            member_ids,
+            {
+                "type": "calendar.rsvp_updated",
+                "event_id": event_id,
+                "space_id": space_id,
+                "counts": counts,
+            },
+        )
         return web.json_response({"ok": True, "counts": counts})
 
 
@@ -434,10 +463,15 @@ class CalendarEventRsvpsView(BaseView):
         event_id = self.match("id")
         space_cal_svc = self.svc(K.space_cal_service_key)
         rsvps = await space_cal_svc.list_rsvps(event_id)
-        return web.json_response({
-            "rsvps": [
-                {"user_id": r.user_id, "status": r.status,
-                 "updated_at": r.updated_at}
-                for r in rsvps
-            ],
-        })
+        return web.json_response(
+            {
+                "rsvps": [
+                    {
+                        "user_id": r.user_id,
+                        "status": r.status,
+                        "updated_at": r.updated_at,
+                    }
+                    for r in rsvps
+                ],
+            }
+        )

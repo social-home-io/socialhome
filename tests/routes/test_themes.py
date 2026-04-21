@@ -8,6 +8,7 @@ from .conftest import _auth
 
 # ─── Household theme ─────────────────────────────────────────────────────
 
+
 async def test_get_household_theme_returns_defaults_first_call(client):
     r = await client.get("/api/theme", headers=_auth(client._tok))
     assert r.status == 200
@@ -64,14 +65,14 @@ async def test_update_household_theme_accepts_extended_fields(client):
     r = await client.put(
         "/api/theme",
         json={
-            "primary_color":   "#112233",
-            "accent_color":    "#445566",
-            "mode":            "dark",
-            "font_family":     "rounded",
-            "density":         "compact",
-            "corner_radius":   8,
-            "surface_color":   "#ffffff",
-            "surface_dark":    "#000011",
+            "primary_color": "#112233",
+            "accent_color": "#445566",
+            "mode": "dark",
+            "font_family": "rounded",
+            "density": "compact",
+            "corner_radius": 8,
+            "surface_color": "#ffffff",
+            "surface_dark": "#000011",
         },
         headers=_auth(client._tok),
     )
@@ -87,6 +88,7 @@ async def test_update_household_theme_accepts_extended_fields(client):
 async def test_update_household_theme_rejects_non_admin(client):
     db = client._db
     from social_home.auth import sha256_token_hash
+
     await db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         ("bob", "bob-uid", "Bob"),
@@ -105,6 +107,7 @@ async def test_update_household_theme_rejects_non_admin(client):
 
 
 # ─── Space theme ─────────────────────────────────────────────────────────
+
 
 async def test_get_space_theme_falls_back_to_household(client):
     """When a space has no theme, GET returns household defaults flagged as default."""

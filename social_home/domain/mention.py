@@ -18,15 +18,15 @@ from enum import StrEnum
 
 
 class MentionType(StrEnum):
-    HERE = "here"   # @here — broadcast to all members of the current scope
-    USER = "user"   # @username / @DisplayName — specific user
+    HERE = "here"  # @here — broadcast to all members of the current scope
+    USER = "user"  # @username / @DisplayName — specific user
 
 
 @dataclass(slots=True, frozen=True)
 class Mention:
     type: MentionType
-    raw: str                             # raw token as written, e.g. "@Anna"
-    user_id: str | None                  # resolved user_id; None for HERE
+    raw: str  # raw token as written, e.g. "@Anna"
+    user_id: str | None  # resolved user_id; None for HERE
 
 
 # A token is ``@`` followed by ``here`` or an identifier up to 30 chars of
@@ -77,10 +77,12 @@ class MentionParser:
             user_id = self._lookup(token, scope_id)
             if user_id and user_id not in seen_user_ids:
                 seen_user_ids.add(user_id)
-                mentions.append(Mention(
-                    type=MentionType.USER,
-                    raw=f"@{token}",
-                    user_id=user_id,
-                ))
+                mentions.append(
+                    Mention(
+                        type=MentionType.USER,
+                        raw=f"@{token}",
+                        user_id=user_id,
+                    )
+                )
 
         return tuple(mentions)

@@ -33,7 +33,8 @@ class AdminUiIndexView(GfsBaseView):
         if not index.is_file():
             return web.Response(
                 text="GFS admin UI not bundled",
-                status=500, content_type="text/plain",
+                status=500,
+                content_type="text/plain",
             )
         return web.FileResponse(index)
 
@@ -148,12 +149,14 @@ class AdminPolicyView(GfsBaseView):
     async def patch(self) -> web.Response:
         svc = self.svc(K.gfs_admin_service_key)
         body = await self.body()
-        return web.json_response(await svc.set_policy(
-            auto_accept_clients=body.get("auto_accept_clients"),
-            auto_accept_spaces=body.get("auto_accept_spaces"),
-            fraud_threshold=body.get("fraud_threshold"),
-            admin_ip=self.client_ip(),
-        ))
+        return web.json_response(
+            await svc.set_policy(
+                auto_accept_clients=body.get("auto_accept_clients"),
+                auto_accept_spaces=body.get("auto_accept_spaces"),
+                fraud_threshold=body.get("fraud_threshold"),
+                admin_ip=self.client_ip(),
+            )
+        )
 
 
 class AdminBrandingView(GfsBaseView):
@@ -166,12 +169,14 @@ class AdminBrandingView(GfsBaseView):
     async def patch(self) -> web.Response:
         svc = self.svc(K.gfs_admin_service_key)
         body = await self.body()
-        return web.json_response(await svc.set_branding(
-            server_name=body.get("server_name"),
-            landing_markdown=body.get("landing_markdown"),
-            header_image_file=body.get("header_image_file"),
-            admin_ip=self.client_ip(),
-        ))
+        return web.json_response(
+            await svc.set_branding(
+                server_name=body.get("server_name"),
+                landing_markdown=body.get("landing_markdown"),
+                header_image_file=body.get("header_image_file"),
+                admin_ip=self.client_ip(),
+            )
+        )
 
 
 class AdminBrandingHeaderImageView(GfsBaseView):
@@ -190,7 +195,8 @@ class AdminBrandingHeaderImageView(GfsBaseView):
             reader = await self.request.multipart()
         except Exception:
             return web.json_response(
-                {"error": "invalid_multipart"}, status=400,
+                {"error": "invalid_multipart"},
+                status=400,
             )
         file_bytes: bytes | None = None
         filename = "header.webp"
@@ -215,25 +221,32 @@ class AdminBrandingHeaderImageView(GfsBaseView):
             webp_bytes, new_name = await proc.process(file_bytes, filename)
         except ValueError:
             return web.json_response(
-                {"error": "unsupported_image"}, status=415,
+                {"error": "unsupported_image"},
+                status=415,
             )
         media_path = Path(cfg.media_dir)
         try:
             media_path.mkdir(parents=True, exist_ok=True)
         except PermissionError:
             return web.json_response(
-                {"error": "media_dir_not_writable"}, status=500,
+                {"error": "media_dir_not_writable"},
+                status=500,
             )
         (media_path / new_name).write_bytes(webp_bytes)
         await admin_repo.set_config("header_image_file", new_name)
         await svc._log(
-            "set_header_image", None, None, self.client_ip(),
+            "set_header_image",
+            None,
+            None,
+            self.client_ip(),
             metadata={"filename": new_name, "bytes": len(webp_bytes)},
         )
-        return web.json_response({
-            "header_image_file": new_name,
-            "url": f"{cfg.base_url}/media/{new_name}",
-        })
+        return web.json_response(
+            {
+                "header_image_file": new_name,
+                "url": f"{cfg.base_url}/media/{new_name}",
+            }
+        )
 
 
 # ─── Reports + appeals + audit ──────────────────────────────────────
@@ -260,7 +273,9 @@ class AdminReportReviewView(GfsBaseView):
         action = str(body.get("action") or "")
         try:
             result = await svc.review_fraud_report(
-                report_id, action=action, admin_ip=self.client_ip(),
+                report_id,
+                action=action,
+                admin_ip=self.client_ip(),
             )
         except KeyError as exc:
             return web.json_response(
@@ -299,7 +314,9 @@ class AdminAppealDecideView(GfsBaseView):
         action = str(body.get("action") or "")
         try:
             result = await svc.decide_appeal(
-                appeal_id, action=action, admin_ip=self.client_ip(),
+                appeal_id,
+                action=action,
+                admin_ip=self.client_ip(),
             )
         except KeyError as exc:
             return web.json_response(
@@ -327,9 +344,13 @@ class AdminAuditView(GfsBaseView):
         except ValueError:
             limit = 200
         limit = max(1, min(limit, 500))
-        return web.json_response(await svc.list_audit_log(
-            action=action, since=since_int, limit=limit,
-        ))
+        return web.json_response(
+            await svc.list_audit_log(
+                action=action,
+                since=since_int,
+                limit=limit,
+            )
+        )
 
 
 # ─── Cluster tab ────────────────────────────────────────────────────
@@ -352,11 +373,13 @@ class AdminClusterPeerCollectionView(GfsBaseView):
         peer_url = str(body.get("url") or "").rstrip("/")
         if not peer_url:
             return web.json_response(
-                {"error": "missing_url"}, status=422,
+                {"error": "missing_url"},
+                status=422,
             )
         node = await svc.add_peer(peer_url)
         return web.json_response(
-            {"node_id": node.node_id, "url": node.url}, status=201,
+            {"node_id": node.node_id, "url": node.url},
+            status=201,
         )
 
 
@@ -379,7 +402,8 @@ class AdminClusterPeerPingView(GfsBaseView):
         match = next((n for n in nodes if n.node_id == node_id), None)
         if match is None:
             return web.json_response(
-                {"error": "not_found"}, status=404,
+                {"error": "not_found"},
+                status=404,
             )
         ok = await svc.ping_peer(match.url)
         return web.json_response({"node_id": node_id, "online": ok})

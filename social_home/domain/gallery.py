@@ -20,13 +20,13 @@ class GalleryAlbum:
     """One album of photos/videos."""
 
     id: str
-    space_id: str | None                # None = household-level
+    space_id: str | None  # None = household-level
     owner_user_id: str
     name: str
     description: str | None = None
     cover_item_id: str | None = None
     item_count: int = 0
-    cover_url: str | None = None        # convenience — not persisted
+    cover_url: str | None = None  # convenience — not persisted
     retention_exempt: bool = False
     created_at: str | None = None
     updated_at: str | None = None
@@ -39,14 +39,14 @@ class GalleryItem:
     id: str
     album_id: str
     uploaded_by: str
-    item_type: str                       # 'photo' | 'video'
-    url: str                             # /api/media/{filename}
-    thumbnail_url: str                   # /api/media/{thumbnail_filename}
+    item_type: str  # 'photo' | 'video'
+    url: str  # /api/media/{filename}
+    thumbnail_url: str  # /api/media/{thumbnail_filename}
     width: int
     height: int
-    duration_s: float | None = None      # None for photos
+    duration_s: float | None = None  # None for photos
     caption: str | None = None
-    taken_at: str | None = None          # ISO 8601 day-precision (YYYY-MM-DD)
+    taken_at: str | None = None  # ISO 8601 day-precision (YYYY-MM-DD)
     sort_order: int = 0
     created_at: str | None = None
 
@@ -58,16 +58,16 @@ class GalleryItem:
         every original file.
         """
         return {
-            "id":            self.id,
-            "album_id":      self.album_id,
-            "uploaded_by":   self.uploaded_by,
-            "item_type":     self.item_type,
+            "id": self.id,
+            "album_id": self.album_id,
+            "uploaded_by": self.uploaded_by,
+            "item_type": self.item_type,
             "thumbnail_url": self.thumbnail_url,
-            "width":         self.width,
-            "height":        self.height,
-            "duration_s":    self.duration_s,
-            "caption":       self.caption,
-            "taken_at":      self.taken_at,
-            "sort_order":    self.sort_order,
-            "created_at":    self.created_at,
+            "width": self.width,
+            "height": self.height,
+            "duration_s": self.duration_s,
+            "caption": self.caption,
+            "taken_at": self.taken_at,
+            "sort_order": self.sort_order,
+            "created_at": self.created_at,
         }

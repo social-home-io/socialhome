@@ -55,16 +55,24 @@ class AbstractPageRepo(Protocol):
     async def save(self, page: Page) -> Page: ...
     async def get(self, page_id: str) -> Page | None: ...
     async def list(
-        self, *, space_id: str | None = None,
+        self,
+        *,
+        space_id: str | None = None,
     ) -> builtins.list[Page]: ...
     async def delete(self, page_id: str) -> None: ...
 
     async def acquire_lock(
-        self, page_id: str, editor: str, *,
+        self,
+        page_id: str,
+        editor: str,
+        *,
         ttl: timedelta = LOCK_TTL,
     ) -> None: ...
     async def refresh_lock(
-        self, page_id: str, editor: str, *,
+        self,
+        page_id: str,
+        editor: str,
+        *,
         ttl: timedelta = LOCK_TTL,
     ) -> None: ...
     async def release_lock(self, page_id: str, editor: str) -> None: ...
@@ -134,12 +142,22 @@ class SqlitePageRepo:
                     last_edited_at=excluded.last_edited_at
                 """,
                 (
-                    page.id, page.title, page.content, page.cover_image_url,
-                    page.created_by, page.created_at, page.updated_at,
-                    page.last_editor_user_id, page.last_edited_at,
-                    page.locked_by, page.locked_at, page.lock_expires_at,
-                    page.delete_requested_by, page.delete_requested_at,
-                    page.delete_approved_by, page.delete_approved_at,
+                    page.id,
+                    page.title,
+                    page.content,
+                    page.cover_image_url,
+                    page.created_by,
+                    page.created_at,
+                    page.updated_at,
+                    page.last_editor_user_id,
+                    page.last_edited_at,
+                    page.locked_by,
+                    page.locked_at,
+                    page.lock_expires_at,
+                    page.delete_requested_by,
+                    page.delete_requested_at,
+                    page.delete_approved_by,
+                    page.delete_approved_at,
                 ),
             )
         else:
@@ -166,30 +184,44 @@ class SqlitePageRepo:
                     last_edited_at=excluded.last_edited_at
                 """,
                 (
-                    page.id, page.space_id, page.title, page.content,
-                    page.cover_image_url, page.created_by,
-                    page.created_at, page.updated_at,
-                    page.last_editor_user_id, page.last_edited_at,
-                    page.locked_by, page.locked_at, page.lock_expires_at,
-                    page.delete_requested_by, page.delete_requested_at,
-                    page.delete_approved_by, page.delete_approved_at,
+                    page.id,
+                    page.space_id,
+                    page.title,
+                    page.content,
+                    page.cover_image_url,
+                    page.created_by,
+                    page.created_at,
+                    page.updated_at,
+                    page.last_editor_user_id,
+                    page.last_edited_at,
+                    page.locked_by,
+                    page.locked_at,
+                    page.lock_expires_at,
+                    page.delete_requested_by,
+                    page.delete_requested_at,
+                    page.delete_approved_by,
+                    page.delete_approved_at,
                 ),
             )
         return page
 
     async def get(self, page_id: str) -> Page | None:
         row = await self._db.fetchone(
-            "SELECT *, NULL AS space_id FROM pages WHERE id=?", (page_id,),
+            "SELECT *, NULL AS space_id FROM pages WHERE id=?",
+            (page_id,),
         )
         if row is not None:
             return _row_to_page(row_to_dict(row))
         row = await self._db.fetchone(
-            "SELECT * FROM space_pages WHERE id=?", (page_id,),
+            "SELECT * FROM space_pages WHERE id=?",
+            (page_id,),
         )
         return _row_to_page(row_to_dict(row))
 
     async def list(
-        self, *, space_id: str | None = None,
+        self,
+        *,
+        space_id: str | None = None,
     ) -> builtins.list[Page]:
         if space_id is None:
             rows = await self._db.fetchall(
@@ -197,13 +229,10 @@ class SqlitePageRepo:
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM space_pages WHERE space_id=? "
-                "ORDER BY updated_at DESC",
+                "SELECT * FROM space_pages WHERE space_id=? ORDER BY updated_at DESC",
                 (space_id,),
             )
-        return [
-            p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p
-        ]
+        return [p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p]
 
     async def delete(self, page_id: str) -> None:
         # Try both tables; whichever matches, wins.
@@ -213,7 +242,11 @@ class SqlitePageRepo:
     # ── Locks ──────────────────────────────────────────────────────────
 
     async def acquire_lock(
-        self, page_id: str, editor: str, *, ttl: timedelta = LOCK_TTL,
+        self,
+        page_id: str,
+        editor: str,
+        *,
+        ttl: timedelta = LOCK_TTL,
     ) -> None:
         """Atomically claim the edit lock.
 
@@ -234,7 +267,7 @@ class SqlitePageRepo:
                 if row is None:
                     continue
                 current_holder = row[0]
-                expiry         = row[1]
+                expiry = row[1]
                 # Another editor holds a still-valid lock → can't take it.
                 if (
                     current_holder is not None
@@ -250,15 +283,17 @@ class SqlitePageRepo:
                 )
                 return
             if held_by is not None:
-                raise PageLockError(
-                    f"page {page_id!r} is locked by {held_by!r}"
-                )
+                raise PageLockError(f"page {page_id!r} is locked by {held_by!r}")
             raise PageNotFoundError(page_id)
 
         await self._db.transact(_run)
 
     async def refresh_lock(
-        self, page_id: str, editor: str, *, ttl: timedelta = LOCK_TTL,
+        self,
+        page_id: str,
+        editor: str,
+        *,
+        ttl: timedelta = LOCK_TTL,
     ) -> None:
         """Extend a lock the caller already owns.
 
@@ -309,8 +344,7 @@ class SqlitePageRepo:
         now_iso = datetime.now(timezone.utc).isoformat()
         for table in ("pages", "space_pages"):
             row = await self._db.fetchone(
-                f"SELECT locked_by, locked_at, lock_expires_at "
-                f"FROM {table} WHERE id=?",
+                f"SELECT locked_by, locked_at, lock_expires_at FROM {table} WHERE id=?",
                 (page_id,),
             )
             if row is None:
@@ -320,8 +354,8 @@ class SqlitePageRepo:
             if not locked_by or (expires is not None and expires < now_iso):
                 return None
             return {
-                "locked_by":       locked_by,
-                "locked_at":       row["locked_at"],
+                "locked_by": locked_by,
+                "locked_at": row["locked_at"],
                 "lock_expires_at": expires,
             }
         return None
@@ -403,9 +437,15 @@ class SqlitePageRepo:
             ) VALUES(?,?,?,?,?,?,?, COALESCE(?, datetime('now')), ?)
             """,
             (
-                version.id, version.page_id, version.space_id,
-                version.title, version.content, version.cover_image_url,
-                version.edited_by, version.edited_at, int(version.version),
+                version.id,
+                version.page_id,
+                version.space_id,
+                version.title,
+                version.content,
+                version.cover_image_url,
+                version.edited_by,
+                version.edited_at,
+                int(version.version),
             ),
         )
         # Prune old history rows — keep the latest ``MAX_HISTORY`` per
@@ -431,8 +471,7 @@ class SqlitePageRepo:
 
     async def list_versions(self, page_id: str) -> builtins.list[PageVersion]:
         rows = await self._db.fetchall(
-            "SELECT * FROM page_edit_history WHERE page_id=? "
-            "ORDER BY version",
+            "SELECT * FROM page_edit_history WHERE page_id=? ORDER BY version",
             (page_id,),
         )
         return [_row_to_version(d) for d in rows_to_dicts(rows)]
@@ -443,6 +482,7 @@ class SqlitePageRepo:
         Using ``MAX(version) + 1`` inside ``transact`` guarantees no two
         concurrent editors end up with the same version row.
         """
+
         def _run(conn):
             row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 "
@@ -476,15 +516,19 @@ class SqlitePageRepo:
             ) VALUES(?,?,?,?,?,?,?)
             """,
             (
-                page_id, space_id, now, body, author_user_id,
-                side, 1 if conflict else 0,
+                page_id,
+                space_id,
+                now,
+                body,
+                author_user_id,
+                side,
+                1 if conflict else 0,
             ),
         )
 
     async def has_active_conflict(self, page_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT 1 FROM space_page_snapshots "
-            "WHERE page_id=? AND conflict=1 LIMIT 1",
+            "SELECT 1 FROM space_page_snapshots WHERE page_id=? AND conflict=1 LIMIT 1",
             (page_id,),
         )
         return row is not None
@@ -509,13 +553,13 @@ class SqlitePageRepo:
 
     async def clear_conflict_flag(self, page_id: str) -> None:
         await self._db.enqueue(
-            "UPDATE space_page_snapshots SET conflict=0 "
-            "WHERE page_id=? AND conflict=1",
+            "UPDATE space_page_snapshots SET conflict=0 WHERE page_id=? AND conflict=1",
             (page_id,),
         )
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
+
 
 def _row_to_page(row: dict | None) -> Page | None:
     if row is None:
@@ -556,7 +600,10 @@ def _row_to_version(row: dict) -> PageVersion:
 
 
 def new_page(
-    *, title: str, content: str, created_by: str,
+    *,
+    title: str,
+    content: str,
+    created_by: str,
     space_id: str | None = None,
     cover_image_url: str | None = None,
 ) -> Page:

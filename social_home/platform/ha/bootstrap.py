@@ -87,7 +87,8 @@ class HaBootstrap:
     async def _provision_admin(self, username: str) -> None:
         """Insert or re-enable the HA owner as a SH admin."""
         existing = await self._db.fetchone(
-            "SELECT user_id FROM users WHERE username=?", (username,),
+            "SELECT user_id FROM users WHERE username=?",
+            (username,),
         )
         if existing is not None:
             # Already provisioned — ensure is_admin=1 in case it was demoted
@@ -108,7 +109,7 @@ class HaBootstrap:
                 "ha_bootstrap: instance_identity not initialised before bootstrap"
             )
         pk_bytes = bytes.fromhex(identity["identity_public_key"])
-        user_id  = derive_user_id(pk_bytes, username)
+        user_id = derive_user_id(pk_bytes, username)
 
         await self._db.enqueue(
             """
@@ -138,15 +139,17 @@ class HaBootstrap:
             return
 
         user = await self._db.fetchone(
-            "SELECT user_id FROM users WHERE username=?", (username,),
+            "SELECT user_id FROM users WHERE username=?",
+            (username,),
         )
         if user is None:
             log.warning(
-                "ha_bootstrap: user %r not found — cannot create token", username,
+                "ha_bootstrap: user %r not found — cannot create token",
+                username,
             )
             return
 
-        raw_token  = secrets.token_urlsafe(48)
+        raw_token = secrets.token_urlsafe(48)
         token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
 
         await self._db.enqueue(
@@ -174,7 +177,9 @@ class HaBootstrap:
             # Discovery push will notice the file missing and log — the DB
             # row is already in place so there is nothing to retry.
             log.warning(
-                "ha_bootstrap: could not write %s: %s", token_path, exc,
+                "ha_bootstrap: could not write %s: %s",
+                token_path,
+                exc,
             )
 
     # ─── Discovery ───────────────────────────────────────────────────────
@@ -197,12 +202,14 @@ class HaBootstrap:
             log.warning("ha_bootstrap: could not read %s: %s", token_path, exc)
             return
         if not raw_token:
-            log.warning("ha_bootstrap: empty integration token file — skipping discovery")
+            log.warning(
+                "ha_bootstrap: empty integration token file — skipping discovery"
+            )
             return
 
         payload = {
             "service": "social_home",
-            "config":  {"token": raw_token},
+            "config": {"token": raw_token},
         }
         if await self._sv.push_discovery(payload):
             log.info("ha_bootstrap: discovery pushed")
@@ -211,7 +218,8 @@ class HaBootstrap:
 
     async def _is_done(self) -> bool:
         row = await self._db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?", (BOOTSTRAP_FLAG,),
+            "SELECT value FROM instance_config WHERE key=?",
+            (BOOTSTRAP_FLAG,),
         )
         return row is not None and row["value"] == "1"
 

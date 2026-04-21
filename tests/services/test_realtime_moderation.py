@@ -45,10 +45,15 @@ class _FakeWS:
 def _item():
     now = datetime(2026, 4, 15, tzinfo=timezone.utc)
     return SpaceModerationItem(
-        id="mod-1", space_id="sp-1", feature="post", action="create",
-        submitted_by="a-id", payload={"id": "p1", "content": "x"},
+        id="mod-1",
+        space_id="sp-1",
+        feature="post",
+        action="create",
+        submitted_by="a-id",
+        payload={"id": "p1", "content": "x"},
         current_snapshot=None,
-        submitted_at=now, expires_at=now,
+        submitted_at=now,
+        expires_at=now,
     )
 
 
@@ -57,7 +62,8 @@ async def env():
     bus = EventBus()
     ws = WebSocketManager()
     svc = RealtimeService(
-        bus, ws,
+        bus,
+        ws,
         user_repo=_FakeUserRepo(),
         space_repo=_FakeSpaceRepo({"sp-1": ["alice", "bob"]}),
     )

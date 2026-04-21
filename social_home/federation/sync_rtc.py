@@ -31,7 +31,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-import libdatachannel
+# Optional WebRTC dep — see :mod:`social_home.federation.transport`
+# for the full rationale. Absent library ⇒ fallback to webhook.
+try:
+    import libdatachannel
+except ImportError:  # pragma: no cover — optional
+    libdatachannel = None
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +58,7 @@ MAX_SIGNALING_SESSIONS: int = 200
 
 
 # ─── SyncRtcSession ───────────────────────────────────────────────────────
+
 
 class SyncRtcSession:
     """WebRTC DataChannel session used for direct space sync.
@@ -116,21 +122,21 @@ class SyncRtcSession:
         if role not in ("provider", "requester"):
             raise ValueError(f"Invalid role: {role!r}")
 
-        self.sync_id               = sync_id
-        self.space_id              = space_id
+        self.sync_id = sync_id
+        self.space_id = space_id
         self.requester_instance_id = requester_instance_id
-        self.provider_instance_id  = provider_instance_id
-        self.sync_mode             = sync_mode
-        self.role                  = role
-        self._ice_servers          = ice_servers or []
-        self._pc:        Any = None  # set by _init_real_pc()
-        self._channel:   Any | None = None
-        self._ready                = asyncio.Event()
+        self.provider_instance_id = provider_instance_id
+        self.sync_mode = sync_mode
+        self.role = role
+        self._ice_servers = ice_servers or []
+        self._pc: Any = None  # set by _init_real_pc()
+        self._channel: Any | None = None
+        self._ready = asyncio.Event()
         self._remote_sdp: str | None = None
-        self._local_sdp:  str | None = None
+        self._local_sdp: str | None = None
         self._ice_candidates: list[str] = []
-        self._loop                 = loop
-        self._closed               = False
+        self._loop = loop
+        self._closed = False
 
         self._init_real_pc()
 
@@ -145,11 +151,13 @@ class SyncRtcSession:
                 if url.startswith("stun:"):
                     cfg.iceServers.append(libdatachannel.IceServer(url))
                 elif url.startswith("turn:"):
-                    cfg.iceServers.append(libdatachannel.IceServer(
-                        url,
-                        username=srv.get("username", ""),
-                        password=srv.get("credential", ""),
-                    ))
+                    cfg.iceServers.append(
+                        libdatachannel.IceServer(
+                            url,
+                            username=srv.get("username", ""),
+                            password=srv.get("credential", ""),
+                        )
+                    )
 
         self._pc = libdatachannel.PeerConnection(cfg)
         loop = self._loop or asyncio.get_event_loop()
@@ -181,7 +189,9 @@ class SyncRtcSession:
     async def _on_open(self) -> None:
         log.info(
             "SyncRtcSession[%s]: DataChannel open (space=%s, mode=%s)",
-            self.sync_id, self.space_id, self.sync_mode,
+            self.sync_id,
+            self.space_id,
+            self.sync_mode,
         )
         self._ready.set()
 
@@ -222,7 +232,10 @@ class SyncRtcSession:
 
         loop = self._loop or asyncio.get_event_loop()
         await loop.run_in_executor(
-            None, self._pc.setRemoteDescription, sdp_answer, "answer",
+            None,
+            self._pc.setRemoteDescription,
+            sdp_answer,
+            "answer",
         )
 
     # ─── Requester role ───────────────────────────────────────────────────
@@ -247,7 +260,10 @@ class SyncRtcSession:
 
         loop = self._loop or asyncio.get_event_loop()
         await loop.run_in_executor(
-            None, self._pc.setRemoteDescription, sdp_offer, "offer",
+            None,
+            self._pc.setRemoteDescription,
+            sdp_offer,
+            "offer",
         )
         await loop.run_in_executor(None, self._pc.setLocalDescription, "answer")
         sdp = await loop.run_in_executor(None, self._pc.localDescription)
@@ -268,7 +284,10 @@ class SyncRtcSession:
 
         loop = self._loop or asyncio.get_event_loop()
         await loop.run_in_executor(
-            None, self._pc.addRemoteCandidate, candidate, sdp_mid,
+            None,
+            self._pc.addRemoteCandidate,
+            candidate,
+            sdp_mid,
         )
 
     async def wait_ready(self, timeout: float = ICE_TIMEOUT_SECONDS) -> bool:
@@ -291,7 +310,9 @@ class SyncRtcSession:
             raise ConnectionError("DataChannel not open")
         loop = self._loop or asyncio.get_event_loop()
         await loop.run_in_executor(
-            None, self._channel.sendMessage, chunk_payload,
+            None,
+            self._channel.sendMessage,
+            chunk_payload,
         )
 
     @property
@@ -318,6 +339,7 @@ class SyncRtcSession:
 
 
 # ─── Stateful helpers used by the manager ────────────────────────────────
+
 
 @dataclass(slots=True)
 class SyncSessionRecord:

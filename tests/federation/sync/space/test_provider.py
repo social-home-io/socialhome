@@ -28,6 +28,7 @@ class _FakeExporter:
 class _FakeCrypto:
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
         import base64
+
         return 0, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
 
@@ -55,8 +56,8 @@ def encoder():
 def provider(encoder):
     builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
     exporters = {
-        "posts":    _FakeExporter("posts", [{"id": "p-1", "author": "u-1"}]),
-        "members":  _FakeExporter("members", [{"user_id": "u-1", "role": "member"}]),
+        "posts": _FakeExporter("posts", [{"id": "p-1", "author": "u-1"}]),
+        "members": _FakeExporter("members", [{"user_id": "u-1", "role": "member"}]),
     }
     return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
 

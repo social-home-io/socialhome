@@ -21,6 +21,7 @@ async def _make_space(client, *, sid: str = "sp-1") -> None:
 
 # ─── Authentication ──────────────────────────────────────────────────────
 
+
 async def test_list_household_albums_requires_auth(client):
     r = await client.get("/api/gallery/albums")
     assert r.status == 401
@@ -37,6 +38,7 @@ async def test_create_album_requires_auth(client):
 
 
 # ─── Household album CRUD ───────────────────────────────────────────────
+
 
 async def test_household_albums_initially_empty(client):
     r = await client.get("/api/gallery/albums", headers=_auth(client._tok))
@@ -76,6 +78,7 @@ async def test_create_album_bad_json_400(client):
 
 # ─── Space album CRUD ───────────────────────────────────────────────────
 
+
 async def test_create_space_album(client):
     await _make_space(client)
     r = await client.post(
@@ -103,6 +106,7 @@ async def test_list_space_albums_non_member_403(client):
 
 
 # ─── Get / update / delete album ────────────────────────────────────────
+
 
 async def test_get_album_unknown_404(client):
     r = await client.get(
@@ -194,6 +198,7 @@ async def test_set_retention_exempt(client):
 
 
 # ─── Items ──────────────────────────────────────────────────────────────
+
 
 async def test_list_items_unknown_album_404(client):
     r = await client.get(

@@ -48,9 +48,10 @@ BIO_MAX_LENGTH = 300
 class _Unset:
     """Sentinel so partial-update kwargs can distinguish "unset" from
     an explicit ``None`` that clears a column."""
+
     __slots__ = ()
 
-    def __repr__(self) -> str:   # pragma: no cover
+    def __repr__(self) -> str:  # pragma: no cover
         return "_UNSET"
 
 
@@ -76,7 +77,8 @@ class UserService:
         self._pictures = profile_picture_repo
 
     def attach_profile_picture_repo(
-        self, repo: AbstractProfilePictureRepo,
+        self,
+        repo: AbstractProfilePictureRepo,
     ) -> None:
         """Wire the picture repo post-construction (tests may build a
         bare :class:`UserService` first and attach later)."""
@@ -145,7 +147,8 @@ class UserService:
         await self._repo.save(user)
         await self._bus.publish(
             UserProvisioned(
-                user_id=user.user_id, username=user.username,
+                user_id=user.user_id,
+                username=user.username,
                 is_admin=user.is_admin,
             ),
         )
@@ -178,8 +181,7 @@ class UserService:
             raise KeyError(f"user {username!r} not found")
         if existing.source != "ha":
             raise PermissionError(
-                f"user {username!r} is not HA-synced "
-                "(source={existing.source!r})",
+                f"user {username!r} is not HA-synced (source={{existing.source!r}})",
             )
         await self._repo.soft_delete(username, grace_days=0)
         await self._bus.publish(
@@ -236,18 +238,22 @@ class UserService:
 
         updated = replace(user, display_name=next_display, bio=next_bio)
         await self._repo.save(updated)
-        await self._bus.publish(UserProfileUpdated(
-            user_id=updated.user_id,
-            username=updated.username,
-            display_name=updated.display_name,
-            bio=updated.bio,
-            picture_hash=updated.picture_hash,
-            picture_webp=None,   # unchanged — no blob to ship
-        ))
+        await self._bus.publish(
+            UserProfileUpdated(
+                user_id=updated.user_id,
+                username=updated.username,
+                display_name=updated.display_name,
+                bio=updated.bio,
+                picture_hash=updated.picture_hash,
+                picture_webp=None,  # unchanged — no blob to ship
+            )
+        )
         return updated
 
     async def set_picture(
-        self, user_id: str, raw_bytes: bytes,
+        self,
+        user_id: str,
+        raw_bytes: bytes,
     ) -> User:
         """Accept any image, convert via :class:`ImageProcessor` to a
         square-bounded WebP at :data:`PROFILE_PICTURE_MAX_DIMENSION`,
@@ -261,7 +267,8 @@ class UserService:
         if user is None:
             raise KeyError(f"user_id {user_id!r} not found")
         webp_bytes = await ImageProcessor().generate_thumbnail(
-            raw_bytes, size=PROFILE_PICTURE_MAX_DIMENSION,
+            raw_bytes,
+            size=PROFILE_PICTURE_MAX_DIMENSION,
         )
         hash_ = compute_picture_hash(webp_bytes)
         await self._pictures.set_user_picture(
@@ -274,14 +281,16 @@ class UserService:
         await self._repo.set_picture_hash(user_id, hash_)
         refreshed = await self._repo.get_by_user_id(user_id)
         assert refreshed is not None
-        await self._bus.publish(UserProfileUpdated(
-            user_id=refreshed.user_id,
-            username=refreshed.username,
-            display_name=refreshed.display_name,
-            bio=refreshed.bio,
-            picture_hash=hash_,
-            picture_webp=webp_bytes,
-        ))
+        await self._bus.publish(
+            UserProfileUpdated(
+                user_id=refreshed.user_id,
+                username=refreshed.username,
+                display_name=refreshed.display_name,
+                bio=refreshed.bio,
+                picture_hash=hash_,
+                picture_webp=webp_bytes,
+            )
+        )
         return refreshed
 
     async def clear_picture(self, user_id: str) -> User:
@@ -292,18 +301,21 @@ class UserService:
             raise KeyError(f"user_id {user_id!r} not found")
         await self._pictures.clear_user_picture(user_id)
         await self._repo.set_picture_hash(user_id, None)
-        await self._bus.publish(UserProfileUpdated(
-            user_id=user.user_id,
-            username=user.username,
-            display_name=user.display_name,
-            bio=user.bio,
-            picture_hash=None,
-            picture_webp=None,
-        ))
+        await self._bus.publish(
+            UserProfileUpdated(
+                user_id=user.user_id,
+                username=user.username,
+                display_name=user.display_name,
+                bio=user.bio,
+                picture_hash=None,
+                picture_webp=None,
+            )
+        )
         return replace(user, picture_hash=None)
 
     async def get_picture(
-        self, user_id: str,
+        self,
+        user_id: str,
     ) -> tuple[bytes, str] | None:
         if self._pictures is None:
             return None
@@ -372,7 +384,11 @@ class UserService:
     # ── API tokens ──────────────────────────────────────────────────────
 
     async def create_api_token(
-        self, username: str, *, label: str, expires_at: str | None = None,
+        self,
+        username: str,
+        *,
+        label: str,
+        expires_at: str | None = None,
     ) -> tuple[str, str]:
         """Create an API token. Returns ``(token_id, raw_token)``.
 
@@ -387,7 +403,9 @@ class UserService:
         raw_token = secrets.token_urlsafe(48)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         token_id = await self._repo.create_api_token(
-            user.user_id, token_hash, label.strip(),
+            user.user_id,
+            token_hash,
+            label.strip(),
             expires_at=expires_at,
         )
         return token_id, raw_token
@@ -418,7 +436,9 @@ class UserService:
         await self._repo.unblock(blocker.user_id, blocked_user_id)
 
     async def is_blocked(
-        self, blocker_user_id: str, candidate_user_id: str,
+        self,
+        blocker_user_id: str,
+        candidate_user_id: str,
     ) -> bool:
         return await self._repo.is_blocked(blocker_user_id, candidate_user_id)
 
@@ -436,12 +456,11 @@ class UserService:
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
+
 def _validate_username(username: str) -> None:
     if not username:
         raise ValueError("username must not be empty")
     if len(username) > _USERNAME_MAX_LENGTH:
-        raise ValueError(
-            f"username must be at most {_USERNAME_MAX_LENGTH} characters"
-        )
+        raise ValueError(f"username must be at most {_USERNAME_MAX_LENGTH} characters")
     if username in RESERVED_USERNAMES:
         raise ValueError(f"username {username!r} is reserved")

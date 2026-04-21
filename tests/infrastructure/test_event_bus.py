@@ -20,8 +20,11 @@ async def test_publish_delivers():
 
     bus.subscribe(PostCreated, handler)
     now = datetime.now(timezone.utc)
-    await bus.publish(PostCreated(post=Post(id="p1", author="u", type=PostType.TEXT, created_at=now)))
+    await bus.publish(
+        PostCreated(post=Post(id="p1", author="u", type=PostType.TEXT, created_at=now))
+    )
     assert seen == ["p1"]
+
 
 async def test_handler_error_isolation():
     """A failing handler does not prevent other handlers from running."""
@@ -37,8 +40,11 @@ async def test_handler_error_isolation():
     bus.subscribe(PostCreated, bad)
     bus.subscribe(PostCreated, good)
     now = datetime.now(timezone.utc)
-    await bus.publish(PostCreated(post=Post(id="p", author="u", type=PostType.TEXT, created_at=now)))
+    await bus.publish(
+        PostCreated(post=Post(id="p", author="u", type=PostType.TEXT, created_at=now))
+    )
     assert seen == ["ok"]
+
 
 async def test_unsubscribe():
     """Unsubscribing a handler removes it so handler_count drops to zero."""

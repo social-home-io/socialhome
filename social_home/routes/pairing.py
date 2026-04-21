@@ -40,17 +40,17 @@ def _instance_dict(inst) -> dict:
     ``key_remote_to_self``) and the ``routing_secret`` — those are stored
     fields, never exposed over HTTP (§27.9 SENSITIVE_FIELDS).
     """
-    status = inst.status.value if isinstance(inst.status, PairingStatus) else inst.status
+    status = (
+        inst.status.value if isinstance(inst.status, PairingStatus) else inst.status
+    )
     reachable = inst.is_reachable() if hasattr(inst, "is_reachable") else True
     return {
-        "instance_id":         inst.id,
-        "display_name":        inst.display_name,
-        "status":              status,
-        "reachable":           reachable,
-        "paired_at":           getattr(inst, "paired_at", None),
-        "source":              (
-            inst.source.value if hasattr(inst.source, "value") else inst.source
-        ),
+        "instance_id": inst.id,
+        "display_name": inst.display_name,
+        "status": status,
+        "reachable": reachable,
+        "paired_at": getattr(inst, "paired_at", None),
+        "source": (inst.source.value if hasattr(inst.source, "value") else inst.source),
     }
 
 
@@ -63,7 +63,9 @@ class PairingInitiateView(BaseView):
         webhook_url = str(body.get("webhook_url") or "").strip()
         if not webhook_url:
             return error_response(
-                422, "UNPROCESSABLE", "webhook_url is required.",
+                422,
+                "UNPROCESSABLE",
+                "webhook_url is required.",
             )
         qr = await self.svc(federation_service_key).initiate_pairing(webhook_url)
         return web.json_response(qr, status=201)
@@ -90,7 +92,8 @@ class PairingConfirmView(BaseView):
         code = str(body.get("verification_code") or "")
         if not token or not code:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "token and verification_code are required.",
             )
         instance = await self.svc(federation_service_key).confirm_pairing(token, code)
@@ -113,18 +116,22 @@ class PairingIntroduceView(BaseView):
         via = str(body.get("via_instance_id") or "")
         if not target or not via:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "target_instance_id and via_instance_id are required.",
             )
         if target == via:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "target_instance_id and via_instance_id must differ.",
             )
         fed_repo = self.svc(federation_repo_key)
         if await fed_repo.get_instance(via) is None:
             return error_response(
-                404, "NOT_FOUND", f"Relay peer {via!r} not found.",
+                404,
+                "NOT_FOUND",
+                f"Relay peer {via!r} not found.",
             )
         message = str(body.get("message") or "")[:500]
         result = await self.svc(federation_service_key).send_event(
@@ -132,12 +139,13 @@ class PairingIntroduceView(BaseView):
             event_type=FederationEventType.PAIRING_INTRO_RELAY,
             payload={
                 "target_instance_id": target,
-                "message":            message,
+                "message": message,
             },
         )
         if not result.ok:
             return error_response(
-                502, "UPSTREAM_UNREACHABLE",
+                502,
+                "UPSTREAM_UNREACHABLE",
                 "Could not reach the relay instance — retry later.",
             )
         return web.Response(status=204)
@@ -174,7 +182,8 @@ class AutoPairViaView(BaseView):
         display_name = str(body.get("target_display_name") or "")
         if not via or not target:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "via_instance_id and target_instance_id are required.",
             )
         coord = self.svc(auto_pair_coordinator_key)
@@ -199,18 +208,20 @@ class AutoPairInboxCollectionView(BaseView):
         if not ctx.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         inbox = self.svc(auto_pair_inbox_key)
-        return web.json_response([
-            {
-                "request_id":     r.request_id,
-                "from_a_id":      r.from_a_id,
-                "from_a_display": r.from_a_display,
-                "via_b_id":       r.via_b_id,
-                "via_b_display":  r.via_b_display,
-                "ts":             r.ts,
-                "received_at":    r.received_at,
-            }
-            for r in inbox.list_pending()
-        ])
+        return web.json_response(
+            [
+                {
+                    "request_id": r.request_id,
+                    "from_a_id": r.from_a_id,
+                    "from_a_display": r.from_a_display,
+                    "via_b_id": r.via_b_id,
+                    "via_b_display": r.via_b_display,
+                    "ts": r.ts,
+                    "received_at": r.received_at,
+                }
+                for r in inbox.list_pending()
+            ]
+        )
 
 
 class AutoPairInboxApproveView(BaseView):
@@ -226,13 +237,17 @@ class AutoPairInboxApproveView(BaseView):
             inst = await coord.finalize_pending(request_id)
         except KeyError:
             return error_response(
-                404, "NOT_FOUND", "Request not found (already handled?).",
+                404,
+                "NOT_FOUND",
+                "Request not found (already handled?).",
             )
-        return web.json_response({
-            "ok": True,
-            "instance_id": inst.id,
-            "display_name": inst.display_name,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "instance_id": inst.id,
+                "display_name": inst.display_name,
+            }
+        )
 
 
 class AutoPairInboxDeclineView(BaseView):
@@ -247,11 +262,14 @@ class AutoPairInboxDeclineView(BaseView):
         body = await self.body()
         try:
             await coord.decline_pending(
-                request_id, reason=str(body.get("reason") or ""),
+                request_id,
+                reason=str(body.get("reason") or ""),
             )
         except KeyError:
             return error_response(
-                404, "NOT_FOUND", "Request not found (already handled?).",
+                404,
+                "NOT_FOUND",
+                "Request not found (already handled?).",
             )
         return web.json_response({"ok": True})
 
@@ -272,11 +290,11 @@ class PairingConnectionDetailView(BaseView):
 
 def _relay_request_dict(req) -> dict:
     return {
-        "id":                 req.id,
-        "from_instance":      req.from_instance,
+        "id": req.id,
+        "from_instance": req.from_instance,
         "target_instance_id": req.target_instance_id,
-        "message":            req.message,
-        "received_at":        req.received_at.isoformat(),
+        "message": req.message,
+        "received_at": req.received_at.isoformat(),
     }
 
 

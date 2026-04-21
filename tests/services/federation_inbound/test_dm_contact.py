@@ -27,11 +27,20 @@ class _FakeFederationService:
 
 
 class _FakeFederationRepo:
-    async def get_instance(self, iid): return None
-    async def get_pairing(self, token): return None
-    async def save_instance(self, inst): return inst
-    async def delete_instance(self, iid): pass
-    async def delete_pairing(self, token): pass
+    async def get_instance(self, iid):
+        return None
+
+    async def get_pairing(self, token):
+        return None
+
+    async def save_instance(self, inst):
+        return inst
+
+    async def delete_instance(self, iid):
+        pass
+
+    async def delete_pairing(self, token):
+        pass
 
 
 class _FakeDmContactRepo:
@@ -54,8 +63,10 @@ class _FakeDmContactRepo:
 
 def _event(payload, from_instance="peer-a"):
     return FederationEvent(
-        msg_id="m", event_type=FederationEventType.DM_CONTACT_REQUEST,
-        from_instance=from_instance, to_instance="self",
+        msg_id="m",
+        event_type=FederationEventType.DM_CONTACT_REQUEST,
+        from_instance=from_instance,
+        to_instance="self",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload=payload,
     )
@@ -88,7 +99,8 @@ def test_attach_registers_dm_contact_request_only_when_repo_given(bus):
     keeps the federation registry clean for deployments that don't
     want the contact-request flow."""
     h_without = PairingInboundHandlers(
-        bus=bus, federation_repo=_FakeFederationRepo(),
+        bus=bus,
+        federation_repo=_FakeFederationRepo(),
     )
     fed = _FakeFederationService()
     h_without.attach_to(fed)
@@ -107,11 +119,15 @@ async def test_contact_request_persists_and_publishes(bus, repo, handlers):
     captured: list[DmContactRequested] = []
     bus.subscribe(DmContactRequested, captured.append)
 
-    await h._on_contact_request(_event({
-        "requester_user_id": "u-remote",
-        "requester_display_name": "Alice",
-        "recipient_user_id": "u-local",
-    }))
+    await h._on_contact_request(
+        _event(
+            {
+                "requester_user_id": "u-remote",
+                "requester_display_name": "Alice",
+                "recipient_user_id": "u-local",
+            }
+        )
+    )
 
     assert repo.saved == [("u-remote", "u-local")]
     assert len(captured) == 1
@@ -124,10 +140,14 @@ async def test_contact_request_accepts_legacy_field_names(bus, repo, handlers):
     """``from_user_id`` / ``to_user_id`` aliases work too — some older
     peers may send those instead of the current spec names."""
     h, _ = handlers
-    await h._on_contact_request(_event({
-        "from_user_id": "u-1",
-        "to_user_id": "u-2",
-    }))
+    await h._on_contact_request(
+        _event(
+            {
+                "from_user_id": "u-1",
+                "to_user_id": "u-2",
+            }
+        )
+    )
     assert repo.saved == [("u-1", "u-2")]
 
 
@@ -149,10 +169,14 @@ async def test_contact_request_fk_failure_drops_silently(bus, repo, handlers):
     captured: list[DmContactRequested] = []
     bus.subscribe(DmContactRequested, captured.append)
 
-    await h._on_contact_request(_event({
-        "requester_user_id": "u-remote",
-        "recipient_user_id": "u-missing",
-    }))
+    await h._on_contact_request(
+        _event(
+            {
+                "requester_user_id": "u-remote",
+                "recipient_user_id": "u-missing",
+            }
+        )
+    )
     # Repo raised → nothing saved, event not published (it would be
     # pointing at a row that doesn't exist).
     assert repo.saved == []

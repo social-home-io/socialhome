@@ -18,37 +18,37 @@ from .base import BaseView
 
 def _listing_dict(listing) -> dict:
     return {
-        "post_id":        listing.post_id,
+        "post_id": listing.post_id,
         "seller_user_id": listing.seller_user_id,
-        "mode":           listing.mode.value,
-        "title":          listing.title,
-        "description":    listing.description,
-        "image_urls":     list(listing.image_urls),
-        "end_time":       listing.end_time,
-        "currency":       listing.currency,
-        "status":         listing.status.value,
-        "price":          listing.price,
-        "start_price":    listing.start_price,
-        "step_price":     listing.step_price,
+        "mode": listing.mode.value,
+        "title": listing.title,
+        "description": listing.description,
+        "image_urls": list(listing.image_urls),
+        "end_time": listing.end_time,
+        "currency": listing.currency,
+        "status": listing.status.value,
+        "price": listing.price,
+        "start_price": listing.start_price,
+        "step_price": listing.step_price,
         "winner_user_id": listing.winner_user_id,
-        "winning_price":  listing.winning_price,
-        "sold_at":        listing.sold_at,
-        "created_at":     listing.created_at,
+        "winning_price": listing.winning_price,
+        "sold_at": listing.sold_at,
+        "created_at": listing.created_at,
     }
 
 
 def _bid_dict(bid) -> dict:
     return {
-        "id":               bid.id,
-        "listing_post_id":  bid.listing_post_id,
-        "bidder_user_id":   bid.bidder_user_id,
-        "amount":           bid.amount,
-        "message":          bid.message,
-        "accepted":         bid.accepted,
-        "rejected":         bid.rejected,
+        "id": bid.id,
+        "listing_post_id": bid.listing_post_id,
+        "bidder_user_id": bid.bidder_user_id,
+        "amount": bid.amount,
+        "message": bid.message,
+        "accepted": bid.accepted,
+        "rejected": bid.rejected,
         "rejection_reason": bid.rejection_reason,
-        "withdrawn":        bid.withdrawn,
-        "created_at":       bid.created_at,
+        "withdrawn": bid.withdrawn,
+        "created_at": bid.created_at,
     }
 
 
@@ -96,13 +96,17 @@ class BazaarCollectionView(BaseView):
         currency = str(body.get("currency") or "").upper().strip()
         if not currency:
             return error_response(
-                422, "UNPROCESSABLE", "currency is required.",
+                422,
+                "UNPROCESSABLE",
+                "currency is required.",
             )
 
         image_urls = body.get("image_urls") or []
         if not isinstance(image_urls, list):
             return error_response(
-                422, "UNPROCESSABLE", "image_urls must be a list.",
+                422,
+                "UNPROCESSABLE",
+                "image_urls must be a list.",
             )
 
         try:
@@ -163,7 +167,8 @@ class BazaarDetailView(BaseView):
         svc = self.svc(bazaar_service_key)
         try:
             await svc.cancel_listing(
-                post_id=self.match("id"), actor_user_id=ctx.user_id,
+                post_id=self.match("id"),
+                actor_user_id=ctx.user_id,
             )
         except ListingNotFoundError:
             return error_response(404, "NOT_FOUND", "Listing not found.")
@@ -194,9 +199,11 @@ class BazaarBidCollectionView(BaseView):
             return error_response(422, "UNPROCESSABLE", "amount is required.")
         try:
             amount_i = int(amount)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return error_response(
-                422, "UNPROCESSABLE", "amount must be an integer.",
+                422,
+                "UNPROCESSABLE",
+                "amount must be an integer.",
             )
 
         try:
@@ -221,7 +228,8 @@ class BazaarBidDetailView(BaseView):
         svc = self.svc(bazaar_service_key)
         try:
             await svc.withdraw_bid(
-                bid_id=self.match("bid_id"), actor_user_id=ctx.user_id,
+                bid_id=self.match("bid_id"),
+                actor_user_id=ctx.user_id,
             )
         except BidNotFoundError:
             return error_response(404, "NOT_FOUND", "Bid not found.")
@@ -240,7 +248,8 @@ class BazaarBidAcceptView(BaseView):
         svc = self.svc(bazaar_service_key)
         try:
             await svc.accept_offer(
-                bid_id=self.match("bid_id"), actor_user_id=ctx.user_id,
+                bid_id=self.match("bid_id"),
+                actor_user_id=ctx.user_id,
             )
         except BidNotFoundError:
             return error_response(404, "NOT_FOUND", "Bid not found.")

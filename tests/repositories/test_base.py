@@ -18,6 +18,7 @@ from social_home.repositories.base import (
 
 # ── row_to_dict ───────────────────────────────────────────────────────────
 
+
 def test_row_to_dict_none():
     """row_to_dict(None) returns None."""
     assert row_to_dict(None) is None
@@ -34,6 +35,7 @@ def test_row_to_dict_sqlite_row():
 
 
 # ── rows_to_dicts ─────────────────────────────────────────────────────────
+
 
 def test_rows_to_dicts_empty():
     """rows_to_dicts returns an empty list for an empty iterable."""
@@ -54,6 +56,7 @@ def test_rows_to_dicts_multiple():
 
 
 # ── dump_json ─────────────────────────────────────────────────────────────
+
 
 def test_dump_json_basic():
     """dump_json produces compact, sorted-key JSON."""
@@ -78,6 +81,7 @@ def test_dump_json_list():
 
 # ── load_json ─────────────────────────────────────────────────────────────
 
+
 def test_load_json_valid():
     """load_json parses valid JSON strings."""
     assert load_json('["a","b"]', []) == ["a", "b"]
@@ -99,6 +103,7 @@ def test_load_json_invalid_returns_default():
 
 
 # ── bool_col ──────────────────────────────────────────────────────────────
+
 
 def test_bool_col_zero():
     """bool_col(0) returns False."""
@@ -126,6 +131,7 @@ def test_bool_col_none():
 
 
 # ── pick ──────────────────────────────────────────────────────────────────
+
 
 def test_pick_selects_present_keys():
     """pick returns only the requested keys that exist in the mapping."""

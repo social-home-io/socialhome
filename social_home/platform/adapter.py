@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 # ── Value types ──────────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class InstanceConfig:
     """Immutable snapshot of the instance's physical / regional settings."""
@@ -57,6 +58,7 @@ class ExternalUser:
 
 
 # ── Protocol ─────────────────────────────────────────────────────────────────
+
 
 @runtime_checkable
 class AbstractPlatformAdapter(Protocol):
@@ -103,7 +105,9 @@ class AbstractPlatformAdapter(Protocol):
         ...
 
     async def transcribe_audio(
-        self, audio_bytes: bytes, language: str = "en",
+        self,
+        audio_bytes: bytes,
+        language: str = "en",
     ) -> str:
         """Transcribe ``audio_bytes`` (buffered) to text.
 
@@ -206,6 +210,7 @@ _PLATFORM_SECTION: dict[str, str] = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _extract_bearer(request: "web.Request") -> str | None:
     """Extract a raw bearer token from a request.
 
@@ -218,7 +223,7 @@ def _extract_bearer(request: "web.Request") -> str | None:
     """
     header = request.headers.get("Authorization", "")
     if header.startswith("Bearer "):
-        bearer = header[len("Bearer "):].strip()
+        bearer = header[len("Bearer ") :].strip()
         if bearer:
             return bearer
 

@@ -17,6 +17,7 @@ from social_home.platform.ha.adapter import HomeAssistantAdapter
 
 # ─── Fake HaClient ───────────────────────────────────────────────────────
 
+
 class _FakeHaClient:
     """Minimal :class:`HaClient` stand-in for adapter unit tests.
 
@@ -95,6 +96,7 @@ class _FakeHaClient:
 
 # ─── Adapter construction helper ─────────────────────────────────────────
 
+
 def _build_adapter(
     *,
     client: _FakeHaClient,
@@ -118,6 +120,7 @@ class _FakeRequest:
 
 
 # ─── Authentication ──────────────────────────────────────────────────────
+
 
 async def test_authenticate_no_headers():
     adapter = _build_adapter(client=_FakeHaClient())
@@ -170,6 +173,7 @@ async def test_authenticate_bearer_invalid_returns_none():
 
 # ─── User listing ────────────────────────────────────────────────────────
 
+
 async def test_list_external_users_filters_person_entities():
     states = [
         {"entity_id": "person.pascal", "attributes": {"friendly_name": "Pascal"}},
@@ -202,6 +206,7 @@ async def test_get_external_user_not_found():
 
 # ─── Instance config ─────────────────────────────────────────────────────
 
+
 async def test_get_instance_config_maps_ha_response():
     cfg = {
         "location_name": "Home",
@@ -225,12 +230,17 @@ async def test_get_instance_config_fallback_on_client_error():
 
 # ─── Push + events ───────────────────────────────────────────────────────
 
+
 async def test_send_push_targets_mobile_app_service():
     client = _FakeHaClient()
     adapter = _build_adapter(client=client)
     from social_home.platform.adapter import ExternalUser
+
     user = ExternalUser(
-        username="pascal", display_name="P", picture_url=None, is_admin=False,
+        username="pascal",
+        display_name="P",
+        picture_url=None,
+        is_admin=False,
     )
     await adapter.send_push(user, "title", "message", data={"x": 1})
     assert any(
@@ -252,6 +262,7 @@ async def test_fire_event_delegates():
 
 # ─── STT ─────────────────────────────────────────────────────────────────
 
+
 async def test_supports_stt_requires_entity_id():
     assert _build_adapter(client=_FakeHaClient()).supports_stt is False
     enabled = _build_adapter(
@@ -272,7 +283,8 @@ async def test_stream_transcribe_audio_success():
         stt_response={"result": "success", "text": "hello world"},
     )
     adapter = _build_adapter(
-        client=client, options={"stt_entity_id": "stt.whisper"},
+        client=client,
+        options={"stt_entity_id": "stt.whisper"},
     )
 
     async def _audio():
@@ -292,7 +304,8 @@ async def test_stream_transcribe_audio_success():
 async def test_stream_transcribe_audio_empty_on_error_payload():
     client = _FakeHaClient(stt_response={"result": "error"})
     adapter = _build_adapter(
-        client=client, options={"stt_entity_id": "stt.whisper"},
+        client=client,
+        options={"stt_entity_id": "stt.whisper"},
     )
 
     async def _audio():
@@ -307,12 +320,14 @@ async def test_transcribe_audio_delegates_to_stream():
         stt_response={"result": "success", "text": "hi"},
     )
     adapter = _build_adapter(
-        client=client, options={"stt_entity_id": "stt.whisper"},
+        client=client,
+        options={"stt_entity_id": "stt.whisper"},
     )
     assert await adapter.transcribe_audio(b"buffered-bytes", language="de") == "hi"
 
 
 # ─── AI task ─────────────────────────────────────────────────────────────
+
 
 async def test_generate_ai_data_unwraps_service_response():
     client = _FakeHaClient(
@@ -331,7 +346,8 @@ async def test_generate_ai_data_sends_entity_id_when_configured():
         call_service_response={"service_response": {"data": ""}},
     )
     adapter = _build_adapter(
-        client=client, options={"ai_task_entity_id": "ai_task.openai"},
+        client=client,
+        options={"ai_task_entity_id": "ai_task.openai"},
     )
     await adapter.generate_ai_data(task_name="t", instructions="go")
     (_, domain, service, body, return_response) = next(
@@ -341,7 +357,9 @@ async def test_generate_ai_data_sends_entity_id_when_configured():
     assert service == "generate_data"
     assert return_response is True
     assert body == {
-        "task_name": "t", "instructions": "go", "entity_id": "ai_task.openai",
+        "task_name": "t",
+        "instructions": "go",
+        "entity_id": "ai_task.openai",
     }
 
 
@@ -352,6 +370,7 @@ async def test_generate_ai_data_returns_empty_on_client_error():
 
 
 # ─── update_location ─────────────────────────────────────────────────────
+
 
 async def test_update_location_truncates_coords():
     cfg = {
@@ -371,6 +390,7 @@ async def test_update_location_truncates_coords():
 
 
 # ─── Uninitialised adapter guard ─────────────────────────────────────────
+
 
 async def test_adapter_raises_before_on_startup_when_client_not_injected():
     adapter = HomeAssistantAdapter(

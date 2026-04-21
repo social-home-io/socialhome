@@ -15,9 +15,11 @@ from .conftest import _auth
 
 def _fake_instance(iid: str = "peer-1") -> RemoteInstance:
     return RemoteInstance(
-        id=iid, display_name=iid,
+        id=iid,
+        display_name=iid,
         remote_identity_pk="aa" * 32,
-        key_self_to_remote="enc", key_remote_to_self="enc",
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
         remote_webhook_url="https://peer/wh",
         local_webhook_id=f"wh-{iid}",
         status=PairingStatus.CONFIRMED,
@@ -83,7 +85,8 @@ async def test_confirm_pairing_unknown_token(client):
 
 async def test_list_connections_empty(client):
     r = await client.get(
-        "/api/pairing/connections", headers=_auth(client._tok),
+        "/api/pairing/connections",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     assert await r.json() == []
@@ -93,7 +96,8 @@ async def test_list_connections_returns_instances(client):
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(_fake_instance("peer-1"))
     r = await client.get(
-        "/api/pairing/connections", headers=_auth(client._tok),
+        "/api/pairing/connections",
+        headers=_auth(client._tok),
     )
     data = await r.json()
     assert len(data) == 1
@@ -111,7 +115,8 @@ async def test_connections_alias_matches_pairing_list(client):
 
 async def test_unpair_missing_instance_returns_404(client):
     r = await client.delete(
-        "/api/pairing/connections/nope", headers=_auth(client._tok),
+        "/api/pairing/connections/nope",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -120,12 +125,14 @@ async def test_unpair_removes_instance(client):
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(_fake_instance("peer-3"))
     r = await client.delete(
-        "/api/pairing/connections/peer-3", headers=_auth(client._tok),
+        "/api/pairing/connections/peer-3",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     # Gone from listing.
     r = await client.get(
-        "/api/pairing/connections", headers=_auth(client._tok),
+        "/api/pairing/connections",
+        headers=_auth(client._tok),
     )
     assert (await r.json()) == []
 
@@ -142,6 +149,7 @@ async def test_connections_endpoint_does_not_leak_session_keys(client):
 
 
 # ─── Pairing introduce (§11.9) ─────────────────────────────────────────────
+
 
 async def test_introduce_rejects_missing_fields(client):
     r = await client.post(
@@ -181,9 +189,11 @@ async def test_introduce_bad_json_400(client):
 
 # ─── Pairing relay requests (§11.9 approve/decline) ────────────────────────
 
+
 async def test_relay_requests_list_empty(client):
     r = await client.get(
-        "/api/pairing/relay-requests", headers=_auth(client._tok),
+        "/api/pairing/relay-requests",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     assert await r.json() == []
@@ -214,16 +224,23 @@ async def test_relay_list_approve_decline_full_flow(client):
     queue = client.app[pairing_relay_queue_key]
     # Inject two pending requests directly via the bus the queue subscribed to.
     bus: EventBus = queue._bus
-    await bus.publish(PairingIntroRelayReceived(
-        from_instance="peer-a", target_instance_id="peer-b",
-        message="intro",
-    ))
-    await bus.publish(PairingIntroRelayReceived(
-        from_instance="peer-c", target_instance_id="peer-d",
-    ))
+    await bus.publish(
+        PairingIntroRelayReceived(
+            from_instance="peer-a",
+            target_instance_id="peer-b",
+            message="intro",
+        )
+    )
+    await bus.publish(
+        PairingIntroRelayReceived(
+            from_instance="peer-c",
+            target_instance_id="peer-d",
+        )
+    )
 
     r = await client.get(
-        "/api/pairing/relay-requests", headers=_auth(client._tok),
+        "/api/pairing/relay-requests",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     items = await r.json()
@@ -238,7 +255,8 @@ async def test_relay_list_approve_decline_full_flow(client):
     assert r.status == 204
 
     r = await client.get(
-        "/api/pairing/relay-requests", headers=_auth(client._tok),
+        "/api/pairing/relay-requests",
+        headers=_auth(client._tok),
     )
     remaining = await r.json()
     assert len(remaining) == 1
@@ -257,18 +275,17 @@ async def test_relay_requests_require_admin(client):
     pk_bytes = bytes.fromhex(row["identity_public_key"])
     uid = derive_user_id(pk_bytes, "regular")
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin) "
-        "VALUES(?,?,?,0)",
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         ("regular", uid, "Regular"),
     )
     raw = "regular-tok"
     await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
         ("t-reg", uid, "t", sha256_token_hash(raw)),
     )
 
     r = await client.get(
-        "/api/pairing/relay-requests", headers=_auth(raw),
+        "/api/pairing/relay-requests",
+        headers=_auth(raw),
     )
     assert r.status == 403

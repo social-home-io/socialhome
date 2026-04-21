@@ -37,17 +37,16 @@ class _RecordingBus:
 
 # ─── Commit path ─────────────────────────────────────────────────────────
 
+
 async def test_writes_and_events_commit_on_clean_exit(db):
     """Buffered writes apply on commit; events fire after commit."""
     bus = _RecordingBus()
     async with UnitOfWork(db, bus=bus) as uow:
         await uow.exec(
-            "INSERT INTO users(username, user_id, display_name)"
-            " VALUES('a','a-id','A')",
+            "INSERT INTO users(username, user_id, display_name) VALUES('a','a-id','A')",
         )
         await uow.exec(
-            "INSERT INTO users(username, user_id, display_name)"
-            " VALUES('b','b-id','B')",
+            "INSERT INTO users(username, user_id, display_name) VALUES('b','b-id','B')",
         )
         uow.publish({"kind": "user_created", "username": "a"})
         uow.publish({"kind": "user_created", "username": "b"})
@@ -59,6 +58,7 @@ async def test_writes_and_events_commit_on_clean_exit(db):
 
 
 # ─── Rollback path ───────────────────────────────────────────────────────
+
 
 async def test_writes_and_events_rolled_back_on_exception(db):
     """If the body raises, no writes commit and no events fire."""
@@ -81,6 +81,7 @@ async def test_writes_and_events_rolled_back_on_exception(db):
 
 # ─── Lifecycle ───────────────────────────────────────────────────────────
 
+
 async def test_writing_after_close_raises(db):
     """exec/publish after the CM exits is an error, not silent."""
     async with UnitOfWork(db) as uow:
@@ -96,8 +97,7 @@ async def test_no_bus_means_events_are_dropped_silently(db):
     async with UnitOfWork(db) as uow:
         uow.publish({"unwatched": True})
         await uow.exec(
-            "INSERT INTO users(username, user_id, display_name)"
-            " VALUES('z','z-id','Z')",
+            "INSERT INTO users(username, user_id, display_name) VALUES('z','z-id','Z')",
         )
     rows = await db.fetchall("SELECT 1 FROM users WHERE username='z'")
     assert len(rows) == 1
@@ -112,8 +112,7 @@ async def test_event_handler_failure_does_not_unwind_commit(db):
 
     async with UnitOfWork(db, bus=_ExplodingBus()) as uow:
         await uow.exec(
-            "INSERT INTO users(username, user_id, display_name)"
-            " VALUES('q','q-id','Q')",
+            "INSERT INTO users(username, user_id, display_name) VALUES('q','q-id','Q')",
         )
         uow.publish({"x": 1})
 

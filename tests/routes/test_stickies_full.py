@@ -1,4 +1,5 @@
 """Full route coverage for stickies endpoints."""
+
 from .conftest import _auth
 
 
@@ -13,8 +14,11 @@ async def test_sticky_full_lifecycle(client):
     assert r.status == 200
     assert len(await r.json()) >= 1
 
-    r = await client.patch(f"/api/stickies/{sid}",
-                            json={"content": "Updated", "color": "#FF0000"}, headers=h)
+    r = await client.patch(
+        f"/api/stickies/{sid}",
+        json={"content": "Updated", "color": "#FF0000"},
+        headers=h,
+    )
     assert r.status == 200
 
     r = await client.delete(f"/api/stickies/{sid}", headers=h)

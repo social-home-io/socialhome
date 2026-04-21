@@ -45,12 +45,14 @@ class BackupPreView(BaseView):
         require_admin(self.request)
         db = self.svc(K.db_key)
         busy, log_frames, ckpt_frames = await db.checkpoint("TRUNCATE")
-        return self._json({
-            "ok":                  True,
-            "busy":                busy,
-            "log_frames":          log_frames,
-            "checkpointed_frames": ckpt_frames,
-        })
+        return self._json(
+            {
+                "ok": True,
+                "busy": busy,
+                "log_frames": log_frames,
+                "checkpointed_frames": ckpt_frames,
+            }
+        )
 
 
 class BackupPostView(BaseView):
@@ -74,8 +76,7 @@ class BackupExportView(BaseView):
             body=body,
             content_type="application/gzip",
             headers={
-                "Content-Disposition":
-                    'attachment; filename="social-home-backup.tar.gz"',
+                "Content-Disposition": 'attachment; filename="social-home-backup.tar.gz"',
             },
         )
 

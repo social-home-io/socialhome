@@ -22,7 +22,9 @@ from social_home.federation.encoder import FederationEncoder
 def _make_encoder(pq_signer=None, suite="ed25519"):
     kp = generate_identity_keypair()
     encoder = FederationEncoder(
-        kp.private_key, pq_signer=pq_signer, sig_suite=suite,
+        kp.private_key,
+        pq_signer=pq_signer,
+        sig_suite=suite,
     )
     return encoder, kp
 
@@ -82,13 +84,16 @@ def test_verify_signatures_all_rejects_tampered_ed_sig():
     bad = bytearray(b64url_decode(sigs["ed25519"]))
     bad[0] ^= 0xFF
     sigs["ed25519"] = b64url_encode(bytes(bad))
-    assert encoder.verify_signatures_all(
-        msg,
-        suite="ed25519",
-        signatures=sigs,
-        ed_public_key=kp.public_key,
-        pq_public_key=None,
-    ) is False
+    assert (
+        encoder.verify_signatures_all(
+            msg,
+            suite="ed25519",
+            signatures=sigs,
+            ed_public_key=kp.public_key,
+            pq_public_key=None,
+        )
+        is False
+    )
 
 
 def test_verify_signatures_all_rejects_extra_algo_in_map():
@@ -97,13 +102,16 @@ def test_verify_signatures_all_rejects_extra_algo_in_map():
     msg = b"payload-bytes"
     sigs = encoder.sign_envelope_all(msg)
     sigs["mldsa65"] = "uninvited"
-    assert encoder.verify_signatures_all(
-        msg,
-        suite="ed25519",
-        signatures=sigs,
-        ed_public_key=kp.public_key,
-        pq_public_key=None,
-    ) is False
+    assert (
+        encoder.verify_signatures_all(
+            msg,
+            suite="ed25519",
+            signatures=sigs,
+            ed_public_key=kp.public_key,
+            pq_public_key=None,
+        )
+        is False
+    )
 
 
 def test_verify_signatures_all_rejects_missing_algo_from_map():
@@ -113,13 +121,16 @@ def test_verify_signatures_all_rejects_missing_algo_from_map():
     msg = b"payload-bytes"
     sigs = encoder.sign_envelope_all(msg)
     del sigs["mldsa65"]
-    assert encoder.verify_signatures_all(
-        msg,
-        suite="ed25519+mldsa65",
-        signatures=sigs,
-        ed_public_key=kp.public_key,
-        pq_public_key=pq_pk,
-    ) is False
+    assert (
+        encoder.verify_signatures_all(
+            msg,
+            suite="ed25519+mldsa65",
+            signatures=sigs,
+            ed_public_key=kp.public_key,
+            pq_public_key=pq_pk,
+        )
+        is False
+    )
 
 
 def test_verify_signatures_all_hybrid_requires_pq_pk():
@@ -128,21 +139,27 @@ def test_verify_signatures_all_hybrid_requires_pq_pk():
     encoder, kp = _make_encoder(pq_signer=pq_signer, suite="ed25519+mldsa65")
     msg = b"payload-bytes"
     sigs = encoder.sign_envelope_all(msg)
-    assert encoder.verify_signatures_all(
-        msg,
-        suite="ed25519+mldsa65",
-        signatures=sigs,
-        ed_public_key=kp.public_key,
-        pq_public_key=None,
-    ) is False
+    assert (
+        encoder.verify_signatures_all(
+            msg,
+            suite="ed25519+mldsa65",
+            signatures=sigs,
+            ed_public_key=kp.public_key,
+            pq_public_key=None,
+        )
+        is False
+    )
 
 
 def test_verify_signatures_all_rejects_malformed_suite():
     encoder, kp = _make_encoder(suite="ed25519")
-    assert encoder.verify_signatures_all(
-        b"msg",
-        suite="",  # empty suite parses as ValueError
-        signatures={"ed25519": "x"},
-        ed_public_key=kp.public_key,
-        pq_public_key=None,
-    ) is False
+    assert (
+        encoder.verify_signatures_all(
+            b"msg",
+            suite="",  # empty suite parses as ValueError
+            signatures={"ed25519": "x"},
+            ed_public_key=kp.public_key,
+            pq_public_key=None,
+        )
+        is False
+    )

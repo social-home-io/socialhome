@@ -19,12 +19,13 @@ pytestmark = pytest.mark.security
 
 # ─── sanitise_for_api invariants ────────────────────────────────────────
 
+
 def test_sanitise_strips_top_level_sensitive_keys():
     raw = {
         "username": "alice",
-        "user_id":  "alice-id",
-        "email":    "alice@example.com",
-        "phone":    "+15551234",
+        "user_id": "alice-id",
+        "email": "alice@example.com",
+        "phone": "+15551234",
         "date_of_birth": "2010-01-01",
     }
     out = sanitise_for_api(raw)
@@ -39,7 +40,7 @@ def test_sanitise_recurses_into_nested_dicts():
     raw = {
         "user": {
             "username": "alice",
-            "email":    "leaked@example.com",
+            "email": "leaked@example.com",
         },
         "list": [{"phone": "+1"}],
     }
@@ -50,10 +51,10 @@ def test_sanitise_recurses_into_nested_dicts():
 
 def test_sanitise_strips_federation_envelope_material():
     raw = {
-        "msg_id":            "x",
+        "msg_id": "x",
         "encrypted_payload": "secret",
-        "signature":         "sig",
-        "session_key":       "very-secret",
+        "signature": "sig",
+        "session_key": "very-secret",
     }
     out = sanitise_for_api(raw)
     assert "encrypted_payload" not in out
@@ -64,9 +65,9 @@ def test_sanitise_strips_federation_envelope_material():
 
 def test_sanitise_strips_push_subscription_secrets():
     raw = {
-        "id":          "sub-1",
-        "endpoint":    "https://push.example/abc",
-        "p256dh":      "secret-key",
+        "id": "sub-1",
+        "endpoint": "https://push.example/abc",
+        "p256dh": "secret-key",
         "auth_secret": "also-secret",
     }
     out = sanitise_for_api(raw)
@@ -79,12 +80,17 @@ def test_sanitise_strips_push_subscription_secrets():
 def test_sensitive_fields_includes_critical_keys():
     """Smoke test: the allowlist must include the non-negotiables."""
     for key in (
-        "email", "phone", "date_of_birth",
-        "identity_private_key", "routing_secret",
-        "auth_secret", "p256dh", "endpoint",
-        "encrypted_payload", "signature",
-        "private_key", "session_key",
+        "email",
+        "phone",
+        "date_of_birth",
+        "identity_private_key",
+        "routing_secret",
+        "auth_secret",
+        "p256dh",
+        "endpoint",
+        "encrypted_payload",
+        "signature",
+        "private_key",
+        "session_key",
     ):
-        assert key in SENSITIVE_FIELDS, (
-            f"§27.9: {key!r} must be in SENSITIVE_FIELDS"
-        )
+        assert key in SENSITIVE_FIELDS, f"§27.9: {key!r} must be in SENSITIVE_FIELDS"

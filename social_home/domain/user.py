@@ -23,13 +23,15 @@ from dataclasses import dataclass, field
 
 # Usernames that a platform adapter must never provision, because the spec
 # (§4.1.9) reserves them for special routing or display semantics.
-RESERVED_USERNAMES: frozenset[str] = frozenset({
-    "system",
-    "admin",
-    "root",
-    "bot",
-    "social-home",
-})
+RESERVED_USERNAMES: frozenset[str] = frozenset(
+    {
+        "system",
+        "admin",
+        "root",
+        "bot",
+        "social-home",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,7 +44,7 @@ class UserStatus:
 
     emoji: str | None = None
     text: str | None = None
-    expires_at: str | None = None   # ISO-8601 UTC; ``None`` = no expiry
+    expires_at: str | None = None  # ISO-8601 UTC; ``None`` = no expiry
 
 
 @dataclass(slots=True, frozen=True)
@@ -56,8 +58,8 @@ class User:
     anything to a client.
     """
 
-    user_id: str                 # derive_user_id(own_instance_pk, username)
-    username: str                # local username; primary key
+    user_id: str  # derive_user_id(own_instance_pk, username)
+    username: str  # local username; primary key
     display_name: str
     is_admin: bool = False
     # Short hex digest of the current profile picture (or None). Bytes
@@ -65,17 +67,17 @@ class User:
     # synthetic ``/api/users/{id}/picture?v=<hash>`` URL the frontend
     # uses. Replaces the former ``picture_url`` column (§23 profile).
     picture_hash: str | None = None
-    state: str = "active"        # 'active' | 'inactive'
+    state: str = "active"  # 'active' | 'inactive'
     bio: str | None = None
-    locale: str | None = None    # IETF tag e.g. "en", "nl"; None = follow browser
-    theme: str = "auto"          # 'light' | 'dark' | 'auto'
+    locale: str | None = None  # IETF tag e.g. "en", "nl"; None = follow browser
+    theme: str = "auto"  # 'light' | 'dark' | 'auto'
     emoji_skin_tone_default: str | None = None
 
     # Status / presence (optional, user-set)
     status: UserStatus = field(default_factory=UserStatus)
 
     # End-to-end encryption (§12.5)
-    public_key: str | None = None        # base64url P-256 ECDH SPKI
+    public_key: str | None = None  # base64url P-256 ECDH SPKI
     public_key_version: int = 0
 
     # Onboarding
@@ -88,7 +90,7 @@ class User:
     # Sensitive — never leave the instance
     email: str | None = None
     phone: str | None = None
-    date_of_birth: str | None = None     # ISO 8601 date
+    date_of_birth: str | None = None  # ISO 8601 date
     declared_age: int | None = None
     is_minor: bool = False
     child_protection_enabled: bool = False
@@ -97,12 +99,12 @@ class User:
     preferences_json: str = "{}"
 
     # Bookkeeping
-    created_at: str | None = None        # ISO-8601 UTC
+    created_at: str | None = None  # ISO-8601 UTC
 
     # Provisioning source: 'manual' (standalone or explicit admin) vs 'ha'
     # (mirrored from a Home Assistant person.* entity). Admins manage 'ha'
     # rows via the HA Users admin panel.
-    source: str = "manual"               # 'manual' | 'ha'
+    source: str = "manual"  # 'manual' | 'ha'
 
     def is_active(self) -> bool:
         return self.state == "active" and self.deleted_at is None
@@ -120,14 +122,14 @@ class RemoteUser:
     instance_id: str
     remote_username: str
     display_name: str
-    alias: str | None = None         # local display override — never federated
-    visible_to: str = '"all"'        # JSON-encoded visibility (see §12)
+    alias: str | None = None  # local display override — never federated
+    visible_to: str = '"all"'  # JSON-encoded visibility (see §12)
     # Same cache-busting semantics as :class:`User.picture_hash`; the
     # federation inbound handler stores the bytes into
     # ``user_profile_pictures`` and sets this hash.
     picture_hash: str | None = None
     bio: str | None = None
-    status_json: str | None = None   # JSON {emoji, text, expires_at}
+    status_json: str | None = None  # JSON {emoji, text, expires_at}
     public_key: str | None = None
     public_key_version: int = 0
     synced_at: str | None = None
@@ -171,13 +173,13 @@ class UserIdentityAssertion:
     instance_id: str
     username: str
     display_name: str
-    issued_at: str                    # ISO-8601 UTC
-    signature: str                    # base64url Ed25519 signature
+    issued_at: str  # ISO-8601 UTC
+    signature: str  # base64url Ed25519 signature
 
     # Informational cache-busting hash; bytes travel via USER_UPDATED
     # federation events, not the identity assertion itself.
     picture_hash: str | None = None
-    public_key: str | None = None     # base64url P-256 ECDH SPKI (§12.5)
+    public_key: str | None = None  # base64url P-256 ECDH SPKI (§12.5)
     public_key_version: int = 0
 
 

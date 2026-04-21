@@ -149,7 +149,9 @@ class GfsAppealView(BaseView):
         ctx = self.user
         if ctx is None or ctx.user_id is None:
             return error_response(
-                401, "UNAUTHENTICATED", "Authentication required.",
+                401,
+                "UNAUTHENTICATED",
+                "Authentication required.",
             )
         if not ctx.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
@@ -160,7 +162,8 @@ class GfsAppealView(BaseView):
         message = str(body.get("message") or "").strip()
         if target_type not in ("space", "instance") or not target_id:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "target_type must be 'space'|'instance' and target_id required",
             )
         svc = self.svc(K.gfs_connection_service_key)

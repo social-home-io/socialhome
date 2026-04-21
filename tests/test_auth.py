@@ -96,10 +96,12 @@ async def test_bearer_strategy_no_creds(env):
 async def test_ha_ingress_strategy(env):
     """X-Ingress-User + X-Ingress-Token headers authenticate the user."""
     strategy = HaIngressStrategy(env.user_repo)
-    req = _FakeRequest(headers={
-        "X-Ingress-User": "testuser",
-        "X-Ingress-Token": "some-supervisor-token",
-    })
+    req = _FakeRequest(
+        headers={
+            "X-Ingress-User": "testuser",
+            "X-Ingress-Token": "some-supervisor-token",
+        }
+    )
     ctx = await strategy.authenticate(req)
     assert ctx is not None
     assert ctx.username == "testuser"
@@ -115,9 +117,7 @@ async def test_ha_ingress_missing_headers(env):
     )
     assert ctx is None
 
-    ctx2 = await strategy.authenticate(
-        _FakeRequest(headers={"X-Ingress-Token": "tok"})
-    )
+    ctx2 = await strategy.authenticate(_FakeRequest(headers={"X-Ingress-Token": "tok"}))
     assert ctx2 is None
 
     ctx3 = await strategy.authenticate(_FakeRequest())
@@ -135,10 +135,12 @@ async def test_chained_strategy(env):
     assert ctx is not None
     assert ctx.username == "testuser"
 
-    req_ingress = _FakeRequest(headers={
-        "X-Ingress-User": "testuser",
-        "X-Ingress-Token": "tok",
-    })
+    req_ingress = _FakeRequest(
+        headers={
+            "X-Ingress-User": "testuser",
+            "X-Ingress-Token": "tok",
+        }
+    )
     ctx2 = await chained.authenticate(req_ingress)
     assert ctx2 is not None
     assert ctx2.username == "testuser"
@@ -148,6 +150,7 @@ async def test_chained_strategy(env):
 
 
 # ── Middleware + helpers ──────────────────────────────────────────────────
+
 
 async def test_require_auth_blocks_unauthenticated():
     """require_auth middleware returns 401 for unauthenticated requests."""
@@ -219,6 +222,7 @@ def test_current_user_raises_without_context():
     req = MagicMock()
     req.get.return_value = None
     import pytest
+
     with pytest.raises(RuntimeError, match="auth middleware"):
         current_user(req)
 

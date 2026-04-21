@@ -28,16 +28,22 @@ from ..domain.sticky import Sticky  # noqa: F401,E402
 class AbstractStickyRepo(Protocol):
     async def add(
         self,
-        *, author: str, content: str,
+        *,
+        author: str,
+        content: str,
         color: str = DEFAULT_COLOR,
-        position_x: float = 0.0, position_y: float = 0.0,
+        position_x: float = 0.0,
+        position_y: float = 0.0,
         space_id: str | None = None,
     ) -> Sticky: ...
     async def get(self, sticky_id: str) -> Sticky | None: ...
     async def list(self, *, space_id: str | None = None) -> list[Sticky]: ...
     async def update_content(self, sticky_id: str, content: str) -> None: ...
     async def update_position(
-        self, sticky_id: str, x: float, y: float,
+        self,
+        sticky_id: str,
+        x: float,
+        y: float,
     ) -> None: ...
     async def update_color(self, sticky_id: str, color: str) -> None: ...
     async def delete(self, sticky_id: str) -> None: ...
@@ -52,9 +58,12 @@ class SqliteStickyRepo:
 
     async def add(
         self,
-        *, author: str, content: str,
+        *,
+        author: str,
+        content: str,
         color: str = DEFAULT_COLOR,
-        position_x: float = 0.0, position_y: float = 0.0,
+        position_x: float = 0.0,
+        position_y: float = 0.0,
         space_id: str | None = None,
     ) -> Sticky:
         content = content.strip()
@@ -81,35 +90,41 @@ class SqliteStickyRepo:
                                      COALESCE(?, datetime('now')))
             """,
             (
-                sticky.id, sticky.space_id, sticky.author, sticky.content,
-                sticky.color, sticky.position_x, sticky.position_y,
-                sticky.created_at, sticky.updated_at,
+                sticky.id,
+                sticky.space_id,
+                sticky.author,
+                sticky.content,
+                sticky.color,
+                sticky.position_x,
+                sticky.position_y,
+                sticky.created_at,
+                sticky.updated_at,
             ),
         )
         return sticky
 
     async def get(self, sticky_id: str) -> Sticky | None:
         row = await self._db.fetchone(
-            "SELECT * FROM stickies WHERE id=?", (sticky_id,),
+            "SELECT * FROM stickies WHERE id=?",
+            (sticky_id,),
         )
         return _row_to_sticky(row_to_dict(row))
 
     async def list(
-        self, *, space_id: str | None = None,
+        self,
+        *,
+        space_id: str | None = None,
     ) -> list[Sticky]:
         if space_id is None:
             rows = await self._db.fetchall(
-                "SELECT * FROM stickies WHERE space_id IS NULL "
-                "ORDER BY created_at",
+                "SELECT * FROM stickies WHERE space_id IS NULL ORDER BY created_at",
             )
         else:
             rows = await self._db.fetchall(
                 "SELECT * FROM stickies WHERE space_id=? ORDER BY created_at",
                 (space_id,),
             )
-        return [
-            s for s in (_row_to_sticky(d) for d in rows_to_dicts(rows)) if s
-        ]
+        return [s for s in (_row_to_sticky(d) for d in rows_to_dicts(rows)) if s]
 
     async def update_content(self, sticky_id: str, content: str) -> None:
         content = content.strip()
@@ -121,7 +136,10 @@ class SqliteStickyRepo:
         )
 
     async def update_position(
-        self, sticky_id: str, x: float, y: float,
+        self,
+        sticky_id: str,
+        x: float,
+        y: float,
     ) -> None:
         await self._db.enqueue(
             "UPDATE stickies SET position_x=?, position_y=?, "
@@ -157,16 +175,23 @@ class SqliteStickyRepo:
                 updated_at=excluded.updated_at
             """,
             (
-                sticky.id, sticky.space_id, sticky.author, sticky.content,
-                sticky.color, sticky.position_x, sticky.position_y,
-                sticky.created_at, sticky.updated_at,
+                sticky.id,
+                sticky.space_id,
+                sticky.author,
+                sticky.content,
+                sticky.color,
+                sticky.position_x,
+                sticky.position_y,
+                sticky.created_at,
+                sticky.updated_at,
             ),
         )
         return sticky
 
     async def delete(self, sticky_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM stickies WHERE id=?", (sticky_id,),
+            "DELETE FROM stickies WHERE id=?",
+            (sticky_id,),
         )
 
 

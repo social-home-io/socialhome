@@ -70,14 +70,16 @@ class PeerDirectoryService:
         out: list[dict] = []
         for s in spaces:
             members = await self._space_repo.list_members(s.id)
-            out.append({
-                "space_id":     s.id,
-                "name":         s.name,
-                "description":  s.description,
-                "emoji":        s.emoji,
-                "member_count": len(members),
-                "join_mode":    s.join_mode.value,
-            })
+            out.append(
+                {
+                    "space_id": s.id,
+                    "name": s.name,
+                    "description": s.description,
+                    "emoji": s.emoji,
+                    "member_count": len(members),
+                    "join_mode": s.join_mode.value,
+                }
+            )
         return out
 
     async def _broadcast_snapshot(self) -> None:
@@ -92,9 +94,11 @@ class PeerDirectoryService:
                     event_type=FederationEventType.SPACE_DIRECTORY_SYNC,
                     payload={"spaces": snapshot},
                 )
-            except Exception as exc:      # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
-                    "peer_directory: send to %s failed: %s", peer.id, exc,
+                    "peer_directory: send to %s failed: %s",
+                    peer.id,
+                    exc,
                 )
 
     async def send_snapshot(self, to_instance_id: str) -> None:
@@ -106,8 +110,9 @@ class PeerDirectoryService:
                 event_type=FederationEventType.SPACE_DIRECTORY_SYNC,
                 payload={"spaces": snapshot},
             )
-        except Exception as exc:          # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug(
                 "peer_directory: send snapshot to %s failed: %s",
-                to_instance_id, exc,
+                to_instance_id,
+                exc,
             )

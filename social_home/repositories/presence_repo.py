@@ -53,7 +53,8 @@ def _to_presence(row) -> PersonPresence:
     picture_hash = row["picture_hash"]
     picture_url = (
         f"/api/users/{row['user_id']}/picture?v={picture_hash}"
-        if picture_hash else None
+        if picture_hash
+        else None
     )
     return PersonPresence(
         username=row["username"],
@@ -128,8 +129,14 @@ class SqlitePresenceRepo:
                 updated_at=excluded.updated_at
             """,
             (
-                username, entity_id, state, zone_name,
-                latitude, longitude, gps_accuracy_m, updated_at,
+                username,
+                entity_id,
+                state,
+                zone_name,
+                latitude,
+                longitude,
+                gps_accuracy_m,
+                updated_at,
             ),
         )
 
@@ -160,7 +167,13 @@ class SqlitePresenceRepo:
                 updated_at=excluded.updated_at
             """,
             (
-                from_instance, remote_username, state, zone_name,
-                latitude, longitude, gps_accuracy_m, updated_at,
+                from_instance,
+                remote_username,
+                state,
+                zone_name,
+                latitude,
+                longitude,
+                gps_accuracy_m,
+                updated_at,
             ),
         )

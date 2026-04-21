@@ -154,7 +154,8 @@ class GfsConnectionService:
                     detail = await resp.text()
                     log.warning(
                         "GFS publish failed (HTTP %d): %s",
-                        resp.status, detail,
+                        resp.status,
+                        detail,
                     )
         except aiohttp.ClientError as exc:
             log.warning("GFS publish request failed: %s", exc)
@@ -178,7 +179,8 @@ class GfsConnectionService:
                     detail = await resp.text()
                     log.warning(
                         "GFS unpublish failed (HTTP %d): %s",
-                        resp.status, detail,
+                        resp.status,
+                        detail,
                     )
         except aiohttp.ClientError as exc:
             log.warning("GFS unpublish request failed: %s", exc)
@@ -196,11 +198,11 @@ class GfsConnectionService:
         conns = await self._repo.list_active()
         for conn in conns:
             try:
-                await self.publish_space(space_id, conn.gfs_id)
+                await self.publish_space(space_id, conn.id)
             except Exception:
                 log.exception(
                     "publish_space_to_all: failed for gfs %s",
-                    conn.gfs_id,
+                    conn.id,
                 )
         return len(conns)
 
@@ -209,11 +211,11 @@ class GfsConnectionService:
         conns = await self._repo.list_active()
         for conn in conns:
             try:
-                await self.unpublish_space(space_id, conn.gfs_id)
+                await self.unpublish_space(space_id, conn.id)
             except Exception:
                 log.exception(
                     "unpublish_space_from_all: failed for gfs %s",
-                    conn.gfs_id,
+                    conn.id,
                 )
         return len(conns)
 
@@ -247,16 +249,17 @@ class GfsConnectionService:
             return False
 
         body = {
-            "target_type":          target_type,
-            "target_id":            target_id,
-            "category":             category,
-            "notes":                notes,
+            "target_type": target_type,
+            "target_id": target_id,
+            "category": category,
+            "notes": notes,
             "reporter_instance_id": reporter_instance_id,
-            "reporter_user_id":     reporter_user_id,
-            "created_at":           datetime.now(timezone.utc).isoformat(),
+            "reporter_user_id": reporter_user_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        canonical = json.dumps(body, separators=(",", ":"),
-                                sort_keys=True).encode("utf-8")
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
         body["signature"] = b64url_encode(
             sign_ed25519(signing_key, canonical),
         )
@@ -269,14 +272,16 @@ class GfsConnectionService:
         url = f"{conn.endpoint_url}/gfs/report"
         try:
             async with client.post(
-                url, json=body,
+                url,
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if 200 <= resp.status < 300:
                     return True
                 log.warning(
                     "GFS report_fraud returned HTTP %d: %s",
-                    resp.status, await resp.text(),
+                    resp.status,
+                    await resp.text(),
                 )
                 return False
         except aiohttp.ClientError as exc:
@@ -306,13 +311,15 @@ class GfsConnectionService:
             return False
 
         body = {
-            "target_type":   target_type,
-            "target_id":     target_id,
-            "message":       message,
+            "target_type": target_type,
+            "target_id": target_id,
+            "message": message,
             "from_instance": from_instance,
         }
         canonical = json.dumps(
-            body, separators=(",", ":"), sort_keys=True,
+            body,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("utf-8")
         body["signature"] = b64url_encode(sign_ed25519(signing_key, canonical))
 
@@ -322,14 +329,16 @@ class GfsConnectionService:
             return False
         try:
             async with client.post(
-                f"{conn.endpoint_url}/gfs/appeal", json=body,
+                f"{conn.endpoint_url}/gfs/appeal",
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if 200 <= resp.status < 300:
                     return True
                 log.warning(
                     "GFS send_appeal returned HTTP %d: %s",
-                    resp.status, await resp.text(),
+                    resp.status,
+                    await resp.text(),
                 )
                 return False
         except aiohttp.ClientError as exc:

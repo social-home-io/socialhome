@@ -50,7 +50,8 @@ class ScheduleCalendarBridge:
 
     def wire(self) -> None:
         self._bus.subscribe(
-            SchedulePollFinalized, self._on_finalized,
+            SchedulePollFinalized,
+            self._on_finalized,
         )
 
     async def _on_finalized(self, event: SchedulePollFinalized) -> None:
@@ -80,10 +81,11 @@ class ScheduleCalendarBridge:
                 all_day=event.start_time is None,
                 attendees=(),
             )
-        except Exception as exc:          # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.warning(
                 "schedule→calendar: create_event failed for %s: %s",
-                event.post_id, exc,
+                event.post_id,
+                exc,
             )
 
 

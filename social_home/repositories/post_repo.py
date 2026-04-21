@@ -42,11 +42,22 @@ from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
 #: Columns the Specification pattern is allowed to filter / order on
 #: when ``find()`` is called against ``feed_posts``.
-_FEED_POST_COLS: frozenset[str] = frozenset({
-    "id", "author", "type", "content", "media_url",
-    "comment_count", "pinned", "deleted", "edited_at",
-    "no_link_preview", "moderated", "created_at",
-})
+_FEED_POST_COLS: frozenset[str] = frozenset(
+    {
+        "id",
+        "author",
+        "type",
+        "content",
+        "media_url",
+        "comment_count",
+        "pinned",
+        "deleted",
+        "edited_at",
+        "no_link_preview",
+        "moderated",
+        "created_at",
+    }
+)
 
 
 @runtime_checkable
@@ -55,7 +66,10 @@ class AbstractPostRepo(Protocol):
     async def save(self, post: Post) -> Post: ...
     async def get(self, post_id: str) -> Post | None: ...
     async def list_feed(
-        self, *, before: str | None = None, limit: int = 20,
+        self,
+        *,
+        before: str | None = None,
+        limit: int = 20,
     ) -> list[Post]: ...
     async def find(self, spec: Spec) -> list[Post]: ...
     async def soft_delete(self, post_id: str) -> None: ...
@@ -63,10 +77,16 @@ class AbstractPostRepo(Protocol):
 
     # Reactions -----------------------------------------------------------
     async def add_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post: ...
     async def remove_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post: ...
 
     # Comment counters (maintained by FeedService on comment add/remove) --
@@ -79,7 +99,9 @@ class AbstractPostRepo(Protocol):
     async def list_comments(self, post_id: str) -> list[Comment]: ...
     async def soft_delete_comment(self, comment_id: str) -> None: ...
     async def edit_comment(
-        self, comment_id: str, new_content: str,
+        self,
+        comment_id: str,
+        new_content: str,
     ) -> None: ...
 
     # Saved / bookmarks ---------------------------------------------------
@@ -89,6 +111,7 @@ class AbstractPostRepo(Protocol):
 
 
 # ─── Concrete SQLite implementation ───────────────────────────────────────
+
 
 class SqlitePostRepo:
     """SQLite-backed :class:`AbstractPostRepo` for the household feed."""
@@ -119,11 +142,19 @@ class SqlitePostRepo:
                 file_meta_json=excluded.file_meta_json
             """,
             (
-                post.id, post.author, post.type.value, post.content,
-                post.media_url, _encode_reactions(post.reactions),
-                int(post.comment_count), int(post.pinned), int(post.deleted),
-                _iso_or_none(post.edited_at), int(post.no_link_preview),
-                int(post.moderated), _encode_file_meta(post.file_meta),
+                post.id,
+                post.author,
+                post.type.value,
+                post.content,
+                post.media_url,
+                _encode_reactions(post.reactions),
+                int(post.comment_count),
+                int(post.pinned),
+                int(post.deleted),
+                _iso_or_none(post.edited_at),
+                int(post.no_link_preview),
+                int(post.moderated),
+                _encode_file_meta(post.file_meta),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -131,12 +162,16 @@ class SqlitePostRepo:
 
     async def get(self, post_id: str) -> Post | None:
         row = await self._db.fetchone(
-            "SELECT * FROM feed_posts WHERE id=?", (post_id,),
+            "SELECT * FROM feed_posts WHERE id=?",
+            (post_id,),
         )
         return _row_to_post(row_to_dict(row))
 
     async def list_feed(
-        self, *, before: str | None = None, limit: int = 20,
+        self,
+        *,
+        before: str | None = None,
+        limit: int = 20,
     ) -> list[Post]:
         """Return posts ordered by ``created_at DESC``.
 
@@ -167,7 +202,9 @@ class SqlitePostRepo:
         into the SQL.
         """
         clause, params = spec_to_sql(
-            spec, table="feed_posts", allowed_cols=_FEED_POST_COLS,
+            spec,
+            table="feed_posts",
+            allowed_cols=_FEED_POST_COLS,
         )
         sql = "SELECT * FROM feed_posts " + clause
         rows = await self._db.fetchall(sql, params)
@@ -192,7 +229,10 @@ class SqlitePostRepo:
     # ── Reactions (inline JSON, atomic) ────────────────────────────────
 
     async def add_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post:
         """Atomically add ``user_id`` to ``reactions[emoji]`` on the post.
 
@@ -200,6 +240,7 @@ class SqlitePostRepo:
         Raises :class:`ValueError` if adding this emoji would exceed
         :data:`MAX_DISTINCT_REACTIONS_PER_POST`.
         """
+
         def _run(conn):
             row = conn.execute(
                 "SELECT * FROM feed_posts WHERE id=? AND deleted=0",
@@ -209,7 +250,10 @@ class SqlitePostRepo:
                 raise KeyError(f"post {post_id!r} not found or deleted")
             row_dict = {k: row[k] for k in row.keys()}
             reactions = _decode_reactions(row_dict["reactions"])
-            if emoji not in reactions and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST:
+            if (
+                emoji not in reactions
+                and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
+            ):
                 raise ValueError("too many distinct reactions on this post")
             reactions.setdefault(emoji, set()).add(user_id)
             conn.execute(
@@ -217,7 +261,8 @@ class SqlitePostRepo:
                 (_encode_reactions(_to_frozenset(reactions)), post_id),
             )
             row = conn.execute(
-                "SELECT * FROM feed_posts WHERE id=?", (post_id,),
+                "SELECT * FROM feed_posts WHERE id=?",
+                (post_id,),
             ).fetchone()
             return {k: row[k] for k in row.keys()}
 
@@ -225,7 +270,10 @@ class SqlitePostRepo:
         return _row_to_post(row)  # type: ignore[return-value]
 
     async def remove_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post:
         """Atomically remove ``user_id`` from ``reactions[emoji]``.
 
@@ -234,9 +282,11 @@ class SqlitePostRepo:
         the emoji key is dropped so UI consumers can use the presence of a
         key as a "anyone reacted?" signal.
         """
+
         def _run(conn):
             row = conn.execute(
-                "SELECT * FROM feed_posts WHERE id=?", (post_id,),
+                "SELECT * FROM feed_posts WHERE id=?",
+                (post_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"post {post_id!r} not found")
@@ -252,7 +302,8 @@ class SqlitePostRepo:
                     (_encode_reactions(_to_frozenset(reactions)), post_id),
                 )
                 row = conn.execute(
-                    "SELECT * FROM feed_posts WHERE id=?", (post_id,),
+                    "SELECT * FROM feed_posts WHERE id=?",
+                    (post_id,),
                 ).fetchone()
             return {k: row[k] for k in row.keys()}
 
@@ -285,9 +336,14 @@ class SqlitePostRepo:
             ) VALUES(?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             """,
             (
-                comment.id, comment.post_id, comment.parent_id,
-                comment.author, comment.type.value, comment.content,
-                comment.media_url, int(comment.deleted),
+                comment.id,
+                comment.post_id,
+                comment.parent_id,
+                comment.author,
+                comment.type.value,
+                comment.content,
+                comment.media_url,
+                int(comment.deleted),
                 _iso_or_none(comment.created_at),
             ),
         )
@@ -295,7 +351,8 @@ class SqlitePostRepo:
 
     async def get_comment(self, comment_id: str) -> Comment | None:
         row = await self._db.fetchone(
-            "SELECT * FROM post_comments WHERE id=?", (comment_id,),
+            "SELECT * FROM post_comments WHERE id=?",
+            (comment_id,),
         )
         return _row_to_comment(row_to_dict(row))
 
@@ -322,7 +379,9 @@ class SqlitePostRepo:
         )
 
     async def edit_comment(
-        self, comment_id: str, new_content: str,
+        self,
+        comment_id: str,
+        new_content: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -362,6 +421,7 @@ class SqlitePostRepo:
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
+
 def _iso_or_none(value) -> str | None:
     if value is None:
         return None
@@ -390,12 +450,14 @@ def _to_frozenset(d: dict[str, set[str]]) -> dict[str, frozenset[str]]:
 def _encode_file_meta(meta: FileMeta | None) -> str | None:
     if meta is None:
         return None
-    return dump_json({
-        "url":           meta.url,
-        "mime_type":     meta.mime_type,
-        "original_name": meta.original_name,
-        "size_bytes":    meta.size_bytes,
-    })
+    return dump_json(
+        {
+            "url": meta.url,
+            "mime_type": meta.mime_type,
+            "original_name": meta.original_name,
+            "size_bytes": meta.size_bytes,
+        }
+    )
 
 
 def _decode_file_meta(raw: str | None) -> FileMeta | None:
@@ -413,12 +475,15 @@ def _decode_file_meta(raw: str | None) -> FileMeta | None:
 def _row_to_post(row: dict | None) -> Post | None:
     if row is None:
         return None
-    reactions = {k: frozenset(v) for k, v in _decode_reactions(row.get("reactions")).items()}
+    reactions = {
+        k: frozenset(v) for k, v in _decode_reactions(row.get("reactions")).items()
+    }
     return Post(
         id=row["id"],
         author=row["author"],
         type=PostType(row["type"]),
-        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at"))
+        or datetime.now(timezone.utc),
         content=row.get("content"),
         media_url=row.get("media_url"),
         reactions=reactions,
@@ -440,7 +505,8 @@ def _row_to_comment(row: dict | None) -> Comment | None:
         post_id=row["post_id"],
         author=row["author"],
         type=CommentType(row.get("type", "text")),
-        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at"))
+        or datetime.now(timezone.utc),
         parent_id=row.get("parent_id"),
         content=row.get("content"),
         media_url=row.get("media_url"),

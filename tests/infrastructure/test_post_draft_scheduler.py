@@ -17,8 +17,7 @@ async def env(tmp_dir):
     db = AsyncDatabase(tmp_dir / "t.db", batch_timeout_ms=10)
     await db.startup()
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name) "
-        "VALUES('u', 'u-uid', 'U')",
+        "INSERT INTO users(username, user_id, display_name) VALUES('u', 'u-uid', 'U')",
     )
     yield db
     await db.shutdown()

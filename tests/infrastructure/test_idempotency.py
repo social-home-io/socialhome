@@ -9,6 +9,7 @@ from social_home.infrastructure.idempotency import IdempotencyCache
 
 # ─── Construction ────────────────────────────────────────────────────────
 
+
 def test_zero_ttl_rejected():
     with pytest.raises(ValueError):
         IdempotencyCache(ttl_seconds=0)
@@ -20,6 +21,7 @@ def test_negative_ttl_rejected():
 
 
 # ─── Core API ────────────────────────────────────────────────────────────
+
 
 def test_unseen_key_returns_false():
     c = IdempotencyCache(ttl_seconds=60)
@@ -59,6 +61,7 @@ def test_separate_keys_independent():
 
 # ─── TTL eviction ────────────────────────────────────────────────────────
 
+
 def test_key_expires_after_ttl():
     c = IdempotencyCache(ttl_seconds=10)
     c.mark_seen("k1", now=100)
@@ -73,6 +76,7 @@ def test_check_and_mark_after_expiry_returns_true_again():
 
 
 # ─── Cap ─────────────────────────────────────────────────────────────────
+
 
 def test_max_entries_evicts_oldest():
     c = IdempotencyCache(ttl_seconds=3600, max_entries=3)

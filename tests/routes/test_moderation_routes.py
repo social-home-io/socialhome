@@ -23,7 +23,8 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
@@ -64,7 +65,8 @@ async def client(tmp_dir):
 async def _seed_moderated_space(client):
     """Build a space, make it MODERATED, add bob as a member. Returns space id."""
     r = await client.post(
-        "/api/spaces", json={"name": "ModSpace"},
+        "/api/spaces",
+        json={"name": "ModSpace"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -75,15 +77,21 @@ async def _seed_moderated_space(client):
     )
     # Flip posts_access to moderated via PATCH.
     from social_home.app_keys import space_service_key
+
     app = client.server.app
     from social_home.domain.space import SpaceFeatures, SpaceFeatureAccess
+
     await app[space_service_key].update_config(
-        sid, actor_username="pascal",
+        sid,
+        actor_username="pascal",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     # Bob submits a post → lands in queue.
     await app[space_service_key].create_post(
-        sid, author_user_id=client._bob_uid, type="text", content="please review",
+        sid,
+        author_user_id=client._bob_uid,
+        type="text",
+        content="please review",
     )
     return sid
 
@@ -103,10 +111,12 @@ async def test_get_moderation_queue_lists_pending(client):
 
 async def test_approve_moderation_item(client):
     sid = await _seed_moderated_space(client)
-    items = await (await client.get(
-        f"/api/spaces/{sid}/moderation",
-        headers=_auth(client._admin_token),
-    )).json()
+    items = await (
+        await client.get(
+            f"/api/spaces/{sid}/moderation",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     item_id = items[0]["id"]
     resp = await client.post(
         f"/api/spaces/{sid}/moderation/{item_id}/approve",
@@ -117,18 +127,24 @@ async def test_approve_moderation_item(client):
     assert body["status"] == "approved"
     assert body["post_id"]
     # No more pending.
-    assert (await (await client.get(
-        f"/api/spaces/{sid}/moderation",
-        headers=_auth(client._admin_token),
-    )).json()) == []
+    assert (
+        await (
+            await client.get(
+                f"/api/spaces/{sid}/moderation",
+                headers=_auth(client._admin_token),
+            )
+        ).json()
+    ) == []
 
 
 async def test_reject_moderation_item_captures_reason(client):
     sid = await _seed_moderated_space(client)
-    items = await (await client.get(
-        f"/api/spaces/{sid}/moderation",
-        headers=_auth(client._admin_token),
-    )).json()
+    items = await (
+        await client.get(
+            f"/api/spaces/{sid}/moderation",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     item_id = items[0]["id"]
     resp = await client.post(
         f"/api/spaces/{sid}/moderation/{item_id}/reject",
@@ -141,10 +157,12 @@ async def test_reject_moderation_item_captures_reason(client):
 
 async def test_approve_forbidden_for_non_admin(client):
     sid = await _seed_moderated_space(client)
-    items = await (await client.get(
-        f"/api/spaces/{sid}/moderation",
-        headers=_auth(client._admin_token),
-    )).json()
+    items = await (
+        await client.get(
+            f"/api/spaces/{sid}/moderation",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     item_id = items[0]["id"]
     resp = await client.post(
         f"/api/spaces/{sid}/moderation/{item_id}/approve",
@@ -155,10 +173,12 @@ async def test_approve_forbidden_for_non_admin(client):
 
 async def test_double_approve_is_409(client):
     sid = await _seed_moderated_space(client)
-    items = await (await client.get(
-        f"/api/spaces/{sid}/moderation",
-        headers=_auth(client._admin_token),
-    )).json()
+    items = await (
+        await client.get(
+            f"/api/spaces/{sid}/moderation",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     item_id = items[0]["id"]
     await client.post(
         f"/api/spaces/{sid}/moderation/{item_id}/approve",
@@ -173,7 +193,8 @@ async def test_double_approve_is_409(client):
 
 async def test_unknown_item_is_404(client):
     r = await client.post(
-        "/api/spaces", json={"name": "X"},
+        "/api/spaces",
+        json={"name": "X"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -186,10 +207,12 @@ async def test_unknown_item_is_404(client):
 
 # ── Ban list + unban ──────────────────────────────────────────────────
 
+
 async def test_list_bans_then_unban(client):
     # Create, add bob, ban bob, list, unban.
     r = await client.post(
-        "/api/spaces", json={"name": "BanList"},
+        "/api/spaces",
+        json={"name": "BanList"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -215,16 +238,19 @@ async def test_list_bans_then_unban(client):
         headers=_auth(client._admin_token),
     )
     assert resp.status == 200
-    bans_after = await (await client.get(
-        f"/api/spaces/{sid}/bans",
-        headers=_auth(client._admin_token),
-    )).json()
+    bans_after = await (
+        await client.get(
+            f"/api/spaces/{sid}/bans",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     assert not any(b["user_id"] == client._bob_uid for b in bans_after)
 
 
 async def test_ban_list_forbidden_for_non_admin(client):
     r = await client.post(
-        "/api/spaces", json={"name": "BanList2"},
+        "/api/spaces",
+        json={"name": "BanList2"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]

@@ -25,7 +25,8 @@ from ..db import AsyncDatabase
 @runtime_checkable
 class AbstractDmRoutingRepo(Protocol):
     async def list_known_peers(
-        self, source_instance_id: str,
+        self,
+        source_instance_id: str,
     ) -> list[str]: ...
 
     async def upsert_network_discovery(
@@ -52,7 +53,10 @@ class AbstractDmRoutingRepo(Protocol):
     async def prune_seen(self, *, cutoff_iso: str) -> int: ...
 
     async def next_sender_seq(
-        self, *, conversation_id: str, sender_user_id: str,
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
     ) -> int: ...
 
 
@@ -67,7 +71,8 @@ class SqliteDmRoutingRepo:
     # ── network_discovery ──────────────────────────────────────────────
 
     async def list_known_peers(
-        self, source_instance_id: str,
+        self,
+        source_instance_id: str,
     ) -> list[str]:
         rows = await self._db.fetchall(
             "SELECT instance_id FROM network_discovery WHERE discovered_via=?",
@@ -116,8 +121,11 @@ class SqliteDmRoutingRepo:
                 last_used_at=excluded.last_used_at
             """,
             (
-                conversation_id, target_instance, relay_via,
-                hop_count, last_used_at,
+                conversation_id,
+                target_instance,
+                relay_via,
+                hop_count,
+                last_used_at,
             ),
         )
 
@@ -152,9 +160,13 @@ class SqliteDmRoutingRepo:
     # ── sender sequence ────────────────────────────────────────────────
 
     async def next_sender_seq(
-        self, *, conversation_id: str, sender_user_id: str,
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
     ) -> int:
         """Atomically increment + return the next sender_seq."""
+
         def _run(conn):
             conn.execute(
                 """
@@ -172,6 +184,7 @@ class SqliteDmRoutingRepo:
                 (conversation_id, sender_user_id),
             ).fetchone()
             return int(row[0]) if row else 1
+
         return await self._db.transact(_run)
 
 

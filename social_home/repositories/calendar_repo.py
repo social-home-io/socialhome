@@ -28,7 +28,10 @@ from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
 
 def _expand_window(
-    events: list[CalendarEvent], *, start: datetime, end: datetime,
+    events: list[CalendarEvent],
+    *,
+    start: datetime,
+    end: datetime,
 ) -> list[CalendarEvent]:
     """Expand recurring events into their virtual occurrences.
 
@@ -43,20 +46,23 @@ def _expand_window(
             out.append(ev)
             continue
         occs = expand_rrule(
-            ev.start, ev.end, ev.rrule,
-            window_start=start, window_end=end,
+            ev.start,
+            ev.end,
+            ev.rrule,
+            window_start=start,
+            window_end=end,
         )
         for s, e in occs:
             if s == ev.start and e == ev.end:
                 out.append(ev)
             else:
-                out.append(replace(ev, start=s, end=e,
-                                   id=f"{ev.id}@{s.isoformat()}"))
+                out.append(replace(ev, start=s, end=e, id=f"{ev.id}@{s.isoformat()}"))
     out.sort(key=lambda x: x.start)
     return out
 
 
 # ─── Shared helpers ───────────────────────────────────────────────────────
+
 
 def _iso(value) -> str | None:
     if value is None:
@@ -77,6 +83,7 @@ def _parse(value: str | None) -> datetime | None:
 
 # ─── Personal calendars ───────────────────────────────────────────────────
 
+
 @runtime_checkable
 class AbstractCalendarRepo(Protocol):
     async def save_calendar(self, calendar: Calendar) -> Calendar: ...
@@ -87,10 +94,18 @@ class AbstractCalendarRepo(Protocol):
     async def save_event(self, event: CalendarEvent) -> CalendarEvent: ...
     async def get_event(self, event_id: str) -> CalendarEvent | None: ...
     async def list_events_in_range(
-        self, calendar_id: str, *, start: datetime, end: datetime,
+        self,
+        calendar_id: str,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[CalendarEvent]: ...
     async def list_events_for_user_in_range(
-        self, username: str, *, start: datetime, end: datetime,
+        self,
+        username: str,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[CalendarEvent]: ...
     async def delete_event(self, event_id: str) -> None: ...
 
@@ -114,15 +129,19 @@ class SqliteCalendarRepo:
                 calendar_type=excluded.calendar_type
             """,
             (
-                calendar.id, calendar.name, calendar.color,
-                calendar.owner_username, calendar.calendar_type,
+                calendar.id,
+                calendar.name,
+                calendar.color,
+                calendar.owner_username,
+                calendar.calendar_type,
             ),
         )
         return calendar
 
     async def get_calendar(self, calendar_id: str) -> Calendar | None:
         row = await self._db.fetchone(
-            "SELECT * FROM calendars WHERE id=?", (calendar_id,),
+            "SELECT * FROM calendars WHERE id=?",
+            (calendar_id,),
         )
         return _row_to_calendar(row_to_dict(row))
 
@@ -135,7 +154,8 @@ class SqliteCalendarRepo:
 
     async def delete_calendar(self, calendar_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM calendars WHERE id=?", (calendar_id,),
+            "DELETE FROM calendars WHERE id=?",
+            (calendar_id,),
         )
 
     # ── Events ─────────────────────────────────────────────────────────
@@ -162,23 +182,36 @@ class SqliteCalendarRepo:
                 updated_at=datetime('now')
             """,
             (
-                event.id, event.calendar_id, event.summary, event.description,
-                _iso(event.start), _iso(event.end), int(event.all_day),
-                dump_json(list(event.attendees)), event.mirrored_from,
+                event.id,
+                event.calendar_id,
+                event.summary,
+                event.description,
+                _iso(event.start),
+                _iso(event.end),
+                int(event.all_day),
+                dump_json(list(event.attendees)),
+                event.mirrored_from,
                 event.rrule,
-                event.created_by, None, None,
+                event.created_by,
+                None,
+                None,
             ),
         )
         return event
 
     async def get_event(self, event_id: str) -> CalendarEvent | None:
         row = await self._db.fetchone(
-            "SELECT * FROM calendar_events WHERE id=?", (event_id,),
+            "SELECT * FROM calendar_events WHERE id=?",
+            (event_id,),
         )
         return _row_to_event(row_to_dict(row))
 
     async def list_events_in_range(
-        self, calendar_id: str, *, start: datetime, end: datetime,
+        self,
+        calendar_id: str,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[CalendarEvent]:
         # Pull one-off events that overlap the window, plus every
         # recurring event whose seed starts before ``end`` — recurring
@@ -196,13 +229,15 @@ class SqliteCalendarRepo:
             """,
             (calendar_id, _iso(end), _iso(start), _iso(end)),
         )
-        events = [
-            e for e in (_row_to_event(d) for d in rows_to_dicts(rows)) if e
-        ]
+        events = [e for e in (_row_to_event(d) for d in rows_to_dicts(rows)) if e]
         return _expand_window(events, start=start, end=end)
 
     async def list_events_for_user_in_range(
-        self, username: str, *, start: datetime, end: datetime,
+        self,
+        username: str,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[CalendarEvent]:
         rows = await self._db.fetchall(
             """
@@ -217,29 +252,36 @@ class SqliteCalendarRepo:
             """,
             (username, _iso(end), _iso(start), _iso(end)),
         )
-        events = [
-            e for e in (_row_to_event(d) for d in rows_to_dicts(rows)) if e
-        ]
+        events = [e for e in (_row_to_event(d) for d in rows_to_dicts(rows)) if e]
         return _expand_window(events, start=start, end=end)
 
     async def delete_event(self, event_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM calendar_events WHERE id=?", (event_id,),
+            "DELETE FROM calendar_events WHERE id=?",
+            (event_id,),
         )
 
 
 # ─── Space calendars ──────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class AbstractSpaceCalendarRepo(Protocol):
     async def save_event(
-        self, space_id: str, event: CalendarEvent,
+        self,
+        space_id: str,
+        event: CalendarEvent,
     ) -> CalendarEvent: ...
     async def get_event(
-        self, event_id: str,
+        self,
+        event_id: str,
     ) -> tuple[str, CalendarEvent] | None: ...
     async def list_events_in_range(
-        self, space_id: str, *, start: datetime, end: datetime,
+        self,
+        space_id: str,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[CalendarEvent]: ...
     async def delete_event(self, event_id: str) -> None: ...
 
@@ -255,7 +297,9 @@ class SqliteSpaceCalendarRepo:
         self._db = db
 
     async def save_event(
-        self, space_id: str, event: CalendarEvent,
+        self,
+        space_id: str,
+        event: CalendarEvent,
     ) -> CalendarEvent:
         await self._db.enqueue(
             """
@@ -277,19 +321,29 @@ class SqliteSpaceCalendarRepo:
                 updated_at=datetime('now')
             """,
             (
-                event.id, space_id, event.summary, event.description,
-                _iso(event.start), _iso(event.end), int(event.all_day),
-                dump_json(list(event.attendees)), event.rrule,
-                event.created_by, None, None,
+                event.id,
+                space_id,
+                event.summary,
+                event.description,
+                _iso(event.start),
+                _iso(event.end),
+                int(event.all_day),
+                dump_json(list(event.attendees)),
+                event.rrule,
+                event.created_by,
+                None,
+                None,
             ),
         )
         return event
 
     async def get_event(
-        self, event_id: str,
+        self,
+        event_id: str,
     ) -> tuple[str, CalendarEvent] | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_calendar_events WHERE id=?", (event_id,),
+            "SELECT * FROM space_calendar_events WHERE id=?",
+            (event_id,),
         )
         d = row_to_dict(row)
         if d is None:
@@ -297,7 +351,11 @@ class SqliteSpaceCalendarRepo:
         return d["space_id"], _row_to_space_event(d)
 
     async def list_events_in_range(
-        self, space_id: str, *, start: datetime, end: datetime,
+        self,
+        space_id: str,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[CalendarEvent]:
         rows = await self._db.fetchall(
             """
@@ -316,7 +374,8 @@ class SqliteSpaceCalendarRepo:
 
     async def delete_event(self, event_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM space_calendar_events WHERE id=?", (event_id,),
+            "DELETE FROM space_calendar_events WHERE id=?",
+            (event_id,),
         )
 
     # ── RSVPs ──────────────────────────────────────────────────────────
@@ -344,8 +403,7 @@ class SqliteSpaceCalendarRepo:
 
     async def list_rsvps(self, event_id: str) -> list[CalendarRSVP]:
         rows = await self._db.fetchall(
-            "SELECT * FROM space_calendar_rsvps WHERE event_id=? "
-            "ORDER BY updated_at",
+            "SELECT * FROM space_calendar_rsvps WHERE event_id=? ORDER BY updated_at",
             (event_id,),
         )
         return [
@@ -360,6 +418,7 @@ class SqliteSpaceCalendarRepo:
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
+
 
 def _row_to_calendar(row: dict | None) -> Calendar | None:
     if row is None:

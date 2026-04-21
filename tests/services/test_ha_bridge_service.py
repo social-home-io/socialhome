@@ -44,7 +44,9 @@ def env():
 
 def _post():
     return Post(
-        id="p1", author="u1", type=PostType.TEXT,
+        id="p1",
+        author="u1",
+        type=PostType.TEXT,
         content="hi",
         created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
@@ -53,13 +55,19 @@ def _post():
 def _task():
     now = datetime(2026, 4, 15, tzinfo=timezone.utc)
     return Task(
-        id="t1", list_id="l1", title="Buy milk",
-        status=TaskStatus.TODO, position=0, created_by="me",
-        created_at=now, updated_at=now,
+        id="t1",
+        list_id="l1",
+        title="Buy milk",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="me",
+        created_at=now,
+        updated_at=now,
     )
 
 
 # ─── Event handlers ──────────────────────────────────────────────────────
+
 
 async def test_post_created_fires_namespaced_event(env):
     bus, adapter = env

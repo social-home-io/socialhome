@@ -71,7 +71,8 @@ class PairingInboundHandlers:
         registry.register(FederationEventType.UNPAIR, self._on_unpair)
         if self._dm_contact_repo is not None:
             registry.register(
-                FederationEventType.DM_CONTACT_REQUEST, self._on_contact_request,
+                FederationEventType.DM_CONTACT_REQUEST,
+                self._on_contact_request,
             )
 
     async def _on_intro(self, event: "FederationEvent") -> None:
@@ -83,13 +84,16 @@ class PairingInboundHandlers:
             return
         log.info(
             "PAIRING_INTRO received from=%s via=%s",
-            event.from_instance, via,
+            event.from_instance,
+            via,
         )
-        await self._bus.publish(PairingIntroReceived(
-            from_instance=event.from_instance,
-            via_instance_id=via,
-            message=message,
-        ))
+        await self._bus.publish(
+            PairingIntroReceived(
+                from_instance=event.from_instance,
+                via_instance_id=via,
+                message=message,
+            )
+        )
 
     async def _on_accept(self, event: "FederationEvent") -> None:
         """Initiator side — peer accepted our QR invite."""
@@ -104,14 +108,17 @@ class PairingInboundHandlers:
         if session is None:
             log.warning(
                 "PAIRING_ACCEPT for unknown token=%s from=%s",
-                token, event.from_instance,
+                token,
+                event.from_instance,
             )
             return
-        await self._bus.publish(PairingAcceptReceived(
-            from_instance=event.from_instance,
-            token=token,
-            verification_code=code,
-        ))
+        await self._bus.publish(
+            PairingAcceptReceived(
+                from_instance=event.from_instance,
+                token=token,
+                verification_code=code,
+            )
+        )
 
     async def _on_confirm(self, event: "FederationEvent") -> None:
         """Peer confirmed the SAS — flip local status to CONFIRMED."""
@@ -159,9 +166,12 @@ class PairingInboundHandlers:
         instance = await self._repo.get_instance(event.from_instance)
         if instance is not None and instance.status is not PairingStatus.CONFIRMED:
             await self._repo.delete_instance(instance.id)
-        await self._bus.publish(PairingAborted(
-            instance_id=event.from_instance, reason=reason,
-        ))
+        await self._bus.publish(
+            PairingAborted(
+                instance_id=event.from_instance,
+                reason=reason,
+            )
+        )
 
     async def _on_unpair(self, event: "FederationEvent") -> None:
         """Peer tore down a confirmed pairing. Purge the row."""
@@ -197,17 +207,21 @@ class PairingInboundHandlers:
                 from_user_id=requester_user_id,
                 to_user_id=recipient_user_id,
             )
-        except Exception as exc:                                   # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             # The recipient's local user row may not exist yet — schema has
             # an FK to users.user_id. Log + drop rather than raise; the
             # admin can see this via operator logs.
             log.warning(
                 "DM_CONTACT_REQUEST persistence failed (%s → %s): %s",
-                requester_user_id, recipient_user_id, exc,
+                requester_user_id,
+                recipient_user_id,
+                exc,
             )
             return
-        await self._bus.publish(DmContactRequested(
-            requester_user_id=requester_user_id,
-            requester_display_name=requester_display_name,
-            recipient_user_id=recipient_user_id,
-        ))
+        await self._bus.publish(
+            DmContactRequested(
+                requester_user_id=requester_user_id,
+                requester_display_name=requester_display_name,
+                recipient_user_id=recipient_user_id,
+            )
+        )

@@ -6,8 +6,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.calendar import Calendar, CalendarEvent, CalendarRSVP, RSVPStatus
-from social_home.repositories.calendar_repo import SqliteCalendarRepo, SqliteSpaceCalendarRepo
+from social_home.domain.calendar import (
+    Calendar,
+    CalendarEvent,
+    CalendarRSVP,
+    RSVPStatus,
+)
+from social_home.repositories.calendar_repo import (
+    SqliteCalendarRepo,
+    SqliteSpaceCalendarRepo,
+)
 
 
 @pytest.fixture
@@ -44,6 +52,7 @@ async def env(tmp_dir):
 
 # ── Personal calendars ──────────────────────────────────────────────────────
 
+
 async def test_save_and_get_calendar(env):
     """save_calendar persists a calendar; get_calendar retrieves it."""
     cal = Calendar(id="cal-1", name="Personal", color="#fff", owner_username="alice")
@@ -74,7 +83,9 @@ async def test_save_calendar_upserts(env):
     """save_calendar with the same id updates the existing record."""
     cal = Calendar(id="cal-up", name="Old Name", color="#000", owner_username="alice")
     await env.cal_repo.save_calendar(cal)
-    updated = Calendar(id="cal-up", name="New Name", color="#fff", owner_username="alice")
+    updated = Calendar(
+        id="cal-up", name="New Name", color="#fff", owner_username="alice"
+    )
     await env.cal_repo.save_calendar(updated)
     fetched = await env.cal_repo.get_calendar("cal-up")
     assert fetched.name == "New Name"
@@ -90,14 +101,21 @@ async def test_delete_calendar(env):
 
 # ── Personal calendar events ────────────────────────────────────────────────
 
+
 async def test_save_and_get_event(env):
     """save_event persists an event; get_event retrieves it."""
     cal = Calendar(id="cal-ev", name="Events", color="#fff", owner_username="alice")
     await env.cal_repo.save_calendar(cal)
     now = datetime(2025, 6, 1, 10, 0, tzinfo=timezone.utc)
     end = datetime(2025, 6, 1, 11, 0, tzinfo=timezone.utc)
-    evt = CalendarEvent(id="ev-1", calendar_id="cal-ev", summary="Standup",
-                        start=now, end=end, created_by="uid-alice")
+    evt = CalendarEvent(
+        id="ev-1",
+        calendar_id="cal-ev",
+        summary="Standup",
+        start=now,
+        end=end,
+        created_by="uid-alice",
+    )
     await env.cal_repo.save_event(evt)
     fetched = await env.cal_repo.get_event("ev-1")
     assert fetched is not None
@@ -117,10 +135,22 @@ async def test_list_events_in_range(env):
     end1 = datetime(2025, 6, 1, 9, 0, tzinfo=timezone.utc)
     start2 = datetime(2025, 6, 2, 8, 0, tzinfo=timezone.utc)
     end2 = datetime(2025, 6, 2, 9, 0, tzinfo=timezone.utc)
-    evt1 = CalendarEvent(id="ev-r1", calendar_id="cal-r", summary="E1",
-                         start=start1, end=end1, created_by="uid-alice")
-    evt2 = CalendarEvent(id="ev-r2", calendar_id="cal-r", summary="E2",
-                         start=start2, end=end2, created_by="uid-alice")
+    evt1 = CalendarEvent(
+        id="ev-r1",
+        calendar_id="cal-r",
+        summary="E1",
+        start=start1,
+        end=end1,
+        created_by="uid-alice",
+    )
+    evt2 = CalendarEvent(
+        id="ev-r2",
+        calendar_id="cal-r",
+        summary="E2",
+        start=start2,
+        end=end2,
+        created_by="uid-alice",
+    )
     await env.cal_repo.save_event(evt1)
     await env.cal_repo.save_event(evt2)
     window_start = datetime(2025, 6, 1, 0, 0, tzinfo=timezone.utc)
@@ -137,14 +167,21 @@ async def test_delete_event(env):
     cal = Calendar(id="cal-de", name="X", color="#fff", owner_username="alice")
     await env.cal_repo.save_calendar(cal)
     now = datetime(2025, 6, 1, tzinfo=timezone.utc)
-    evt = CalendarEvent(id="ev-del", calendar_id="cal-de", summary="Bye",
-                        start=now, end=now, created_by="uid-alice")
+    evt = CalendarEvent(
+        id="ev-del",
+        calendar_id="cal-de",
+        summary="Bye",
+        start=now,
+        end=now,
+        created_by="uid-alice",
+    )
     await env.cal_repo.save_event(evt)
     await env.cal_repo.delete_event("ev-del")
     assert await env.cal_repo.get_event("ev-del") is None
 
 
 # ── Space calendar events ───────────────────────────────────────────────────
+
 
 async def _seed_space(env, space_id: str = "sp-1") -> str:
     """Insert a minimal space row for FK constraints."""
@@ -161,8 +198,14 @@ async def test_space_cal_save_and_get(env):
     sid = await _seed_space(env)
     now = datetime(2025, 7, 1, tzinfo=timezone.utc)
     end = datetime(2025, 7, 1, 1, tzinfo=timezone.utc)
-    evt = CalendarEvent(id="sp-ev-1", calendar_id=sid, summary="Space Event",
-                        start=now, end=end, created_by="uid-alice")
+    evt = CalendarEvent(
+        id="sp-ev-1",
+        calendar_id=sid,
+        summary="Space Event",
+        start=now,
+        end=end,
+        created_by="uid-alice",
+    )
     await env.space_cal_repo.save_event(sid, evt)
     result = await env.space_cal_repo.get_event("sp-ev-1")
     assert result is not None
@@ -178,10 +221,22 @@ async def test_space_cal_list_events_in_range(env):
     e1 = datetime(2025, 8, 1, 1, tzinfo=timezone.utc)
     s2 = datetime(2025, 8, 10, tzinfo=timezone.utc)
     e2 = datetime(2025, 8, 10, 1, tzinfo=timezone.utc)
-    ev1 = CalendarEvent(id="sp-ev-a", calendar_id=sid, summary="A",
-                        start=s1, end=e1, created_by="uid-alice")
-    ev2 = CalendarEvent(id="sp-ev-b", calendar_id=sid, summary="B",
-                        start=s2, end=e2, created_by="uid-alice")
+    ev1 = CalendarEvent(
+        id="sp-ev-a",
+        calendar_id=sid,
+        summary="A",
+        start=s1,
+        end=e1,
+        created_by="uid-alice",
+    )
+    ev2 = CalendarEvent(
+        id="sp-ev-b",
+        calendar_id=sid,
+        summary="B",
+        start=s2,
+        end=e2,
+        created_by="uid-alice",
+    )
     await env.space_cal_repo.save_event(sid, ev1)
     await env.space_cal_repo.save_event(sid, ev2)
     ws = datetime(2025, 8, 1, tzinfo=timezone.utc)
@@ -196,12 +251,20 @@ async def test_space_cal_rsvp_upsert_and_list(env):
     sid = await _seed_space(env, "sp-3")
     now = datetime(2025, 9, 1, tzinfo=timezone.utc)
     end = datetime(2025, 9, 1, 1, tzinfo=timezone.utc)
-    evt = CalendarEvent(id="sp-ev-r", calendar_id=sid, summary="Party",
-                        start=now, end=end, created_by="uid-alice")
+    evt = CalendarEvent(
+        id="sp-ev-r",
+        calendar_id=sid,
+        summary="Party",
+        start=now,
+        end=end,
+        created_by="uid-alice",
+    )
     await env.space_cal_repo.save_event(sid, evt)
     rsvp = CalendarRSVP(
-        event_id="sp-ev-r", user_id="uid-alice",
-        status=RSVPStatus.GOING, updated_at="2025-09-01T00:00:00",
+        event_id="sp-ev-r",
+        user_id="uid-alice",
+        status=RSVPStatus.GOING,
+        updated_at="2025-09-01T00:00:00",
     )
     await env.space_cal_repo.upsert_rsvp(rsvp)
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-r")
@@ -213,13 +276,27 @@ async def test_space_cal_rsvp_upsert_update(env):
     """upsert_rsvp with the same (event_id, user_id) updates the status."""
     sid = await _seed_space(env, "sp-4")
     now = datetime(2025, 9, 1, tzinfo=timezone.utc)
-    evt = CalendarEvent(id="sp-ev-u", calendar_id=sid, summary="Party2",
-                        start=now, end=now, created_by="uid-alice")
+    evt = CalendarEvent(
+        id="sp-ev-u",
+        calendar_id=sid,
+        summary="Party2",
+        start=now,
+        end=now,
+        created_by="uid-alice",
+    )
     await env.space_cal_repo.save_event(sid, evt)
-    rsvp1 = CalendarRSVP(event_id="sp-ev-u", user_id="uid-alice",
-                          status=RSVPStatus.GOING, updated_at="2025-09-01T00:00:00")
-    rsvp2 = CalendarRSVP(event_id="sp-ev-u", user_id="uid-alice",
-                          status=RSVPStatus.MAYBE, updated_at="2025-09-02T00:00:00")
+    rsvp1 = CalendarRSVP(
+        event_id="sp-ev-u",
+        user_id="uid-alice",
+        status=RSVPStatus.GOING,
+        updated_at="2025-09-01T00:00:00",
+    )
+    rsvp2 = CalendarRSVP(
+        event_id="sp-ev-u",
+        user_id="uid-alice",
+        status=RSVPStatus.MAYBE,
+        updated_at="2025-09-02T00:00:00",
+    )
     await env.space_cal_repo.upsert_rsvp(rsvp1)
     await env.space_cal_repo.upsert_rsvp(rsvp2)
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-u")
@@ -239,7 +316,9 @@ async def test_recurring_event_expands_into_window(env):
     cal = Calendar(id="cal-rr", name="Recurring", color="#fff", owner_username="alice")
     await env.cal_repo.save_calendar(cal)
     seed = CalendarEvent(
-        id="ev-daily", calendar_id="cal-rr", summary="Daily standup",
+        id="ev-daily",
+        calendar_id="cal-rr",
+        summary="Daily standup",
         start=datetime(2026, 4, 6, 9, 0, tzinfo=timezone.utc),
         end=datetime(2026, 4, 6, 9, 30, tzinfo=timezone.utc),
         created_by="uid-alice",
@@ -265,7 +344,9 @@ async def test_non_recurring_event_still_works(env):
     cal = Calendar(id="cal-nr", name="One-off", color="#fff", owner_username="alice")
     await env.cal_repo.save_calendar(cal)
     seed = CalendarEvent(
-        id="ev-once", calendar_id="cal-nr", summary="Dentist",
+        id="ev-once",
+        calendar_id="cal-nr",
+        summary="Dentist",
         start=datetime(2026, 4, 6, 9, 0, tzinfo=timezone.utc),
         end=datetime(2026, 4, 6, 9, 30, tzinfo=timezone.utc),
         created_by="uid-alice",
@@ -285,11 +366,21 @@ async def test_space_cal_rsvp_remove(env):
     """remove_rsvp deletes the RSVP record."""
     sid = await _seed_space(env, "sp-5")
     now = datetime(2025, 9, 1, tzinfo=timezone.utc)
-    evt = CalendarEvent(id="sp-ev-rm", calendar_id=sid, summary="Test",
-                        start=now, end=now, created_by="uid-alice")
+    evt = CalendarEvent(
+        id="sp-ev-rm",
+        calendar_id=sid,
+        summary="Test",
+        start=now,
+        end=now,
+        created_by="uid-alice",
+    )
     await env.space_cal_repo.save_event(sid, evt)
-    rsvp = CalendarRSVP(event_id="sp-ev-rm", user_id="uid-alice",
-                         status=RSVPStatus.GOING, updated_at="2025-09-01T00:00:00")
+    rsvp = CalendarRSVP(
+        event_id="sp-ev-rm",
+        user_id="uid-alice",
+        status=RSVPStatus.GOING,
+        updated_at="2025-09-01T00:00:00",
+    )
     await env.space_cal_repo.upsert_rsvp(rsvp)
     await env.space_cal_repo.remove_rsvp("sp-ev-rm", "uid-alice")
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-rm")

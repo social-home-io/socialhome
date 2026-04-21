@@ -38,7 +38,9 @@ class CalendarExportView(BaseView):
         far_past = datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat()
         far_future = datetime(2099, 12, 31, tzinfo=timezone.utc).isoformat()
         events = await svc.list_events_in_range(
-            calendar_id, start=far_past, end=far_future,
+            calendar_id,
+            start=far_past,
+            end=far_future,
         )
 
         lines: list[str] = [

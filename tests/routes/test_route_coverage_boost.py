@@ -13,6 +13,7 @@ from .conftest import _auth
 
 # ─── /api/me + tokens ────────────────────────────────────────────────────
 
+
 async def test_get_me_returns_profile(client):
     r = await client.get("/api/me", headers=_auth(client._tok))
     assert r.status == 200
@@ -51,7 +52,9 @@ async def test_patch_me_bad_json_400(client):
 
 async def test_patch_me_no_changes_returns_current(client):
     r = await client.patch(
-        "/api/me", json={}, headers=_auth(client._tok),
+        "/api/me",
+        json={},
+        headers=_auth(client._tok),
     )
     assert r.status == 200
 
@@ -82,6 +85,7 @@ async def test_list_users_returns_active_admin(client):
 
 
 # ─── /api/calls extras ───────────────────────────────────────────────────
+
 
 async def test_calls_unauth_initiate_401(client):
     r = await client.post(
@@ -166,6 +170,7 @@ async def test_calls_active_returns_empty_when_none(client):
 
 # ─── /api/stickies ───────────────────────────────────────────────────────
 
+
 async def test_stickies_list_initially_empty(client):
     r = await client.get("/api/stickies", headers=_auth(client._tok))
     assert r.status == 200
@@ -175,8 +180,12 @@ async def test_stickies_list_initially_empty(client):
 async def test_stickies_create_returns_201(client):
     r = await client.post(
         "/api/stickies",
-        json={"content": "remember the milk", "color": "#fff9b1",
-              "position_x": 10, "position_y": 20},
+        json={
+            "content": "remember the milk",
+            "color": "#fff9b1",
+            "position_x": 10,
+            "position_y": 20,
+        },
         headers=_auth(client._tok),
     )
     assert r.status == 201
@@ -240,7 +249,8 @@ async def test_stickies_update_bad_json_400(client):
 
 async def test_stickies_delete_unknown_404(client):
     r = await client.delete(
-        "/api/stickies/missing", headers=_auth(client._tok),
+        "/api/stickies/missing",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -257,6 +267,7 @@ async def test_stickies_delete_existing_204(client):
 
 
 # ─── /api/calendars ──────────────────────────────────────────────────────
+
 
 async def test_calendars_list_initially_empty(client):
     r = await client.get("/api/calendars", headers=_auth(client._tok))
@@ -355,6 +366,7 @@ async def test_calendars_delete_unknown_event_404(client):
 
 # ─── /api/presence ───────────────────────────────────────────────────────
 
+
 async def test_presence_list_returns_array(client):
     r = await client.get("/api/presence", headers=_auth(client._tok))
     assert r.status == 200
@@ -384,10 +396,10 @@ async def test_presence_update_truncates_gps_to_4dp(client):
     r = await client.post(
         "/api/presence/location",
         json={
-            "username":   "admin",
-            "zone_name":  "home",
-            "latitude":   47.123456789,
-            "longitude":  8.987654321,
+            "username": "admin",
+            "zone_name": "home",
+            "latitude": 47.123456789,
+            "longitude": 8.987654321,
             "accuracy_m": 30,
         },
         headers=_auth(client._tok),

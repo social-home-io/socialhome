@@ -39,7 +39,10 @@ async def stack(tmp_dir):
         user_svc = UserService(user_repo, bus, own_instance_public_key=kp.public_key)
         await user_svc.provision(username="alice", display_name="Alice")
         svc = SpaceService(
-            space_repo, SqliteSpacePostRepo(db), user_repo, bus,
+            space_repo,
+            SqliteSpacePostRepo(db),
+            user_repo,
+            bus,
             own_instance_id=iid,
         )
         gfs = AsyncMock()
@@ -52,8 +55,10 @@ async def stack(tmp_dir):
 async def test_create_global_space_publishes_to_all(stack):
     svc, gfs = stack
     space = await svc.create_space(
-        owner_username="alice", name="Chess Club",
-        lat=47.0, lon=8.0,
+        owner_username="alice",
+        name="Chess Club",
+        lat=47.0,
+        lon=8.0,
         space_type=SpaceType.GLOBAL,
     )
     gfs.publish_space_to_all.assert_awaited_once_with(space.id)
@@ -63,7 +68,8 @@ async def test_create_global_space_publishes_to_all(stack):
 async def test_create_household_space_does_not_publish(stack):
     svc, gfs = stack
     await svc.create_space(
-        owner_username="alice", name="Family",
+        owner_username="alice",
+        name="Family",
         space_type=SpaceType.HOUSEHOLD,
     )
     gfs.publish_space_to_all.assert_not_awaited()
@@ -72,11 +78,13 @@ async def test_create_household_space_does_not_publish(stack):
 async def test_flip_household_to_global_publishes(stack):
     svc, gfs = stack
     space = await svc.create_space(
-        owner_username="alice", name="Family",
+        owner_username="alice",
+        name="Family",
         space_type=SpaceType.HOUSEHOLD,
     )
     await svc.update_config(
-        space.id, actor_username="alice",
+        space.id,
+        actor_username="alice",
         space_type=SpaceType.GLOBAL,
     )
     gfs.publish_space_to_all.assert_awaited_once_with(space.id)
@@ -85,12 +93,16 @@ async def test_flip_household_to_global_publishes(stack):
 async def test_flip_global_to_household_unpublishes(stack):
     svc, gfs = stack
     space = await svc.create_space(
-        owner_username="alice", name="Chess", lat=47.0, lon=8.0,
+        owner_username="alice",
+        name="Chess",
+        lat=47.0,
+        lon=8.0,
         space_type=SpaceType.GLOBAL,
     )
     gfs.publish_space_to_all.reset_mock()
     await svc.update_config(
-        space.id, actor_username="alice",
+        space.id,
+        actor_username="alice",
         space_type=SpaceType.HOUSEHOLD,
     )
     gfs.unpublish_space_from_all.assert_awaited_once_with(space.id)
@@ -99,7 +111,10 @@ async def test_flip_global_to_household_unpublishes(stack):
 async def test_dissolve_global_space_unpublishes(stack):
     svc, gfs = stack
     space = await svc.create_space(
-        owner_username="alice", name="Chess", lat=47.0, lon=8.0,
+        owner_username="alice",
+        name="Chess",
+        lat=47.0,
+        lon=8.0,
         space_type=SpaceType.GLOBAL,
     )
     gfs.publish_space_to_all.reset_mock()
@@ -110,12 +125,16 @@ async def test_dissolve_global_space_unpublishes(stack):
 async def test_update_without_type_change_does_nothing(stack):
     svc, gfs = stack
     space = await svc.create_space(
-        owner_username="alice", name="Chess", lat=47.0, lon=8.0,
+        owner_username="alice",
+        name="Chess",
+        lat=47.0,
+        lon=8.0,
         space_type=SpaceType.GLOBAL,
     )
     gfs.publish_space_to_all.reset_mock()
     await svc.update_config(
-        space.id, actor_username="alice",
+        space.id,
+        actor_username="alice",
         name="Chess Renamed",
         join_mode=JoinMode.OPEN,
     )

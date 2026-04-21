@@ -24,6 +24,7 @@ from social_home.services.public_space_discovery_service import (
 
 # ─── DB fixture ──────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def env(tmp_dir):
     kp = generate_identity_keypair()
@@ -44,14 +45,21 @@ async def env(tmp_dir):
 
 def _listing(space_id: str, *, instance_id: str = "remote-1", member_count: int = 5):
     return PublicSpaceListing(
-        space_id=space_id, instance_id=instance_id,
-        name=f"Space {space_id}", description="d",
-        emoji="\U0001f310", lat=47.0, lon=8.0, radius_km=10,
+        space_id=space_id,
+        instance_id=instance_id,
+        name=f"Space {space_id}",
+        description="d",
+        emoji="\U0001f310",
+        lat=47.0,
+        lon=8.0,
+        radius_km=10,
         member_count=member_count,
     )
 
 
-def _gfs_conn(gfs_id: str = "gfs-1", *, endpoint_url: str = "https://gfs.example.com") -> GfsConnection:
+def _gfs_conn(
+    gfs_id: str = "gfs-1", *, endpoint_url: str = "https://gfs.example.com"
+) -> GfsConnection:
     return GfsConnection(
         id=gfs_id,
         gfs_instance_id=f"inst-{gfs_id}",
@@ -64,6 +72,7 @@ def _gfs_conn(gfs_id: str = "gfs-1", *, endpoint_url: str = "https://gfs.example
 
 
 # ─── Repo ────────────────────────────────────────────────────────────────
+
 
 async def test_upsert_then_list_active(env):
     _, repo, _ = env
@@ -140,6 +149,7 @@ async def test_purge_older_than(env):
 
 # ─── Service ─────────────────────────────────────────────────────────────
 
+
 class _StubResp:
     def __init__(self, status: int, body):
         self.status = status
@@ -179,12 +189,19 @@ async def test_disabled_when_no_gfs_connection_repo(env):
 async def test_poll_once_caches_listings(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
-    body = {"spaces": [
-        {"space_id": "sp-X", "instance_id": "inst-X", "name": "X",
-         "member_count": 7},
-    ]}
+    body = {
+        "spaces": [
+            {
+                "space_id": "sp-X",
+                "instance_id": "inst-X",
+                "name": "X",
+                "member_count": 7,
+            },
+        ]
+    }
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=_StubSession(body=body),
     )
     n = await svc.poll_once()
@@ -198,12 +215,15 @@ async def test_poll_once_skips_blocked_instances(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
     await repo.block_instance("bad-inst", blocked_by="admin")
-    body = {"spaces": [
-        {"space_id": "sp-1", "instance_id": "bad-inst", "name": "X"},
-        {"space_id": "sp-2", "instance_id": "ok-inst",  "name": "Y"},
-    ]}
+    body = {
+        "spaces": [
+            {"space_id": "sp-1", "instance_id": "bad-inst", "name": "X"},
+            {"space_id": "sp-2", "instance_id": "ok-inst", "name": "Y"},
+        ]
+    }
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=_StubSession(body=body),
     )
     await svc.poll_once()
@@ -215,7 +235,8 @@ async def test_poll_once_handles_non_200(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=_StubSession(status=503, body={}),
     )
     n = await svc.poll_once()
@@ -226,7 +247,8 @@ async def test_poll_once_handles_malformed_body(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=_StubSession(body={"not_spaces": "x"}),
     )
     n = await svc.poll_once()
@@ -236,13 +258,16 @@ async def test_poll_once_handles_malformed_body(env):
 async def test_poll_once_skips_malformed_items(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
-    body = {"spaces": [
-        {"space_id": "good", "instance_id": "i", "name": "X"},
-        "not a dict",
-        {"missing_required_fields": True},
-    ]}
+    body = {
+        "spaces": [
+            {"space_id": "good", "instance_id": "i", "name": "X"},
+            "not a dict",
+            {"missing_required_fields": True},
+        ]
+    }
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=_StubSession(body=body),
     )
     n = await svc.poll_once()
@@ -259,7 +284,8 @@ async def test_poll_once_purges_stale_cache(env):
         (old_iso, "sp-old"),
     )
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         cache_ttl_hours=24,
         http_client=_StubSession(body={"spaces": []}),
     )
@@ -272,7 +298,8 @@ async def test_poll_once_no_active_connections_returns_zero(env):
     _, repo, gfs_repo = env
     # No active connections saved.
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=_StubSession(body={"spaces": []}),
     )
     n = await svc.poll_once()
@@ -283,12 +310,15 @@ async def test_poll_once_multiple_gfs(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1", endpoint_url="https://gfs1.example.com"))
     await gfs_repo.save(_gfs_conn("gfs-2", endpoint_url="https://gfs2.example.com"))
-    body = {"spaces": [
-        {"space_id": "sp-A", "instance_id": "inst-A", "name": "A"},
-    ]}
+    body = {
+        "spaces": [
+            {"space_id": "sp-A", "instance_id": "inst-A", "name": "A"},
+        ]
+    }
     session = _StubSession(body=body)
     svc = PublicSpaceDiscoveryService(
-        repo, gfs_connection_repo=gfs_repo,
+        repo,
+        gfs_connection_repo=gfs_repo,
         http_client=session,
     )
     n = await svc.poll_once()

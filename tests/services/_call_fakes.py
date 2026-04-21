@@ -31,20 +31,26 @@ class FakeFedRepo:
             PairingStatus,
             RemoteInstance,
         )
+
         if self._peer_pk_hex is None:
             return None
         return RemoteInstance(
-            id=iid, display_name="peer",
+            id=iid,
+            display_name="peer",
             remote_identity_pk=self._peer_pk_hex,
-            key_self_to_remote="x", key_remote_to_self="x",
-            remote_webhook_url="https://x", local_webhook_id="wh",
-            status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+            key_self_to_remote="x",
+            key_remote_to_self="x",
+            remote_webhook_url="https://x",
+            local_webhook_id="wh",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
         )
 
 
 class FakeFederation:
-    def __init__(self, peer_pk_hex: str | None = None,
-                 own_instance_id: str = "self-instance"):
+    def __init__(
+        self, peer_pk_hex: str | None = None, own_instance_id: str = "self-instance"
+    ):
         self.own_instance_id = own_instance_id
         self.sent: list[tuple] = []
         self._federation_repo = FakeFedRepo(peer_pk_hex)
@@ -68,10 +74,12 @@ class FakeUserRepo:
         self._instance_for_user: dict[str, str] = {}
         self._remotes: dict[str, list[RemoteUser]] = {}
 
-    def add_user(self, username: str, user_id: str,
-                 *, instance_id: str = "self-instance") -> None:
+    def add_user(
+        self, username: str, user_id: str, *, instance_id: str = "self-instance"
+    ) -> None:
         u = User(
-            user_id=user_id, username=username,
+            user_id=user_id,
+            username=username,
             display_name=username,
         )
         self._by_username[username] = u
@@ -79,10 +87,15 @@ class FakeUserRepo:
         self._instance_for_user[user_id] = instance_id
 
     def add_remote(
-        self, *, user_id: str, instance_id: str, remote_username: str,
+        self,
+        *,
+        user_id: str,
+        instance_id: str,
+        remote_username: str,
     ) -> None:
         ru = RemoteUser(
-            user_id=user_id, instance_id=instance_id,
+            user_id=user_id,
+            instance_id=instance_id,
             remote_username=remote_username,
             display_name=remote_username,
         )
@@ -110,15 +123,20 @@ class FakeConversationRepo:
         self.touched: list[str] = []
 
     def add_conversation(
-        self, conversation_id: str, usernames: list[str],
-        *, remotes: list[tuple[str, str, str]] = (),
+        self,
+        conversation_id: str,
+        usernames: list[str],
+        *,
+        remotes: list[tuple[str, str, str]] = (),
     ) -> None:
         """``remotes`` is a list of (instance_id, remote_username, user_id)."""
         self._members[conversation_id] = [
             ConversationMember(
-                conversation_id=conversation_id, username=u,
+                conversation_id=conversation_id,
+                username=u,
                 joined_at="2026-01-01T00:00:00+00:00",
-                last_read_at=None, history_visible_from=None,
+                last_read_at=None,
+                history_visible_from=None,
                 deleted_at=None,
             )
             for u in usernames
@@ -126,7 +144,8 @@ class FakeConversationRepo:
         self._remote_members[conversation_id] = [
             RemoteConversationMember(
                 conversation_id=conversation_id,
-                instance_id=inst, remote_username=ru,
+                instance_id=inst,
+                remote_username=ru,
                 joined_at="2026-01-01T00:00:00+00:00",
             )
             for inst, ru, _uid in remotes
@@ -180,7 +199,8 @@ class FakeCallRepo:
 
     async def list_active(self, *, user_id):
         return [
-            c for c in self._sessions.values()
+            c
+            for c in self._sessions.values()
             if c.status in ("ringing", "active")
             and (
                 c.initiator_user_id == user_id
@@ -191,15 +211,20 @@ class FakeCallRepo:
 
     async def list_history_for_conversation(self, conversation_id, *, limit=50):
         rows = [
-            c for c in self._sessions.values()
-            if c.conversation_id == conversation_id
+            c for c in self._sessions.values() if c.conversation_id == conversation_id
         ]
         rows.sort(key=lambda c: c.started_at, reverse=True)
         return rows[:limit]
 
     async def transition(
-        self, call_id, *, status, connected_at=None, ended_at=None,
-        duration_seconds=None, participant_user_ids=None,
+        self,
+        call_id,
+        *,
+        status,
+        connected_at=None,
+        ended_at=None,
+        duration_seconds=None,
+        participant_user_ids=None,
     ):
         cur = self._sessions.get(call_id)
         if cur is None:
@@ -239,7 +264,8 @@ class FakeCallRepo:
             age = (datetime.now(timezone.utc) - started).total_seconds()
             if age > older_than_seconds:
                 await self.transition(
-                    cid, status="missed",
+                    cid,
+                    status="missed",
                     ended_at=datetime.now(timezone.utc).isoformat(),
                 )
                 missed.append(self._sessions[cid])
@@ -264,6 +290,7 @@ def make_call_service(
     inspect side effects without threading many arguments.
     """
     from types import SimpleNamespace
+
     users = FakeUserRepo()
     convos = FakeConversationRepo()
     call_repo = FakeCallRepo()
@@ -279,6 +306,11 @@ def make_call_service(
         ws_manager=wsm,
     )
     return SimpleNamespace(
-        svc=svc, users=users, convos=convos,
-        fed=fed, ws=wsm, call_repo=call_repo, seed=seed,
+        svc=svc,
+        users=users,
+        convos=convos,
+        fed=fed,
+        ws=wsm,
+        call_repo=call_repo,
+        seed=seed,
     )

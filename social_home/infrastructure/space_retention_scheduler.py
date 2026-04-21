@@ -36,7 +36,7 @@ class SpaceRetentionScheduler:
         *,
         interval_seconds: float = 3600.0,
     ) -> None:
-        self._db       = db
+        self._db = db
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -52,7 +52,7 @@ class SpaceRetentionScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -62,13 +62,15 @@ class SpaceRetentionScheduler:
                 pruned = await self._prune_once()
                 if pruned:
                     log.info(
-                        "space-retention: soft-deleted %d posts", pruned,
+                        "space-retention: soft-deleted %d posts",
+                        pruned,
                     )
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("space-retention loop failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue
@@ -86,11 +88,10 @@ class SpaceRetentionScheduler:
         for s in spaces:
             try:
                 exempt = set(json.loads(s["retention_exempt_json"] or "[]"))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 exempt = set()
             cutoff = (
-                datetime.now(timezone.utc)
-                - timedelta(days=int(s["retention_days"]))
+                datetime.now(timezone.utc) - timedelta(days=int(s["retention_days"]))
             ).strftime("%Y-%m-%d %H:%M:%S")
             # Build the type filter as ``NOT IN``; sqlite needs the
             # placeholder list to match exempt cardinality.

@@ -53,13 +53,13 @@ class CommentFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_COMMENT_CREATED,
             {
-                "id":         c.id,
-                "post_id":    c.post_id,
-                "author":     c.author,
-                "parent_id":  c.parent_id,
-                "content":    c.content,
+                "id": c.id,
+                "post_id": c.post_id,
+                "author": c.author,
+                "parent_id": c.parent_id,
+                "content": c.content,
                 "created_at": c.created_at.isoformat() if c.created_at else None,
-                "space_id":   event.space_id,
+                "space_id": event.space_id,
             },
         )
 
@@ -71,11 +71,11 @@ class CommentFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_COMMENT_UPDATED,
             {
-                "id":        c.id,
-                "post_id":   c.post_id,
-                "content":   c.content,
+                "id": c.id,
+                "post_id": c.post_id,
+                "content": c.content,
                 "edited_at": c.edited_at.isoformat() if c.edited_at else None,
-                "space_id":  event.space_id,
+                "space_id": event.space_id,
             },
         )
 
@@ -86,18 +86,21 @@ class CommentFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_COMMENT_DELETED,
             {
-                "id":       event.comment_id,
-                "post_id":  event.post_id,
+                "id": event.comment_id,
+                "post_id": event.post_id,
                 "space_id": event.space_id,
             },
         )
 
     async def _fan_out(
-        self, space_id: str, event_type: FederationEventType, payload: dict,
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
     ) -> None:
         try:
             peers = await self._space_repo.list_member_instances(space_id)
-        except Exception as exc:         # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("comment-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -111,8 +114,9 @@ class CommentFederationOutbound:
                     payload=payload,
                     space_id=space_id,
                 )
-            except Exception as exc:      # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "comment-outbound: send to %s failed: %s",
-                    instance_id, exc,
+                    instance_id,
+                    exc,
                 )

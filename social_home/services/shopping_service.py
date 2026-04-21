@@ -49,12 +49,14 @@ class ShoppingService:
             raise ValueError("shopping item text must not be empty")
         item = await self._repo.add(text, created_by=created_by)
         if self._bus is not None:
-            await self._bus.publish(ShoppingItemAdded(
-                item_id=item.id,
-                text=item.text,
-                created_by=item.created_by,
-                created_at=item.created_at,
-            ))
+            await self._bus.publish(
+                ShoppingItemAdded(
+                    item_id=item.id,
+                    text=item.text,
+                    created_by=item.created_by,
+                    created_at=item.created_at,
+                )
+            )
         return item
 
     async def get_item(self, item_id: str) -> ShoppingItem:
@@ -64,7 +66,9 @@ class ShoppingService:
         return item
 
     async def list_items(
-        self, *, include_completed: bool = False,
+        self,
+        *,
+        include_completed: bool = False,
     ) -> list[ShoppingItem]:
         return await self._repo.list(include_completed=include_completed)
 
@@ -74,9 +78,12 @@ class ShoppingService:
             raise KeyError(f"shopping item {item_id!r} not found")
         await self._repo.complete(item_id)
         if self._bus is not None:
-            await self._bus.publish(ShoppingItemToggled(
-                item_id=item_id, completed=True,
-            ))
+            await self._bus.publish(
+                ShoppingItemToggled(
+                    item_id=item_id,
+                    completed=True,
+                )
+            )
 
     async def uncomplete_item(self, item_id: str) -> None:
         item = await self._repo.get(item_id)
@@ -84,9 +91,12 @@ class ShoppingService:
             raise KeyError(f"shopping item {item_id!r} not found")
         await self._repo.uncomplete(item_id)
         if self._bus is not None:
-            await self._bus.publish(ShoppingItemToggled(
-                item_id=item_id, completed=False,
-            ))
+            await self._bus.publish(
+                ShoppingItemToggled(
+                    item_id=item_id,
+                    completed=False,
+                )
+            )
 
     async def delete_item(self, item_id: str) -> None:
         item = await self._repo.get(item_id)

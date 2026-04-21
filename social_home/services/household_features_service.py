@@ -131,6 +131,6 @@ class HouseholdFeaturesService:
         if changed and self._bus is not None:
             try:
                 await self._bus.publish(HouseholdConfigChanged(changed=changed))
-            except Exception as exc:               # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug("household config_changed publish failed: %s", exc)
         return after

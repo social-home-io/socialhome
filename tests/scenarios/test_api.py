@@ -28,17 +28,22 @@ async def client(aiohttp_client, tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
 
     tc = await aiohttp_client(app)
     db = app[_db_key]
 
-    _row = await db.fetchone("SELECT identity_public_key FROM instance_identity WHERE id='self'")
+    _row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
     _pk = bytes.fromhex(_row["identity_public_key"])
+
     class _KP:
         public_key = _pk
+
     kp = _KP()
 
     uid = derive_user_id(kp.public_key, "pascal")
@@ -84,6 +89,7 @@ def _auth(token: str) -> dict:
 
 # ─── Health ───────────────────────────────────────────────────────────────
 
+
 async def test_healthz(client):
     resp = await client.get("/healthz")
     assert resp.status == 200
@@ -93,26 +99,29 @@ async def test_healthz(client):
 
 # ─── Auth ─────────────────────────────────────────────────────────────────
 
+
 async def test_auth_no_auth_returns_401(client):
     resp = await client.get("/api/me")
     assert resp.status == 401
+
 
 async def test_auth_bad_token_returns_401(client):
     resp = await client.get("/api/me", headers=_auth("wrong"))
     assert resp.status == 401
 
+
 async def test_auth_good_token(client):
     resp = await client.get("/api/me", headers=_auth(client._admin_token))
     assert resp.status == 200
 
+
 async def test_auth_query_token(client):
-    resp = await client.get(
-        f"/api/me?token={client._admin_token}"
-    )
+    resp = await client.get(f"/api/me?token={client._admin_token}")
     assert resp.status == 200
 
 
 # ─── Users ────────────────────────────────────────────────────────────────
+
 
 async def test_users_get_me(client):
     resp = await client.get("/api/me", headers=_auth(client._admin_token))
@@ -122,6 +131,7 @@ async def test_users_get_me(client):
     # Sensitive fields stripped
     assert "email" not in body
     assert "password_hash" not in body
+
 
 async def test_users_patch_me(client):
     resp = await client.patch(
@@ -133,11 +143,13 @@ async def test_users_patch_me(client):
     body = await resp.json()
     assert body["display_name"] == "Pascal V."
 
+
 async def test_users_list_users(client):
     resp = await client.get("/api/users", headers=_auth(client._admin_token))
     assert resp.status == 200
     body = await resp.json()
     assert len(body) >= 2
+
 
 async def test_users_create_and_revoke_token(client):
     resp = await client.post(
@@ -159,6 +171,7 @@ async def test_users_create_and_revoke_token(client):
 
 # ─── Feed ─────────────────────────────────────────────────────────────────
 
+
 async def test_feed_create_and_list_post(client):
     resp = await client.post(
         "/api/feed/posts",
@@ -173,6 +186,7 @@ async def test_feed_create_and_list_post(client):
     assert resp2.status == 200
     feed = await resp2.json()
     assert any(p["id"] == post["id"] for p in feed)
+
 
 async def test_feed_edit_and_delete(client):
     r = await client.post(
@@ -196,6 +210,7 @@ async def test_feed_edit_and_delete(client):
     )
     assert r3.status == 204
 
+
 async def test_feed_reaction_add_remove(client):
     r = await client.post(
         "/api/feed/posts",
@@ -216,6 +231,7 @@ async def test_feed_reaction_add_remove(client):
         headers=_auth(client._admin_token),
     )
     assert r3.status == 200
+
 
 async def test_feed_comment_add_list(client):
     r = await client.post(
@@ -240,6 +256,7 @@ async def test_feed_comment_add_list(client):
     comments = await r3.json()
     assert len(comments) == 1
 
+
 async def test_feed_non_author_cannot_edit(client):
     r = await client.post(
         "/api/feed/posts",
@@ -257,6 +274,7 @@ async def test_feed_non_author_cannot_edit(client):
 
 
 # ─── Notifications ────────────────────────────────────────────────────────
+
 
 async def test_notifications_list_and_unread(client):
     # Create a post → bob should get a notification
@@ -280,6 +298,7 @@ async def test_notifications_list_and_unread(client):
     body2 = await resp2.json()
     assert body2["unread"] >= 1
 
+
 async def test_notifications_mark_all_read(client):
     await client.post(
         "/api/feed/posts",
@@ -299,6 +318,7 @@ async def test_notifications_mark_all_read(client):
 
 
 # ─── Conversations ────────────────────────────────────────────────────────
+
 
 async def test_conversations_create_dm_and_send(client):
     resp = await client.post(
@@ -324,6 +344,7 @@ async def test_conversations_create_dm_and_send(client):
     msgs = await resp3.json()
     assert len(msgs) == 1
 
+
 async def test_conversations_mark_read(client):
     resp = await client.post(
         "/api/conversations/dm",
@@ -342,6 +363,7 @@ async def test_conversations_mark_read(client):
     )
     assert resp2.status == 200
 
+
 async def test_conversations_list_conversations(client):
     await client.post(
         "/api/conversations/dm",
@@ -359,6 +381,7 @@ async def test_conversations_list_conversations(client):
 
 # ─── Spaces ──────────────────────────────────────────────────────────────
 
+
 async def test_spaces_create_and_get(client):
     resp = await client.post(
         "/api/spaces",
@@ -374,6 +397,7 @@ async def test_spaces_create_and_get(client):
         headers=_auth(client._admin_token),
     )
     assert resp2.status == 200
+
 
 async def test_spaces_update_and_dissolve(client):
     resp = await client.post(
@@ -396,6 +420,7 @@ async def test_spaces_update_and_dissolve(client):
         headers=_auth(client._admin_token),
     )
     assert resp3.status == 200
+
 
 async def test_spaces_member_management(client):
     resp = await client.post(
@@ -425,6 +450,7 @@ async def test_spaces_member_management(client):
     )
     assert resp4.status == 200
 
+
 async def test_spaces_space_post(client):
     resp = await client.post(
         "/api/spaces",
@@ -447,6 +473,7 @@ async def test_spaces_space_post(client):
     assert resp3.status == 200
     feed = await resp3.json()
     assert len(feed) == 1
+
 
 async def test_spaces_invite_token_flow(client):
     resp = await client.post(

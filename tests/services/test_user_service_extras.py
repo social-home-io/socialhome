@@ -32,6 +32,7 @@ async def env(tmp_dir):
 
 # ─── KeyError paths ──────────────────────────────────────────────────────
 
+
 async def test_set_admin_unknown_user_raises(env):
     svc, _ = env
     with pytest.raises(KeyError):
@@ -83,6 +84,7 @@ async def test_unblock_unknown_user_raises(env):
 
 # ─── patch_preferences corrupted JSON path ──────────────────────────────
 
+
 async def test_patch_preferences_handles_corrupted_json(env):
     svc, db = env
     await svc.provision(username="alice", display_name="A")
@@ -93,10 +95,12 @@ async def test_patch_preferences_handles_corrupted_json(env):
     user = await svc.patch_preferences("alice", {"theme": "dark"})
     # Should recover by starting fresh.
     import json as _json
+
     assert _json.loads(user.preferences_json) == {"theme": "dark"}
 
 
 # ─── _validate_username branches ────────────────────────────────────────
+
 
 def test_validate_username_empty_raises():
     with pytest.raises(ValueError):
@@ -110,6 +114,7 @@ def test_validate_username_too_long_raises():
 
 def test_validate_username_reserved_raises():
     from social_home.domain.user import RESERVED_USERNAMES
+
     sample = next(iter(RESERVED_USERNAMES))
     with pytest.raises(ValueError):
         _validate_username(sample)

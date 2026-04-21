@@ -64,8 +64,11 @@ class PairingCoordinator:
     """§11 QR-code pairing handshake."""
 
     __slots__ = (
-        "_repo", "_key_manager", "_own_identity_pk",
-        "_own_pq_pk", "_own_sig_suite",
+        "_repo",
+        "_key_manager",
+        "_own_identity_pk",
+        "_own_pq_pk",
+        "_own_sig_suite",
     )
 
     def __init__(
@@ -93,9 +96,7 @@ class PairingCoordinator:
         token = random_token(24)
         dh_kp = generate_x25519_keypair()
         now = datetime.now(timezone.utc)
-        expires_at = (
-            now + timedelta(seconds=PAIRING_TTL_SECONDS)
-        ).isoformat()
+        expires_at = (now + timedelta(seconds=PAIRING_TTL_SECONDS)).isoformat()
 
         session = PairingSession(
             token=token,
@@ -133,7 +134,11 @@ class PairingCoordinator:
     async def accept(self, qr_payload: dict) -> dict:
         """Process an incoming QR scan."""
         _require_fields(
-            qr_payload, "token", "identity_pk", "dh_pk", "webhook_url",
+            qr_payload,
+            "token",
+            "identity_pk",
+            "dh_pk",
+            "webhook_url",
         )
 
         token: str = qr_payload["token"]
@@ -185,12 +190,10 @@ class PairingCoordinator:
         local_webhook_id = secrets.token_urlsafe(24)
 
         # 6-digit SAS verification code.
-        verification_code = str(secrets.randbelow(10 ** SAS_DIGITS)).zfill(SAS_DIGITS)
+        verification_code = str(secrets.randbelow(10**SAS_DIGITS)).zfill(SAS_DIGITS)
 
         now = datetime.now(timezone.utc)
-        expires_at = (
-            now + timedelta(seconds=PAIRING_TTL_SECONDS)
-        ).isoformat()
+        expires_at = (now + timedelta(seconds=PAIRING_TTL_SECONDS)).isoformat()
 
         # Store the in-progress pairing session for confirm_pairing.
         session = PairingSession(
@@ -242,7 +245,9 @@ class PairingCoordinator:
         }
 
     async def confirm(
-        self, token: str, verification_code: str,
+        self,
+        token: str,
+        verification_code: str,
     ) -> RemoteInstance:
         """Admin confirms the 6-digit SAS code → finalize the ``RemoteInstance``.
 

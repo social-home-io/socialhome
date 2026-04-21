@@ -48,7 +48,10 @@ class AbstractOutboxRepo(Protocol):
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
     async def reschedule(
-        self, entry_id: str, next_attempt_at: str, attempts: int,
+        self,
+        entry_id: str,
+        next_attempt_at: str,
+        attempts: int,
     ) -> None: ...
     async def expire_past_retention(self, now_iso: str) -> int: ...
     async def count_pending_for(self, instance_id: str) -> int: ...
@@ -79,8 +82,12 @@ class SqliteOutboxRepo:
             ) VALUES(?,?,?,?,?,?)
             """,
             (
-                entry_id, instance_id, event_type.value, payload_json,
-                authority_json, expires_at,
+                entry_id,
+                instance_id,
+                event_type.value,
+                payload_json,
+                authority_json,
+                expires_at,
             ),
         )
         return entry_id
@@ -120,11 +127,13 @@ class SqliteOutboxRepo:
         )
 
     async def reschedule(
-        self, entry_id: str, next_attempt_at: str, attempts: int,
+        self,
+        entry_id: str,
+        next_attempt_at: str,
+        attempts: int,
     ) -> None:
         await self._db.enqueue(
-            "UPDATE federation_outbox SET next_attempt_at=?, attempts=? "
-            "WHERE id=?",
+            "UPDATE federation_outbox SET next_attempt_at=?, attempts=? WHERE id=?",
             (next_attempt_at, attempts, entry_id),
         )
 
@@ -156,12 +165,14 @@ class SqliteOutboxRepo:
         return int(count)
 
     async def count_pending_for(self, instance_id: str) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(*) FROM federation_outbox "
-            "WHERE instance_id=? AND status='pending'",
-            (instance_id,),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM federation_outbox "
+                "WHERE instance_id=? AND status='pending'",
+                (instance_id,),
+                default=0,
+            )
+        )
 
 
 def _row_to_entry(row: dict) -> OutboxEntry:

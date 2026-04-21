@@ -42,8 +42,14 @@ async def env(tmp_dir):
 
 
 async def _seed_post(db, post_id: str, size: int) -> None:
-    meta = json.dumps({"url": f"/m/{post_id}", "mime_type": "application/octet-stream",
-                       "original_name": "x.bin", "size_bytes": size})
+    meta = json.dumps(
+        {
+            "url": f"/m/{post_id}",
+            "mime_type": "application/octet-stream",
+            "original_name": "x.bin",
+            "size_bytes": size,
+        }
+    )
     await db.enqueue(
         "INSERT INTO feed_posts(id, author, type, content, file_meta_json)"
         " VALUES(?, 'u1-id', 'file', '', ?)",
@@ -52,6 +58,7 @@ async def _seed_post(db, post_id: str, size: int) -> None:
 
 
 # ─── current_usage_bytes ─────────────────────────────────────────────────
+
 
 async def test_zero_usage_when_no_files(env):
     svc = _svc(env, quota_bytes=1024)
@@ -85,6 +92,7 @@ async def test_skips_meta_without_size(env):
 
 # ─── usage ───────────────────────────────────────────────────────────────
 
+
 async def test_usage_returns_struct(env):
     await _seed_post(env, "p1", 200)
     svc = _svc(env, quota_bytes=1000)
@@ -102,6 +110,7 @@ async def test_usage_percent_zero_when_quota_zero(env):
 
 
 # ─── check_can_store ─────────────────────────────────────────────────────
+
 
 async def test_check_can_store_passes_when_under_quota(env):
     await _seed_post(env, "p1", 100)

@@ -36,7 +36,9 @@ async def env(tmp_dir):
 
 def _post(pid: str, content: str):
     return Post(
-        id=pid, author="u1", type=PostType.TEXT,
+        id=pid,
+        author="u1",
+        type=PostType.TEXT,
         content=content,
         created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
@@ -46,8 +48,11 @@ async def test_comment_added_does_not_index_separately(env):
     """Comments are NOT independently indexed — only the post body."""
     svc, bus, _ = env
     comment = Comment(
-        id="c1", post_id="p1", author="u1",
-        type=CommentType.TEXT, content="comment-only-text",
+        id="c1",
+        post_id="p1",
+        author="u1",
+        type=CommentType.TEXT,
+        content="comment-only-text",
         created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
     await bus.publish(CommentAdded(post_id="p1", comment=comment))
@@ -59,11 +64,17 @@ async def test_comment_added_does_not_index_separately(env):
 async def test_space_post_moderated_drops_index_entry(env):
     svc, bus, _ = env
     from social_home.domain.events import SpacePostCreated
-    await bus.publish(SpacePostCreated(post=_post("sp1", "moderated text"), space_id="sp-A"))
+
+    await bus.publish(
+        SpacePostCreated(post=_post("sp1", "moderated text"), space_id="sp-A")
+    )
     assert (await svc.search("moderated"))[0].ref_id == "sp1"
-    await bus.publish(SpacePostModerated(
-        space_id="sp-A", post=_post("sp1", "moderated text"),
-        moderated_by="admin",
-    ))
+    await bus.publish(
+        SpacePostModerated(
+            space_id="sp-A",
+            post=_post("sp1", "moderated text"),
+            moderated_by="admin",
+        )
+    )
     # Index entry removed.
     assert await svc.search("moderated") == []

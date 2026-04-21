@@ -18,10 +18,16 @@ class AbstractPublicSpaceRepo(Protocol):
     async def upsert(self, listing: PublicSpaceListing) -> None: ...
     async def list_active(self, *, limit: int = 50) -> list[PublicSpaceListing]: ...
     async def list_visible_for_user(
-        self, user_id: str, *, limit: int = 50, max_min_age: int | None = None,
+        self,
+        user_id: str,
+        *,
+        limit: int = 50,
+        max_min_age: int | None = None,
     ) -> list[PublicSpaceListing]: ...
     async def hide_for_user(self, user_id: str, space_id: str) -> None: ...
-    async def block_instance(self, instance_id: str, *, blocked_by: str, reason: str | None = None) -> None: ...
+    async def block_instance(
+        self, instance_id: str, *, blocked_by: str, reason: str | None = None
+    ) -> None: ...
     async def is_instance_blocked(self, instance_id: str) -> bool: ...
     async def purge_older_than(self, cutoff_iso: str) -> int: ...
 
@@ -55,9 +61,14 @@ class SqlitePublicSpaceRepo:
                 cached_at=excluded.cached_at
             """,
             (
-                listing.space_id, listing.instance_id, listing.name,
-                listing.description, listing.emoji,
-                listing.lat, listing.lon, listing.radius_km,
+                listing.space_id,
+                listing.instance_id,
+                listing.name,
+                listing.description,
+                listing.emoji,
+                listing.lat,
+                listing.lon,
+                listing.radius_km,
                 listing.member_count,
                 int(listing.min_age or 0),
                 listing.target_audience or "all",
@@ -75,7 +86,10 @@ class SqlitePublicSpaceRepo:
         return [_row(r) for r in rows_to_dicts(rows)]
 
     async def list_visible_for_user(
-        self, user_id: str, *, limit: int = 50,
+        self,
+        user_id: str,
+        *,
+        limit: int = 50,
         max_min_age: int | None = None,
     ) -> list[PublicSpaceListing]:
         """Return listings visible to *user_id* honouring age-gates.
@@ -111,7 +125,11 @@ class SqlitePublicSpaceRepo:
         )
 
     async def block_instance(
-        self, instance_id: str, *, blocked_by: str, reason: str | None = None,
+        self,
+        instance_id: str,
+        *,
+        blocked_by: str,
+        reason: str | None = None,
     ) -> None:
         await self._db.enqueue(
             """
@@ -151,7 +169,9 @@ def _row(r) -> PublicSpaceListing:
         name=r["name"],
         description=r["description"],
         emoji=r["emoji"],
-        lat=r["lat"], lon=r["lon"], radius_km=r["radius_km"],
+        lat=r["lat"],
+        lon=r["lon"],
+        radius_km=r["radius_km"],
         member_count=int(r["member_count"] or 0),
         cached_at=r["cached_at"],
         min_age=int(_get(r, "min_age") or 0),
@@ -162,5 +182,5 @@ def _row(r) -> PublicSpaceListing:
 def _get(row, key: str):
     try:
         return row[key]
-    except (KeyError, IndexError):
+    except KeyError, IndexError:
         return None

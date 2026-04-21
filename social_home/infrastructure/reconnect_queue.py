@@ -45,13 +45,13 @@ SYNC_CONCURRENCY: int = 4
 
 #: Priority floors. Higher number = lower priority. Smaller heap value
 #: → drained first.
-P1_SECURITY:    int = 1
-P2_STRUCTURAL:  int = 2
-P3_MEMBERSHIP:  int = 3
-P4_DM:          int = 4
-P5_CONTENT:     int = 5
+P1_SECURITY: int = 1
+P2_STRUCTURAL: int = 2
+P3_MEMBERSHIP: int = 3
+P4_DM: int = 4
+P5_CONTENT: int = 5
 P6_PRODUCTIVITY: int = 6
-P7_BULK:        int = 7
+P7_BULK: int = 7
 
 
 @dataclass(slots=True, order=True)
@@ -84,8 +84,13 @@ class ReconnectSyncQueue:
     """
 
     __slots__ = (
-        "_concurrency", "_heap", "_seq", "_workers",
-        "_event", "_stop", "_lock",
+        "_concurrency",
+        "_heap",
+        "_seq",
+        "_workers",
+        "_event",
+        "_stop",
+        "_lock",
     )
 
     def __init__(self, concurrency: int = SYNC_CONCURRENCY) -> None:
@@ -100,7 +105,7 @@ class ReconnectSyncQueue:
         # invariant — set by ``stop()`` to tell workers to drain + exit.
         self._event = asyncio.Event()
         self._stop = asyncio.Event()
-        self._stop.set()   # initial state: not running
+        self._stop.set()  # initial state: not running
         self._lock = asyncio.Lock()
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
@@ -112,9 +117,12 @@ class ReconnectSyncQueue:
         self._stop.clear()
         loop = asyncio.get_running_loop()
         for i in range(self._concurrency):
-            self._workers.append(loop.create_task(
-                self._worker(), name=f"ReconnectSyncQueueWorker-{i}",
-            ))
+            self._workers.append(
+                loop.create_task(
+                    self._worker(),
+                    name=f"ReconnectSyncQueueWorker-{i}",
+                )
+            )
 
     async def stop(self) -> None:
         """Signal workers to exit and wait for them to drain."""
@@ -136,7 +144,7 @@ class ReconnectSyncQueue:
     async def _await_safely(task: asyncio.Task) -> None:
         try:
             await task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError, Exception:
             pass
 
     # ─── Public API ───────────────────────────────────────────────────────
@@ -178,7 +186,9 @@ class ReconnectSyncQueue:
             except Exception as exc:
                 log.warning(
                     "ReconnectSyncQueue task failed (%s P%d): %s",
-                    item.description, item.priority, exc,
+                    item.description,
+                    item.priority,
+                    exc,
                 )
 
     async def _next_item(self) -> _QueueItem | None:

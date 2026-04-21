@@ -36,8 +36,8 @@ async def env(tmp_dir):
     )
     for username, uid, admin in [
         ("alice", "a-id", 1),
-        ("bob",   "b-id", 0),
-        ("eve",   "e-id", 0),
+        ("bob", "b-id", 0),
+        ("eve", "e-id", 0),
     ]:
         await db.enqueue(
             "INSERT INTO users(username, user_id, display_name, is_admin)"
@@ -57,11 +57,16 @@ async def env(tmp_dir):
         "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-1', 'b-id', 'member')",
     )
     cfg = Config(
-        data_dir=str(tmp_dir), db_path=str(tmp_dir / "t.db"),
-        media_path=str(tmp_dir / "media"), mode="standalone",
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "t.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
     )
     svc = GalleryService(
-        SqliteGalleryRepo(db), SqliteSpaceRepo(db), EventBus(), cfg,
+        SqliteGalleryRepo(db),
+        SqliteSpaceRepo(db),
+        EventBus(),
+        cfg,
     )
     yield svc
     await db.shutdown()
@@ -69,9 +74,12 @@ async def env(tmp_dir):
 
 # ─── Album CRUD permissions ──────────────────────────────────────────────
 
+
 async def test_create_album_member_succeeds(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="b-id", name="Trip 2026",
+        space_id="sp-1",
+        owner_user_id="b-id",
+        name="Trip 2026",
     )
     assert a.name == "Trip 2026"
     assert a.owner_user_id == "b-id"
@@ -80,13 +88,17 @@ async def test_create_album_member_succeeds(env):
 async def test_create_album_non_member_403(env):
     with pytest.raises(GalleryPermissionError):
         await env.create_album(
-            space_id="sp-1", owner_user_id="e-id", name="Hostile",
+            space_id="sp-1",
+            owner_user_id="e-id",
+            name="Hostile",
         )
 
 
 async def test_create_household_album_no_membership_check(env):
     a = await env.create_album(
-        space_id=None, owner_user_id="e-id", name="Personal",
+        space_id=None,
+        owner_user_id="e-id",
+        name="Personal",
     )
     assert a.space_id is None
 
@@ -94,14 +106,17 @@ async def test_create_household_album_no_membership_check(env):
 async def test_create_album_empty_name_422(env):
     with pytest.raises(ValueError):
         await env.create_album(
-            space_id="sp-1", owner_user_id="a-id", name="",
+            space_id="sp-1",
+            owner_user_id="a-id",
+            name="",
         )
 
 
 async def test_create_album_too_long_name_422(env):
     with pytest.raises(ValueError):
         await env.create_album(
-            space_id="sp-1", owner_user_id="a-id",
+            space_id="sp-1",
+            owner_user_id="a-id",
             name="x" * (NAME_MAX + 1),
         )
 
@@ -109,12 +124,15 @@ async def test_create_album_too_long_name_422(env):
 async def test_create_album_too_long_description_422(env):
     with pytest.raises(ValueError):
         await env.create_album(
-            space_id="sp-1", owner_user_id="a-id", name="X",
+            space_id="sp-1",
+            owner_user_id="a-id",
+            name="X",
             description="x" * (DESCRIPTION_MAX + 1),
         )
 
 
 # ─── List + get ──────────────────────────────────────────────────────────
+
 
 async def test_list_albums_member_succeeds(env):
     await env.create_album(space_id="sp-1", owner_user_id="a-id", name="A")
@@ -135,12 +153,17 @@ async def test_get_album_unknown_404(env):
 
 # ─── Update + delete permissions ─────────────────────────────────────────
 
+
 async def test_update_album_owner_succeeds(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="b-id", name="Original",
+        space_id="sp-1",
+        owner_user_id="b-id",
+        name="Original",
     )
     await env.update_album(
-        a.id, actor_user_id="b-id", name="Renamed",
+        a.id,
+        actor_user_id="b-id",
+        name="Renamed",
     )
     refreshed = await env.get_album(a.id, actor_user_id="b-id")
     assert refreshed.name == "Renamed"
@@ -148,27 +171,37 @@ async def test_update_album_owner_succeeds(env):
 
 async def test_update_album_space_admin_succeeds(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="b-id", name="Bobs",
+        space_id="sp-1",
+        owner_user_id="b-id",
+        name="Bobs",
     )
     # alice = space owner → counts as admin.
     await env.update_album(
-        a.id, actor_user_id="a-id", name="Admin renamed",
+        a.id,
+        actor_user_id="a-id",
+        name="Admin renamed",
     )
 
 
 async def test_update_album_other_user_403(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="b-id", name="Bobs",
+        space_id="sp-1",
+        owner_user_id="b-id",
+        name="Bobs",
     )
     with pytest.raises(GalleryPermissionError):
         await env.update_album(
-            a.id, actor_user_id="e-id", name="Hijack",
+            a.id,
+            actor_user_id="e-id",
+            name="Hijack",
         )
 
 
 async def test_delete_album_owner_succeeds(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="b-id", name="X",
+        space_id="sp-1",
+        owner_user_id="b-id",
+        name="X",
     )
     await env.delete_album(a.id, actor_user_id="b-id")
     with pytest.raises(GalleryNotFoundError):
@@ -182,9 +215,12 @@ async def test_delete_unknown_album_silent(env):
 
 # ─── Retention exemption ────────────────────────────────────────────────
 
+
 async def test_set_retention_exempt_owner_succeeds(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="a-id", name="Keep me",
+        space_id="sp-1",
+        owner_user_id="a-id",
+        name="Keep me",
     )
     await env.set_retention_exempt(a.id, True, actor_user_id="a-id")
     refreshed = await env.get_album(a.id, actor_user_id="a-id")
@@ -193,9 +229,13 @@ async def test_set_retention_exempt_owner_succeeds(env):
 
 async def test_set_retention_exempt_non_owner_403(env):
     a = await env.create_album(
-        space_id="sp-1", owner_user_id="a-id", name="X",
+        space_id="sp-1",
+        owner_user_id="a-id",
+        name="X",
     )
     with pytest.raises(GalleryPermissionError):
         await env.set_retention_exempt(
-            a.id, True, actor_user_id="b-id",
+            a.id,
+            True,
+            actor_user_id="b-id",
         )

@@ -32,7 +32,7 @@ class PageLockExpiryScheduler:
         *,
         interval_seconds: float = 30.0,
     ) -> None:
-        self._repo     = repo
+        self._repo = repo
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -50,7 +50,7 @@ class PageLockExpiryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -60,11 +60,12 @@ class PageLockExpiryScheduler:
                 released = await self._repo.release_expired_locks()
                 if released:
                     log.debug("page-lock: released %d expired locks", released)
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("page-lock loop failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue

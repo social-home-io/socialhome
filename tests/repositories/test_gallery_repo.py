@@ -38,22 +38,29 @@ async def env(tmp_dir):
 
 def _album(album_id: str = "alb-1", *, space_id: str | None = "sp-1") -> GalleryAlbum:
     return GalleryAlbum(
-        id=album_id, space_id=space_id, owner_user_id="a-id",
-        name=f"Album {album_id}", description="d",
+        id=album_id,
+        space_id=space_id,
+        owner_user_id="a-id",
+        name=f"Album {album_id}",
+        description="d",
     )
 
 
 def _item(item_id: str = "it-1", *, album_id: str = "alb-1") -> GalleryItem:
     return GalleryItem(
-        id=item_id, album_id=album_id, uploaded_by="a-id",
+        id=item_id,
+        album_id=album_id,
+        uploaded_by="a-id",
         item_type="photo",
         url=f"/api/media/{item_id}.webp",
         thumbnail_url=f"/api/media/{item_id}-thumb.jpg",
-        width=1920, height=1080,
+        width=1920,
+        height=1080,
     )
 
 
 # ─── Albums ──────────────────────────────────────────────────────────────
+
 
 async def test_create_then_get_album(env):
     _, repo = env
@@ -94,10 +101,14 @@ async def test_list_albums_orders_by_created_desc(env):
 async def test_update_album_only_allowed_keys(env):
     _, repo = env
     await repo.create_album(_album())
-    await repo.update_album("alb-1", {
-        "name": "Renamed", "description": "new",
-        "owner_user_id": "hijack",  # NOT allowed
-    })
+    await repo.update_album(
+        "alb-1",
+        {
+            "name": "Renamed",
+            "description": "new",
+            "owner_user_id": "hijack",  # NOT allowed
+        },
+    )
     got = await repo.get_album("alb-1")
     assert got.name == "Renamed"
     assert got.description == "new"
@@ -130,6 +141,7 @@ async def test_set_retention_exempt_wrong_space_no_op(env):
 
 
 # ─── Items ───────────────────────────────────────────────────────────────
+
 
 async def test_create_then_get_item(env):
     _, repo = env
@@ -182,6 +194,7 @@ async def test_get_first_item_thumbnail_empty_album(env):
 
 
 # ─── Domain helpers ──────────────────────────────────────────────────────
+
 
 def test_to_thumbnail_dict_excludes_full_url():
     """S-9: thumbnail-only projection must NOT carry the full ``url``."""

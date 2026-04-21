@@ -115,7 +115,7 @@ class CalendarService:
                 raise ValueError(f"invalid datetime: {value!r}") from exc
 
         start_dt = _parse_dt(start)
-        end_dt   = _parse_dt(end)
+        end_dt = _parse_dt(end)
         if end_dt < start_dt:
             raise ValueError("event end must not be before start")
 
@@ -200,10 +200,10 @@ class CalendarService:
             start=new_start,
             end=new_end,
             all_day=bool(all_day) if all_day is not None else existing.all_day,
-            description=description if description is not None
-                        else existing.description,
-            attendees=tuple(attendees) if attendees is not None
-                      else existing.attendees,
+            description=description
+            if description is not None
+            else existing.description,
+            attendees=tuple(attendees) if attendees is not None else existing.attendees,
             rrule=rrule if rrule is not None else existing.rrule,
         )
         await self._repo.save_event(updated)
@@ -270,7 +270,7 @@ class SpaceCalendarService:
             raise ValueError("end must be at or after start")
         event = CalendarEvent(
             id=uuid.uuid4().hex,
-            calendar_id=space_id,    # space-scoped events use space_id as calendar_id
+            calendar_id=space_id,  # space-scoped events use space_id as calendar_id
             summary=summary,
             description=description,
             start=start_dt,
@@ -324,7 +324,7 @@ class SpaceCalendarService:
         if not new_summary:
             raise ValueError("event summary must not be empty")
         new_start = _parse_iso(start) if start else existing.start
-        new_end   = _parse_iso(end)   if end   else existing.end
+        new_end = _parse_iso(end) if end else existing.end
         if new_end < new_start:
             raise ValueError("event end must not be before start")
 
@@ -334,7 +334,9 @@ class SpaceCalendarService:
             start=new_start,
             end=new_end,
             all_day=bool(all_day) if all_day is not None else existing.all_day,
-            description=description if description is not None else existing.description,
+            description=description
+            if description is not None
+            else existing.description,
             attendees=tuple(attendees) if attendees is not None else existing.attendees,
             rrule=rrule if rrule is not None else existing.rrule,
         )
@@ -344,14 +346,22 @@ class SpaceCalendarService:
         return updated
 
     async def rsvp(
-        self, *, event_id: str, user_id: str, status: str,
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        status: str,
     ) -> None:
         if status not in RSVPStatus.ALL:
             raise ValueError(f"invalid RSVP status: {status!r}")
-        await self._repo.upsert_rsvp(CalendarRSVP(
-            event_id=event_id, user_id=user_id, status=status,
-            updated_at=datetime.now(timezone.utc).isoformat(),
-        ))
+        await self._repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=event_id,
+                user_id=user_id,
+                status=status,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
 
     async def remove_rsvp(self, *, event_id: str, user_id: str) -> None:
         await self._repo.remove_rsvp(event_id, user_id)

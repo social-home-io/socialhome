@@ -26,7 +26,8 @@ class HouseholdThemeView(BaseView):
         data = await self.body()
         if not isinstance(data, dict):
             return web.json_response(
-                {"error": "body must be an object"}, status=422,
+                {"error": "body must be an object"},
+                status=422,
             )
         svc = self.svc(K.theme_service_key)
         theme = await svc.update_household_theme(
@@ -63,7 +64,8 @@ class SpaceThemeView(BaseView):
         data = await self.body()
         if not isinstance(data, dict):
             return web.json_response(
-                {"error": "body must be an object"}, status=422,
+                {"error": "body must be an object"},
+                status=422,
             )
         svc = self.svc(K.theme_service_key)
         theme = await svc.update_space_theme(

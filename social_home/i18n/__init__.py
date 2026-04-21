@@ -48,7 +48,9 @@ class Catalog:
     # ─── Loading ──────────────────────────────────────────────────────────
 
     @classmethod
-    def from_directory(cls, path: str | Path, *, default_locale: str = _DEFAULT_LOCALE) -> "Catalog":
+    def from_directory(
+        cls, path: str | Path, *, default_locale: str = _DEFAULT_LOCALE
+    ) -> "Catalog":
         """Load every ``{locale}.json`` file under ``path``."""
         catalog = cls(default_locale=default_locale)
         d = Path(path)

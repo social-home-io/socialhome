@@ -19,17 +19,19 @@ class ShoppingCollectionView(BaseView):
         items = await self.svc(shopping_service_key).list_items(
             include_completed=include_completed,
         )
-        return self._json([
-            {
-                "id":           i.id,
-                "text":         i.text,
-                "completed":    i.completed,
-                "created_by":   i.created_by,
-                "created_at":   i.created_at,
-                "completed_at": i.completed_at,
-            }
-            for i in items
-        ])
+        return self._json(
+            [
+                {
+                    "id": i.id,
+                    "text": i.text,
+                    "completed": i.completed,
+                    "created_by": i.created_by,
+                    "created_at": i.created_at,
+                    "completed_at": i.completed_at,
+                }
+                for i in items
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -40,9 +42,9 @@ class ShoppingCollectionView(BaseView):
         )
         return self._json(
             {
-                "id":         item.id,
-                "text":       item.text,
-                "completed":  item.completed,
+                "id": item.id,
+                "text": item.text,
+                "completed": item.completed,
                 "created_by": item.created_by,
                 "created_at": item.created_at,
             },

@@ -7,7 +7,8 @@ from .conftest import _auth
 
 async def test_auto_pair_via_requires_fields(client):
     r = await client.post(
-        "/api/pairing/auto-pair-via", json={},
+        "/api/pairing/auto-pair-via",
+        json={},
         headers=_auth(client._tok),
     )
     assert r.status == 422
@@ -27,7 +28,8 @@ async def test_auto_pair_via_unknown_peer(client):
 
 async def test_auto_pair_requests_empty_inbox(client):
     r = await client.get(
-        "/api/pairing/auto-pair-requests", headers=_auth(client._tok),
+        "/api/pairing/auto-pair-requests",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     assert await r.json() == []
@@ -36,7 +38,8 @@ async def test_auto_pair_requests_empty_inbox(client):
 async def test_auto_pair_approve_missing_returns_404(client):
     r = await client.post(
         "/api/pairing/auto-pair-requests/missing-id/approve",
-        json={}, headers=_auth(client._tok),
+        json={},
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -44,6 +47,7 @@ async def test_auto_pair_approve_missing_returns_404(client):
 async def test_auto_pair_decline_missing_returns_404(client):
     r = await client.post(
         "/api/pairing/auto-pair-requests/missing-id/decline",
-        json={}, headers=_auth(client._tok),
+        json={},
+        headers=_auth(client._tok),
     )
     assert r.status == 404

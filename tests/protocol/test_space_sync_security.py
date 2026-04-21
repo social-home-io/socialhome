@@ -40,6 +40,7 @@ pytestmark = pytest.mark.security
 
 # ─── Stubs ──────────────────────────────────────────────────────────────
 
+
 class _AadCheckingCrypto:
     """Reject when (space_id, epoch, sync_id) AAD doesn't match what was
     used to encrypt. Mirrors the real AES-GCM behaviour in a pure-Python
@@ -51,12 +52,14 @@ class _AadCheckingCrypto:
 
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
         import base64
+
         aad = f"{space_id}:{self.epoch}:{sync_id}".encode("utf-8")
         blob = aad + b"|" + plaintext
         return self.epoch, base64.urlsafe_b64encode(blob).decode("ascii")
 
     async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
         import base64
+
         blob = base64.urlsafe_b64decode(ciphertext)
         expected = f"{space_id}:{epoch}:{sync_id}".encode("utf-8")
         aad, _, body = blob.partition(b"|")
@@ -85,7 +88,9 @@ class _Stub:
         self.saved.append(member)
         return member
 
-    async def ban_member(self, *, space_id, user_id, banned_by, identity_pk=None, reason=None):
+    async def ban_member(
+        self, *, space_id, user_id, banned_by, identity_pk=None, reason=None
+    ):
         self.saved.append((space_id, user_id, banned_by, reason))
 
     async def add_comment(self, comment):
@@ -147,14 +152,16 @@ def _sign(envelope: dict, kp) -> dict:
     enc = FederationEncoder(kp.private_key)
     signed = {k: v for k, v in envelope.items() if k != "signatures"}
     envelope["signatures"] = enc.sign_envelope_all(
-        orjson.dumps(signed), suite="ed25519",
+        orjson.dumps(signed),
+        suite="ed25519",
     )
     return envelope
 
 
 async def _encrypt(crypto, *, space_id, sync_id, records):
     _, ct = await crypto.encrypt_chunk(
-        space_id=space_id, sync_id=sync_id,
+        space_id=space_id,
+        sync_id=sync_id,
         plaintext=orjson.dumps({"records": records}),
     )
     return ct
@@ -168,18 +175,30 @@ async def test_forged_signature_is_rejected(env):
     imposter = generate_identity_keypair()
     ct = await _encrypt(
         _AadCheckingCrypto(),
-        space_id="sp-1", sync_id="sync-1",
-        records=[{"user_id": "u-bad", "role": "member",
-                  "joined_at": "2026-04-18T00:00:00+00:00"}],
+        space_id="sp-1",
+        sync_id="sync-1",
+        records=[
+            {
+                "user_id": "u-bad",
+                "role": "member",
+                "joined_at": "2026-04-18T00:00:00+00:00",
+            }
+        ],
     )
     envelope = {
-        "sync_id": "sync-1", "resource": "members", "space_id": "sp-1",
-        "epoch": 0, "seq_start": 0, "seq_end": 1, "is_last": False,
+        "sync_id": "sync-1",
+        "resource": "members",
+        "space_id": "sp-1",
+        "epoch": 0,
+        "seq_start": 0,
+        "seq_end": 1,
+        "is_last": False,
         "encrypted_payload": ct,
     }
-    _sign(envelope, imposter)                            # wrong signer
+    _sign(envelope, imposter)  # wrong signer
     await env.receiver.on_chunk(
-        serialise_chunk(envelope), from_instance="peer-a",
+        serialise_chunk(envelope),
+        from_instance="peer-a",
     )
     assert env.stub.saved == []
 
@@ -190,19 +209,30 @@ async def test_mismatched_sync_id_triggers_aad_decrypt_failure(env):
     """
     ct = await _encrypt(
         _AadCheckingCrypto(),
-        space_id="sp-1", sync_id="sync-ORIGINAL",
-        records=[{"user_id": "u-1", "role": "member",
-                  "joined_at": "2026-04-18T00:00:00+00:00"}],
+        space_id="sp-1",
+        sync_id="sync-ORIGINAL",
+        records=[
+            {
+                "user_id": "u-1",
+                "role": "member",
+                "joined_at": "2026-04-18T00:00:00+00:00",
+            }
+        ],
     )
     envelope = {
-        "sync_id": "sync-REPLAY",                       # tampered
-        "resource": "members", "space_id": "sp-1",
-        "epoch": 0, "seq_start": 0, "seq_end": 1, "is_last": False,
+        "sync_id": "sync-REPLAY",  # tampered
+        "resource": "members",
+        "space_id": "sp-1",
+        "epoch": 0,
+        "seq_start": 0,
+        "seq_end": 1,
+        "is_last": False,
         "encrypted_payload": ct,
     }
     _sign(envelope, env.peer_kp)
     await env.receiver.on_chunk(
-        serialise_chunk(envelope), from_instance="peer-a",
+        serialise_chunk(envelope),
+        from_instance="peer-a",
     )
     assert env.stub.saved == []
 
@@ -213,18 +243,24 @@ async def test_unknown_resource_drops(env):
     """
     ct = await _encrypt(
         _AadCheckingCrypto(),
-        space_id="sp-1", sync_id="sync-1",
+        space_id="sp-1",
+        sync_id="sync-1",
         records=[{"whatever": "value"}],
     )
     envelope = {
-        "sync_id": "sync-1", "resource": "not_a_resource",
+        "sync_id": "sync-1",
+        "resource": "not_a_resource",
         "space_id": "sp-1",
-        "epoch": 0, "seq_start": 0, "seq_end": 1, "is_last": False,
+        "epoch": 0,
+        "seq_start": 0,
+        "seq_end": 1,
+        "is_last": False,
         "encrypted_payload": ct,
     }
     _sign(envelope, env.peer_kp)
     await env.receiver.on_chunk(
-        serialise_chunk(envelope), from_instance="peer-a",
+        serialise_chunk(envelope),
+        from_instance="peer-a",
     )
     assert env.stub.saved == []
 
@@ -241,11 +277,14 @@ async def test_tampered_sentinel_does_not_fire_completion(env):
 
     env.bus.subscribe(SpaceSyncComplete, _on_complete)
     sentinel = {
-        "sync_id": "sync-1", "resource": SENTINEL_RESOURCE,
-        "space_id": "sp-1", "is_last": True,
-        "signatures": {"ed25519": "0" * 128},            # bogus
+        "sync_id": "sync-1",
+        "resource": SENTINEL_RESOURCE,
+        "space_id": "sp-1",
+        "is_last": True,
+        "signatures": {"ed25519": "0" * 128},  # bogus
     }
     await env.receiver.on_chunk(
-        serialise_chunk(sentinel), from_instance="peer-a",
+        serialise_chunk(sentinel),
+        from_instance="peer-a",
     )
     assert captured == []

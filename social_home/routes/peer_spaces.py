@@ -45,22 +45,28 @@ class PeerSpaceCollectionView(BaseView):
                     inst.display_name or iid,
                     inst.status is PairingStatus.CONFIRMED,
                 )
-        return web.json_response([
-            {
-                "space_id":          e.space_id,
-                "host_instance_id":  e.instance_id,
-                "host_display_name": host_info.get(e.instance_id, (e.instance_id, False))[0],
-                "host_is_paired":    host_info.get(e.instance_id, (e.instance_id, False))[1],
-                "name":              e.name,
-                "description":       e.description,
-                "emoji":             e.emoji,
-                "member_count":      e.member_count,
-                "join_mode":         e.join_mode,
-                "min_age":           e.min_age,
-                "target_audience":   e.target_audience,
-            }
-            for e in entries
-            # A peer must be CONFIRMED — don't show orphan cache rows
-            # for instances we've since unpaired.
-            if host_info.get(e.instance_id, ("", False))[1]
-        ])
+        return web.json_response(
+            [
+                {
+                    "space_id": e.space_id,
+                    "host_instance_id": e.instance_id,
+                    "host_display_name": host_info.get(
+                        e.instance_id, (e.instance_id, False)
+                    )[0],
+                    "host_is_paired": host_info.get(
+                        e.instance_id, (e.instance_id, False)
+                    )[1],
+                    "name": e.name,
+                    "description": e.description,
+                    "emoji": e.emoji,
+                    "member_count": e.member_count,
+                    "join_mode": e.join_mode,
+                    "min_age": e.min_age,
+                    "target_audience": e.target_audience,
+                }
+                for e in entries
+                # A peer must be CONFIRMED — don't show orphan cache rows
+                # for instances we've since unpaired.
+                if host_info.get(e.instance_id, ("", False))[1]
+            ]
+        )

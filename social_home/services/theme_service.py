@@ -17,18 +17,31 @@ from ..repositories.theme_repo import (
 
 
 #: Household fields callers are permitted to patch.
-_HOUSEHOLD_ALLOWED = frozenset({
-    "primary_color", "accent_color",
-    "surface_color", "surface_dark",
-    "mode", "font_family", "density", "corner_radius",
-})
+_HOUSEHOLD_ALLOWED = frozenset(
+    {
+        "primary_color",
+        "accent_color",
+        "surface_color",
+        "surface_dark",
+        "mode",
+        "font_family",
+        "density",
+        "corner_radius",
+    }
+)
 
 #: Space fields callers are permitted to patch.
-_SPACE_ALLOWED = frozenset({
-    "primary_color", "accent_color",
-    "header_image_file", "background_tint",
-    "mode_override", "font_family", "post_layout",
-})
+_SPACE_ALLOWED = frozenset(
+    {
+        "primary_color",
+        "accent_color",
+        "header_image_file",
+        "background_tint",
+        "mode_override",
+        "font_family",
+        "post_layout",
+    }
+)
 
 
 class ThemeService:

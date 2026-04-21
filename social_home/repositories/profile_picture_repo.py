@@ -30,7 +30,8 @@ def compute_picture_hash(bytes_webp: bytes) -> str:
 class AbstractProfilePictureRepo(Protocol):
     # Household -----------------------------------------------------------
     async def get_user_picture(
-        self, user_id: str,
+        self,
+        user_id: str,
     ) -> tuple[bytes, str] | None: ...
     async def set_user_picture(
         self,
@@ -45,7 +46,9 @@ class AbstractProfilePictureRepo(Protocol):
 
     # Space -------------------------------------------------------------
     async def get_member_picture(
-        self, space_id: str, user_id: str,
+        self,
+        space_id: str,
+        user_id: str,
     ) -> tuple[bytes, str] | None: ...
     async def set_member_picture(
         self,
@@ -58,7 +61,9 @@ class AbstractProfilePictureRepo(Protocol):
         height: int,
     ) -> None: ...
     async def clear_member_picture(
-        self, space_id: str, user_id: str,
+        self,
+        space_id: str,
+        user_id: str,
     ) -> None: ...
 
 
@@ -71,11 +76,11 @@ class SqliteProfilePictureRepo:
     # ── Household pictures ─────────────────────────────────────────────
 
     async def get_user_picture(
-        self, user_id: str,
+        self,
+        user_id: str,
     ) -> tuple[bytes, str] | None:
         row = await self._db.fetchone(
-            "SELECT bytes_webp, hash FROM user_profile_pictures "
-            "WHERE user_id=?",
+            "SELECT bytes_webp, hash FROM user_profile_pictures WHERE user_id=?",
             (user_id,),
         )
         if row is None:
@@ -115,7 +120,9 @@ class SqliteProfilePictureRepo:
     # ── Space-scoped pictures ──────────────────────────────────────────
 
     async def get_member_picture(
-        self, space_id: str, user_id: str,
+        self,
+        space_id: str,
+        user_id: str,
     ) -> tuple[bytes, str] | None:
         row = await self._db.fetchone(
             "SELECT bytes_webp, hash FROM space_member_profile_pictures "
@@ -152,10 +159,11 @@ class SqliteProfilePictureRepo:
         )
 
     async def clear_member_picture(
-        self, space_id: str, user_id: str,
+        self,
+        space_id: str,
+        user_id: str,
     ) -> None:
         await self._db.enqueue(
-            "DELETE FROM space_member_profile_pictures "
-            "WHERE space_id=? AND user_id=?",
+            "DELETE FROM space_member_profile_pictures WHERE space_id=? AND user_id=?",
             (space_id, user_id),
         )

@@ -32,11 +32,12 @@ from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
 #: §23.15 auction anti-snipe: bids arriving within this window of the
 #: close-time push the close-time back by :data:`SNIPE_EXTEND_SECONDS`.
-SNIPE_WINDOW_SECONDS:  int = 5 * 60
-SNIPE_EXTEND_SECONDS:  int = 5 * 60
+SNIPE_WINDOW_SECONDS: int = 5 * 60
+SNIPE_EXTEND_SECONDS: int = 5 * 60
 
 
 # ─── Bid state-machine errors ─────────────────────────────────────────────
+
 
 class BidStateError(Exception):
     """Raised when a bid transition would violate the OFFER state machine."""
@@ -49,10 +50,15 @@ class AbstractBazaarRepo(Protocol):
     async def get_listing(self, post_id: str) -> BazaarListing | None: ...
     async def list_active(self) -> list[BazaarListing]: ...
     async def list_by_seller(self, seller_user_id: str) -> list[BazaarListing]: ...
-    async def list_expired(self, *, now_iso: str | None = None) -> list[BazaarListing]: ...
+    async def list_expired(
+        self, *, now_iso: str | None = None
+    ) -> list[BazaarListing]: ...
     async def mark_sold(
-        self, post_id: str, *,
-        winner_user_id: str, winning_price: int,
+        self,
+        post_id: str,
+        *,
+        winner_user_id: str,
+        winning_price: int,
     ) -> None: ...
     async def mark_expired(self, post_id: str) -> None: ...
     async def mark_cancelled(self, post_id: str) -> None: ...
@@ -64,7 +70,10 @@ class AbstractBazaarRepo(Protocol):
     async def highest_bid(self, post_id: str) -> BazaarBid | None: ...
     async def accept_offer(self, bid_id: str) -> None: ...
     async def reject_offer(
-        self, bid_id: str, *, reason: str | None = None,
+        self,
+        bid_id: str,
+        *,
+        reason: str | None = None,
     ) -> None: ...
     async def withdraw_bid(self, bid_id: str) -> None: ...
 
@@ -105,12 +114,21 @@ class SqliteBazaarRepo:
                 sold_at=excluded.sold_at
             """,
             (
-                listing.post_id, listing.seller_user_id, listing.mode.value,
-                listing.title, listing.description,
+                listing.post_id,
+                listing.seller_user_id,
+                listing.mode.value,
+                listing.title,
+                listing.description,
                 dump_json(list(listing.image_urls)),
-                listing.end_time, listing.currency, listing.status.value,
-                listing.price, listing.start_price, listing.step_price,
-                listing.winner_user_id, listing.winning_price, listing.sold_at,
+                listing.end_time,
+                listing.currency,
+                listing.status.value,
+                listing.price,
+                listing.start_price,
+                listing.step_price,
+                listing.winner_user_id,
+                listing.winning_price,
+                listing.sold_at,
                 listing.created_at,
             ),
         )
@@ -118,7 +136,8 @@ class SqliteBazaarRepo:
 
     async def get_listing(self, post_id: str) -> BazaarListing | None:
         row = await self._db.fetchone(
-            "SELECT * FROM bazaar_listings WHERE post_id=?", (post_id,),
+            "SELECT * FROM bazaar_listings WHERE post_id=?",
+            (post_id,),
         )
         return _row_to_listing(row_to_dict(row))
 
@@ -127,24 +146,23 @@ class SqliteBazaarRepo:
             "SELECT * FROM bazaar_listings WHERE status='active' "
             "ORDER BY created_at DESC",
         )
-        return [
-            lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst
-        ]
+        return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
 
     async def list_by_seller(
-        self, seller_user_id: str,
+        self,
+        seller_user_id: str,
     ) -> list[BazaarListing]:
         rows = await self._db.fetchall(
             "SELECT * FROM bazaar_listings WHERE seller_user_id=? "
             "ORDER BY created_at DESC",
             (seller_user_id,),
         )
-        return [
-            lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst
-        ]
+        return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
 
     async def list_expired(
-        self, *, now_iso: str | None = None,
+        self,
+        *,
+        now_iso: str | None = None,
     ) -> list[BazaarListing]:
         cutoff = now_iso or datetime.now(timezone.utc).isoformat()
         rows = await self._db.fetchall(
@@ -155,15 +173,17 @@ class SqliteBazaarRepo:
             """,
             (cutoff,),
         )
-        return [
-            lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst
-        ]
+        return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
 
     async def mark_sold(
-        self, post_id: str, *,
-        winner_user_id: str, winning_price: int,
+        self,
+        post_id: str,
+        *,
+        winner_user_id: str,
+        winning_price: int,
     ) -> None:
         """Atomic status transition ``active`` → ``sold`` with winner stamp."""
+
         def _run(conn):
             cur = conn.execute(
                 """
@@ -210,19 +230,16 @@ class SqliteBazaarRepo:
         ``end_time`` by :data:`SNIPE_EXTEND_SECONDS`. The service
         returns the updated deadline so the WS broadcast can carry it.
         """
+
         def _run(conn):
             row = conn.execute(
                 "SELECT status, mode, end_time FROM bazaar_listings WHERE post_id=?",
                 (bid.listing_post_id,),
             ).fetchone()
             if row is None:
-                raise ValueError(
-                    f"listing {bid.listing_post_id!r} not found"
-                )
+                raise ValueError(f"listing {bid.listing_post_id!r} not found")
             if row[0] != BazaarStatus.ACTIVE.value:
-                raise ValueError(
-                    f"listing {bid.listing_post_id!r} is not active"
-                )
+                raise ValueError(f"listing {bid.listing_post_id!r} is not active")
             conn.execute(
                 """
                 INSERT INTO bazaar_bids(
@@ -232,10 +249,15 @@ class SqliteBazaarRepo:
                 ) VALUES(?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
                 """,
                 (
-                    bid.id, bid.listing_post_id, bid.bidder_user_id,
-                    int(bid.amount), bid.message,
-                    int(bid.accepted), int(bid.rejected),
-                    bid.rejection_reason, int(bid.withdrawn),
+                    bid.id,
+                    bid.listing_post_id,
+                    bid.bidder_user_id,
+                    int(bid.amount),
+                    bid.message,
+                    int(bid.accepted),
+                    int(bid.rejected),
+                    bid.rejection_reason,
+                    int(bid.withdrawn),
                     bid.created_at,
                 ),
             )
@@ -248,13 +270,11 @@ class SqliteBazaarRepo:
                     )
                     if end_dt.tzinfo is None:
                         end_dt = end_dt.replace(tzinfo=timezone.utc)
-                except (ValueError, AttributeError):
+                except ValueError, AttributeError:
                     return
                 now = datetime.now(timezone.utc)
-                if (
-                    end_dt > now
-                    and (end_dt - now)
-                    <= timedelta(seconds=SNIPE_WINDOW_SECONDS)
+                if end_dt > now and (end_dt - now) <= timedelta(
+                    seconds=SNIPE_WINDOW_SECONDS
                 ):
                     new_end = (
                         now + timedelta(seconds=SNIPE_EXTEND_SECONDS)
@@ -269,19 +289,17 @@ class SqliteBazaarRepo:
 
     async def get_bid(self, bid_id: str) -> BazaarBid | None:
         row = await self._db.fetchone(
-            "SELECT * FROM bazaar_bids WHERE id=?", (bid_id,),
+            "SELECT * FROM bazaar_bids WHERE id=?",
+            (bid_id,),
         )
         return _row_to_bid(row_to_dict(row))
 
     async def list_bids(self, post_id: str) -> list[BazaarBid]:
         rows = await self._db.fetchall(
-            "SELECT * FROM bazaar_bids WHERE listing_post_id=? "
-            "ORDER BY created_at",
+            "SELECT * FROM bazaar_bids WHERE listing_post_id=? ORDER BY created_at",
             (post_id,),
         )
-        return [
-            b for b in (_row_to_bid(d) for d in rows_to_dicts(rows)) if b
-        ]
+        return [b for b in (_row_to_bid(d) for d in rows_to_dicts(rows)) if b]
 
     async def highest_bid(self, post_id: str) -> BazaarBid | None:
         """Return the single highest *non-withdrawn* bid, or ``None``.
@@ -307,6 +325,7 @@ class SqliteBazaarRepo:
         offers transition to ``rejected`` with the standard "another offer
         was accepted" reason.
         """
+
         def _run(conn):
             # Check target is pending
             row = conn.execute(
@@ -318,9 +337,7 @@ class SqliteBazaarRepo:
                 raise ValueError(f"bid {bid_id!r} not found")
             listing_post_id = row[0]
             if row[1] or row[2] or row[3]:
-                raise BidStateError(
-                    f"bid {bid_id!r} is not pending — cannot accept"
-                )
+                raise BidStateError(f"bid {bid_id!r} is not pending — cannot accept")
             conn.execute(
                 "UPDATE bazaar_bids SET accepted=1 WHERE id=?",
                 (bid_id,),
@@ -340,12 +357,14 @@ class SqliteBazaarRepo:
         await self._db.transact(_run)
 
     async def reject_offer(
-        self, bid_id: str, *, reason: str | None = None,
+        self,
+        bid_id: str,
+        *,
+        reason: str | None = None,
     ) -> None:
         def _run(conn):
             row = conn.execute(
-                "SELECT accepted, rejected, withdrawn "
-                "FROM bazaar_bids WHERE id=?",
+                "SELECT accepted, rejected, withdrawn FROM bazaar_bids WHERE id=?",
                 (bid_id,),
             ).fetchone()
             if row is None:
@@ -355,8 +374,7 @@ class SqliteBazaarRepo:
                     f"bid {bid_id!r} already accepted or withdrawn — cannot reject"
                 )
             conn.execute(
-                "UPDATE bazaar_bids SET rejected=1, rejection_reason=? "
-                "WHERE id=?",
+                "UPDATE bazaar_bids SET rejected=1, rejection_reason=? WHERE id=?",
                 (reason, bid_id),
             )
 
@@ -365,24 +383,23 @@ class SqliteBazaarRepo:
     async def withdraw_bid(self, bid_id: str) -> None:
         def _run(conn):
             row = conn.execute(
-                "SELECT accepted, rejected, withdrawn "
-                "FROM bazaar_bids WHERE id=?",
+                "SELECT accepted, rejected, withdrawn FROM bazaar_bids WHERE id=?",
                 (bid_id,),
             ).fetchone()
             if row is None:
                 raise ValueError(f"bid {bid_id!r} not found")
             if row[0] or row[1] or row[2]:
-                raise BidStateError(
-                    f"bid {bid_id!r} is not pending — cannot withdraw"
-                )
+                raise BidStateError(f"bid {bid_id!r} is not pending — cannot withdraw")
             conn.execute(
-                "UPDATE bazaar_bids SET withdrawn=1 WHERE id=?", (bid_id,),
+                "UPDATE bazaar_bids SET withdrawn=1 WHERE id=?",
+                (bid_id,),
             )
 
         await self._db.transact(_run)
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
+
 
 def _row_to_listing(row: dict | None) -> BazaarListing | None:
     if row is None:
@@ -426,7 +443,10 @@ def _row_to_bid(row: dict | None) -> BazaarBid | None:
 
 
 def new_bid(
-    *, listing_post_id: str, bidder_user_id: str, amount: int,
+    *,
+    listing_post_id: str,
+    bidder_user_id: str,
+    amount: int,
     message: str | None = None,
 ) -> BazaarBid:
     return BazaarBid(

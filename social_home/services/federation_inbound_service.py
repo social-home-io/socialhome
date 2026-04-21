@@ -151,14 +151,16 @@ class FederationInboundService:
         await self._conversation_repo.save_message(msg)
 
         recipients = tuple(p.get("recipient_user_ids") or ())
-        await self._bus.publish(DmMessageCreated(
-            conversation_id=conv_id,
-            message_id=message_id,
-            sender_user_id=sender_user_id,
-            sender_display_name=str(p.get("sender_display_name") or sender_user_id),
-            recipient_user_ids=tuple(str(r) for r in recipients),
-            content=content,
-        ))
+        await self._bus.publish(
+            DmMessageCreated(
+                conversation_id=conv_id,
+                message_id=message_id,
+                sender_user_id=sender_user_id,
+                sender_display_name=str(p.get("sender_display_name") or sender_user_id),
+                recipient_user_ids=tuple(str(r) for r in recipients),
+                content=content,
+            )
+        )
 
     async def _on_dm_deleted(self, event: "FederationEvent") -> None:
         message_id = str(event.payload.get("message_id") or "")
@@ -236,7 +238,8 @@ class FederationInboundService:
         await self._space_post_repo.increment_comment_count(post_id)
         await self._bus.publish(
             CommentAdded(
-                post_id=post_id, comment=comment,
+                post_id=post_id,
+                comment=comment,
                 space_id=str(p.get("space_id") or event.space_id or "") or None,
             ),
         )
@@ -269,7 +272,8 @@ class FederationInboundService:
         await self._space_post_repo.decrement_comment_count(post_id)
         await self._bus.publish(
             CommentDeleted(
-                post_id=post_id, comment_id=comment_id,
+                post_id=post_id,
+                comment_id=comment_id,
                 space_id=str(p.get("space_id") or event.space_id or "") or None,
             ),
         )
@@ -316,7 +320,8 @@ class FederationInboundService:
         await self._space_repo.delete_member(space_id, user_id)
 
     async def _on_space_member_profile_updated(
-        self, event: "FederationEvent",
+        self,
+        event: "FederationEvent",
     ) -> None:
         p = event.payload
         space_id = event.space_id or str(p.get("space_id") or "")
@@ -334,33 +339,40 @@ class FederationInboundService:
             try:
                 raw = base64.b64decode(bytes_b64)
                 webp = await ImageProcessor().generate_thumbnail(
-                    raw, size=PROFILE_PICTURE_MAX_DIMENSION,
+                    raw,
+                    size=PROFILE_PICTURE_MAX_DIMENSION,
                 )
                 local_hash = compute_picture_hash(webp)
                 await self._profile_picture_repo.set_member_picture(
-                    space_id, user_id,
+                    space_id,
+                    user_id,
                     bytes_webp=webp,
                     hash=local_hash,
                     width=PROFILE_PICTURE_MAX_DIMENSION,
                     height=PROFILE_PICTURE_MAX_DIMENSION,
                 )
                 picture_hash = local_hash
-            except Exception as exc:       # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.warning(
-                    "SPACE_MEMBER_PROFILE_UPDATED: bad blob for "
-                    "%s in %s: %s", user_id, space_id, exc,
+                    "SPACE_MEMBER_PROFILE_UPDATED: bad blob for %s in %s: %s",
+                    user_id,
+                    space_id,
+                    exc,
                 )
         await self._space_repo.set_member_profile(
-            space_id, user_id,
+            space_id,
+            user_id,
             space_display_name=p.get("space_display_name"),
             picture_hash=picture_hash,
         )
-        await self._bus.publish(SpaceMemberProfileUpdated(
-            space_id=space_id,
-            user_id=user_id,
-            space_display_name=p.get("space_display_name"),
-            picture_hash=picture_hash,
-        ))
+        await self._bus.publish(
+            SpaceMemberProfileUpdated(
+                space_id=space_id,
+                user_id=user_id,
+                space_display_name=p.get("space_display_name"),
+                picture_hash=picture_hash,
+            )
+        )
 
     # ── User-profile handlers ──────────────────────────────────────────
 
@@ -427,7 +439,8 @@ class FederationInboundService:
             try:
                 raw = base64.b64decode(bytes_b64)
                 webp = await ImageProcessor().generate_thumbnail(
-                    raw, size=PROFILE_PICTURE_MAX_DIMENSION,
+                    raw,
+                    size=PROFILE_PICTURE_MAX_DIMENSION,
                 )
                 local_hash = compute_picture_hash(webp)
                 await self._profile_picture_repo.set_user_picture(
@@ -438,10 +451,11 @@ class FederationInboundService:
                     height=PROFILE_PICTURE_MAX_DIMENSION,
                 )
                 picture_hash = local_hash
-            except Exception as exc:      # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.warning(
                     "USER_UPDATED: rejected remote picture for %s: %s",
-                    user_id, exc,
+                    user_id,
+                    exc,
                 )
 
         remote = RemoteUser(

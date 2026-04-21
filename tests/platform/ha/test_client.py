@@ -10,22 +10,25 @@ from social_home.platform.ha.client import HaClient, build_ha_client
 
 # ─── Fake HA server ──────────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def ha_server(aiohttp_server):
     """Mount a minimal in-process HA REST fake and return (server, captured)."""
     captured: dict = {"requests": []}
 
     async def _record(request: web.Request, body: dict | None = None) -> None:
-        captured["requests"].append({
-            "method": request.method,
-            "path":   request.path,
-            "query":  dict(request.query),
-            "headers": {
-                "Authorization":   request.headers.get("Authorization"),
-                "X-Speech-Content": request.headers.get("X-Speech-Content"),
-            },
-            "body": body,
-        })
+        captured["requests"].append(
+            {
+                "method": request.method,
+                "path": request.path,
+                "query": dict(request.query),
+                "headers": {
+                    "Authorization": request.headers.get("Authorization"),
+                    "X-Speech-Content": request.headers.get("X-Speech-Content"),
+                },
+                "body": body,
+            }
+        )
 
     async def api_root(request: web.Request) -> web.Response:
         await _record(request)
@@ -33,10 +36,12 @@ async def ha_server(aiohttp_server):
 
     async def states_list(request: web.Request) -> web.Response:
         await _record(request)
-        return web.json_response([
-            {"entity_id": "person.pascal", "attributes": {}},
-            {"entity_id": "light.kitchen", "attributes": {}},
-        ])
+        return web.json_response(
+            [
+                {"entity_id": "person.pascal", "attributes": {}},
+                {"entity_id": "light.kitchen", "attributes": {}},
+            ]
+        )
 
     async def state_by_id(request: web.Request) -> web.Response:
         await _record(request)
@@ -82,6 +87,7 @@ async def ha_server(aiohttp_server):
 @pytest.fixture
 async def session():
     import aiohttp
+
     async with aiohttp.ClientSession() as s:
         yield s
 
@@ -94,9 +100,13 @@ def client(session, ha_server):
 
 # ─── Factory ─────────────────────────────────────────────────────────────
 
+
 def test_build_ha_client_direct(session):
     c = build_ha_client(
-        session, supervisor_token="", ha_url="http://ha.local:8123/", ha_token="t",
+        session,
+        supervisor_token="",
+        ha_url="http://ha.local:8123/",
+        ha_token="t",
     )
     assert c.base_url == "http://ha.local:8123"
 
@@ -112,6 +122,7 @@ def test_build_ha_client_supervisor_overrides(session):
 
 
 # ─── Call paths ──────────────────────────────────────────────────────────
+
 
 async def test_verify_token_uses_supplied_token_header(client, ha_server):
     _, captured = ha_server
@@ -140,7 +151,8 @@ async def test_get_config_success(client):
 async def test_call_service_appends_return_response(client, ha_server):
     _, captured = ha_server
     result = await client.call_service(
-        "ai_task", "generate_data",
+        "ai_task",
+        "generate_data",
         {"instructions": "x"},
         return_response=True,
     )
@@ -151,7 +163,9 @@ async def test_call_service_appends_return_response(client, ha_server):
 async def test_call_service_plain(client, ha_server):
     _, captured = ha_server
     result = await client.call_service(
-        "notify", "mobile_app_pascal", {"title": "hi", "message": "m"},
+        "notify",
+        "mobile_app_pascal",
+        {"title": "hi", "message": "m"},
     )
     assert result == {}
     assert captured["requests"][-1]["query"] == {}
@@ -169,8 +183,11 @@ async def test_stream_stt_sends_metadata_header(client, ha_server):
         yield b"frame2"
 
     result = await client.stream_stt(
-        "stt.whisper", _audio(),
-        language="en", sample_rate=16000, channels=1,
+        "stt.whisper",
+        _audio(),
+        language="en",
+        sample_rate=16000,
+        channels=1,
     )
     assert result == {"result": "success", "text": "hi"}
     last = captured["requests"][-1]

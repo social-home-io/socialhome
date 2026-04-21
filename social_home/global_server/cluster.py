@@ -34,21 +34,21 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-HEARTBEAT_INTERVAL_S:        int = 30
-HEARTBEAT_FAIL_THRESHOLD:    int = 3
-SYNC_RETRY_DELAY_S:          int = 5
-CLUSTER_RATE_LIMIT_PER_MIN:  int = 60
+HEARTBEAT_INTERVAL_S: int = 30
+HEARTBEAT_FAIL_THRESHOLD: int = 3
+SYNC_RETRY_DELAY_S: int = 5
+CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 
 
 # ─── NODE_* message types ───────────────────────────────────────────────
 
-NODE_HELLO        = "NODE_HELLO"
-NODE_HEARTBEAT    = "NODE_HEARTBEAT"
-NODE_SYNC_CLIENT  = "NODE_SYNC_CLIENT"
-NODE_SYNC_SPACE   = "NODE_SYNC_SPACE"
-NODE_SYNC_REPORT  = "NODE_SYNC_REPORT"     # Phase Z — fraud aggregation
-NODE_RELAY        = "NODE_RELAY"
-NODE_POLICY_PUSH  = "NODE_POLICY_PUSH"
+NODE_HELLO = "NODE_HELLO"
+NODE_HEARTBEAT = "NODE_HEARTBEAT"
+NODE_SYNC_CLIENT = "NODE_SYNC_CLIENT"
+NODE_SYNC_SPACE = "NODE_SYNC_SPACE"
+NODE_SYNC_REPORT = "NODE_SYNC_REPORT"  # Phase Z — fraud aggregation
+NODE_RELAY = "NODE_RELAY"
+NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
 
 
 class ClusterService:
@@ -60,10 +60,18 @@ class ClusterService:
     """
 
     __slots__ = (
-        "_repo", "_admin_repo", "_fed_repo",
-        "_node_id", "_self_url", "_peers", "_signing_key", "_own_pk_hex",
-        "_enabled", "_heartbeat_task",
-        "_fail_counts", "_seen_relays",
+        "_repo",
+        "_admin_repo",
+        "_fed_repo",
+        "_node_id",
+        "_self_url",
+        "_peers",
+        "_signing_key",
+        "_own_pk_hex",
+        "_enabled",
+        "_heartbeat_task",
+        "_fail_counts",
+        "_seen_relays",
     )
 
     def __init__(
@@ -96,9 +104,13 @@ class ClusterService:
     # ─── Back-compat single-node stub API ─────────────────────────────
 
     async def announce(self, node_id: str, address: str) -> None:
-        await self._repo.upsert_node(ClusterNode(
-            node_id=node_id, url=address, status="online",
-        ))
+        await self._repo.upsert_node(
+            ClusterNode(
+                node_id=node_id,
+                url=address,
+                status="online",
+            )
+        )
 
     async def list_nodes(self) -> list[ClusterNode]:
         return await self._repo.list_nodes()
@@ -124,7 +136,7 @@ class ClusterService:
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError, Exception:
                 pass
             self._heartbeat_task = None
 
@@ -133,12 +145,12 @@ class ClusterService:
         rows = await self._repo.list_nodes()
         return {
             "node_id": self._node_id,
-            "status":  "online" if self._enabled else "single-node",
+            "status": "online" if self._enabled else "single-node",
             "peers": [
                 {
-                    "node_id":   r.node_id,
-                    "url":       r.url,
-                    "status":    r.status,
+                    "node_id": r.node_id,
+                    "url": r.url,
+                    "status": r.status,
                     "last_seen": r.last_seen,
                 }
                 for r in rows
@@ -148,32 +160,47 @@ class ClusterService:
     # ─── Outbound NODE_* broadcasts ──────────────────────────────────
 
     async def sync_client(
-        self, client: ClientInstance, *, action: str = "upsert",
+        self,
+        client: ClientInstance,
+        *,
+        action: str = "upsert",
     ) -> None:
         if not self._enabled:
             return
-        await self._broadcast(NODE_SYNC_CLIENT, {
-            "action": action,
-            "client_instance": _client_to_wire(client),
-        })
+        await self._broadcast(
+            NODE_SYNC_CLIENT,
+            {
+                "action": action,
+                "client_instance": _client_to_wire(client),
+            },
+        )
 
     async def sync_space(
-        self, space: GlobalSpace, *, action: str = "upsert",
+        self,
+        space: GlobalSpace,
+        *,
+        action: str = "upsert",
     ) -> None:
         if not self._enabled:
             return
-        await self._broadcast(NODE_SYNC_SPACE, {
-            "action": action,
-            "global_space": _space_to_wire(space),
-        })
+        await self._broadcast(
+            NODE_SYNC_SPACE,
+            {
+                "action": action,
+                "global_space": _space_to_wire(space),
+            },
+        )
 
     async def sync_report(self, report: GfsFraudReport) -> None:
         """Phase Z — propagate a fraud report to every peer."""
         if not self._enabled:
             return
-        await self._broadcast(NODE_SYNC_REPORT, {
-            "report": _report_to_wire(report),
-        })
+        await self._broadcast(
+            NODE_SYNC_REPORT,
+            {
+                "report": _report_to_wire(report),
+            },
+        )
 
     async def sync_policy(self, policy: dict) -> None:
         if not self._enabled:
@@ -181,31 +208,43 @@ class ClusterService:
         await self._broadcast(NODE_POLICY_PUSH, policy)
 
     async def relay_to_peers(
-        self, space_id: str, envelope: dict,
-        *, session: aiohttp.ClientSession | None = None,
+        self,
+        space_id: str,
+        envelope: dict,
+        *,
+        session: aiohttp.ClientSession | None = None,
     ) -> None:
         """Forward a post-relay to peer nodes (fire-and-forget)."""
         if not self._enabled:
             return
-        asyncio.create_task(self._broadcast(
-            NODE_RELAY,
-            {"space_id": space_id, "envelope": envelope},
-            ignore_errors=True, session=session,
-        ))
+        asyncio.create_task(
+            self._broadcast(
+                NODE_RELAY,
+                {"space_id": space_id, "envelope": envelope},
+                ignore_errors=True,
+                session=session,
+            )
+        )
 
     # ─── Admin-portal entry points ────────────────────────────────────
 
     async def add_peer(self, peer_url: str) -> ClusterNode:
         """Admin added a peer URL via the portal. Upsert + send NODE_HELLO."""
         node = ClusterNode(
-            node_id=peer_url, url=peer_url, status="unknown",
+            node_id=peer_url,
+            url=peer_url,
+            status="unknown",
         )
         await self._repo.upsert_node(node)
         try:
             await self._post_to_peer(
-                peer_url, NODE_HELLO,
-                {"node_id": self._node_id, "url": self._self_url,
-                 "public_key": self._own_pk_hex},
+                peer_url,
+                NODE_HELLO,
+                {
+                    "node_id": self._node_id,
+                    "url": self._self_url,
+                    "public_key": self._own_pk_hex,
+                },
                 session=None,
             )
         except Exception:
@@ -221,28 +260,42 @@ class ClusterService:
     # ─── Inbound NODE_* handlers ─────────────────────────────────────
 
     async def handle_hello(
-        self, from_node_id: str, url: str, public_key_hex: str,
+        self,
+        from_node_id: str,
+        url: str,
+        public_key_hex: str,
     ) -> None:
-        await self._repo.upsert_node(ClusterNode(
-            node_id=from_node_id, url=url, public_key=public_key_hex,
-            status="online", last_seen=_now_iso(),
-        ))
+        await self._repo.upsert_node(
+            ClusterNode(
+                node_id=from_node_id,
+                url=url,
+                public_key=public_key_hex,
+                status="online",
+                last_seen=_now_iso(),
+            )
+        )
 
     async def handle_heartbeat(self, from_node_id: str) -> None:
         rows = await self._repo.list_nodes()
         for r in rows:
             if r.node_id == from_node_id:
-                await self._repo.upsert_node(ClusterNode(
-                    node_id=r.node_id, url=r.url,
-                    public_key=r.public_key, status="online",
-                    last_seen=_now_iso(),
-                    added_at=r.added_at,
-                    active_sync_sessions=r.active_sync_sessions,
-                ))
+                await self._repo.upsert_node(
+                    ClusterNode(
+                        node_id=r.node_id,
+                        url=r.url,
+                        public_key=r.public_key,
+                        status="online",
+                        last_seen=_now_iso(),
+                        added_at=r.added_at,
+                        active_sync_sessions=r.active_sync_sessions,
+                    )
+                )
                 return
 
     async def apply_sync_client(
-        self, action: str, client_instance: dict,
+        self,
+        action: str,
+        client_instance: dict,
     ) -> None:
         """Inbound NODE_SYNC_CLIENT — LWW with ban-wins rule."""
         if self._fed_repo is None:
@@ -254,7 +307,9 @@ class ClusterService:
         await self._fed_repo.upsert_instance(instance)
 
     async def apply_sync_space(
-        self, action: str, global_space: dict,
+        self,
+        action: str,
+        global_space: dict,
     ) -> None:
         if self._fed_repo is None:
             return
@@ -270,15 +325,14 @@ class ClusterService:
             return
         try:
             report = _wire_to_report(report_dict)
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             return
         await self._admin_repo.save_fraud_report(report)
 
     async def apply_policy_push(self, policy: dict) -> None:
         if self._admin_repo is None:
             return
-        for key in ("auto_accept_clients", "auto_accept_spaces",
-                    "fraud_threshold"):
+        for key in ("auto_accept_clients", "auto_accept_spaces", "fraud_threshold"):
             if key in policy:
                 await self._admin_repo.set_config(key, str(policy[key]))
 
@@ -297,8 +351,8 @@ class ClusterService:
 
     async def _announce_to_peers(self) -> None:
         msg = {
-            "node_id":    self._node_id,
-            "url":        self._self_url,
+            "node_id": self._node_id,
+            "url": self._self_url,
             "public_key": self._own_pk_hex,
         }
         for peer_url in self._peers:
@@ -319,29 +373,40 @@ class ClusterService:
                     fails = self._fail_counts.get(r.url, 0)
                     if ok:
                         self._fail_counts[r.url] = 0
-                        await self._repo.upsert_node(ClusterNode(
-                            node_id=r.node_id, url=r.url,
-                            public_key=r.public_key, status="online",
-                            last_seen=_now_iso(),
-                            added_at=r.added_at,
-                            active_sync_sessions=r.active_sync_sessions,
-                        ))
+                        await self._repo.upsert_node(
+                            ClusterNode(
+                                node_id=r.node_id,
+                                url=r.url,
+                                public_key=r.public_key,
+                                status="online",
+                                last_seen=_now_iso(),
+                                added_at=r.added_at,
+                                active_sync_sessions=r.active_sync_sessions,
+                            )
+                        )
                     else:
                         self._fail_counts[r.url] = fails + 1
                         if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:
-                            await self._repo.upsert_node(ClusterNode(
-                                node_id=r.node_id, url=r.url,
-                                public_key=r.public_key, status="offline",
-                                last_seen=r.last_seen,
-                                added_at=r.added_at,
-                                active_sync_sessions=r.active_sync_sessions,
-                            ))
+                            await self._repo.upsert_node(
+                                ClusterNode(
+                                    node_id=r.node_id,
+                                    url=r.url,
+                                    public_key=r.public_key,
+                                    status="offline",
+                                    last_seen=r.last_seen,
+                                    added_at=r.added_at,
+                                    active_sync_sessions=r.active_sync_sessions,
+                                )
+                            )
         except asyncio.CancelledError:
             return
 
     async def _broadcast(
-        self, msg_type: str, payload: dict,
-        *, ignore_errors: bool = False,
+        self,
+        msg_type: str,
+        payload: dict,
+        *,
+        ignore_errors: bool = False,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         rows = await self._repo.list_nodes()
@@ -358,12 +423,17 @@ class ClusterService:
                 await asyncio.sleep(SYNC_RETRY_DELAY_S)
                 try:
                     await self._post_to_peer(
-                        r.url, msg_type, payload, session=session,
+                        r.url,
+                        msg_type,
+                        payload,
+                        session=session,
                     )
                 except Exception as exc2:
                     log.warning(
                         "cluster: %s to %s dropped after retry: %s",
-                        msg_type, r.url, exc2,
+                        msg_type,
+                        r.url,
+                        exc2,
                     )
 
     async def _post_to_peer(
@@ -375,17 +445,20 @@ class ClusterService:
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         body = {
-            "type":    msg_type,
-            "from":    self._node_id,
-            "ts":      int(time.time()),
+            "type": msg_type,
+            "from": self._node_id,
+            "ts": int(time.time()),
             "payload": payload,
         }
         canonical = json.dumps(
-            body, separators=(",", ":"), sort_keys=True,
+            body,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("utf-8")
         sig = (
             b64url_encode(sign_ed25519(self._signing_key, canonical))
-            if self._signing_key else ""
+            if self._signing_key
+            else ""
         )
         own_session = session is None
         active = session if session is not None else aiohttp.ClientSession()
@@ -394,9 +467,9 @@ class ClusterService:
                 f"{peer_url.rstrip('/')}/cluster/sync",
                 data=canonical,
                 headers={
-                    "Content-Type":       "application/json",
-                    "X-Node-Signature":   sig,
-                    "X-Node-Id":          self._node_id,
+                    "Content-Type": "application/json",
+                    "X-Node-Signature": sig,
+                    "X-Node-Id": self._node_id,
                 },
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
@@ -429,17 +502,18 @@ class ClusterService:
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).isoformat()
 
 
 def _client_to_wire(c: ClientInstance) -> dict:
     return {
-        "instance_id":  c.instance_id,
+        "instance_id": c.instance_id,
         "display_name": c.display_name,
-        "public_key":   c.public_key,
+        "public_key": c.public_key,
         "endpoint_url": c.endpoint_url,
-        "status":       c.status,
-        "auto_accept":  c.auto_accept,
+        "status": c.status,
+        "auto_accept": c.auto_accept,
         "connected_at": c.connected_at,
     }
 
@@ -458,19 +532,19 @@ def _wire_to_client(d: dict) -> ClientInstance:
 
 def _space_to_wire(s: GlobalSpace) -> dict:
     return {
-        "space_id":         s.space_id,
-        "owning_instance":  s.owning_instance,
-        "name":             s.name,
-        "description":      s.description,
-        "about_markdown":   s.about_markdown,
-        "cover_url":        s.cover_url,
-        "min_age":          s.min_age,
-        "target_audience":  s.target_audience,
-        "accent_color":     s.accent_color,
-        "status":           s.status,
+        "space_id": s.space_id,
+        "owning_instance": s.owning_instance,
+        "name": s.name,
+        "description": s.description,
+        "about_markdown": s.about_markdown,
+        "cover_url": s.cover_url,
+        "min_age": s.min_age,
+        "target_audience": s.target_audience,
+        "accent_color": s.accent_color,
+        "status": s.status,
         "subscriber_count": s.subscriber_count,
-        "posts_per_week":   s.posts_per_week,
-        "published_at":     s.published_at,
+        "posts_per_week": s.posts_per_week,
+        "published_at": s.published_at,
     }
 
 
@@ -494,15 +568,15 @@ def _wire_to_space(d: dict) -> GlobalSpace:
 
 def _report_to_wire(r: GfsFraudReport) -> dict:
     return {
-        "id":                    r.id,
-        "target_type":           r.target_type,
-        "target_id":             r.target_id,
-        "category":              r.category,
-        "notes":                 r.notes,
-        "reporter_instance_id":  r.reporter_instance_id,
-        "reporter_user_id":      r.reporter_user_id,
-        "status":                r.status,
-        "created_at":            r.created_at,
+        "id": r.id,
+        "target_type": r.target_type,
+        "target_id": r.target_id,
+        "category": r.category,
+        "notes": r.notes,
+        "reporter_instance_id": r.reporter_instance_id,
+        "reporter_user_id": r.reporter_user_id,
+        "status": r.status,
+        "created_at": r.created_at,
     }
 
 
@@ -524,13 +598,15 @@ def _wire_to_report(d: dict) -> GfsFraudReport:
 
 
 def verify_node_signature(
-    canonical_body: bytes, signature_b64url: str, public_key_hex: str,
+    canonical_body: bytes,
+    signature_b64url: str,
+    public_key_hex: str,
 ) -> bool:
     if not signature_b64url or not public_key_hex:
         return False
     try:
         raw_key = bytes.fromhex(public_key_hex)
         raw_sig = b64url_decode(signature_b64url)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
     return verify_ed25519(raw_key, canonical_body, raw_sig)

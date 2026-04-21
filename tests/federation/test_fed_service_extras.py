@@ -39,8 +39,11 @@ async def env(tmp_dir):
     bus = EventBus()
     kek = KeyManager.from_data_dir(tmp_dir)
     svc = FederationService(
-        db=db, federation_repo=fed_repo, outbox_repo=outbox,
-        key_manager=kek, bus=bus,
+        db=db,
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=kek,
+        bus=bus,
         own_instance_id=own_iid,
         own_identity_seed=own_kp.private_key,
         own_identity_pk=own_kp.public_key,
@@ -50,6 +53,7 @@ async def env(tmp_dir):
 
 
 # ─── Property accessors ──────────────────────────────────────────────────
+
 
 async def test_own_instance_id_property(env):
     svc, _, _, own_iid, _ = env
@@ -63,6 +67,7 @@ async def test_own_identity_seed_property(env):
 
 # ─── set_ice_servers ────────────────────────────────────────────────────
 
+
 async def test_set_ice_servers_replaces_value(env):
     svc, _, _, _, _ = env
     svc.set_ice_servers([{"urls": ["stun:x"]}])
@@ -72,6 +77,7 @@ async def test_set_ice_servers_replaces_value(env):
 
 
 # ─── send_event error paths ──────────────────────────────────────────────
+
 
 async def test_send_event_unknown_instance(env):
     svc, _, _, _, _ = env
@@ -90,11 +96,14 @@ async def test_send_event_failed_session_decrypt(env):
     # Save with a malformed session-key blob — KEK decrypt will fail.
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote="garbage:bytes",
         key_remote_to_self="garbage:bytes",
-        remote_webhook_url="https://x/wh", local_webhook_id="wh",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
     result = await svc.send_event(
@@ -114,10 +123,13 @@ async def test_send_event_transport_error(env):
     wrapped = kek.encrypt(session_key)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
         remote_webhook_url="https://nonexistent.invalid/wh",
-        local_webhook_id="wh", status=PairingStatus.CONFIRMED,
+        local_webhook_id="wh",
+        status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
@@ -138,10 +150,12 @@ async def test_send_event_transport_error(env):
 
 # ─── broadcast_to_peers — empty + with explicit list ────────────────────
 
+
 async def test_broadcast_to_peers_no_peers(env):
     svc, _, _, _, _ = env
     result = await svc.broadcast_to_peers(
-        event_type=FederationEventType.PRESENCE_UPDATED, payload={},
+        event_type=FederationEventType.PRESENCE_UPDATED,
+        payload={},
     )
     assert result.attempted == 0
     assert result.all_ok is False
@@ -150,7 +164,8 @@ async def test_broadcast_to_peers_no_peers(env):
 async def test_broadcast_to_peers_explicit_list_unknown(env):
     svc, _, _, _, _ = env
     result = await svc.broadcast_to_peers(
-        event_type=FederationEventType.PRESENCE_UPDATED, payload={},
+        event_type=FederationEventType.PRESENCE_UPDATED,
+        payload={},
         instance_ids=["unknown-1", "unknown-2"],
     )
     assert result.attempted == 2

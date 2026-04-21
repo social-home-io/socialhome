@@ -32,17 +32,20 @@ def test_derive_instance_id_deterministic():
     kp = generate_identity_keypair()
     assert derive_instance_id(kp.public_key) == derive_instance_id(kp.public_key)
 
+
 def test_derive_instance_id_length():
     """derive_instance_id produces a 32-character string."""
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     assert len(iid) == 32
 
+
 def test_derive_instance_id_different_keys_differ():
     """Two different keypairs yield different instance IDs."""
     a = generate_identity_keypair()
     b = generate_identity_keypair()
     assert derive_instance_id(a.public_key) != derive_instance_id(b.public_key)
+
 
 def test_derive_instance_id_rejects_bad_key_length():
     """derive_instance_id raises ValueError for a key shorter than 32 bytes."""
@@ -53,18 +56,27 @@ def test_derive_instance_id_rejects_bad_key_length():
 def test_derive_user_id_deterministic():
     """derive_user_id is stable for a given key and username."""
     kp = generate_identity_keypair()
-    assert derive_user_id(kp.public_key, "alice") == derive_user_id(kp.public_key, "alice")
+    assert derive_user_id(kp.public_key, "alice") == derive_user_id(
+        kp.public_key, "alice"
+    )
+
 
 def test_derive_user_id_different_username():
     """Different usernames yield different user IDs."""
     kp = generate_identity_keypair()
-    assert derive_user_id(kp.public_key, "alice") != derive_user_id(kp.public_key, "bob")
+    assert derive_user_id(kp.public_key, "alice") != derive_user_id(
+        kp.public_key, "bob"
+    )
+
 
 def test_derive_user_id_different_key():
     """Same username under different instance keys yields different IDs."""
     a = generate_identity_keypair()
     b = generate_identity_keypair()
-    assert derive_user_id(a.public_key, "alice") != derive_user_id(b.public_key, "alice")
+    assert derive_user_id(a.public_key, "alice") != derive_user_id(
+        b.public_key, "alice"
+    )
+
 
 def test_derive_user_id_empty_username_rejected():
     """Empty username raises ValueError."""
@@ -80,11 +92,13 @@ def test_ed25519_sign_verify():
     sig = sign_ed25519(kp.private_key, msg)
     assert verify_ed25519(kp.public_key, msg, sig)
 
+
 def test_ed25519_wrong_message():
     """Verification fails when the message does not match the signature."""
     kp = generate_identity_keypair()
     sig = sign_ed25519(kp.private_key, b"hello")
     assert not verify_ed25519(kp.public_key, b"wrong", sig)
+
 
 def test_ed25519_wrong_key():
     """Verification fails when a different public key is used."""
@@ -102,12 +116,15 @@ def test_x25519_shared_secret_agreement():
     s2 = x25519_exchange(b.private_key, a.public_key)
     assert s1 == s2
 
+
 def test_x25519_different_peers_different_secrets():
     """A and B share a secret distinct from A and C."""
     a = generate_x25519_keypair()
     b = generate_x25519_keypair()
     c = generate_x25519_keypair()
-    assert x25519_exchange(a.private_key, b.public_key) != x25519_exchange(a.private_key, c.public_key)
+    assert x25519_exchange(a.private_key, b.public_key) != x25519_exchange(
+        a.private_key, c.public_key
+    )
 
 
 def test_user_identity_assertion_sign_and_verify():
@@ -117,14 +134,23 @@ def test_user_identity_assertion_sign_and_verify():
     uid = derive_user_id(kp.public_key, "pascal")
     issued = datetime.now(timezone.utc).isoformat()
     sig = sign_user_assertion(
-        kp.private_key, user_id=uid, instance_id=iid,
-        username="pascal", display_name="Pascal", issued_at=issued,
+        kp.private_key,
+        user_id=uid,
+        instance_id=iid,
+        username="pascal",
+        display_name="Pascal",
+        issued_at=issued,
     )
     a = UserIdentityAssertion(
-        user_id=uid, instance_id=iid, username="pascal",
-        display_name="Pascal", issued_at=issued, signature=sig,
+        user_id=uid,
+        instance_id=iid,
+        username="pascal",
+        display_name="Pascal",
+        issued_at=issued,
+        signature=sig,
     )
     verify_user_identity_assertion(a, kp.public_key)
+
 
 def test_user_identity_assertion_tampered_display_name():
     """A tampered display_name invalidates the signature."""
@@ -133,15 +159,24 @@ def test_user_identity_assertion_tampered_display_name():
     uid = derive_user_id(kp.public_key, "pascal")
     issued = datetime.now(timezone.utc).isoformat()
     sig = sign_user_assertion(
-        kp.private_key, user_id=uid, instance_id=iid,
-        username="pascal", display_name="Pascal", issued_at=issued,
+        kp.private_key,
+        user_id=uid,
+        instance_id=iid,
+        username="pascal",
+        display_name="Pascal",
+        issued_at=issued,
     )
     bad = UserIdentityAssertion(
-        user_id=uid, instance_id=iid, username="pascal",
-        display_name="TAMPERED", issued_at=issued, signature=sig,
+        user_id=uid,
+        instance_id=iid,
+        username="pascal",
+        display_name="TAMPERED",
+        issued_at=issued,
+        signature=sig,
     )
     with pytest.raises(ValueError, match="Invalid"):
         verify_user_identity_assertion(bad, kp.public_key)
+
 
 def test_user_identity_assertion_wrong_instance_id():
     """A mismatched instance_id is caught before verifying the signature."""
@@ -150,12 +185,20 @@ def test_user_identity_assertion_wrong_instance_id():
     uid = derive_user_id(kp.public_key, "pascal")
     issued = datetime.now(timezone.utc).isoformat()
     sig = sign_user_assertion(
-        kp.private_key, user_id=uid, instance_id=iid,
-        username="pascal", display_name="P", issued_at=issued,
+        kp.private_key,
+        user_id=uid,
+        instance_id=iid,
+        username="pascal",
+        display_name="P",
+        issued_at=issued,
     )
     bad = UserIdentityAssertion(
-        user_id=uid, instance_id="wrong_id", username="pascal",
-        display_name="P", issued_at=issued, signature=sig,
+        user_id=uid,
+        instance_id="wrong_id",
+        username="pascal",
+        display_name="P",
+        issued_at=issued,
+        signature=sig,
     )
     with pytest.raises(ValueError, match="instance_id"):
         verify_user_identity_assertion(bad, kp.public_key)
@@ -173,11 +216,13 @@ def test_replay_cache_seen_twice():
     assert rc.seen("x") is False
     assert rc.seen("x") is True
 
+
 def test_replay_cache_different_ids_independent():
     """Seeing ID 'a' does not mark ID 'b' as seen."""
     rc = ReplayCache()
     rc.seen("a")
     assert rc.seen("b") is False
+
 
 def test_replay_cache_load_from_persistence():
     """Replay IDs loaded from storage are immediately considered seen."""
@@ -192,18 +237,22 @@ def test_crypto_helpers_random_token():
     t = random_token(32)
     assert len(t) > 40
 
+
 def test_crypto_helpers_sha256_hex_bytes():
     """sha256_hex on bytes returns lowercase hex of length 64."""
     assert len(sha256_hex(b"hello")) == 64
+
 
 def test_crypto_helpers_sha256_hex_str():
     """sha256_hex on str auto-encodes to utf-8, matching the bytes result."""
     assert sha256_hex("hello") == sha256_hex(b"hello")
 
+
 def test_crypto_helpers_generate_routing_secret():
     """Routing secret is 64 hex chars (32 bytes)."""
     s = generate_routing_secret()
     assert len(s) == 64
+
 
 def test_crypto_helpers_keyed_hash():
     """keyed_hash returns a 32-byte HMAC-SHA256 digest."""
@@ -212,6 +261,7 @@ def test_crypto_helpers_keyed_hash():
 
 
 # ─── Defensive edge paths ─────────────────────────────────────────────────
+
 
 def test_verify_ed25519_bad_key_length():
     """verify_ed25519 returns False for wrong-length public key."""

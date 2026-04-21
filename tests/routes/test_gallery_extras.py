@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 
-
 from .conftest import _auth
 
 
 # ─── Unauth ──────────────────────────────────────────────────────────────
+
 
 async def test_get_album_unauth_401(client):
     r = await client.get("/api/gallery/albums/x")
@@ -50,6 +50,7 @@ async def test_create_space_album_unauth_401(client):
 
 
 # ─── Edge cases ─────────────────────────────────────────────────────────
+
 
 async def test_create_space_album_non_member_403(client):
     db = client._db

@@ -1,4 +1,5 @@
 """Full route coverage for shopping endpoints."""
+
 from .conftest import _auth
 
 

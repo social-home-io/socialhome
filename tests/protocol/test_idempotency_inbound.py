@@ -33,7 +33,8 @@ pytestmark = pytest.mark.security
 
 def _build_inbound(
     *,
-    own_iid: str, own_pk: bytes,
+    own_iid: str,
+    own_pk: bytes,
     peer_kp,
     session_key: bytes,
     payload: dict,
@@ -91,16 +92,23 @@ async def env(tmp_dir):
     wrapped = kek.encrypt(session_key)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh", local_webhook_id="wh-peer",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh-peer",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
 
     svc = FederationService(
-        db=db, federation_repo=fed_repo, outbox_repo=outbox,
-        key_manager=kek, bus=bus,
+        db=db,
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=kek,
+        bus=bus,
         own_instance_id=own_iid,
         own_identity_seed=own_kp.private_key,
         own_identity_pk=own_kp.public_key,
@@ -109,8 +117,12 @@ async def env(tmp_dir):
     svc.attach_idempotency_cache(cache)
 
     yield {
-        "svc": svc, "own_iid": own_iid, "own_pk": own_kp.public_key,
-        "peer_kp": peer_kp, "session_key": session_key, "peer": peer,
+        "svc": svc,
+        "own_iid": own_iid,
+        "own_pk": own_kp.public_key,
+        "peer_kp": peer_kp,
+        "session_key": session_key,
+        "peer": peer,
         "cache": cache,
     }
     await db.shutdown()
@@ -118,11 +130,14 @@ async def env(tmp_dir):
 
 # ─── Idempotency dedup ───────────────────────────────────────────────────
 
+
 async def test_inbound_idempotency_drops_duplicates(env):
     """Same idempotency_key sent twice → second call returns deduped flag."""
     body = _build_inbound(
-        own_iid=env["own_iid"], own_pk=env["own_pk"],
-        peer_kp=env["peer_kp"], session_key=env["session_key"],
+        own_iid=env["own_iid"],
+        own_pk=env["own_pk"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
         payload={"idempotency_key": "ik-1", "user_id": "alice"},
         msg_id="msg-1",
     )
@@ -130,8 +145,10 @@ async def test_inbound_idempotency_drops_duplicates(env):
     assert out["status"] == "ok"
 
     body2 = _build_inbound(
-        own_iid=env["own_iid"], own_pk=env["own_pk"],
-        peer_kp=env["peer_kp"], session_key=env["session_key"],
+        own_iid=env["own_iid"],
+        own_pk=env["own_pk"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
         payload={"idempotency_key": "ik-1", "user_id": "alice"},
         msg_id="msg-2",  # distinct msg_id so replay cache doesn't trip
     )
@@ -141,8 +158,10 @@ async def test_inbound_idempotency_drops_duplicates(env):
 
 async def test_inbound_no_idempotency_key_processes_normally(env):
     body = _build_inbound(
-        own_iid=env["own_iid"], own_pk=env["own_pk"],
-        peer_kp=env["peer_kp"], session_key=env["session_key"],
+        own_iid=env["own_iid"],
+        own_pk=env["own_pk"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
         payload={"user_id": "alice"},
         msg_id="msg-3",
     )
@@ -154,11 +173,15 @@ async def test_inbound_no_idempotency_key_processes_normally(env):
 async def test_inbound_distinct_idempotency_keys_both_processed(env):
     for ik, mid in [("ik-A", "m-A"), ("ik-B", "m-B")]:
         body = _build_inbound(
-            own_iid=env["own_iid"], own_pk=env["own_pk"],
-            peer_kp=env["peer_kp"], session_key=env["session_key"],
+            own_iid=env["own_iid"],
+            own_pk=env["own_pk"],
+            peer_kp=env["peer_kp"],
+            session_key=env["session_key"],
             payload={"idempotency_key": ik, "user_id": "alice"},
             msg_id=mid,
         )
-        out = await env["svc"].handle_inbound_webhook(env["peer"].local_webhook_id, body)
+        out = await env["svc"].handle_inbound_webhook(
+            env["peer"].local_webhook_id, body
+        )
         assert out["status"] == "ok"
         assert "deduped" not in out

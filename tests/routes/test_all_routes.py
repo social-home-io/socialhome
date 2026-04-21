@@ -16,11 +16,14 @@ async def test_healthz(client):
 
 # ── Feed routes ───────────────────────────────────────────────────────────
 
+
 async def test_feed_crud(client):
     """Full feed lifecycle: create → list → edit → react → comment → delete."""
     h = _auth(client._tok)
     # Create
-    r = await client.post("/api/feed/posts", json={"type": "text", "content": "Hello"}, headers=h)
+    r = await client.post(
+        "/api/feed/posts", json={"type": "text", "content": "Hello"}, headers=h
+    )
     assert r.status == 201
     pid = (await r.json())["id"]
     # List
@@ -32,19 +35,25 @@ async def test_feed_crud(client):
         r = await client.get(f"/api/feed?before={posts[-1]['created_at']}", headers=h)
         assert r.status == 200
     # Edit
-    r = await client.patch(f"/api/feed/posts/{pid}", json={"content": "Edited"}, headers=h)
+    r = await client.patch(
+        f"/api/feed/posts/{pid}", json={"content": "Edited"}, headers=h
+    )
     assert r.status == 200
     # Edit missing content field → 422
     r = await client.patch(f"/api/feed/posts/{pid}", json={}, headers=h)
     assert r.status == 422
     # Reaction add
-    r = await client.post(f"/api/feed/posts/{pid}/reactions", json={"emoji": "👍"}, headers=h)
+    r = await client.post(
+        f"/api/feed/posts/{pid}/reactions", json={"emoji": "👍"}, headers=h
+    )
     assert r.status == 200
     # Reaction remove
     r = await client.delete(f"/api/feed/posts/{pid}/reactions/👍", headers=h)
     assert r.status == 200
     # Comment
-    r = await client.post(f"/api/feed/posts/{pid}/comments", json={"content": "Nice!"}, headers=h)
+    r = await client.post(
+        f"/api/feed/posts/{pid}/comments", json={"content": "Nice!"}, headers=h
+    )
     assert r.status == 201
     # List comments
     r = await client.get(f"/api/feed/posts/{pid}/comments", headers=h)
@@ -53,21 +62,31 @@ async def test_feed_crud(client):
     r = await client.delete(f"/api/feed/posts/{pid}", headers=h)
     assert r.status == 204
     # Errors
-    r = await client.post("/api/feed/posts", json={"type": "text", "content": "  "}, headers=h)
+    r = await client.post(
+        "/api/feed/posts", json={"type": "text", "content": "  "}, headers=h
+    )
     assert r.status == 422
     r = await client.post("/api/feed/posts", json={"type": "bogus"}, headers=h)
     assert r.status == 422
-    r = await client.patch("/api/feed/posts/nonexistent", json={"content": "x"}, headers=h)
+    r = await client.patch(
+        "/api/feed/posts/nonexistent", json={"content": "x"}, headers=h
+    )
     assert r.status == 404
-    r = await client.post("/api/feed/posts/{pid}/reactions", json={"emoji": ""}, headers=h)
+    r = await client.post(
+        "/api/feed/posts/{pid}/reactions", json={"emoji": ""}, headers=h
+    )
     assert r.status in (404, 422)
     # Invalid JSON
-    r = await client.post("/api/feed/posts", data="not json",
-                           headers={**h, "Content-Type": "application/json"})
+    r = await client.post(
+        "/api/feed/posts",
+        data="not json",
+        headers={**h, "Content-Type": "application/json"},
+    )
     assert r.status == 400
 
 
 # ── User routes ───────────────────────────────────────────────────────────
+
 
 async def test_user_routes(client):
     """GET /api/me, PATCH /api/me, GET /api/users, tokens."""
@@ -92,10 +111,13 @@ async def test_user_routes(client):
 
 # ── Space routes ──────────────────────────────────────────────────────────
 
+
 async def test_space_routes(client):
     """Full space lifecycle: create → get → update → members → posts → feed → invite → dissolve."""
     h = _auth(client._tok)
-    r = await client.post("/api/spaces", json={"name": "TestSpace", "emoji": "🏠"}, headers=h)
+    r = await client.post(
+        "/api/spaces", json={"name": "TestSpace", "emoji": "🏠"}, headers=h
+    )
     assert r.status == 201
     sid = (await r.json())["id"]
     r = await client.get(f"/api/spaces/{sid}", headers=h)
@@ -106,10 +128,13 @@ async def test_space_routes(client):
     assert r.status == 200
     r = await client.get(f"/api/spaces/{sid}/feed", headers=h)
     assert r.status == 200
-    r = await client.post(f"/api/spaces/{sid}/posts",
-                           json={"type": "text", "content": "hello"}, headers=h)
+    r = await client.post(
+        f"/api/spaces/{sid}/posts", json={"type": "text", "content": "hello"}, headers=h
+    )
     assert r.status == 201
-    r = await client.post(f"/api/spaces/{sid}/invite-tokens", json={"uses": 1}, headers=h)
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens", json={"uses": 1}, headers=h
+    )
     assert r.status == 201
     r = await client.delete(f"/api/spaces/{sid}", headers=h)
     assert r.status == 200
@@ -122,18 +147,21 @@ async def test_space_routes(client):
 
 # ── Conversation routes ───────────────────────────────────────────────────
 
+
 async def test_conversation_routes(client):
     """DM lifecycle: create → send → list → mark read → unread."""
     h = _auth(client._tok)
     # Need a second user
     await client._db.enqueue(
         "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("bob", "uid-bob", "Bob"))
+        ("bob", "uid-bob", "Bob"),
+    )
     r = await client.post("/api/conversations/dm", json={"username": "bob"}, headers=h)
     assert r.status == 201
     cid = (await r.json())["id"]
-    r = await client.post(f"/api/conversations/{cid}/messages",
-                           json={"content": "hi bob"}, headers=h)
+    r = await client.post(
+        f"/api/conversations/{cid}/messages", json={"content": "hi bob"}, headers=h
+    )
     assert r.status == 201
     r = await client.get(f"/api/conversations/{cid}/messages", headers=h)
     assert r.status == 200
@@ -146,16 +174,23 @@ async def test_conversation_routes(client):
     # Group DM
     await client._db.enqueue(
         "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("carl", "uid-carl", "Carl"))
-    r = await client.post("/api/conversations/group",
-                           json={"members": ["bob", "carl"], "name": "Crew"}, headers=h)
+        ("carl", "uid-carl", "Carl"),
+    )
+    r = await client.post(
+        "/api/conversations/group",
+        json={"members": ["bob", "carl"], "name": "Crew"},
+        headers=h,
+    )
     assert r.status == 201
     # Errors
-    r = await client.post("/api/conversations/dm", json={"username": "admin"}, headers=h)
+    r = await client.post(
+        "/api/conversations/dm", json={"username": "admin"}, headers=h
+    )
     assert r.status == 422
 
 
 # ── Notification routes ───────────────────────────────────────────────────
+
 
 async def test_notification_routes(client):
     """List → unread count → mark read → mark all read."""
@@ -172,6 +207,7 @@ async def test_notification_routes(client):
 
 
 # ── Shopping routes ───────────────────────────────────────────────────────
+
 
 async def test_shopping_routes(client):
     """Add → list → complete → uncomplete → clear → delete."""
@@ -201,6 +237,7 @@ async def test_shopping_routes(client):
 
 # ── Task routes ───────────────────────────────────────────────────────────
 
+
 async def test_task_routes(client):
     """Lists + tasks CRUD."""
     h = _auth(client._tok)
@@ -211,7 +248,9 @@ async def test_task_routes(client):
     assert r.status == 200
     r = await client.get(f"/api/tasks/lists/{lid}", headers=h)
     assert r.status == 200
-    r = await client.post(f"/api/tasks/lists/{lid}/tasks", json={"title": "Vacuum"}, headers=h)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "Vacuum"}, headers=h
+    )
     assert r.status == 201
     tid = (await r.json())["id"]
     r = await client.get(f"/api/tasks/lists/{lid}/tasks", headers=h)
@@ -226,6 +265,7 @@ async def test_task_routes(client):
 
 # ── Calendar routes ───────────────────────────────────────────────────────
 
+
 async def test_calendar_routes(client):
     """Calendars + events CRUD."""
     h = _auth(client._tok)
@@ -235,17 +275,23 @@ async def test_calendar_routes(client):
     r = await client.get("/api/calendars", headers=h)
     assert r.status == 200
     now = datetime.now(timezone.utc)
-    r = await client.post(f"/api/calendars/{cid}/events", json={
-        "summary": "Meeting",
-        "start": now.isoformat(),
-        "end": (now + timedelta(hours=1)).isoformat(),
-    }, headers=h)
+    r = await client.post(
+        f"/api/calendars/{cid}/events",
+        json={
+            "summary": "Meeting",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=h,
+    )
     assert r.status == 201
     eid = (await r.json())["id"]
     # Use Z-suffix timestamps to avoid URL-encoding issues with +00:00
     start_z = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_z = (now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    r = await client.get(f"/api/calendars/{cid}/events?start={start_z}&end={end_z}", headers=h)
+    r = await client.get(
+        f"/api/calendars/{cid}/events?start={start_z}&end={end_z}", headers=h
+    )
     assert r.status == 200
     r = await client.delete(f"/api/calendars/events/{eid}", headers=h)
     assert r.status in (200, 204)
@@ -253,10 +299,13 @@ async def test_calendar_routes(client):
 
 # ── Page routes ───────────────────────────────────────────────────────────
 
+
 async def test_page_routes(client):
     """Pages CRUD + lock/unlock."""
     h = _auth(client._tok)
-    r = await client.post("/api/pages", json={"title": "Wiki", "content": "Hi"}, headers=h)
+    r = await client.post(
+        "/api/pages", json={"title": "Wiki", "content": "Hi"}, headers=h
+    )
     assert r.status == 201
     pid = (await r.json())["id"]
     r = await client.get("/api/pages", headers=h)
@@ -275,6 +324,7 @@ async def test_page_routes(client):
 
 # ── Sticky routes ─────────────────────────────────────────────────────────
 
+
 async def test_sticky_routes(client):
     """Stickies CRUD."""
     h = _auth(client._tok)
@@ -283,14 +333,18 @@ async def test_sticky_routes(client):
     sid = (await r.json())["id"]
     r = await client.get("/api/stickies", headers=h)
     assert r.status == 200
-    r = await client.patch(f"/api/stickies/{sid}",
-                            json={"content": "Updated", "color": "#FF0000"}, headers=h)
+    r = await client.patch(
+        f"/api/stickies/{sid}",
+        json={"content": "Updated", "color": "#FF0000"},
+        headers=h,
+    )
     assert r.status == 200
     r = await client.delete(f"/api/stickies/{sid}", headers=h)
     assert r.status in (200, 204)
 
 
 # ── Bazaar routes ─────────────────────────────────────────────────────────
+
 
 async def test_bazaar_routes(client):
     """List active listings."""
@@ -301,18 +355,25 @@ async def test_bazaar_routes(client):
 
 # ── Presence routes ───────────────────────────────────────────────────────
 
+
 async def test_presence_routes(client):
     """List + update presence."""
     h = _auth(client._tok)
     r = await client.get("/api/presence", headers=h)
     assert r.status == 200
-    r = await client.post("/api/presence/location", json={
-        "username": "admin", "zone_name": "home",
-    }, headers=h)
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "zone_name": "home",
+        },
+        headers=h,
+    )
     assert r.status == 204
 
 
 # ── Federation webhook ───────────────────────────────────────────────────
+
 
 async def test_federation_webhook(client):
     """POST /webhook/{id} runs the §24.11 pipeline (now wired).
@@ -327,6 +388,7 @@ async def test_federation_webhook(client):
 
 # ── Media routes ──────────────────────────────────────────────────────────
 
+
 async def test_media_get_404(client):
     """GET /api/media/nonexistent returns 404."""
     h = _auth(client._tok)
@@ -340,6 +402,7 @@ async def test_media_get_404(client):
 
 # ── Bazaar error paths (30% → target 80%+) ────────────────────────────────
 
+
 async def test_bazaar_get_nonexistent(client):
     """GET /api/bazaar/{id} for missing listing returns 404."""
     h = _auth(client._tok)
@@ -350,8 +413,9 @@ async def test_bazaar_get_nonexistent(client):
 async def test_bazaar_place_bid(client):
     """POST /api/bazaar/{id}/bids on nonexistent listing."""
     h = _auth(client._tok)
-    r = await client.post("/api/bazaar/nonexistent/bids",
-                           json={"amount": 100}, headers=h)
+    r = await client.post(
+        "/api/bazaar/nonexistent/bids", json={"amount": 100}, headers=h
+    )
     assert r.status >= 400
 
 
@@ -363,6 +427,7 @@ async def test_bazaar_accept_nonexistent(client):
 
 
 # ── Users error paths (58% → target 85%+) ─────────────────────────────────
+
 
 async def test_users_patch_invalid_json(client):
     """PATCH /api/me with bad JSON returns 400."""
@@ -393,11 +458,13 @@ async def test_users_query_token_auth(client):
 
 # ── Spaces error paths (78% → target 90%+) ────────────────────────────────
 
+
 async def test_spaces_add_member_nonexistent(client):
     """POST /api/spaces/{id}/members for missing space returns 404."""
     h = _auth(client._tok)
-    r = await client.post("/api/spaces/nonexistent/members",
-                           json={"user_id": "x"}, headers=h)
+    r = await client.post(
+        "/api/spaces/nonexistent/members", json={"user_id": "x"}, headers=h
+    )
     assert r.status == 404
 
 
@@ -413,8 +480,9 @@ async def test_spaces_remove_member(client):
 async def test_spaces_ban_nonexistent(client):
     """POST /api/spaces/{id}/ban on missing space."""
     h = _auth(client._tok)
-    r = await client.post("/api/spaces/nonexistent/ban",
-                           json={"user_id": "x"}, headers=h)
+    r = await client.post(
+        "/api/spaces/nonexistent/ban", json={"user_id": "x"}, headers=h
+    )
     assert r.status >= 400
 
 
@@ -435,18 +503,23 @@ async def test_spaces_feed_nonexistent(client):
 async def test_spaces_post_to_nonexistent(client):
     """POST /api/spaces/{id}/posts for missing space."""
     h = _auth(client._tok)
-    r = await client.post("/api/spaces/nonexistent/posts",
-                           json={"type": "text", "content": "x"}, headers=h)
+    r = await client.post(
+        "/api/spaces/nonexistent/posts",
+        json={"type": "text", "content": "x"},
+        headers=h,
+    )
     assert r.status >= 400
 
 
 # ── Feed error paths (81% → target 90%+) ──────────────────────────────────
 
+
 async def test_feed_reaction_on_nonexistent(client):
     """POST reactions on nonexistent post."""
     h = _auth(client._tok)
-    r = await client.post("/api/feed/posts/nonexistent/reactions",
-                           json={"emoji": "👍"}, headers=h)
+    r = await client.post(
+        "/api/feed/posts/nonexistent/reactions", json={"emoji": "👍"}, headers=h
+    )
     assert r.status == 404
 
 
@@ -473,6 +546,7 @@ async def test_feed_reaction_invalid_json(client):
 
 # ── Tasks error paths (76% → target 90%+) ─────────────────────────────────
 
+
 async def test_tasks_get_nonexistent_list(client):
     """GET /api/tasks/lists/{id} for missing list."""
     h = _auth(client._tok)
@@ -483,8 +557,9 @@ async def test_tasks_get_nonexistent_list(client):
 async def test_tasks_create_in_nonexistent_list(client):
     """POST task in nonexistent list."""
     h = _auth(client._tok)
-    r = await client.post("/api/tasks/lists/nonexistent/tasks",
-                           json={"title": "T"}, headers=h)
+    r = await client.post(
+        "/api/tasks/lists/nonexistent/tasks", json={"title": "T"}, headers=h
+    )
     assert r.status >= 400
 
 
@@ -511,6 +586,7 @@ async def test_tasks_delete_nonexistent_list(client):
 
 # ── Pages error paths (75% → target 90%+) ─────────────────────────────────
 
+
 async def test_pages_get_nonexistent(client):
     """GET /api/pages/{id} for missing page."""
     h = _auth(client._tok)
@@ -534,6 +610,7 @@ async def test_pages_delete_nonexistent(client):
 
 # ── Calendar error paths (74% → target 90%+) ──────────────────────────────
 
+
 async def test_calendar_events_missing_params(client):
     """GET events without start/end returns 422."""
     h = _auth(client._tok)
@@ -552,6 +629,7 @@ async def test_calendar_delete_nonexistent_event(client):
 
 # ── Stickies error paths (74% → target 90%+) ──────────────────────────────
 
+
 async def test_stickies_empty_content(client):
     """POST sticky with empty content returns 422."""
     h = _auth(client._tok)
@@ -568,6 +646,7 @@ async def test_stickies_delete_nonexistent(client):
 
 # ── Presence error paths (72% → target 90%+) ──────────────────────────────
 
+
 async def test_presence_missing_username(client):
     """POST location without username returns 422."""
     h = _auth(client._tok)
@@ -578,22 +657,32 @@ async def test_presence_missing_username(client):
 async def test_presence_invalid_state(client):
     """POST location with invalid state returns 422."""
     h = _auth(client._tok)
-    r = await client.post("/api/presence/location",
-                           json={"username": "admin", "state": "flying"}, headers=h)
+    r = await client.post(
+        "/api/presence/location",
+        json={"username": "admin", "state": "flying"},
+        headers=h,
+    )
     assert r.status == 422
 
 
 async def test_presence_with_gps(client):
     """POST location with latitude/longitude coordinates."""
     h = _auth(client._tok)
-    r = await client.post("/api/presence/location", json={
-        "username": "admin", "zone_name": "Work",
-        "latitude": 52.37654, "longitude": 4.89567,
-    }, headers=h)
+    r = await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "zone_name": "Work",
+            "latitude": 52.37654,
+            "longitude": 4.89567,
+        },
+        headers=h,
+    )
     assert r.status == 204
 
 
 # ── Conversations error paths (86% → target 90%+) ─────────────────────────
+
 
 async def test_conversations_send_empty(client):
     """POST empty message returns 422."""
@@ -601,31 +690,38 @@ async def test_conversations_send_empty(client):
     # Create a DM first
     await client._db.enqueue(
         "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("dm_bob", "uid-dm-bob", "Bob"))
-    r = await client.post("/api/conversations/dm", json={"username": "dm_bob"}, headers=h)
+        ("dm_bob", "uid-dm-bob", "Bob"),
+    )
+    r = await client.post(
+        "/api/conversations/dm", json={"username": "dm_bob"}, headers=h
+    )
     cid = (await r.json())["id"]
-    r = await client.post(f"/api/conversations/{cid}/messages",
-                           json={"content": ""}, headers=h)
+    r = await client.post(
+        f"/api/conversations/{cid}/messages", json={"content": ""}, headers=h
+    )
     assert r.status == 422
 
 
 async def test_conversations_nonexistent(client):
     """POST message to nonexistent conversation returns 404."""
     h = _auth(client._tok)
-    r = await client.post("/api/conversations/nonexistent/messages",
-                           json={"content": "hi"}, headers=h)
+    r = await client.post(
+        "/api/conversations/nonexistent/messages", json={"content": "hi"}, headers=h
+    )
     assert r.status == 404
 
 
 async def test_conversations_group_too_few(client):
     """POST group DM with <3 members returns 422."""
     h = _auth(client._tok)
-    r = await client.post("/api/conversations/group",
-                           json={"members": ["dm_bob"]}, headers=h)
+    r = await client.post(
+        "/api/conversations/group", json={"members": ["dm_bob"]}, headers=h
+    )
     assert r.status == 422
 
 
 # ── Shopping error paths (86% → target 90%+) ──────────────────────────────
+
 
 async def test_shopping_delete_nonexistent(client):
     """DELETE nonexistent shopping item."""

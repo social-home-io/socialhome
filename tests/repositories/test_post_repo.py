@@ -47,7 +47,9 @@ async def test_save_and_get_post(env):
     """A post created via feed_svc can be retrieved by ID."""
     u = await env.user_svc.provision(username="alice", display_name="Alice")
     p = await env.feed_svc.create_post(
-        author_user_id=u.user_id, type=PostType.TEXT, content="hello",
+        author_user_id=u.user_id,
+        type=PostType.TEXT,
+        content="hello",
     )
     got = await env.feed_svc.get_post(p.id)
     assert got.id == p.id
@@ -59,7 +61,9 @@ async def test_list_feed(env):
     u = await env.user_svc.provision(username="alice", display_name="Alice")
     for i in range(3):
         await env.feed_svc.create_post(
-            author_user_id=u.user_id, type=PostType.TEXT, content=f"post {i}",
+            author_user_id=u.user_id,
+            type=PostType.TEXT,
+            content=f"post {i}",
         )
     feed = await env.feed_svc.list_feed(limit=10)
     assert len(feed) == 3

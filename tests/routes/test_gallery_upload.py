@@ -27,6 +27,7 @@ async def _make_album(client) -> str:
 
 # ─── Raw-body upload path ────────────────────────────────────────────────
 
+
 async def test_upload_raw_png_creates_item(client):
     aid = await _make_album(client)
     r = await client.post(
@@ -69,17 +70,22 @@ async def test_upload_no_content_type_treated_as_octet_stream(client):
 
 # ─── Multipart upload path ───────────────────────────────────────────────
 
+
 async def test_upload_multipart_creates_item(client):
     aid = await _make_album(client)
     import aiohttp
+
     form = aiohttp.FormData()
     form.add_field(
-        "file", _png_bytes(),
-        filename="x.png", content_type="image/png",
+        "file",
+        _png_bytes(),
+        filename="x.png",
+        content_type="image/png",
     )
     r = await client.post(
         f"/api/gallery/albums/{aid}/items",
-        data=form, headers=_auth(client._tok),
+        data=form,
+        headers=_auth(client._tok),
     )
     assert r.status == 201
 
@@ -95,6 +101,7 @@ async def test_upload_unknown_album_raw_404(client):
 
 # ─── Album item count after upload ──────────────────────────────────────
 
+
 async def test_album_item_count_increments(client):
     aid = await _make_album(client)
     r = await client.post(
@@ -104,12 +111,14 @@ async def test_album_item_count_increments(client):
     )
     assert r.status == 201
     r = await client.get(
-        f"/api/gallery/albums/{aid}", headers=_auth(client._tok),
+        f"/api/gallery/albums/{aid}",
+        headers=_auth(client._tok),
     )
     assert (await r.json())["item_count"] == 1
 
 
 # ─── Item delete ────────────────────────────────────────────────────────
+
 
 async def test_item_delete_round_trip(client):
     aid = await _make_album(client)
@@ -120,11 +129,13 @@ async def test_item_delete_round_trip(client):
     )
     iid = (await r.json())["id"]
     r = await client.delete(
-        f"/api/gallery/items/{iid}", headers=_auth(client._tok),
+        f"/api/gallery/items/{iid}",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
     # Album item_count back to 0.
     r = await client.get(
-        f"/api/gallery/albums/{aid}", headers=_auth(client._tok),
+        f"/api/gallery/albums/{aid}",
+        headers=_auth(client._tok),
     )
     assert (await r.json())["item_count"] == 0

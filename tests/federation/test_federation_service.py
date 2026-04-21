@@ -33,20 +33,25 @@ from social_home.infrastructure.key_manager import KeyManager
 
 try:
     import orjson as _json_lib
+
     def _dumps(obj):
         return _json_lib.dumps(obj).decode("utf-8")
+
     def _loads(s):
         return _json_lib.loads(s)
 except ImportError:
     import json as _json_lib
+
     def _dumps(obj):
         return _json_lib.dumps(obj, separators=(",", ":"))
+
     def _loads(s):
         return _json_lib.loads(s)
 
 
 def _make_kek_manager() -> KeyManager:
     import os
+
     return KeyManager(os.urandom(32))
 
 
@@ -59,6 +64,7 @@ def _make_remote_instance(
 ) -> tuple[RemoteInstance, bytes]:
     """Return (RemoteInstance, raw_session_key) for use in tests."""
     import os
+
     if peer_kp is None:
         peer_kp = generate_identity_keypair()
     peer_id = derive_instance_id(peer_kp.public_key)
@@ -100,7 +106,10 @@ class InMemoryFederationRepo:
         return inst
 
     async def list_instances(
-        self, *, source: str | None = None, status: str | None = None,
+        self,
+        *,
+        source: str | None = None,
+        status: str | None = None,
     ) -> list[RemoteInstance]:
         result = list(self._instances.values())
         if status is not None:
@@ -141,12 +150,18 @@ class InMemoryFederationRepo:
         self._pairings.pop(token, None)
 
     async def ban_instance_from_space(
-        self, space_id: str, instance_id: str, *, reason: str | None = None,
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
     ) -> None:
         self._bans.add((space_id, instance_id))
 
     async def is_instance_banned_from_space(
-        self, space_id: str, instance_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
     ) -> bool:
         return (space_id, instance_id) in self._bans
 
@@ -168,12 +183,14 @@ class InMemoryOutboxRepo:
         expires_at: str | None = None,
     ) -> str:
         entry_id = msg_id or str(uuid.uuid4())
-        self.enqueued.append({
-            "id": entry_id,
-            "instance_id": instance_id,
-            "event_type": event_type,
-            "payload_json": payload_json,
-        })
+        self.enqueued.append(
+            {
+                "id": entry_id,
+                "instance_id": instance_id,
+                "event_type": event_type,
+                "payload_json": payload_json,
+            }
+        )
         return entry_id
 
     async def list_due(self, limit: int = 50):
@@ -185,7 +202,9 @@ class InMemoryOutboxRepo:
     async def mark_failed(self, entry_id: str) -> None:
         pass
 
-    async def reschedule(self, entry_id: str, next_attempt_at: str, attempts: int) -> None:
+    async def reschedule(
+        self, entry_id: str, next_attempt_at: str, attempts: int
+    ) -> None:
         pass
 
     async def expire_past_retention(self, now_iso: str) -> int:
@@ -222,9 +241,11 @@ def _make_service(
 
 # ─── Crypto helpers ───────────────────────────────────────────────────────
 
+
 def test_encrypt_decrypt_roundtrip():
     """Encrypt then decrypt returns the original plaintext."""
     import os
+
     svc, _ = _make_service()
     session_key = os.urandom(32)
     original = '{"hello": "world", "num": 42}'
@@ -266,6 +287,7 @@ def test_wrong_key_signature_rejected():
 
 
 # ─── send_event ───────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_send_event_to_peer():
@@ -309,7 +331,11 @@ async def test_send_event_to_peer():
     # Verify envelope structure passed to HTTP.
     call_kwargs = mock_post.call_args
     assert call_kwargs is not None
-    posted_json = call_kwargs.kwargs.get("json") or call_kwargs.args[1] if len(call_kwargs.args) > 1 else call_kwargs.kwargs["json"]
+    posted_json = (
+        call_kwargs.kwargs.get("json") or call_kwargs.args[1]
+        if len(call_kwargs.args) > 1
+        else call_kwargs.kwargs["json"]
+    )
     assert "msg_id" in posted_json
     assert "sig_suite" in posted_json
     assert "signatures" in posted_json
@@ -378,13 +404,16 @@ async def test_send_event_prefers_attached_transport():
     failing_http.post = MagicMock(side_effect=Exception("must-not-be-called"))
 
     svc, _ = _make_service(
-        federation_repo=fed_repo, outbox_repo=outbox_repo,
-        key_manager=km, http_client=failing_http,
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=failing_http,
     )
 
     class _FakeTransport:
         def __init__(self):
             self.calls = []
+
         async def send(self, *, instance, envelope_dict):
             self.calls.append((instance.id, envelope_dict["event_type"]))
             return _TransportSendResult(ok=True, via="rtc", status_code=None)
@@ -406,6 +435,7 @@ async def test_send_event_prefers_attached_transport():
 
 
 # ─── Inbound webhook ──────────────────────────────────────────────────────
+
 
 def _make_valid_envelope(
     *,
@@ -429,9 +459,11 @@ def _make_valid_envelope(
 
     # Encrypt payload with session key.
     from social_home.federation.federation_service import _dumps
+
     payload_json = _dumps(payload)
     import os
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
     nonce = os.urandom(12)
     ct = AESGCM(session_key).encrypt(nonce, payload_json.encode(), None)
     encrypted_payload = b64url_encode(nonce) + ":" + b64url_encode(ct)
@@ -452,6 +484,7 @@ def _make_valid_envelope(
     }
 
     from social_home.crypto import sign_ed25519
+
     envelope_bytes = _dumps(envelope_dict).encode("utf-8")
     sig = sign_ed25519(peer_kp.private_key, envelope_bytes)
     envelope_dict["signatures"] = {"ed25519": b64url_encode(sig)}
@@ -467,6 +500,7 @@ async def test_inbound_webhook_validation():
     peer_kp = generate_identity_keypair()
 
     import os
+
     session_key = os.urandom(32)
     inst, _ = _make_remote_instance(km, peer_kp=peer_kp, session_key=session_key)
     await fed_repo.save_instance(inst)
@@ -496,6 +530,7 @@ async def test_inbound_replay_rejected():
     peer_kp = generate_identity_keypair()
 
     import os
+
     session_key = os.urandom(32)
     inst, _ = _make_remote_instance(km, peer_kp=peer_kp, session_key=session_key)
     await fed_repo.save_instance(inst)
@@ -535,6 +570,7 @@ async def test_inbound_timestamp_skew_rejected():
     peer_kp = generate_identity_keypair()
 
     import os
+
     session_key = os.urandom(32)
     inst, _ = _make_remote_instance(km, peer_kp=peer_kp, session_key=session_key)
     await fed_repo.save_instance(inst)
@@ -567,6 +603,7 @@ async def test_inbound_bad_signature_rejected():
     peer_kp = generate_identity_keypair()
 
     import os
+
     session_key = os.urandom(32)
     inst, _ = _make_remote_instance(km, peer_kp=peer_kp, session_key=session_key)
     await fed_repo.save_instance(inst)
@@ -602,16 +639,18 @@ async def test_inbound_unknown_webhook_rejected():
     fed_repo = InMemoryFederationRepo()
     svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
 
-    raw_body = _dumps({
-        "msg_id": str(uuid.uuid4()),
-        "event_type": "user_updated",
-        "from_instance": "abc",
-        "to_instance": svc._own_instance_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "encrypted_payload": "nonce:ct",
-        "sig_suite": "ed25519",
-        "signatures": {"ed25519": "sig"},
-    }).encode("utf-8")
+    raw_body = _dumps(
+        {
+            "msg_id": str(uuid.uuid4()),
+            "event_type": "user_updated",
+            "from_instance": "abc",
+            "to_instance": svc._own_instance_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "encrypted_payload": "nonce:ct",
+            "sig_suite": "ed25519",
+            "signatures": {"ed25519": "sig"},
+        }
+    ).encode("utf-8")
 
     with pytest.raises(ValueError, match="No instance found"):
         await svc.handle_inbound_webhook(
@@ -621,6 +660,7 @@ async def test_inbound_unknown_webhook_rejected():
 
 
 # ─── Pairing ──────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_initiate_pairing():
@@ -728,6 +768,7 @@ async def test_confirm_pairing_wrong_code():
 
 # ─── broadcast_to_peers ───────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_broadcast_to_peers():
     """broadcast_to_peers sends to multiple instances and aggregates results."""
@@ -784,6 +825,7 @@ async def test_broadcast_to_peers_partial_failure():
     outbox_repo = InMemoryOutboxRepo()
 
     import os
+
     peer1_kp = generate_identity_keypair()
     peer2_kp = generate_identity_keypair()
     inst1, _ = _make_remote_instance(km, peer_kp=peer1_kp, session_key=os.urandom(32))
@@ -796,8 +838,10 @@ async def test_broadcast_to_peers_partial_failure():
     class _Resp:
         def __init__(self, status):
             self.status = status
+
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, *_):
             return False
 
@@ -838,6 +882,7 @@ async def test_broadcast_to_all_confirmed_when_no_ids():
     outbox_repo = InMemoryOutboxRepo()
 
     import os
+
     peers = [generate_identity_keypair() for _ in range(3)]
     for p in peers:
         inst, _ = _make_remote_instance(km, peer_kp=p, session_key=os.urandom(32))
@@ -869,14 +914,18 @@ async def test_broadcast_to_all_confirmed_when_no_ids():
 
 # ─── Dispatch event match arms ────────────────────────────────────────────
 
+
 async def test_dispatch_users_sync():
     """USERS_SYNC dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m1", event_type=FederationEventType.USERS_SYNC,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m1",
+        event_type=FederationEventType.USERS_SYNC,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload={"users": [{"username": "bob"}]},
     )
@@ -888,9 +937,12 @@ async def test_dispatch_user_updated():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m2", event_type=FederationEventType.USER_UPDATED,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m2",
+        event_type=FederationEventType.USER_UPDATED,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload={"user_id": "u1", "display_name": "Bob"},
     )
@@ -902,9 +954,12 @@ async def test_dispatch_user_removed():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m3", event_type=FederationEventType.USER_REMOVED,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m3",
+        event_type=FederationEventType.USER_REMOVED,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload={"user_id": "u1"},
     )
@@ -916,11 +971,15 @@ async def test_dispatch_space_post_created():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m4", event_type=FederationEventType.SPACE_POST_CREATED,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m4",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
-        payload={"post_id": "p1"}, space_id="s1",
+        payload={"post_id": "p1"},
+        space_id="s1",
     )
     await svc._dispatch_event(event)
 
@@ -930,11 +989,15 @@ async def test_dispatch_space_member_joined():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m5", event_type=FederationEventType.SPACE_MEMBER_JOINED,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m5",
+        event_type=FederationEventType.SPACE_MEMBER_JOINED,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
-        payload={"user_id": "u1"}, space_id="s1",
+        payload={"user_id": "u1"},
+        space_id="s1",
     )
     await svc._dispatch_event(event)
 
@@ -945,15 +1008,22 @@ async def test_dispatch_space_config_changed():
     svc, _ = _make_service(bus=bus)
     events_seen = []
     from social_home.domain.events import SpaceConfigChanged
-    async def on_config(e): events_seen.append(e)
+
+    async def on_config(e):
+        events_seen.append(e)
+
     bus.subscribe(SpaceConfigChanged, on_config)
 
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m6", event_type=FederationEventType.SPACE_CONFIG_CHANGED,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m6",
+        event_type=FederationEventType.SPACE_CONFIG_CHANGED,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
-        payload={"sequence": 5, "name": "Updated"}, space_id="s1",
+        payload={"sequence": 5, "name": "Updated"},
+        space_id="s1",
     )
     await svc._dispatch_event(event)
     assert len(events_seen) == 1
@@ -965,9 +1035,12 @@ async def test_dispatch_dm_message():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m7", event_type=FederationEventType.DM_MESSAGE,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m7",
+        event_type=FederationEventType.DM_MESSAGE,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload={"content": "hi"},
     )
@@ -979,9 +1052,12 @@ async def test_dispatch_presence_updated():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m8", event_type=FederationEventType.PRESENCE_UPDATED,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m8",
+        event_type=FederationEventType.PRESENCE_UPDATED,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload={"state": "home"},
     )
@@ -993,11 +1069,18 @@ async def test_dispatch_pairing_event():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
-    for etype in [FederationEventType.PAIRING_INTRO, FederationEventType.PAIRING_ACCEPT,
-                  FederationEventType.PAIRING_CONFIRM, FederationEventType.UNPAIR]:
+
+    for etype in [
+        FederationEventType.PAIRING_INTRO,
+        FederationEventType.PAIRING_ACCEPT,
+        FederationEventType.PAIRING_CONFIRM,
+        FederationEventType.UNPAIR,
+    ]:
         event = FederationEvent(
-            msg_id=f"pair-{etype.value}", event_type=etype,
-            from_instance="peer", to_instance="test-instance",
+            msg_id=f"pair-{etype.value}",
+            event_type=etype,
+            from_instance="peer",
+            to_instance="test-instance",
             timestamp=datetime.now(timezone.utc).isoformat(),
             payload={},
         )
@@ -1009,9 +1092,12 @@ async def test_dispatch_unknown_event():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     from social_home.domain.federation import FederationEvent, FederationEventType
+
     event = FederationEvent(
-        msg_id="m-unknown", event_type=FederationEventType.NETWORK_SYNC,
-        from_instance="peer", to_instance="test-instance",
+        msg_id="m-unknown",
+        event_type=FederationEventType.NETWORK_SYNC,
+        from_instance="peer",
+        to_instance="test-instance",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload={},
     )

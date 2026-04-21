@@ -17,6 +17,7 @@ def test_encrypt_decrypt():
     wire = km.encrypt(b"secret", associated_data=b"row-1")
     assert km.decrypt(wire, associated_data=b"row-1") == b"secret"
 
+
 def test_ad_mismatch():
     """Decrypting with mismatched associated_data raises KeyManagerError."""
     km = KeyManager.from_data_dir(Path(tempfile.mkdtemp()))
@@ -24,11 +25,13 @@ def test_ad_mismatch():
     with pytest.raises(KeyManagerError):
         km.decrypt(wire, associated_data=b"row-2")
 
+
 def test_malformed_wire():
     """Passing a non-valid wire value raises KeyManagerError."""
     km = KeyManager.from_data_dir(Path(tempfile.mkdtemp()))
     with pytest.raises(KeyManagerError):
         km.decrypt("not-valid-format")
+
 
 def test_stable_across_instances():
     """A key loaded from the same directory decrypts ciphertext from an earlier instance."""

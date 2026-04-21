@@ -54,7 +54,8 @@ def build_platform_adapter(
                 ha_url=config.ha_url,
                 ha_token=config.ha_token,
                 supervisor_url=os.environ.get(
-                    "SUPERVISOR_URL", "http://supervisor",
+                    "SUPERVISOR_URL",
+                    "http://supervisor",
                 ),
                 supervisor_token=os.environ.get("SUPERVISOR_TOKEN", ""),
                 data_dir=config.data_dir,

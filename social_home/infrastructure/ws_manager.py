@@ -89,7 +89,9 @@ class WebSocketManager:
         return await self._send_many(user_id, sessions, payload)
 
     async def broadcast_to_users(
-        self, user_ids: list[str] | set[str], payload: dict[str, Any],
+        self,
+        user_ids: list[str] | set[str],
+        payload: dict[str, Any],
     ) -> int:
         """Fan a frame to many users in parallel."""
         if not user_ids:
@@ -122,9 +124,9 @@ class WebSocketManager:
             try:
                 await ws.send_str(msg)
                 delivered += 1
-            except (ConnectionResetError, RuntimeError, asyncio.CancelledError):
+            except ConnectionResetError, RuntimeError, asyncio.CancelledError:
                 dead.append(ws)
-            except Exception as exc:                  # defensive
+            except Exception as exc:  # defensive
                 log.debug("ws send failed user=%s: %s", user_id, exc)
                 dead.append(ws)
         if dead:

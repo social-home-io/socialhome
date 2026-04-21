@@ -19,26 +19,32 @@ from ..db import AsyncDatabase
 from .base import rows_to_dicts
 
 
-SCOPE_POST       = "post"
+SCOPE_POST = "post"
 SCOPE_SPACE_POST = "space_post"
-SCOPE_MESSAGE    = "message"
-SCOPE_PAGE       = "page"
-SCOPE_USER       = "user"   # §23.2 — "People" filter (local + known remote)
-SCOPE_SPACE      = "space"  # §23.2 — "Spaces" filter
-ALLOWED_SCOPES = frozenset({
-    SCOPE_POST, SCOPE_SPACE_POST, SCOPE_MESSAGE, SCOPE_PAGE,
-    SCOPE_USER, SCOPE_SPACE,
-})
+SCOPE_MESSAGE = "message"
+SCOPE_PAGE = "page"
+SCOPE_USER = "user"  # §23.2 — "People" filter (local + known remote)
+SCOPE_SPACE = "space"  # §23.2 — "Spaces" filter
+ALLOWED_SCOPES = frozenset(
+    {
+        SCOPE_POST,
+        SCOPE_SPACE_POST,
+        SCOPE_MESSAGE,
+        SCOPE_PAGE,
+        SCOPE_USER,
+        SCOPE_SPACE,
+    }
+)
 
 
 #: Scope groups — the public API exposes these higher-level "types".
 #: Callers pass ``type="posts"`` and the service expands to the two
 #: underlying scopes (`post` + `space_post`).
 SCOPE_TYPE_GROUPS: dict[str, frozenset[str]] = {
-    "posts":    frozenset({SCOPE_POST, SCOPE_SPACE_POST}),
-    "people":   frozenset({SCOPE_USER}),
-    "spaces":   frozenset({SCOPE_SPACE}),
-    "pages":    frozenset({SCOPE_PAGE}),
+    "posts": frozenset({SCOPE_POST, SCOPE_SPACE_POST}),
+    "people": frozenset({SCOPE_USER}),
+    "spaces": frozenset({SCOPE_SPACE}),
+    "pages": frozenset({SCOPE_PAGE}),
     "messages": frozenset({SCOPE_MESSAGE}),
 }
 
@@ -60,8 +66,13 @@ class SearchHit:
 @runtime_checkable
 class AbstractSearchRepo(Protocol):
     async def upsert(
-        self, *, scope: str, ref_id: str, space_id: str | None,
-        title: str, body: str,
+        self,
+        *,
+        scope: str,
+        ref_id: str,
+        space_id: str | None,
+        title: str,
+        body: str,
     ) -> None: ...
 
     async def delete(self, *, scope: str, ref_id: str) -> None: ...
@@ -77,7 +88,10 @@ class AbstractSearchRepo(Protocol):
     ) -> list[SearchHit]: ...
 
     async def count_by_scope(
-        self, query: str, *, space_id: str | None = None,
+        self,
+        query: str,
+        *,
+        space_id: str | None = None,
     ) -> dict[str, int]: ...
 
 
@@ -93,8 +107,13 @@ class SqliteSearchRepo:
         self._db = db
 
     async def upsert(
-        self, *, scope: str, ref_id: str, space_id: str | None,
-        title: str, body: str,
+        self,
+        *,
+        scope: str,
+        ref_id: str,
+        space_id: str | None,
+        title: str,
+        body: str,
     ) -> None:
         if scope not in ALLOWED_SCOPES:
             raise ValueError(f"Invalid scope: {scope!r}")
@@ -165,7 +184,10 @@ class SqliteSearchRepo:
         ]
 
     async def count_by_scope(
-        self, query: str, *, space_id: str | None = None,
+        self,
+        query: str,
+        *,
+        space_id: str | None = None,
     ) -> dict[str, int]:
         """Return ``{scope: count}`` for a query.
 

@@ -31,12 +31,12 @@ class ReplayCachePruneScheduler:
         self,
         repo: AbstractFederationRepo,
         *,
-        interval_seconds: float = 600.0,    # every 10 min
+        interval_seconds: float = 600.0,  # every 10 min
         window: timedelta = timedelta(hours=1),
     ) -> None:
-        self._repo     = repo
+        self._repo = repo
         self._interval = interval_seconds
-        self._window   = window
+        self._window = window
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -53,7 +53,7 @@ class ReplayCachePruneScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -63,11 +63,12 @@ class ReplayCachePruneScheduler:
                 pruned = await self._prune_once()
                 if pruned:
                     log.debug("replay-cache: pruned %d stale rows", pruned)
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("replay-cache prune failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue

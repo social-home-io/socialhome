@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 # ─── Space feature access levels (§4.3) ───────────────────────────────────
 
+
 class SpaceFeatureAccess(StrEnum):
     """Per-feature permission level for a space.
 
@@ -36,8 +37,8 @@ class SpaceFeatureAccess(StrEnum):
     * ``ADMIN_ONLY`` — only admins / owner may mutate. Members read-only.
     """
 
-    OPEN       = "open"
-    MODERATED  = "moderated"
+    OPEN = "open"
+    MODERATED = "moderated"
     ADMIN_ONLY = "admin_only"
 
 
@@ -58,18 +59,18 @@ _ALL_POST_TYPES: tuple[str, ...] = (
 class SpaceFeatures:
     """Per-space feature toggles and access levels."""
 
-    calendar:          bool = False
-    todo:              bool = True
-    location:          bool = False
-    location_mode:     str  = "off"      # "off" | "zone_only" | "gps"
-    stickies:          bool = False
-    pages:             bool = True
+    calendar: bool = False
+    todo: bool = True
+    location: bool = False
+    location_mode: str = "off"  # "off" | "zone_only" | "gps"
+    stickies: bool = False
+    pages: bool = True
 
-    posts_access:      SpaceFeatureAccess = SpaceFeatureAccess.OPEN
-    pages_access:      SpaceFeatureAccess = SpaceFeatureAccess.OPEN
-    stickies_access:   SpaceFeatureAccess = SpaceFeatureAccess.OPEN
-    calendar_access:   SpaceFeatureAccess = SpaceFeatureAccess.OPEN
-    tasks_access:      SpaceFeatureAccess = SpaceFeatureAccess.OPEN
+    posts_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
+    pages_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
+    stickies_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
+    calendar_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
+    tasks_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
 
     allowed_post_types: tuple[str, ...] = _ALL_POST_TYPES
 
@@ -101,27 +102,30 @@ class SpaceFeatures:
     ) -> "SpaceFeatures":
         if not types:
             raise ValueError("allowed_post_types must contain at least one post type")
-        normalised = tuple(sorted(
-            t.value if hasattr(t, "value") else str(t) for t in types
-        ))
+        normalised = tuple(
+            sorted(t.value if hasattr(t, "value") else str(t) for t in types)
+        )
         return copy.replace(self, allowed_post_types=normalised)
 
     @classmethod
     def from_row(cls, row: dict) -> "SpaceFeatures":
         """Reconstruct from a ``spaces`` table row."""
-        allowed = tuple(sorted(
-            t for t, col in (
-                ("text",       "allow_post_text"),
-                ("image",      "allow_post_image"),
-                ("video",      "allow_post_video"),
-                ("transcript", "allow_post_transcript"),
-                ("poll",       "allow_post_poll"),
-                ("schedule",   "allow_post_schedule"),
-                ("file",       "allow_post_file"),
-                ("bazaar",     "allow_post_bazaar"),
+        allowed = tuple(
+            sorted(
+                t
+                for t, col in (
+                    ("text", "allow_post_text"),
+                    ("image", "allow_post_image"),
+                    ("video", "allow_post_video"),
+                    ("transcript", "allow_post_transcript"),
+                    ("poll", "allow_post_poll"),
+                    ("schedule", "allow_post_schedule"),
+                    ("file", "allow_post_file"),
+                    ("bazaar", "allow_post_bazaar"),
+                )
+                if row.get(col, 1)
             )
-            if row.get(col, 1)
-        ))
+        )
         return cls(
             calendar=bool(row.get("feature_calendar", 0)),
             todo=bool(row.get("feature_todo", 1)),
@@ -139,46 +143,47 @@ class SpaceFeatures:
 
     def to_columns(self) -> dict:
         return {
-            "feature_calendar":      int(self.calendar),
-            "feature_todo":          int(self.todo),
-            "feature_location":      int(self.location),
-            "feature_stickies":      int(self.stickies),
-            "feature_pages":         int(self.pages),
-            "location_mode":         self.location_mode,
-            "posts_access":          self.posts_access.value,
-            "pages_access":          self.pages_access.value,
-            "stickies_access":       self.stickies_access.value,
-            "calendar_access":       self.calendar_access.value,
-            "tasks_access":          self.tasks_access.value,
-            "allow_post_text":       int("text"       in self.allowed_post_types),
-            "allow_post_image":      int("image"      in self.allowed_post_types),
-            "allow_post_video":      int("video"      in self.allowed_post_types),
+            "feature_calendar": int(self.calendar),
+            "feature_todo": int(self.todo),
+            "feature_location": int(self.location),
+            "feature_stickies": int(self.stickies),
+            "feature_pages": int(self.pages),
+            "location_mode": self.location_mode,
+            "posts_access": self.posts_access.value,
+            "pages_access": self.pages_access.value,
+            "stickies_access": self.stickies_access.value,
+            "calendar_access": self.calendar_access.value,
+            "tasks_access": self.tasks_access.value,
+            "allow_post_text": int("text" in self.allowed_post_types),
+            "allow_post_image": int("image" in self.allowed_post_types),
+            "allow_post_video": int("video" in self.allowed_post_types),
             "allow_post_transcript": int("transcript" in self.allowed_post_types),
-            "allow_post_poll":       int("poll"       in self.allowed_post_types),
-            "allow_post_schedule":   int("schedule"   in self.allowed_post_types),
-            "allow_post_file":       int("file"       in self.allowed_post_types),
-            "allow_post_bazaar":     int("bazaar"     in self.allowed_post_types),
+            "allow_post_poll": int("poll" in self.allowed_post_types),
+            "allow_post_schedule": int("schedule" in self.allowed_post_types),
+            "allow_post_file": int("file" in self.allowed_post_types),
+            "allow_post_bazaar": int("bazaar" in self.allowed_post_types),
         }
 
     def to_wire_dict(self) -> dict:
         """Wire form used by SPACE_SYNC_BEGIN."""
         return {
-            "calendar":        self.calendar,
-            "todo":            self.todo,
-            "location":        self.location,
-            "location_mode":   self.location_mode,
-            "stickies":        self.stickies,
-            "pages":           self.pages,
-            "posts_access":    self.posts_access.value,
-            "pages_access":    self.pages_access.value,
+            "calendar": self.calendar,
+            "todo": self.todo,
+            "location": self.location,
+            "location_mode": self.location_mode,
+            "stickies": self.stickies,
+            "pages": self.pages,
+            "posts_access": self.posts_access.value,
+            "pages_access": self.pages_access.value,
             "stickies_access": self.stickies_access.value,
             "calendar_access": self.calendar_access.value,
-            "tasks_access":    self.tasks_access.value,
+            "tasks_access": self.tasks_access.value,
             "allowed_post_types": list(self.allowed_post_types),
         }
 
 
 # ─── Household features ───────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class HouseholdFeatures:
@@ -189,107 +194,108 @@ class HouseholdFeatures:
     here is always open to all HA users when enabled.
     """
 
-    feed:            bool = True
-    pages:           bool = True
-    tasks:           bool = True
-    stickies:        bool = True
-    calendar:        bool = True
-    bazaar:          bool = True
-    allow_text:      bool = True
-    allow_image:     bool = True
-    allow_video:     bool = True
-    allow_file:      bool = True
-    allow_poll:      bool = True
-    allow_schedule:  bool = True
-    allow_bazaar:    bool = True
-    household_name:  str  = "Home"
+    feed: bool = True
+    pages: bool = True
+    tasks: bool = True
+    stickies: bool = True
+    calendar: bool = True
+    bazaar: bool = True
+    allow_text: bool = True
+    allow_image: bool = True
+    allow_video: bool = True
+    allow_file: bool = True
+    allow_poll: bool = True
+    allow_schedule: bool = True
+    allow_bazaar: bool = True
+    household_name: str = "Home"
 
     def allows_post_type(self, pt: "PostType | str") -> bool:
         val = pt.value if hasattr(pt, "value") else str(pt)
         return {
-            "text":       self.allow_text,
-            "image":      self.allow_image,
-            "video":      self.allow_video,
-            "file":       self.allow_file,
-            "poll":       self.allow_poll,
-            "schedule":   self.allow_schedule,
-            "bazaar":     self.allow_bazaar,
-            "transcript": True,   # transcripts are system-generated
+            "text": self.allow_text,
+            "image": self.allow_image,
+            "video": self.allow_video,
+            "file": self.allow_file,
+            "poll": self.allow_poll,
+            "schedule": self.allow_schedule,
+            "bazaar": self.allow_bazaar,
+            "transcript": True,  # transcripts are system-generated
         }.get(val, True)
 
     def allows_section(self, section: str) -> bool:
         return {
-            "feed":     self.feed,
-            "pages":    self.pages,
-            "tasks":    self.tasks,
+            "feed": self.feed,
+            "pages": self.pages,
+            "tasks": self.tasks,
             "stickies": self.stickies,
             "calendar": self.calendar,
-            "bazaar":   self.bazaar,
+            "bazaar": self.bazaar,
         }.get(section, True)
 
     @classmethod
     def from_row(cls, row: dict) -> "HouseholdFeatures":
         return cls(
-            feed           =bool(row.get("feat_feed",     1)),
-            pages          =bool(row.get("feat_pages",    1)),
-            tasks          =bool(row.get("feat_tasks",    1)),
-            stickies       =bool(row.get("feat_stickies", 1)),
-            calendar       =bool(row.get("feat_calendar", 1)),
-            bazaar         =bool(row.get("feat_bazaar",   1)),
-            allow_text     =bool(row.get("allow_text",     1)),
-            allow_image    =bool(row.get("allow_image",    1)),
-            allow_video    =bool(row.get("allow_video",    1)),
-            allow_file     =bool(row.get("allow_file",     1)),
-            allow_poll     =bool(row.get("allow_poll",     1)),
-            allow_schedule =bool(row.get("allow_schedule", 1)),
-            allow_bazaar   =bool(row.get("allow_bazaar",   1)),
-            household_name =row.get("household_name", "Home"),
+            feed=bool(row.get("feat_feed", 1)),
+            pages=bool(row.get("feat_pages", 1)),
+            tasks=bool(row.get("feat_tasks", 1)),
+            stickies=bool(row.get("feat_stickies", 1)),
+            calendar=bool(row.get("feat_calendar", 1)),
+            bazaar=bool(row.get("feat_bazaar", 1)),
+            allow_text=bool(row.get("allow_text", 1)),
+            allow_image=bool(row.get("allow_image", 1)),
+            allow_video=bool(row.get("allow_video", 1)),
+            allow_file=bool(row.get("allow_file", 1)),
+            allow_poll=bool(row.get("allow_poll", 1)),
+            allow_schedule=bool(row.get("allow_schedule", 1)),
+            allow_bazaar=bool(row.get("allow_bazaar", 1)),
+            household_name=row.get("household_name", "Home"),
         )
 
     def to_columns(self) -> dict:
         return {
-            "feat_feed":      int(self.feed),
-            "feat_pages":     int(self.pages),
-            "feat_tasks":     int(self.tasks),
-            "feat_stickies":  int(self.stickies),
-            "feat_calendar":  int(self.calendar),
-            "feat_bazaar":    int(self.bazaar),
-            "allow_text":     int(self.allow_text),
-            "allow_image":    int(self.allow_image),
-            "allow_video":    int(self.allow_video),
-            "allow_file":     int(self.allow_file),
-            "allow_poll":     int(self.allow_poll),
+            "feat_feed": int(self.feed),
+            "feat_pages": int(self.pages),
+            "feat_tasks": int(self.tasks),
+            "feat_stickies": int(self.stickies),
+            "feat_calendar": int(self.calendar),
+            "feat_bazaar": int(self.bazaar),
+            "allow_text": int(self.allow_text),
+            "allow_image": int(self.allow_image),
+            "allow_video": int(self.allow_video),
+            "allow_file": int(self.allow_file),
+            "allow_poll": int(self.allow_poll),
             "allow_schedule": int(self.allow_schedule),
-            "allow_bazaar":   int(self.allow_bazaar),
+            "allow_bazaar": int(self.allow_bazaar),
             "household_name": self.household_name,
         }
 
     def to_wire_dict(self) -> dict:
         return {
-            "feed":           self.feed,
-            "pages":          self.pages,
-            "tasks":          self.tasks,
-            "stickies":       self.stickies,
-            "calendar":       self.calendar,
-            "bazaar":         self.bazaar,
-            "allow_text":     self.allow_text,
-            "allow_image":    self.allow_image,
-            "allow_video":    self.allow_video,
-            "allow_file":     self.allow_file,
-            "allow_poll":     self.allow_poll,
+            "feed": self.feed,
+            "pages": self.pages,
+            "tasks": self.tasks,
+            "stickies": self.stickies,
+            "calendar": self.calendar,
+            "bazaar": self.bazaar,
+            "allow_text": self.allow_text,
+            "allow_image": self.allow_image,
+            "allow_video": self.allow_video,
+            "allow_file": self.allow_file,
+            "allow_poll": self.allow_poll,
             "allow_schedule": self.allow_schedule,
-            "allow_bazaar":   self.allow_bazaar,
+            "allow_bazaar": self.allow_bazaar,
             "household_name": self.household_name,
         }
 
 
 # ─── Moderation queue ─────────────────────────────────────────────────────
 
+
 class ModerationStatus(StrEnum):
-    PENDING  = "pending"
+    PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
-    EXPIRED  = "expired"
+    EXPIRED = "expired"
 
 
 @dataclass(slots=True, frozen=True)
@@ -318,20 +324,21 @@ class SpaceModerationItem:
 
 # ─── Signed config events (§4.3) ──────────────────────────────────────────
 
+
 class SpaceConfigEventType(StrEnum):
-    RENAME                     = "rename"
-    FEATURE_CHANGED            = "feature_changed"
+    RENAME = "rename"
+    FEATURE_CHANGED = "feature_changed"
     ALLOWED_POST_TYPES_CHANGED = "allowed_post_types_changed"
-    JOIN_MODE_CHANGED          = "join_mode_changed"
-    ADMIN_GRANTED              = "admin_granted"
-    ADMIN_REVOKED              = "admin_revoked"
-    OWNERSHIP_TRANSFERRED      = "ownership_transferred"
-    MEMBER_BANNED              = "member_banned"
-    MEMBER_UNBANNED            = "member_unbanned"
-    DISSOLVED                  = "dissolved"
-    PUBLIC_MODE_CHANGED        = "public_mode_changed"
-    COVER_UPDATED              = "cover_updated"
-    ABOUT_UPDATED              = "about_updated"
+    JOIN_MODE_CHANGED = "join_mode_changed"
+    ADMIN_GRANTED = "admin_granted"
+    ADMIN_REVOKED = "admin_revoked"
+    OWNERSHIP_TRANSFERRED = "ownership_transferred"
+    MEMBER_BANNED = "member_banned"
+    MEMBER_UNBANNED = "member_unbanned"
+    DISSOLVED = "dissolved"
+    PUBLIC_MODE_CHANGED = "public_mode_changed"
+    COVER_UPDATED = "cover_updated"
+    ABOUT_UPDATED = "about_updated"
 
 
 @dataclass(slots=True, frozen=True)
@@ -354,6 +361,7 @@ class SpaceConfigEvent:
 
 
 # ─── Domain exceptions ────────────────────────────────────────────────────
+
 
 @dataclass
 class SpaceConfigGapError(Exception):
@@ -395,18 +403,19 @@ class ModerationAlreadyDecidedError(Exception):
 
 # ─── Space entity (§4.3) ──────────────────────────────────────────────────
 
+
 class SpaceType(StrEnum):
-    PRIVATE   = "private"
+    PRIVATE = "private"
     HOUSEHOLD = "household"
-    PUBLIC    = "public"
-    GLOBAL    = "global"
+    PUBLIC = "public"
+    GLOBAL = "global"
 
 
 class JoinMode(StrEnum):
     INVITE_ONLY = "invite_only"
-    OPEN        = "open"
-    LINK        = "link"
-    REQUEST     = "request"
+    OPEN = "open"
+    LINK = "link"
+    REQUEST = "request"
 
 
 @dataclass(slots=True, frozen=True)
@@ -426,7 +435,7 @@ class Space:
     # Optional fields — must come after required ones.
     description: str | None = None
     emoji: str | None = None
-    retention_days: int | None = None            # None → unlimited
+    retention_days: int | None = None  # None → unlimited
     retention_exempt_types: tuple[str, ...] = field(default_factory=tuple)
     join_code: str | None = None
     lat: float | None = None
@@ -449,11 +458,11 @@ class SpaceMember:
 
     space_id: str
     user_id: str
-    role: str                            # "owner" | "admin" | "member"
+    role: str  # "owner" | "admin" | "member"
     joined_at: str
     history_visible_from: str | None = None
     location_share_enabled: bool = False
-    space_display_name: str | None = None    # member-self-set alias (§4.1.6)
+    space_display_name: str | None = None  # member-self-set alias (§4.1.6)
     # Per-space picture hash (bytes live in
     # ``space_member_profile_pictures``). NULL means inherit household.
     picture_hash: str | None = None
@@ -473,6 +482,6 @@ class SpacePublicProfile:
     emoji: str | None
     owner_instance_id: str
     member_count: int
-    location: tuple[float, float] | None   # (lat, lon), 4dp-truncated
+    location: tuple[float, float] | None  # (lat, lon), 4dp-truncated
     radius_km: float | None
     join_mode: JoinMode

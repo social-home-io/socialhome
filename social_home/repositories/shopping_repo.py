@@ -45,10 +45,14 @@ class SqliteShoppingRepo:
         text = text.strip()
         if not text:
             raise ValueError("shopping item text must not be empty")
-        now  = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         item = ShoppingItem(
-            id=uuid.uuid4().hex, text=text, completed=False,
-            created_by=created_by, created_at=now, completed_at=None,
+            id=uuid.uuid4().hex,
+            text=text,
+            completed=False,
+            created_by=created_by,
+            created_at=now,
+            completed_at=None,
         )
         await self._db.enqueue(
             """
@@ -62,26 +66,26 @@ class SqliteShoppingRepo:
 
     async def get(self, item_id: str) -> ShoppingItem | None:
         row = await self._db.fetchone(
-            "SELECT * FROM shopping_list_items WHERE id=?", (item_id,),
+            "SELECT * FROM shopping_list_items WHERE id=?",
+            (item_id,),
         )
         return _row_to_item(row_to_dict(row))
 
     async def list(
-        self, *, include_completed: bool = False,
+        self,
+        *,
+        include_completed: bool = False,
     ) -> list[ShoppingItem]:
         if include_completed:
             rows = await self._db.fetchall(
-                "SELECT * FROM shopping_list_items "
-                "ORDER BY completed ASC, created_at",
+                "SELECT * FROM shopping_list_items ORDER BY completed ASC, created_at",
             )
         else:
             rows = await self._db.fetchall(
                 "SELECT * FROM shopping_list_items WHERE completed=0 "
                 "ORDER BY created_at",
             )
-        return [
-            i for i in (_row_to_item(d) for d in rows_to_dicts(rows)) if i
-        ]
+        return [i for i in (_row_to_item(d) for d in rows_to_dicts(rows)) if i]
 
     async def complete(self, item_id: str) -> None:
         await self._db.enqueue(
@@ -105,7 +109,8 @@ class SqliteShoppingRepo:
 
     async def delete(self, item_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM shopping_list_items WHERE id=?", (item_id,),
+            "DELETE FROM shopping_list_items WHERE id=?",
+            (item_id,),
         )
 
     async def clear_completed(self) -> int:

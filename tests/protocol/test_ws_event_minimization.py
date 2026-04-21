@@ -22,6 +22,7 @@ pytestmark = pytest.mark.security
 
 # ─── _safe never serializes a `password` / `private_key` ────────────────
 
+
 def test_safe_passes_through_simple_dicts():
     out = _safe({"foo": "bar"})
     assert out == {"foo": "bar"}
@@ -36,9 +37,11 @@ def test_safe_handles_set_and_frozenset():
 
 # ─── Notification fan-out body restrictions (§25.3) ────────────────────
 
+
 def test_push_payload_class_omits_body_field():
     """PushPayload defines no `body` attribute by design."""
     from social_home.services.push_service import PushPayload
+
     p = PushPayload(title="Hello")
     serialized = json.loads(p.to_json())
     assert "body" not in serialized
@@ -47,12 +50,14 @@ def test_push_payload_class_omits_body_field():
 
 def test_push_payload_drops_none_fields():
     from social_home.services.push_service import PushPayload
+
     p = PushPayload(title="x", click_url=None)
     serialized = json.loads(p.to_json())
     assert "click_url" not in serialized
 
 
 # ─── Conversation typing event shape ────────────────────────────────────
+
 
 async def test_typing_event_carries_only_routing():
     from social_home.services.typing_service import TypingService
@@ -77,7 +82,8 @@ async def test_typing_event_carries_only_routing():
         ws_manager=_FakeWS(),
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice",
+        conversation_id="c1",
+        sender_user_id="alice",
         sender_username="alice",
     )
     # Member list is empty, so no broadcast captured. Force one by

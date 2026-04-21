@@ -27,35 +27,35 @@ from .base import BaseView
 
 def _album_dict(a) -> dict:
     return {
-        "id":             a.id,
-        "space_id":       a.space_id,
-        "owner_user_id":  a.owner_user_id,
-        "name":           a.name,
-        "description":    a.description,
-        "cover_item_id":  a.cover_item_id,
-        "cover_url":      a.cover_url,
-        "item_count":     a.item_count,
+        "id": a.id,
+        "space_id": a.space_id,
+        "owner_user_id": a.owner_user_id,
+        "name": a.name,
+        "description": a.description,
+        "cover_item_id": a.cover_item_id,
+        "cover_url": a.cover_url,
+        "item_count": a.item_count,
         "retention_exempt": a.retention_exempt,
-        "created_at":     a.created_at,
-        "updated_at":     a.updated_at,
+        "created_at": a.created_at,
+        "updated_at": a.updated_at,
     }
 
 
 def _item_dict(i) -> dict:
     return {
-        "id":            i.id,
-        "album_id":      i.album_id,
-        "uploaded_by":   i.uploaded_by,
-        "item_type":     i.item_type,
-        "url":           i.url,
+        "id": i.id,
+        "album_id": i.album_id,
+        "uploaded_by": i.uploaded_by,
+        "item_type": i.item_type,
+        "url": i.url,
         "thumbnail_url": i.thumbnail_url,
-        "width":         i.width,
-        "height":        i.height,
-        "duration_s":    i.duration_s,
-        "caption":       i.caption,
-        "taken_at":      i.taken_at,
-        "sort_order":    i.sort_order,
-        "created_at":    i.created_at,
+        "width": i.width,
+        "height": i.height,
+        "duration_s": i.duration_s,
+        "caption": i.caption,
+        "taken_at": i.taken_at,
+        "sort_order": i.sort_order,
+        "created_at": i.created_at,
     }
 
 
@@ -70,8 +70,10 @@ class HouseholdAlbumCollectionView(BaseView):
         except ValueError:
             limit = 30
         albums = await self.svc(K.gallery_service_key).list_albums(
-            space_id=None, actor_user_id=ctx.user_id,
-            limit=limit, before=before,
+            space_id=None,
+            actor_user_id=ctx.user_id,
+            limit=limit,
+            before=before,
         )
         return web.json_response([_album_dict(a) for a in albums])
 
@@ -99,8 +101,10 @@ class SpaceAlbumCollectionView(BaseView):
         except ValueError:
             limit = 30
         albums = await self.svc(K.gallery_service_key).list_albums(
-            space_id=space_id, actor_user_id=ctx.user_id,
-            limit=limit, before=before,
+            space_id=space_id,
+            actor_user_id=ctx.user_id,
+            limit=limit,
+            before=before,
         )
         return web.json_response([_album_dict(a) for a in albums])
 
@@ -123,7 +127,8 @@ class AlbumDetailView(BaseView):
     async def get(self) -> web.Response:
         ctx = self.user
         album = await self.svc(K.gallery_service_key).get_album(
-            self.match("album_id"), actor_user_id=ctx.user_id,
+            self.match("album_id"),
+            actor_user_id=ctx.user_id,
         )
         return web.json_response(_album_dict(album))
 
@@ -142,7 +147,8 @@ class AlbumDetailView(BaseView):
     async def delete(self) -> web.Response:
         ctx = self.user
         await self.svc(K.gallery_service_key).delete_album(
-            self.match("album_id"), actor_user_id=ctx.user_id,
+            self.match("album_id"),
+            actor_user_id=ctx.user_id,
         )
         return web.Response(status=204)
 
@@ -158,7 +164,8 @@ class AlbumRetentionView(BaseView):
             body = {}
         exempt = bool(body.get("retention_exempt"))
         await self.svc(K.gallery_service_key).set_retention_exempt(
-            self.match("album_id"), exempt,
+            self.match("album_id"),
+            exempt,
             actor_user_id=ctx.user_id,
         )
         return web.json_response({"retention_exempt": exempt})
@@ -177,7 +184,8 @@ class AlbumItemCollectionView(BaseView):
         items = await self.svc(K.gallery_service_key).list_items(
             self.match("album_id"),
             actor_user_id=ctx.user_id,
-            limit=limit, before=before,
+            limit=limit,
+            before=before,
         )
         return web.json_response([_item_dict(i) for i in items])
 
@@ -239,6 +247,7 @@ class GalleryItemDetailView(BaseView):
     async def delete(self) -> web.Response:
         ctx = self.user
         await self.svc(K.gallery_service_key).delete_item(
-            self.match("item_id"), actor_user_id=ctx.user_id,
+            self.match("item_id"),
+            actor_user_id=ctx.user_id,
         )
         return web.Response(status=204)

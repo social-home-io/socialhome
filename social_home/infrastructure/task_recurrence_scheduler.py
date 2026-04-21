@@ -32,7 +32,7 @@ class TaskRecurrenceScheduler:
         self,
         service: "TaskService",
         *,
-        interval_seconds: float = 3600.0,    # hourly
+        interval_seconds: float = 3600.0,  # hourly
     ) -> None:
         self._svc = service
         self._interval = interval_seconds
@@ -50,7 +50,7 @@ class TaskRecurrenceScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -60,11 +60,12 @@ class TaskRecurrenceScheduler:
                 spawned = await self._svc.spawn_overdue_recurrences()
                 if spawned:
                     log.debug("task-recurrence: spawned %d", len(spawned))
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("task-recurrence tick failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue

@@ -39,9 +39,19 @@ from dataclasses import dataclass, field
 #: deliberate — typos like ``=!`` would otherwise produce confusing
 #: errors. ``IN``/``NOT IN`` would need parameter expansion logic;
 #: keep them out of v1.
-_ALLOWED_OPS: frozenset[str] = frozenset({
-    "=", "!=", "<", "<=", ">", ">=", "LIKE", "IS", "IS NOT",
-})
+_ALLOWED_OPS: frozenset[str] = frozenset(
+    {
+        "=",
+        "!=",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "LIKE",
+        "IS",
+        "IS NOT",
+    }
+)
 
 _ALLOWED_DIRECTIONS: frozenset[str] = frozenset({"ASC", "DESC"})
 
@@ -63,7 +73,10 @@ class Spec:
 
 
 def spec_to_sql(
-    spec: Spec, *, table: str, allowed_cols: set[str] | frozenset[str],
+    spec: Spec,
+    *,
+    table: str,
+    allowed_cols: set[str] | frozenset[str],
 ) -> tuple[str, tuple]:
     """Convert *spec* into a ``WHERE … ORDER BY … LIMIT … OFFSET …`` fragment.
 
@@ -99,14 +112,10 @@ def spec_to_sql(
         order_parts: list[str] = []
         for col, direction in spec.order_by:
             if col not in allowed_cols:
-                raise ValueError(
-                    f"order_by column {col!r} not allowed for {table!r}"
-                )
+                raise ValueError(f"order_by column {col!r} not allowed for {table!r}")
             dir_upper = direction.upper()
             if dir_upper not in _ALLOWED_DIRECTIONS:
-                raise ValueError(
-                    f"order direction {direction!r} not allowed"
-                )
+                raise ValueError(f"order direction {direction!r} not allowed")
             order_parts.append(f"{col} {dir_upper}")
         parts.append("ORDER BY " + ", ".join(order_parts))
 

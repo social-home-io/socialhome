@@ -22,7 +22,13 @@ from datetime import datetime, timedelta, timezone
 
 
 _WEEKDAYS = {
-    "MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6,
+    "MO": 0,
+    "TU": 1,
+    "WE": 2,
+    "TH": 3,
+    "FR": 4,
+    "SA": 5,
+    "SU": 6,
 }
 
 
@@ -58,11 +64,11 @@ def parse_rrule(rrule: str) -> dict:
     ``{"FREQ": None}`` and the expander degenerates to "seed only".
     """
     out: dict = {
-        "FREQ":     None,
+        "FREQ": None,
         "INTERVAL": 1,
-        "BYDAY":    [],
-        "COUNT":    None,
-        "UNTIL":    None,
+        "BYDAY": [],
+        "COUNT": None,
+        "UNTIL": None,
     }
     if not rrule:
         return out
@@ -73,9 +79,17 @@ def parse_rrule(rrule: str) -> dict:
         k = k.strip().upper()
         v = v.strip()
         if k == "FREQ":
-            out["FREQ"] = v.upper() if v.upper() in (
-                "DAILY", "WEEKLY", "MONTHLY", "YEARLY",
-            ) else None
+            out["FREQ"] = (
+                v.upper()
+                if v.upper()
+                in (
+                    "DAILY",
+                    "WEEKLY",
+                    "MONTHLY",
+                    "YEARLY",
+                )
+                else None
+            )
         elif k == "INTERVAL":
             try:
                 out["INTERVAL"] = max(1, int(v))
@@ -172,7 +186,8 @@ def expand_rrule(
                 candidate = week_start + timedelta(days=dow)
                 # Align time-of-day with the seed.
                 candidate = candidate.replace(
-                    hour=seed_start.hour, minute=seed_start.minute,
+                    hour=seed_start.hour,
+                    minute=seed_start.minute,
                     second=seed_start.second,
                     microsecond=seed_start.microsecond,
                 )
@@ -203,7 +218,9 @@ def expand_rrule(
                 for fallback in range(cur.day - 1, 27, -1):
                     try:
                         cur = cur.replace(
-                            year=y, month=new_month, day=fallback,
+                            year=y,
+                            month=new_month,
+                            day=fallback,
                         )
                         break
                     except ValueError:
@@ -220,7 +237,7 @@ def expand_rrule(
                 break
             try:
                 cur = cur.replace(year=cur.year + year_step)
-            except ValueError:      # Feb 29 on a non-leap year
+            except ValueError:  # Feb 29 on a non-leap year
                 cur = cur.replace(year=cur.year + year_step, day=28)
 
     return occurrences

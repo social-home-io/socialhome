@@ -22,11 +22,13 @@ class _FakeFederation:
         self.sent: list[dict] = []
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
-        self.sent.append({
-            "to": to_instance_id,
-            "type": event_type,
-            "payload": payload,
-        })
+        self.sent.append(
+            {
+                "to": to_instance_id,
+                "type": event_type,
+                "payload": payload,
+            }
+        )
 
 
 class _FakeConvRepo:
@@ -63,8 +65,11 @@ async def test_pairing_confirmed_enqueues_history_requests(bus, queue):
     fed = _FakeFederation()
     repo = _FakeConvRepo({"peer-a": ["conv-1", "conv-2"]})
     sched = DmHistoryScheduler(
-        bus=bus, federation=fed, conversation_repo=repo,
-        queue=queue, own_instance_id="self",
+        bus=bus,
+        federation=fed,
+        conversation_repo=repo,
+        queue=queue,
+        own_instance_id="self",
     )
     sched.wire()
     await queue.start()
@@ -79,8 +84,11 @@ async def test_connection_reachable_enqueues_history_requests(bus, queue):
     latest = {"conv-1": _Msg("2026-04-01T00:00:00+00:00")}
     repo = _FakeConvRepo({"peer-b": ["conv-1"]}, latest_by_conv=latest)
     sched = DmHistoryScheduler(
-        bus=bus, federation=fed, conversation_repo=repo,
-        queue=queue, own_instance_id="self",
+        bus=bus,
+        federation=fed,
+        conversation_repo=repo,
+        queue=queue,
+        own_instance_id="self",
     )
     sched.wire()
     await queue.start()
@@ -95,8 +103,11 @@ async def test_ignores_own_instance(bus, queue):
     fed = _FakeFederation()
     repo = _FakeConvRepo({"self": ["conv-x"]})
     sched = DmHistoryScheduler(
-        bus=bus, federation=fed, conversation_repo=repo,
-        queue=queue, own_instance_id="self",
+        bus=bus,
+        federation=fed,
+        conversation_repo=repo,
+        queue=queue,
+        own_instance_id="self",
     )
     sched.wire()
     await queue.start()
@@ -109,8 +120,11 @@ async def test_rate_limit_blocks_rapid_repeats(bus, queue):
     fed = _FakeFederation()
     repo = _FakeConvRepo({"peer-a": ["conv-1"]})
     sched = DmHistoryScheduler(
-        bus=bus, federation=fed, conversation_repo=repo,
-        queue=queue, own_instance_id="self",
+        bus=bus,
+        federation=fed,
+        conversation_repo=repo,
+        queue=queue,
+        own_instance_id="self",
     )
     await queue.start()
     assert await sched._enqueue_for_peer("peer-a") == 1
@@ -122,8 +136,11 @@ async def test_rate_limit_expires_after_window(bus, queue):
     fed = _FakeFederation()
     repo = _FakeConvRepo({"peer-a": ["conv-1"]})
     sched = DmHistoryScheduler(
-        bus=bus, federation=fed, conversation_repo=repo,
-        queue=queue, own_instance_id="self",
+        bus=bus,
+        federation=fed,
+        conversation_repo=repo,
+        queue=queue,
+        own_instance_id="self",
     )
     await queue.start()
     await sched._enqueue_for_peer("peer-a")

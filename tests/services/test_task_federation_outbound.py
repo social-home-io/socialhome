@@ -35,9 +35,14 @@ class _FakeSpaceRepo:
 def _task(tid: str) -> Task:
     now = datetime.now(timezone.utc)
     return Task(
-        id=tid, list_id="L", title=f"t{tid}",
-        status=TaskStatus.TODO, position=0,
-        created_by="u", created_at=now, updated_at=now,
+        id=tid,
+        list_id="L",
+        title=f"t{tid}",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="u",
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -45,12 +50,16 @@ def _task(tid: str) -> Task:
 def env():
     bus = EventBus()
     fed = _FakeFed()
-    repo = _FakeSpaceRepo({
-        "sp-A": ["own-inst", "peer-1", "peer-2"],
-        "sp-B": ["peer-3"],
-    })
+    repo = _FakeSpaceRepo(
+        {
+            "sp-A": ["own-inst", "peer-1", "peer-2"],
+            "sp-B": ["peer-3"],
+        }
+    )
     out = TaskFederationOutbound(
-        bus=bus, federation_service=fed, space_repo=repo,
+        bus=bus,
+        federation_service=fed,
+        space_repo=repo,
     )
     out.wire()
     return bus, fed
@@ -76,9 +85,13 @@ async def test_space_task_created_fanouts_to_peers_excluding_self(env):
 
 async def test_space_task_deleted_minimal_payload(env):
     bus, fed = env
-    await bus.publish(TaskDeleted(
-        task_id="t1", list_id="L", space_id="sp-A",
-    ))
+    await bus.publish(
+        TaskDeleted(
+            task_id="t1",
+            list_id="L",
+            space_id="sp-A",
+        )
+    )
     assert len(fed.sent) == 2
     for _to, event_type, payload in fed.sent:
         assert event_type is FederationEventType.SPACE_TASK_DELETED

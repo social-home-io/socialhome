@@ -57,9 +57,13 @@ def _coerce_datetimes(d: dict) -> dict:
             out[k] = _coerce_datetimes(v)
         elif isinstance(v, list):
             out[k] = [
-                _coerce_datetimes(i) if isinstance(i, dict) else
-                sorted(i) if isinstance(i, (frozenset, set)) else
-                i.isoformat() if isinstance(i, datetime) else i
+                _coerce_datetimes(i)
+                if isinstance(i, dict)
+                else sorted(i)
+                if isinstance(i, (frozenset, set))
+                else i.isoformat()
+                if isinstance(i, datetime)
+                else i
                 for i in v
             ]
         elif isinstance(v, tuple):
@@ -203,7 +207,8 @@ class PostCommentDetailView(BaseView):
         ctx = self.user
         svc = self.svc(feed_service_key)
         await svc.delete_comment(
-            self.match("cid"), actor_user_id=ctx.user_id,
+            self.match("cid"),
+            actor_user_id=ctx.user_id,
         )
         return web.Response(status=204)
 

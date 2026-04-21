@@ -6,7 +6,9 @@ from __future__ import annotations
 from .conftest import _auth
 
 
-async def _seed_listing(client, *, listing_id: str = "lst-1", seller: str | None = None) -> None:
+async def _seed_listing(
+    client, *, listing_id: str = "lst-1", seller: str | None = None
+) -> None:
     seller = seller or client._uid
     db = client._db
     # bazaar_listings.post_id FKs feed_posts(id), so we need a parent feed post.
@@ -23,6 +25,7 @@ async def _seed_listing(client, *, listing_id: str = "lst-1", seller: str | None
 
 # ─── List ─────────────────────────────────────────────────────────────────
 
+
 async def test_list_listings_returns_active(client):
     await _seed_listing(client, listing_id="lst-A")
     r = await client.get("/api/bazaar", headers=_auth(client._tok))
@@ -32,6 +35,7 @@ async def test_list_listings_returns_active(client):
 
 
 # ─── Get ──────────────────────────────────────────────────────────────────
+
 
 async def test_get_listing_returns_404_when_missing(client):
     r = await client.get("/api/bazaar/missing", headers=_auth(client._tok))
@@ -47,10 +51,13 @@ async def test_get_listing_returns_existing(client):
 
 # ─── Place bid ────────────────────────────────────────────────────────────
 
+
 async def test_place_bid_requires_amount(client):
     await _seed_listing(client, listing_id="lst-C")
     r = await client.post(
-        "/api/bazaar/lst-C/bids", json={}, headers=_auth(client._tok),
+        "/api/bazaar/lst-C/bids",
+        json={},
+        headers=_auth(client._tok),
     )
     assert r.status == 422
 
@@ -58,7 +65,8 @@ async def test_place_bid_requires_amount(client):
 async def test_place_bid_rejects_non_int_amount(client):
     await _seed_listing(client, listing_id="lst-D")
     r = await client.post(
-        "/api/bazaar/lst-D/bids", json={"amount": "lots"},
+        "/api/bazaar/lst-D/bids",
+        json={"amount": "lots"},
         headers=_auth(client._tok),
     )
     assert r.status == 422
@@ -82,7 +90,8 @@ async def test_place_bid_on_own_listing_rejected(client):
     """Seller cannot bid on their own listing (§23.15)."""
     await _seed_listing(client, listing_id="lst-self")
     r = await client.post(
-        "/api/bazaar/lst-self/bids", json={"amount": 100},
+        "/api/bazaar/lst-self/bids",
+        json={"amount": 100},
         headers=_auth(client._tok),
     )
     assert r.status == 422
@@ -93,13 +102,15 @@ async def test_place_bid_on_own_listing_rejected(client):
 async def test_place_bid_rejects_zero_amount(client):
     await _seed_listing(client, listing_id="lst-zero", seller="other")
     r = await client.post(
-        "/api/bazaar/lst-zero/bids", json={"amount": 0},
+        "/api/bazaar/lst-zero/bids",
+        json={"amount": 0},
         headers=_auth(client._tok),
     )
     assert r.status == 422
 
 
 # ─── Accept offer ─────────────────────────────────────────────────────────
+
 
 async def test_accept_offer_requires_seller(client):
     # Listing owned by 'other-user'; our test user places a bid, then a
@@ -108,7 +119,8 @@ async def test_accept_offer_requires_seller(client):
     # 404 lookup and reaches the seller check.
     await _seed_listing(client, listing_id="lst-F", seller="other-user")
     bid_r = await client.post(
-        "/api/bazaar/lst-F/bids", json={"amount": 100},
+        "/api/bazaar/lst-F/bids",
+        json={"amount": 100},
         headers=_auth(client._tok),
     )
     bid_id = (await bid_r.json())["id"]
@@ -122,7 +134,8 @@ async def test_accept_offer_requires_seller(client):
 
 async def test_accept_offer_unknown_listing_404(client):
     r = await client.post(
-        "/api/bazaar/missing/bids/x/accept", headers=_auth(client._tok),
+        "/api/bazaar/missing/bids/x/accept",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -147,6 +160,7 @@ async def test_place_bid_invalid_json_400(client):
 
 
 # ─── Create listing ───────────────────────────────────────────────────────
+
 
 async def test_create_listing_succeeds(client):
     r = await client.post(
@@ -192,18 +206,21 @@ async def test_create_listing_auction_requires_start_price(client):
 
 # ─── Reject / withdraw / cancel ──────────────────────────────────────────
 
+
 async def test_reject_offer_seller_only(client):
     # Seller is someone else, so we (the test user) can bid but can't reject.
     await _seed_listing(client, listing_id="lst-rej", seller="other-user")
     bid_r = await client.post(
-        "/api/bazaar/lst-rej/bids", json={"amount": 100},
+        "/api/bazaar/lst-rej/bids",
+        json={"amount": 100},
         headers=_auth(client._tok),
     )
     bid_id = (await bid_r.json())["id"]
     # Now our test user tries to reject their own bid — they aren't the seller.
     r = await client.post(
         f"/api/bazaar/lst-rej/bids/{bid_id}/reject",
-        json={}, headers=_auth(client._tok),
+        json={},
+        headers=_auth(client._tok),
     )
     assert r.status == 403
 
@@ -211,12 +228,14 @@ async def test_reject_offer_seller_only(client):
 async def test_withdraw_bid_by_bidder_succeeds(client):
     await _seed_listing(client, listing_id="lst-wd", seller="other-user")
     bid_r = await client.post(
-        "/api/bazaar/lst-wd/bids", json={"amount": 100},
+        "/api/bazaar/lst-wd/bids",
+        json={"amount": 100},
         headers=_auth(client._tok),
     )
     bid_id = (await bid_r.json())["id"]
     r = await client.delete(
-        f"/api/bazaar/lst-wd/bids/{bid_id}", headers=_auth(client._tok),
+        f"/api/bazaar/lst-wd/bids/{bid_id}",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
 
@@ -224,7 +243,8 @@ async def test_withdraw_bid_by_bidder_succeeds(client):
 async def test_cancel_listing_seller_only(client):
     await _seed_listing(client, listing_id="lst-cxl", seller="other-user")
     r = await client.delete(
-        "/api/bazaar/lst-cxl", headers=_auth(client._tok),
+        "/api/bazaar/lst-cxl",
+        headers=_auth(client._tok),
     )
     assert r.status == 403
 
@@ -232,11 +252,13 @@ async def test_cancel_listing_seller_only(client):
 async def test_cancel_own_listing_succeeds(client):
     await _seed_listing(client, listing_id="lst-cxl-ok")
     r = await client.delete(
-        "/api/bazaar/lst-cxl-ok", headers=_auth(client._tok),
+        "/api/bazaar/lst-cxl-ok",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
     # Listing status is now cancelled.
     got = await client.get(
-        "/api/bazaar/lst-cxl-ok", headers=_auth(client._tok),
+        "/api/bazaar/lst-cxl-ok",
+        headers=_auth(client._tok),
     )
     assert (await got.json())["status"] == "cancelled"

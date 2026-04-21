@@ -46,13 +46,23 @@ EXPORTABLE_TABLES: tuple[str, ...] = (
     "space_aliases",
     "space_posts",
     "space_post_comments",
-    "polls", "poll_options", "poll_votes",
-    "schedule_poll_meta", "schedule_slots", "schedule_responses",
-    "conversations", "conversation_members", "conversation_messages",
+    "polls",
+    "poll_options",
+    "poll_votes",
+    "schedule_poll_meta",
+    "schedule_slots",
+    "schedule_responses",
+    "conversations",
+    "conversation_members",
+    "conversation_messages",
     "message_reactions",
-    "task_lists", "tasks",
-    "calendars", "calendar_events", "calendar_rsvps",
-    "pages", "page_edit_history",
+    "task_lists",
+    "tasks",
+    "calendars",
+    "calendar_events",
+    "calendar_rsvps",
+    "pages",
+    "page_edit_history",
     "stickies",
     "shopping_list_items",
     "household_features",
@@ -61,26 +71,30 @@ EXPORTABLE_TABLES: tuple[str, ...] = (
     "space_links",
     "post_drafts",
     "notifications",
-    "bazaar_listings", "bazaar_bids",
+    "bazaar_listings",
+    "bazaar_bids",
 )
 
 #: Tables whose names appear in the export but must NEVER appear on the
 #: wire. The export will refuse to add them even if the caller passes
 #: them through — defence-in-depth against future changes.
-NEVER_EXPORT: frozenset[str] = frozenset({
-    "instance_identity",
-    "space_keys",
-    "pending_pairings",
-    "pending_space_key_exchanges",
-    "remote_instances",   # contains KEK-wrapped session keys
-    "api_tokens",         # token hashes — useless out of context but still secret
-    "user_sessions",
-    "platform_tokens",
-    "push_subscriptions",
-})
+NEVER_EXPORT: frozenset[str] = frozenset(
+    {
+        "instance_identity",
+        "space_keys",
+        "pending_pairings",
+        "pending_space_key_exchanges",
+        "remote_instances",  # contains KEK-wrapped session keys
+        "api_tokens",  # token hashes — useless out of context but still secret
+        "user_sessions",
+        "platform_tokens",
+        "push_subscriptions",
+    }
+)
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
+
 
 class BackupError(Exception):
     """Base error class for backup operations."""
@@ -92,12 +106,13 @@ class BackupRestoreNotEmpty(BackupError):
 
 # ─── Service ─────────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class BackupManifest:
     schema_version: int
-    instance_id:    str
-    exported_at:    str
-    table_names:    list[str]
+    instance_id: str
+    exported_at: str
+    table_names: list[str]
 
 
 class BackupService:
@@ -162,20 +177,25 @@ class BackupService:
 
         with tarfile.open(fileobj=fp, mode="w:gz") as tar:
             self._tar_add_bytes(
-                tar, "manifest.json",
-                json.dumps({
-                    "schema_version": manifest.schema_version,
-                    "instance_id":    manifest.instance_id,
-                    "exported_at":    manifest.exported_at,
-                    "table_names":    manifest.table_names,
-                }, indent=2).encode("utf-8"),
+                tar,
+                "manifest.json",
+                json.dumps(
+                    {
+                        "schema_version": manifest.schema_version,
+                        "instance_id": manifest.instance_id,
+                        "exported_at": manifest.exported_at,
+                        "table_names": manifest.table_names,
+                    },
+                    indent=2,
+                ).encode("utf-8"),
             )
             for table in EXPORTABLE_TABLES:
                 if table in NEVER_EXPORT:
                     continue
                 rows = await self._dump_table(table)
                 self._tar_add_bytes(
-                    tar, f"tables/{table}.json",
+                    tar,
+                    f"tables/{table}.json",
                     json.dumps(rows).encode("utf-8"),
                 )
             self._tar_add_media(tar)
@@ -183,7 +203,7 @@ class BackupService:
     async def _dump_table(self, table: str) -> list[dict]:
         try:
             rows = await self._db.fetchall(f"SELECT * FROM {table}")
-        except Exception as exc:                             # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("backup: skipping %s due to %s", table, exc)
             return []
         return [dict(r) for r in rows]
@@ -229,7 +249,7 @@ class BackupService:
                     continue
                 if name == "manifest.json":
                     continue
-                table = name[len("tables/"):-len(".json")]
+                table = name[len("tables/") : -len(".json")]
                 if table in NEVER_EXPORT:
                     log.warning("backup: skipping %s (in NEVER_EXPORT)", table)
                     continue
@@ -246,7 +266,7 @@ class BackupService:
             for name, member in members.items():
                 if not name.startswith("media/") or not member.isfile():
                     continue
-                target = self._media_path / name[len("media/"):]
+                target = self._media_path / name[len("media/") :]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 fobj = tar.extractfile(member)
                 if fobj is None:

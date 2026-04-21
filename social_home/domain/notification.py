@@ -15,11 +15,11 @@ class Notification:
 
     id: str
     user_id: str
-    type: str                            # free-form category tag, e.g. "mention"
+    type: str  # free-form category tag, e.g. "mention"
     title: str
     created_at: str
 
-    body: str | None = None              # redacted for DM / location / UGC
+    body: str | None = None  # redacted for DM / location / UGC
     link_url: str | None = None
     read_at: str | None = None
 

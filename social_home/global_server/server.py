@@ -60,10 +60,11 @@ from .rtc_transport import GfsRtcSession
 log = logging.getLogger(__name__)
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
-_ADMIN_UI_DIR   = Path(__file__).resolve().parent / "admin_ui"
+_ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
 
 
 # ─── Application factory ───────────────────────────────────────────────
+
 
 class GfsApp:
     """Owns the GFS runtime — repos, services, middleware, and the
@@ -78,7 +79,11 @@ class GfsApp:
     """
 
     __slots__ = (
-        "config", "db", "repos", "services", "app",
+        "config",
+        "db",
+        "repos",
+        "services",
+        "app",
     )
 
     def __init__(
@@ -101,8 +106,7 @@ class GfsApp:
     def _build_db(self, db_path_override: str | Path | None) -> AsyncDatabase:
         """Prepare data_dir + return an :class:`AsyncDatabase`."""
         resolved_db = (
-            Path(db_path_override) if db_path_override
-            else Path(self.config.db_path)
+            Path(db_path_override) if db_path_override else Path(self.config.db_path)
         )
         try:
             resolved_db.parent.mkdir(parents=True, exist_ok=True)
@@ -118,13 +122,15 @@ class GfsApp:
     def _build_repos(self, db: AsyncDatabase) -> SimpleNamespace:
         """Instantiate the three GFS repositories."""
         return SimpleNamespace(
-            federation = SqliteGfsFederationRepo(db),
-            admin      = SqliteGfsAdminRepo(db),
-            cluster    = SqliteClusterRepo(db),
+            federation=SqliteGfsFederationRepo(db),
+            admin=SqliteGfsAdminRepo(db),
+            cluster=SqliteClusterRepo(db),
         )
 
     def _build_services(
-        self, config: GfsConfig, repos: SimpleNamespace,
+        self,
+        config: GfsConfig,
+        repos: SimpleNamespace,
     ) -> SimpleNamespace:
         """Instantiate federation / admin / cluster services + auth + tokens."""
         federation = GfsFederationService(repos.federation)
@@ -142,11 +148,8 @@ class GfsApp:
         seed = hashlib.sha256(
             f"gfs-cluster-{config.instance_id}".encode("utf-8"),
         ).digest()
-        signing_key = seed            # Ed25519 private key is 32 bytes
-        pk_obj = (
-            ed25519.Ed25519PrivateKey.from_private_bytes(signing_key)
-            .public_key()
-        )
+        signing_key = seed  # Ed25519 private key is 32 bytes
+        pk_obj = ed25519.Ed25519PrivateKey.from_private_bytes(signing_key).public_key()
         own_pk_hex = pk_obj.public_bytes(
             encoding=_ser.Encoding.Raw,
             format=_ser.PublicFormat.Raw,
@@ -164,12 +167,12 @@ class GfsApp:
         )
         admin.attach_cluster(cluster)
         return SimpleNamespace(
-            federation = federation,
-            cluster    = cluster,
-            admin_auth = AdminAuth(repos.admin),
-            admin      = admin,
-            tokens     = PairingTokenService(repos.admin),
-            rtc        = GfsRtcSession(),
+            federation=federation,
+            cluster=cluster,
+            admin_auth=AdminAuth(repos.admin),
+            admin=admin,
+            tokens=PairingTokenService(repos.admin),
+            rtc=GfsRtcSession(),
         )
 
     def _build_app(self) -> web.Application:
@@ -183,19 +186,19 @@ class GfsApp:
 
     def _wire_app_keys(self) -> None:
         a = self.app
-        a[K.gfs_db_key]            = self.db
-        a[K.gfs_config_key]        = self.config
-        a[K.gfs_fed_repo_key]      = self.repos.federation
-        a[K.gfs_admin_repo_key]    = self.repos.admin
-        a[K.gfs_cluster_repo_key]  = self.repos.cluster
-        a[K.gfs_federation_key]    = self.services.federation
-        a[K.gfs_cluster_key]       = self.services.cluster
-        a[K.gfs_admin_auth_key]    = self.services.admin_auth
+        a[K.gfs_db_key] = self.db
+        a[K.gfs_config_key] = self.config
+        a[K.gfs_fed_repo_key] = self.repos.federation
+        a[K.gfs_admin_repo_key] = self.repos.admin
+        a[K.gfs_cluster_repo_key] = self.repos.cluster
+        a[K.gfs_federation_key] = self.services.federation
+        a[K.gfs_cluster_key] = self.services.cluster
+        a[K.gfs_admin_auth_key] = self.services.admin_auth
         a[K.gfs_admin_service_key] = self.services.admin
-        a[K.gfs_rtc_key]           = self.services.rtc
+        a[K.gfs_rtc_key] = self.services.rtc
         # Non-typed helpers the admin module reads directly.
-        a["admin_auth"]            = self.services.admin_auth
-        a["gfs_token_service"]     = self.services.tokens
+        a["admin_auth"] = self.services.admin_auth
+        a["gfs_token_service"] = self.services.tokens
 
     def _register_routes(self) -> None:
         """Mount relay / cluster / rtc / admin / public / static routes."""
@@ -226,7 +229,8 @@ class GfsApp:
             existing = await self.repos.admin.get_config("admin_password_hash")
             if not existing:
                 await self.repos.admin.set_config(
-                    "admin_password_hash", self.config.admin_password_hash,
+                    "admin_password_hash",
+                    self.config.admin_password_hash,
                 )
 
         async def _signaling_send(*_args, **_kwargs):
@@ -277,13 +281,13 @@ def create_gfs_app(
 
 # ─── Console-script CLI ─────────────────────────────────────────────────
 
+
 def _cli_init(config_path: Path | None) -> int:
     target = config_path or Path(DEFAULT_CONFIG_FILENAME)
     try:
         write_example_config(target)
     except FileExistsError:
-        print(f"{target} already exists — refusing to overwrite.",
-              file=sys.stderr)
+        print(f"{target} already exists — refusing to overwrite.", file=sys.stderr)
         return 2
     print(f"Wrote example config to {target}")
     print("Edit [server] base_url + [admin] password_hash before starting the GFS.")
@@ -298,8 +302,7 @@ def _cli_set_password(config_path: Path | None) -> int:
     pw = getpass.getpass("New GFS admin password: ")
     confirm = getpass.getpass("Confirm: ")
     if pw != confirm or len(pw) < 8:
-        print("Passwords do not match or too short (min 8 chars).",
-              file=sys.stderr)
+        print("Passwords do not match or too short (min 8 chars).", file=sys.stderr)
         return 2
     hashed = hash_password(pw)
     set_password_in_toml(target, hashed)

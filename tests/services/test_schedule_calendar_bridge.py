@@ -42,8 +42,8 @@ def env(request):
     features = _FakeFeaturesService(enabled=enabled)
     bridge = ScheduleCalendarBridge(
         bus=bus,
-        space_calendar_service=cal,       # type: ignore[arg-type]
-        household_features=features,      # type: ignore[arg-type]
+        space_calendar_service=cal,  # type: ignore[arg-type]
+        household_features=features,  # type: ignore[arg-type]
     )
     bridge.wire()
     return bus, cal
@@ -51,9 +51,11 @@ def env(request):
 
 def _finalized(**kw) -> SchedulePollFinalized:
     base = dict(
-        post_id="sp-1", slot_id="slot-A",
+        post_id="sp-1",
+        slot_id="slot-A",
         slot_date="2026-05-01",
-        start_time="18:00", end_time="20:00",
+        start_time="18:00",
+        end_time="20:00",
         title="Pizza night",
         finalized_by="alice",
         space_id="sp-A",

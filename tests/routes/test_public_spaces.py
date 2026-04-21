@@ -12,16 +12,26 @@ from social_home.repositories.public_space_repo import (
 from .conftest import _auth
 
 
-async def _seed(client, *, space_id: str = "sp-1", instance_id: str = "remote-1",
-                member_count: int = 5):
+async def _seed(
+    client,
+    *,
+    space_id: str = "sp-1",
+    instance_id: str = "remote-1",
+    member_count: int = 5,
+):
     repo = SqlitePublicSpaceRepo(client._db)
-    await repo.upsert(PublicSpaceListing(
-        space_id=space_id, instance_id=instance_id,
-        name=f"Space {space_id}", member_count=member_count,
-    ))
+    await repo.upsert(
+        PublicSpaceListing(
+            space_id=space_id,
+            instance_id=instance_id,
+            name=f"Space {space_id}",
+            member_count=member_count,
+        )
+    )
 
 
 # ─── List ────────────────────────────────────────────────────────────────
+
 
 async def test_list_requires_auth(client):
     r = await client.get("/api/public_spaces")
@@ -49,7 +59,8 @@ async def test_list_clamps_limit(client):
     for i in range(10):
         await _seed(client, space_id=f"sp-{i}")
     r = await client.get(
-        "/api/public_spaces?limit=99999", headers=_auth(client._tok),
+        "/api/public_spaces?limit=99999",
+        headers=_auth(client._tok),
     )
     body = await r.json()
     assert len(body) <= 200
@@ -65,11 +76,13 @@ async def test_list_invalid_limit_falls_back(client):
 
 # ─── Hide ────────────────────────────────────────────────────────────────
 
+
 async def test_hide_removes_from_visible_list(client):
     await _seed(client, space_id="sp-1")
     await _seed(client, space_id="sp-2")
     r = await client.post(
-        "/api/public_spaces/sp-1/hide", headers=_auth(client._tok),
+        "/api/public_spaces/sp-1/hide",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
     r = await client.get("/api/public_spaces", headers=_auth(client._tok))
@@ -83,6 +96,7 @@ async def test_hide_requires_auth(client):
 
 
 # ─── Block instance ─────────────────────────────────────────────────────
+
 
 async def test_block_instance_admin_succeeds(client):
     r = await client.post(
@@ -128,14 +142,17 @@ async def test_block_then_list_excludes_blocked_instance(client):
 # ─── §CP.F1 — minor discovery filter ────────────────────────────────────
 
 
-async def _seed_with_age(client, *, space_id: str, min_age: int,
-                         target: str = "all"):
+async def _seed_with_age(client, *, space_id: str, min_age: int, target: str = "all"):
     repo = SqlitePublicSpaceRepo(client._db)
-    await repo.upsert(PublicSpaceListing(
-        space_id=space_id, instance_id="remote-1",
-        name=f"Space {space_id}",
-        min_age=min_age, target_audience=target,
-    ))
+    await repo.upsert(
+        PublicSpaceListing(
+            space_id=space_id,
+            instance_id="remote-1",
+            name=f"Space {space_id}",
+            min_age=min_age,
+            target_audience=target,
+        )
+    )
 
 
 async def _seed_minor(client, *, declared_age: int) -> str:
@@ -158,8 +175,8 @@ async def _seed_minor(client, *, declared_age: int) -> str:
 
 async def test_minor_is_hidden_from_age_gated_listings(client):
     await _seed_with_age(client, space_id="sp-adult", min_age=18)
-    await _seed_with_age(client, space_id="sp-teen",  min_age=13)
-    await _seed_with_age(client, space_id="sp-open",  min_age=0)
+    await _seed_with_age(client, space_id="sp-teen", min_age=13)
+    await _seed_with_age(client, space_id="sp-open", min_age=0)
     tok = await _seed_minor(client, declared_age=12)
     r = await client.get(
         "/api/public_spaces",
@@ -174,7 +191,7 @@ async def test_minor_is_hidden_from_age_gated_listings(client):
 
 async def test_adult_sees_all_listings(client):
     await _seed_with_age(client, space_id="sp-adult", min_age=18)
-    await _seed_with_age(client, space_id="sp-open",  min_age=0)
+    await _seed_with_age(client, space_id="sp-open", min_age=0)
     r = await client.get("/api/public_spaces", headers=_auth(client._tok))
     body = await r.json()
     ids = {s["space_id"] for s in body}

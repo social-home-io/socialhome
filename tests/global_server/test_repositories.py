@@ -32,16 +32,24 @@ async def admin(gfs_db):
 
 
 async def test_list_instances_filtered_by_status(fed):
-    await fed.upsert_instance(ClientInstance(
-        instance_id="a", display_name="A",
-        public_key="aa" * 32, endpoint_url="http://a",
-        status="pending",
-    ))
-    await fed.upsert_instance(ClientInstance(
-        instance_id="b", display_name="B",
-        public_key="bb" * 32, endpoint_url="http://b",
-        status="active",
-    ))
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="a",
+            display_name="A",
+            public_key="aa" * 32,
+            endpoint_url="http://a",
+            status="pending",
+        )
+    )
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="b",
+            display_name="B",
+            public_key="bb" * 32,
+            endpoint_url="http://b",
+            status="active",
+        )
+    )
     active = await fed.list_instances(status="active")
     assert {x.instance_id for x in active} == {"b"}
     pending = await fed.list_instances(status="pending")
@@ -49,35 +57,59 @@ async def test_list_instances_filtered_by_status(fed):
 
 
 async def test_list_spaces_for_instance(fed):
-    await fed.upsert_instance(ClientInstance(
-        instance_id="owner", display_name="O",
-        public_key="aa" * 32, endpoint_url="http://o",
-        status="active",
-    ))
-    await fed.upsert_space(GlobalSpace(
-        space_id="s1", owning_instance="owner", status="active",
-    ))
-    await fed.upsert_space(GlobalSpace(
-        space_id="s2", owning_instance="owner", status="banned",
-    ))
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="owner",
+            display_name="O",
+            public_key="aa" * 32,
+            endpoint_url="http://o",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="s1",
+            owning_instance="owner",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="s2",
+            owning_instance="owner",
+            status="banned",
+        )
+    )
     got = await fed.list_spaces_for_instance("owner")
     assert {s.space_id for s in got} == {"s1", "s2"}
 
 
 async def test_remove_subscriber_updates_count(fed):
-    await fed.upsert_instance(ClientInstance(
-        instance_id="o", display_name="O",
-        public_key="aa" * 32, endpoint_url="http://o",
-        status="active",
-    ))
-    await fed.upsert_instance(ClientInstance(
-        instance_id="sub", display_name="S",
-        public_key="bb" * 32, endpoint_url="http://s",
-        status="active",
-    ))
-    await fed.upsert_space(GlobalSpace(
-        space_id="sp", owning_instance="o", status="active",
-    ))
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="o",
+            display_name="O",
+            public_key="aa" * 32,
+            endpoint_url="http://o",
+            status="active",
+        )
+    )
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="sub",
+            display_name="S",
+            public_key="bb" * 32,
+            endpoint_url="http://s",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp",
+            owning_instance="o",
+            status="active",
+        )
+    )
     await fed.add_subscriber(space_id="sp", instance_id="sub")
     sp = await fed.get_space("sp")
     assert sp.subscriber_count == 1
@@ -92,13 +124,19 @@ async def test_remove_subscriber_updates_count(fed):
 async def test_count_reports_by_reporter(admin):
     now = int(time.time())
     for i in range(3):
-        await admin.save_fraud_report(GfsFraudReport(
-            id=f"rep-{i}", target_type="space",
-            target_id=f"t-{i}", category="spam", notes=None,
-            reporter_instance_id="rep.home",
-            reporter_user_id=None, status="pending",
-            created_at=now,
-        ))
+        await admin.save_fraud_report(
+            GfsFraudReport(
+                id=f"rep-{i}",
+                target_type="space",
+                target_id=f"t-{i}",
+                category="spam",
+                notes=None,
+                reporter_instance_id="rep.home",
+                reporter_user_id=None,
+                status="pending",
+                created_at=now,
+            )
+        )
     cnt = await admin.count_reports_by_reporter("rep.home", since=now - 60)
     assert cnt == 3
 
@@ -132,8 +170,12 @@ async def test_admin_session_purge_expired(admin):
 
 async def test_appeal_persist_list_and_decide(admin):
     a = GfsAppeal(
-        id="a1", target_type="space", target_id="sp",
-        message="plz", status="pending", created_at=int(time.time()),
+        id="a1",
+        target_type="space",
+        target_id="sp",
+        message="plz",
+        status="pending",
+        created_at=int(time.time()),
     )
     await admin.save_appeal(a)
     pending = await admin.list_appeals(status="pending")

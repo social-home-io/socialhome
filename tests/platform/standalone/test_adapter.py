@@ -21,11 +21,13 @@ from social_home.platform.standalone.adapter import StandaloneAdapter
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _sha256(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 async def db(tmp_path):
@@ -90,6 +92,7 @@ async def _add_token(
 
 # ── authenticate_bearer ───────────────────────────────────────────────────────
 
+
 async def test_authenticate_bearer_valid_token(db, adapter):
     """A valid, unexpired token returns the owning ExternalUser."""
     await _add_user(db, username="alice", display_name="Alice", is_admin=False)
@@ -148,7 +151,9 @@ async def test_authenticate_bearer_no_expiry_accepted(db, adapter):
 
 async def test_authenticate_bearer_is_admin_flag(db, adapter):
     """is_admin flag is correctly propagated from the database row."""
-    await _add_user(db, username="superadmin", display_name="Super Admin", is_admin=True)
+    await _add_user(
+        db, username="superadmin", display_name="Super Admin", is_admin=True
+    )
     raw = secrets.token_urlsafe(32)
     await _add_token(db, "superadmin", raw)
 
@@ -158,6 +163,7 @@ async def test_authenticate_bearer_is_admin_flag(db, adapter):
 
 
 # ── authenticate (request-level) ─────────────────────────────────────────────
+
 
 class _FakeRequest:
     """Minimal stand-in for aiohttp.web.Request."""
@@ -192,6 +198,7 @@ async def test_authenticate_no_credentials(db, adapter):
 
 # ── list_external_users ───────────────────────────────────────────────────────
 
+
 async def test_list_external_users_empty(db, adapter):
     """list_external_users returns an empty list when no users exist."""
     users = await adapter.list_external_users()
@@ -209,6 +216,7 @@ async def test_list_external_users_multiple(db, adapter):
 
 
 # ── get_external_user ─────────────────────────────────────────────────────────
+
 
 async def test_get_external_user_found(db, adapter):
     """get_external_user returns the correct user when they exist."""
@@ -235,6 +243,7 @@ async def test_get_external_user_not_found(db, adapter):
 
 # ── get_instance_config ───────────────────────────────────────────────────────
 
+
 async def test_get_instance_config_defaults_when_no_coords(db, adapter):
     """get_instance_config falls back to Config.instance_name when DB has no coords."""
     cfg = await adapter.get_instance_config()
@@ -259,6 +268,7 @@ async def test_get_instance_config_reads_from_db(db, adapter):
 
 
 # ── update_location ───────────────────────────────────────────────────────────
+
 
 async def test_update_location_persists(db, adapter):
     """update_location writes coords to DB and returns updated InstanceConfig."""
@@ -285,6 +295,7 @@ async def test_update_location_truncates_precision(db, adapter):
 
 # ── STT (v1: unsupported) ─────────────────────────────────────────────────────
 
+
 async def test_supports_stt_is_false(adapter):
     """Standalone has no STT backend in v1."""
     assert adapter.supports_stt is False
@@ -292,6 +303,7 @@ async def test_supports_stt_is_false(adapter):
 
 async def test_stream_transcribe_audio_raises(adapter):
     """Streaming STT raises NotImplementedError on standalone."""
+
     async def _audio():
         yield b"x"
 

@@ -26,6 +26,7 @@ from social_home.federation.inbound_validator import (
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
+
 def _loads(raw):
     return orjson.loads(raw)
 
@@ -46,6 +47,7 @@ def _minimal_envelope(**overrides) -> dict:
 
 
 # ─── Step 1: parse_json ──────────────────────────────────────────────────
+
 
 async def test_parse_json_success():
     step = make_parse_json(loads=_loads)
@@ -71,6 +73,7 @@ async def test_parse_json_rejects_missing_fields():
 
 
 # ─── Step 2: lookup_instance ─────────────────────────────────────────────
+
 
 class _FakeInstance:
     remote_identity_pk = "aa" * 32
@@ -100,6 +103,7 @@ async def test_lookup_instance_rejects_unknown():
 
 # ─── Step 3: check_timestamp ─────────────────────────────────────────────
 
+
 async def test_check_timestamp_passes_for_recent():
     step = make_check_timestamp()
     ctx = InboundContext()
@@ -124,6 +128,7 @@ async def test_check_timestamp_rejects_garbage():
 
 
 # ─── Step 5: check_replay ────────────────────────────────────────────────
+
 
 class _FakeReplayCache:
     def __init__(self, *, already_seen=False):
@@ -150,6 +155,7 @@ async def test_replay_rejects_duplicate():
 
 # ─── Step 8: idempotency ─────────────────────────────────────────────────
 
+
 class _FakeIdempotencyCache:
     def __init__(self, *, accept=True):
         self._accept = accept
@@ -166,8 +172,11 @@ async def test_idempotency_no_key_passes():
     )
     ctx = InboundContext()
     ctx.event = FederationEvent(
-        msg_id="m1", event_type=FederationEventType.SPACE_POST_CREATED,
-        from_instance="r", to_instance="s", timestamp="t",
+        msg_id="m1",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        from_instance="r",
+        to_instance="s",
+        timestamp="t",
         payload={"content": "hi"},
     )
     await step(ctx)
@@ -182,8 +191,11 @@ async def test_idempotency_duplicate_short_circuits():
     )
     ctx = InboundContext()
     ctx.event = FederationEvent(
-        msg_id="m1", event_type=FederationEventType.SPACE_POST_CREATED,
-        from_instance="r", to_instance="s", timestamp="t",
+        msg_id="m1",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        from_instance="r",
+        to_instance="s",
+        timestamp="t",
         payload={"idempotency_key": "ik-1"},
     )
     await step(ctx)
@@ -191,6 +203,7 @@ async def test_idempotency_duplicate_short_circuits():
 
 
 # ─── Step 9: ban_check ──────────────────────────────────────────────────
+
 
 class _FakeBanRepo:
     def __init__(self, banned_combos=None):
@@ -228,6 +241,7 @@ async def test_ban_check_rejects_banned():
 
 # ─── Step 10: persist_replay ─────────────────────────────────────────────
 
+
 class _FakePersistRepo:
     def __init__(self):
         self.inserted: list[str] = []
@@ -246,6 +260,7 @@ async def test_persist_replay_inserts():
 
 
 # ─── Pipeline composition ────────────────────────────────────────────────
+
 
 async def test_pipeline_stops_on_error():
     called: list[str] = []

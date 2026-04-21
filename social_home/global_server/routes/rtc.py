@@ -88,7 +88,8 @@ class RtcIceView(GfsBaseView):
         candidate = body.get("candidate") or {}
         if not isinstance(candidate, dict):
             return web.json_response(
-                {"error": "invalid_candidate"}, status=422,
+                {"error": "invalid_candidate"},
+                status=422,
             )
         rtc = self.svc(K.gfs_rtc_key)
         try:
@@ -107,13 +108,15 @@ class RtcSessionView(GfsBaseView):
         session = rtc.get_session(session_id)
         if session is None:
             return web.json_response({"error": "not_found"}, status=404)
-        return web.json_response({
-            "session_id":     session.session_id,
-            "initiator_id":   session.initiator_id,
-            "offer_sdp":      session.offer_sdp,
-            "answer_sdp":     session.answer_sdp,
-            "ice_candidates": session.ice_candidates,
-        })
+        return web.json_response(
+            {
+                "session_id": session.session_id,
+                "initiator_id": session.initiator_id,
+                "offer_sdp": session.offer_sdp,
+                "answer_sdp": session.answer_sdp,
+                "ice_candidates": session.ice_candidates,
+            }
+        )
 
 
 class RtcPingView(GfsBaseView):
@@ -127,7 +130,8 @@ class RtcPingView(GfsBaseView):
         transport = str(body.get("transport") or "webrtc")
         if transport not in ("webrtc", "webhook"):
             return web.json_response(
-                {"error": "invalid_transport"}, status=422,
+                {"error": "invalid_transport"},
+                status=422,
             )
         fed_repo = self.svc(K.gfs_fed_repo_key)
         await fed_repo.upsert_rtc_connection(instance_id, transport=transport)

@@ -39,7 +39,11 @@ class SpaceContentInboundHandlers:
     """Register space-content inbound handlers."""
 
     __slots__ = (
-        "_bus", "_page_repo", "_sticky_repo", "_task_repo", "_calendar_repo",
+        "_bus",
+        "_page_repo",
+        "_sticky_repo",
+        "_task_repo",
+        "_calendar_repo",
         "_poll_repo",
     )
 
@@ -74,32 +78,44 @@ class SpaceContentInboundHandlers:
         registry.register(FederationEventType.SPACE_PAGE_DELETED, self._on_page_deleted)
 
         # Stickies
-        registry.register(FederationEventType.SPACE_STICKY_CREATED, self._on_sticky_saved)
-        registry.register(FederationEventType.SPACE_STICKY_UPDATED, self._on_sticky_saved)
-        registry.register(FederationEventType.SPACE_STICKY_DELETED, self._on_sticky_deleted)
+        registry.register(
+            FederationEventType.SPACE_STICKY_CREATED, self._on_sticky_saved
+        )
+        registry.register(
+            FederationEventType.SPACE_STICKY_UPDATED, self._on_sticky_saved
+        )
+        registry.register(
+            FederationEventType.SPACE_STICKY_DELETED, self._on_sticky_deleted
+        )
 
         # Calendar events
         registry.register(
-            FederationEventType.SPACE_CALENDAR_EVENT_CREATED, self._on_calendar_saved,
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            self._on_calendar_saved,
         )
         registry.register(
-            FederationEventType.SPACE_CALENDAR_EVENT_UPDATED, self._on_calendar_saved,
+            FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+            self._on_calendar_saved,
         )
         registry.register(
-            FederationEventType.SPACE_CALENDAR_EVENT_DELETED, self._on_calendar_deleted,
+            FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+            self._on_calendar_deleted,
         )
 
         # Polls — only registered when a poll_repo is attached (deployments
         # without polls skip it entirely, classical behaviour).
         if self._poll_repo is not None:
             registry.register(
-                FederationEventType.SPACE_POLL_CREATED, self._on_poll_created,
+                FederationEventType.SPACE_POLL_CREATED,
+                self._on_poll_created,
             )
             registry.register(
-                FederationEventType.SPACE_POLL_VOTE_CAST, self._on_poll_vote,
+                FederationEventType.SPACE_POLL_VOTE_CAST,
+                self._on_poll_vote,
             )
             registry.register(
-                FederationEventType.SPACE_POLL_CLOSED, self._on_poll_closed,
+                FederationEventType.SPACE_POLL_CLOSED,
+                self._on_poll_closed,
             )
             # Schedule polls piggy-back on the poll repo — the
             # response / finalized rows live in the same SQLite module.
@@ -136,7 +152,9 @@ class SpaceContentInboundHandlers:
             position=int(p.get("position") or 0),
             created_by=str(p.get("created_by") or ""),
             created_at=parse_iso8601_lenient(p.get("created_at")),
-            updated_at=parse_iso8601_lenient(p.get("updated_at") or p.get("occurred_at")),
+            updated_at=parse_iso8601_lenient(
+                p.get("updated_at") or p.get("occurred_at")
+            ),
             description=p.get("description"),
             due_date=None,  # due_date is a ``date`` — parsing lives in the service
             assignees=tuple(str(a) for a in assignees),
@@ -227,8 +245,13 @@ class SpaceContentInboundHandlers:
         start = parse_iso8601_optional(p.get("start"))
         end = parse_iso8601_optional(p.get("end"))
         if (
-            not space_id or not event_id or not calendar_id
-            or not summary or not created_by or start is None or end is None
+            not space_id
+            or not event_id
+            or not calendar_id
+            or not summary
+            or not created_by
+            or start is None
+            or end is None
         ):
             log.debug("SPACE_CALENDAR_EVENT_* missing required field")
             return
@@ -265,7 +288,9 @@ class SpaceContentInboundHandlers:
             return
         log.debug(
             "SPACE_POLL_CREATED post=%s space=%s from=%s",
-            post_id, event.space_id, event.from_instance,
+            post_id,
+            event.space_id,
+            event.from_instance,
         )
 
     async def _on_poll_vote(self, event: "FederationEvent") -> None:
@@ -284,19 +309,23 @@ class SpaceContentInboundHandlers:
         # actually belong to this post on our side — would corrupt
         # the tally.
         belongs = await self._poll_repo.option_belongs_to_post(
-            option_id=option_id, post_id=post_id,
+            option_id=option_id,
+            post_id=post_id,
         )
         if not belongs:
             log.debug(
                 "SPACE_POLL_VOTE_CAST option %s not in post %s",
-                option_id, post_id,
+                option_id,
+                post_id,
             )
             return
         await self._poll_repo.clear_user_votes(
-            post_id=post_id, voter_user_id=voter,
+            post_id=post_id,
+            voter_user_id=voter,
         )
         await self._poll_repo.insert_vote(
-            option_id=option_id, voter_user_id=voter,
+            option_id=option_id,
+            voter_user_id=voter,
         )
 
     async def _on_poll_closed(self, event: "FederationEvent") -> None:
@@ -308,29 +337,34 @@ class SpaceContentInboundHandlers:
         await self._poll_repo.close(post_id)
 
     async def _on_schedule_response_updated(
-        self, event: "FederationEvent",
+        self,
+        event: "FederationEvent",
     ) -> None:
         """Mirror a peer's schedule-poll vote / retraction locally."""
         if self._poll_repo is None:
             return
         p = event.payload
-        slot_id  = str(p.get("slot_id")  or "")
-        user_id  = str(p.get("user_id")  or "")
+        slot_id = str(p.get("slot_id") or "")
+        user_id = str(p.get("user_id") or "")
         response = str(p.get("response") or "")
         if not slot_id or not user_id:
             log.debug("SPACE_SCHEDULE_RESPONSE_UPDATED missing field")
             return
         if response == "retracted" or not response:
             await self._poll_repo.delete_schedule_response(
-                slot_id=slot_id, user_id=user_id,
+                slot_id=slot_id,
+                user_id=user_id,
             )
         else:
             await self._poll_repo.upsert_schedule_response(
-                slot_id=slot_id, user_id=user_id, response=response,
+                slot_id=slot_id,
+                user_id=user_id,
+                response=response,
             )
 
     async def _on_schedule_finalized(
-        self, event: "FederationEvent",
+        self,
+        event: "FederationEvent",
     ) -> None:
         """Mirror a peer's schedule-poll finalisation. The matching
         local calendar entry is produced by
@@ -343,5 +377,6 @@ class SpaceContentInboundHandlers:
         if not post_id or not slot_id:
             return
         await self._poll_repo.finalize_schedule_poll(
-            post_id=post_id, slot_id=slot_id,
+            post_id=post_id,
+            slot_id=slot_id,
         )

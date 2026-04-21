@@ -40,7 +40,9 @@ class PublicSpaceCollectionView(BaseView):
 
         discovery = self.svc(K.public_space_discovery_key)
         listings = await discovery._repo.list_visible_for_user(  # noqa: SLF001
-            ctx.user_id, limit=limit, max_min_age=max_min_age,
+            ctx.user_id,
+            limit=limit,
+            max_min_age=max_min_age,
         )
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {lst.instance_id for lst in listings}
@@ -54,25 +56,31 @@ class PublicSpaceCollectionView(BaseView):
                     inst.display_name or iid,
                     inst.status is PairingStatus.CONFIRMED,
                 )
-        return web.json_response([
-            {
-                "space_id":          lst.space_id,
-                "instance_id":       lst.instance_id,
-                "host_instance_id":  lst.instance_id,
-                "host_display_name": host_info.get(lst.instance_id, (lst.instance_id, False))[0],
-                "host_is_paired":    host_info.get(lst.instance_id, (lst.instance_id, False))[1],
-                "name":              lst.name,
-                "description":       lst.description,
-                "emoji":             lst.emoji,
-                "lat":               lst.lat,
-                "lon":               lst.lon,
-                "radius_km":         lst.radius_km,
-                "member_count":      lst.member_count,
-                "min_age":           lst.min_age,
-                "target_audience":   lst.target_audience,
-            }
-            for lst in listings
-        ])
+        return web.json_response(
+            [
+                {
+                    "space_id": lst.space_id,
+                    "instance_id": lst.instance_id,
+                    "host_instance_id": lst.instance_id,
+                    "host_display_name": host_info.get(
+                        lst.instance_id, (lst.instance_id, False)
+                    )[0],
+                    "host_is_paired": host_info.get(
+                        lst.instance_id, (lst.instance_id, False)
+                    )[1],
+                    "name": lst.name,
+                    "description": lst.description,
+                    "emoji": lst.emoji,
+                    "lat": lst.lat,
+                    "lon": lst.lon,
+                    "radius_km": lst.radius_km,
+                    "member_count": lst.member_count,
+                    "min_age": lst.min_age,
+                    "target_audience": lst.target_audience,
+                }
+                for lst in listings
+            ]
+        )
 
 
 class PublicSpaceJoinRequestView(BaseView):
@@ -96,7 +104,8 @@ class PublicSpaceJoinRequestView(BaseView):
         host_instance_id = body.get("host_instance_id")
         if not host_instance_id:
             return web.json_response(
-                {"error": "host_instance_id is required"}, status=422,
+                {"error": "host_instance_id is required"},
+                status=422,
             )
         svc = self.svc(K.space_service_key)
         request_id = await svc.request_join_remote(
@@ -106,7 +115,8 @@ class PublicSpaceJoinRequestView(BaseView):
             message=body.get("message"),
         )
         return web.json_response(
-            {"request_id": request_id}, status=202,
+            {"request_id": request_id},
+            status=202,
         )
 
 
@@ -156,6 +166,8 @@ class PublicSpaceBlockInstanceView(BaseView):
             data = {}
         discovery = self.svc(K.public_space_discovery_key)
         await discovery._repo.block_instance(  # noqa: SLF001
-            instance_id, blocked_by=ctx.user_id, reason=data.get("reason"),
+            instance_id,
+            blocked_by=ctx.user_id,
+            reason=data.get("reason"),
         )
         return web.Response(status=204)

@@ -57,7 +57,8 @@ def bool_col(value: Any) -> bool:
 
 
 def pick(
-    mapping: Mapping[str, Any], keys: Iterable[str],
+    mapping: Mapping[str, Any],
+    keys: Iterable[str],
 ) -> dict[str, Any]:
     """Return ``{k: mapping[k]}`` for every ``k`` present in ``mapping``.
 

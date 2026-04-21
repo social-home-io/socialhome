@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-
 from social_home.domain.federation import FederationEventType
 from social_home.services.typing_service import (
     TYPING_TTL_SECONDS,
@@ -12,6 +11,7 @@ from social_home.services.typing_service import (
 
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
+
 
 class _FakeMember:
     def __init__(self, user_id: str):
@@ -66,17 +66,24 @@ class _Event:
 
 # ─── Local fan-out ───────────────────────────────────────────────────────
 
+
 async def test_user_started_typing_fans_to_other_local_members():
-    repo = _FakeConvoRepo(members=[
-        _FakeMember("alice"), _FakeMember("bob"), _FakeMember("carol"),
-    ])
+    repo = _FakeConvoRepo(
+        members=[
+            _FakeMember("alice"),
+            _FakeMember("bob"),
+            _FakeMember("carol"),
+        ]
+    )
     ws = _FakeWS()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(),
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
         ws_manager=ws,
     )
     n = await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice",
+        conversation_id="c1",
+        sender_user_id="alice",
         sender_username="alice",
     )
     assert n == 2
@@ -90,10 +97,13 @@ async def test_typing_does_not_fan_to_self():
     repo = _FakeConvoRepo(members=[_FakeMember("alice"), _FakeMember("bob")])
     ws = _FakeWS()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice",
+        conversation_id="c1",
+        sender_user_id="alice",
         sender_username="alice",
     )
     targets, _ = ws.calls[0]
@@ -105,13 +115,21 @@ async def test_typing_throttle_within_one_second():
     repo = _FakeConvoRepo(members=[_FakeMember("alice"), _FakeMember("bob")])
     ws = _FakeWS()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a", now=100.0,
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
+        now=100.0,
     )
     n2 = await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a", now=100.5,
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
+        now=100.5,
     )
     assert n2 == 0
     assert len(ws.calls) == 1
@@ -121,26 +139,40 @@ async def test_typing_throttle_lifts_after_a_second():
     repo = _FakeConvoRepo(members=[_FakeMember("alice"), _FakeMember("bob")])
     ws = _FakeWS()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a", now=100.0,
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
+        now=100.0,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a", now=101.5,
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
+        now=101.5,
     )
     assert len(ws.calls) == 2
 
 
 # ─── is_typing / active_typers ───────────────────────────────────────────
 
+
 async def test_is_typing_true_within_ttl():
     repo = _FakeConvoRepo(members=[_FakeMember("alice"), _FakeMember("bob")])
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=_FakeWS(),
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=_FakeWS(),
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a", now=100.0,
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
+        now=100.0,
     )
     assert svc.is_typing("c1", "alice", now=103.0) is True
     # After TTL it expires.
@@ -150,13 +182,21 @@ async def test_is_typing_true_within_ttl():
 async def test_active_typers_filters_by_conversation():
     repo = _FakeConvoRepo(members=[_FakeMember("alice"), _FakeMember("bob")])
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=_FakeWS(),
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=_FakeWS(),
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a", now=100.0,
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
+        now=100.0,
     )
     await svc.user_started_typing(
-        conversation_id="c2", sender_user_id="bob", sender_username="b", now=100.0,
+        conversation_id="c2",
+        sender_user_id="bob",
+        sender_username="b",
+        now=100.0,
     )
     assert svc.active_typers("c1", now=101.0) == ["alice"]
     assert svc.active_typers("c2", now=101.0) == ["bob"]
@@ -164,23 +204,29 @@ async def test_active_typers_filters_by_conversation():
 
 # ─── Federation fan-out ──────────────────────────────────────────────────
 
+
 async def test_typing_relays_to_remote_instances():
     repo = _FakeConvoRepo(
         members=[_FakeMember("alice"), _FakeMember("bob")],
         remote=[
             _FakeRemoteMember("remote-1"),
             _FakeRemoteMember("remote-2"),
-            _FakeRemoteMember("remote-1"),     # duplicate — dedup
-            _FakeRemoteMember("self"),         # own instance — skip
+            _FakeRemoteMember("remote-1"),  # duplicate — dedup
+            _FakeRemoteMember("self"),  # own instance — skip
         ],
     )
     fed = _FakeFed()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=_FakeWS(),
-        federation_service=fed, own_instance_id="self",
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=_FakeWS(),
+        federation_service=fed,
+        own_instance_id="self",
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="alice",
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="alice",
     )
     targets = {t for t, _, _ in fed.sent}
     assert targets == {"remote-1", "remote-2"}
@@ -195,32 +241,45 @@ async def test_typing_no_federation_when_unattached():
         remote=[_FakeRemoteMember("remote-x")],
     )
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=_FakeWS(),
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=_FakeWS(),
     )
     # No federation attached → silent skip.
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="alice", sender_username="a",
+        conversation_id="c1",
+        sender_user_id="alice",
+        sender_username="a",
     )
 
 
 # ─── Inbound (federation → local WS) ─────────────────────────────────────
 
+
 async def test_handle_remote_typing_fans_to_local_members():
-    repo = _FakeConvoRepo(members=[
-        _FakeMember("alice"), _FakeMember("bob"),
-    ])
+    repo = _FakeConvoRepo(
+        members=[
+            _FakeMember("alice"),
+            _FakeMember("bob"),
+        ]
+    )
     ws = _FakeWS()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
     )
-    n = await svc.handle_remote_typing(_Event(
-        FederationEventType.DM_USER_TYPING, "remote-1",
-        {
-            "conversation_id": "c1",
-            "sender_user_id":  "remote-eve",
-            "sender_username": "eve",
-        },
-    ))
+    n = await svc.handle_remote_typing(
+        _Event(
+            FederationEventType.DM_USER_TYPING,
+            "remote-1",
+            {
+                "conversation_id": "c1",
+                "sender_user_id": "remote-eve",
+                "sender_username": "eve",
+            },
+        )
+    )
     assert n == 2
     targets, payload = ws.calls[0]
     assert set(targets) == {"alice", "bob"}
@@ -229,21 +288,29 @@ async def test_handle_remote_typing_fans_to_local_members():
 
 
 async def test_handle_remote_typing_drops_self_target():
-    repo = _FakeConvoRepo(members=[
-        _FakeMember("alice"), _FakeMember("remote-eve"),
-    ])
+    repo = _FakeConvoRepo(
+        members=[
+            _FakeMember("alice"),
+            _FakeMember("remote-eve"),
+        ]
+    )
     ws = _FakeWS()
     svc = TypingService(
-        conversation_repo=repo, user_repo=_FakeUserRepo(), ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
     )
-    await svc.handle_remote_typing(_Event(
-        FederationEventType.DM_USER_TYPING, "remote-1",
-        {
-            "conversation_id": "c1",
-            "sender_user_id":  "remote-eve",
-            "sender_username": "eve",
-        },
-    ))
+    await svc.handle_remote_typing(
+        _Event(
+            FederationEventType.DM_USER_TYPING,
+            "remote-1",
+            {
+                "conversation_id": "c1",
+                "sender_user_id": "remote-eve",
+                "sender_username": "eve",
+            },
+        )
+    )
     targets, _ = ws.calls[0]
     assert "remote-eve" not in targets
 
@@ -254,13 +321,18 @@ async def test_handle_remote_typing_missing_fields_returns_zero():
         user_repo=_FakeUserRepo(),
         ws_manager=_FakeWS(),
     )
-    n = await svc.handle_remote_typing(_Event(
-        FederationEventType.DM_USER_TYPING, "remote-1", {},
-    ))
+    n = await svc.handle_remote_typing(
+        _Event(
+            FederationEventType.DM_USER_TYPING,
+            "remote-1",
+            {},
+        )
+    )
     assert n == 0
 
 
 # ─── _resolve_user_id branches ──────────────────────────────────────────
+
 
 class _UsernameMember:
     def __init__(self, username):
@@ -285,14 +357,20 @@ async def test_resolve_user_id_from_username_lookup():
     """Member has only ``username`` → resolve via user_repo."""
     repo = _FakeConvoRepo(members=[_UsernameMember("alice")])
     ws = _FakeWS()
-    user_repo = _FakeUserRepoWithLookup({
-        "alice": _RealUser("alice", "alice-uid"),
-    })
+    user_repo = _FakeUserRepoWithLookup(
+        {
+            "alice": _RealUser("alice", "alice-uid"),
+        }
+    )
     svc = TypingService(
-        conversation_repo=repo, user_repo=user_repo, ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=user_repo,
+        ws_manager=ws,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="bob-uid", sender_username="bob",
+        conversation_id="c1",
+        sender_user_id="bob-uid",
+        sender_username="bob",
     )
     targets, _ = ws.calls[0]
     assert "alice-uid" in targets
@@ -308,10 +386,14 @@ async def test_resolve_user_id_lookup_failure_drops_member():
             raise RuntimeError("DB down")
 
     svc = TypingService(
-        conversation_repo=repo, user_repo=_Raises(), ws_manager=ws,
+        conversation_repo=repo,
+        user_repo=_Raises(),
+        ws_manager=ws,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="b", sender_username="b",
+        conversation_id="c1",
+        sender_user_id="b",
+        sender_username="b",
     )
     targets, _ = ws.calls[0]
     assert targets == []
@@ -326,7 +408,9 @@ async def test_resolve_user_id_unknown_username_returns_none():
         ws_manager=ws,
     )
     await svc.user_started_typing(
-        conversation_id="c1", sender_user_id="b", sender_username="b",
+        conversation_id="c1",
+        sender_user_id="b",
+        sender_username="b",
     )
     targets, _ = ws.calls[0]
     assert targets == []

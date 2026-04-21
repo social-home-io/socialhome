@@ -17,7 +17,9 @@ async def test_corner_empty(client):
     assert body["upcoming_events"] == []
     assert body["tasks_due_today"] == []
     assert body["bazaar"] == {
-        "active_listings": 0, "pending_offers": 0, "ending_soon": 0,
+        "active_listings": 0,
+        "pending_offers": 0,
+        "ending_soon": 0,
     }
 
 
@@ -25,8 +27,7 @@ async def test_corner_counts_overdue_task(client):
     """A task assigned to the caller with due_date <= today shows up."""
     db = client._db
     await db.enqueue(
-        "INSERT INTO task_lists(id, name, created_by)"
-        " VALUES('l1', 'default', ?)",
+        "INSERT INTO task_lists(id, name, created_by) VALUES('l1', 'default', ?)",
         (client._uid,),
     )
     await db.enqueue(
@@ -72,9 +73,17 @@ async def test_corner_requires_auth(client):
 
 # ─── Followed spaces widget ─────────────────────────────────────────
 
+
 async def _seed_space_with_post(
-    db, *, space_id: str, name: str, emoji: str | None,
-    member_user_id: str, post_id: str, content: str, created_at: str,
+    db,
+    *,
+    space_id: str,
+    name: str,
+    emoji: str | None,
+    member_user_id: str,
+    post_id: str,
+    content: str,
+    created_at: str,
 ) -> None:
     """Insert a space + membership + one post for the caller."""
     fake_pk = "00" * 32
@@ -85,8 +94,7 @@ async def _seed_space_with_post(
         (space_id, name, emoji, fake_pk),
     )
     await db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role)"
-        " VALUES(?, ?, 'member')",
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'member')",
         (space_id, member_user_id),
     )
     await db.enqueue(
@@ -106,15 +114,23 @@ async def test_corner_followed_empty_when_prefs_unset(client):
 async def test_corner_followed_merges_two_spaces(client):
     db = client._db
     await _seed_space_with_post(
-        db, space_id="sp-A", name="Alpha", emoji="🅰",
+        db,
+        space_id="sp-A",
+        name="Alpha",
+        emoji="🅰",
         member_user_id=client._uid,
-        post_id="p-A1", content="hello alpha",
+        post_id="p-A1",
+        content="hello alpha",
         created_at="2025-06-01T10:00:00+00:00",
     )
     await _seed_space_with_post(
-        db, space_id="sp-B", name="Beta", emoji="🅱",
+        db,
+        space_id="sp-B",
+        name="Beta",
+        emoji="🅱",
         member_user_id=client._uid,
-        post_id="p-B1", content="hello beta",
+        post_id="p-B1",
+        content="hello beta",
         created_at="2025-06-02T10:00:00+00:00",
     )
     # Persist the follow preference.
@@ -127,7 +143,7 @@ async def test_corner_followed_merges_two_spaces(client):
     body = await r.json()
     assert set(body["followed_space_ids"]) == {"sp-A", "sp-B"}
     ids = [p["post_id"] for p in body["followed_spaces_feed"]]
-    assert ids == ["p-B1", "p-A1"]   # newest-first by created_at
+    assert ids == ["p-B1", "p-A1"]  # newest-first by created_at
     # Each row carries space metadata.
     a = next(p for p in body["followed_spaces_feed"] if p["post_id"] == "p-A1")
     assert a["space_name"] == "Alpha"

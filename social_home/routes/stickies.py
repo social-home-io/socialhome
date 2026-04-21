@@ -29,15 +29,15 @@ from .base import BaseView
 
 def _sticky_dict(s) -> dict:
     return {
-        "id":         s.id,
-        "author":     s.author,
-        "content":    s.content,
-        "color":      s.color,
+        "id": s.id,
+        "author": s.author,
+        "content": s.content,
+        "color": s.color,
         "position_x": s.position_x,
         "position_y": s.position_y,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
-        "space_id":   s.space_id,
+        "space_id": s.space_id,
     }
 
 
@@ -63,12 +63,17 @@ class StickyCollectionView(BaseView):
             position_y=float(body.get("position_y", 0.0)),
             space_id=None,
         )
-        await bus.publish(StickyCreated(
-            sticky_id=sticky.id, space_id=None,
-            author=sticky.author, content=sticky.content,
-            color=sticky.color,
-            position_x=sticky.position_x, position_y=sticky.position_y,
-        ))
+        await bus.publish(
+            StickyCreated(
+                sticky_id=sticky.id,
+                space_id=None,
+                author=sticky.author,
+                content=sticky.content,
+                color=sticky.color,
+                position_x=sticky.position_x,
+                position_y=sticky.position_y,
+            )
+        )
         return self._json(_sticky_dict(sticky), status=201)
 
 
@@ -98,11 +103,16 @@ class StickyDetailView(BaseView):
         updated = await repo.get(sticky_id)
         if updated is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await bus.publish(StickyUpdated(
-            sticky_id=updated.id, space_id=updated.space_id,
-            content=updated.content, color=updated.color,
-            position_x=updated.position_x, position_y=updated.position_y,
-        ))
+        await bus.publish(
+            StickyUpdated(
+                sticky_id=updated.id,
+                space_id=updated.space_id,
+                content=updated.content,
+                color=updated.color,
+                position_x=updated.position_x,
+                position_y=updated.position_y,
+            )
+        )
         return self._json(_sticky_dict(updated))
 
     async def delete(self) -> web.Response:
@@ -114,9 +124,12 @@ class StickyDetailView(BaseView):
         if sticky is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
         await repo.delete(sticky_id)
-        await bus.publish(StickyDeleted(
-            sticky_id=sticky_id, space_id=sticky.space_id,
-        ))
+        await bus.publish(
+            StickyDeleted(
+                sticky_id=sticky_id,
+                space_id=sticky.space_id,
+            )
+        )
         return self._json({"ok": True})
 
 
@@ -155,12 +168,17 @@ class SpaceStickyCollectionView(BaseView):
             position_y=float(body.get("position_y", 0.0)),
             space_id=space_id,
         )
-        await bus.publish(StickyCreated(
-            sticky_id=sticky.id, space_id=space_id,
-            author=sticky.author, content=sticky.content,
-            color=sticky.color,
-            position_x=sticky.position_x, position_y=sticky.position_y,
-        ))
+        await bus.publish(
+            StickyCreated(
+                sticky_id=sticky.id,
+                space_id=space_id,
+                author=sticky.author,
+                content=sticky.content,
+                color=sticky.color,
+                position_x=sticky.position_x,
+                position_y=sticky.position_y,
+            )
+        )
         return self._json(_sticky_dict(sticky), status=201)
 
 
@@ -202,11 +220,16 @@ class SpaceStickyDetailView(BaseView):
         updated = await repo.get(sticky.id)
         if updated is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await bus.publish(StickyUpdated(
-            sticky_id=updated.id, space_id=updated.space_id,
-            content=updated.content, color=updated.color,
-            position_x=updated.position_x, position_y=updated.position_y,
-        ))
+        await bus.publish(
+            StickyUpdated(
+                sticky_id=updated.id,
+                space_id=updated.space_id,
+                content=updated.content,
+                color=updated.color,
+                position_x=updated.position_x,
+                position_y=updated.position_y,
+            )
+        )
         return self._json(_sticky_dict(updated))
 
     async def delete(self) -> web.Response:
@@ -220,7 +243,10 @@ class SpaceStickyDetailView(BaseView):
         if sticky is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
         await repo.delete(sticky.id)
-        await bus.publish(StickyDeleted(
-            sticky_id=sticky.id, space_id=space_id,
-        ))
+        await bus.publish(
+            StickyDeleted(
+                sticky_id=sticky.id,
+                space_id=space_id,
+            )
+        )
         return self._json({"ok": True})

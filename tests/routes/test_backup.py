@@ -22,19 +22,25 @@ from .conftest import _auth
 
 # ─── HA-mode client fixture ──────────────────────────────────────────────
 
+
 @pytest.fixture
 async def ha_client(aiohttp_client, tmp_dir):
     """Same shape as the standalone ``client`` but with mode='ha'."""
     cfg = Config(
-        data_dir=str(tmp_dir), db_path=str(tmp_dir / "test.db"),
-        media_path=str(tmp_dir / "media"), mode="ha",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="ha",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     tc = await aiohttp_client(app)
 
     db = app[_db_key]
-    row = await db.fetchone("SELECT identity_public_key FROM instance_identity WHERE id='self'")
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
     pk_bytes = bytes.fromhex(row["identity_public_key"])
     uid = derive_user_id(pk_bytes, "admin")
     await db.enqueue(
@@ -54,6 +60,7 @@ async def ha_client(aiohttp_client, tmp_dir):
 
 # ─── Backup routes are adapter-agnostic (always mounted) ────────────────
 
+
 async def test_backup_export_returns_200_in_standalone(client):
     """Backup routes are mounted for all adapters — standalone included."""
     r = await client.get("/api/backup/export", headers=_auth(client._tok))
@@ -67,9 +74,11 @@ async def test_pre_backup_returns_200_in_standalone(client):
 
 # ─── pre_backup / post_backup ────────────────────────────────────────────
 
+
 async def test_pre_backup_admin_returns_checkpoint_stats(ha_client):
     r = await ha_client.post(
-        "/api/backup/pre_backup", headers=_auth(ha_client._tok),
+        "/api/backup/pre_backup",
+        headers=_auth(ha_client._tok),
     )
     assert r.status == 200
     body = await r.json()
@@ -85,7 +94,8 @@ async def test_pre_backup_idempotent(ha_client):
     """Calling twice in a row must succeed both times."""
     for _ in range(3):
         r = await ha_client.post(
-            "/api/backup/pre_backup", headers=_auth(ha_client._tok),
+            "/api/backup/pre_backup",
+            headers=_auth(ha_client._tok),
         )
         assert r.status == 200
 
@@ -106,7 +116,8 @@ async def test_pre_backup_non_admin_403(ha_client):
 
 async def test_post_backup_returns_ack(ha_client):
     r = await ha_client.post(
-        "/api/backup/post_backup", headers=_auth(ha_client._tok),
+        "/api/backup/post_backup",
+        headers=_auth(ha_client._tok),
     )
     assert r.status == 200
     assert (await r.json())["ok"] is True
@@ -127,6 +138,7 @@ async def test_post_backup_non_admin_403(ha_client):
 
 
 # ─── Export ──────────────────────────────────────────────────────────────
+
 
 async def test_export_admin_returns_gzip(ha_client):
     r = await ha_client.get("/api/backup/export", headers=_auth(ha_client._tok))
@@ -158,9 +170,12 @@ async def test_export_non_admin_403(ha_client):
 
 # ─── Import ──────────────────────────────────────────────────────────────
 
+
 async def test_import_empty_body_422(ha_client):
     r = await ha_client.post(
-        "/api/backup/import", data=b"", headers=_auth(ha_client._tok),
+        "/api/backup/import",
+        data=b"",
+        headers=_auth(ha_client._tok),
     )
     assert r.status == 422
 
@@ -188,6 +203,8 @@ async def test_import_non_admin_403(ha_client):
         (sha256_token_hash(raw),),
     )
     r = await ha_client.post(
-        "/api/backup/import", data=b"x", headers=_auth(raw),
+        "/api/backup/import",
+        data=b"x",
+        headers=_auth(raw),
     )
     assert r.status == 403

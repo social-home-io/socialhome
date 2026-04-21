@@ -48,6 +48,7 @@ async def env(tmp_dir):
 
 # ─── Allowlist invariants ────────────────────────────────────────────────
 
+
 def test_secret_tables_in_never_export():
     """Identity / KEK material must never be in the export."""
     assert "instance_identity" in NEVER_EXPORT
@@ -72,6 +73,7 @@ def test_no_table_in_both_lists():
 
 
 # ─── Export ──────────────────────────────────────────────────────────────
+
 
 async def test_export_produces_tar_gz(env):
     _, svc, _ = env
@@ -124,6 +126,7 @@ async def test_export_to_path_writes_file(env, tmp_dir):
 
 
 # ─── Restore guard ───────────────────────────────────────────────────────
+
 
 async def test_restore_refuses_non_empty_db(env):
     _, svc, _ = env
@@ -185,13 +188,19 @@ async def test_restore_rejects_schema_mismatch(tmp_dir):
     await db.startup()
     blob = io.BytesIO()
     with tarfile.open(fileobj=blob, mode="w:gz") as tar:
-        manifest = json.dumps({
-            "schema_version": 999, "instance_id": "x",
-            "exported_at": "now", "table_names": [],
-        }).encode()
+        manifest = json.dumps(
+            {
+                "schema_version": 999,
+                "instance_id": "x",
+                "exported_at": "now",
+                "table_names": [],
+            }
+        ).encode()
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(manifest)
         tar.addfile(info, io.BytesIO(manifest))
     with pytest.raises(BackupError):
-        await BackupService(db, tmp_dir, schema_version=1).restore_from_bytes(blob.getvalue())
+        await BackupService(db, tmp_dir, schema_version=1).restore_from_bytes(
+            blob.getvalue()
+        )
     await db.shutdown()

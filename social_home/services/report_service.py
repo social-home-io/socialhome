@@ -52,10 +52,15 @@ MAX_REPORTS_PER_DAY: int = 20
 
 class ReportService:
     __slots__ = (
-        "_reports", "_users", "_bus",
-        "_federation", "_own_instance_id",
-        "_space_repo", "_space_post_repo",
-        "_gfs_connection_service", "_signing_key",
+        "_reports",
+        "_users",
+        "_bus",
+        "_federation",
+        "_own_instance_id",
+        "_space_repo",
+        "_space_post_repo",
+        "_gfs_connection_service",
+        "_signing_key",
     )
 
     def __init__(
@@ -130,7 +135,8 @@ class ReportService:
             raise ValueError(str(exc)) from exc
 
         count = await self._reports.count_recent_by_reporter(
-            reporter_user_id, hours=24,
+            reporter_user_id,
+            hours=24,
         )
         if count >= MAX_REPORTS_PER_DAY:
             raise ReportRateLimitedError(
@@ -159,16 +165,20 @@ class ReportService:
                     f"already reported this {tt.value}",
                 ) from exc
             raise
-        await self._bus.publish(ReportFiled(
-            report_id=report.id,
-            target_type=tt.value,
-            target_id=target_id,
-            category=cat.value,
-            reporter_user_id=reporter_user_id,
-        ))
+        await self._bus.publish(
+            ReportFiled(
+                report_id=report.id,
+                target_type=tt.value,
+                target_id=target_id,
+                category=cat.value,
+                reporter_user_id=reporter_user_id,
+            )
+        )
 
         federated = await self._maybe_federate(
-            tt=tt, cat=cat, target_id=target_id,
+            tt=tt,
+            cat=cat,
+            target_id=target_id,
             reporter_user_id=reporter_user_id,
             notes=clean_notes,
             occurred_at=report.created_at,
@@ -177,15 +187,22 @@ class ReportService:
         # Auto-forward to every paired GFS by default (opt-out via
         # forward_gfs=False). Background task — never blocks the caller.
         if forward_gfs and tt in (
-            ReportTargetType.SPACE, ReportTargetType.USER,
-            ReportTargetType.POST, ReportTargetType.COMMENT,
+            ReportTargetType.SPACE,
+            ReportTargetType.USER,
+            ReportTargetType.POST,
+            ReportTargetType.COMMENT,
         ):
             import asyncio
-            asyncio.create_task(self._forward_to_gfs(
-                tt=tt, cat=cat, target_id=target_id,
-                reporter_user_id=reporter_user_id,
-                notes=clean_notes,
-            ))
+
+            asyncio.create_task(
+                self._forward_to_gfs(
+                    tt=tt,
+                    cat=cat,
+                    target_id=target_id,
+                    reporter_user_id=reporter_user_id,
+                    notes=clean_notes,
+                )
+            )
 
         return report, federated
 
@@ -211,8 +228,11 @@ class ReportService:
             tt = ReportTargetType(target_type)
             cat = ReportCategory(category)
         except ValueError:
-            log.debug("SPACE_REPORT inbound: bad target/category: %s/%s",
-                      target_type, category)
+            log.debug(
+                "SPACE_REPORT inbound: bad target/category: %s/%s",
+                target_type,
+                category,
+            )
             return None
         report = ContentReport(
             id=uuid.uuid4().hex,
@@ -233,22 +253,28 @@ class ReportService:
                 # Replay / duplicate — harmless, ignore.
                 return None
             raise
-        await self._bus.publish(ReportFiled(
-            report_id=report.id,
-            target_type=tt.value,
-            target_id=target_id,
-            category=cat.value,
-            reporter_user_id=reporter_user_id,
-        ))
+        await self._bus.publish(
+            ReportFiled(
+                report_id=report.id,
+                target_type=tt.value,
+                target_id=target_id,
+                category=cat.value,
+                reporter_user_id=reporter_user_id,
+            )
+        )
         return report
 
     # ── Federation helpers ─────────────────────────────────────────────
 
     async def _maybe_federate(
-        self, *,
-        tt: ReportTargetType, cat: ReportCategory,
-        target_id: str, reporter_user_id: str,
-        notes: str | None, occurred_at: datetime,
+        self,
+        *,
+        tt: ReportTargetType,
+        cat: ReportCategory,
+        target_id: str,
+        reporter_user_id: str,
+        notes: str | None,
+        occurred_at: datetime,
     ) -> bool:
         """If the target is hosted on paired peers, send SPACE_REPORT
         transitively to every instance that hosts a member of the space
@@ -264,12 +290,12 @@ class ReportService:
         if not peers:
             return False
         payload = {
-            "target_type":      tt.value,
-            "target_id":        target_id,
-            "category":         cat.value,
-            "notes":            notes,
+            "target_type": tt.value,
+            "target_id": target_id,
+            "category": cat.value,
+            "notes": notes,
             "reporter_user_id": reporter_user_id,
-            "occurred_at":      occurred_at.isoformat(),
+            "occurred_at": occurred_at.isoformat(),
         }
         dispatched = 0
         for peer in peers:
@@ -280,17 +306,23 @@ class ReportService:
                     payload=payload,
                 )
                 dispatched += 1
-            except Exception as exc:                     # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug(
                     "report federation failed for target=%s %s to %s: %s",
-                    tt.value, target_id, peer, exc,
+                    tt.value,
+                    target_id,
+                    peer,
+                    exc,
                 )
         return dispatched > 0
 
     async def _forward_to_gfs(
-        self, *,
-        tt: ReportTargetType, cat: ReportCategory,
-        target_id: str, reporter_user_id: str,
+        self,
+        *,
+        tt: ReportTargetType,
+        cat: ReportCategory,
+        target_id: str,
+        reporter_user_id: str,
         notes: str | None,
     ) -> None:
         """Fan a fraud report out to every paired GFS.
@@ -302,7 +334,7 @@ class ReportService:
             return
         try:
             connections = await self._gfs_connection_service.list_connections()
-        except Exception:                                 # pragma: no cover
+        except Exception:  # pragma: no cover
             return
         if not connections:
             return
@@ -324,8 +356,9 @@ class ReportService:
                 comment = await self._space_post_repo.get_comment(target_id)
                 if comment is None:
                     return
-                gfs_target_id = getattr(comment, "space_id", None) \
-                                or getattr(comment, "post_id", "")
+                gfs_target_id = getattr(comment, "space_id", None) or getattr(
+                    comment, "post_id", ""
+                )
             if not gfs_target_id:
                 return
             gfs_target_type = "space"
@@ -348,11 +381,13 @@ class ReportService:
                     reporter_user_id=reporter_user_id,
                     signing_key=self._signing_key,
                 )
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug("GFS forward to %s failed: %s", conn.id, exc)
 
     async def _resolve_target_instance(
-        self, tt: ReportTargetType, target_id: str,
+        self,
+        tt: ReportTargetType,
+        target_id: str,
     ) -> str | None:
         """Return the primary hosting instance id for this target.
 
@@ -381,7 +416,9 @@ class ReportService:
         return None
 
     async def _resolve_target_instances(
-        self, tt: ReportTargetType, target_id: str,
+        self,
+        tt: ReportTargetType,
+        target_id: str,
     ) -> list[str]:
         """Return every instance that should see a ``SPACE_REPORT`` for
         this target (§CP.R1 transitive delivery).
@@ -410,8 +447,8 @@ class ReportService:
 
         if space_id and self._space_repo is not None:
             try:
-                member_instances = (
-                    await self._space_repo.list_member_instances(space_id)
+                member_instances = await self._space_repo.list_member_instances(
+                    space_id
                 )
             except Exception:
                 member_instances = []
@@ -430,8 +467,10 @@ class ReportService:
         return await self._reports.list_by_status(ReportStatus.PENDING)
 
     async def resolve(
-        self, report_id: str,
-        *, actor_username: str,
+        self,
+        report_id: str,
+        *,
+        actor_username: str,
         dismissed: bool = False,
     ) -> None:
         actor = await self._require_admin(actor_username)
@@ -440,16 +479,22 @@ class ReportService:
             raise KeyError(f"report {report_id!r} not found")
         if existing.status is not ReportStatus.PENDING:
             from ..domain.space import ModerationAlreadyDecidedError
+
             raise ModerationAlreadyDecidedError(
                 f"report {report_id!r} is already {existing.status.value}",
             )
         status = ReportStatus.DISMISSED if dismissed else ReportStatus.RESOLVED
         await self._reports.resolve(
-            report_id, resolved_by=actor.user_id, status=status,
+            report_id,
+            resolved_by=actor.user_id,
+            status=status,
         )
-        await self._bus.publish(ReportResolved(
-            report_id=report_id, resolved_by=actor.user_id,
-        ))
+        await self._bus.publish(
+            ReportResolved(
+                report_id=report_id,
+                resolved_by=actor.user_id,
+            )
+        )
 
     async def _require_admin(self, username: str):
         user = await self._users.get(username)

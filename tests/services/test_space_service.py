@@ -39,7 +39,9 @@ async def stack(tmp_dir):
     space_repo = SqliteSpaceRepo(db)
     space_post_repo = SqliteSpacePostRepo(db)
     user_svc = UserService(user_repo, bus, own_instance_public_key=kp.public_key)
-    space_svc = SpaceService(space_repo, space_post_repo, user_repo, bus, own_instance_id=iid)
+    space_svc = SpaceService(
+        space_repo, space_post_repo, user_repo, bus, own_instance_id=iid
+    )
 
     class Stack:
         pass
@@ -71,6 +73,7 @@ async def test_create_and_dissolve(stack):
     with pytest.raises(KeyError):
         await stack.space_svc.list_feed(space.id)
 
+
 async def test_member_management(stack):
     """add_member and remove_member adjust the member count correctly."""
     await stack.provision_user("anna")
@@ -79,9 +82,12 @@ async def test_member_management(stack):
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     members = await stack.space_repo.list_members(space.id)
     assert len(members) == 2
-    await stack.space_svc.remove_member(space.id, actor_username="anna", user_id=b.user_id)
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=b.user_id
+    )
     members = await stack.space_repo.list_members(space.id)
     assert len(members) == 1
+
 
 async def test_ban_and_unban(stack):
     """ban removes the member; unban clears the ban record."""
@@ -95,16 +101,20 @@ async def test_ban_and_unban(stack):
     await stack.space_svc.unban(space.id, actor_username="anna", user_id=b.user_id)
     assert not await stack.space_repo.is_banned(space.id, b.user_id)
 
+
 async def test_invite_flow(stack):
     """Invite token can be created and accepted; expired token is rejected."""
     _a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    tok = await stack.space_svc.create_invite_token(space.id, actor_username="anna", uses=1)
+    tok = await stack.space_svc.create_invite_token(
+        space.id, actor_username="anna", uses=1
+    )
     m = await stack.space_svc.accept_invite_token(tok, user_id=b.user_id)
     assert m.role == "member"
     with pytest.raises(KeyError):
         await stack.space_svc.accept_invite_token(tok, user_id="uid-x")
+
 
 async def test_set_role(stack):
     """set_role updates a member's role in the space."""
@@ -112,10 +122,12 @@ async def test_set_role(stack):
     b = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
-    await stack.space_svc.set_role(space.id, actor_username="anna",
-                                    user_id=b.user_id, role="admin")
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=b.user_id, role="admin"
+    )
     m = await stack.space_repo.get_member(space.id, b.user_id)
     assert m.role == "admin"
+
 
 async def test_non_owner_cannot_dissolve(stack):
     """Non-owner dissolving a space raises SpacePermissionError."""
@@ -126,6 +138,7 @@ async def test_non_owner_cannot_dissolve(stack):
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.dissolve_space(space.id, actor_username="bob")
 
+
 async def test_space_post_with_moderation(stack):
     """Moderated space queues regular member posts; admin posts go through directly."""
     a = await stack.provision_user("anna")
@@ -133,46 +146,69 @@ async def test_space_post_with_moderation(stack):
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     result = await stack.space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending",
+        space.id,
+        author_user_id=b.user_id,
+        type=PostType.TEXT,
+        content="pending",
     )
     assert result is None
     direct = await stack.space_svc.create_post(
-        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="admin ok",
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.TEXT,
+        content="admin ok",
     )
     assert direct is not None
+
 
 async def test_approve_moderation_item_persists_post(stack):
     """Approving a queued post persists it and marks the queue item APPROVED."""
     from social_home.domain.space import ModerationStatus
+
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     # Bob's post goes to the queue.
-    assert await stack.space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="hello",
-    ) is None
+    assert (
+        await stack.space_svc.create_post(
+            space.id,
+            author_user_id=b.user_id,
+            type=PostType.TEXT,
+            content="hello",
+        )
+        is None
+    )
     pending = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
     )
     assert len(pending) == 1
     approved_post = await stack.space_svc.approve_moderation_item(
-        space.id, pending[0].id, actor_username="anna",
+        space.id,
+        pending[0].id,
+        actor_username="anna",
     )
     assert approved_post.content == "hello"
     assert approved_post.author == b.user_id
     # Item is now APPROVED; no longer listed as pending.
-    assert await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna",
-    ) == []
+    assert (
+        await stack.space_svc.list_pending_moderation(
+            space.id,
+            actor_username="anna",
+        )
+        == []
+    )
     # The queued row should be loadable with its new status.
     item = await stack.space_svc._spaces.get_moderation_item(pending[0].id)
     assert item is not None and item.status is ModerationStatus.APPROVED
@@ -181,22 +217,31 @@ async def test_approve_moderation_item_persists_post(stack):
 
 async def test_reject_moderation_item_records_reason(stack):
     from social_home.domain.space import ModerationStatus
+
     _a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     await stack.space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="spam",
+        space.id,
+        author_user_id=b.user_id,
+        type=PostType.TEXT,
+        content="spam",
     )
     pending = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
     )
     await stack.space_svc.reject_moderation_item(
-        space.id, pending[0].id, actor_username="anna", reason="off-topic",
+        space.id,
+        pending[0].id,
+        actor_username="anna",
+        reason="off-topic",
     )
     item = await stack.space_svc._spaces.get_moderation_item(pending[0].id)
     assert item is not None
@@ -210,51 +255,71 @@ async def test_moderation_requires_admin(stack):
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     await stack.space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="x",
+        space.id,
+        author_user_id=b.user_id,
+        type=PostType.TEXT,
+        content="x",
     )
     pending = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
     )
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.approve_moderation_item(
-            space.id, pending[0].id, actor_username="bob",
+            space.id,
+            pending[0].id,
+            actor_username="bob",
         )
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.list_pending_moderation(
-            space.id, actor_username="bob",
+            space.id,
+            actor_username="bob",
         )
 
 
 async def test_double_decide_raises_already_decided(stack):
     from social_home.domain.space import ModerationAlreadyDecidedError
+
     _a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     await stack.space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="x",
+        space.id,
+        author_user_id=b.user_id,
+        type=PostType.TEXT,
+        content="x",
     )
     pending = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
     )
     await stack.space_svc.approve_moderation_item(
-        space.id, pending[0].id, actor_username="anna",
+        space.id,
+        pending[0].id,
+        actor_username="anna",
     )
     with pytest.raises(ModerationAlreadyDecidedError):
         await stack.space_svc.approve_moderation_item(
-            space.id, pending[0].id, actor_username="anna",
+            space.id,
+            pending[0].id,
+            actor_username="anna",
         )
     with pytest.raises(ModerationAlreadyDecidedError):
         await stack.space_svc.reject_moderation_item(
-            space.id, pending[0].id, actor_username="anna",
+            space.id,
+            pending[0].id,
+            actor_username="anna",
         )
 
 
@@ -265,93 +330,125 @@ async def test_space_post_admin_only(stack):
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
     await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
     )
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.create_post(
-            space.id, author_user_id=b.user_id, type=PostType.TEXT, content="denied",
+            space.id,
+            author_user_id=b.user_id,
+            type=PostType.TEXT,
+            content="denied",
         )
+
 
 async def test_transfer_ownership(stack):
     """Transferring ownership makes the new owner's role 'owner' and demotes the old one."""
     anna = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(owner_username="anna", name="Family")
-    await stack.space_svc.add_member(space.id, actor_username="anna", user_id=bob.user_id)
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
     await stack.space_svc.transfer_ownership(
-        space.id, actor_username="anna", to_user_id=bob.user_id,
+        space.id,
+        actor_username="anna",
+        to_user_id=bob.user_id,
     )
     anna_member = await stack.space_repo.get_member(space.id, anna.user_id)
     bob_member = await stack.space_repo.get_member(space.id, bob.user_id)
     assert bob_member.role == "owner"
     assert anna_member.role == "admin"
 
+
 async def test_join_request_approve(stack):
     """Open space: request to join, then admin approves, user becomes a member."""
     _anna = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Open", join_mode=JoinMode.OPEN,
+        owner_username="anna",
+        name="Open",
+        join_mode=JoinMode.OPEN,
     )
     req_id = await stack.space_svc.request_join(space.id, user_id=bob.user_id)
     member = await stack.space_svc.approve_join_request(req_id, actor_username="anna")
     assert member.user_id == bob.user_id
     assert member.role == "member"
 
+
 async def test_join_request_deny(stack):
     """Denied join request does not add the user to the space."""
     _anna = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Open", join_mode=JoinMode.OPEN,
+        owner_username="anna",
+        name="Open",
+        join_mode=JoinMode.OPEN,
     )
     req_id = await stack.space_svc.request_join(space.id, user_id=bob.user_id)
     await stack.space_svc.deny_join_request(req_id, actor_username="anna")
     members = await stack.space_repo.list_members(space.id)
     assert bob.user_id not in {m.user_id for m in members}
 
+
 async def test_invite_only_rejects_join_request(stack):
     """Invite-only space rejects join requests with SpacePermissionError."""
     _anna = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Private", join_mode=JoinMode.INVITE_ONLY,
+        owner_username="anna",
+        name="Private",
+        join_mode=JoinMode.INVITE_ONLY,
     )
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.request_join(space.id, user_id=bob.user_id)
+
 
 async def test_update_config_branches(stack):
     """update_config handles name, description+emoji, features, join_mode, retention."""
     _anna = await stack.provision_user("anna")
     space = await stack.space_svc.create_space(owner_username="anna", name="Original")
 
-    updated = await stack.space_svc.update_config(space.id, actor_username="anna", name="Renamed")
+    updated = await stack.space_svc.update_config(
+        space.id, actor_username="anna", name="Renamed"
+    )
     assert updated.name == "Renamed"
 
     updated2 = await stack.space_svc.update_config(
-        space.id, actor_username="anna", description="A great space", emoji="🏠",
+        space.id,
+        actor_username="anna",
+        description="A great space",
+        emoji="🏠",
     )
     assert updated2.description == "A great space"
 
     new_features = SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED)
     updated3 = await stack.space_svc.update_config(
-        space.id, actor_username="anna", features=new_features,
+        space.id,
+        actor_username="anna",
+        features=new_features,
     )
     assert updated3.features.posts_access == SpaceFeatureAccess.MODERATED
 
     updated4 = await stack.space_svc.update_config(
-        space.id, actor_username="anna", join_mode=JoinMode.OPEN,
+        space.id,
+        actor_username="anna",
+        join_mode=JoinMode.OPEN,
     )
     assert updated4.join_mode == JoinMode.OPEN
 
     updated5 = await stack.space_svc.update_config(
-        space.id, actor_username="anna", retention_days=30,
+        space.id,
+        actor_username="anna",
+        retention_days=30,
     )
     assert updated5.retention_days == 30
 
     updated6 = await stack.space_svc.update_config(
-        space.id, actor_username="anna", retention_days=0,
+        space.id,
+        actor_username="anna",
+        retention_days=0,
     )
     assert updated6.retention_days is None
 
@@ -360,10 +457,12 @@ async def test_update_config_accepts_retention_exempt_types(stack):
     """retention_exempt_types round-trips through the repo."""
     await stack.provision_user("anna")
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Exempt",
+        owner_username="anna",
+        name="Exempt",
     )
     updated = await stack.space_svc.update_config(
-        space.id, actor_username="anna",
+        space.id,
+        actor_username="anna",
         retention_exempt_types=["list", "poll", "", "  ", "schedule"],
     )
     # Empty / whitespace entries stripped; rest preserved as a tuple.
@@ -375,17 +474,27 @@ async def test_public_space_requires_coordinates(stack):
     await stack.provision_user("a")
     with pytest.raises(ValueError, match="lat"):
         await stack.space_svc.create_space(
-            owner_username="a", name="Pub",
-            space_type=SpaceType.PUBLIC, join_mode=JoinMode.OPEN)
+            owner_username="a",
+            name="Pub",
+            space_type=SpaceType.PUBLIC,
+            join_mode=JoinMode.OPEN,
+        )
+
 
 async def test_public_space_with_coordinates(stack):
     """Public space stores 4dp-truncated coordinates."""
     await stack.provision_user("a")
     s = await stack.space_svc.create_space(
-        owner_username="a", name="Pub",
-        space_type=SpaceType.PUBLIC, join_mode=JoinMode.OPEN,
-        lat=52.376543, lon=4.895678, radius_km=5.0)
+        owner_username="a",
+        name="Pub",
+        space_type=SpaceType.PUBLIC,
+        join_mode=JoinMode.OPEN,
+        lat=52.376543,
+        lon=4.895678,
+        radius_km=5.0,
+    )
     assert s.lat == 52.3765 and s.lon == 4.8957
+
 
 async def test_non_member_cannot_post(stack):
     """Non-member posting raises SpacePermissionError."""
@@ -394,9 +503,12 @@ async def test_non_member_cannot_post(stack):
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.create_post(
-            space.id, author_user_id=bob.user_id,
-            type=PostType.TEXT, content="Unauthorised post",
+            space.id,
+            author_user_id=bob.user_id,
+            type=PostType.TEXT,
+            content="Unauthorised post",
         )
+
 
 async def test_pin_unpin_alias(stack):
     """Sidebar pin, unpin, and space alias operations complete without error."""
@@ -410,6 +522,7 @@ async def test_pin_unpin_alias(stack):
 
 # ─── Space post CRUD edge paths ──────────────────────────────────────────
 
+
 async def test_space_edit_post_nonexistent(stack):
     """Editing a nonexistent space post raises KeyError."""
     with pytest.raises(KeyError):
@@ -422,8 +535,12 @@ async def test_space_edit_post_author_allowed(stack):
     bob = await stack.provision_user("bob")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
-    p = await stack.space_svc.create_post(s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="v1")
-    updated = await stack.space_svc.edit_post(p.id, editor_user_id=bob.user_id, new_content="v2")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="v1"
+    )
+    updated = await stack.space_svc.edit_post(
+        p.id, editor_user_id=bob.user_id, new_content="v2"
+    )
     assert updated.content == "v2"
 
 
@@ -435,16 +552,22 @@ async def test_space_edit_post_non_admin_rejected(stack):
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=carl.user_id)
-    p = await stack.space_svc.create_post(s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
     with pytest.raises(PermissionError):
-        await stack.space_svc.edit_post(p.id, editor_user_id=carl.user_id, new_content="y")
+        await stack.space_svc.edit_post(
+            p.id, editor_user_id=carl.user_id, new_content="y"
+        )
 
 
 async def test_space_delete_post_self_no_moderated_flag(stack):
     """Self-deleting a space post does not set moderated flag."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     await stack.space_svc.delete_post(p.id, actor_user_id=anna.user_id)
     got = (await stack.space_post_repo.get(p.id))[1]
     assert got.deleted and not got.moderated
@@ -456,7 +579,9 @@ async def test_space_delete_post_admin_sets_moderated(stack):
     bob = await stack.provision_user("bob")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
-    p = await stack.space_svc.create_post(s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
     await stack.space_svc.delete_post(p.id, actor_user_id=anna.user_id)
     got = (await stack.space_post_repo.get(p.id))[1]
     assert got.deleted and got.moderated
@@ -476,7 +601,9 @@ async def test_space_delete_post_non_admin_rejected(stack):
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=carl.user_id)
-    p = await stack.space_svc.create_post(s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
     with pytest.raises(PermissionError):
         await stack.space_svc.delete_post(p.id, actor_user_id=carl.user_id)
 
@@ -485,7 +612,9 @@ async def test_space_reactions(stack):
     """Add and remove reaction on a space post."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     r = await stack.space_svc.add_reaction(p.id, user_id=anna.user_id, emoji=" 👍 ")
     assert "👍" in r.reactions
     r2 = await stack.space_svc.remove_reaction(p.id, user_id=anna.user_id, emoji="👍")
@@ -496,7 +625,9 @@ async def test_space_reaction_empty_rejected(stack):
     """Empty emoji raises ValueError."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     with pytest.raises(ValueError, match="empty"):
         await stack.space_svc.add_reaction(p.id, user_id=anna.user_id, emoji="")
 
@@ -507,8 +638,12 @@ async def test_space_comment_and_delete(stack):
     bob = await stack.provision_user("bob")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
-    p = await stack.space_svc.create_post(s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x")
-    c = await stack.space_svc.add_comment(p.id, author_user_id=bob.user_id, content="nice")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=bob.user_id, content="nice"
+    )
     await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
     got = await stack.space_post_repo.get_comment(c.id)
     assert got.deleted
@@ -519,28 +654,40 @@ async def test_space_comment_non_member_rejected(stack):
     anna = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     with pytest.raises(SpacePermissionError):
-        await stack.space_svc.add_comment(p.id, author_user_id=bob.user_id, content="nope")
+        await stack.space_svc.add_comment(
+            p.id, author_user_id=bob.user_id, content="nope"
+        )
 
 
 async def test_space_comment_on_deleted_post(stack):
     """Commenting on a deleted post raises KeyError."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     await stack.space_svc.delete_post(p.id, actor_user_id=anna.user_id)
     with pytest.raises(KeyError, match="deleted"):
-        await stack.space_svc.add_comment(p.id, author_user_id=anna.user_id, content="late")
+        await stack.space_svc.add_comment(
+            p.id, author_user_id=anna.user_id, content="late"
+        )
 
 
 async def test_space_comment_empty_content_rejected(stack):
     """Empty comment content raises ValueError."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     with pytest.raises(ValueError, match="content"):
-        await stack.space_svc.add_comment(p.id, author_user_id=anna.user_id, content="  ")
+        await stack.space_svc.add_comment(
+            p.id, author_user_id=anna.user_id, content="  "
+        )
 
 
 async def test_space_delete_comment_nonexistent(stack):
@@ -557,8 +704,12 @@ async def test_space_delete_comment_non_admin_rejected(stack):
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
     await stack.space_svc.add_member(s.id, actor_username="anna", user_id=carl.user_id)
-    p = await stack.space_svc.create_post(s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x")
-    c = await stack.space_svc.add_comment(p.id, author_user_id=bob.user_id, content="hi")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=bob.user_id, content="hi"
+    )
     with pytest.raises(PermissionError):
         await stack.space_svc.delete_comment(c.id, actor_user_id=carl.user_id)
 
@@ -567,8 +718,12 @@ async def test_space_list_feed(stack):
     """list_feed returns posts scoped to the space."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="a")
-    await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="b")
+    await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="a"
+    )
+    await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="b"
+    )
     feed = await stack.space_svc.list_feed(s.id, limit=10)
     assert len(feed) == 2
 
@@ -577,12 +732,15 @@ async def test_space_create_post_type_not_allowed(stack):
     """Posting a disallowed type raises SpacePermissionError."""
     anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(
-        owner_username="anna", name="S",
+        owner_username="anna",
+        name="S",
         features=SpaceFeatures(allowed_post_types=("text",)),
     )
     with pytest.raises(SpacePermissionError, match="does not allow"):
         await stack.space_svc.create_post(
-            s.id, author_user_id=anna.user_id, type="image",
+            s.id,
+            author_user_id=anna.user_id,
+            type="image",
             media_url="/img.webp",
         )
 
@@ -593,7 +751,10 @@ async def test_space_create_post_text_empty_rejected(stack):
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
     with pytest.raises(ValueError, match="content"):
         await stack.space_svc.create_post(
-            s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="  ",
+            s.id,
+            author_user_id=anna.user_id,
+            type=PostType.TEXT,
+            content="  ",
         )
 
 
@@ -601,9 +762,13 @@ async def test_public_space_coordinate_truncation(stack):
     """Public space coordinates are truncated to 4dp."""
     _anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(
-        owner_username="anna", name="Pub",
-        space_type=SpaceType.PUBLIC, join_mode=JoinMode.OPEN,
-        lat=52.376543, lon=4.895678, radius_km=5.0,
+        owner_username="anna",
+        name="Pub",
+        space_type=SpaceType.PUBLIC,
+        join_mode=JoinMode.OPEN,
+        lat=52.376543,
+        lon=4.895678,
+        radius_km=5.0,
     )
     assert s.lat == 52.3765
     assert s.lon == 4.8957
@@ -611,10 +776,12 @@ async def test_public_space_coordinate_truncation(stack):
 
 # ── Helper function coverage ──────────────────────────────────────────────
 
+
 def test_coerce_space_type_string():
     """String space type is coerced to enum."""
     from social_home.services.space_service import _coerce_space_type
     from social_home.domain.space import SpaceType
+
     assert _coerce_space_type("private") is SpaceType.PRIVATE
     assert _coerce_space_type(SpaceType.PUBLIC) is SpaceType.PUBLIC
 
@@ -622,6 +789,7 @@ def test_coerce_space_type_string():
 def test_coerce_space_type_invalid():
     """Invalid space type string raises ValueError."""
     from social_home.services.space_service import _coerce_space_type
+
     with pytest.raises(ValueError, match="invalid space type"):
         _coerce_space_type("bogus")
 
@@ -630,6 +798,7 @@ def test_coerce_join_mode_string():
     """String join mode is coerced to enum."""
     from social_home.services.space_service import _coerce_join_mode
     from social_home.domain.space import JoinMode
+
     assert _coerce_join_mode("open") is JoinMode.OPEN
     assert _coerce_join_mode(JoinMode.INVITE_ONLY) is JoinMode.INVITE_ONLY
 
@@ -637,6 +806,7 @@ def test_coerce_join_mode_string():
 def test_coerce_join_mode_invalid():
     """Invalid join mode raises ValueError."""
     from social_home.services.space_service import _coerce_join_mode
+
     with pytest.raises(ValueError, match="invalid join mode"):
         _coerce_join_mode("bogus")
 
@@ -644,6 +814,7 @@ def test_coerce_join_mode_invalid():
 def test_coerce_post_type():
     """Post type coercion works for strings and enums."""
     from social_home.services.space_service import _coerce_post_type
+
     assert _coerce_post_type("text") is PostType.TEXT
     assert _coerce_post_type(PostType.IMAGE) is PostType.IMAGE
     with pytest.raises(ValueError):
@@ -654,6 +825,7 @@ def test_coerce_comment_type():
     """Comment type coercion works."""
     from social_home.services.space_service import _coerce_comment_type
     from social_home.domain.post import CommentType
+
     assert _coerce_comment_type("text") is CommentType.TEXT
     assert _coerce_comment_type(CommentType.IMAGE) is CommentType.IMAGE
     with pytest.raises(ValueError):
@@ -663,6 +835,7 @@ def test_coerce_comment_type():
 def test_validate_space_content_file():
     """File post without file_meta raises ValueError."""
     from social_home.services.space_service import _validate_space_content
+
     with pytest.raises(ValueError, match="file_meta"):
         _validate_space_content(PostType.FILE, None, None)
 
@@ -670,6 +843,7 @@ def test_validate_space_content_file():
 def test_validate_space_content_text_empty():
     """Text post with empty content raises ValueError."""
     from social_home.services.space_service import _validate_space_content
+
     with pytest.raises(ValueError, match="content"):
         _validate_space_content(PostType.TEXT, "   ", None)
 
@@ -677,12 +851,14 @@ def test_validate_space_content_text_empty():
 def test_validate_text_length():
     """Over-length content raises ValueError."""
     from social_home.services.space_service import _validate_text_length
+
     with pytest.raises(ValueError, match="maximum length"):
         _validate_text_length("x" * 10001, limit=10000)
     _validate_text_length(None, limit=100)  # None is OK
 
 
 # ── More service edge paths ───────────────────────────────────────────────
+
 
 async def test_space_create_unknown_owner(stack):
     """Creating space with unknown owner raises KeyError."""
@@ -717,16 +893,24 @@ async def test_space_edit_post_deleted_rejected(stack):
     """Editing a deleted post raises KeyError."""
     anna = await stack.provision_user("edel_anna")
     s = await stack.space_svc.create_space(owner_username="edel_anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     await stack.space_svc.delete_post(p.id, actor_user_id=anna.user_id)
     with pytest.raises(KeyError, match="deleted"):
-        await stack.space_svc.edit_post(p.id, editor_user_id=anna.user_id, new_content="y")
+        await stack.space_svc.edit_post(
+            p.id, editor_user_id=anna.user_id, new_content="y"
+        )
 
 
 async def test_space_comment_image_no_media(stack):
     """Image comment without media_url raises ValueError."""
     anna = await stack.provision_user("img_anna")
     s = await stack.space_svc.create_space(owner_username="img_anna", name="S")
-    p = await stack.space_svc.create_post(s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
     with pytest.raises(ValueError, match="media_url"):
-        await stack.space_svc.add_comment(p.id, author_user_id=anna.user_id, comment_type="image")
+        await stack.space_svc.add_comment(
+            p.id, author_user_id=anna.user_id, comment_type="image"
+        )

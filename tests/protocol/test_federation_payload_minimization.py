@@ -69,8 +69,11 @@ async def env(tmp_dir):
     bus = EventBus()
     kek = KeyManager.from_data_dir(tmp_dir)
     svc = FederationService(
-        db=db, federation_repo=fed_repo, outbox_repo=outbox,
-        key_manager=kek, bus=bus,
+        db=db,
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=kek,
+        bus=bus,
         own_instance_id=own_iid,
         own_identity_seed=own_kp.private_key,
         own_identity_pk=own_kp.public_key,
@@ -79,10 +82,14 @@ async def env(tmp_dir):
     wrapped = kek.encrypt(b"\x05" * 32)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh", local_webhook_id="wh",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
     capture = _Capture()
@@ -91,11 +98,21 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-_ALLOWED_PLAINTEXT_FIELDS: frozenset[str] = frozenset({
-    "msg_id", "event_type", "from_instance", "to_instance",
-    "timestamp", "encrypted_payload", "sig_suite", "signatures",
-    "space_id", "epoch", "proto_version",
-})
+_ALLOWED_PLAINTEXT_FIELDS: frozenset[str] = frozenset(
+    {
+        "msg_id",
+        "event_type",
+        "from_instance",
+        "to_instance",
+        "timestamp",
+        "encrypted_payload",
+        "sig_suite",
+        "signatures",
+        "space_id",
+        "epoch",
+        "proto_version",
+    }
+)
 
 
 async def test_envelope_has_no_extra_plaintext_fields(env):
@@ -143,7 +160,8 @@ async def test_envelope_signature_is_present(env):
     svc, peer, capture = env
     await svc.send_event(
         to_instance_id=peer.id,
-        event_type=FederationEventType.PRESENCE_UPDATED, payload={},
+        event_type=FederationEventType.PRESENCE_UPDATED,
+        payload={},
     )
     envelope = capture.bodies[0]
     assert envelope.get("sig_suite") == "ed25519"

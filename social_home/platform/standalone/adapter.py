@@ -146,8 +146,7 @@ class StandaloneAdapter:
         raw = secrets.token_urlsafe(32)
         token_id = secrets.token_urlsafe(16)
         await self._db.enqueue(
-            "INSERT INTO platform_tokens(token_id, username, token_hash) "
-            "VALUES(?,?,?)",
+            "INSERT INTO platform_tokens(token_id, username, token_hash) VALUES(?,?,?)",
             (token_id, username, _sha256(raw)),
         )
         # ``label`` is accepted for forward-compatibility but ignored
@@ -165,12 +164,14 @@ class StandaloneAdapter:
         """
         # N*r*128 stays ≤16 MB so we sit comfortably under OpenSSL's
         # default EVP memory limit (~32 MB). ~50 ms on commodity hardware.
-        n = 2 ** 14
+        n = 2**14
         r = 8
         p = 1
         if salt is None:
             salt = os.urandom(16)
-        dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32)
+        dk = hashlib.scrypt(
+            password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32
+        )
         return f"scrypt${n}${r}${p}${salt.hex()}${dk.hex()}"
 
     @staticmethod
@@ -183,11 +184,15 @@ class StandaloneAdapter:
             salt = bytes.fromhex(salt_hex)
             expected = bytes.fromhex(hash_hex)
             dk = hashlib.scrypt(
-                password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
+                password.encode("utf-8"),
+                salt=salt,
+                n=n,
+                r=r,
+                p=p,
                 dklen=len(expected),
             )
             return hmac.compare_digest(dk, expected)
-        except (ValueError, KeyError):
+        except ValueError, KeyError:
             return False
 
     # ── User listing ──────────────────────────────────────────────────────
@@ -270,11 +275,14 @@ class StandaloneAdapter:
                 if resp.status not in (200, 201, 204):
                     log.debug(
                         "standalone: send_push to %r returned %d",
-                        user.username, resp.status,
+                        user.username,
+                        resp.status,
                     )
         except aiohttp.ClientError as exc:
             log.debug(
-                "standalone: send_push to %r failed: %s", user.username, exc,
+                "standalone: send_push to %r failed: %s",
+                user.username,
+                exc,
             )
 
     # ── Lifecycle hooks ────────────────────────────────────────────────────
@@ -312,7 +320,9 @@ class StandaloneAdapter:
         return False
 
     async def transcribe_audio(
-        self, audio_bytes: bytes, language: str = "en",
+        self,
+        audio_bytes: bytes,
+        language: str = "en",
     ) -> str:
         raise NotImplementedError(
             "StandaloneAdapter does not support audio transcription in v1"

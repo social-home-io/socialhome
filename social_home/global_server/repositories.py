@@ -35,16 +35,21 @@ from .domain import (
 
 # ─── Federation repo ─────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class AbstractGfsFederationRepo(Protocol):
     # Instances
     async def upsert_instance(self, instance: ClientInstance) -> None: ...
     async def get_instance(self, instance_id: str) -> ClientInstance | None: ...
     async def list_instances(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[ClientInstance]: ...
     async def set_instance_status(
-        self, instance_id: str, status: str,
+        self,
+        instance_id: str,
+        status: str,
     ) -> None: ...
     async def delete_instance(self, instance_id: str) -> None: ...
 
@@ -52,31 +57,47 @@ class AbstractGfsFederationRepo(Protocol):
     async def upsert_space(self, space: GlobalSpace) -> None: ...
     async def get_space(self, space_id: str) -> GlobalSpace | None: ...
     async def list_spaces(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[GlobalSpace]: ...
     async def set_space_status(self, space_id: str, status: str) -> None: ...
     async def delete_space(self, space_id: str) -> None: ...
     async def list_spaces_for_instance(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> list[GlobalSpace]: ...
 
     # Subscribers
     async def add_subscriber(
-        self, *, space_id: str, instance_id: str,
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
     ) -> None: ...
     async def remove_subscriber(
-        self, *, space_id: str, instance_id: str,
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
     ) -> None: ...
     async def list_subscribers(
-        self, space_id: str, *, exclude: str = "",
+        self,
+        space_id: str,
+        *,
+        exclude: str = "",
     ) -> list[GfsSubscriber]: ...
 
     # RTC transport state (spec §24.12)
     async def upsert_rtc_connection(
-        self, instance_id: str, *, transport: str,
+        self,
+        instance_id: str,
+        *,
+        transport: str,
     ) -> None: ...
     async def get_rtc_connection(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> RtcConnection | None: ...
 
 
@@ -105,9 +126,12 @@ class SqliteGfsFederationRepo:
                 auto_accept  = excluded.auto_accept
             """,
             (
-                instance.instance_id, instance.display_name,
-                instance.public_key, instance.endpoint_url,
-                instance.status, int(instance.auto_accept),
+                instance.instance_id,
+                instance.display_name,
+                instance.public_key,
+                instance.endpoint_url,
+                instance.status,
+                int(instance.auto_accept),
                 instance.connected_at or None,
             ),
         )
@@ -120,7 +144,9 @@ class SqliteGfsFederationRepo:
         return _row_to_instance(_to_dict(row))
 
     async def list_instances(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[ClientInstance]:
         if status is None:
             rows = await self._db.fetchall(
@@ -132,12 +158,12 @@ class SqliteGfsFederationRepo:
                 "ORDER BY connected_at DESC",
                 (status,),
             )
-        return [
-            i for i in (_row_to_instance(_to_dict(r)) for r in rows) if i
-        ]
+        return [i for i in (_row_to_instance(_to_dict(r)) for r in rows) if i]
 
     async def set_instance_status(
-        self, instance_id: str, status: str,
+        self,
+        instance_id: str,
+        status: str,
     ) -> None:
         await self._db.enqueue(
             "UPDATE client_instances SET status=? WHERE instance_id=?",
@@ -174,23 +200,33 @@ class SqliteGfsFederationRepo:
                 posts_per_week = excluded.posts_per_week
             """,
             (
-                space.space_id, space.owning_instance, space.name,
-                space.description, space.about_markdown,
-                space.cover_url, space.min_age, space.target_audience,
-                space.accent_color, space.status,
-                space.subscriber_count, space.posts_per_week,
+                space.space_id,
+                space.owning_instance,
+                space.name,
+                space.description,
+                space.about_markdown,
+                space.cover_url,
+                space.min_age,
+                space.target_audience,
+                space.accent_color,
+                space.status,
+                space.subscriber_count,
+                space.posts_per_week,
                 space.published_at or None,
             ),
         )
 
     async def get_space(self, space_id: str) -> GlobalSpace | None:
         row = await self._db.fetchone(
-            "SELECT * FROM global_spaces WHERE space_id=?", (space_id,),
+            "SELECT * FROM global_spaces WHERE space_id=?",
+            (space_id,),
         )
         return _row_to_space(_to_dict(row))
 
     async def list_spaces(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[GlobalSpace]:
         if status is None:
             rows = await self._db.fetchall(
@@ -198,13 +234,10 @@ class SqliteGfsFederationRepo:
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM global_spaces WHERE status=? "
-                "ORDER BY published_at DESC",
+                "SELECT * FROM global_spaces WHERE status=? ORDER BY published_at DESC",
                 (status,),
             )
-        return [
-            s for s in (_row_to_space(_to_dict(r)) for r in rows) if s
-        ]
+        return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]
 
     async def set_space_status(self, space_id: str, status: str) -> None:
         await self._db.enqueue(
@@ -214,25 +247,28 @@ class SqliteGfsFederationRepo:
 
     async def delete_space(self, space_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM global_spaces WHERE space_id=?", (space_id,),
+            "DELETE FROM global_spaces WHERE space_id=?",
+            (space_id,),
         )
 
     async def list_spaces_for_instance(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> list[GlobalSpace]:
         rows = await self._db.fetchall(
             "SELECT * FROM global_spaces WHERE owning_instance=? "
             "ORDER BY published_at DESC",
             (instance_id,),
         )
-        return [
-            s for s in (_row_to_space(_to_dict(r)) for r in rows) if s
-        ]
+        return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]
 
     # ── Subscribers ────────────────────────────────────────────────────
 
     async def add_subscriber(
-        self, *, space_id: str, instance_id: str,
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
     ) -> None:
         await self._db.enqueue(
             "INSERT OR IGNORE INTO space_subscribers(space_id, instance_id) "
@@ -247,11 +283,13 @@ class SqliteGfsFederationRepo:
         )
 
     async def remove_subscriber(
-        self, *, space_id: str, instance_id: str,
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
     ) -> None:
         await self._db.enqueue(
-            "DELETE FROM space_subscribers "
-            "WHERE space_id=? AND instance_id=?",
+            "DELETE FROM space_subscribers WHERE space_id=? AND instance_id=?",
             (space_id, instance_id),
         )
         await self._db.enqueue(
@@ -262,7 +300,10 @@ class SqliteGfsFederationRepo:
         )
 
     async def list_subscribers(
-        self, space_id: str, *, exclude: str = "",
+        self,
+        space_id: str,
+        *,
+        exclude: str = "",
     ) -> list[GfsSubscriber]:
         rows = await self._db.fetchall(
             """
@@ -285,7 +326,10 @@ class SqliteGfsFederationRepo:
     # ── RTC transport state (spec §24.12) ──────────────────────────────
 
     async def upsert_rtc_connection(
-        self, instance_id: str, *, transport: str,
+        self,
+        instance_id: str,
+        *,
+        transport: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -299,7 +343,8 @@ class SqliteGfsFederationRepo:
         )
 
     async def get_rtc_connection(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> RtcConnection | None:
         row = await self._db.fetchone(
             "SELECT * FROM rtc_connections WHERE instance_id=?",
@@ -309,14 +354,15 @@ class SqliteGfsFederationRepo:
         if r is None:
             return None
         return RtcConnection(
-            instance_id  = r["instance_id"],
-            transport    = r["transport"],
-            connected_at = r["connected_at"],
-            last_ping_at = r["last_ping_at"],
+            instance_id=r["instance_id"],
+            transport=r["transport"],
+            connected_at=r["connected_at"],
+            last_ping_at=r["last_ping_at"],
         )
 
 
 # ─── Admin repo ──────────────────────────────────────────────────────────
+
 
 @runtime_checkable
 class AbstractGfsAdminRepo(Protocol):
@@ -337,11 +383,19 @@ class AbstractGfsAdminRepo(Protocol):
 
     # Audit log
     async def log_admin_action(
-        self, *, action: str, target_type: str | None, target_id: str | None,
-        metadata: dict, admin_ip: str | None,
+        self,
+        *,
+        action: str,
+        target_type: str | None,
+        target_id: str | None,
+        metadata: dict,
+        admin_ip: str | None,
     ) -> None: ...
     async def list_admin_actions(
-        self, *, action: str | None = None, since: int | None = None,
+        self,
+        *,
+        action: str | None = None,
+        since: int | None = None,
         limit: int = 200,
     ) -> list[dict]: ...
 
@@ -349,29 +403,47 @@ class AbstractGfsAdminRepo(Protocol):
     async def save_fraud_report(self, report: GfsFraudReport) -> bool: ...
     async def get_fraud_report(self, report_id: str) -> GfsFraudReport | None: ...
     async def list_fraud_reports(
-        self, *, status: str | None = None, limit: int = 500,
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 500,
     ) -> list[GfsFraudReport]: ...
     async def count_reporters_for_target(
-        self, target_type: str, target_id: str,
+        self,
+        target_type: str,
+        target_id: str,
     ) -> int: ...
     async def set_fraud_report_status(
-        self, report_id: str, status: str, reviewed_by: str,
+        self,
+        report_id: str,
+        status: str,
+        reviewed_by: str,
     ) -> None: ...
     async def mark_pending_reports_acted(
-        self, target_type: str, target_id: str, reviewed_by: str,
+        self,
+        target_type: str,
+        target_id: str,
+        reviewed_by: str,
     ) -> None: ...
     async def count_reports_by_reporter(
-        self, reporter_instance_id: str, since: int,
+        self,
+        reporter_instance_id: str,
+        since: int,
     ) -> int: ...
 
     # Appeals
     async def save_appeal(self, appeal: GfsAppeal) -> None: ...
     async def get_appeal(self, appeal_id: str) -> GfsAppeal | None: ...
     async def list_appeals(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[GfsAppeal]: ...
     async def set_appeal_status(
-        self, appeal_id: str, status: str, decided_by: str,
+        self,
+        appeal_id: str,
+        status: str,
+        decided_by: str,
     ) -> None: ...
 
     # Pair tokens
@@ -392,7 +464,8 @@ class SqliteGfsAdminRepo:
 
     async def get_config(self, key: str) -> str | None:
         row = await self._db.fetchone(
-            "SELECT value FROM server_config WHERE key=?", (key,),
+            "SELECT value FROM server_config WHERE key=?",
+            (key,),
         )
         return row["value"] if row else None
 
@@ -423,7 +496,8 @@ class SqliteGfsAdminRepo:
 
     async def get_session(self, token: str) -> AdminSession | None:
         row = await self._db.fetchone(
-            "SELECT * FROM admin_sessions WHERE token=?", (token,),
+            "SELECT * FROM admin_sessions WHERE token=?",
+            (token,),
         )
         if row is None:
             return None
@@ -435,34 +509,44 @@ class SqliteGfsAdminRepo:
 
     async def delete_session(self, token: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM admin_sessions WHERE token=?", (token,),
+            "DELETE FROM admin_sessions WHERE token=?",
+            (token,),
         )
 
     async def purge_expired_sessions(self, now: int) -> None:
         await self._db.enqueue(
-            "DELETE FROM admin_sessions WHERE expires_at < ?", (now,),
+            "DELETE FROM admin_sessions WHERE expires_at < ?",
+            (now,),
         )
 
     # ── Brute-force tracking ──────────────────────────────────────────
 
     async def record_login_attempt(self, ip: str) -> None:
         await self._db.enqueue(
-            "INSERT INTO admin_login_attempts(ip) VALUES(?)", (ip,),
+            "INSERT INTO admin_login_attempts(ip) VALUES(?)",
+            (ip,),
         )
 
     async def count_failed_attempts(self, ip: str, since: int) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(*) FROM admin_login_attempts "
-            "WHERE ip=? AND attempted_at >= ?",
-            (ip, since),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM admin_login_attempts "
+                "WHERE ip=? AND attempted_at >= ?",
+                (ip, since),
+                default=0,
+            )
+        )
 
     # ── Audit log ─────────────────────────────────────────────────────
 
     async def log_admin_action(
-        self, *, action: str, target_type: str | None, target_id: str | None,
-        metadata: dict, admin_ip: str | None,
+        self,
+        *,
+        action: str,
+        target_type: str | None,
+        target_id: str | None,
+        metadata: dict,
+        admin_ip: str | None,
     ) -> None:
         await self._db.enqueue(
             """
@@ -470,12 +554,14 @@ class SqliteGfsAdminRepo:
                 action, target_type, target_id, metadata_json, admin_ip
             ) VALUES(?, ?, ?, ?, ?)
             """,
-            (action, target_type, target_id, json.dumps(metadata or {}),
-             admin_ip),
+            (action, target_type, target_id, json.dumps(metadata or {}), admin_ip),
         )
 
     async def list_admin_actions(
-        self, *, action: str | None = None, since: int | None = None,
+        self,
+        *,
+        action: str | None = None,
+        since: int | None = None,
         limit: int = 200,
     ) -> list[dict]:
         clauses = []
@@ -489,19 +575,18 @@ class SqliteGfsAdminRepo:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(int(limit))
         rows = await self._db.fetchall(
-            f"SELECT * FROM admin_audit_log{where} "
-            "ORDER BY created_at DESC LIMIT ?",
+            f"SELECT * FROM admin_audit_log{where} ORDER BY created_at DESC LIMIT ?",
             tuple(params),
         )
         return [
             {
-                "id":            r["id"],
-                "action":        r["action"],
-                "target_type":   r["target_type"],
-                "target_id":     r["target_id"],
-                "metadata":      _safe_json(r["metadata_json"]),
-                "admin_ip":      r["admin_ip"],
-                "created_at":    int(r["created_at"]),
+                "id": r["id"],
+                "action": r["action"],
+                "target_type": r["target_type"],
+                "target_id": r["target_id"],
+                "metadata": _safe_json(r["metadata_json"]),
+                "admin_ip": r["admin_ip"],
+                "created_at": int(r["created_at"]),
             }
             for r in rows
         ]
@@ -519,10 +604,15 @@ class SqliteGfsAdminRepo:
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    report.id, report.target_type, report.target_id,
-                    report.category, report.notes,
-                    report.reporter_instance_id, report.reporter_user_id,
-                    report.status, int(report.created_at),
+                    report.id,
+                    report.target_type,
+                    report.target_id,
+                    report.category,
+                    report.notes,
+                    report.reporter_instance_id,
+                    report.reporter_user_id,
+                    report.status,
+                    int(report.created_at),
                 ),
             )
             return True
@@ -532,20 +622,24 @@ class SqliteGfsAdminRepo:
             raise
 
     async def get_fraud_report(
-        self, report_id: str,
+        self,
+        report_id: str,
     ) -> GfsFraudReport | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gfs_fraud_reports WHERE id=?", (report_id,),
+            "SELECT * FROM gfs_fraud_reports WHERE id=?",
+            (report_id,),
         )
         return _row_to_report(_to_dict(row))
 
     async def list_fraud_reports(
-        self, *, status: str | None = None, limit: int = 500,
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 500,
     ) -> list[GfsFraudReport]:
         if status is None:
             rows = await self._db.fetchall(
-                "SELECT * FROM gfs_fraud_reports "
-                "ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM gfs_fraud_reports ORDER BY created_at DESC LIMIT ?",
                 (int(limit),),
             )
         else:
@@ -554,23 +648,28 @@ class SqliteGfsAdminRepo:
                 "ORDER BY created_at DESC LIMIT ?",
                 (status, int(limit)),
             )
-        return [
-            r for r in (_row_to_report(_to_dict(row)) for row in rows) if r
-        ]
+        return [r for r in (_row_to_report(_to_dict(row)) for row in rows) if r]
 
     async def count_reporters_for_target(
-        self, target_type: str, target_id: str,
+        self,
+        target_type: str,
+        target_id: str,
     ) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(DISTINCT reporter_instance_id) "
-            "FROM gfs_fraud_reports "
-            "WHERE target_type=? AND target_id=? AND status='pending'",
-            (target_type, target_id),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(DISTINCT reporter_instance_id) "
+                "FROM gfs_fraud_reports "
+                "WHERE target_type=? AND target_id=? AND status='pending'",
+                (target_type, target_id),
+                default=0,
+            )
+        )
 
     async def set_fraud_report_status(
-        self, report_id: str, status: str, reviewed_by: str,
+        self,
+        report_id: str,
+        status: str,
+        reviewed_by: str,
     ) -> None:
         await self._db.enqueue(
             "UPDATE gfs_fraud_reports SET status=?, reviewed_by=?, "
@@ -579,7 +678,10 @@ class SqliteGfsAdminRepo:
         )
 
     async def mark_pending_reports_acted(
-        self, target_type: str, target_id: str, reviewed_by: str,
+        self,
+        target_type: str,
+        target_id: str,
+        reviewed_by: str,
     ) -> None:
         await self._db.enqueue(
             "UPDATE gfs_fraud_reports SET status='acted', "
@@ -589,14 +691,18 @@ class SqliteGfsAdminRepo:
         )
 
     async def count_reports_by_reporter(
-        self, reporter_instance_id: str, since: int,
+        self,
+        reporter_instance_id: str,
+        since: int,
     ) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(*) FROM gfs_fraud_reports "
-            "WHERE reporter_instance_id=? AND created_at >= ?",
-            (reporter_instance_id, since),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM gfs_fraud_reports "
+                "WHERE reporter_instance_id=? AND created_at >= ?",
+                (reporter_instance_id, since),
+                default=0,
+            )
+        )
 
     # ── Appeals ───────────────────────────────────────────────────────
 
@@ -608,14 +714,19 @@ class SqliteGfsAdminRepo:
             ) VALUES(?, ?, ?, ?, ?, ?)
             """,
             (
-                appeal.id, appeal.target_type, appeal.target_id,
-                appeal.message, appeal.status, int(appeal.created_at),
+                appeal.id,
+                appeal.target_type,
+                appeal.target_id,
+                appeal.message,
+                appeal.status,
+                int(appeal.created_at),
             ),
         )
 
     async def get_appeal(self, appeal_id: str) -> GfsAppeal | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gfs_appeals WHERE id=?", (appeal_id,),
+            "SELECT * FROM gfs_appeals WHERE id=?",
+            (appeal_id,),
         )
         if row is None:
             return None
@@ -631,7 +742,9 @@ class SqliteGfsAdminRepo:
         )
 
     async def list_appeals(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[GfsAppeal]:
         if status is None:
             rows = await self._db.fetchall(
@@ -639,8 +752,7 @@ class SqliteGfsAdminRepo:
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM gfs_appeals WHERE status=? "
-                "ORDER BY created_at DESC",
+                "SELECT * FROM gfs_appeals WHERE status=? ORDER BY created_at DESC",
                 (status,),
             )
         return [
@@ -658,7 +770,10 @@ class SqliteGfsAdminRepo:
         ]
 
     async def set_appeal_status(
-        self, appeal_id: str, status: str, decided_by: str,
+        self,
+        appeal_id: str,
+        status: str,
+        decided_by: str,
     ) -> None:
         await self._db.enqueue(
             "UPDATE gfs_appeals SET status=?, decided_by=?, "
@@ -683,25 +798,27 @@ class SqliteGfsAdminRepo:
         if row is None or row["consumed_at"] is not None:
             return False
         import time
+
         if int(time.time()) - int(row["created_at"]) > 600:
             return False
         await self._db.enqueue(
-            "UPDATE gfs_pair_tokens SET consumed_at=strftime('%s','now') "
-            "WHERE token=?",
+            "UPDATE gfs_pair_tokens SET consumed_at=strftime('%s','now') WHERE token=?",
             (token,),
         )
         return True
 
     async def count_pair_tokens(self, ip: str, since: int) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(*) FROM gfs_pair_tokens "
-            "WHERE ip=? AND created_at >= ?",
-            (ip, since),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM gfs_pair_tokens WHERE ip=? AND created_at >= ?",
+                (ip, since),
+                default=0,
+            )
+        )
 
 
 # ─── Cluster repo (unchanged surface) ────────────────────────────────────
+
 
 @runtime_checkable
 class AbstractClusterRepo(Protocol):
@@ -731,8 +848,7 @@ class SqliteClusterRepo:
                 status=excluded.status,
                 last_seen=excluded.last_seen
             """,
-            (node.node_id, node.url, node.public_key, node.status,
-             node.last_seen),
+            (node.node_id, node.url, node.public_key, node.status, node.last_seen),
         )
 
     async def list_nodes(self) -> list[ClusterNode]:
@@ -754,7 +870,8 @@ class SqliteClusterRepo:
 
     async def remove_node(self, node_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM cluster_nodes WHERE node_id=?", (node_id,),
+            "DELETE FROM cluster_nodes WHERE node_id=?",
+            (node_id,),
         )
 
     async def get_leader_id(self) -> str | None:
@@ -766,6 +883,7 @@ class SqliteClusterRepo:
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
+
 
 def _to_dict(row) -> dict | None:
     if row is None:
@@ -785,7 +903,7 @@ def _safe_json(value) -> dict:
     try:
         parsed = json.loads(value)
         return parsed if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return {}
 
 

@@ -66,6 +66,7 @@ MAX_CALLS_PER_USER: int = 16
 
 # ─── Exceptions ──────────────────────────────────────────────────────────
 
+
 class CallNotFoundError(KeyError):
     """Raised when a call_id does not match a live or persisted call."""
 
@@ -88,8 +89,8 @@ class CallRecord:
     caller_user_id: str
     callee_user_id: str | None
     callee_instance_id: str | None
-    call_type: str                       # "audio" | "video"
-    status: str = "ringing"              # ringing | in_progress | ended
+    call_type: str  # "audio" | "video"
+    status: str = "ringing"  # ringing | in_progress | ended
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     pending_signals: list[dict] = field(default_factory=list)
@@ -99,6 +100,7 @@ class CallRecord:
 
 
 # ─── Service ──────────────────────────────────────────────────────────────
+
 
 class CallSignalingService:
     """Relay backend for WebRTC calls.
@@ -151,12 +153,12 @@ class CallSignalingService:
         federation_service=None,
         ws_manager=None,
     ) -> None:
-        self._call_repo   = call_repo
-        self._conv_repo   = conversation_repo
-        self._user_repo   = user_repo
-        self._federation  = federation_service
-        self._own_seed    = own_identity_seed
-        self._ws_manager  = ws_manager
+        self._call_repo = call_repo
+        self._conv_repo = conversation_repo
+        self._user_repo = user_repo
+        self._federation = federation_service
+        self._own_seed = own_identity_seed
+        self._ws_manager = ws_manager
         self._calls: dict[str, CallRecord] = {}
         self._per_user: dict[str, set[str]] = {}
         # Optional push service for missed-call notifications (Phase CH).
@@ -207,7 +209,8 @@ class CallSignalingService:
         caller_username = caller_user.username
 
         local_callees, remote_callees = await self._resolve_conversation_peers(
-            conversation_id, exclude_username=caller_username,
+            conversation_id,
+            exclude_username=caller_username,
         )
         if not local_callees and not remote_callees:
             raise CallConversationError(
@@ -221,7 +224,7 @@ class CallSignalingService:
 
         # For 1:1 DMs there is a single callee; for groups we leave it
         # None (the mesh tracks each peer individually).
-        is_one_to_one = (len(participants) == 2)
+        is_one_to_one = len(participants) == 2
         primary_callee_id: str | None = None
         primary_callee_instance: str | None = None
         if is_one_to_one:
@@ -260,14 +263,17 @@ class CallSignalingService:
         # Ring every local callee.
         for u in local_callees:
             self._per_user.setdefault(u.user_id, set()).add(call_id)
-            await self._fanout_to_user(u.user_id, {
-                "type":            "call.ringing",
-                "call_id":         call_id,
-                "conversation_id": conversation_id,
-                "from_user":       caller_user_id,
-                "call_type":       call_type,
-                "signed_sdp":      signed_dict,
-            })
+            await self._fanout_to_user(
+                u.user_id,
+                {
+                    "type": "call.ringing",
+                    "call_id": call_id,
+                    "conversation_id": conversation_id,
+                    "from_user": caller_user_id,
+                    "call_type": call_type,
+                    "signed_sdp": signed_dict,
+                },
+            )
         # Federate each remote callee.
         if self._federation is not None:
             for remote_instance, remote_user_id in remote_callees:
@@ -276,24 +282,26 @@ class CallSignalingService:
                         to_instance_id=remote_instance,
                         event_type=FederationEventType.CALL_OFFER,
                         payload={
-                            "call_id":          call_id,
-                            "conversation_id":  conversation_id,
-                            "from_user":        caller_user_id,
-                            "to_user":          remote_user_id,
-                            "call_type":        call_type,
-                            "signed_sdp":       signed_dict,
+                            "call_id": call_id,
+                            "conversation_id": conversation_id,
+                            "from_user": caller_user_id,
+                            "to_user": remote_user_id,
+                            "call_type": call_type,
+                            "signed_sdp": signed_dict,
                         },
                     )
-                except Exception as exc:                    # pragma: no cover
+                except Exception as exc:  # pragma: no cover
                     log.warning(
-                        "CALL_OFFER to %s failed: %s", remote_instance, exc,
+                        "CALL_OFFER to %s failed: %s",
+                        remote_instance,
+                        exc,
                     )
 
         return {
-            "call_id":            call_id,
-            "status":             record.status,
-            "conversation_id":    conversation_id,
-            "callee_user_id":     primary_callee_id,
+            "call_id": call_id,
+            "status": record.status,
+            "conversation_id": conversation_id,
+            "callee_user_id": primary_callee_id,
             "callee_instance_id": primary_callee_instance,
         }
 
@@ -308,35 +316,45 @@ class CallSignalingService:
         record = self._calls.get(call_id)
         if record is None:
             raise CallNotFoundError(call_id)
-        if answerer_user_id not in record.participants or \
-                answerer_user_id == record.caller_user_id:
+        if (
+            answerer_user_id not in record.participants
+            or answerer_user_id == record.caller_user_id
+        ):
             raise PermissionError("Only a callee may answer this call")
         record.status = "in_progress"
         record.last_activity = time.time()
 
         await self._call_repo.transition(
-            call_id, status="active", connected_at=_now_iso(),
+            call_id,
+            status="active",
+            connected_at=_now_iso(),
         )
 
         signed = sign_rtc_offer(sdp_answer, "answer", identity_seed=self._own_seed)
         signed_dict = signed_sdp_to_dict(signed)
 
         caller_instance = await self._instance_of(record.caller_user_id)
-        if caller_instance and self._federation is not None and \
-                caller_instance != self._federation.own_instance_id:
+        if (
+            caller_instance
+            and self._federation is not None
+            and caller_instance != self._federation.own_instance_id
+        ):
             await self._federation.send_event(
                 to_instance_id=caller_instance,
                 event_type=FederationEventType.CALL_ANSWER,
                 payload={
-                    "call_id":    call_id,
+                    "call_id": call_id,
                     "signed_sdp": signed_dict,
                 },
             )
-        await self._fanout_to_user(record.caller_user_id, {
-            "type":       "call.answered",
-            "call_id":    call_id,
-            "signed_sdp": signed_dict,
-        })
+        await self._fanout_to_user(
+            record.caller_user_id,
+            {
+                "type": "call.answered",
+                "call_id": call_id,
+                "signed_sdp": signed_dict,
+            },
+        )
         return {"call_id": call_id, "status": record.status}
 
     async def add_ice_candidate(
@@ -357,24 +375,30 @@ class CallSignalingService:
         others = [u for u in record.participants if u != from_user_id]
         for other in others:
             other_instance = await self._instance_of(other)
-            if other_instance and self._federation is not None and \
-                    other_instance != self._federation.own_instance_id:
+            if (
+                other_instance
+                and self._federation is not None
+                and other_instance != self._federation.own_instance_id
+            ):
                 await self._federation.send_event(
                     to_instance_id=other_instance,
                     event_type=FederationEventType.CALL_ICE_CANDIDATE,
                     payload={
-                        "call_id":   call_id,
+                        "call_id": call_id,
                         "from_user": from_user_id,
                         "candidate": candidate,
                     },
                 )
             else:
-                await self._fanout_to_user(other, {
-                    "type":      "call.ice_candidate",
-                    "call_id":   call_id,
-                    "from_user": from_user_id,
-                    "candidate": candidate,
-                })
+                await self._fanout_to_user(
+                    other,
+                    {
+                        "type": "call.ice_candidate",
+                        "call_id": call_id,
+                        "from_user": from_user_id,
+                        "candidate": candidate,
+                    },
+                )
 
     async def decline(self, *, call_id: str, decliner_user_id: str) -> None:
         """A callee refuses a ringing call (§26.8). Emits
@@ -383,31 +407,41 @@ class CallSignalingService:
         record = self._calls.get(call_id)
         if record is None:
             return
-        if decliner_user_id not in record.participants or \
-                decliner_user_id == record.caller_user_id:
+        if (
+            decliner_user_id not in record.participants
+            or decliner_user_id == record.caller_user_id
+        ):
             raise PermissionError("Only a callee may decline")
         record.status = "declined"
 
         session = await self._call_repo.transition(
-            call_id, status="declined", ended_at=_now_iso(),
+            call_id,
+            status="declined",
+            ended_at=_now_iso(),
         )
         if session is not None:
             await self._emit_call_event_message(session, event="declined")
 
         caller = record.caller_user_id
         caller_instance = await self._instance_of(caller)
-        if caller_instance and self._federation is not None and \
-                caller_instance != self._federation.own_instance_id:
+        if (
+            caller_instance
+            and self._federation is not None
+            and caller_instance != self._federation.own_instance_id
+        ):
             await self._federation.send_event(
                 to_instance_id=caller_instance,
                 event_type=FederationEventType.CALL_DECLINE,
                 payload={"call_id": call_id, "decliner_user": decliner_user_id},
             )
-        await self._fanout_to_user(caller or "", {
-            "type":    "call.declined",
-            "call_id": call_id,
-            "by":      decliner_user_id,
-        })
+        await self._fanout_to_user(
+            caller or "",
+            {
+                "type": "call.declined",
+                "call_id": call_id,
+                "by": decliner_user_id,
+            },
+        )
         self._cleanup_call(call_id)
 
     async def hangup(self, *, call_id: str, hanger_user_id: str) -> None:
@@ -429,10 +463,12 @@ class CallSignalingService:
                 duration = int(
                     (datetime.now(timezone.utc) - start).total_seconds(),
                 )
-            except ValueError:                         # pragma: no cover
+            except ValueError:  # pragma: no cover
                 duration = 0
         session = await self._call_repo.transition(
-            call_id, status="ended", ended_at=_now_iso(),
+            call_id,
+            status="ended",
+            ended_at=_now_iso(),
             duration_seconds=duration,
         )
         if session is not None:
@@ -441,19 +477,25 @@ class CallSignalingService:
         others = [u for u in record.participants if u != hanger_user_id]
         for other in others:
             other_instance = await self._instance_of(other)
-            if other_instance and self._federation is not None and \
-                    other_instance != self._federation.own_instance_id:
+            if (
+                other_instance
+                and self._federation is not None
+                and other_instance != self._federation.own_instance_id
+            ):
                 await self._federation.send_event(
                     to_instance_id=other_instance,
                     event_type=FederationEventType.CALL_HANGUP,
                     payload={"call_id": call_id, "hanger_user": hanger_user_id},
                 )
             else:
-                await self._fanout_to_user(other, {
-                    "type":    "call.ended",
-                    "call_id": call_id,
-                    "by":      hanger_user_id,
-                })
+                await self._fanout_to_user(
+                    other,
+                    {
+                        "type": "call.ended",
+                        "call_id": call_id,
+                        "by": hanger_user_id,
+                    },
+                )
         self._cleanup_call(call_id)
 
     async def join_call(
@@ -476,8 +518,7 @@ class CallSignalingService:
             raise PermissionError("Unknown joiner user_id")
         members = await self._conv_repo.list_members(session.conversation_id)
         if not any(
-            m.username == joiner.username and m.deleted_at is None
-            for m in members
+            m.username == joiner.username and m.deleted_at is None for m in members
         ):
             raise PermissionError(
                 "User is not a member of this conversation",
@@ -491,7 +532,8 @@ class CallSignalingService:
             record.last_activity = time.time()
             self._per_user.setdefault(joiner_user_id, set()).add(call_id)
         await self._call_repo.transition(
-            call_id, status=session.status,
+            call_id,
+            status=session.status,
             participant_user_ids=tuple(sorted(participants)),
         )
 
@@ -501,32 +543,40 @@ class CallSignalingService:
             if participant_id not in session.participant_user_ids:
                 continue
             signed = sign_rtc_offer(
-                sdp_offer, "offer", identity_seed=self._own_seed,
+                sdp_offer,
+                "offer",
+                identity_seed=self._own_seed,
             )
             signed_dict = signed_sdp_to_dict(signed)
             peer_instance = await self._instance_of(participant_id)
-            if peer_instance and self._federation is not None and \
-                    peer_instance != self._federation.own_instance_id:
+            if (
+                peer_instance
+                and self._federation is not None
+                and peer_instance != self._federation.own_instance_id
+            ):
                 await self._federation.send_event(
                     to_instance_id=peer_instance,
                     event_type=FederationEventType.CALL_OFFER,
                     payload={
-                        "call_id":          call_id,
-                        "conversation_id":  session.conversation_id,
-                        "from_user":        joiner_user_id,
-                        "to_user":          participant_id,
-                        "call_type":        session.call_type,
-                        "signed_sdp":       signed_dict,
-                        "late_join":        True,
+                        "call_id": call_id,
+                        "conversation_id": session.conversation_id,
+                        "from_user": joiner_user_id,
+                        "to_user": participant_id,
+                        "call_type": session.call_type,
+                        "signed_sdp": signed_dict,
+                        "late_join": True,
                     },
                 )
             else:
-                await self._fanout_to_user(participant_id, {
-                    "type":            "call.peer_join",
-                    "call_id":         call_id,
-                    "joiner_user_id":  joiner_user_id,
-                    "signed_sdp":      signed_dict,
-                })
+                await self._fanout_to_user(
+                    participant_id,
+                    {
+                        "type": "call.peer_join",
+                        "call_id": call_id,
+                        "joiner_user_id": joiner_user_id,
+                        "signed_sdp": signed_dict,
+                    },
+                )
             joined.append(participant_id)
         return {"call_id": call_id, "joined": joined}
 
@@ -583,24 +633,30 @@ class CallSignalingService:
                 )
                 self._calls[call_id] = new_record
                 self._per_user.setdefault(callee_user, set()).add(call_id)
-                await self._fanout_to_user(callee_user, {
-                    "type":            "call.ringing",
-                    "call_id":         call_id,
-                    "conversation_id": conversation_id,
-                    "from_user":       caller,
-                    "call_type":       payload.get("call_type"),
-                    "signed_sdp":      signed_dict,
-                })
+                await self._fanout_to_user(
+                    callee_user,
+                    {
+                        "type": "call.ringing",
+                        "call_id": call_id,
+                        "conversation_id": conversation_id,
+                        "from_user": caller,
+                        "call_type": payload.get("call_type"),
+                        "signed_sdp": signed_dict,
+                    },
+                )
             case FederationEventType.CALL_ANSWER:
                 record = self._calls.get(call_id)
                 if record is not None:
                     record.status = "in_progress"
                     record.last_activity = time.time()
-                    await self._fanout_to_user(record.caller_user_id, {
-                        "type":       "call.answered",
-                        "call_id":    call_id,
-                        "signed_sdp": signed_dict,
-                    })
+                    await self._fanout_to_user(
+                        record.caller_user_id,
+                        {
+                            "type": "call.answered",
+                            "call_id": call_id,
+                            "signed_sdp": signed_dict,
+                        },
+                    )
             case FederationEventType.CALL_ICE_CANDIDATE | FederationEventType.CALL_ICE:
                 record = self._calls.get(call_id)
                 if record is not None:
@@ -610,11 +666,14 @@ class CallSignalingService:
                         if payload.get("from_user") == record.caller_user_id
                         else record.caller_user_id
                     )
-                    await self._fanout_to_user(target or "", {
-                        "type":      "call.ice_candidate",
-                        "call_id":   call_id,
-                        "candidate": payload.get("candidate"),
-                    })
+                    await self._fanout_to_user(
+                        target or "",
+                        {
+                            "type": "call.ice_candidate",
+                            "call_id": call_id,
+                            "candidate": payload.get("candidate"),
+                        },
+                    )
             case (
                 FederationEventType.CALL_HANGUP
                 | FederationEventType.CALL_END
@@ -628,10 +687,13 @@ class CallSignalingService:
                         if payload.get("hanger_user") == record.caller_user_id
                         else record.caller_user_id
                     )
-                    await self._fanout_to_user(target or "", {
-                        "type":    "call.ended",
-                        "call_id": call_id,
-                    })
+                    await self._fanout_to_user(
+                        target or "",
+                        {
+                            "type": "call.ended",
+                            "call_id": call_id,
+                        },
+                    )
                     self._cleanup_call(call_id)
             case FederationEventType.CALL_QUALITY:
                 # Phase CF — persist remote-reported WebRTC quality sample.
@@ -673,17 +735,17 @@ class CallSignalingService:
                         to_instance_id=peer_instance,
                         event_type=FederationEventType.CALL_QUALITY,
                         payload={
-                            "call_id":         sample.call_id,
-                            "reporter_user":   sample.reporter_user_id,
-                            "sampled_at":      sample.sampled_at,
-                            "rtt_ms":          sample.rtt_ms,
-                            "jitter_ms":       sample.jitter_ms,
-                            "loss_pct":        sample.loss_pct,
-                            "audio_bitrate":   sample.audio_bitrate,
-                            "video_bitrate":   sample.video_bitrate,
+                            "call_id": sample.call_id,
+                            "reporter_user": sample.reporter_user_id,
+                            "sampled_at": sample.sampled_at,
+                            "rtt_ms": sample.rtt_ms,
+                            "jitter_ms": sample.jitter_ms,
+                            "loss_pct": sample.loss_pct,
+                            "audio_bitrate": sample.audio_bitrate,
+                            "video_bitrate": sample.video_bitrate,
                         },
                     )
-                except Exception as exc:                    # pragma: no cover
+                except Exception as exc:  # pragma: no cover
                     log.debug("CALL_QUALITY fanout failed: %s", exc)
 
     # ─── Inspection (for routes / tests) ──────────────────────────────────
@@ -693,7 +755,8 @@ class CallSignalingService:
 
     def list_calls_for_user(self, user_id: str) -> list[CallRecord]:
         return [
-            self._calls[c] for c in self._per_user.get(user_id, set())
+            self._calls[c]
+            for c in self._per_user.get(user_id, set())
             if c in self._calls
         ]
 
@@ -764,7 +827,10 @@ class CallSignalingService:
                     self._per_user.pop(u, None)
 
     async def _resolve_conversation_peers(
-        self, conversation_id: str, *, exclude_username: str,
+        self,
+        conversation_id: str,
+        *,
+        exclude_username: str,
     ) -> tuple[list, list]:
         """Return ``(local_callees: list[User], remote_callees: [(inst, uid)])``.
 
@@ -772,8 +838,7 @@ class CallSignalingService:
         """
         members = await self._conv_repo.list_members(conversation_id)
         if not any(
-            m.username == exclude_username and m.deleted_at is None
-            for m in members
+            m.username == exclude_username and m.deleted_at is None for m in members
         ):
             raise PermissionError(
                 "User is not a member of this conversation",
@@ -789,7 +854,8 @@ class CallSignalingService:
         remotes = await self._conv_repo.list_remote_members(conversation_id)
         for r in remotes:
             remote_user = await self._find_remote_user(
-                r.instance_id, r.remote_username,
+                r.instance_id,
+                r.remote_username,
             )
             if remote_user is not None:
                 remote_callees.append((r.instance_id, remote_user.user_id))
@@ -817,7 +883,10 @@ class CallSignalingService:
             return None
 
     async def _emit_call_event_message(
-        self, session: CallSession, *, event: str,
+        self,
+        session: CallSession,
+        *,
+        event: str,
     ) -> None:
         """Write a ``type='call_event'`` system message in the DM thread.
 
@@ -827,25 +896,31 @@ class CallSignalingService:
         """
         if not session.conversation_id:
             return
-        content = json.dumps({
-            "event":            event,
-            "call_id":          session.id,
-            "call_type":        session.call_type,
-            "caller_user_id":   session.initiator_user_id,
-            "callee_user_id":   session.callee_user_id,
-            "duration_seconds": session.duration_seconds,
-        }, separators=(",", ":"), sort_keys=True)
-        await self._conv_repo.save_message(ConversationMessage(
-            id="msg-" + secrets.token_urlsafe(12),
-            conversation_id=session.conversation_id,
-            sender_user_id=session.initiator_user_id,
-            content=content,
-            created_at=datetime.now(timezone.utc),
-            type="call_event",
-        ))
+        content = json.dumps(
+            {
+                "event": event,
+                "call_id": session.id,
+                "call_type": session.call_type,
+                "caller_user_id": session.initiator_user_id,
+                "callee_user_id": session.callee_user_id,
+                "duration_seconds": session.duration_seconds,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        await self._conv_repo.save_message(
+            ConversationMessage(
+                id="msg-" + secrets.token_urlsafe(12),
+                conversation_id=session.conversation_id,
+                sender_user_id=session.initiator_user_id,
+                content=content,
+                created_at=datetime.now(timezone.utc),
+                type="call_event",
+            )
+        )
         try:
             await self._conv_repo.touch_last_message(session.conversation_id)
-        except Exception:                                # pragma: no cover
+        except Exception:  # pragma: no cover
             pass
 
     async def _emit_missed_call_push(self, session: CallSession) -> None:
@@ -855,7 +930,8 @@ class CallSignalingService:
         # Callees = every participant except the initiator; for 1:1 DMs
         # that's a single user_id.
         recipients = [
-            uid for uid in session.participant_user_ids
+            uid
+            for uid in session.participant_user_ids
             if uid != session.initiator_user_id
         ]
         if not recipients and session.callee_user_id:
@@ -867,7 +943,7 @@ class CallSignalingService:
                 call_id=session.id,
                 conversation_id=session.conversation_id,
             )
-        except Exception as exc:                        # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.debug("missed-call push failed: %s", exc)
 
     async def _fanout_to_user(self, user_id: str, payload: dict[str, Any]) -> None:
@@ -886,6 +962,7 @@ def _now_iso() -> str:
 
 # ─── Stale-call cleanup scheduler ────────────────────────────────────────
 
+
 class StaleCallCleanupScheduler:
     """Background task that marks ringing calls past TTL as ``missed``
     (§26.8). Follows the ``_stop: asyncio.Event`` pattern (CLAUDE.md
@@ -901,7 +978,7 @@ class StaleCallCleanupScheduler:
         *,
         interval_seconds: float = 30.0,
     ) -> None:
-        self._service  = service
+        self._service = service
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -919,7 +996,7 @@ class StaleCallCleanupScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -929,11 +1006,12 @@ class StaleCallCleanupScheduler:
                 missed = await self._service.gc_expired()
                 if missed:
                     log.debug("stale-call cleanup: marked %d missed", missed)
-            except Exception:                              # pragma: no cover
+            except Exception:  # pragma: no cover
                 log.exception("stale-call cleanup tick failed")
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue

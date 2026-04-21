@@ -13,14 +13,22 @@ from .base import rows_to_dicts
 @runtime_checkable
 class AbstractGalleryRepo(Protocol):
     async def list_albums(
-        self, space_id: str | None, *, limit: int = 30, before: str | None = None,
+        self,
+        space_id: str | None,
+        *,
+        limit: int = 30,
+        before: str | None = None,
     ) -> list[GalleryAlbum]: ...
     async def get_album(self, album_id: str) -> GalleryAlbum | None: ...
     async def create_album(self, album: GalleryAlbum) -> GalleryAlbum: ...
     async def update_album(self, album_id: str, patch: dict) -> None: ...
     async def delete_album(self, album_id: str) -> None: ...
     async def list_items(
-        self, album_id: str, *, limit: int = 50, before: str | None = None,
+        self,
+        album_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
     ) -> list[GalleryItem]: ...
     async def get_item(self, item_id: str) -> GalleryItem | None: ...
     async def create_item(self, item: GalleryItem) -> GalleryItem: ...
@@ -28,7 +36,11 @@ class AbstractGalleryRepo(Protocol):
     async def increment_item_count(self, album_id: str, delta: int) -> None: ...
     async def get_first_item_thumbnail(self, album_id: str) -> str | None: ...
     async def set_retention_exempt(
-        self, album_id: str, exempt: bool, *, space_id: str | None = None,
+        self,
+        album_id: str,
+        exempt: bool,
+        *,
+        space_id: str | None = None,
     ) -> None: ...
 
 
@@ -52,13 +64,17 @@ class SqliteGalleryRepo:
             cover_item_id=r.get("cover_item_id"),
             item_count=int(r.get("item_count") or 0),
             retention_exempt=bool(r.get("retention_exempt")),
-            cover_url=None,                # filled in by service
+            cover_url=None,  # filled in by service
             created_at=r.get("created_at"),
             updated_at=r.get("updated_at"),
         )
 
     async def list_albums(
-        self, space_id: str | None, *, limit: int = 30, before: str | None = None,
+        self,
+        space_id: str | None,
+        *,
+        limit: int = 30,
+        before: str | None = None,
     ) -> list[GalleryAlbum]:
         limit = max(1, min(limit, 200))
         # ``space_id IS ?`` matches both NULL (household) and a specific id.
@@ -78,7 +94,8 @@ class SqliteGalleryRepo:
 
     async def get_album(self, album_id: str) -> GalleryAlbum | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gallery_albums WHERE id=?", (album_id,),
+            "SELECT * FROM gallery_albums WHERE id=?",
+            (album_id,),
         )
         return self._row_to_album(dict(row)) if row else None
 
@@ -92,9 +109,16 @@ class SqliteGalleryRepo:
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                album.id, album.space_id, int(album.retention_exempt),
-                album.owner_user_id, album.name, album.description,
-                album.cover_item_id, album.item_count, now, now,
+                album.id,
+                album.space_id,
+                int(album.retention_exempt),
+                album.owner_user_id,
+                album.name,
+                album.description,
+                album.cover_item_id,
+                album.item_count,
+                now,
+                now,
             ),
         )
         return album
@@ -111,11 +135,16 @@ class SqliteGalleryRepo:
 
     async def delete_album(self, album_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM gallery_albums WHERE id=?", (album_id,),
+            "DELETE FROM gallery_albums WHERE id=?",
+            (album_id,),
         )
 
     async def set_retention_exempt(
-        self, album_id: str, exempt: bool, *, space_id: str | None = None,
+        self,
+        album_id: str,
+        exempt: bool,
+        *,
+        space_id: str | None = None,
     ) -> None:
         if space_id is None:
             await self._db.enqueue(
@@ -148,7 +177,11 @@ class SqliteGalleryRepo:
         )
 
     async def list_items(
-        self, album_id: str, *, limit: int = 50, before: str | None = None,
+        self,
+        album_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
     ) -> list[GalleryItem]:
         limit = max(1, min(limit, 500))
         if before:
@@ -167,7 +200,8 @@ class SqliteGalleryRepo:
 
     async def get_item(self, item_id: str) -> GalleryItem | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gallery_items WHERE id=?", (item_id,),
+            "SELECT * FROM gallery_items WHERE id=?",
+            (item_id,),
         )
         return self._row_to_item(dict(row)) if row else None
 
@@ -182,11 +216,18 @@ class SqliteGalleryRepo:
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                item.id, item.album_id, item.uploaded_by, item.item_type,
+                item.id,
+                item.album_id,
+                item.uploaded_by,
+                item.item_type,
                 item.url.rsplit("/", 1)[-1],
                 item.thumbnail_url.rsplit("/", 1)[-1],
-                item.width, item.height,
-                item.duration_s, item.caption, item.taken_at, item.sort_order,
+                item.width,
+                item.height,
+                item.duration_s,
+                item.caption,
+                item.taken_at,
+                item.sort_order,
                 item.created_at or datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -194,7 +235,8 @@ class SqliteGalleryRepo:
 
     async def delete_item(self, item_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM gallery_items WHERE id=?", (item_id,),
+            "DELETE FROM gallery_items WHERE id=?",
+            (item_id,),
         )
 
     async def increment_item_count(self, album_id: str, delta: int) -> None:

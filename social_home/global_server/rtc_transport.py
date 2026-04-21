@@ -40,12 +40,12 @@ class RtcSession:
     so it stays here rather than in ``domain.py``.
     """
 
-    session_id:    str
-    initiator_id:  str
-    offer_sdp:     str
-    answer_sdp:    str | None                 = None
-    ice_candidates: list[dict[str, Any]]      = field(default_factory=list)
-    created_at:    float                      = field(default_factory=time.time)
+    session_id: str
+    initiator_id: str
+    offer_sdp: str
+    answer_sdp: str | None = None
+    ice_candidates: list[dict[str, Any]] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
 
 
 class GfsRtcSession:
@@ -156,10 +156,7 @@ class GfsRtcSession:
         tests). Returns the number of sessions evicted.
         """
         cutoff = (now if now is not None else time.time()) - SESSION_TTL_SECONDS
-        stale = [
-            sid for sid, s in self._sessions.items()
-            if s.created_at < cutoff
-        ]
+        stale = [sid for sid, s in self._sessions.items() if s.created_at < cutoff]
         for sid in stale:
             self._sessions.pop(sid, None)
         return len(stale)

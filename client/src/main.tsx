@@ -1,5 +1,5 @@
 import { render } from 'preact'
-import { App } from './app'
+import { App } from './App'
 import { ws } from './ws'
 import './styles/tokens.css'
 import './styles/app.css'

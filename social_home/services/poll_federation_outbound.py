@@ -43,8 +43,8 @@ class PollFederationOutbound:
 
     def wire(self) -> None:
         self._bus.subscribe(PollCreated, self._on_created)
-        self._bus.subscribe(PollVoted,   self._on_voted)
-        self._bus.subscribe(PollClosed,  self._on_closed)
+        self._bus.subscribe(PollVoted, self._on_voted)
+        self._bus.subscribe(PollClosed, self._on_closed)
 
     async def _on_created(self, event: PollCreated) -> None:
         if event.space_id is None:
@@ -53,10 +53,10 @@ class PollFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_POLL_CREATED,
             {
-                "post_id":        event.post_id,
-                "question":       event.question,
+                "post_id": event.post_id,
+                "question": event.question,
                 "allow_multiple": event.allow_multiple,
-                "space_id":       event.space_id,
+                "space_id": event.space_id,
             },
         )
 
@@ -67,10 +67,10 @@ class PollFederationOutbound:
             event.space_id,
             FederationEventType.SPACE_POLL_VOTE_CAST,
             {
-                "post_id":       event.post_id,
+                "post_id": event.post_id,
                 "voter_user_id": event.voter_user_id,
-                "option_ids":    list(event.option_ids),
-                "space_id":      event.space_id,
+                "option_ids": list(event.option_ids),
+                "space_id": event.space_id,
             },
         )
 
@@ -84,11 +84,14 @@ class PollFederationOutbound:
         )
 
     async def _fan_out(
-        self, space_id: str, event_type: FederationEventType, payload: dict,
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
     ) -> None:
         try:
             peers = await self._space_repo.list_member_instances(space_id)
-        except Exception as exc:           # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("poll-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -102,7 +105,9 @@ class PollFederationOutbound:
                     payload=payload,
                     space_id=space_id,
                 )
-            except Exception as exc:         # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
-                    "poll-outbound: send to %s failed: %s", instance_id, exc,
+                    "poll-outbound: send to %s failed: %s",
+                    instance_id,
+                    exc,
                 )

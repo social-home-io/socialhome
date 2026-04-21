@@ -39,6 +39,7 @@ _VCAL_BLOCK_RE = re.compile(
 
 # ─── Errors ──────────────────────────────────────────────────────────────
 
+
 class AICalendarImportError(Exception):
     """Base class for calendar import errors."""
 
@@ -52,6 +53,7 @@ class AICalendarImportParseError(AICalendarImportError):
 
 
 # ─── Service ─────────────────────────────────────────────────────────────
+
 
 class CalendarImportService:
     """Turn files / photos / prompts into draft calendar events."""
@@ -103,12 +105,13 @@ class CalendarImportService:
                 f"(max {self._max_image_bytes})"
             )
 
-        data_url = (
-            f"data:{mime_type};base64,"
-            + base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode(
+            "ascii"
         )
         instructions = _build_image_prompt(
-            locale=locale, caption=caption, data_url=data_url,
+            locale=locale,
+            caption=caption,
+            data_url=data_url,
         )
         reply = await self._call_ai(
             task_name="social_home_calendar_import_image",
@@ -211,17 +214,13 @@ def _parse_ics(ics_bytes: bytes) -> list[CalendarEventCreate]:
     try:
         cal = Calendar.from_ical(ics_bytes)
     except (ValueError, KeyError) as exc:
-        raise AICalendarImportParseError(
-            f"Could not parse VCALENDAR: {exc}"
-        ) from exc
+        raise AICalendarImportParseError(f"Could not parse VCALENDAR: {exc}") from exc
 
     events: list[CalendarEventCreate] = []
     for component in cal.walk("VEVENT"):
         events.append(_vevent_to_create(component))
     if not events:
-        raise AICalendarImportParseError(
-            "VCALENDAR contained no VEVENT components"
-        )
+        raise AICalendarImportParseError("VCALENDAR contained no VEVENT components")
     return events
 
 

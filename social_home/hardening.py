@@ -31,6 +31,7 @@ DEFAULT_MEDIA_MAX_BYTES: int = 200 * 1024 * 1024
 
 # ─── Body-size middleware ────────────────────────────────────────────────
 
+
 def build_body_size_middleware(
     *,
     json_max_bytes: int = DEFAULT_JSON_MAX_BYTES,
@@ -42,6 +43,7 @@ def build_body_size_middleware(
     it (aiohttp's own ``client_max_size`` covers those).  The
     federation webhook has its own per-route limit on top.
     """
+
     @web.middleware
     async def middleware(request: web.Request, handler):
         cl_header = request.headers.get("Content-Length")
@@ -50,7 +52,8 @@ def build_body_size_middleware(
                 cl = int(cl_header)
             except ValueError:
                 return web.json_response(
-                    {"error": "bad_content_length"}, status=400,
+                    {"error": "bad_content_length"},
+                    status=400,
                 )
             ctype = request.headers.get("Content-Type", "")
             cap = (
@@ -69,6 +72,7 @@ def build_body_size_middleware(
 
 
 # ─── CORS-deny middleware ────────────────────────────────────────────────
+
 
 def build_cors_deny_middleware(
     *,
@@ -92,23 +96,24 @@ def build_cors_deny_middleware(
         if origin not in allowlist:
             log.debug("cors deny: blocked Origin=%r path=%s", origin, request.path)
             return web.json_response(
-                {"error": "cors_denied"}, status=403,
+                {"error": "cors_denied"},
+                status=403,
             )
         # Allowed — answer preflight directly.
         if request.method == "OPTIONS":
             return web.Response(
                 status=204,
                 headers={
-                    "Access-Control-Allow-Origin":      origin,
+                    "Access-Control-Allow-Origin": origin,
                     "Access-Control-Allow-Credentials": "true",
-                    "Access-Control-Allow-Methods":     "GET, POST, PATCH, DELETE, OPTIONS",
-                    "Access-Control-Allow-Headers":     "Authorization, Content-Type",
-                    "Access-Control-Max-Age":           "600",
+                    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                    "Access-Control-Max-Age": "600",
                 },
             )
         # Regular request — annotate the response with the allow header.
         response = await handler(request)
-        response.headers["Access-Control-Allow-Origin"]      = origin
+        response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         return response
 

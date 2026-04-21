@@ -262,7 +262,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/me/corner", CornerView)
     app.router.add_view("/api/me/picture", MePictureView)
     app.router.add_view(
-        "/api/me/picture/refresh-from-ha", MePictureRefreshFromHaView,
+        "/api/me/picture/refresh-from-ha",
+        MePictureRefreshFromHaView,
     )
     app.router.add_view("/api/me/tokens", TokenCollectionView)
     app.router.add_view("/api/me/tokens/{id}", TokenDetailView)
@@ -280,10 +281,13 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/feed/posts", PostCollectionView)
     app.router.add_view("/api/feed/posts/{id}", PostDetailView)
     app.router.add_view("/api/feed/posts/{id}/reactions", PostReactionCollectionView)
-    app.router.add_view("/api/feed/posts/{id}/reactions/{emoji}", PostReactionDetailView)
+    app.router.add_view(
+        "/api/feed/posts/{id}/reactions/{emoji}", PostReactionDetailView
+    )
     app.router.add_view("/api/feed/posts/{id}/comments", PostCommentView)
     app.router.add_view(
-        "/api/feed/posts/{id}/comments/{cid}", PostCommentDetailView,
+        "/api/feed/posts/{id}/comments/{cid}",
+        PostCommentDetailView,
     )
     app.router.add_view("/api/feed/posts/{id}/save", PostSaveView)
     app.router.add_view("/api/feed/saved", SavedPostsView)
@@ -295,10 +299,12 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}", SpaceDetailView)
     app.router.add_view("/api/spaces/{id}/members", SpaceMembersView)
     app.router.add_view(
-        "/api/spaces/{id}/members/me", SpaceMemberMeProfileView,
+        "/api/spaces/{id}/members/me",
+        SpaceMemberMeProfileView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/members/me/picture", SpaceMemberMePictureView,
+        "/api/spaces/{id}/members/me/picture",
+        SpaceMemberMePictureView,
     )
     # Route ordering: picture (concrete child) before the dynamic
     # {user_id} detail view, so "me/picture" doesn't match user_id="me"
@@ -314,11 +320,13 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}/invite-tokens", SpaceInviteTokenView)
     app.router.add_view("/api/spaces/{id}/presence", SpacePresenceView)
     app.router.add_view(
-        "/api/spaces/{id}/remote-invites", SpaceRemoteInviteView,
+        "/api/spaces/{id}/remote-invites",
+        SpaceRemoteInviteView,
     )
     app.router.add_view("/api/remote_invites", RemoteInviteCollectionView)
     app.router.add_view(
-        "/api/remote_invites/{token}/{decision}", RemoteInviteDecisionView,
+        "/api/remote_invites/{token}/{decision}",
+        RemoteInviteDecisionView,
     )
     app.router.add_view("/api/spaces/{id}/feed", SpaceFeedView)
     app.router.add_view("/api/spaces/{id}/cover", SpaceCoverView)
@@ -339,7 +347,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}/ownership", SpaceOwnershipView)
     # Join-request review.
     app.router.add_view(
-        "/api/spaces/{id}/join-requests", SpaceJoinRequestCollectionView,
+        "/api/spaces/{id}/join-requests",
+        SpaceJoinRequestCollectionView,
     )
     app.router.add_view(
         "/api/spaces/{id}/join-requests/{request_id}/{action}",
@@ -393,33 +402,41 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/tasks/lists/{id}", TaskListDetailView)
     app.router.add_view("/api/tasks/lists/{id}/tasks", TaskListTasksView)
     app.router.add_view(
-        "/api/tasks/lists/{id}/reorder", TaskListReorderView,
+        "/api/tasks/lists/{id}/reorder",
+        TaskListReorderView,
     )
     app.router.add_view("/api/tasks/{id}", TaskDetailView)
     app.router.add_view(
-        "/api/tasks/{id}/comments", TaskCommentCollectionView,
+        "/api/tasks/{id}/comments",
+        TaskCommentCollectionView,
     )
     app.router.add_view(
-        "/api/tasks/{id}/comments/{comment_id}", TaskCommentDetailView,
+        "/api/tasks/{id}/comments/{comment_id}",
+        TaskCommentDetailView,
     )
     app.router.add_view(
-        "/api/tasks/{id}/attachments", TaskAttachmentCollectionView,
+        "/api/tasks/{id}/attachments",
+        TaskAttachmentCollectionView,
     )
     app.router.add_view(
         "/api/tasks/{id}/attachments/{attachment_id}",
         TaskAttachmentDetailView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/tasks/lists", SpaceTaskListCollectionView,
+        "/api/spaces/{id}/tasks/lists",
+        SpaceTaskListCollectionView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/tasks/lists/{lid}", SpaceTaskListDetailView,
+        "/api/spaces/{id}/tasks/lists/{lid}",
+        SpaceTaskListDetailView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/tasks/lists/{lid}/tasks", SpaceTaskListTasksView,
+        "/api/spaces/{id}/tasks/lists/{lid}/tasks",
+        SpaceTaskListTasksView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/tasks/{tid}", SpaceTaskDetailView,
+        "/api/spaces/{id}/tasks/{tid}",
+        SpaceTaskDetailView,
     )
 
     # ── Calendar ────────────────────────────────────────────────────────
@@ -433,7 +450,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/calendars/events/{id}/rsvps", CalendarEventRsvpsView)
     app.router.add_view("/api/spaces/{id}/calendar/events", SpaceCalendarEventsView)
     app.router.add_view(
-        "/api/spaces/{id}/calendar/events/{eid}", SpaceCalendarEventDetailView,
+        "/api/spaces/{id}/calendar/events/{eid}",
+        SpaceCalendarEventDetailView,
     )
 
     # ── Pages ───────────────────────────────────────────────────────────
@@ -444,28 +462,34 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/pages/{id}/versions", PageVersionView)
     app.router.add_view("/api/pages/{id}/revert", PageRevertView)
     app.router.add_view(
-        "/api/pages/{id}/delete-request", PageDeleteRequestView,
+        "/api/pages/{id}/delete-request",
+        PageDeleteRequestView,
     )
     app.router.add_view(
-        "/api/pages/{id}/delete-approve", PageDeleteApproveView,
+        "/api/pages/{id}/delete-approve",
+        PageDeleteApproveView,
     )
     app.router.add_view(
-        "/api/pages/{id}/delete-cancel", PageDeleteCancelView,
+        "/api/pages/{id}/delete-cancel",
+        PageDeleteCancelView,
     )
     app.router.add_view("/api/spaces/{id}/pages", SpacePageCollectionView)
     app.router.add_view("/api/spaces/{id}/pages/{pid}", SpacePageDetailView)
     app.router.add_view(
-        "/api/spaces/{id}/pages/{pid}/resolve-conflict", PageConflictView,
+        "/api/spaces/{id}/pages/{pid}/resolve-conflict",
+        PageConflictView,
     )
 
     # ── Stickies ────────────────────────────────────────────────────────
     app.router.add_view("/api/stickies", StickyCollectionView)
     app.router.add_view("/api/stickies/{id}", StickyDetailView)
     app.router.add_view(
-        "/api/spaces/{id}/stickies", SpaceStickyCollectionView,
+        "/api/spaces/{id}/stickies",
+        SpaceStickyCollectionView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/stickies/{sid}", SpaceStickyDetailView,
+        "/api/spaces/{id}/stickies/{sid}",
+        SpaceStickyDetailView,
     )
 
     # ── Bazaar ──────────────────────────────────────────────────────────
@@ -473,13 +497,16 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/bazaar/{id}", BazaarDetailView)
     app.router.add_view("/api/bazaar/{id}/bids", BazaarBidCollectionView)
     app.router.add_view(
-        "/api/bazaar/{id}/bids/{bid_id}", BazaarBidDetailView,
+        "/api/bazaar/{id}/bids/{bid_id}",
+        BazaarBidDetailView,
     )
     app.router.add_view(
-        "/api/bazaar/{id}/bids/{bid_id}/accept", BazaarBidAcceptView,
+        "/api/bazaar/{id}/bids/{bid_id}/accept",
+        BazaarBidAcceptView,
     )
     app.router.add_view(
-        "/api/bazaar/{id}/bids/{bid_id}/reject", BazaarBidRejectView,
+        "/api/bazaar/{id}/bids/{bid_id}/reject",
+        BazaarBidRejectView,
     )
 
     # ── Media ───────────────────────────────────────────────────────────
@@ -493,7 +520,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/gallery/albums/{album_id}/items", AlbumItemCollectionView)
     app.router.add_view("/api/gallery/items/{item_id}", GalleryItemDetailView)
     app.router.add_view(
-        "/api/spaces/{space_id}/gallery/albums", SpaceAlbumCollectionView,
+        "/api/spaces/{space_id}/gallery/albums",
+        SpaceAlbumCollectionView,
     )
 
     # ── Federation ──────────────────────────────────────────────────────
@@ -519,27 +547,33 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view("/api/pairing/connections", PairingConnectionCollectionView)
     app.router.add_view(
-        "/api/pairing/connections/{instance_id}", PairingConnectionDetailView,
+        "/api/pairing/connections/{instance_id}",
+        PairingConnectionDetailView,
     )
     app.router.add_view("/api/connections", PairingConnectionCollectionView)
     app.router.add_view(
-        "/api/pairing/relay-requests", PairingRelayRequestCollectionView,
+        "/api/pairing/relay-requests",
+        PairingRelayRequestCollectionView,
     )
     app.router.add_view(
-        "/api/pairing/relay-requests/{id}/approve", PairingRelayApproveView,
+        "/api/pairing/relay-requests/{id}/approve",
+        PairingRelayApproveView,
     )
     app.router.add_view(
-        "/api/pairing/relay-requests/{id}/decline", PairingRelayDeclineView,
+        "/api/pairing/relay-requests/{id}/decline",
+        PairingRelayDeclineView,
     )
     # ── GFS connections ────────────────────────────────────────────────
     app.router.add_view("/api/gfs/connections", GfsConnectionCollectionView)
     app.router.add_view("/api/gfs/publications", GfsPublicationsView)
     app.router.add_view("/api/gfs/connections/{id}", GfsConnectionDetailView)
     app.router.add_view(
-        "/api/gfs/connections/{gfs_id}/appeal", GfsAppealView,
+        "/api/gfs/connections/{gfs_id}/appeal",
+        GfsAppealView,
     )
     app.router.add_view(
-        "/api/spaces/{id}/publish/{gfs_id}", GfsSpacePublishView,
+        "/api/spaces/{id}/publish/{gfs_id}",
+        GfsSpacePublishView,
     )
 
     # ── Calls / WebRTC ──────────────────────────────────────────────────
@@ -552,7 +586,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/calls/{call_id}/join", CallJoinView)
     app.router.add_view("/api/calls/{call_id}/quality", CallQualityView)
     app.router.add_view(
-        "/api/conversations/{id}/calls", ConversationCallHistoryView,
+        "/api/conversations/{id}/calls",
+        ConversationCallHistoryView,
     )
     app.router.add_view("/api/webrtc/ice_servers", IceServersView)
     app.router.add_view("/api/calls/ice-servers", IceServersView)
@@ -607,19 +642,24 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/cp/users/{username}/protection", CPProtectionView)
     app.router.add_view("/api/cp/users/{minor_id}/guardians", CPGuardiansView)
     app.router.add_view(
-        "/api/cp/users/{minor_id}/guardians/{guardian_id}", CPGuardiansView,
+        "/api/cp/users/{minor_id}/guardians/{guardian_id}",
+        CPGuardiansView,
     )
     app.router.add_view(
-        "/api/cp/minors/{minor_id}/blocks/{blocked_id}", CPBlockView,
+        "/api/cp/minors/{minor_id}/blocks/{blocked_id}",
+        CPBlockView,
     )
     app.router.add_view(
-        "/api/cp/minors/{minor_id}/blocks", CPBlockCollectionView,
+        "/api/cp/minors/{minor_id}/blocks",
+        CPBlockCollectionView,
     )
     app.router.add_view(
-        "/api/cp/minors/{minor_id}/spaces", CPSpaceCollectionView,
+        "/api/cp/minors/{minor_id}/spaces",
+        CPSpaceCollectionView,
     )
     app.router.add_view(
-        "/api/cp/minors/{minor_id}/spaces/{space_id}/kick", CPKickView,
+        "/api/cp/minors/{minor_id}/spaces/{space_id}/kick",
+        CPKickView,
     )
     app.router.add_view(
         "/api/cp/minors/{minor_id}/conversations",
@@ -629,7 +669,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/cp/minors/{minor_id}/dm-contacts",
         CPDmContactCollectionView,
     )
-    app.router.add_view("/api/cp/minors",                   CPMinorsForGuardianView)
+    app.router.add_view("/api/cp/minors", CPMinorsForGuardianView)
     app.router.add_view("/api/cp/spaces/{space_id}/age-gate", CPAgeGateView)
     app.router.add_view("/api/cp/minors/{minor_id}/audit-log", CPAuditLogView)
 
@@ -638,10 +678,12 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/posts/{id}/poll/vote", PollVoteView)
     app.router.add_view("/api/posts/{id}/poll/close", PollCloseView)
     app.router.add_view(
-        "/api/posts/{id}/schedule-poll", SchedulePollCollectionView,
+        "/api/posts/{id}/schedule-poll",
+        SchedulePollCollectionView,
     )
     app.router.add_view(
-        "/api/schedule-polls/{id}/finalize", SchedulePollFinalizeView,
+        "/api/schedule-polls/{id}/finalize",
+        SchedulePollFinalizeView,
     )
     app.router.add_view("/api/schedule-polls/{id}/respond", SchedulePollRespondView)
     app.router.add_view(
@@ -674,11 +716,13 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     # ── HA user sync (admin only — 501 in standalone mode) ────────────
     app.router.add_view("/api/admin/ha-users", HaUsersCollectionView)
     app.router.add_view(
-        "/api/admin/ha-users/{username}/provision", HaUserProvisionView,
+        "/api/admin/ha-users/{username}/provision",
+        HaUserProvisionView,
     )
 
     # ── Calendar export (iCal) ─────────────────────────────────────────
     from .calendar_export import CalendarExportView
+
     app.router.add_view("/api/calendar/{calendar_id}/export.ics", CalendarExportView)
 
     # ── Adapter-provided routes ────────────────────────────────────────

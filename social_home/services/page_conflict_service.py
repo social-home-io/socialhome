@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 # ─── Errors ──────────────────────────────────────────────────────────────
 
+
 class PageConflictError(Exception):
     """Base class for conflict-resolution errors."""
 
@@ -45,6 +46,7 @@ class NoActiveConflictError(PageConflictError):
 
 
 # ─── Diff3 merge ─────────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class MergeResult:
@@ -60,7 +62,7 @@ class MergeResult:
 
 #: Marker strings used when a paragraph triple cannot auto-merge.
 CONFLICT_HEAD = "<<<<<<< mine"
-CONFLICT_SEP  = "======="
+CONFLICT_SEP = "======="
 CONFLICT_TAIL = ">>>>>>> theirs"
 
 
@@ -152,11 +154,11 @@ def diff3_merge(base: str, mine: str, theirs: str) -> MergeResult:
 
         # All three present.
         if mp == tp:
-            merged.append(mp)                       # identical edits / same keep
+            merged.append(mp)  # identical edits / same keep
         elif mp == bp:
-            merged.append(tp)                       # theirs changed only
+            merged.append(tp)  # theirs changed only
         elif tp == bp:
-            merged.append(mp)                       # mine changed only
+            merged.append(mp)  # mine changed only
         else:
             has_conflict = True
             merged.append(_conflict_block(mp, tp))
@@ -165,12 +167,11 @@ def diff3_merge(base: str, mine: str, theirs: str) -> MergeResult:
 
 
 def _conflict_block(mine: str, theirs: str) -> str:
-    return (
-        f"{CONFLICT_HEAD}\n{mine}\n{CONFLICT_SEP}\n{theirs}\n{CONFLICT_TAIL}"
-    )
+    return f"{CONFLICT_HEAD}\n{mine}\n{CONFLICT_SEP}\n{theirs}\n{CONFLICT_TAIL}"
 
 
 # ─── Service ─────────────────────────────────────────────────────────────
+
 
 class PageConflictService:
     """Record concurrent-edit conflicts and resolve them on demand."""
@@ -183,13 +184,21 @@ class PageConflictService:
     # ─── Snapshot + conflict bookkeeping ──────────────────────────────────
 
     async def record_base(
-        self, *, page_id: str, space_id: str | None,
-        body: str, author_user_id: str,
+        self,
+        *,
+        page_id: str,
+        space_id: str | None,
+        body: str,
+        author_user_id: str,
     ) -> None:
         """Mark the current body as the last-common-ancestor for future merges."""
         await self._pages.insert_snapshot(
-            page_id=page_id, space_id=space_id, body=body,
-            author_user_id=author_user_id, side="base", conflict=False,
+            page_id=page_id,
+            space_id=space_id,
+            body=body,
+            author_user_id=author_user_id,
+            side="base",
+            conflict=False,
         )
 
     async def has_active_conflict(self, page_id: str) -> bool:
@@ -217,20 +226,22 @@ class PageConflictService:
         if page is None:
             raise PageNotFoundError(page_id)
 
-        base_body  = await self._pages.last_base_snapshot(page_id)
-        mine_body  = page.content
+        base_body = await self._pages.last_base_snapshot(page_id)
+        mine_body = page.content
 
         result = diff3_merge(base_body, mine_body, remote_body)
 
         if not result.has_conflict:
             # Clean merge → apply silently + refresh base.
             updated = replace(
-                page, content=result.content,
+                page,
+                content=result.content,
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
             await self._pages.save(updated)
             await self.record_base(
-                page_id=page_id, space_id=space_id,
+                page_id=page_id,
+                space_id=space_id,
                 body=result.content,
                 author_user_id=remote_author_user_id,
             )
@@ -239,12 +250,20 @@ class PageConflictService:
         # Conflict — store both sides. Subsequent edits should be blocked
         # by the route layer until resolve_conflict() is called.
         await self._pages.insert_snapshot(
-            page_id=page_id, space_id=space_id, body=mine_body,
-            author_user_id=page.created_by, side="mine", conflict=True,
+            page_id=page_id,
+            space_id=space_id,
+            body=mine_body,
+            author_user_id=page.created_by,
+            side="mine",
+            conflict=True,
         )
         await self._pages.insert_snapshot(
-            page_id=page_id, space_id=space_id, body=remote_body,
-            author_user_id=remote_author_user_id, side="theirs", conflict=True,
+            page_id=page_id,
+            space_id=space_id,
+            body=remote_body,
+            author_user_id=remote_author_user_id,
+            side="theirs",
+            conflict=True,
         )
         log.info("page %s: stored conflict (mine vs theirs)", page_id)
         return result
@@ -257,7 +276,7 @@ class PageConflictService:
         space_id: str,
         page_id: str,
         user_id: str,
-        resolution: str,                     # "mine" | "theirs" | "merged_content"
+        resolution: str,  # "mine" | "theirs" | "merged_content"
         merged_content: str | None = None,
     ) -> str:
         """Apply the chosen version and clear the conflict flag.
@@ -271,9 +290,7 @@ class PageConflictService:
             raise ValueError(f"Unknown resolution: {resolution!r}")
 
         if not await self.has_active_conflict(page_id):
-            raise NoActiveConflictError(
-                f"page {page_id!r} has no unresolved conflict"
-            )
+            raise NoActiveConflictError(f"page {page_id!r} has no unresolved conflict")
 
         page = await self._pages.get(page_id)
         if page is None:
@@ -290,7 +307,8 @@ class PageConflictService:
 
         # Apply.
         updated = replace(
-            page, content=new_body,
+            page,
+            content=new_body,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._pages.save(updated)
@@ -298,7 +316,9 @@ class PageConflictService:
         # Clear the conflict flag and stamp a fresh base.
         await self._pages.clear_conflict_flag(page_id)
         await self.record_base(
-            page_id=page_id, space_id=space_id,
-            body=new_body, author_user_id=user_id,
+            page_id=page_id,
+            space_id=space_id,
+            body=new_body,
+            author_user_id=user_id,
         )
         return new_body

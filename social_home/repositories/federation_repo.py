@@ -34,7 +34,10 @@ class AbstractFederationRepo(Protocol):
     async def get_instance(self, instance_id: str) -> RemoteInstance | None: ...
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance: ...
     async def list_instances(
-        self, *, source: str | None = None, status: str | None = None,
+        self,
+        *,
+        source: str | None = None,
+        status: str | None = None,
     ) -> list[RemoteInstance]: ...
     async def delete_instance(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
@@ -42,7 +45,9 @@ class AbstractFederationRepo(Protocol):
     async def update_webhook(self, instance_id: str, new_url: str) -> None: ...
 
     # Replay cache --------------------------------------------------------
-    async def load_replay_cache(self, within_hours: int = 1) -> list[tuple[str, str]]: ...
+    async def load_replay_cache(
+        self, within_hours: int = 1
+    ) -> list[tuple[str, str]]: ...
     async def insert_replay_id(self, msg_id: str) -> None: ...
     async def prune_replay_cache(self, cutoff_iso: str) -> int: ...
 
@@ -54,10 +59,16 @@ class AbstractFederationRepo(Protocol):
 
     # Bans ----------------------------------------------------------------
     async def ban_instance_from_space(
-        self, space_id: str, instance_id: str, *, reason: str | None = None,
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
     ) -> None: ...
     async def is_instance_banned_from_space(
-        self, space_id: str, instance_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
     ) -> bool: ...
 
 
@@ -71,7 +82,8 @@ class SqliteFederationRepo:
 
     async def get_instance(self, instance_id: str) -> RemoteInstance | None:
         row = await self._db.fetchone(
-            "SELECT * FROM remote_instances WHERE id=?", (instance_id,),
+            "SELECT * FROM remote_instances WHERE id=?",
+            (instance_id,),
         )
         return _row_to_instance(row_to_dict(row))
 
@@ -109,21 +121,36 @@ class SqliteFederationRepo:
                 unreachable_since=excluded.unreachable_since
             """,
             (
-                inst.id, inst.display_name, inst.remote_identity_pk,
-                inst.key_self_to_remote, inst.key_remote_to_self,
-                inst.remote_webhook_url, inst.local_webhook_id,
-                inst.status.value, inst.source.value, inst.proto_version,
-                inst.remote_pq_algorithm, inst.remote_pq_identity_pk,
+                inst.id,
+                inst.display_name,
+                inst.remote_identity_pk,
+                inst.key_self_to_remote,
+                inst.key_remote_to_self,
+                inst.remote_webhook_url,
+                inst.local_webhook_id,
+                inst.status.value,
+                inst.source.value,
+                inst.proto_version,
+                inst.remote_pq_algorithm,
+                inst.remote_pq_identity_pk,
                 inst.sig_suite,
-                int(inst.intro_relay_enabled), inst.relay_via,
-                inst.home_lat, inst.home_lon, inst.paired_at, inst.created_at,
-                inst.last_reachable_at, inst.unreachable_since,
+                int(inst.intro_relay_enabled),
+                inst.relay_via,
+                inst.home_lat,
+                inst.home_lon,
+                inst.paired_at,
+                inst.created_at,
+                inst.last_reachable_at,
+                inst.unreachable_since,
             ),
         )
         return inst
 
     async def list_instances(
-        self, *, source: str | None = None, status: str | None = None,
+        self,
+        *,
+        source: str | None = None,
+        status: str | None = None,
     ) -> list[RemoteInstance]:
         clauses: list[str] = []
         params: list = []
@@ -138,13 +165,12 @@ class SqliteFederationRepo:
             f"SELECT * FROM remote_instances{where} ORDER BY display_name",
             tuple(params),
         )
-        return [
-            i for i in (_row_to_instance(d) for d in rows_to_dicts(rows)) if i
-        ]
+        return [i for i in (_row_to_instance(d) for d in rows_to_dicts(rows)) if i]
 
     async def delete_instance(self, instance_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM remote_instances WHERE id=?", (instance_id,),
+            "DELETE FROM remote_instances WHERE id=?",
+            (instance_id,),
         )
 
     async def mark_reachable(self, instance_id: str) -> None:
@@ -171,7 +197,8 @@ class SqliteFederationRepo:
     # ── Replay cache ───────────────────────────────────────────────────
 
     async def load_replay_cache(
-        self, within_hours: int = 1,
+        self,
+        within_hours: int = 1,
     ) -> list[tuple[str, str]]:
         rows = await self._db.fetchall(
             "SELECT msg_id, received_at FROM federation_replay_cache "
@@ -216,18 +243,27 @@ class SqliteFederationRepo:
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                session.token, session.own_identity_pk, session.own_dh_pk,
-                session.own_dh_sk, session.peer_identity_pk,
-                session.peer_dh_pk, session.peer_webhook_url,
-                session.webhook_url, session.verification_code,
-                session.intro_note, session.relay_via,
-                session.status.value, session.issued_at, session.expires_at,
+                session.token,
+                session.own_identity_pk,
+                session.own_dh_pk,
+                session.own_dh_sk,
+                session.peer_identity_pk,
+                session.peer_dh_pk,
+                session.peer_webhook_url,
+                session.webhook_url,
+                session.verification_code,
+                session.intro_note,
+                session.relay_via,
+                session.status.value,
+                session.issued_at,
+                session.expires_at,
             ),
         )
 
     async def get_pairing(self, token: str) -> PairingSession | None:
         row = await self._db.fetchone(
-            "SELECT * FROM pending_pairings WHERE token=?", (token,),
+            "SELECT * FROM pending_pairings WHERE token=?",
+            (token,),
         )
         d = row_to_dict(row)
         if d is None:
@@ -263,22 +299,31 @@ class SqliteFederationRepo:
             WHERE token=?
             """,
             (
-                session.peer_identity_pk, session.peer_dh_pk,
-                session.peer_webhook_url, session.verification_code,
-                session.intro_note, session.relay_via,
-                session.status.value, session.token,
+                session.peer_identity_pk,
+                session.peer_dh_pk,
+                session.peer_webhook_url,
+                session.verification_code,
+                session.intro_note,
+                session.relay_via,
+                session.status.value,
+                session.token,
             ),
         )
 
     async def delete_pairing(self, token: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM pending_pairings WHERE token=?", (token,),
+            "DELETE FROM pending_pairings WHERE token=?",
+            (token,),
         )
 
     # ── Instance bans ──────────────────────────────────────────────────
 
     async def ban_instance_from_space(
-        self, space_id: str, instance_id: str, *, reason: str | None = None,
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
     ) -> None:
         await self._db.enqueue(
             """
@@ -291,7 +336,9 @@ class SqliteFederationRepo:
         )
 
     async def is_instance_banned_from_space(
-        self, space_id: str, instance_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
     ) -> bool:
         row = await self._db.fetchone(
             "SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
@@ -301,6 +348,7 @@ class SqliteFederationRepo:
 
 
 # ─── Row → domain helper ──────────────────────────────────────────────────
+
 
 def _row_to_instance(row: dict | None) -> RemoteInstance | None:
     if row is None:

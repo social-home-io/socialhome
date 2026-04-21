@@ -19,6 +19,7 @@ async def test_process_valid_jpeg():
     """process() on a minimal JPEG returns WebP bytes."""
     from PIL import Image
     import io
+
     img = Image.new("RGB", (100, 100), color="red")
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
@@ -43,6 +44,7 @@ async def test_generate_thumbnail():
     """generate_thumbnail returns smaller image bytes."""
     from PIL import Image
     import io
+
     img = Image.new("RGB", (800, 600), color="blue")
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
@@ -58,6 +60,7 @@ async def test_process_png():
     """process() handles PNG input."""
     from PIL import Image
     import io
+
     img = Image.new("RGBA", (64, 64), color=(0, 255, 0, 128))
     buf = io.BytesIO()
     img.save(buf, format="PNG")

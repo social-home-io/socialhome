@@ -66,11 +66,13 @@ class PushSubscriptionListView(BaseView):
         ctx = self.user
         repo = self.svc(K.push_subscription_repo_key)
         subs = await repo.list_for_user(ctx.user_id)
-        return self._json([
-            {
-                "id":           s.id,
-                "device_label": s.device_label,
-                "created_at":   s.created_at,
-            }
-            for s in subs
-        ])
+        return self._json(
+            [
+                {
+                    "id": s.id,
+                    "device_label": s.device_label,
+                    "created_at": s.created_at,
+                }
+                for s in subs
+            ]
+        )

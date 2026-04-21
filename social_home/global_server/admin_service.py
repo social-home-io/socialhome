@@ -37,7 +37,10 @@ class GfsAdminService:
     """Admin-portal operations surface."""
 
     __slots__ = (
-        "_fed_repo", "_admin_repo", "_federation", "_fraud_threshold",
+        "_fed_repo",
+        "_admin_repo",
+        "_federation",
+        "_fraud_threshold",
         "_cluster",
     )
 
@@ -53,7 +56,7 @@ class GfsAdminService:
         self._admin_repo = admin_repo
         self._federation = federation
         self._fraud_threshold = fraud_threshold
-        self._cluster = None                # attached in GfsApp
+        self._cluster = None  # attached in GfsApp
 
     def attach_cluster(self, cluster) -> None:
         """Wire the :class:`ClusterService` for NODE_SYNC_REPORT fan-out.
@@ -67,21 +70,24 @@ class GfsAdminService:
     # ── Overview ──────────────────────────────────────────────────────
 
     async def overview(self) -> dict:
-        clients_active  = len(await self._fed_repo.list_instances(status="active"))
+        clients_active = len(await self._fed_repo.list_instances(status="active"))
         clients_pending = len(await self._fed_repo.list_instances(status="pending"))
-        spaces_active   = len(await self._fed_repo.list_spaces(status="active"))
-        spaces_pending  = len(await self._fed_repo.list_spaces(status="pending"))
-        open_reports    = len(await self._admin_repo.list_fraud_reports(status="pending"))
+        spaces_active = len(await self._fed_repo.list_spaces(status="active"))
+        spaces_pending = len(await self._fed_repo.list_spaces(status="pending"))
+        open_reports = len(await self._admin_repo.list_fraud_reports(status="pending"))
         return {
             "clients": {"active": clients_active, "pending": clients_pending},
-            "spaces":  {"active": spaces_active,  "pending": spaces_pending},
+            "spaces": {"active": spaces_active, "pending": spaces_pending},
             "open_reports": open_reports,
         }
 
     # ── Clients ───────────────────────────────────────────────────────
 
     async def list_clients(
-        self, *, status: str | None = None, admin_ip: str | None = None,
+        self,
+        *,
+        status: str | None = None,
+        admin_ip: str | None = None,
     ) -> list[dict]:
         items = await self._fed_repo.list_instances(status=status)
         return [asdict(c) for c in items]
@@ -95,7 +101,11 @@ class GfsAdminService:
         await self._log("reject_client", "instance", instance_id, admin_ip)
 
     async def ban_client(
-        self, instance_id: str, *, reason: str | None, admin_ip: str,
+        self,
+        instance_id: str,
+        *,
+        reason: str | None,
+        admin_ip: str,
     ) -> None:
         await self._fed_repo.set_instance_status(instance_id, "banned")
         # Side effects (spec §24.9): remove all the instance's spaces.
@@ -103,7 +113,10 @@ class GfsAdminService:
         for sp in owned:
             await self._fed_repo.set_space_status(sp.space_id, "banned")
         await self._log(
-            "ban_client", "instance", instance_id, admin_ip,
+            "ban_client",
+            "instance",
+            instance_id,
+            admin_ip,
             {"reason": reason, "removed_spaces": [s.space_id for s in owned]},
         )
 
@@ -114,7 +127,9 @@ class GfsAdminService:
     # ── Spaces ────────────────────────────────────────────────────────
 
     async def list_spaces(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[dict]:
         items = await self._fed_repo.list_spaces(status=status)
         return [asdict(s) for s in items]
@@ -128,11 +143,19 @@ class GfsAdminService:
         await self._log("reject_space", "space", space_id, admin_ip)
 
     async def ban_space(
-        self, space_id: str, *, reason: str | None, admin_ip: str,
+        self,
+        space_id: str,
+        *,
+        reason: str | None,
+        admin_ip: str,
     ) -> None:
         await self._fed_repo.set_space_status(space_id, "banned")
         await self._log(
-            "ban_space", "space", space_id, admin_ip, {"reason": reason},
+            "ban_space",
+            "space",
+            space_id,
+            admin_ip,
+            {"reason": reason},
         )
 
     async def unban_space(self, space_id: str, *, admin_ip: str) -> None:
@@ -142,29 +165,36 @@ class GfsAdminService:
     # ── Policy ────────────────────────────────────────────────────────
 
     async def get_policy(self) -> dict:
-        cfg = await self._admin_repo.get_configs([
-            "auto_accept_clients", "auto_accept_spaces", "fraud_threshold",
-        ])
+        cfg = await self._admin_repo.get_configs(
+            [
+                "auto_accept_clients",
+                "auto_accept_spaces",
+                "fraud_threshold",
+            ]
+        )
         return {
             "auto_accept_clients": cfg.get("auto_accept_clients", "1") == "1",
-            "auto_accept_spaces":  cfg.get("auto_accept_spaces",  "0") == "1",
-            "fraud_threshold":     int(cfg.get("fraud_threshold", "5")),
+            "auto_accept_spaces": cfg.get("auto_accept_spaces", "0") == "1",
+            "fraud_threshold": int(cfg.get("fraud_threshold", "5")),
         }
 
     async def set_policy(
-        self, *,
+        self,
+        *,
         auto_accept_clients: bool | None = None,
-        auto_accept_spaces:  bool | None = None,
-        fraud_threshold:     int  | None = None,
+        auto_accept_spaces: bool | None = None,
+        fraud_threshold: int | None = None,
         admin_ip: str,
     ) -> dict:
         if auto_accept_clients is not None:
             await self._admin_repo.set_config(
-                "auto_accept_clients", "1" if auto_accept_clients else "0",
+                "auto_accept_clients",
+                "1" if auto_accept_clients else "0",
             )
         if auto_accept_spaces is not None:
             await self._admin_repo.set_config(
-                "auto_accept_spaces", "1" if auto_accept_spaces else "0",
+                "auto_accept_spaces",
+                "1" if auto_accept_spaces else "0",
             )
         if fraud_threshold is not None:
             clean = max(1, int(fraud_threshold))
@@ -176,19 +206,24 @@ class GfsAdminService:
     # ── Branding ──────────────────────────────────────────────────────
 
     async def get_branding(self) -> dict:
-        cfg = await self._admin_repo.get_configs([
-            "server_name", "landing_markdown", "header_image_file",
-        ])
+        cfg = await self._admin_repo.get_configs(
+            [
+                "server_name",
+                "landing_markdown",
+                "header_image_file",
+            ]
+        )
         return {
-            "server_name":       cfg.get("server_name") or "My Global Server",
-            "landing_markdown":  cfg.get("landing_markdown") or "",
+            "server_name": cfg.get("server_name") or "My Global Server",
+            "landing_markdown": cfg.get("landing_markdown") or "",
             "header_image_file": cfg.get("header_image_file") or "",
         }
 
     async def set_branding(
-        self, *,
-        server_name:       str | None = None,
-        landing_markdown:  str | None = None,
+        self,
+        *,
+        server_name: str | None = None,
+        landing_markdown: str | None = None,
         header_image_file: str | None = None,
         admin_ip: str,
     ) -> dict:
@@ -224,12 +259,14 @@ class GfsAdminService:
         # Secondary anti-flood: reporter cap per rolling 24h.
         since = int(time.time()) - 86400
         recent = await self._admin_repo.count_reports_by_reporter(
-            reporter_instance_id, since=since,
+            reporter_instance_id,
+            since=since,
         )
         if recent >= MAX_REPORTS_PER_REPORTER_PER_DAY:
             log.warning(
                 "GFS fraud report rate-limited for reporter=%s (%d in 24h)",
-                reporter_instance_id, recent,
+                reporter_instance_id,
+                recent,
             )
             return False, False
 
@@ -253,12 +290,13 @@ class GfsAdminService:
         if self._cluster is not None:
             try:
                 await self._cluster.sync_report(report)
-            except Exception:                              # pragma: no cover
+            except Exception:  # pragma: no cover
                 log.debug("cluster sync_report failed", exc_info=True)
 
         # Threshold check — count distinct reporters for this target.
         distinct = await self._admin_repo.count_reporters_for_target(
-            target_type, target_id,
+            target_type,
+            target_id,
         )
         auto_banned = False
         if distinct >= self._fraud_threshold:
@@ -267,19 +305,27 @@ class GfsAdminService:
             elif target_type == "instance":
                 await self._fed_repo.set_instance_status(target_id, "banned")
             await self._admin_repo.mark_pending_reports_acted(
-                target_type, target_id, reviewed_by="auto",
+                target_type,
+                target_id,
+                reviewed_by="auto",
             )
             auto_banned = True
             await self._log(
-                "auto_ban_by_threshold", target_type, target_id,
+                "auto_ban_by_threshold",
+                target_type,
+                target_id,
                 admin_ip="auto",
-                metadata={"threshold": self._fraud_threshold,
-                          "distinct_reporters": distinct},
+                metadata={
+                    "threshold": self._fraud_threshold,
+                    "distinct_reporters": distinct,
+                },
             )
         return True, auto_banned
 
     async def list_fraud_reports(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[dict]:
         items = await self._admin_repo.list_fraud_reports(status=status)
         return [asdict(r) for r in items]
@@ -288,7 +334,7 @@ class GfsAdminService:
         self,
         report_id: str,
         *,
-        action: str,               # 'dismiss' | 'ban_target' | 'ban_instance'
+        action: str,  # 'dismiss' | 'ban_target' | 'ban_instance'
         admin_ip: str,
     ) -> dict:
         report = await self._admin_repo.get_fraud_report(report_id)
@@ -296,13 +342,16 @@ class GfsAdminService:
             raise KeyError(f"report {report_id!r} not found")
         if report.status != "pending":
             from ..domain.space import ModerationAlreadyDecidedError
+
             raise ModerationAlreadyDecidedError(
                 f"report {report_id!r} is already {report.status}",
             )
 
         if action == "dismiss":
             await self._admin_repo.set_fraud_report_status(
-                report_id, status="dismissed", reviewed_by="admin",
+                report_id,
+                status="dismissed",
+                reviewed_by="admin",
             )
         elif action == "ban_target":
             if report.target_type == "space":
@@ -310,7 +359,9 @@ class GfsAdminService:
             else:
                 await self._fed_repo.set_instance_status(report.target_id, "banned")
             await self._admin_repo.mark_pending_reports_acted(
-                report.target_type, report.target_id, reviewed_by="admin",
+                report.target_type,
+                report.target_id,
+                reviewed_by="admin",
             )
         elif action == "ban_instance":
             # Look up the space owner; ban the owning household.
@@ -321,32 +372,45 @@ class GfsAdminService:
                         f"space {report.target_id!r} not found",
                     )
                 await self.ban_client(
-                    space.owning_instance, reason="fraud-report",
+                    space.owning_instance,
+                    reason="fraud-report",
                     admin_ip=admin_ip,
                 )
             else:
                 await self.ban_client(
-                    report.target_id, reason="fraud-report",
+                    report.target_id,
+                    reason="fraud-report",
                     admin_ip=admin_ip,
                 )
             await self._admin_repo.mark_pending_reports_acted(
-                report.target_type, report.target_id, reviewed_by="admin",
+                report.target_type,
+                report.target_id,
+                reviewed_by="admin",
             )
         else:
             raise ValueError(f"invalid action: {action!r}")
 
         await self._log(
-            "review_fraud_report", "report", report_id, admin_ip,
-            {"action": action,
-             "target_type": report.target_type,
-             "target_id": report.target_id},
+            "review_fraud_report",
+            "report",
+            report_id,
+            admin_ip,
+            {
+                "action": action,
+                "target_type": report.target_type,
+                "target_id": report.target_id,
+            },
         )
         return {"id": report_id, "action": action}
 
     # ── Appeals ───────────────────────────────────────────────────────
 
     async def record_appeal(
-        self, *, target_type: str, target_id: str, message: str,
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        message: str,
     ) -> GfsAppeal:
         appeal = GfsAppeal(
             id=uuid.uuid4().hex,
@@ -364,7 +428,11 @@ class GfsAdminService:
         return [asdict(a) for a in items]
 
     async def decide_appeal(
-        self, appeal_id: str, *, action: str, admin_ip: str,
+        self,
+        appeal_id: str,
+        *,
+        action: str,
+        admin_ip: str,
     ) -> dict:
         appeal = await self._admin_repo.get_appeal(appeal_id)
         if appeal is None:
@@ -375,16 +443,23 @@ class GfsAdminService:
             else:
                 await self.unban_client(appeal.target_id, admin_ip=admin_ip)
             await self._admin_repo.set_appeal_status(
-                appeal_id, status="lifted", decided_by="admin",
+                appeal_id,
+                status="lifted",
+                decided_by="admin",
             )
         elif action == "dismiss":
             await self._admin_repo.set_appeal_status(
-                appeal_id, status="dismissed", decided_by="admin",
+                appeal_id,
+                status="dismissed",
+                decided_by="admin",
             )
         else:
             raise ValueError(f"invalid action: {action!r}")
         await self._log(
-            "decide_appeal", "appeal", appeal_id, admin_ip,
+            "decide_appeal",
+            "appeal",
+            appeal_id,
+            admin_ip,
             {"action": action},
         )
         return {"id": appeal_id, "action": action}
@@ -392,18 +467,27 @@ class GfsAdminService:
     # ── Audit log ─────────────────────────────────────────────────────
 
     async def list_audit_log(
-        self, *, action: str | None = None,
-        since: int | None = None, limit: int = 200,
+        self,
+        *,
+        action: str | None = None,
+        since: int | None = None,
+        limit: int = 200,
     ) -> list[dict]:
         return await self._admin_repo.list_admin_actions(
-            action=action, since=since, limit=limit,
+            action=action,
+            since=since,
+            limit=limit,
         )
 
     # ── Internals ─────────────────────────────────────────────────────
 
     async def _log(
-        self, action: str, target_type: str | None, target_id: str | None,
-        admin_ip: str | None, metadata: dict | None = None,
+        self,
+        action: str,
+        target_type: str | None,
+        target_id: str | None,
+        admin_ip: str | None,
+        metadata: dict | None = None,
     ) -> None:
         await self._admin_repo.log_admin_action(
             action=action,
@@ -416,8 +500,11 @@ class GfsAdminService:
 
 # ─── Ed25519 signature verification for inbound GFS_FRAUD_REPORT ───────
 
+
 def verify_report_signature(
-    body_without_sig: dict, signature: str, public_key_hex: str,
+    body_without_sig: dict,
+    signature: str,
+    public_key_hex: str,
 ) -> bool:
     """Verify the Ed25519 signature over the canonical-JSON payload.
 
@@ -426,12 +513,15 @@ def verify_report_signature(
     key in ``client_instances``.
     """
     import json
+
     canonical = json.dumps(
-        body_without_sig, separators=(",", ":"), sort_keys=True,
+        body_without_sig,
+        separators=(",", ":"),
+        sort_keys=True,
     ).encode("utf-8")
     try:
         raw_key = bytes.fromhex(public_key_hex)
         raw_sig = b64url_decode(signature)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
     return verify_ed25519(raw_key, canonical, raw_sig)

@@ -200,12 +200,14 @@ class FederationService:
         )
         # §11 QR-code pairing handshake delegate.
         self._pairing = PairingCoordinator(
-            federation_repo, key_manager, own_identity_pk,
+            federation_repo,
+            key_manager,
+            own_identity_pk,
             own_pq_pk=own_pq_pk,
             own_sig_suite=sig_suite,
         )
         # §24.11 inbound validation pipeline (middleware chain).
-        self._inbound_pipeline = None      # lazy-built on first use
+        self._inbound_pipeline = None  # lazy-built on first use
         self._rtc_inbound_pipeline = None  # lazy-built on first RTC frame
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
@@ -219,12 +221,14 @@ class FederationService:
         pipeline references it. Built on first inbound webhook rather
         than in ``__init__`` so all optional wiring is in place.
         """
-        return InboundPipeline(self._common_pipeline_steps(
-            lookup_step=make_lookup_instance(
-                repo=self._federation_repo,
-                lookup_fn=_lookup_by_webhook_id,
-            ),
-        ))
+        return InboundPipeline(
+            self._common_pipeline_steps(
+                lookup_step=make_lookup_instance(
+                    repo=self._federation_repo,
+                    lookup_fn=_lookup_by_webhook_id,
+                ),
+            )
+        )
 
     def _build_rtc_inbound_pipeline(self):
         """Build the §24.11 pipeline variant for WebRTC DataChannel frames.
@@ -233,11 +237,13 @@ class FederationService:
         ``instance_id`` (already known from the peer connection) instead
         of ``webhook_id``.
         """
-        return InboundPipeline(self._common_pipeline_steps(
-            lookup_step=make_lookup_instance_by_id(
-                repo=self._federation_repo,
-            ),
-        ))
+        return InboundPipeline(
+            self._common_pipeline_steps(
+                lookup_step=make_lookup_instance_by_id(
+                    repo=self._federation_repo,
+                ),
+            )
+        )
 
     def _common_pipeline_steps(self, *, lookup_step):
         """Return the shared step list for both webhook and RTC pipelines."""
@@ -417,10 +423,13 @@ class FederationService:
         except Exception as exc:
             log.error(
                 "send_event: failed to decrypt session key for %s: %s",
-                to_instance_id, exc,
+                to_instance_id,
+                exc,
             )
             return DeliveryResult(
-                instance_id=to_instance_id, ok=False, error="key_decrypt_error",
+                instance_id=to_instance_id,
+                ok=False,
+                error="key_decrypt_error",
             )
 
         # Encrypt the payload.
@@ -446,7 +455,8 @@ class FederationService:
         # Signatures cover everything except the ``signatures`` field itself.
         envelope_bytes = _dumps(envelope_dict).encode("utf-8")
         envelope_dict["signatures"] = self._encoder.sign_envelope_all(
-            envelope_bytes, suite=effective_suite,
+            envelope_bytes,
+            suite=effective_suite,
         )
 
         # Dispatch the envelope. When a FederationTransport facade is
@@ -462,7 +472,8 @@ class FederationService:
         status_code: int | None = None
         if self._transport is not None:
             result = await self._transport.send(
-                instance=instance, envelope_dict=envelope_dict,
+                instance=instance,
+                envelope_dict=envelope_dict,
             )
             if result.ok:
                 await self._federation_repo.mark_reachable(to_instance_id)
@@ -498,12 +509,14 @@ class FederationService:
                         )
                     log.warning(
                         "send_event: peer %s returned HTTP %d",
-                        to_instance_id, status_code,
+                        to_instance_id,
+                        status_code,
                     )
             except Exception as exc:
                 log.warning(
                     "send_event: transport error to %s: %s",
-                    to_instance_id, exc,
+                    to_instance_id,
+                    exc,
                 )
                 status_code = None
 
@@ -576,7 +589,8 @@ class FederationService:
         target_ids: list[str] = []
         for inst in instances:
             banned = await self._federation_repo.is_instance_banned_from_space(
-                space_id, inst.id,
+                space_id,
+                inst.id,
             )
             if not banned:
                 target_ids.append(inst.id)
@@ -756,7 +770,9 @@ class FederationService:
         except ValueError as exc:
             log.warning(
                 "Stripping invalid file_meta from %s (from=%s): %s",
-                event.event_type, event.from_instance, exc,
+                event.event_type,
+                event.from_instance,
+                exc,
             )
             event.payload.pop("file_meta", None)
 
@@ -766,13 +782,16 @@ class FederationService:
         message = str(event.payload.get("message") or "")[:500]
         log.info(
             "PAIRING_INTRO_RELAY: %s wants to introduce %s (via us)",
-            event.from_instance, target,
+            event.from_instance,
+            target,
         )
-        await self._bus.publish(PairingIntroRelayReceived(
-            from_instance=event.from_instance,
-            target_instance_id=target,
-            message=message,
-        ))
+        await self._bus.publish(
+            PairingIntroRelayReceived(
+                from_instance=event.from_instance,
+                target_instance_id=target,
+                message=message,
+            )
+        )
 
     async def _handle_dm_relay(self, event: FederationEvent) -> None:
         if self._dm_routing_service is not None:
@@ -780,7 +799,8 @@ class FederationService:
             log.debug(
                 "DM_RELAY %s from %s → %s",
                 event.payload.get("message_id"),
-                event.from_instance, outcome,
+                event.from_instance,
+                outcome,
             )
 
     async def _handle_dm_user_typing(self, event: FederationEvent) -> None:
@@ -830,7 +850,6 @@ class FederationService:
                 event.payload.get("sync_id", ""),
             )
 
-
     async def _handle_space_sync_begin(self, event) -> None:
         """Provider receives SPACE_SYNC_BEGIN — admit + create session.
 
@@ -872,8 +891,8 @@ class FederationService:
                     to_instance_id=event.from_instance,
                     event_type=FederationEventType.SPACE_SYNC_OFFER,
                     payload={
-                        "sync_id":     sync_id,
-                        "sdp_offer":   sdp_offer,
+                        "sync_id": sync_id,
+                        "sdp_offer": sdp_offer,
                         "ice_servers": self._ice_servers,
                     },
                     space_id=space_id,
@@ -933,7 +952,8 @@ class FederationService:
         """DataChannel open → provider starts streaming content (§25.6)."""
         log.debug(
             "SPACE_SYNC_DIRECT_READY from %s sync_id=%s",
-            event.from_instance, event.payload.get("sync_id"),
+            event.from_instance,
+            event.payload.get("sync_id"),
         )
         if self._sync_manager is None or self._space_sync_service is None:
             return
@@ -977,7 +997,8 @@ class FederationService:
             return
         log.debug(
             "SPACE_SYNC_REQUEST_MORE from %s: %s",
-            event.from_instance, cleaned,
+            event.from_instance,
+            cleaned,
         )
         if self._space_sync_service is None:
             return
@@ -1002,7 +1023,8 @@ class FederationService:
         )
         log.debug(
             "INSTANCE_SYNC_STATUS from %s: accepted %d spaces",
-            event.from_instance, len(spaces),
+            event.from_instance,
+            len(spaces),
         )
 
     # ─── Pairing ──────────────────────────────────────────────────────────
@@ -1019,7 +1041,9 @@ class FederationService:
         return await self._pairing.accept(qr_payload)
 
     async def confirm_pairing(
-        self, token: str, verification_code: str,
+        self,
+        token: str,
+        verification_code: str,
     ) -> RemoteInstance:
         """Delegates to :class:`PairingCoordinator`."""
         return await self._pairing.confirm(token, verification_code)
@@ -1046,11 +1070,14 @@ class FederationService:
     ) -> bool:
         """Delegates to :class:`FederationEncoder`."""
         return self._encoder.verify_signature(
-            envelope_bytes, signature, public_key,
+            envelope_bytes,
+            signature,
+            public_key,
         )
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────
+
 
 def _require_fields(data: dict, *fields: str) -> None:
     """Raise ``ValueError`` if any of ``fields`` are missing from ``data``."""
@@ -1074,7 +1101,6 @@ async def _lookup_by_webhook_id(
         if inst.local_webhook_id == webhook_id:
             return _WebhookInstance(inst)
     return None
-
 
 
 def _aiohttp_timeout(seconds: float):

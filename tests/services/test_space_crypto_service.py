@@ -23,6 +23,7 @@ from social_home.services.space_crypto_service import (
 
 # ─── Crypto helpers ──────────────────────────────────────────────────────
 
+
 def test_derive_space_id_from_public_key():
     kp = generate_space_keypair()
     sid = derive_space_id(kp.public_key)
@@ -64,6 +65,7 @@ def test_verify_space_config_rejects_garbage_signature():
 
 
 # ─── SpaceContentEncryption ──────────────────────────────────────────────
+
 
 @pytest.fixture
 async def crypto_env(tmp_dir):
@@ -162,6 +164,7 @@ async def test_get_current_epoch_returns_latest(crypto_env):
 
 # ─── seal_for_gfs / unseal_from_gfs (§24.10) ──────────────────────────────
 
+
 async def test_seal_for_gfs_roundtrip(crypto_env):
     """Sender + payload encrypt under the per-epoch key and decrypt back."""
     crypto, _ = crypto_env
@@ -199,16 +202,21 @@ async def test_seal_for_gfs_unknown_space_raises(crypto_env):
     crypto, _ = crypto_env
     with pytest.raises(RuntimeError, match="no epoch key"):
         await crypto.seal_for_gfs(
-            space_id="missing", sender_instance_id="me", payload_json="{}",
+            space_id="missing",
+            sender_instance_id="me",
+            payload_json="{}",
         )
 
 
 async def test_unseal_unknown_epoch_raises(crypto_env):
     from social_home.federation.sealed_sender import SealedEnvelope
+
     crypto, _ = crypto_env
     fake = SealedEnvelope(
-        space_id="sp-1", epoch=99,
-        encrypted_sender="a:b", encrypted_payload="a:b",
+        space_id="sp-1",
+        epoch=99,
+        encrypted_sender="a:b",
+        encrypted_payload="a:b",
     )
     with pytest.raises(RuntimeError, match="missing epoch"):
         await crypto.unseal_from_gfs(fake)

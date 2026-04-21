@@ -54,7 +54,7 @@ class DmHistoryProvider:
         conversation_id = str(payload.get("conversation_id") or "")
         try:
             chunk_index = int(payload.get("chunk_index") or -1)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             chunk_index = -1
         if not conversation_id or chunk_index < 0:
             return
@@ -62,7 +62,10 @@ class DmHistoryProvider:
         self._acks[key] = max(self._acks.get(key, -1), chunk_index)
 
     def last_ack(
-        self, *, from_instance: str, conversation_id: str,
+        self,
+        *,
+        from_instance: str,
+        conversation_id: str,
     ) -> int:
         return self._acks.get((from_instance, conversation_id), -1)
 
@@ -80,7 +83,8 @@ class DmHistoryProvider:
             return 0
 
         messages = await self._conversation_repo.list_messages_since(
-            conversation_id, since_iso if since_iso else None,
+            conversation_id,
+            since_iso if since_iso else None,
             limit=MAX_MESSAGES_PER_REQUEST,
         )
 
@@ -93,7 +97,7 @@ class DmHistoryProvider:
                 event_type=FederationEventType.DM_HISTORY_CHUNK,
                 payload={
                     "conversation_id": conversation_id,
-                    "chunk_index":     chunks_sent,
+                    "chunk_index": chunks_sent,
                     "messages": [_message_to_dict(m) for m in batch],
                     "is_last": is_last,
                 },
@@ -117,14 +121,14 @@ class DmHistoryProvider:
 
 def _message_to_dict(msg) -> dict:
     return {
-        "id":              msg.id,
+        "id": msg.id,
         "conversation_id": msg.conversation_id,
-        "sender_user_id":  msg.sender_user_id,
-        "content":         msg.content,
-        "type":            msg.type,
-        "media_url":       msg.media_url,
-        "reply_to_id":     msg.reply_to_id,
-        "deleted":         bool(msg.deleted),
-        "edited_at":       msg.edited_at.isoformat() if msg.edited_at else None,
-        "created_at":      msg.created_at.isoformat(),
+        "sender_user_id": msg.sender_user_id,
+        "content": msg.content,
+        "type": msg.type,
+        "media_url": msg.media_url,
+        "reply_to_id": msg.reply_to_id,
+        "deleted": bool(msg.deleted),
+        "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
+        "created_at": msg.created_at.isoformat(),
     }

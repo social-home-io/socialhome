@@ -62,7 +62,9 @@ async def test_page_space_scope(env):
     )
 
     household = new_page(title="Household wiki", content="HH", created_by="u1")
-    space_page = new_page(title="Space wiki", content="SP", created_by="u1", space_id=sp_id)
+    space_page = new_page(
+        title="Space wiki", content="SP", created_by="u1", space_id=sp_id
+    )
     await env.page_repo.save(household)
     await env.page_repo.save(space_page)
 
@@ -129,9 +131,15 @@ async def test_page_lock_and_versions(env):
     with pytest.raises(PageLockError):
         await env.page_repo.acquire_lock(p.id, "bob")
     await env.page_repo.release_lock(p.id, "anna")
-    v = PageVersion(id="v1", page_id=p.id, version=1,
-                     title="Wiki", content="v1", edited_by="u1",
-                     edited_at=datetime.now(timezone.utc).isoformat())
+    v = PageVersion(
+        id="v1",
+        page_id=p.id,
+        version=1,
+        title="Wiki",
+        content="v1",
+        edited_by="u1",
+        edited_at=datetime.now(timezone.utc).isoformat(),
+    )
     await env.page_repo.save_version(v)
     versions = await env.page_repo.list_versions(p.id)
     assert len(versions) == 1

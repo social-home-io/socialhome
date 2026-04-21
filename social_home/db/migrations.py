@@ -79,7 +79,9 @@ class Migration:
         migrate(conn)
 
 
-_FILENAME_RE = re.compile(r"^(?P<version>\d{4})_(?P<description>[\w\-]+)\.(?P<ext>sql|py)$")
+_FILENAME_RE = re.compile(
+    r"^(?P<version>\d{4})_(?P<description>[\w\-]+)\.(?P<ext>sql|py)$"
+)
 
 
 def discover_migrations(directory: Path | None = None) -> list[Migration]:
@@ -139,7 +141,9 @@ def run_migrations(
 
     for migration in to_apply:
         log.info(
-            "Applying migration %04d: %s", migration.version, migration.description,
+            "Applying migration %04d: %s",
+            migration.version,
+            migration.description,
         )
         try:
             # ``with conn`` enters an implicit BEGIN, commits on success,

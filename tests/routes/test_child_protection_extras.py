@@ -10,6 +10,7 @@ from .conftest import _auth
 
 # ─── Unauth ──────────────────────────────────────────────────────────────
 
+
 async def test_list_guardians_unauth_401(client):
     r = await client.get("/api/cp/users/some/guardians")
     assert r.status == 401
@@ -36,6 +37,7 @@ async def test_unblock_for_minor_unauth_401(client):
 
 
 # ─── Branches ────────────────────────────────────────────────────────────
+
 
 async def test_list_guardians_subject_can_read_self(client):
     """A user can read their own guardians list (admin or guardian or self)."""

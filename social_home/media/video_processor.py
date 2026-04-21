@@ -56,7 +56,9 @@ class VideoProcessor:
     # ── Public API ────────────────────────────────────────────────────────
 
     async def process(
-        self, data: bytes, filename: str,
+        self,
+        data: bytes,
+        filename: str,
     ) -> tuple[bytes, str]:
         """Validate and transcode *data* to a VP9/Opus WebM.
 
@@ -87,7 +89,9 @@ class VideoProcessor:
 
         loop = asyncio.get_running_loop()
         webm_bytes = await loop.run_in_executor(
-            None, self._transcode, data,
+            None,
+            self._transcode,
+            data,
         )
 
         new_filename = f"{uuid.uuid4().hex}.webm"
@@ -105,7 +109,9 @@ class VideoProcessor:
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, self._extract_thumbnail, data,
+            None,
+            self._extract_thumbnail,
+            data,
         )
 
     # ── Internal (run in executor) ────────────────────────────────────────
@@ -162,7 +168,11 @@ class VideoProcessor:
             if in_video.time_base is not None:
                 max_pts = int(self._max_duration / float(in_video.time_base))
 
-            for packet in input_container.demux(in_video, in_audio) if in_audio else input_container.demux(in_video):
+            for packet in (
+                input_container.demux(in_video, in_audio)
+                if in_audio
+                else input_container.demux(in_video)
+            ):
                 if packet.dts is None:
                     continue
 
@@ -220,7 +230,8 @@ class VideoProcessor:
 
         try:
             video_stream = next(
-                (s for s in container.streams if s.type == "video"), None,
+                (s for s in container.streams if s.type == "video"),
+                None,
             )
             if video_stream is None:
                 raise ValueError("No video stream found for thumbnail")

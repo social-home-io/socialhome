@@ -123,7 +123,11 @@ class ChunkBuilder:
         while pending:
             chunk_records = pending
             envelope = await self._build_one(
-                exporter.resource, chunk_records, space_id, sync_id, sig_suite,
+                exporter.resource,
+                chunk_records,
+                space_id,
+                sync_id,
+                sig_suite,
                 seq_start=cursor,
                 seq_end=cursor + len(chunk_records),
                 is_last=False,
@@ -132,7 +136,11 @@ class ChunkBuilder:
             while len(encoded) > CHUNK_SIZE_BUDGET_BYTES and len(chunk_records) > 1:
                 chunk_records = chunk_records[: max(1, len(chunk_records) // 2)]
                 envelope = await self._build_one(
-                    exporter.resource, chunk_records, space_id, sync_id, sig_suite,
+                    exporter.resource,
+                    chunk_records,
+                    space_id,
+                    sync_id,
+                    sig_suite,
                     seq_start=cursor,
                     seq_end=cursor + len(chunk_records),
                     is_last=False,
@@ -140,7 +148,7 @@ class ChunkBuilder:
                 encoded = _orjson.dumps(envelope)
             yield envelope
             cursor += len(chunk_records)
-            pending = pending[len(chunk_records):]
+            pending = pending[len(chunk_records) :]
 
     async def build_sentinel(
         self,
@@ -155,14 +163,15 @@ class ChunkBuilder:
         trust the session-end signal.
         """
         envelope: dict[str, Any] = {
-            "sync_id":   sync_id,
-            "resource":  SENTINEL_RESOURCE,
-            "space_id":  space_id,
-            "is_last":   True,
+            "sync_id": sync_id,
+            "resource": SENTINEL_RESOURCE,
+            "space_id": space_id,
+            "is_last": True,
         }
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
-            bytes_to_sign, suite=sig_suite,
+            bytes_to_sign,
+            suite=sig_suite,
         )
         return envelope
 
@@ -182,21 +191,24 @@ class ChunkBuilder:
             raise ValueError(f"resource {resource!r} not in ALLOWED_RESOURCES")
         plaintext = _orjson.dumps({"records": records})
         epoch, encrypted_payload = await self._crypto.encrypt_chunk(
-            space_id=space_id, sync_id=sync_id, plaintext=plaintext,
+            space_id=space_id,
+            sync_id=sync_id,
+            plaintext=plaintext,
         )
         envelope: dict[str, Any] = {
-            "sync_id":           sync_id,
-            "resource":          resource,
-            "space_id":          space_id,
-            "epoch":             epoch,
-            "seq_start":         seq_start,
-            "seq_end":           seq_end,
-            "is_last":           is_last,
+            "sync_id": sync_id,
+            "resource": resource,
+            "space_id": space_id,
+            "epoch": epoch,
+            "seq_start": seq_start,
+            "seq_end": seq_end,
+            "is_last": is_last,
             "encrypted_payload": encrypted_payload,
         }
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
-            bytes_to_sign, suite=sig_suite,
+            bytes_to_sign,
+            suite=sig_suite,
         )
         return envelope
 

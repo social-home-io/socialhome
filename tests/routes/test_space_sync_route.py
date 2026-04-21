@@ -26,7 +26,8 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
@@ -67,7 +68,9 @@ async def client(tmp_dir):
 
 async def _create_space(client, name="Family"):
     r = await client.post(
-        "/api/spaces", json={"name": name}, headers=_auth(client._admin_token),
+        "/api/spaces",
+        json={"name": name},
+        headers=_auth(client._admin_token),
     )
     assert r.status == 201
     return (await r.json())["id"]
@@ -86,15 +89,19 @@ async def test_sync_trigger_enqueues_for_confirmed_peers(client):
         RemoteInstance,
     )
 
-    await fed_repo.save_instance(RemoteInstance(
-        id="peer-a", display_name="Peer A",
-        remote_identity_pk="aa" * 32,
-        key_self_to_remote="enc", key_remote_to_self="enc",
-        remote_webhook_url="https://peer/wh",
-        local_webhook_id="wh-peer-a",
-        status=PairingStatus.CONFIRMED,
-        source=InstanceSource.MANUAL,
-    ))
+    await fed_repo.save_instance(
+        RemoteInstance(
+            id="peer-a",
+            display_name="Peer A",
+            remote_identity_pk="aa" * 32,
+            key_self_to_remote="enc",
+            key_remote_to_self="enc",
+            remote_webhook_url="https://peer/wh",
+            local_webhook_id="wh-peer-a",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
     # Mark instance as a member of this space.
     await app[_db_key].enqueue(
         "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
@@ -102,7 +109,8 @@ async def test_sync_trigger_enqueues_for_confirmed_peers(client):
     )
 
     resp = await client.post(
-        f"/api/spaces/{space_id}/sync", headers=_auth(client._admin_token),
+        f"/api/spaces/{space_id}/sync",
+        headers=_auth(client._admin_token),
     )
     assert resp.status == 202
     body = await resp.json()
@@ -119,22 +127,28 @@ async def test_sync_trigger_skips_unconfirmed_peers(client):
         PairingStatus,
         RemoteInstance,
     )
-    await fed_repo.save_instance(RemoteInstance(
-        id="peer-new", display_name="Peer New",
-        remote_identity_pk="bb" * 32,
-        key_self_to_remote="enc", key_remote_to_self="enc",
-        remote_webhook_url="https://peer/wh",
-        local_webhook_id="wh-peer-new",
-        status=PairingStatus.PENDING_SENT,
-        source=InstanceSource.MANUAL,
-    ))
+
+    await fed_repo.save_instance(
+        RemoteInstance(
+            id="peer-new",
+            display_name="Peer New",
+            remote_identity_pk="bb" * 32,
+            key_self_to_remote="enc",
+            key_remote_to_self="enc",
+            remote_webhook_url="https://peer/wh",
+            local_webhook_id="wh-peer-new",
+            status=PairingStatus.PENDING_SENT,
+            source=InstanceSource.MANUAL,
+        )
+    )
     await app[_db_key].enqueue(
         "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
         (space_id, "peer-new"),
     )
 
     resp = await client.post(
-        f"/api/spaces/{space_id}/sync", headers=_auth(client._admin_token),
+        f"/api/spaces/{space_id}/sync",
+        headers=_auth(client._admin_token),
     )
     assert resp.status == 202
     body = await resp.json()
@@ -144,13 +158,15 @@ async def test_sync_trigger_skips_unconfirmed_peers(client):
 async def test_sync_trigger_forbidden_for_non_admin(client):
     space_id = await _create_space(client)
     resp = await client.post(
-        f"/api/spaces/{space_id}/sync", headers=_auth(client._bob_token),
+        f"/api/spaces/{space_id}/sync",
+        headers=_auth(client._bob_token),
     )
     assert resp.status in (401, 403)
 
 
 async def test_sync_trigger_unknown_space_returns_404(client):
     resp = await client.post(
-        "/api/spaces/does-not-exist/sync", headers=_auth(client._admin_token),
+        "/api/spaces/does-not-exist/sync",
+        headers=_auth(client._admin_token),
     )
     assert resp.status == 404

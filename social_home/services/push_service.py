@@ -37,8 +37,9 @@ from ..repositories.push_subscription_repo import (
 
 log = logging.getLogger(__name__)
 
-try:                                                  # pragma: no cover
+try:  # pragma: no cover
     from pywebpush import WebPushException, webpush
+
     _PYWEBPUSH_AVAILABLE = True
 except ImportError:
     webpush = None
@@ -62,21 +63,25 @@ class PushPayload:
     """
 
     title: str
-    tag: str | None = None                            # surface clustering
+    tag: str | None = None  # surface clustering
     click_url: str | None = None
     space_id: str | None = None
     icon_url: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps({
-            k: v for k, v in {
-                "title":     self.title,
-                "tag":       self.tag,
-                "click_url": self.click_url,
-                "space_id":  self.space_id,
-                "icon_url":  self.icon_url,
-            }.items() if v is not None
-        })
+        return json.dumps(
+            {
+                k: v
+                for k, v in {
+                    "title": self.title,
+                    "tag": self.tag,
+                    "click_url": self.click_url,
+                    "space_id": self.space_id,
+                    "icon_url": self.icon_url,
+                }.items()
+                if v is not None
+            }
+        )
 
 
 class PushService:
@@ -102,8 +107,8 @@ class PushService:
         vapid: VapidKeyPair,
         contact_email: str = "admin@social-home.local",
     ) -> None:
-        self._sub_repo      = sub_repo
-        self._vapid         = vapid
+        self._sub_repo = sub_repo
+        self._vapid = vapid
         self._contact_email = contact_email
 
     @property
@@ -122,7 +127,9 @@ class PushService:
         return delivered
 
     async def push_to_users(
-        self, user_ids: list[str] | set[str], payload: PushPayload,
+        self,
+        user_ids: list[str] | set[str],
+        payload: PushPayload,
     ) -> int:
         delivered = 0
         for uid in user_ids:
@@ -152,13 +159,14 @@ class PushService:
         return await self.push_to_users(recipient_user_ids, payload)
 
     async def _push_one(self, sub: PushSubscription, payload: PushPayload) -> bool:
-        if not _PYWEBPUSH_AVAILABLE:                  # pragma: no cover
+        if not _PYWEBPUSH_AVAILABLE:  # pragma: no cover
             log.debug(
                 "push: pywebpush not installed; would send %r to %s",
-                payload.title, sub.endpoint[:40],
+                payload.title,
+                sub.endpoint[:40],
             )
             return True
-        try:                                          # pragma: no cover
+        try:  # pragma: no cover
             webpush(
                 subscription_info={
                     "endpoint": sub.endpoint,
@@ -169,14 +177,14 @@ class PushService:
                 vapid_claims={"sub": f"mailto:{self._contact_email}"},
             )
             return True
-        except WebPushException as exc:               # pragma: no cover
+        except WebPushException as exc:  # pragma: no cover
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status in (404, 410):
                 # Subscription is dead — clean it out.
                 await self._sub_repo.delete_by_endpoint(sub.endpoint)
             log.warning("push: failed status=%s endpoint=%s", status, sub.endpoint[:40])
             return False
-        except Exception as exc:                      # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("push: unexpected error: %s", exc)
             return False
 
@@ -184,7 +192,7 @@ class PushService:
 # ─── VAPID key persistence ────────────────────────────────────────────────
 
 VAPID_PRIVATE_FILENAME: str = ".vapid_private.pem"
-VAPID_PUBLIC_FILENAME:  str = ".vapid_public.txt"
+VAPID_PUBLIC_FILENAME: str = ".vapid_public.txt"
 
 
 def load_or_create_vapid(data_dir: str | Path) -> VapidKeyPair:
@@ -197,7 +205,7 @@ def load_or_create_vapid(data_dir: str | Path) -> VapidKeyPair:
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     priv_path = data_dir / VAPID_PRIVATE_FILENAME
-    pub_path  = data_dir / VAPID_PUBLIC_FILENAME
+    pub_path = data_dir / VAPID_PUBLIC_FILENAME
 
     if priv_path.exists() and pub_path.exists():
         return VapidKeyPair(

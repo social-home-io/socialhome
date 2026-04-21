@@ -32,9 +32,9 @@ class PostDraftCleanupScheduler:
         interval_seconds: float = 24 * 3600.0,
         ttl_days: int = 30,
     ) -> None:
-        self._db        = db
-        self._interval  = interval_seconds
-        self._ttl_days  = ttl_days
+        self._db = db
+        self._interval = interval_seconds
+        self._ttl_days = ttl_days
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -49,7 +49,7 @@ class PostDraftCleanupScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -59,20 +59,21 @@ class PostDraftCleanupScheduler:
                 pruned = await self._prune_once()
                 if pruned:
                     log.info("post-drafts: pruned %d stale drafts", pruned)
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("post-draft loop failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue
 
     async def _prune_once(self) -> int:
         """Run one prune pass. Exposed for tests."""
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=self._ttl_days)
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._ttl_days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM post_drafts WHERE updated_at < ?",
             (cutoff,),

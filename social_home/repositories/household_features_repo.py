@@ -16,12 +16,21 @@ from ..domain.household_features import HouseholdFeatures
 
 
 _FEATURE_KEYS: tuple[str, ...] = (
-    "feat_feed", "feat_pages", "feat_tasks", "feat_stickies",
-    "feat_calendar", "feat_bazaar",
+    "feat_feed",
+    "feat_pages",
+    "feat_tasks",
+    "feat_stickies",
+    "feat_calendar",
+    "feat_bazaar",
 )
 _ALLOW_KEYS: tuple[str, ...] = (
-    "allow_text", "allow_image", "allow_video", "allow_file",
-    "allow_poll", "allow_schedule", "allow_bazaar",
+    "allow_text",
+    "allow_image",
+    "allow_video",
+    "allow_file",
+    "allow_poll",
+    "allow_schedule",
+    "allow_bazaar",
 )
 ALL_KEYS: frozenset[str] = frozenset(_FEATURE_KEYS + _ALLOW_KEYS)
 

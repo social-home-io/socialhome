@@ -11,5 +11,5 @@ class SpaceKey:
 
     space_id: str
     epoch: int
-    content_key_hex: str                # KEK-encrypted ciphertext (hex)
+    content_key_hex: str  # KEK-encrypted ciphertext (hex)
     created_at: str | None = None

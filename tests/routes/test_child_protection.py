@@ -26,9 +26,11 @@ async def _seed_space(client, *, sid: str = "sp-1"):
 
 # ─── Auth ────────────────────────────────────────────────────────────────
 
+
 async def test_update_protection_unauth_401(client):
     r = await client.post(
-        "/api/cp/users/lila/protection", json={"enabled": True, "declared_age": 12},
+        "/api/cp/users/lila/protection",
+        json={"enabled": True, "declared_age": 12},
     )
     assert r.status == 401
 
@@ -39,6 +41,7 @@ async def test_get_age_gate_unauth_401(client):
 
 
 # ─── Protection toggle ──────────────────────────────────────────────────
+
 
 async def test_enable_protection_admin_204(client):
     await _seed_minor(client)
@@ -119,6 +122,7 @@ async def test_disable_protection_204(client):
 
 # ─── Guardians ───────────────────────────────────────────────────────────
 
+
 async def test_add_guardian_admin_204(client):
     await _seed_minor(client)
     await _seed_minor(client, username="mom", uid="mom-id")
@@ -161,6 +165,7 @@ async def test_remove_guardian_204(client):
 
 # ─── Per-minor blocks ────────────────────────────────────────────────────
 
+
 async def test_block_for_minor_requires_guardian_403(client):
     await _seed_minor(client)
     # admin is not a guardian → 403
@@ -200,6 +205,7 @@ async def test_block_for_minor_succeeds_when_guardian(client):
 
 
 # ─── Space age gate ──────────────────────────────────────────────────────
+
 
 async def test_get_age_gate_default_for_unknown_space(client):
     r = await client.get(
@@ -268,6 +274,7 @@ async def test_set_age_gate_invalid_value_422(client):
 
 # ─── Guardian audit log (§CP) ──────────────────────────────────────────────
 
+
 async def test_audit_log_admin_can_read(client):
     """The admin (seeded by the test fixture) may always read an audit log."""
     r = await client.get(
@@ -318,13 +325,11 @@ async def test_list_minors_other_guardian_requires_admin(client):
     """Non-admin asking for another user's minors → 403."""
     db = client._db
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin) "
-        "VALUES(?,?,?,0)",
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         ("bob", "bob-uid", "Bob"),
     )
     await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
         ("tb", "bob-uid", "t", sha256_token_hash("bob-tok")),
     )
     r = await client.get(
@@ -349,7 +354,8 @@ async def test_list_blocks_as_guardian_200(client):
         headers=_auth(client._tok),
     )
     r = await client.get(
-        "/api/cp/minors/lila-id/blocks", headers=_auth(client._tok),
+        "/api/cp/minors/lila-id/blocks",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.json()
@@ -360,13 +366,11 @@ async def test_list_blocks_non_guardian_403(client):
     await _seed_minor(client)
     db = client._db
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin) "
-        "VALUES(?,?,?,0)",
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         ("stranger", "stranger-uid", "Stranger"),
     )
     await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
         ("ts2", "stranger-uid", "t", sha256_token_hash("stranger-tok2")),
     )
     r = await client.get(
@@ -398,13 +402,11 @@ async def test_list_conversations_non_guardian_403(client):
     await _seed_minor(client)
     db = client._db
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin) "
-        "VALUES(?,?,?,0)",
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         ("outside", "outside-uid", "Out"),
     )
     await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
         ("ts3", "outside-uid", "t", sha256_token_hash("outside-tok")),
     )
     r = await client.get(

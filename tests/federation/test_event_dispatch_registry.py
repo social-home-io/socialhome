@@ -7,7 +7,9 @@ from social_home.domain.federation import FederationEvent, FederationEventType
 from social_home.federation.event_dispatch_registry import EventDispatchRegistry
 
 
-def _event(event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED) -> FederationEvent:
+def _event(
+    event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED,
+) -> FederationEvent:
     return FederationEvent(
         msg_id="m1",
         event_type=event_type,

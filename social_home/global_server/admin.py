@@ -33,12 +33,13 @@ log = logging.getLogger(__name__)
 SESSION_TTL_SECONDS: int = 3600
 #: Brute-force window (spec §24.9 — 5 attempts / 15 minutes).
 BRUTE_FORCE_WINDOW_SECONDS: int = 15 * 60
-BRUTE_FORCE_MAX_ATTEMPTS:   int = 5
+BRUTE_FORCE_MAX_ATTEMPTS: int = 5
 #: Cookie name.
 SESSION_COOKIE: str = "gfs_session"
 
 
 # ─── Password helpers ───────────────────────────────────────────────────
+
 
 def hash_password(password: str) -> str:
     """Return a bcrypt hash as an ASCII string."""
@@ -51,13 +52,15 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
     try:
         return bcrypt.checkpw(
-            password.encode("utf-8"), stored_hash.encode("ascii"),
+            password.encode("utf-8"),
+            stored_hash.encode("ascii"),
         )
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
 
 
 # ─── AdminAuth service ─────────────────────────────────────────────────
+
 
 class AdminAuth:
     """Admin login / logout / session-check gate for the GFS portal."""
@@ -68,7 +71,9 @@ class AdminAuth:
         self._admin_repo = admin_repo
 
     async def login(
-        self, password: str, client_ip: str,
+        self,
+        password: str,
+        client_ip: str,
     ) -> tuple[str | None, str]:
         """Attempt a login.
 
@@ -84,12 +89,14 @@ class AdminAuth:
         # Brute-force check.
         since = now - BRUTE_FORCE_WINDOW_SECONDS
         fails = await self._admin_repo.count_failed_attempts(
-            client_ip, since=since,
+            client_ip,
+            since=since,
         )
         if fails >= BRUTE_FORCE_MAX_ATTEMPTS:
             log.warning(
                 "GFS admin login rate-limited for ip=%s (%d recent failures)",
-                client_ip, fails,
+                client_ip,
+                fails,
             )
             return None, "locked"
 
@@ -99,7 +106,8 @@ class AdminAuth:
 
         token = secrets.token_urlsafe(32)
         await self._admin_repo.create_session(
-            token, expires_at=now + SESSION_TTL_SECONDS,
+            token,
+            expires_at=now + SESSION_TTL_SECONDS,
         )
         return token, "ok"
 
@@ -123,6 +131,7 @@ class AdminAuth:
 
 # ─── aiohttp middleware ─────────────────────────────────────────────────
 
+
 def build_admin_middleware(auth: AdminAuth):
     """Return an aiohttp middleware that guards ``/admin/api/*``.
 
@@ -141,7 +150,8 @@ def build_admin_middleware(auth: AdminAuth):
         ok = await auth.check(cookie)
         if not ok:
             return web.json_response(
-                {"error": "unauthorized"}, status=401,
+                {"error": "unauthorized"},
+                status=401,
             )
         return await handler(request)
 
@@ -149,6 +159,7 @@ def build_admin_middleware(auth: AdminAuth):
 
 
 # ─── Route handlers ─────────────────────────────────────────────────────
+
 
 def _client_ip(request: web.Request) -> str:
     fwd = request.headers.get("X-Forwarded-For", "")
@@ -173,14 +184,17 @@ async def handle_login(request: web.Request) -> web.Response:
     token, status = await auth.login(password, _client_ip(request))
     if status == "locked":
         resp = web.json_response(
-            {"error": "rate_limited"}, status=429,
+            {"error": "rate_limited"},
+            status=429,
         )
         resp.headers["Retry-After"] = str(BRUTE_FORCE_WINDOW_SECONDS)
         return resp
     if status == "disabled":
         return web.json_response(
-            {"error": "admin_disabled",
-             "detail": "Set an admin password via `social-home-global-server --set-password`"},
+            {
+                "error": "admin_disabled",
+                "detail": "Set an admin password via `social-home-global-server --set-password`",
+            },
             status=503,
         )
     if status != "ok" or token is None:
@@ -188,7 +202,8 @@ async def handle_login(request: web.Request) -> web.Response:
 
     resp = web.json_response({"status": "ok"})
     resp.set_cookie(
-        SESSION_COOKIE, token,
+        SESSION_COOKIE,
+        token,
         max_age=SESSION_TTL_SECONDS,
         path="/admin",
         httponly=True,

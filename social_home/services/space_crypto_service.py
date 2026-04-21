@@ -74,7 +74,7 @@ class SpaceContentEncryption:
         key_manager: KeyManager,
     ) -> None:
         self._repo = space_key_repo
-        self._kek  = key_manager
+        self._kek = key_manager
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -91,11 +91,15 @@ class SpaceContentEncryption:
     async def rotate_epoch(self, space_id: str) -> int:
         """Generate a fresh AES key, persist it, return the new epoch."""
         epoch = await self._repo.next_epoch(space_id)
-        raw   = AESGCM.generate_key(bit_length=256)
+        raw = AESGCM.generate_key(bit_length=256)
         wrapped = self._kek.encrypt(raw, associated_data=space_id.encode("utf-8"))
-        await self._repo.save(SpaceKey(
-            space_id=space_id, epoch=epoch, content_key_hex=wrapped,
-        ))
+        await self._repo.save(
+            SpaceKey(
+                space_id=space_id,
+                epoch=epoch,
+                content_key_hex=wrapped,
+            )
+        )
         log.info("space_crypto: rotated %s to epoch %d", space_id, epoch)
         return epoch
 
@@ -129,7 +133,10 @@ class SpaceContentEncryption:
         return latest.epoch, wire
 
     async def decrypt(
-        self, space_id: str, epoch: int, ciphertext: str,
+        self,
+        space_id: str,
+        epoch: int,
+        ciphertext: str,
     ) -> bytes:
         """Decrypt under the specified epoch's key."""
         key = await self._repo.get(space_id, epoch)
@@ -146,14 +153,18 @@ class SpaceContentEncryption:
         except ValueError as exc:
             raise ValueError("Malformed space ciphertext") from exc
         nonce = b64url_decode(nonce_b64)
-        ct    = b64url_decode(ct_b64)
-        aead  = AESGCM(raw)
+        ct = b64url_decode(ct_b64)
+        aead = AESGCM(raw)
         return aead.decrypt(nonce, ct, space_id.encode("utf-8"))
 
     # ─── Sync chunks (§25.6 direct space sync) ──────────────────────────
 
     async def encrypt_chunk(
-        self, *, space_id: str, sync_id: str, plaintext: bytes,
+        self,
+        *,
+        space_id: str,
+        sync_id: str,
+        plaintext: bytes,
     ) -> tuple[int, str]:
         """AES-256-GCM-encrypt a sync chunk under the current epoch key.
 
@@ -179,7 +190,12 @@ class SpaceContentEncryption:
         return latest.epoch, wire
 
     async def decrypt_chunk(
-        self, *, space_id: str, epoch: int, sync_id: str, ciphertext: str,
+        self,
+        *,
+        space_id: str,
+        epoch: int,
+        sync_id: str,
+        ciphertext: str,
     ) -> bytes:
         """Inverse of :meth:`encrypt_chunk`. Raises :class:`RuntimeError`
         on missing epoch or :class:`cryptography.exceptions.InvalidTag`
@@ -198,7 +214,7 @@ class SpaceContentEncryption:
         except ValueError as exc:
             raise ValueError("Malformed space ciphertext") from exc
         nonce = b64url_decode(nonce_b64)
-        ct    = b64url_decode(ct_b64)
+        ct = b64url_decode(ct_b64)
         aad = f"{space_id}:{epoch}:{sync_id}".encode("utf-8")
         aead = AESGCM(raw)
         return aead.decrypt(nonce, ct, aad)
@@ -239,7 +255,8 @@ class SpaceContentEncryption:
         return sealed
 
     async def unseal_from_gfs(
-        self, envelope: SealedEnvelope,
+        self,
+        envelope: SealedEnvelope,
     ) -> UnsealedContent:
         """Inverse of :meth:`seal_for_gfs` — fetches the matching epoch
         key and decrypts the sealed envelope.
@@ -255,12 +272,14 @@ class SpaceContentEncryption:
             associated_data=envelope.space_id.encode("utf-8"),
         )
         unsealed = unseal_envelope(
-            envelope, space_content_key=raw_key,
+            envelope,
+            space_content_key=raw_key,
         )
         return unsealed
 
 
 # ─── Space identity helpers ──────────────────────────────────────────────
+
 
 def create_space_identity() -> tuple[bytes, bytes, str]:
     """Mint a fresh space identity. Returns ``(seed, public_key, space_id)``.
@@ -279,7 +298,10 @@ def sign_space_config(payload: bytes, *, space_seed: bytes) -> str:
 
 
 def verify_space_config(
-    payload: bytes, signature_b64: str, *, space_public_key: bytes,
+    payload: bytes,
+    signature_b64: str,
+    *,
+    space_public_key: bytes,
 ) -> bool:
     """Verify a config event's Ed25519 signature."""
     try:

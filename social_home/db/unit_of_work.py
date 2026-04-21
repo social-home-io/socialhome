@@ -40,7 +40,10 @@ class UnitOfWork(AbstractAsyncContextManager["UnitOfWork"]):
     """Single-transaction write batch + buffered event dispatch."""
 
     __slots__ = (
-        "_db", "_bus", "_pending_events", "_writes",
+        "_db",
+        "_bus",
+        "_pending_events",
+        "_writes",
         "_closed",
     )
 
@@ -104,7 +107,8 @@ class UnitOfWork(AbstractAsyncContextManager["UnitOfWork"]):
                         await coro
                 except Exception:
                     log.exception(
-                        "UnitOfWork: event dispatch failed for %r", event,
+                        "UnitOfWork: event dispatch failed for %r",
+                        event,
                     )
         self._pending_events.clear()
         return None

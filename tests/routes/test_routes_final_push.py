@@ -6,6 +6,7 @@ from .conftest import _auth
 
 # ── Users route — 64% → 90%+ ─────────────────────────────────────────────
 
+
 async def test_users_get_me_detailed(client):
     """GET /api/me returns full user profile."""
     h = _auth(client._tok)
@@ -33,7 +34,9 @@ async def test_users_patch_bio(client):
 async def test_users_patch_preferences(client):
     """PATCH /api/me updates preferences."""
     h = _auth(client._tok)
-    r = await client.patch("/api/me", json={"preferences": {"theme": "dark"}}, headers=h)
+    r = await client.patch(
+        "/api/me", json={"preferences": {"theme": "dark"}}, headers=h
+    )
     assert r.status == 200
 
 
@@ -64,6 +67,7 @@ async def test_users_revoke_token(client):
 
 
 # ── Bazaar route — 68% → 90%+ ────────────────────────────────────────────
+
 
 async def test_bazaar_list(client):
     """GET /api/bazaar returns listing array."""
@@ -96,6 +100,7 @@ async def test_bazaar_accept_missing(client):
 
 # ── Calendar route — 80% → 90%+ ──────────────────────────────────────────
 
+
 async def test_calendar_create_and_list(client):
     """POST + GET calendars."""
     h = _auth(client._tok)
@@ -112,10 +117,15 @@ async def test_calendar_create_event_and_list(client):
     r = await client.post("/api/calendars", json={"name": "C"}, headers=h)
     cid = (await r.json())["id"]
     now = datetime.now(timezone.utc)
-    r2 = await client.post(f"/api/calendars/{cid}/events", json={
-        "summary": "Lunch", "start": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end": (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }, headers=h)
+    r2 = await client.post(
+        f"/api/calendars/{cid}/events",
+        json={
+            "summary": "Lunch",
+            "start": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        headers=h,
+    )
     assert r2.status == 201
     eid = (await r2.json())["id"]
 
@@ -123,7 +133,8 @@ async def test_calendar_create_event_and_list(client):
         f"/api/calendars/{cid}/events"
         f"?start={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         f"&end={(now + timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
-        headers=h)
+        headers=h,
+    )
     assert r3.status == 200
     assert len(await r3.json()) >= 1
 
@@ -142,6 +153,7 @@ async def test_calendar_missing_range_params(client):
 
 # ── Spaces route — 82% → 90%+ ────────────────────────────────────────────
 
+
 async def test_space_create_get_update_dissolve(client):
     """Full space lifecycle via API."""
     h = _auth(client._tok)
@@ -158,14 +170,17 @@ async def test_space_create_get_update_dissolve(client):
     r = await client.get(f"/api/spaces/{sid}/members", headers=h)
     assert r.status == 200
 
-    r = await client.post(f"/api/spaces/{sid}/posts",
-                           json={"type": "text", "content": "hi"}, headers=h)
+    r = await client.post(
+        f"/api/spaces/{sid}/posts", json={"type": "text", "content": "hi"}, headers=h
+    )
     assert r.status == 201
 
     r = await client.get(f"/api/spaces/{sid}/feed", headers=h)
     assert r.status == 200
 
-    r = await client.post(f"/api/spaces/{sid}/invite-tokens", json={"uses": 1}, headers=h)
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens", json={"uses": 1}, headers=h
+    )
     assert r.status == 201
     _token = (await r.json())["token"]
 
@@ -182,25 +197,37 @@ async def test_space_errors(client):
     assert r.status == 404
     r = await client.get("/api/spaces/nonexistent/feed", headers=h)
     assert r.status == 404
-    r = await client.post("/api/spaces/nonexistent/posts",
-                           json={"type": "text", "content": "x"}, headers=h)
+    r = await client.post(
+        "/api/spaces/nonexistent/posts",
+        json={"type": "text", "content": "x"},
+        headers=h,
+    )
     assert r.status >= 400
 
 
 # ── Feed route — 86% → 90%+ ──────────────────────────────────────────────
 
+
 async def test_feed_full_flow(client):
     """Feed create → edit → comment → reaction → delete."""
     h = _auth(client._tok)
-    r = await client.post("/api/feed/posts", json={"type": "text", "content": "Flow"}, headers=h)
+    r = await client.post(
+        "/api/feed/posts", json={"type": "text", "content": "Flow"}, headers=h
+    )
     pid = (await r.json())["id"]
-    r = await client.patch(f"/api/feed/posts/{pid}", json={"content": "Edited"}, headers=h)
+    r = await client.patch(
+        f"/api/feed/posts/{pid}", json={"content": "Edited"}, headers=h
+    )
     assert r.status == 200
-    r = await client.post(f"/api/feed/posts/{pid}/comments", json={"content": "C"}, headers=h)
+    r = await client.post(
+        f"/api/feed/posts/{pid}/comments", json={"content": "C"}, headers=h
+    )
     assert r.status == 201
     r = await client.get(f"/api/feed/posts/{pid}/comments", headers=h)
     assert r.status == 200
-    r = await client.post(f"/api/feed/posts/{pid}/reactions", json={"emoji": "❤️"}, headers=h)
+    r = await client.post(
+        f"/api/feed/posts/{pid}/reactions", json={"emoji": "❤️"}, headers=h
+    )
     assert r.status == 200
     r = await client.delete(f"/api/feed/posts/{pid}/reactions/❤️", headers=h)
     assert r.status == 200

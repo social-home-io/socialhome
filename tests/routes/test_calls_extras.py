@@ -7,19 +7,18 @@ from social_home.auth import sha256_token_hash
 from .conftest import _auth
 
 
-async def _seed_dm(client, conv_id: str, *, peer: str = "bob",
-                   peer_uid: str = "bob-uid") -> str:
+async def _seed_dm(
+    client, conv_id: str, *, peer: str = "bob", peer_uid: str = "bob-uid"
+) -> str:
     """Seed a second local user and a 1:1 DM. Returns bob's token."""
     db = client._db
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin) "
-        "VALUES(?,?,?,0)",
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         (peer, peer_uid, peer.title()),
     )
     raw = f"{peer}-tok"
     await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
         (f"t-{peer}", peer_uid, "t", sha256_token_hash(raw)),
     )
     await db.enqueue(
@@ -52,8 +51,7 @@ async def test_calls_answer_wrong_callee_403(client):
     await _seed_dm(client, "c-1")
     r = await client.post(
         "/api/calls",
-        json={"conversation_id": "c-1",
-              "sdp_offer": "v=0\r\n", "call_type": "audio"},
+        json={"conversation_id": "c-1", "sdp_offer": "v=0\r\n", "call_type": "audio"},
         headers=_auth(client._tok),
     )
     cid = (await r.json())["call_id"]
@@ -73,8 +71,7 @@ async def test_calls_ice_success_204(client):
     await _seed_dm(client, "c-ice")
     r = await client.post(
         "/api/calls",
-        json={"conversation_id": "c-ice",
-              "sdp_offer": "v=0\r\n", "call_type": "audio"},
+        json={"conversation_id": "c-ice", "sdp_offer": "v=0\r\n", "call_type": "audio"},
         headers=_auth(client._tok),
     )
     cid = (await r.json())["call_id"]
@@ -94,20 +91,17 @@ async def test_calls_hangup_non_participant_403(client):
     db = client._db
     # Intruder user + token — not in the DM.
     await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin) "
-        "VALUES(?,?,?,0)",
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
         ("intruder", "intruder-id", "X"),
     )
     raw = "intruder-tok"
     await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
         ("t-int", "intruder-id", "t", sha256_token_hash(raw)),
     )
     r = await client.post(
         "/api/calls",
-        json={"conversation_id": "c-ho",
-              "sdp_offer": "v=0\r\n", "call_type": "audio"},
+        json={"conversation_id": "c-ho", "sdp_offer": "v=0\r\n", "call_type": "audio"},
         headers=_auth(client._tok),
     )
     cid = (await r.json())["call_id"]
@@ -121,6 +115,7 @@ async def test_calls_hangup_non_participant_403(client):
 async def test_ice_servers_includes_turn_when_configured(client):
     from social_home.app_keys import config_key
     import dataclasses as _dc
+
     cfg = client.server.app[config_key]
     new_cfg = _dc.replace(
         cfg,
@@ -132,7 +127,6 @@ async def test_ice_servers_includes_turn_when_configured(client):
     r = await client.get("/api/webrtc/ice_servers", headers=_auth(client._tok))
     body = await r.json()
     has_turn = any(
-        any("turn" in u for u in (s.get("urls") or []))
-        for s in body["ice_servers"]
+        any("turn" in u for u in (s.get("urls") or [])) for s in body["ice_servers"]
     )
     assert has_turn

@@ -27,11 +27,14 @@ from social_home.federation.transport import (
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
+
 def _fake_instance(iid: str = "peer-1") -> RemoteInstance:
     return RemoteInstance(
-        id=iid, display_name=iid,
+        id=iid,
+        display_name=iid,
         remote_identity_pk="aa" * 32,
-        key_self_to_remote="enc", key_remote_to_self="enc",
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
         remote_webhook_url="https://peer/wh",
         local_webhook_id=f"wh-{iid}",
         status=PairingStatus.CONFIRMED,
@@ -61,18 +64,23 @@ class _FakeSignaler:
     async def __call__(self, to_instance_id, event_type, payload):
         self.events.append((to_instance_id, event_type, payload))
         return DeliveryResult(
-            instance_id=to_instance_id, ok=True, status_code=200,
+            instance_id=to_instance_id,
+            ok=True,
+            status_code=200,
         )
 
 
 # ─── Facade: primary + fallback + handshake ───────────────────────────────
+
 
 async def test_send_uses_rtc_when_peer_is_ready():
     """A peer whose DataChannel is already open takes the RTC path."""
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     inst = _fake_instance("peer-1")
 
@@ -89,20 +97,21 @@ async def test_send_uses_rtc_when_peer_is_ready():
     class _FakeChannel:
         def __init__(self):
             self.sent = []
+
         def sendMessage(self, data):
             self.sent.append(data)
 
     fake_ch = _FakeChannel()
-    peer._channel = fake_ch           # type: ignore[attr-defined]
-    peer._open.set()                  # type: ignore[attr-defined]
-    t._peers[inst.id] = peer          # type: ignore[attr-defined]
+    peer._channel = fake_ch  # type: ignore[attr-defined]
+    peer._open.set()  # type: ignore[attr-defined]
+    t._peers[inst.id] = peer  # type: ignore[attr-defined]
 
     result = await t.send(instance=inst, envelope_dict={"msg_id": "x"})
 
     assert result.ok is True
     assert result.via == "rtc"
-    assert fake_ch.sent                    # DataChannel received the frame
-    assert webhook.calls == []             # no webhook fallback
+    assert fake_ch.sent  # DataChannel received the frame
+    assert webhook.calls == []  # no webhook fallback
 
 
 async def test_send_falls_back_to_webhook_when_peer_not_ready():
@@ -110,7 +119,9 @@ async def test_send_falls_back_to_webhook_when_peer_not_ready():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     inst = _fake_instance("peer-2")
 
@@ -120,7 +131,10 @@ async def test_send_falls_back_to_webhook_when_peer_not_ready():
     assert result.via == "webhook"
     assert len(webhook.calls) == 1
     # Handshake was kicked — one OFFER was sent through the signaler.
-    assert signal.events and signal.events[0][1] is FederationEventType.FEDERATION_RTC_OFFER
+    assert (
+        signal.events
+        and signal.events[0][1] is FederationEventType.FEDERATION_RTC_OFFER
+    )
 
 
 async def test_send_falls_back_when_webhook_fails():
@@ -128,10 +142,13 @@ async def test_send_falls_back_when_webhook_fails():
     webhook = _RecordingWebhook(ok=False, status=502)
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     result = await t.send(
-        instance=_fake_instance("peer-3"), envelope_dict={"msg_id": "x"},
+        instance=_fake_instance("peer-3"),
+        envelope_dict={"msg_id": "x"},
     )
     assert result.ok is False
     assert result.via == "webhook"
@@ -143,7 +160,9 @@ async def test_send_falls_back_to_webhook_when_rtc_send_raises():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     inst = _fake_instance("peer-4")
 
@@ -151,14 +170,17 @@ async def test_send_falls_back_to_webhook_when_rtc_send_raises():
         """Subclass because ``_RtcPeer`` uses ``__slots__`` — we can't
         patch ``.send`` on an instance, so override at the class level.
         """
+
         @property
         def is_ready(self) -> bool:
             return True
+
         async def send(self, envelope_dict):
             raise RuntimeError("boom")
 
     peer = _RaisingPeer(
-        instance_id=inst.id, ice_servers=None,
+        instance_id=inst.id,
+        ice_servers=None,
         signaling=t._signaling_factory(inst.id),
         inbound=t._inbound_factory(inst.id),
     )
@@ -172,11 +194,14 @@ async def test_send_falls_back_to_webhook_when_rtc_send_raises():
 
 # ─── Inbound signalling ────────────────────────────────────────────────────
 
+
 async def test_on_rtc_offer_creates_peer_and_sends_answer():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     await t.on_rtc_offer(
         from_instance="peer-5",
@@ -193,7 +218,9 @@ async def test_on_rtc_offer_ignores_empty_sdp():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     await t.on_rtc_offer(from_instance="peer-6", payload={"sdp": ""})
     # Peer was still registered (we hold the slot) but no ANSWER sent.
@@ -207,7 +234,9 @@ async def test_on_rtc_answer_with_matching_from_applies():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     inst = _fake_instance("peer-7")
     # Prime the peer with a pending offer.
@@ -218,7 +247,7 @@ async def test_on_rtc_answer_with_matching_from_applies():
         payload={"sdp": "answer-sdp", "sdp_type": "answer"},
     )
     peer = t._peers["peer-7"]
-    assert peer._expected_answer_from is None       # type: ignore[attr-defined]
+    assert peer._expected_answer_from is None  # type: ignore[attr-defined]
 
 
 async def test_on_rtc_answer_with_mismatched_from_is_rejected():
@@ -226,7 +255,9 @@ async def test_on_rtc_answer_with_mismatched_from_is_rejected():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     inst = _fake_instance("peer-8")
     await t._ensure_handshake(inst)
@@ -237,7 +268,7 @@ async def test_on_rtc_answer_with_mismatched_from_is_rejected():
     )
     peer = t._peers["peer-8"]
     # Still expecting the real peer's answer.
-    assert peer._expected_answer_from == "peer-8"   # type: ignore[attr-defined]
+    assert peer._expected_answer_from == "peer-8"  # type: ignore[attr-defined]
 
 
 async def test_on_rtc_answer_unknown_peer_is_noop():
@@ -245,10 +276,13 @@ async def test_on_rtc_answer_unknown_peer_is_noop():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     await t.on_rtc_answer(
-        from_instance="ghost", payload={"sdp": "x"},
+        from_instance="ghost",
+        payload={"sdp": "x"},
     )
     assert t.peer_count() == 0
 
@@ -257,7 +291,9 @@ async def test_on_rtc_ice_unknown_peer_is_noop():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     # Should not raise.
     await t.on_rtc_ice(
@@ -270,25 +306,32 @@ async def test_on_rtc_ice_accepts_trickled_candidate():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     inst = _fake_instance("peer-9")
     await t._ensure_handshake(inst)
     # Should not raise — stub peer accepts candidates into its list.
     await t.on_rtc_ice(
         from_instance="peer-9",
-        payload={"candidate": "candidate:1 udp 1 1.1.1.1 5000 typ host",
-                 "sdp_mid": "0"},
+        payload={
+            "candidate": "candidate:1 udp 1 1.1.1.1 5000 typ host",
+            "sdp_mid": "0",
+        },
     )
 
 
 # ─── Facade lifecycle ──────────────────────────────────────────────────────
 
+
 async def test_close_peer_removes_entry():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     await t._ensure_handshake(_fake_instance("peer-10"))
     assert t.peer_count() == 1
@@ -300,7 +343,9 @@ async def test_close_all_drops_every_peer():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     await t._ensure_handshake(_fake_instance("a"))
     await t._ensure_handshake(_fake_instance("b"))
@@ -312,20 +357,28 @@ async def test_is_ready_reports_false_for_unknown_peer():
     webhook = _RecordingWebhook()
     signal = _FakeSignaler()
     t = FederationTransport(
-        own_instance_id="self-iid", webhook=webhook, signaling_send=signal,
+        own_instance_id="self-iid",
+        webhook=webhook,
+        signaling_send=signal,
     )
     assert t.is_ready("never-seen") is False
 
 
 # ─── WebhookTransport ──────────────────────────────────────────────────────
 
+
 async def test_webhook_transport_2xx_is_ok():
     """WebhookTransport.send returns (True, status) for 2xx."""
+
     class _FakeResp:
         def __init__(self, status):
             self.status = status
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
 
     class _FakeClient:
         def post(self, url, json, timeout):
@@ -346,8 +399,12 @@ async def test_webhook_transport_non_2xx_is_failure():
     class _FakeResp:
         def __init__(self, status):
             self.status = status
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
 
     class _FakeClient:
         def post(self, url, json, timeout):
@@ -358,7 +415,8 @@ async def test_webhook_transport_non_2xx_is_failure():
 
     wt = WebhookTransport(client_factory=_factory)
     ok, status = await wt.send(
-        instance=_fake_instance("peer"), envelope_dict={"x": 1},
+        instance=_fake_instance("peer"),
+        envelope_dict={"x": 1},
     )
     assert ok is False and status == 503
 
@@ -373,6 +431,7 @@ async def test_webhook_transport_network_error_is_failure():
 
     wt = WebhookTransport(client_factory=_factory)
     ok, status = await wt.send(
-        instance=_fake_instance("peer"), envelope_dict={"x": 1},
+        instance=_fake_instance("peer"),
+        envelope_dict={"x": 1},
     )
     assert ok is False and status is None

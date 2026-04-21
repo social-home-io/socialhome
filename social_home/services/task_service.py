@@ -78,9 +78,12 @@ class TaskService:
         )
         saved = await self._repo.save_list(task_list)
         if self._bus is not None:
-            await self._bus.publish(TaskListCreated(
-                list_id=saved.id, name=saved.name,
-            ))
+            await self._bus.publish(
+                TaskListCreated(
+                    list_id=saved.id,
+                    name=saved.name,
+                )
+            )
         return saved
 
     async def rename_list(self, list_id: str, *, name: str) -> TaskList:
@@ -95,9 +98,12 @@ class TaskService:
         updated = replace(current, name=name)
         saved = await self._repo.save_list(updated)
         if self._bus is not None:
-            await self._bus.publish(TaskListUpdated(
-                list_id=saved.id, name=saved.name,
-            ))
+            await self._bus.publish(
+                TaskListUpdated(
+                    list_id=saved.id,
+                    name=saved.name,
+                )
+            )
         return saved
 
     async def get_list(self, list_id: str) -> TaskList:
@@ -166,9 +172,12 @@ class TaskService:
             for user_id in saved.assignees:
                 if user_id == created_by:
                     continue
-                await self._bus.publish(TaskAssigned(
-                    task=saved, assigned_to=user_id,
-                ))
+                await self._bus.publish(
+                    TaskAssigned(
+                        task=saved,
+                        assigned_to=user_id,
+                    )
+                )
         return saved
 
     async def get_task(self, task_id: str) -> Task:
@@ -195,7 +204,7 @@ class TaskService:
         value. All filters combine with AND.
         """
         df = date.fromisoformat(due_from[:10]) if due_from else None
-        dt = date.fromisoformat(due_to[:10])   if due_to   else None
+        dt = date.fromisoformat(due_to[:10]) if due_to else None
         return await self._repo.list_by_list(
             list_id,
             include_done=include_done,
@@ -263,19 +272,22 @@ class TaskService:
             for user_id in added:
                 if user_id == actor_user_id:
                     continue
-                await self._bus.publish(TaskAssigned(
-                    task=saved, assigned_to=user_id,
-                ))
+                await self._bus.publish(
+                    TaskAssigned(
+                        task=saved,
+                        assigned_to=user_id,
+                    )
+                )
 
         # Publish TaskCompleted when transitioning to DONE.
-        if (
-            saved.status == TaskStatus.DONE
-            and task.status != TaskStatus.DONE
-        ):
+        if saved.status == TaskStatus.DONE and task.status != TaskStatus.DONE:
             if self._bus is not None:
-                await self._bus.publish(TaskCompleted(
-                    task=saved, completed_by=actor_user_id,
-                ))
+                await self._bus.publish(
+                    TaskCompleted(
+                        task=saved,
+                        completed_by=actor_user_id,
+                    )
+                )
             # §15 recurrence: spawn the next instance so the user
             # doesn't lose the schedule.
             if saved.is_recurring():
@@ -284,15 +296,21 @@ class TaskService:
         return saved
 
     async def delete_task(self, task_id: str, *, actor_user_id: str) -> None:
-        task = await self.get_task(task_id)   # raises KeyError if not found
+        task = await self.get_task(task_id)  # raises KeyError if not found
         await self._repo.delete(task_id)
         if self._bus is not None:
-            await self._bus.publish(TaskDeleted(
-                task_id=task_id, list_id=task.list_id,
-            ))
+            await self._bus.publish(
+                TaskDeleted(
+                    task_id=task_id,
+                    list_id=task.list_id,
+                )
+            )
 
     async def reorder_tasks(
-        self, list_id: str, *, ordered_ids: list[str],
+        self,
+        list_id: str,
+        *,
+        ordered_ids: list[str],
     ) -> list[Task]:
         """Persist a new task order within a list.
 
@@ -313,7 +331,8 @@ class TaskService:
             if task.position == idx:
                 continue
             new_task = replace(
-                task, position=idx,
+                task,
+                position=idx,
                 updated_at=datetime.now(timezone.utc),
             )
             saved = await self._repo.save(new_task)
@@ -325,7 +344,11 @@ class TaskService:
     # ── Task comments / attachments (spec §23.68) ────────────────────
 
     async def add_comment(
-        self, task_id: str, *, author_user_id: str, content: str,
+        self,
+        task_id: str,
+        *,
+        author_user_id: str,
+        content: str,
     ) -> "TaskComment":
         """Attach a comment to a task. Author must exist; content non-empty."""
         await self._require_tasks_enabled()
@@ -347,14 +370,23 @@ class TaskService:
         return await self._repo.list_comments(task_id)
 
     async def delete_comment(
-        self, comment_id: str, *, actor_user_id: str,
+        self,
+        comment_id: str,
+        *,
+        actor_user_id: str,
     ) -> None:
         """Author-or-admin only (we let the route enforce admin)."""
         await self._repo.delete_comment(comment_id)
 
     async def add_attachment(
-        self, task_id: str, *,
-        uploaded_by: str, url: str, filename: str, mime: str, size_bytes: int,
+        self,
+        task_id: str,
+        *,
+        uploaded_by: str,
+        url: str,
+        filename: str,
+        mime: str,
+        size_bytes: int,
     ) -> "TaskAttachment":
         await self._require_tasks_enabled()
         await self.get_task(task_id)
@@ -364,13 +396,17 @@ class TaskService:
             id=uuid.uuid4().hex,
             task_id=task_id,
             uploaded_by=uploaded_by,
-            url=url, filename=filename, mime=mime, size_bytes=size_bytes,
+            url=url,
+            filename=filename,
+            mime=mime,
+            size_bytes=size_bytes,
             created_at=datetime.now(timezone.utc),
         )
         return await self._repo.add_attachment(attachment)
 
     async def list_attachments(
-        self, task_id: str,
+        self,
+        task_id: str,
     ) -> list["TaskAttachment"]:
         await self.get_task(task_id)
         return await self._repo.list_attachments(task_id)
@@ -379,7 +415,9 @@ class TaskService:
         await self._repo.delete_attachment(attachment_id)
 
     async def spawn_overdue_recurrences(
-        self, *, today: date | None = None,
+        self,
+        *,
+        today: date | None = None,
     ) -> list[Task]:
         """For every recurring task whose due-date has passed without
         a follow-up, spawn the next occurrence.
@@ -404,7 +442,7 @@ class TaskService:
         date (e.g. ``UNTIL`` clause already passed).
         """
         rec = completed.recurrence
-        if rec is None:                             # guarded by caller
+        if rec is None:  # guarded by caller
             return None
         next_due = _next_occurrence(
             rec.rrule,
@@ -437,6 +475,7 @@ class TaskService:
 
 
 # ─── Minimal RRULE evaluator (§15) ────────────────────────────────────────
+
 
 def _next_occurrence(rrule: str, *, base: date) -> date | None:
     """Return the next occurrence date after *base* for *rrule*.
@@ -501,23 +540,36 @@ class SpaceTaskService:
     # ── Lists ────────────────────────────────────────────────────────────
 
     async def create_list(
-        self, *, space_id: str, name: str, created_by: str,
+        self,
+        *,
+        space_id: str,
+        name: str,
+        created_by: str,
     ) -> TaskList:
         name = name.strip()
         if not name:
             raise ValueError("task list name must not be empty")
         lst = TaskList(
-            id=uuid.uuid4().hex, name=name, created_by=created_by,
+            id=uuid.uuid4().hex,
+            name=name,
+            created_by=created_by,
         )
         saved = await self._repo.save_list(space_id, lst)
         if self._bus is not None:
-            await self._bus.publish(TaskListCreated(
-                list_id=saved.id, name=saved.name, space_id=space_id,
-            ))
+            await self._bus.publish(
+                TaskListCreated(
+                    list_id=saved.id,
+                    name=saved.name,
+                    space_id=space_id,
+                )
+            )
         return saved
 
     async def rename_list(
-        self, list_id: str, *, name: str,
+        self,
+        list_id: str,
+        *,
+        name: str,
     ) -> TaskList:
         name = name.strip()
         if not name:
@@ -529,9 +581,13 @@ class SpaceTaskService:
         updated = replace(current, name=name)
         saved = await self._repo.save_list(space_id, updated)
         if self._bus is not None:
-            await self._bus.publish(TaskListUpdated(
-                list_id=saved.id, name=saved.name, space_id=space_id,
-            ))
+            await self._bus.publish(
+                TaskListUpdated(
+                    list_id=saved.id,
+                    name=saved.name,
+                    space_id=space_id,
+                )
+            )
         return saved
 
     async def delete_list(self, list_id: str) -> None:
@@ -541,9 +597,12 @@ class SpaceTaskService:
         space_id, _ = result
         await self._repo.delete_list(list_id)
         if self._bus is not None:
-            await self._bus.publish(TaskListDeleted(
-                list_id=list_id, space_id=space_id,
-            ))
+            await self._bus.publish(
+                TaskListDeleted(
+                    list_id=list_id,
+                    space_id=space_id,
+                )
+            )
 
     async def list_lists(self, space_id: str) -> list[TaskList]:
         return await self._repo.list_lists(space_id)
@@ -596,9 +655,12 @@ class SpaceTaskService:
             for user_id in saved.assignees:
                 if user_id == created_by:
                     continue
-                await self._bus.publish(TaskAssigned(
-                    task=saved, assigned_to=user_id,
-                ))
+                await self._bus.publish(
+                    TaskAssigned(
+                        task=saved,
+                        assigned_to=user_id,
+                    )
+                )
         return saved
 
     async def update_task(
@@ -633,7 +695,9 @@ class SpaceTaskService:
                 raise ValueError(f"invalid status: {status!r}") from exc
         if due_date is not None:
             try:
-                kwargs["due_date"] = date.fromisoformat(due_date[:10]) if due_date else None
+                kwargs["due_date"] = (
+                    date.fromisoformat(due_date[:10]) if due_date else None
+                )
             except ValueError as exc:
                 raise ValueError(f"invalid due_date: {due_date!r}") from exc
         if assignees is not None:
@@ -646,16 +710,22 @@ class SpaceTaskService:
         if self._bus is not None:
             await self._bus.publish(TaskUpdated(task=saved, space_id=space_id))
             previous = set(task.assignees or ())
-            for user_id in (saved.assignees or ()):
+            for user_id in saved.assignees or ():
                 if user_id in previous or user_id == actor_user_id:
                     continue
-                await self._bus.publish(TaskAssigned(
-                    task=saved, assigned_to=user_id,
-                ))
+                await self._bus.publish(
+                    TaskAssigned(
+                        task=saved,
+                        assigned_to=user_id,
+                    )
+                )
             if saved.status == TaskStatus.DONE and task.status != TaskStatus.DONE:
-                await self._bus.publish(TaskCompleted(
-                    task=saved, completed_by=actor_user_id,
-                ))
+                await self._bus.publish(
+                    TaskCompleted(
+                        task=saved,
+                        completed_by=actor_user_id,
+                    )
+                )
         return saved
 
     async def delete_task(self, task_id: str) -> None:
@@ -665,6 +735,10 @@ class SpaceTaskService:
         space_id, task = result
         await self._repo.delete(task_id)
         if self._bus is not None:
-            await self._bus.publish(TaskDeleted(
-                task_id=task_id, list_id=task.list_id, space_id=space_id,
-            ))
+            await self._bus.publish(
+                TaskDeleted(
+                    task_id=task_id,
+                    list_id=task.list_id,
+                    space_id=space_id,
+                )
+            )

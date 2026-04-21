@@ -62,16 +62,18 @@ class SearchView(BaseView):
             limit=limit,
             offset=offset,
         )
-        return self._json({
-            "hits": [
-                {
-                    "scope":    h.scope,
-                    "ref_id":   h.ref_id,
-                    "space_id": h.space_id,
-                    "title":    h.title,
-                    "snippet":  h.snippet,
-                }
-                for h in result["hits"]
-            ],
-            "counts": result["counts"],
-        })
+        return self._json(
+            {
+                "hits": [
+                    {
+                        "scope": h.scope,
+                        "ref_id": h.ref_id,
+                        "space_id": h.space_id,
+                        "title": h.title,
+                        "snippet": h.snippet,
+                    }
+                    for h in result["hits"]
+                ],
+                "counts": result["counts"],
+            }
+        )

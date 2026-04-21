@@ -41,9 +41,14 @@ class _FakeDb:
 def _task(tid: str, status: TaskStatus, due: date | None) -> Task:
     now = datetime.now(timezone.utc)
     return Task(
-        id=tid, list_id="L", title=f"t{tid}",
-        status=status, position=0,
-        created_by="u", created_at=now, updated_at=now,
+        id=tid,
+        list_id="L",
+        title=f"t{tid}",
+        status=status,
+        position=0,
+        created_by="u",
+        created_at=now,
+        updated_at=now,
         due_date=due,
     )
 
@@ -53,7 +58,7 @@ def env():
     today = date(2026, 4, 20)
     tasks = [
         _task("t1", TaskStatus.TODO, today),
-        _task("t2", TaskStatus.DONE, today),     # skipped — already done
+        _task("t2", TaskStatus.DONE, today),  # skipped — already done
         _task("t3", TaskStatus.IN_PROGRESS, today),
         _task("t4", TaskStatus.TODO, date(2030, 1, 1)),  # not today
     ]
@@ -61,7 +66,9 @@ def env():
     fired: list[TaskDeadlineDue] = []
     bus.subscribe(TaskDeadlineDue, lambda e: fired.append(e))
     sched = TaskDeadlineScheduler(
-        repo=_FakeTaskRepo(tasks), db=_FakeDb(), bus=bus,
+        repo=_FakeTaskRepo(tasks),
+        db=_FakeDb(),
+        bus=bus,
     )
     return sched, fired, today
 
@@ -69,7 +76,7 @@ def env():
 async def test_tick_fires_for_due_open_tasks(env):
     sched, fired, today = env
     n = await sched.tick_once(today=today)
-    assert n == 2                                        # t1 + t3
+    assert n == 2  # t1 + t3
     ids = sorted(e.task.id for e in fired)
     assert ids == ["t1", "t3"]
 

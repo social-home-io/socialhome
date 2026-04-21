@@ -37,7 +37,10 @@ class AbstractConversationRepo(Protocol):
     async def get(self, conversation_id: str) -> Conversation | None: ...
     async def list_for_user(self, username: str) -> list[Conversation]: ...
     async def touch_last_message(
-        self, conversation_id: str, *, at: str | None = None,
+        self,
+        conversation_id: str,
+        *,
+        at: str | None = None,
     ) -> None: ...
 
     # Members -------------------------------------------------------------
@@ -45,28 +48,46 @@ class AbstractConversationRepo(Protocol):
     async def add_remote_member(self, member: RemoteConversationMember) -> None: ...
     async def list_members(self, conversation_id: str) -> list[ConversationMember]: ...
     async def list_remote_members(
-        self, conversation_id: str,
+        self,
+        conversation_id: str,
     ) -> list[RemoteConversationMember]: ...
     async def set_last_read(
-        self, conversation_id: str, username: str, *, at: str | None = None,
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        at: str | None = None,
     ) -> None: ...
     async def soft_leave(
-        self, conversation_id: str, username: str, *, at: str | None = None,
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        at: str | None = None,
     ) -> None: ...
 
     # Messages ------------------------------------------------------------
-    async def save_message(self, message: ConversationMessage) -> ConversationMessage: ...
+    async def save_message(
+        self, message: ConversationMessage
+    ) -> ConversationMessage: ...
     async def get_message(self, message_id: str) -> ConversationMessage | None: ...
     async def list_messages(
-        self, conversation_id: str,
-        *, before: str | None = None, limit: int = 50,
+        self,
+        conversation_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
     ) -> list[ConversationMessage]: ...
     async def list_messages_since(
-        self, conversation_id: str, since_iso: str | None,
-        *, limit: int = 500,
+        self,
+        conversation_id: str,
+        since_iso: str | None,
+        *,
+        limit: int = 500,
     ) -> list[ConversationMessage]: ...
     async def list_conversations_with_remote_member(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> list[str]: ...
     async def soft_delete_message(self, message_id: str) -> None: ...
     async def edit_message(self, message_id: str, new_content: str) -> None: ...
@@ -74,10 +95,16 @@ class AbstractConversationRepo(Protocol):
 
     # Reactions -----------------------------------------------------------
     async def add_reaction(
-        self, message_id: str, user_id: str, emoji: str,
+        self,
+        message_id: str,
+        user_id: str,
+        emoji: str,
     ) -> None: ...
     async def remove_reaction(
-        self, message_id: str, user_id: str, emoji: str,
+        self,
+        message_id: str,
+        user_id: str,
+        emoji: str,
     ) -> None: ...
     async def list_reactions(self, message_id: str) -> list[MessageReaction]: ...
 
@@ -98,7 +125,9 @@ class SqliteConversationRepo:
             ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?)
             """,
             (
-                conv.id, conv.type.value, conv.name,
+                conv.id,
+                conv.type.value,
+                conv.name,
                 _iso(conv.created_at),
                 _iso(conv.last_message_at),
                 int(conv.notify_enabled),
@@ -108,7 +137,8 @@ class SqliteConversationRepo:
 
     async def get(self, conversation_id: str) -> Conversation | None:
         row = await self._db.fetchone(
-            "SELECT * FROM conversations WHERE id=?", (conversation_id,),
+            "SELECT * FROM conversations WHERE id=?",
+            (conversation_id,),
         )
         return _row_to_conv(row_to_dict(row))
 
@@ -128,12 +158,13 @@ class SqliteConversationRepo:
             """,
             (username,),
         )
-        return [
-            c for c in (_row_to_conv(d) for d in rows_to_dicts(rows)) if c
-        ]
+        return [c for c in (_row_to_conv(d) for d in rows_to_dicts(rows)) if c]
 
     async def touch_last_message(
-        self, conversation_id: str, *, at: str | None = None,
+        self,
+        conversation_id: str,
+        *,
+        at: str | None = None,
     ) -> None:
         await self._db.enqueue(
             "UPDATE conversations SET last_message_at=COALESCE(?, datetime('now')) "
@@ -156,14 +187,18 @@ class SqliteConversationRepo:
                 deleted_at=excluded.deleted_at
             """,
             (
-                member.conversation_id, member.username, member.joined_at,
-                member.last_read_at, member.history_visible_from,
+                member.conversation_id,
+                member.username,
+                member.joined_at,
+                member.last_read_at,
+                member.history_visible_from,
                 member.deleted_at,
             ),
         )
 
     async def add_remote_member(
-        self, member: RemoteConversationMember,
+        self,
+        member: RemoteConversationMember,
     ) -> None:
         await self._db.enqueue(
             """
@@ -175,14 +210,17 @@ class SqliteConversationRepo:
             DO UPDATE SET history_visible_from=excluded.history_visible_from
             """,
             (
-                member.conversation_id, member.instance_id,
-                member.remote_username, member.joined_at,
+                member.conversation_id,
+                member.instance_id,
+                member.remote_username,
+                member.joined_at,
                 member.history_visible_from,
             ),
         )
 
     async def list_members(
-        self, conversation_id: str,
+        self,
+        conversation_id: str,
     ) -> list[ConversationMember]:
         rows = await self._db.fetchall(
             "SELECT * FROM conversation_members WHERE conversation_id=? "
@@ -202,7 +240,8 @@ class SqliteConversationRepo:
         ]
 
     async def list_remote_members(
-        self, conversation_id: str,
+        self,
+        conversation_id: str,
     ) -> list[RemoteConversationMember]:
         rows = await self._db.fetchall(
             "SELECT * FROM conversation_remote_members WHERE conversation_id=? "
@@ -221,8 +260,11 @@ class SqliteConversationRepo:
         ]
 
     async def set_last_read(
-        self, conversation_id: str, username: str,
-        *, at: str | None = None,
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        at: str | None = None,
     ) -> None:
         await self._db.enqueue(
             """
@@ -234,8 +276,11 @@ class SqliteConversationRepo:
         )
 
     async def soft_leave(
-        self, conversation_id: str, username: str,
-        *, at: str | None = None,
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        at: str | None = None,
     ) -> None:
         """Mark a 1:1 DM as hidden from a participant's sidebar.
 
@@ -255,7 +300,8 @@ class SqliteConversationRepo:
     # ── Messages ───────────────────────────────────────────────────────
 
     async def save_message(
-        self, message: ConversationMessage,
+        self,
+        message: ConversationMessage,
     ) -> ConversationMessage:
         await self._db.enqueue(
             """
@@ -272,29 +318,41 @@ class SqliteConversationRepo:
                 edited_at=excluded.edited_at
             """,
             (
-                message.id, message.conversation_id, message.sender_user_id,
-                message.content, message.type, message.media_url,
-                message.reply_to_id, int(message.deleted),
-                _iso(message.edited_at), _iso(message.created_at),
+                message.id,
+                message.conversation_id,
+                message.sender_user_id,
+                message.content,
+                message.type,
+                message.media_url,
+                message.reply_to_id,
+                int(message.deleted),
+                _iso(message.edited_at),
+                _iso(message.created_at),
             ),
         )
         # Bump conversation timestamp so list_for_user ordering is fresh.
         await self.touch_last_message(
-            message.conversation_id, at=_iso(message.created_at),
+            message.conversation_id,
+            at=_iso(message.created_at),
         )
         return message
 
     async def get_message(
-        self, message_id: str,
+        self,
+        message_id: str,
     ) -> ConversationMessage | None:
         row = await self._db.fetchone(
-            "SELECT * FROM conversation_messages WHERE id=?", (message_id,),
+            "SELECT * FROM conversation_messages WHERE id=?",
+            (message_id,),
         )
         return _row_to_message(row_to_dict(row))
 
     async def list_messages(
-        self, conversation_id: str,
-        *, before: str | None = None, limit: int = 50,
+        self,
+        conversation_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
     ) -> list[ConversationMessage]:
         if before is None:
             rows = await self._db.fetchall(
@@ -314,14 +372,14 @@ class SqliteConversationRepo:
                 """,
                 (conversation_id, before, int(limit)),
             )
-        return [
-            m for m in (_row_to_message(d) for d in rows_to_dicts(rows))
-            if m
-        ]
+        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
 
     async def list_messages_since(
-        self, conversation_id: str, since_iso: str | None,
-        *, limit: int = 500,
+        self,
+        conversation_id: str,
+        since_iso: str | None,
+        *,
+        limit: int = 500,
     ) -> list[ConversationMessage]:
         """Return messages newer than ``since_iso`` (ASC).
 
@@ -348,13 +406,11 @@ class SqliteConversationRepo:
                 """,
                 (conversation_id, int(limit)),
             )
-        return [
-            m for m in (_row_to_message(d) for d in rows_to_dicts(rows))
-            if m
-        ]
+        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
 
     async def list_conversations_with_remote_member(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> list[str]:
         """Return conversation ids that have ``instance_id`` as a remote
         participant. Feeds the DM history scheduler on peer reconnect.
@@ -377,7 +433,9 @@ class SqliteConversationRepo:
         )
 
     async def edit_message(
-        self, message_id: str, new_content: str,
+        self,
+        message_id: str,
+        new_content: str,
     ) -> None:
         await self._db.enqueue(
             "UPDATE conversation_messages "
@@ -386,7 +444,9 @@ class SqliteConversationRepo:
         )
 
     async def count_unread(
-        self, conversation_id: str, username: str,
+        self,
+        conversation_id: str,
+        username: str,
     ) -> int:
         """Count messages newer than this member's ``last_read_at``.
 
@@ -395,8 +455,9 @@ class SqliteConversationRepo:
         never count as "unread"; we resolve username → user_id via the
         users table).
         """
-        return int(await self._db.fetchval(
-            """
+        return int(
+            await self._db.fetchval(
+                """
             SELECT COUNT(*) FROM conversation_messages m
               LEFT JOIN users u ON u.username = ?
              WHERE m.conversation_id = ?
@@ -407,14 +468,18 @@ class SqliteConversationRepo:
                        WHERE conversation_id=? AND username=?),
                      '1970-01-01')
             """,
-            (username, conversation_id, conversation_id, username),
-            default=0,
-        ))
+                (username, conversation_id, conversation_id, username),
+                default=0,
+            )
+        )
 
     # ── Reactions ──────────────────────────────────────────────────────
 
     async def add_reaction(
-        self, message_id: str, user_id: str, emoji: str,
+        self,
+        message_id: str,
+        user_id: str,
+        emoji: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -426,7 +491,10 @@ class SqliteConversationRepo:
         )
 
     async def remove_reaction(
-        self, message_id: str, user_id: str, emoji: str,
+        self,
+        message_id: str,
+        user_id: str,
+        emoji: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM message_reactions "
@@ -435,11 +503,11 @@ class SqliteConversationRepo:
         )
 
     async def list_reactions(
-        self, message_id: str,
+        self,
+        message_id: str,
     ) -> list[MessageReaction]:
         rows = await self._db.fetchall(
-            "SELECT * FROM message_reactions WHERE message_id=? "
-            "ORDER BY reacted_at",
+            "SELECT * FROM message_reactions WHERE message_id=? ORDER BY reacted_at",
             (message_id,),
         )
         return [
@@ -454,6 +522,7 @@ class SqliteConversationRepo:
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
+
 
 def _iso(value) -> str | None:
     if value is None:
@@ -503,7 +572,8 @@ def _row_to_message(row: dict | None) -> ConversationMessage | None:
 
 
 def new_conversation(
-    *, type: ConversationType = ConversationType.DM,
+    *,
+    type: ConversationType = ConversationType.DM,
     name: str | None = None,
 ) -> Conversation:
     return Conversation(

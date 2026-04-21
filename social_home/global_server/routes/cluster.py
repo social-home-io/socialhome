@@ -55,17 +55,14 @@ class ClusterSyncView(GfsBaseView):
         from_node = str(
             body.get("from") or self.request.headers.get("X-Node-Id") or "",
         )
-        msg_type  = str(body.get("type") or "")
-        payload   = body.get("payload") or {}
+        msg_type = str(body.get("type") or "")
+        payload = body.get("payload") or {}
         if not from_node or not msg_type:
             raise web.HTTPBadRequest(reason="Missing 'type' or 'from'")
 
         # Rate-limit per node (60 msgs / minute).
         now = time.monotonic()
-        hits = [
-            t for t in _CLUSTER_SYNC_HITS.get(from_node, [])
-            if now - t < 60.0
-        ]
+        hits = [t for t in _CLUSTER_SYNC_HITS.get(from_node, []) if now - t < 60.0]
         if len(hits) >= CLUSTER_RATE_LIMIT_PER_MIN:
             return web.json_response({"error": "rate_limited"}, status=429)
         hits.append(now)
@@ -81,14 +78,16 @@ class ClusterSyncView(GfsBaseView):
             match = next((n for n in nodes if n.node_id == from_node), None)
             if match is None:
                 return web.json_response(
-                    {"error": "unknown_node"}, status=403,
+                    {"error": "unknown_node"},
+                    status=403,
                 )
             pk_hex = match.public_key
 
         signature = self.request.headers.get("X-Node-Signature", "")
         if not verify_node_signature(raw, signature, pk_hex):
             return web.json_response(
-                {"error": "invalid_signature"}, status=401,
+                {"error": "invalid_signature"},
+                status=401,
             )
 
         # Dispatch by message type.
@@ -121,6 +120,8 @@ class ClusterSyncView(GfsBaseView):
             )
         else:
             log.debug(
-                "cluster: unknown NODE_* type %s from %s", msg_type, from_node,
+                "cluster: unknown NODE_* type %s from %s",
+                msg_type,
+                from_node,
             )
         return web.json_response({"status": "ok"})

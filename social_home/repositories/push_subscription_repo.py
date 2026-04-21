@@ -53,8 +53,13 @@ class SqlitePushSubscriptionRepo:
                 device_label=excluded.device_label
             """,
             (
-                sub.id, sub.user_id, sub.endpoint, sub.p256dh,
-                sub.auth_secret, sub.device_label, created,
+                sub.id,
+                sub.user_id,
+                sub.endpoint,
+                sub.p256dh,
+                sub.auth_secret,
+                sub.device_label,
+                created,
             ),
         )
 

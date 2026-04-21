@@ -28,17 +28,17 @@ log = logging.getLogger(__name__)
 # Substrings within a ValueError message that map to specific status codes.
 # Order matters — first match wins.
 _STATUS_CODE_RULES: tuple[tuple[str, int], ...] = (
-    ("Invalid JSON",                400),
-    ("Missing required fields",     400),
-    ("Unparseable timestamp",       400),
-    ("Unknown event_type",          400),
-    ("No instance found",           404),
-    ("Timestamp skew too large",    410),    # gone — too old
-    ("Replay detected",             410),    # gone — already saw this msg_id
-    ("Invalid envelope signature",  403),
-    ("banned from space",           403),
-    ("Failed to decrypt",           400),
-    ("Decrypted payload",           400),
+    ("Invalid JSON", 400),
+    ("Missing required fields", 400),
+    ("Unparseable timestamp", 400),
+    ("Unknown event_type", 400),
+    ("No instance found", 404),
+    ("Timestamp skew too large", 410),  # gone — too old
+    ("Replay detected", 410),  # gone — already saw this msg_id
+    ("Invalid envelope signature", 403),
+    ("banned from space", 403),
+    ("Failed to decrypt", 400),
+    ("Decrypted payload", 400),
     ("Malformed encrypted payload", 400),
 )
 
@@ -67,9 +67,10 @@ class FederationWebhookView(BaseView):
             log.debug("federation webhook: body read error: %s", exc)
             return web.json_response({"error": "bad_body"}, status=400)
 
-        if len(raw_body) > 1 * 1024 * 1024:           # 1 MiB cap
+        if len(raw_body) > 1 * 1024 * 1024:  # 1 MiB cap
             return web.json_response(
-                {"error": "envelope_too_large"}, status=413,
+                {"error": "envelope_too_large"},
+                status=413,
             )
 
         federation_service = self.request.app.get(K.federation_service_key)
@@ -79,18 +80,22 @@ class FederationWebhookView(BaseView):
                 webhook_id,
             )
             return web.json_response(
-                {"error": "service_unavailable"}, status=503,
+                {"error": "service_unavailable"},
+                status=503,
             )
 
         try:
             result = await federation_service.handle_inbound_webhook(
-                webhook_id, raw_body,
+                webhook_id,
+                raw_body,
             )
         except ValueError as exc:
             status = _classify(str(exc))
             log.debug(
                 "federation webhook: rejected webhook_id=%s status=%d reason=%s",
-                webhook_id, status, exc,
+                webhook_id,
+                status,
+                exc,
             )
             return web.json_response({"error": str(exc)}, status=status)
         except Exception:
@@ -99,7 +104,8 @@ class FederationWebhookView(BaseView):
                 webhook_id,
             )
             return web.json_response(
-                {"error": "internal"}, status=500,
+                {"error": "internal"},
+                status=500,
             )
 
         return web.json_response(result)

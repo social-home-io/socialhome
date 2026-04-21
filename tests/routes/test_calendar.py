@@ -6,15 +6,17 @@ from .conftest import _auth
 
 async def test_create_calendar(client):
     """POST /api/calendars creates a calendar."""
-    r = await client.post("/api/calendars", json={"name": "Work"},
-                           headers=_auth(client._tok))
+    r = await client.post(
+        "/api/calendars", json={"name": "Work"}, headers=_auth(client._tok)
+    )
     assert r.status == 201
 
 
 async def test_list_calendars(client):
     """GET /api/calendars returns user's calendars."""
-    await client.post("/api/calendars", json={"name": "Personal"},
-                       headers=_auth(client._tok))
+    await client.post(
+        "/api/calendars", json={"name": "Personal"}, headers=_auth(client._tok)
+    )
     r = await client.get("/api/calendars", headers=_auth(client._tok))
     assert r.status == 200
     assert len(await r.json()) >= 1
@@ -22,19 +24,25 @@ async def test_list_calendars(client):
 
 async def test_create_event(client):
     """POST /api/calendars/{id}/events creates an event."""
-    r = await client.post("/api/calendars", json={"name": "C"},
-                           headers=_auth(client._tok))
+    r = await client.post(
+        "/api/calendars", json={"name": "C"}, headers=_auth(client._tok)
+    )
     cid = (await r.json())["id"]
     now = datetime.now(timezone.utc)
-    r2 = await client.post(f"/api/calendars/{cid}/events", json={
-        "summary": "Meeting",
-        "start": now.isoformat(),
-        "end": (now + timedelta(hours=1)).isoformat(),
-    }, headers=_auth(client._tok))
+    r2 = await client.post(
+        f"/api/calendars/{cid}/events",
+        json={
+            "summary": "Meeting",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     assert r2.status == 201
 
 
 # ─── Space-scoped calendar + RSVP (§23.7) ─────────────────────────────────
+
 
 async def _seed_space(client):
     db = client._db
@@ -57,17 +65,21 @@ async def _seed_space(client):
 async def test_space_create_and_list_events(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "Stand-up",
-        "start": now.isoformat(),
-        "end": (now + timedelta(minutes=30)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Stand-up",
+            "start": now.isoformat(),
+            "end": (now + timedelta(minutes=30)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     assert r.status == 201
     eid = (await r.json())["id"]
 
     # Use Z-suffix so the `+` of +00:00 doesn't get URL-decoded to a space.
     start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
-    end_q   = (now + timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
     r2 = await client.get(
         f"/api/spaces/sp-cal/calendar/events?start={start_q}&end={end_q}",
         headers=_auth(client._tok),
@@ -90,11 +102,15 @@ async def test_space_create_event_requires_start_end(client):
 async def test_rsvp_roundtrip_and_broadcast(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "Party",
-        "start": now.isoformat(),
-        "end": (now + timedelta(hours=2)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Party",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=2)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     eid = (await r.json())["id"]
 
     r2 = await client.post(
@@ -118,10 +134,15 @@ async def test_rsvp_roundtrip_and_broadcast(client):
 async def test_rsvp_invalid_status_422(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "X", "start": now.isoformat(),
-        "end": (now + timedelta(hours=1)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "X",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     eid = (await r.json())["id"]
     r2 = await client.post(
         f"/api/calendars/events/{eid}/rsvp",
@@ -134,10 +155,15 @@ async def test_rsvp_invalid_status_422(client):
 async def test_space_delete_event(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "Gone", "start": now.isoformat(),
-        "end": (now + timedelta(hours=1)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Gone",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     eid = (await r.json())["id"]
     r2 = await client.delete(
         f"/api/spaces/sp-cal/calendar/events/{eid}",
@@ -152,6 +178,7 @@ async def test_space_delete_event(client):
 async def _seed_outsider(client):
     """Register a second user with no space membership and return auth."""
     from social_home.auth import sha256_token_hash
+
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
         "VALUES('outsider', 'out-id', 'Out', 0)",
@@ -169,22 +196,30 @@ async def test_space_create_event_non_member_403(client):
     await _seed_space(client)
     outsider = await _seed_outsider(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "Blocked",
-        "start": now.isoformat(),
-        "end":   (now + timedelta(minutes=15)).isoformat(),
-    }, headers=outsider)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Blocked",
+            "start": now.isoformat(),
+            "end": (now + timedelta(minutes=15)).isoformat(),
+        },
+        headers=outsider,
+    )
     assert r.status == 403
 
 
 async def test_rsvp_non_member_403(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "Party",
-        "start": now.isoformat(),
-        "end":   (now + timedelta(hours=1)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Party",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     eid = (await r.json())["id"]
     outsider = await _seed_outsider(client)
     r2 = await client.post(
@@ -198,11 +233,15 @@ async def test_rsvp_non_member_403(client):
 async def test_space_event_patch_updates_fields(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "Old title",
-        "start": now.isoformat(),
-        "end":   (now + timedelta(hours=1)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Old title",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     eid = (await r.json())["id"]
 
     r2 = await client.patch(
@@ -219,11 +258,15 @@ async def test_space_event_patch_updates_fields(client):
 async def test_space_event_patch_non_member_403(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
-    r = await client.post("/api/spaces/sp-cal/calendar/events", json={
-        "summary": "X",
-        "start": now.isoformat(),
-        "end":   (now + timedelta(hours=1)).isoformat(),
-    }, headers=_auth(client._tok))
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "X",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
     eid = (await r.json())["id"]
     outsider = await _seed_outsider(client)
     r2 = await client.patch(

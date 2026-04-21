@@ -23,6 +23,7 @@ from .base import bool_col, row_to_dict, rows_to_dicts
 
 # ─── Abstract interface ───────────────────────────────────────────────────
 
+
 @runtime_checkable
 class AbstractUserRepo(Protocol):
     # Local users ---------------------------------------------------------
@@ -41,15 +42,22 @@ class AbstractUserRepo(Protocol):
     async def list_remote_for_instance(self, instance_id: str) -> list[RemoteUser]: ...
     async def get_instance_for_user(self, user_id: str) -> str | None: ...
     async def mark_remote_deprovisioned(
-        self, user_id: str, *, at: str | None = None,
+        self,
+        user_id: str,
+        *,
+        at: str | None = None,
     ) -> None: ...
 
     # API tokens ----------------------------------------------------------
     async def list_api_tokens(self, user_id: str) -> list[dict]: ...
     async def list_all_api_tokens(self) -> list[dict]: ...
     async def create_api_token(
-        self, user_id: str, token_hash: str, label: str,
-        *, expires_at: str | None = None,
+        self,
+        user_id: str,
+        token_hash: str,
+        label: str,
+        *,
+        expires_at: str | None = None,
     ) -> str: ...
     async def revoke_api_token(self, token_id: str) -> None: ...
     async def get_user_by_token_hash(self, token_hash: str) -> User | None: ...
@@ -61,14 +69,19 @@ class AbstractUserRepo(Protocol):
 
     # Profile picture (hash only — bytes live in ProfilePictureRepo) ------
     async def set_picture_hash(
-        self, user_id: str, picture_hash: str | None,
+        self,
+        user_id: str,
+        picture_hash: str | None,
     ) -> None: ...
     async def set_remote_picture_hash(
-        self, user_id: str, picture_hash: str | None,
+        self,
+        user_id: str,
+        picture_hash: str | None,
     ) -> None: ...
 
 
 # ─── Concrete SQLite implementation ───────────────────────────────────────
+
 
 class SqliteUserRepo:
     """SQLite-backed :class:`AbstractUserRepo` implementation."""
@@ -80,13 +93,15 @@ class SqliteUserRepo:
 
     async def get(self, username: str) -> User | None:
         row = await self._db.fetchone(
-            "SELECT * FROM users WHERE username=?", (username,),
+            "SELECT * FROM users WHERE username=?",
+            (username,),
         )
         return _row_to_user(row_to_dict(row))
 
     async def get_by_user_id(self, user_id: str) -> User | None:
         row = await self._db.fetchone(
-            "SELECT * FROM users WHERE user_id=?", (user_id,),
+            "SELECT * FROM users WHERE user_id=?",
+            (user_id,),
         )
         return _row_to_user(row_to_dict(row))
 
@@ -142,16 +157,32 @@ class SqliteUserRepo:
                 source=excluded.source
             """,
             (
-                user.username, user.user_id, user.display_name,
-                int(user.is_admin), user.picture_hash, user.state,
-                user.bio, user.locale, user.theme, user.emoji_skin_tone_default,
-                user.status.emoji, user.status.text, user.status.expires_at,
-                user.public_key, user.public_key_version, int(user.is_new_member),
+                user.username,
+                user.user_id,
+                user.display_name,
+                int(user.is_admin),
+                user.picture_hash,
+                user.state,
+                user.bio,
+                user.locale,
+                user.theme,
+                user.emoji_skin_tone_default,
+                user.status.emoji,
+                user.status.text,
+                user.status.expires_at,
+                user.public_key,
+                user.public_key_version,
+                int(user.is_new_member),
                 user.preferences_json,
-                user.email, user.phone, user.date_of_birth,
-                user.declared_age, int(user.is_minor),
+                user.email,
+                user.phone,
+                user.date_of_birth,
+                user.declared_age,
+                int(user.is_minor),
                 int(user.child_protection_enabled),
-                user.deleted_at, user.grace_until, user.created_at,
+                user.deleted_at,
+                user.grace_until,
+                user.created_at,
                 user.source,
             ),
         )
@@ -185,8 +216,8 @@ class SqliteUserRepo:
         )
 
     async def soft_delete(self, username: str, grace_days: int = 30) -> None:
-        now    = datetime.now(timezone.utc).isoformat()
-        grace  = (datetime.now(timezone.utc).timestamp() + grace_days * 86400)
+        now = datetime.now(timezone.utc).isoformat()
+        grace = datetime.now(timezone.utc).timestamp() + grace_days * 86400
         grace_iso = datetime.fromtimestamp(grace, tz=timezone.utc).isoformat()
         await self._db.enqueue(
             "UPDATE users SET state='inactive', deleted_at=?, grace_until=? "
@@ -198,7 +229,8 @@ class SqliteUserRepo:
 
     async def get_remote(self, user_id: str) -> RemoteUser | None:
         row = await self._db.fetchone(
-            "SELECT * FROM remote_users WHERE user_id=?", (user_id,),
+            "SELECT * FROM remote_users WHERE user_id=?",
+            (user_id,),
         )
         return _row_to_remote_user(row_to_dict(row))
 
@@ -224,10 +256,17 @@ class SqliteUserRepo:
                 synced_at=excluded.synced_at
             """,
             (
-                remote.user_id, remote.instance_id, remote.remote_username,
-                remote.display_name, remote.alias, remote.visible_to,
-                remote.picture_hash, remote.bio, remote.status_json,
-                remote.public_key, remote.public_key_version,
+                remote.user_id,
+                remote.instance_id,
+                remote.remote_username,
+                remote.display_name,
+                remote.alias,
+                remote.visible_to,
+                remote.picture_hash,
+                remote.bio,
+                remote.status_json,
+                remote.public_key,
+                remote.public_key_version,
                 remote.synced_at,
             ),
         )
@@ -240,12 +279,13 @@ class SqliteUserRepo:
             "ORDER BY remote_username",
             (instance_id,),
         )
-        return [
-            r for r in (_row_to_remote_user(d) for d in rows_to_dicts(rows)) if r
-        ]
+        return [r for r in (_row_to_remote_user(d) for d in rows_to_dicts(rows)) if r]
 
     async def mark_remote_deprovisioned(
-        self, user_id: str, *, at: str | None = None,
+        self,
+        user_id: str,
+        *,
+        at: str | None = None,
     ) -> None:
         """Flag a remote user as gone. The row is kept so historical
         references (posts, comments) still render the display name.
@@ -304,8 +344,12 @@ class SqliteUserRepo:
         return rows_to_dicts(rows)
 
     async def create_api_token(
-        self, user_id: str, token_hash: str, label: str,
-        *, expires_at: str | None = None,
+        self,
+        user_id: str,
+        token_hash: str,
+        label: str,
+        *,
+        expires_at: str | None = None,
     ) -> str:
         token_id = uuid.uuid4().hex
         await self._db.enqueue(
@@ -356,21 +400,21 @@ class SqliteUserRepo:
 
     async def unblock(self, blocker_user_id: str, blocked_user_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM user_blocks "
-            "WHERE blocker_user_id=? AND blocked_user_id=?",
+            "DELETE FROM user_blocks WHERE blocker_user_id=? AND blocked_user_id=?",
             (blocker_user_id, blocked_user_id),
         )
 
     async def is_blocked(self, blocker_user_id: str, blocked_user_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT 1 FROM user_blocks "
-            "WHERE blocker_user_id=? AND blocked_user_id=?",
+            "SELECT 1 FROM user_blocks WHERE blocker_user_id=? AND blocked_user_id=?",
             (blocker_user_id, blocked_user_id),
         )
         return row is not None
 
     async def set_picture_hash(
-        self, user_id: str, picture_hash: str | None,
+        self,
+        user_id: str,
+        picture_hash: str | None,
     ) -> None:
         await self._db.enqueue(
             "UPDATE users SET picture_hash=? WHERE user_id=?",
@@ -378,7 +422,9 @@ class SqliteUserRepo:
         )
 
     async def set_remote_picture_hash(
-        self, user_id: str, picture_hash: str | None,
+        self,
+        user_id: str,
+        picture_hash: str | None,
     ) -> None:
         await self._db.enqueue(
             "UPDATE remote_users SET picture_hash=? WHERE user_id=?",
@@ -387,6 +433,7 @@ class SqliteUserRepo:
 
 
 # ─── Row ↔ domain mapping ─────────────────────────────────────────────────
+
 
 def _row_to_user(row: dict | None) -> User | None:
     if row is None:

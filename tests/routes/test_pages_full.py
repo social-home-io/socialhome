@@ -1,11 +1,14 @@
 """Full route coverage for pages endpoints."""
+
 from .conftest import _auth
 
 
 async def test_page_full_lifecycle(client):
     """Create → get → update → lock → unlock → delete."""
     h = _auth(client._tok)
-    r = await client.post("/api/pages", json={"title": "Wiki", "content": "Hello"}, headers=h)
+    r = await client.post(
+        "/api/pages", json={"title": "Wiki", "content": "Hello"}, headers=h
+    )
     assert r.status == 201
     pid = (await r.json())["id"]
 

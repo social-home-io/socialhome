@@ -56,14 +56,16 @@ class GfsFederationService:
         auto_accept: bool = False,
     ) -> None:
         """Register or update a client household instance."""
-        await self._repo.upsert_instance(ClientInstance(
-            instance_id=instance_id,
-            display_name=display_name,
-            public_key=public_key,
-            endpoint_url=webhook_url,
-            status="active" if auto_accept else "pending",
-            auto_accept=auto_accept,
-        ))
+        await self._repo.upsert_instance(
+            ClientInstance(
+                instance_id=instance_id,
+                display_name=display_name,
+                public_key=public_key,
+                endpoint_url=webhook_url,
+                status="active" if auto_accept else "pending",
+                auto_accept=auto_accept,
+            )
+        )
         log.debug("GFS: registered instance %s webhook=%s", instance_id, webhook_url)
 
     async def publish_event(
@@ -92,9 +94,9 @@ class GfsFederationService:
         if signature:
             canonical = json.dumps(
                 {
-                    "space_id":      space_id,
-                    "event_type":    event_type,
-                    "payload":       payload,
+                    "space_id": space_id,
+                    "event_type": event_type,
+                    "payload": payload,
                     "from_instance": from_instance,
                 },
                 separators=(",", ":"),
@@ -109,19 +111,22 @@ class GfsFederationService:
         # pending row. Admin portal fleshes the metadata out on accept.
         existing = await self._repo.get_space(space_id)
         if existing is None:
-            await self._repo.upsert_space(GlobalSpace(
-                space_id=space_id,
-                owning_instance=from_instance,
-            ))
+            await self._repo.upsert_space(
+                GlobalSpace(
+                    space_id=space_id,
+                    owning_instance=from_instance,
+                )
+            )
 
         subscribers = await self._repo.list_subscribers(
-            space_id, exclude=from_instance,
+            space_id,
+            exclude=from_instance,
         )
 
         event_body = {
-            "space_id":      space_id,
-            "event_type":    event_type,
-            "payload":       payload,
+            "space_id": space_id,
+            "event_type": event_type,
+            "payload": payload,
             "from_instance": from_instance,
         }
 
@@ -133,23 +138,30 @@ class GfsFederationService:
         if existing is None:
             # Subscription precedes publish — create a pending row so the
             # admin can see the demand.
-            await self._repo.upsert_space(GlobalSpace(
-                space_id=space_id, owning_instance=instance_id,
-            ))
+            await self._repo.upsert_space(
+                GlobalSpace(
+                    space_id=space_id,
+                    owning_instance=instance_id,
+                )
+            )
         await self._repo.add_subscriber(
-            space_id=space_id, instance_id=instance_id,
+            space_id=space_id,
+            instance_id=instance_id,
         )
         log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
 
     async def unsubscribe(self, instance_id: str, space_id: str) -> None:
         """Remove *instance_id* from subscribers of *space_id*."""
         await self._repo.remove_subscriber(
-            space_id=space_id, instance_id=instance_id,
+            space_id=space_id,
+            instance_id=instance_id,
         )
         log.debug("GFS: %s unsubscribed from space %s", instance_id, space_id)
 
     async def list_spaces(
-        self, *, status: str | None = None,
+        self,
+        *,
+        status: str | None = None,
     ) -> list[GlobalSpace]:
         """Return global/public spaces known to this GFS node.
 
@@ -181,7 +193,9 @@ class GfsFederationService:
             delivered: list[str] = []
             for sub in subscribers:
                 # Try DataChannel first.
-                if self._transport is not None and self._transport.is_ready(sub.instance_id):
+                if self._transport is not None and self._transport.is_ready(
+                    sub.instance_id
+                ):
                     try:
                         # Build a minimal RemoteInstance for the transport.
                         inst = RemoteInstance(
@@ -196,7 +210,8 @@ class GfsFederationService:
                             source=InstanceSource.MANUAL,
                         )
                         result = await self._transport.send(
-                            instance=inst, envelope_dict=event_body,
+                            instance=inst,
+                            envelope_dict=event_body,
                         )
                         if result.ok:
                             delivered.append(sub.instance_id)
@@ -204,7 +219,8 @@ class GfsFederationService:
                     except Exception as exc:
                         log.debug(
                             "GFS RTC fan-out failed for %s, falling back to webhook: %s",
-                            sub.instance_id, exc,
+                            sub.instance_id,
+                            exc,
                         )
 
                 # Webhook fallback.
@@ -219,12 +235,14 @@ class GfsFederationService:
                         else:
                             log.warning(
                                 "GFS fan-out: %s returned HTTP %s",
-                                sub.endpoint_url, resp.status,
+                                sub.endpoint_url,
+                                resp.status,
                             )
                 except Exception as exc:
                     log.warning(
                         "GFS fan-out: failed to deliver to %s: %s",
-                        sub.endpoint_url, exc,
+                        sub.endpoint_url,
+                        exc,
                     )
             return delivered
         finally:

@@ -39,7 +39,10 @@ log = logging.getLogger(__name__)
 
 
 def _make_turn_credential(
-    secret: str, user_id: str, *, ttl_seconds: int = 3600,
+    secret: str,
+    user_id: str,
+    *,
+    ttl_seconds: int = 3600,
 ) -> tuple[str, str]:
     """coturn-style time-limited TURN credential (section 26.7).
 
@@ -84,9 +87,7 @@ async def _require_call_participant(view, call_id: str) -> web.Response | None:
         return None
     members = await conv_repo.list_members(session.conversation_id)
     username = ctx.username
-    if not any(
-        m.username == username and m.deleted_at is None for m in members
-    ):
+    if not any(m.username == username and m.deleted_at is None for m in members):
         return web.json_response({"error": "forbidden"}, status=403)
     return None
 
@@ -104,8 +105,10 @@ class CallCollectionView(BaseView):
         call_type = body.get("call_type", "audio")
         if not conversation_id or not sdp_offer:
             return web.json_response(
-                {"error": "missing_fields",
-                 "required": ["conversation_id", "sdp_offer"]},
+                {
+                    "error": "missing_fields",
+                    "required": ["conversation_id", "sdp_offer"],
+                },
                 status=422,
             )
         svc = self.svc(K.call_signaling_service_key)
@@ -117,14 +120,17 @@ class CallCollectionView(BaseView):
                 sdp_offer=sdp_offer,
             )
         except PermissionError as exc:
-            return web.json_response({"error": "forbidden",
-                                      "detail": str(exc)}, status=403)
+            return web.json_response(
+                {"error": "forbidden", "detail": str(exc)}, status=403
+            )
         except CallConversationError as exc:
-            return web.json_response({"error": "invalid_conversation",
-                                      "detail": str(exc)}, status=422)
+            return web.json_response(
+                {"error": "invalid_conversation", "detail": str(exc)}, status=422
+            )
         except ValueError as exc:
-            return web.json_response({"error": "invalid_request",
-                                      "detail": str(exc)}, status=422)
+            return web.json_response(
+                {"error": "invalid_request", "detail": str(exc)}, status=422
+            )
         return web.json_response(result, status=201)
 
 
@@ -150,8 +156,9 @@ class CallAnswerView(BaseView):
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
         except PermissionError as exc:
-            return web.json_response({"error": "forbidden",
-                                      "detail": str(exc)}, status=403)
+            return web.json_response(
+                {"error": "forbidden", "detail": str(exc)}, status=403
+            )
         return web.json_response(result)
 
 
@@ -191,8 +198,9 @@ class CallHangupView(BaseView):
         try:
             await svc.hangup(call_id=call_id, hanger_user_id=self.user.user_id)
         except PermissionError as exc:
-            return web.json_response({"error": "forbidden",
-                                      "detail": str(exc)}, status=403)
+            return web.json_response(
+                {"error": "forbidden", "detail": str(exc)}, status=403
+            )
         return web.Response(status=204)
 
 
@@ -207,11 +215,13 @@ class CallDeclineView(BaseView):
         svc = self.svc(K.call_signaling_service_key)
         try:
             await svc.decline(
-                call_id=call_id, decliner_user_id=self.user.user_id,
+                call_id=call_id,
+                decliner_user_id=self.user.user_id,
             )
         except PermissionError as exc:
-            return web.json_response({"error": "forbidden",
-                                      "detail": str(exc)}, status=403)
+            return web.json_response(
+                {"error": "forbidden", "detail": str(exc)}, status=403
+            )
         return web.Response(status=204)
 
 
@@ -229,7 +239,8 @@ class CallJoinView(BaseView):
         raw_offers = body.get("sdp_offers") or {}
         if not isinstance(raw_offers, dict):
             return web.json_response(
-                {"error": "sdp_offers must be an object"}, status=422,
+                {"error": "sdp_offers must be an object"},
+                status=422,
             )
         sdp_offers = {str(k): str(v) for k, v in raw_offers.items()}
         svc = self.svc(K.call_signaling_service_key)
@@ -242,8 +253,9 @@ class CallJoinView(BaseView):
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
         except PermissionError as exc:
-            return web.json_response({"error": "forbidden",
-                                      "detail": str(exc)}, status=403)
+            return web.json_response(
+                {"error": "forbidden", "detail": str(exc)}, status=403
+            )
         return web.json_response(result, status=200)
 
 
@@ -281,21 +293,23 @@ class CallQualityView(BaseView):
             return guard
         call_repo = self.svc(K.call_repo_key)
         samples = await call_repo.list_quality_samples(call_id)
-        return web.json_response({
-            "call_id": call_id,
-            "samples": [
-                {
-                    "reporter_user_id": s.reporter_user_id,
-                    "sampled_at":       s.sampled_at,
-                    "rtt_ms":           s.rtt_ms,
-                    "jitter_ms":        s.jitter_ms,
-                    "loss_pct":         s.loss_pct,
-                    "audio_bitrate":    s.audio_bitrate,
-                    "video_bitrate":    s.video_bitrate,
-                }
-                for s in samples
-            ],
-        })
+        return web.json_response(
+            {
+                "call_id": call_id,
+                "samples": [
+                    {
+                        "reporter_user_id": s.reporter_user_id,
+                        "sampled_at": s.sampled_at,
+                        "rtt_ms": s.rtt_ms,
+                        "jitter_ms": s.jitter_ms,
+                        "loss_pct": s.loss_pct,
+                        "audio_bitrate": s.audio_bitrate,
+                        "video_bitrate": s.video_bitrate,
+                    }
+                    for s in samples
+                ],
+            }
+        )
 
 
 class CallActiveView(BaseView):
@@ -332,8 +346,7 @@ class ConversationCallHistoryView(BaseView):
         conv_repo = self.svc(K.conversation_repo_key)
         members = await conv_repo.list_members(conversation_id)
         if not any(
-            m.username == ctx.username and m.deleted_at is None
-            for m in members
+            m.username == ctx.username and m.deleted_at is None for m in members
         ):
             return web.json_response({"error": "forbidden"}, status=403)
         try:
@@ -343,28 +356,31 @@ class ConversationCallHistoryView(BaseView):
         limit = max(1, min(200, limit))
         call_repo = self.svc(K.call_repo_key)
         rows = await call_repo.list_history_for_conversation(
-            conversation_id, limit=limit,
+            conversation_id,
+            limit=limit,
         )
         out = []
         for r in rows:
             samples = await call_repo.list_quality_samples(r.id)
             avg_rtt = _avg(s.rtt_ms for s in samples)
             avg_loss = _avg(s.loss_pct for s in samples)
-            out.append({
-                "call_id":            r.id,
-                "conversation_id":    r.conversation_id,
-                "initiator_user_id":  r.initiator_user_id,
-                "callee_user_id":     r.callee_user_id,
-                "call_type":          r.call_type,
-                "status":             r.status,
-                "participant_user_ids": list(r.participant_user_ids),
-                "started_at":         r.started_at,
-                "connected_at":       r.connected_at,
-                "ended_at":           r.ended_at,
-                "duration_seconds":   r.duration_seconds,
-                "avg_rtt_ms":         avg_rtt,
-                "avg_loss_pct":       avg_loss,
-            })
+            out.append(
+                {
+                    "call_id": r.id,
+                    "conversation_id": r.conversation_id,
+                    "initiator_user_id": r.initiator_user_id,
+                    "callee_user_id": r.callee_user_id,
+                    "call_type": r.call_type,
+                    "status": r.status,
+                    "participant_user_ids": list(r.participant_user_ids),
+                    "started_at": r.started_at,
+                    "connected_at": r.connected_at,
+                    "ended_at": r.ended_at,
+                    "duration_seconds": r.duration_seconds,
+                    "avg_rtt_ms": avg_rtt,
+                    "avg_loss_pct": avg_loss,
+                }
+            )
         return web.json_response({"calls": out})
 
 
@@ -390,7 +406,8 @@ class IceServersView(BaseView):
             entry: dict = {"urls": [cfg.webrtc_turn_url]}
             if getattr(cfg, "webrtc_turn_secret", "") and ctx.user_id:
                 username, credential = _make_turn_credential(
-                    cfg.webrtc_turn_secret, ctx.user_id,
+                    cfg.webrtc_turn_secret,
+                    ctx.user_id,
                     ttl_seconds=getattr(cfg, "webrtc_turn_ttl_seconds", 3600),
                 )
                 entry["username"] = username
@@ -412,7 +429,7 @@ def _coerce_int(value) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -421,7 +438,7 @@ def _coerce_float(value) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -434,23 +451,23 @@ def _avg(values) -> float | None:
 
 def _hot_dict(c) -> dict:
     return {
-        "call_id":         c.call_id,
-        "status":          c.status,
-        "caller":          c.caller_user_id,
-        "callee":          c.callee_user_id,
-        "call_type":       c.call_type,
-        "created_at":      c.created_at,
+        "call_id": c.call_id,
+        "status": c.status,
+        "caller": c.caller_user_id,
+        "callee": c.callee_user_id,
+        "call_type": c.call_type,
+        "created_at": c.created_at,
         "conversation_id": c.conversation_id,
     }
 
 
 def _cold_dict(c) -> dict:
     return {
-        "call_id":         c.id,
-        "status":          c.status,
-        "caller":          c.initiator_user_id,
-        "callee":          c.callee_user_id,
-        "call_type":       c.call_type,
-        "created_at":      c.started_at,
+        "call_id": c.id,
+        "status": c.status,
+        "caller": c.initiator_user_id,
+        "callee": c.callee_user_id,
+        "call_type": c.call_type,
+        "created_at": c.started_at,
         "conversation_id": c.conversation_id,
     }

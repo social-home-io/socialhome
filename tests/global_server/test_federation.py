@@ -15,6 +15,7 @@ from social_home.global_server.repositories import SqliteGfsFederationRepo
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _make_keypair() -> tuple[bytes, bytes]:
     """Return (private_seed_bytes, public_key_bytes) for an Ed25519 keypair."""
     sk = Ed25519PrivateKey.generate()
@@ -32,13 +33,16 @@ def _make_keypair() -> tuple[bytes, bytes]:
 
 def _sign(seed: bytes, payload: dict) -> str:
     """Return a URL-safe base64 Ed25519 signature over the canonical JSON of *payload*."""
-    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
     sk = Ed25519PrivateKey.from_private_bytes(seed)
     sig = sk.sign(canonical)
     return base64.urlsafe_b64encode(sig).rstrip(b"=").decode("ascii")
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 async def svc(gfs_db):
@@ -48,6 +52,7 @@ async def svc(gfs_db):
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
+
 
 async def test_register_instance_succeeds(svc):
     """register_instance() persists the instance without raising."""
@@ -106,14 +111,18 @@ async def test_publish_with_no_subscribers_returns_empty_list(svc):
     await svc.register_instance("inst-pub", pk.hex(), "http://pub.example.com/wh")
 
     payload_dict = {
-        "space_id":      "space-nosubs",
-        "event_type":    "post.created",
-        "payload":       {"text": "hello"},
+        "space_id": "space-nosubs",
+        "event_type": "post.created",
+        "payload": {"text": "hello"},
         "from_instance": "inst-pub",
     }
     sig = _sign(seed, payload_dict)
     delivered = await svc.publish_event(
-        "space-nosubs", "post.created", {"text": "hello"}, "inst-pub", sig,
+        "space-nosubs",
+        "post.created",
+        {"text": "hello"},
+        "inst-pub",
+        sig,
     )
     assert delivered == []
 
@@ -124,7 +133,10 @@ async def test_publish_invalid_signature_raises_permission_error(svc):
     await svc.register_instance("inst-badsig", pk.hex(), "http://badsig.example.com/wh")
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.publish_event(
-            "space-sig", "post.created", {"text": "hi"}, "inst-badsig",
+            "space-sig",
+            "post.created",
+            {"text": "hi"},
+            "inst-badsig",
             signature="invalidsignatureXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
         )
 
@@ -133,6 +145,10 @@ async def test_publish_without_signature_still_relays(svc):
     """publish_event() with an empty signature skips verification and relays."""
     await svc.register_instance("inst-nosig", "dd" * 32, "http://nosig.example.com/wh")
     delivered = await svc.publish_event(
-        "space-nosig", "ping", {}, "inst-nosig", signature="",
+        "space-nosig",
+        "ping",
+        {},
+        "inst-nosig",
+        signature="",
     )
     assert isinstance(delivered, list)

@@ -43,7 +43,8 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
@@ -96,12 +97,16 @@ def _swap_to_ha_adapter(app, users):
 
 
 async def test_list_ha_users_includes_synced_flag(client):
-    _swap_to_ha_adapter(client.server.app, [
-        ExternalUser("pascal", "Pascal",  None, is_admin=True),
-        ExternalUser("kid",    "Little Pascal", None, is_admin=False),
-    ])
+    _swap_to_ha_adapter(
+        client.server.app,
+        [
+            ExternalUser("pascal", "Pascal", None, is_admin=True),
+            ExternalUser("kid", "Little Pascal", None, is_admin=False),
+        ],
+    )
     resp = await client.get(
-        "/api/admin/ha-users", headers=_auth(client._admin_token),
+        "/api/admin/ha-users",
+        headers=_auth(client._admin_token),
     )
     assert resp.status == 200
     body = await resp.json()
@@ -112,9 +117,12 @@ async def test_list_ha_users_includes_synced_flag(client):
 
 
 async def test_provision_ha_user_creates_row(client):
-    _swap_to_ha_adapter(client.server.app, [
-        ExternalUser("kid", "Little Pascal", None, is_admin=False),
-    ])
+    _swap_to_ha_adapter(
+        client.server.app,
+        [
+            ExternalUser("kid", "Little Pascal", None, is_admin=False),
+        ],
+    )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",
         headers=_auth(client._admin_token),
@@ -124,9 +132,12 @@ async def test_provision_ha_user_creates_row(client):
     assert body["username"] == "kid"
     assert body["synced"] is True
     # List again — kid is now synced.
-    listing = await (await client.get(
-        "/api/admin/ha-users", headers=_auth(client._admin_token),
-    )).json()
+    listing = await (
+        await client.get(
+            "/api/admin/ha-users",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     kid = next(u for u in listing if u["username"] == "kid")
     assert kid["synced"] is True
 
@@ -141,9 +152,12 @@ async def test_provision_unknown_ha_user_404(client):
 
 
 async def test_deprovision_ha_user(client):
-    _swap_to_ha_adapter(client.server.app, [
-        ExternalUser("kid", "Little Pascal", None, is_admin=False),
-    ])
+    _swap_to_ha_adapter(
+        client.server.app,
+        [
+            ExternalUser("kid", "Little Pascal", None, is_admin=False),
+        ],
+    )
     await client.post(
         "/api/admin/ha-users/kid/provision",
         headers=_auth(client._admin_token),
@@ -154,19 +168,26 @@ async def test_deprovision_ha_user(client):
     )
     assert resp.status == 200
     # Re-listing: kid is back to synced=False.
-    listing = await (await client.get(
-        "/api/admin/ha-users", headers=_auth(client._admin_token),
-    )).json()
+    listing = await (
+        await client.get(
+            "/api/admin/ha-users",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     kid = next(u for u in listing if u["username"] == "kid")
     assert kid["synced"] is False
 
 
 async def test_forbidden_for_non_admin(client):
-    _swap_to_ha_adapter(client.server.app, [
-        ExternalUser("kid", "Little Pascal", None, is_admin=False),
-    ])
+    _swap_to_ha_adapter(
+        client.server.app,
+        [
+            ExternalUser("kid", "Little Pascal", None, is_admin=False),
+        ],
+    )
     resp = await client.get(
-        "/api/admin/ha-users", headers=_auth(client._bob_token),
+        "/api/admin/ha-users",
+        headers=_auth(client._bob_token),
     )
     assert resp.status == 403
 
@@ -175,6 +196,7 @@ async def test_501_in_standalone_mode(client):
     # The default adapter in the standalone fixture has no
     # list_external_users — the route should 501 out.
     resp = await client.get(
-        "/api/admin/ha-users", headers=_auth(client._admin_token),
+        "/api/admin/ha-users",
+        headers=_auth(client._admin_token),
     )
     assert resp.status == 501

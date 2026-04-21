@@ -14,6 +14,7 @@ from social_home.platform.adapter import (
 
 # ── InstanceConfig ────────────────────────────────────────────────────────────
 
+
 def test_instance_config_fields():
     """InstanceConfig stores all five fields and is frozen."""
     cfg = InstanceConfig(
@@ -33,14 +34,18 @@ def test_instance_config_fields():
 def test_instance_config_frozen():
     """InstanceConfig raises FrozenInstanceError on mutation attempt."""
     cfg = InstanceConfig(
-        location_name="X", latitude=0.0, longitude=0.0,
-        time_zone="UTC", currency="USD",
+        location_name="X",
+        latitude=0.0,
+        longitude=0.0,
+        time_zone="UTC",
+        currency="USD",
     )
     with pytest.raises((AttributeError, TypeError)):
         cfg.location_name = "Y"  # type: ignore[misc]
 
 
 # ── ExternalUser ──────────────────────────────────────────────────────────────
+
 
 def test_external_user_required_fields():
     """ExternalUser stores all required fields correctly."""
@@ -72,14 +77,17 @@ def test_external_user_with_email():
 def test_external_user_frozen():
     """ExternalUser raises on mutation attempt."""
     user = ExternalUser(
-        username="carol", display_name="Carol",
-        picture_url=None, is_admin=False,
+        username="carol",
+        display_name="Carol",
+        picture_url=None,
+        is_admin=False,
     )
     with pytest.raises((AttributeError, TypeError)):
         user.username = "mallory"  # type: ignore[misc]
 
 
 # ── _extract_bearer ───────────────────────────────────────────────────────────
+
 
 class _FakeRequest:
     """Minimal stand-in for aiohttp.web.Request."""
@@ -133,6 +141,7 @@ def test_extract_bearer_empty_token():
 
 
 # ── build_platform_adapter ────────────────────────────────────────────────────
+
 
 def test_build_platform_adapter_ha(tmp_path):
     """build_platform_adapter('ha', ...) returns a HomeAssistantAdapter."""

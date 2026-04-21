@@ -58,7 +58,8 @@ def _user_to_dict(user) -> dict:
     else:
         raw = dict(user)
     raw["picture_url"] = _picture_url(
-        raw.get("user_id"), raw.get("picture_hash"),
+        str(raw.get("user_id") or ""),
+        raw.get("picture_hash"),
     )
     return sanitise_for_api(raw)
 
@@ -106,7 +107,8 @@ class MeView(BaseView):
         # Preferences are persisted separately (nested JSON blob).
         if "preferences" in body:
             user = await svc.patch_preferences(
-                ctx.username, body["preferences"],
+                ctx.username,
+                body["preferences"],
             )
             return web.json_response(_user_to_dict(user))
 
@@ -171,20 +173,23 @@ class MePictureRefreshFromHaView(BaseView):
         config = self.svc(config_key)
         if config.mode != "ha":
             return error_response(
-                501, "NOT_IMPLEMENTED",
+                501,
+                "NOT_IMPLEMENTED",
                 "HA avatar refresh is only available in HA mode.",
             )
         adapter = self.svc(platform_adapter_key)
         fetcher = getattr(adapter, "fetch_entity_picture_bytes", None)
         if fetcher is None:
             return error_response(
-                501, "NOT_IMPLEMENTED",
+                501,
+                "NOT_IMPLEMENTED",
                 "This HA adapter does not expose person-picture fetch.",
             )
         raw = await fetcher(ctx.username)
         if raw is None:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "Home Assistant has no picture for this user.",
             )
         svc = self.svc(user_service_key)
@@ -205,7 +210,9 @@ class UserPictureView(BaseView):
         got = await repo.get_user_picture(user_id)
         if got is None:
             return error_response(
-                404, "NOT_FOUND", "No picture set for this user.",
+                404,
+                "NOT_FOUND",
+                "No picture set for this user.",
             )
         bytes_webp, _hash = got
         return web.Response(
@@ -253,7 +260,8 @@ class UserDetailView(BaseView):
         body = await self.body()
         if "is_admin" not in body:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "Only 'is_admin' is editable via this route.",
             )
         desired = bool(body["is_admin"])
@@ -263,7 +271,8 @@ class UserDetailView(BaseView):
             admins = [u for u in actives if u.is_admin]
             if len(admins) <= 1:
                 return error_response(
-                    409, "LAST_ADMIN",
+                    409,
+                    "LAST_ADMIN",
                     "Cannot demote the last remaining admin.",
                 )
         updated = await svc.set_admin(target.username, desired)
@@ -279,18 +288,22 @@ class TokenCollectionView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(user_service_key)
         rows = await svc.list_api_tokens(ctx.username)
-        return web.json_response({"tokens": [
+        return web.json_response(
             {
-                "token_id":     r["token_id"],
-                "label":        r.get("label") or "",
-                "created_at":   r.get("created_at"),
-                "last_used_at": r.get("last_used_at"),
-                "expires_at":   r.get("expires_at"),
-                "revoked_at":   r.get("revoked_at"),
+                "tokens": [
+                    {
+                        "token_id": r["token_id"],
+                        "label": r.get("label") or "",
+                        "created_at": r.get("created_at"),
+                        "last_used_at": r.get("last_used_at"),
+                        "expires_at": r.get("expires_at"),
+                        "revoked_at": r.get("revoked_at"),
+                    }
+                    for r in rows
+                    if not r.get("revoked_at")
+                ]
             }
-            for r in rows
-            if not r.get("revoked_at")
-        ]})
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -299,7 +312,9 @@ class TokenCollectionView(BaseView):
         label = body.get("label", "")
         expires_at = body.get("expires_at")
         token_id, raw_token = await svc.create_api_token(
-            ctx.username, label=label, expires_at=expires_at,
+            ctx.username,
+            label=label,
+            expires_at=expires_at,
         )
         return web.json_response(
             {"token_id": token_id, "token": raw_token},
@@ -328,20 +343,24 @@ class AdminTokenCollectionView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         repo = self.svc(user_repo_key)
         rows = await repo.list_all_api_tokens()
-        return web.json_response({"tokens": [
+        return web.json_response(
             {
-                "token_id":     r["token_id"],
-                "label":        r.get("label") or "",
-                "created_at":   r.get("created_at"),
-                "last_used_at": r.get("last_used_at"),
-                "expires_at":   r.get("expires_at"),
-                "user_id":      r.get("user_id"),
-                "username":     r.get("username"),
-                "display_name": r.get("display_name"),
+                "tokens": [
+                    {
+                        "token_id": r["token_id"],
+                        "label": r.get("label") or "",
+                        "created_at": r.get("created_at"),
+                        "last_used_at": r.get("last_used_at"),
+                        "expires_at": r.get("expires_at"),
+                        "user_id": r.get("user_id"),
+                        "username": r.get("username"),
+                        "display_name": r.get("display_name"),
+                    }
+                    for r in rows
+                    if not r.get("revoked_at")
+                ]
             }
-            for r in rows
-            if not r.get("revoked_at")
-        ]})
+        )
 
 
 class AdminTokenDetailView(BaseView):
@@ -371,8 +390,7 @@ class MeExportView(BaseView):
             body=body,
             content_type="application/json",
             headers={
-                "Content-Disposition":
-                    f'attachment; filename="social-home-export-{ctx.username}.json"',
+                "Content-Disposition": f'attachment; filename="social-home-export-{ctx.username}.json"',
             },
         )
 
@@ -391,8 +409,7 @@ class UserExportView(BaseView):
             body=body,
             content_type="application/json",
             headers={
-                "Content-Disposition":
-                    f'attachment; filename="social-home-export-{target}.json"',
+                "Content-Disposition": f'attachment; filename="social-home-export-{target}.json"',
             },
         )
 
@@ -404,7 +421,9 @@ class AuthTokenView(BaseView):
         adapter = self.svc(platform_adapter_key)
         if not adapter.supports_bearer_token_auth:
             return error_response(
-                404, "NOT_FOUND", "Token auth is not available on this platform.",
+                404,
+                "NOT_FOUND",
+                "Token auth is not available on this platform.",
             )
 
         # IP-bucket throttle — independent of the authenticated rate limiter.
@@ -418,7 +437,8 @@ class AuthTokenView(BaseView):
                 window_s=AUTH_TOKEN_RATE_WINDOW_S,
             ):
                 return error_response(
-                    429, "RATE_LIMITED",
+                    429,
+                    "RATE_LIMITED",
                     "Too many login attempts — wait a few minutes.",
                 )
 
@@ -427,7 +447,9 @@ class AuthTokenView(BaseView):
         password = str(body.get("password") or "")
         if not username or not password:
             return error_response(
-                422, "UNPROCESSABLE", "username and password are required.",
+                422,
+                "UNPROCESSABLE",
+                "username and password are required.",
             )
         token = await adapter.issue_bearer_token(username, password)
         if token is None:

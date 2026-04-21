@@ -24,10 +24,14 @@ async def test_storage_usage_zero_initially(client):
 
 async def test_storage_usage_reports_after_file_post(client):
     db = client._db
-    meta = json.dumps({
-        "url": "/m/1", "mime_type": "image/png",
-        "original_name": "x.png", "size_bytes": 1234,
-    })
+    meta = json.dumps(
+        {
+            "url": "/m/1",
+            "mime_type": "image/png",
+            "original_name": "x.png",
+            "size_bytes": 1234,
+        }
+    )
     await db.enqueue(
         "INSERT INTO feed_posts(id, author, type, content, file_meta_json)"
         " VALUES('p1', ?, 'file', '', ?)",

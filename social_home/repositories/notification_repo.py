@@ -22,10 +22,17 @@ from .base import row_to_dict, rows_to_dicts
 
 
 #: Columns the Specification pattern is allowed to filter / order on.
-_NOTIFICATION_COLS: frozenset[str] = frozenset({
-    "user_id", "type", "title", "body", "link_url",
-    "read_at", "created_at",
-})
+_NOTIFICATION_COLS: frozenset[str] = frozenset(
+    {
+        "user_id",
+        "type",
+        "title",
+        "body",
+        "link_url",
+        "read_at",
+        "created_at",
+    }
+)
 
 
 #: Per-user cap (§17.2). Rows older than this are pruned when new ones land.
@@ -41,7 +48,11 @@ from ..domain.notification import Notification  # noqa: F401,E402
 class AbstractNotificationRepo(Protocol):
     async def save(self, note: Notification) -> Notification: ...
     async def list(
-        self, user_id: str, *, before: str | None = None, limit: int = 50,
+        self,
+        user_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
     ) -> builtins.list[Notification]: ...
     async def find(self, spec: Spec) -> builtins.list[Notification]: ...
     async def get(self, notification_id: str) -> Notification | None: ...
@@ -71,8 +82,14 @@ class SqliteNotificationRepo:
             ) VALUES(?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             """,
             (
-                note.id, note.user_id, note.type, note.title,
-                note.body, note.link_url, note.read_at, note.created_at,
+                note.id,
+                note.user_id,
+                note.type,
+                note.title,
+                note.body,
+                note.link_url,
+                note.read_at,
+                note.created_at,
             ),
         )
         # Keep at most ``cap`` rows per user. Subquery picks the oldest rows
@@ -94,12 +111,17 @@ class SqliteNotificationRepo:
 
     async def get(self, notification_id: str) -> Notification | None:
         row = await self._db.fetchone(
-            "SELECT * FROM notifications WHERE id=?", (notification_id,),
+            "SELECT * FROM notifications WHERE id=?",
+            (notification_id,),
         )
         return _row_to_notification(row_to_dict(row))
 
     async def list(
-        self, user_id: str, *, before: str | None = None, limit: int = 50,
+        self,
+        user_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
     ) -> builtins.list[Notification]:
         """Bespoke per-user listing — kept as the common-case shim.
 
@@ -126,14 +148,13 @@ class SqliteNotificationRepo:
         into the SQL.
         """
         clause, params = spec_to_sql(
-            spec, table="notifications", allowed_cols=_NOTIFICATION_COLS,
+            spec,
+            table="notifications",
+            allowed_cols=_NOTIFICATION_COLS,
         )
         sql = "SELECT * FROM notifications " + clause
         rows = await self._db.fetchall(sql, params)
-        return [
-            n for n in (_row_to_notification(d) for d in rows_to_dicts(rows))
-            if n
-        ]
+        return [n for n in (_row_to_notification(d) for d in rows_to_dicts(rows)) if n]
 
     async def mark_read(self, notification_id: str, user_id: str) -> None:
         """Mark a single notification as read.
@@ -162,18 +183,19 @@ class SqliteNotificationRepo:
         )
 
     async def count_unread(self, user_id: str) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(*) FROM notifications "
-            "WHERE user_id=? AND read_at IS NULL",
-            (user_id,),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM notifications "
+                "WHERE user_id=? AND read_at IS NULL",
+                (user_id,),
+                default=0,
+            )
+        )
 
     async def delete_old(self, older_than_days: int = 90) -> int:
         """Delete notifications older than N days. Returns purge count."""
         cutoff = (
-            datetime.now(timezone.utc)
-            - _timedelta_days(older_than_days)
+            datetime.now(timezone.utc) - _timedelta_days(older_than_days)
         ).isoformat()
         count = await self._db.fetchval(
             "SELECT COUNT(*) FROM notifications WHERE created_at < ?",
@@ -208,8 +230,12 @@ def _row_to_notification(row: dict | None) -> Notification | None:
 
 # Convenience: build a Notification with a fresh UUID.
 def new_notification(
-    *, user_id: str, type: str, title: str,
-    body: str | None = None, link_url: str | None = None,
+    *,
+    user_id: str,
+    type: str,
+    title: str,
+    body: str | None = None,
+    link_url: str | None = None,
 ) -> Notification:
     return Notification(
         id=uuid.uuid4().hex,

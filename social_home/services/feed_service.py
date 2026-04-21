@@ -65,9 +65,9 @@ class FeedService:
     ) -> None:
         self._posts = post_repo
         self._users = user_repo
-        self._bus   = bus
+        self._bus = bus
         self._household = None  # set via attach_household_features
-        self._quota = None      # set via attach_storage_quota
+        self._quota = None  # set via attach_storage_quota
 
     def attach_household_features(self, svc) -> None:
         """Wire :class:`HouseholdFeaturesService` for toggle enforcement
@@ -146,12 +146,15 @@ class FeedService:
 
         await self._posts.edit(post_id, new_content)
         updated = await self._posts.get(post_id)
-        assert updated is not None   # we just edited it
+        assert updated is not None  # we just edited it
         await self._bus.publish(PostEdited(post=updated))
         return updated
 
     async def delete_post(
-        self, post_id: str, *, actor_user_id: str,
+        self,
+        post_id: str,
+        *,
+        actor_user_id: str,
     ) -> None:
         """Soft-delete a post. Only the author or an admin may delete."""
         post = await self._require_post(post_id)
@@ -163,7 +166,10 @@ class FeedService:
         return await self._require_post(post_id)
 
     async def list_feed(
-        self, *, before: str | None = None, limit: int = 20,
+        self,
+        *,
+        before: str | None = None,
+        limit: int = 20,
     ) -> list[Post]:
         """Return a page of posts ordered newest-first.
 
@@ -176,7 +182,11 @@ class FeedService:
     # ── Reactions ──────────────────────────────────────────────────────
 
     async def add_reaction(
-        self, post_id: str, *, user_id: str, emoji: str,
+        self,
+        post_id: str,
+        *,
+        user_id: str,
+        emoji: str,
     ) -> Post:
         emoji = _normalise_emoji(emoji)
         post = await self._posts.add_reaction(post_id, emoji, user_id)
@@ -184,7 +194,11 @@ class FeedService:
         return post
 
     async def remove_reaction(
-        self, post_id: str, *, user_id: str, emoji: str,
+        self,
+        post_id: str,
+        *,
+        user_id: str,
+        emoji: str,
     ) -> Post:
         emoji = _normalise_emoji(emoji)
         post = await self._posts.remove_reaction(post_id, emoji, user_id)
@@ -258,7 +272,10 @@ class FeedService:
         return updated
 
     async def delete_comment(
-        self, comment_id: str, *, actor_user_id: str,
+        self,
+        comment_id: str,
+        *,
+        actor_user_id: str,
     ) -> None:
         comment = await self._posts.get_comment(comment_id)
         if comment is None:
@@ -304,7 +321,9 @@ class FeedService:
         return author
 
     async def _require_author_or_admin(
-        self, post_author_id: str, actor_user_id: str,
+        self,
+        post_author_id: str,
+        actor_user_id: str,
     ) -> None:
         if post_author_id == actor_user_id:
             return
@@ -317,7 +336,7 @@ class FeedService:
 
 # ─── Validation helpers ───────────────────────────────────────────────────
 
-_EMOJI_MAX_CODEPOINTS = 20   # guardrail for abusive ZWJ sequences
+_EMOJI_MAX_CODEPOINTS = 20  # guardrail for abusive ZWJ sequences
 
 
 def _normalise_emoji(emoji: str) -> str:
@@ -373,11 +392,11 @@ def _validate_content(
 
 
 def _validate_text_length(
-    content: str | None, *, limit: int,
+    content: str | None,
+    *,
+    limit: int,
 ) -> None:
     if content is None:
         return
     if len(content) > limit:
-        raise ValueError(
-            f"content exceeds maximum length of {limit} characters"
-        )
+        raise ValueError(f"content exceeds maximum length of {limit} characters")

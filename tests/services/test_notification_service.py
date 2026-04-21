@@ -67,12 +67,15 @@ async def test_post_created_notifies_others(stack):
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     await stack.feed_svc.create_post(
-        author_user_id=a.user_id, type=PostType.TEXT, content="hi",
+        author_user_id=a.user_id,
+        type=PostType.TEXT,
+        content="hi",
     )
     bob_n = await stack.notif_repo.list(b.user_id, limit=10)
     anna_n = await stack.notif_repo.list(a.user_id, limit=10)
     assert len(bob_n) >= 1
     assert len(anna_n) == 0
+
 
 async def test_task_assigned(stack):
     """TaskAssigned event generates a notification for the assignee."""
@@ -80,23 +83,38 @@ async def test_task_assigned(stack):
     b = await stack.provision_user("bob")
     now = datetime.now(timezone.utc)
     evt = TaskAssigned(
-        task=Task(id="t1", list_id="l1", title="Buy milk",
-                   status=TaskStatus.TODO, position=0,
-                   created_by=a.user_id, created_at=now, updated_at=now),
+        task=Task(
+            id="t1",
+            list_id="l1",
+            title="Buy milk",
+            status=TaskStatus.TODO,
+            position=0,
+            created_by=a.user_id,
+            created_at=now,
+            updated_at=now,
+        ),
         assigned_to=b.user_id,
     )
     await stack.bus.publish(evt)
     bob_n = await stack.notif_repo.list(b.user_id, limit=10)
     assert any("Buy milk" in n.title for n in bob_n)
 
+
 async def test_self_assign_no_notification(stack):
     """Assigning a task to yourself does not generate a notification."""
     a = await stack.provision_user("anna")
     now = datetime.now(timezone.utc)
     evt = TaskAssigned(
-        task=Task(id="t1", list_id="l1", title="Self",
-                   status=TaskStatus.TODO, position=0,
-                   created_by=a.user_id, created_at=now, updated_at=now),
+        task=Task(
+            id="t1",
+            list_id="l1",
+            title="Self",
+            status=TaskStatus.TODO,
+            position=0,
+            created_by=a.user_id,
+            created_at=now,
+            updated_at=now,
+        ),
         assigned_to=a.user_id,
     )
     pre = len(await stack.notif_repo.list(a.user_id, limit=50))
@@ -111,7 +129,8 @@ async def test_comment_notifies_others(stack):
     b = await stack.provision_user("bob")
     c = await stack.provision_user("carl")
     post = await stack.feed_svc.create_post(
-        author_user_id=a.user_id, type=PostType.TEXT, content="hi")
+        author_user_id=a.user_id, type=PostType.TEXT, content="hi"
+    )
     # Clear notifications from post creation
     for u in [a, b, c]:
         await stack.notif_repo.mark_all_read(u.user_id)
@@ -131,16 +150,23 @@ async def test_space_post_notifies_members(stack):
     from social_home.repositories.space_repo import SqliteSpaceRepo
     from social_home.repositories.space_post_repo import SqliteSpacePostRepo
     from social_home.services.space_service import SpaceService
+
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     space_repo = SqliteSpaceRepo(stack.db)
     spost_repo = SqliteSpacePostRepo(stack.db)
-    space_svc = SpaceService(space_repo, spost_repo, SqliteUserRepo(stack.db),
-                              stack.bus, own_instance_id="iid")
+    space_svc = SpaceService(
+        space_repo,
+        spost_repo,
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
     space = await space_svc.create_space(owner_username="anna", name="S")
     await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
-    await space_svc.create_post(space.id, author_user_id=a.user_id,
-                                  type=PostType.TEXT, content="space hello")
+    await space_svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="space hello"
+    )
     bob_n = await stack.notif_repo.list(b.user_id, limit=50)
     assert any("posted in S" in n.title for n in bob_n)
 
@@ -151,19 +177,29 @@ async def test_moderation_queued_notifies_admins(stack):
     from social_home.repositories.space_post_repo import SqliteSpacePostRepo
     from social_home.services.space_service import SpaceService
     from social_home.domain.space import SpaceFeatures, SpaceFeatureAccess
+
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     space_repo = SqliteSpaceRepo(stack.db)
     spost_repo = SqliteSpacePostRepo(stack.db)
-    space_svc = SpaceService(space_repo, spost_repo, SqliteUserRepo(stack.db),
-                              stack.bus, own_instance_id="iid")
+    space_svc = SpaceService(
+        space_repo,
+        spost_repo,
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
     space = await space_svc.create_space(owner_username="anna", name="Mod")
     await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
-    await space_svc.update_config(space.id, actor_username="anna",
-                                    features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED))
+    await space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
     # Bob is regular member — post goes to queue → admin (anna) gets notification
-    result = await space_svc.create_post(space.id, author_user_id=b.user_id,
-                                           type=PostType.TEXT, content="pending")
+    result = await space_svc.create_post(
+        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending"
+    )
     assert result is None  # queued
     anna_n = await stack.notif_repo.list(a.user_id, limit=50)
     assert any("pending review" in n.title for n in anna_n)
@@ -173,14 +209,22 @@ async def test_task_deadline_notifies_assignees(stack):
     """TaskDeadlineDue notifies all assignees."""
     from datetime import date
     from social_home.domain.events import TaskDeadlineDue
+
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     now = datetime.now(timezone.utc)
     evt = TaskDeadlineDue(
-        task=Task(id="t1", list_id="l1", title="Deadline task",
-                   status=TaskStatus.TODO, position=0,
-                   created_by="other", created_at=now, updated_at=now,
-                   assignees=(a.user_id, b.user_id)),
+        task=Task(
+            id="t1",
+            list_id="l1",
+            title="Deadline task",
+            status=TaskStatus.TODO,
+            position=0,
+            created_by="other",
+            created_at=now,
+            updated_at=now,
+            assignees=(a.user_id, b.user_id),
+        ),
         due_date=date.today(),
     )
     await stack.bus.publish(evt)
@@ -192,8 +236,10 @@ async def test_task_deadline_notifies_assignees(stack):
 
 # ─── Push fan-out (§25.3) ─────────────────────────────────────────────────
 
+
 class _CapturingPush:
     """Fake PushService for assert-pushed tests."""
+
     def __init__(self):
         self.calls: list[tuple[list[str], object]] = []
 
@@ -205,16 +251,21 @@ class _CapturingPush:
 async def test_dm_message_triggers_push_without_body(stack):
     """§25.3: DM push carries only the title — no message body leaks."""
     from social_home.domain.events import DmMessageCreated
+
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
 
-    await stack.bus.publish(DmMessageCreated(
-        conversation_id="c-1", message_id="m-1",
-        sender_user_id=a.user_id, sender_display_name="Anna",
-        recipient_user_ids=(b.user_id,),
-    ))
+    await stack.bus.publish(
+        DmMessageCreated(
+            conversation_id="c-1",
+            message_id="m-1",
+            sender_user_id=a.user_id,
+            sender_display_name="Anna",
+            recipient_user_ids=(b.user_id,),
+        )
+    )
     assert fake.calls, "push fan-out was not triggered"
     recipients, payload = fake.calls[0]
     assert recipients == [b.user_id]
@@ -225,30 +276,43 @@ async def test_dm_message_triggers_push_without_body(stack):
 
 async def test_dm_message_with_no_recipients_skips_push(stack):
     from social_home.domain.events import DmMessageCreated
+
     a = await stack.provision_user("anna")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
 
-    await stack.bus.publish(DmMessageCreated(
-        conversation_id="c-1", message_id="m-1",
-        sender_user_id=a.user_id, sender_display_name="Anna",
-        recipient_user_ids=(),
-    ))
+    await stack.bus.publish(
+        DmMessageCreated(
+            conversation_id="c-1",
+            message_id="m-1",
+            sender_user_id=a.user_id,
+            sender_display_name="Anna",
+            recipient_user_ids=(),
+        )
+    )
     assert fake.calls == []
 
 
 async def test_task_deadline_triggers_push(stack):
     from datetime import date
     from social_home.domain.events import TaskDeadlineDue
+
     a = await stack.provision_user("anna")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
     now = datetime.now(timezone.utc)
     evt = TaskDeadlineDue(
-        task=Task(id="t1", list_id="l1", title="Pay bills",
-                   status=TaskStatus.TODO, position=0,
-                   created_by="other", created_at=now, updated_at=now,
-                   assignees=(a.user_id,)),
+        task=Task(
+            id="t1",
+            list_id="l1",
+            title="Pay bills",
+            status=TaskStatus.TODO,
+            position=0,
+            created_by="other",
+            created_at=now,
+            updated_at=now,
+            assignees=(a.user_id,),
+        ),
         due_date=date.today(),
     )
     await stack.bus.publish(evt)
@@ -259,18 +323,23 @@ async def test_task_deadline_triggers_push(stack):
 
 # ─── Bazaar + DM contact handlers ─────────────────────────────────────────
 
+
 async def test_bazaar_bid_placed_notifies_seller(stack):
     from social_home.domain.events import BazaarBidPlaced
+
     seller = await stack.provision_user("seller")
     bidder = await stack.provision_user("bidder")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
-    await stack.bus.publish(BazaarBidPlaced(
-        listing_post_id="L-1",
-        seller_user_id=seller.user_id,
-        bidder_user_id=bidder.user_id,
-        amount=200, new_end_time="2099-01-01T00:00:00+00:00",
-    ))
+    await stack.bus.publish(
+        BazaarBidPlaced(
+            listing_post_id="L-1",
+            seller_user_id=seller.user_id,
+            bidder_user_id=bidder.user_id,
+            amount=200,
+            new_end_time="2099-01-01T00:00:00+00:00",
+        )
+    )
     notifs = await stack.notif_repo.list(seller.user_id, limit=10)
     assert any(n.type == "bazaar_bid_placed" for n in notifs)
     assert fake.calls
@@ -279,15 +348,19 @@ async def test_bazaar_bid_placed_notifies_seller(stack):
 
 async def test_bazaar_self_bid_does_not_notify(stack):
     from social_home.domain.events import BazaarBidPlaced
+
     seller = await stack.provision_user("seller")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
-    await stack.bus.publish(BazaarBidPlaced(
-        listing_post_id="L-1",
-        seller_user_id=seller.user_id,
-        bidder_user_id=seller.user_id,
-        amount=200, new_end_time="2099-01-01T00:00:00+00:00",
-    ))
+    await stack.bus.publish(
+        BazaarBidPlaced(
+            listing_post_id="L-1",
+            seller_user_id=seller.user_id,
+            bidder_user_id=seller.user_id,
+            amount=200,
+            new_end_time="2099-01-01T00:00:00+00:00",
+        )
+    )
     notifs = await stack.notif_repo.list(seller.user_id, limit=10)
     assert all(n.type != "bazaar_bid_placed" for n in notifs)
     assert fake.calls == []
@@ -295,30 +368,36 @@ async def test_bazaar_self_bid_does_not_notify(stack):
 
 async def test_bazaar_offer_accepted_notifies_buyer(stack):
     from social_home.domain.events import BazaarOfferAccepted
+
     seller = await stack.provision_user("seller")
     buyer = await stack.provision_user("buyer")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
-    await stack.bus.publish(BazaarOfferAccepted(
-        listing_post_id="L-1",
-        seller_user_id=seller.user_id,
-        buyer_user_id=buyer.user_id,
-        price=200,
-    ))
+    await stack.bus.publish(
+        BazaarOfferAccepted(
+            listing_post_id="L-1",
+            seller_user_id=seller.user_id,
+            buyer_user_id=buyer.user_id,
+            price=200,
+        )
+    )
     notifs = await stack.notif_repo.list(buyer.user_id, limit=10)
     assert any(n.type == "bazaar_offer_accepted" for n in notifs)
 
 
 async def test_dm_contact_request_notifies_recipient(stack):
     from social_home.domain.events import DmContactRequested
+
     recipient = await stack.provision_user("recipient")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
-    await stack.bus.publish(DmContactRequested(
-        requester_user_id="u-other",
-        requester_display_name="Outside Friend",
-        recipient_user_id=recipient.user_id,
-    ))
+    await stack.bus.publish(
+        DmContactRequested(
+            requester_user_id="u-other",
+            requester_display_name="Outside Friend",
+            recipient_user_id=recipient.user_id,
+        )
+    )
     notifs = await stack.notif_repo.list(recipient.user_id, limit=10)
     assert any(n.type == "dm_contact_requested" for n in notifs)
     assert fake.calls
@@ -328,6 +407,7 @@ async def test_dm_contact_request_notifies_recipient(stack):
 
 # ─── CalendarEventCreated handler ──────────────────────────────────────
 
+
 async def test_calendar_event_created_notifies_household(stack):
     from social_home.domain.calendar import CalendarEvent
     from social_home.domain.events import CalendarEventCreated
@@ -335,7 +415,9 @@ async def test_calendar_event_created_notifies_household(stack):
     alice = await stack.provision_user("alice-cal")
     bob = await stack.provision_user("bob-cal")
     event = CalendarEvent(
-        id="e1", calendar_id="c1", summary="Team meeting",
+        id="e1",
+        calendar_id="c1",
+        summary="Team meeting",
         created_by=alice.user_id,
         start=datetime(2026, 5, 1, 10, tzinfo=timezone.utc),
         end=datetime(2026, 5, 1, 11, tzinfo=timezone.utc),
@@ -350,6 +432,7 @@ async def test_calendar_event_created_notifies_household(stack):
 
 # ─── TaskCompleted handler ─────────────────────────────────────────────
 
+
 async def test_task_completed_notifies_assignees(stack):
     from social_home.domain.events import TaskCompleted
 
@@ -357,18 +440,28 @@ async def test_task_completed_notifies_assignees(stack):
     bob = await stack.provision_user("bob-tc")
     now = datetime(2026, 5, 1, tzinfo=timezone.utc)
     task = Task(
-        id="t1", list_id="l1", title="Buy milk",
-        status=TaskStatus.DONE, position=0, created_by="me",
-        created_at=now, updated_at=now, assignees=(bob.user_id,),
+        id="t1",
+        list_id="l1",
+        title="Buy milk",
+        status=TaskStatus.DONE,
+        position=0,
+        created_by="me",
+        created_at=now,
+        updated_at=now,
+        assignees=(bob.user_id,),
     )
-    await stack.bus.publish(TaskCompleted(
-        task=task, completed_by=alice.user_id,
-    ))
+    await stack.bus.publish(
+        TaskCompleted(
+            task=task,
+            completed_by=alice.user_id,
+        )
+    )
     notifs = await stack.notif_repo.list(bob.user_id, limit=10)
     assert any(n.type == "task_completed" for n in notifs)
 
 
 # ─── SpacePostModerated handler ───────────────────────────────────────
+
 
 async def test_space_post_moderated_notifies_author(stack):
     from social_home.domain.events import SpacePostModerated
@@ -376,11 +469,18 @@ async def test_space_post_moderated_notifies_author(stack):
 
     author = await stack.provision_user("author-mod")
     post = Post(
-        id="p-mod", author=author.user_id, type=PostType.TEXT,
-        content="test", created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        id="p-mod",
+        author=author.user_id,
+        type=PostType.TEXT,
+        content="test",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
-    await stack.bus.publish(SpacePostModerated(
-        space_id="sp-1", post=post, moderated_by="admin",
-    ))
+    await stack.bus.publish(
+        SpacePostModerated(
+            space_id="sp-1",
+            post=post,
+            moderated_by="admin",
+        )
+    )
     notifs = await stack.notif_repo.list(author.user_id, limit=10)
     assert any(n.type == "post_moderated" for n in notifs)

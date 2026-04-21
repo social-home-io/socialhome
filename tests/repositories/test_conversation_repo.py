@@ -50,7 +50,9 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-def _conv(conv_id: str = "c1", type: ConversationType = ConversationType.DM) -> Conversation:
+def _conv(
+    conv_id: str = "c1", type: ConversationType = ConversationType.DM
+) -> Conversation:
     return Conversation(id=conv_id, type=type, created_at=datetime.now(timezone.utc))
 
 
@@ -75,6 +77,7 @@ def _message(
 
 
 # ── Conversations ──────────────────────────────────────────────────────────
+
 
 async def test_create_and_get_conversation(env):
     """create persists a conversation; get retrieves it."""
@@ -122,6 +125,7 @@ async def test_touch_last_message(env):
 
 # ── Members ────────────────────────────────────────────────────────────────
 
+
 async def test_add_and_list_members(env):
     """add_member adds a member; list_members returns them."""
     conv = _conv("conv-m")
@@ -161,6 +165,7 @@ async def test_set_last_read(env):
 
 
 # ── Messages ───────────────────────────────────────────────────────────────
+
 
 async def test_save_and_get_message(env):
     """save_message persists; get_message retrieves a message."""
@@ -226,6 +231,7 @@ async def test_count_unread(env):
 
 # ── Reactions ─────────────────────────────────────────────────────────────
 
+
 async def test_add_and_list_reactions(env):
     """add_reaction persists; list_reactions retrieves reactions for a message."""
     conv = _conv("conv-react")
@@ -250,23 +256,29 @@ async def test_remove_reaction(env):
 
 # ── DM history sync helpers ──────────────────────────────────────────────
 
+
 async def test_list_messages_since_returns_ascending_after_cursor(env):
     conv = _conv("conv-hist")
     await env.repo.create(conv)
     # Seed three messages with explicit timestamps.
-    for i, stamp in enumerate([
-        "2026-04-01T00:00:00+00:00",
-        "2026-04-01T00:01:00+00:00",
-        "2026-04-01T00:02:00+00:00",
-    ]):
+    for i, stamp in enumerate(
+        [
+            "2026-04-01T00:00:00+00:00",
+            "2026-04-01T00:01:00+00:00",
+            "2026-04-01T00:02:00+00:00",
+        ]
+    ):
         msg = ConversationMessage(
-            id=f"h-{i}", conversation_id="conv-hist",
-            sender_user_id="uid-alice", content=f"msg {i}",
+            id=f"h-{i}",
+            conversation_id="conv-hist",
+            sender_user_id="uid-alice",
+            content=f"msg {i}",
             created_at=datetime.fromisoformat(stamp),
         )
         await env.repo.save_message(msg)
     result = await env.repo.list_messages_since(
-        "conv-hist", "2026-04-01T00:00:00+00:00",
+        "conv-hist",
+        "2026-04-01T00:00:00+00:00",
     )
     assert [m.id for m in result] == ["h-1", "h-2"]
 
@@ -285,17 +297,29 @@ async def test_list_conversations_with_remote_member(env):
     conv_b = _conv("conv-b")
     await env.repo.create(conv_a)
     await env.repo.create(conv_b)
-    await env.repo.add_remote_member(RemoteConversationMember(
-        conversation_id="conv-a", instance_id="peer-x", remote_username="x1",
-        joined_at=datetime.now(timezone.utc).isoformat(),
-    ))
-    await env.repo.add_remote_member(RemoteConversationMember(
-        conversation_id="conv-a", instance_id="peer-x", remote_username="x2",
-        joined_at=datetime.now(timezone.utc).isoformat(),
-    ))
-    await env.repo.add_remote_member(RemoteConversationMember(
-        conversation_id="conv-b", instance_id="peer-y", remote_username="y1",
-        joined_at=datetime.now(timezone.utc).isoformat(),
-    ))
+    await env.repo.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="conv-a",
+            instance_id="peer-x",
+            remote_username="x1",
+            joined_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+    await env.repo.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="conv-a",
+            instance_id="peer-x",
+            remote_username="x2",
+            joined_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+    await env.repo.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="conv-b",
+            instance_id="peer-y",
+            remote_username="y1",
+            joined_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
     result = await env.repo.list_conversations_with_remote_member("peer-x")
     assert result == ["conv-a"]

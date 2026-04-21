@@ -18,6 +18,7 @@ from social_home.platform.ha.bootstrap import (
 
 # ─── Fakes ───────────────────────────────────────────────────────────────
 
+
 class _FakeSupervisor:
     """In-process :class:`SupervisorClient` substitute for tests."""
 
@@ -40,6 +41,7 @@ class _FakeSupervisor:
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 async def env(tmp_dir):
@@ -71,13 +73,15 @@ async def env(tmp_dir):
 
 # ─── Individual step helpers ─────────────────────────────────────────────
 
+
 async def test_provision_admin_idempotent(env):
     """Admin provisioned once; second call is a no-op (row count stays at 1)."""
     bs = HaBootstrap(env.db, _FakeSupervisor(), env.data_dir)
 
     await bs._provision_admin("ha_owner")
     row = await env.db.fetchone(
-        "SELECT user_id, is_admin FROM users WHERE username=?", ("ha_owner",),
+        "SELECT user_id, is_admin FROM users WHERE username=?",
+        ("ha_owner",),
     )
     assert row is not None
     assert row["is_admin"] == 1
@@ -134,6 +138,7 @@ async def test_generate_integration_token_writes_file(env):
 
 # ─── run() end-to-end ────────────────────────────────────────────────────
 
+
 async def test_run_provisions_admin_and_pushes_discovery(env):
     """First boot provisions the owner, mints a token, pushes discovery."""
     sv = _FakeSupervisor(owner_username="ha_admin")
@@ -143,7 +148,8 @@ async def test_run_provisions_admin_and_pushes_discovery(env):
 
     # Admin provisioned
     row = await env.db.fetchone(
-        "SELECT is_admin FROM users WHERE username=?", ("ha_admin",),
+        "SELECT is_admin FROM users WHERE username=?",
+        ("ha_admin",),
     )
     assert row is not None and row["is_admin"] == 1
 
@@ -179,10 +185,13 @@ async def test_run_is_idempotent(env):
     await HaBootstrap(env.db, sv, env.data_dir).run()
 
     assert await env.db.fetchval("SELECT COUNT(*) FROM users") == 1
-    assert await env.db.fetchval(
-        "SELECT COUNT(*) FROM api_tokens WHERE label=?",
-        (INTEGRATION_TOKEN_LABEL,),
-    ) == 1
+    assert (
+        await env.db.fetchval(
+            "SELECT COUNT(*) FROM api_tokens WHERE label=?",
+            (INTEGRATION_TOKEN_LABEL,),
+        )
+        == 1
+    )
     # Discovery pushed twice (once per run).
     assert len(sv.pushed_payloads) == 2
 

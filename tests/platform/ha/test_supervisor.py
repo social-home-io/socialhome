@@ -16,10 +16,22 @@ async def sv_server(aiohttp_server):
         captured["auth_header"] = request.headers.get("Authorization")
         return web.json_response(
             captured["auth_response"]
-            or {"data": {"users": [
-                {"username": "ha_owner", "is_owner": True, "system_generated": False},
-                {"username": "system", "is_owner": False, "system_generated": True},
-            ]}},
+            or {
+                "data": {
+                    "users": [
+                        {
+                            "username": "ha_owner",
+                            "is_owner": True,
+                            "system_generated": False,
+                        },
+                        {
+                            "username": "system",
+                            "is_owner": False,
+                            "system_generated": True,
+                        },
+                    ]
+                }
+            },
         )
 
     async def discovery(request: web.Request) -> web.Response:
@@ -37,9 +49,12 @@ async def sv_server(aiohttp_server):
 @pytest.fixture
 async def client(sv_server):
     import aiohttp
+
     server, _ = sv_server
     async with aiohttp.ClientSession() as session:
-        yield SupervisorClient(session, str(server.make_url("")).rstrip("/"), "sv-token")
+        yield SupervisorClient(
+            session, str(server.make_url("")).rstrip("/"), "sv-token"
+        )
 
 
 async def test_get_owner_username_returns_non_system_owner(client, sv_server):
@@ -51,9 +66,13 @@ async def test_get_owner_username_returns_non_system_owner(client, sv_server):
 
 async def test_get_owner_username_returns_none_when_no_owner(client, sv_server):
     _, captured = sv_server
-    captured["auth_response"] = {"data": {"users": [
-        {"username": "system", "is_owner": False, "system_generated": True},
-    ]}}
+    captured["auth_response"] = {
+        "data": {
+            "users": [
+                {"username": "system", "is_owner": False, "system_generated": True},
+            ]
+        }
+    }
     assert await client.get_owner_username() is None
 
 

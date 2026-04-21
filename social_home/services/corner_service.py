@@ -39,14 +39,14 @@ log = logging.getLogger(__name__)
 
 #: Cap the per-slice list sizes so a power-user's dashboard stays light.
 MAX_EVENTS = 8
-MAX_TASKS  = 8
+MAX_TASKS = 8
 UPCOMING_DAYS = 7
 
 #: Followed-spaces widget caps — see the plan. 10 spaces × 5 posts each,
 #: trimmed to the newest 15 globally.
 MAX_FOLLOWED_SPACES = 10
-POSTS_PER_FOLLOWED  = 5
-MAX_FOLLOWED_POSTS  = 15
+POSTS_PER_FOLLOWED = 5
+MAX_FOLLOWED_POSTS = 15
 
 
 @dataclass(slots=True, frozen=True)
@@ -54,8 +54,8 @@ class BazaarCornerSummary:
     """Seller-side snapshot for the dashboard bazaar widget."""
 
     active_listings: int
-    pending_offers: int               # bids awaiting accept/reject on my listings
-    ending_soon: int                  # my active listings closing within 24 h
+    pending_offers: int  # bids awaiting accept/reject on my listings
+    ending_soon: int  # my active listings closing within 24 h
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,7 +74,7 @@ class FollowedSpacePost:
     author: str
     type: str
     content: str | None
-    created_at: str                   # ISO string; already timezone-aware
+    created_at: str  # ISO string; already timezone-aware
 
 
 @dataclass(slots=True, frozen=True)
@@ -95,8 +95,15 @@ class CornerService:
     """Assemble a :class:`CornerBundle` for the caller."""
 
     __slots__ = (
-        "_notifications", "_conversations", "_calendar", "_presence",
-        "_tasks", "_bazaar", "_users", "_spaces", "_space_posts",
+        "_notifications",
+        "_conversations",
+        "_calendar",
+        "_presence",
+        "_tasks",
+        "_bazaar",
+        "_users",
+        "_spaces",
+        "_space_posts",
     )
 
     def __init__(
@@ -123,7 +130,10 @@ class CornerService:
         self._space_posts = space_post_repo
 
     async def build(
-        self, *, user_id: str, username: str,
+        self,
+        *,
+        user_id: str,
+        username: str,
     ) -> CornerBundle:
         unread_notifications = await _safe_int(
             "notifications.count_unread",
@@ -134,8 +144,8 @@ class CornerService:
         presence = await self._presence_list()
         tasks_due = await self._tasks_due_today(user_id)
         bazaar_summary = await self._bazaar_summary(user_id)
-        followed_ids, followed_feed = (
-            await self._followed_spaces_feed(username, user_id)
+        followed_ids, followed_feed = await self._followed_spaces_feed(
+            username, user_id
         )
         return CornerBundle(
             unread_notifications=unread_notifications,
@@ -153,29 +163,33 @@ class CornerService:
     async def _count_unread_dms(self, username: str) -> int:
         try:
             convos = await self._conversations.list_for_user(username)
-        except Exception as exc:      # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: list DMs failed: %s", exc)
             return 0
         total = 0
         for c in convos:
             try:
                 total += await self._conversations.count_unread(
-                    c.id, username,
+                    c.id,
+                    username,
                 )
-            except Exception:         # pragma: no cover — defensive
+            except Exception:  # pragma: no cover — defensive
                 continue
         return total
 
     async def _upcoming_events(
-        self, username: str,
+        self,
+        username: str,
     ) -> tuple[CalendarEvent, ...]:
         now = datetime.now(timezone.utc)
         window_end = now + timedelta(days=UPCOMING_DAYS)
         try:
             events = await self._calendar.list_events_for_user_in_range(
-                username, start=now, end=window_end,
+                username,
+                start=now,
+                end=window_end,
             )
-        except Exception as exc:      # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: upcoming events failed: %s", exc)
             return ()
         events.sort(key=lambda e: e.start)
@@ -184,7 +198,7 @@ class CornerService:
     async def _presence_list(self) -> tuple[PersonPresence, ...]:
         try:
             rows = await self._presence.list_presence()
-        except Exception as exc:      # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: presence failed: %s", exc)
             return ()
         return tuple(rows)
@@ -194,21 +208,22 @@ class CornerService:
             return ()
         try:
             tasks = await self._tasks.list_by_assignee(user_id)
-        except Exception as exc:      # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: tasks failed: %s", exc)
             return ()
         today = date.today()
         relevant = [
-            t for t in tasks
-            if t.status != "done"
-            and t.due_date is not None
-            and t.due_date <= today
+            t
+            for t in tasks
+            if t.status != "done" and t.due_date is not None and t.due_date <= today
         ]
         relevant.sort(key=lambda t: (t.due_date, t.position))
         return tuple(relevant[:MAX_TASKS])
 
     async def _followed_spaces_feed(
-        self, username: str, user_id: str,
+        self,
+        username: str,
+        user_id: str,
     ) -> tuple[tuple[str, ...], tuple[FollowedSpacePost, ...]]:
         """Merge recent posts from spaces the user has asked to follow.
 
@@ -219,7 +234,7 @@ class CornerService:
         """
         try:
             user = await self._users.get(username)
-        except Exception as exc:      # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: user lookup failed: %s", exc)
             return (), ()
         if user is None:
@@ -243,43 +258,48 @@ class CornerService:
         for space_id in wanted_ids:
             try:
                 member = await self._spaces.get_member(space_id, user_id)
-            except Exception:         # pragma: no cover — defensive
+            except Exception:  # pragma: no cover — defensive
                 member = None
             if member is None:
                 # Stale preference — user left or was removed.
                 continue
             try:
                 space = await self._spaces.get(space_id)
-            except Exception:         # pragma: no cover — defensive
+            except Exception:  # pragma: no cover — defensive
                 space = None
             if space is None:
                 continue
             try:
                 posts = await self._space_posts.list_feed(
-                    space_id, limit=POSTS_PER_FOLLOWED,
+                    space_id,
+                    limit=POSTS_PER_FOLLOWED,
                 )
-            except Exception as exc:   # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
-                    "corner: list_feed(%s) failed: %s", space_id, exc,
+                    "corner: list_feed(%s) failed: %s",
+                    space_id,
+                    exc,
                 )
                 continue
             for p in posts:
                 if p.deleted:
                     continue
-                rows.append(FollowedSpacePost(
-                    post_id=p.id,
-                    space_id=space_id,
-                    space_name=space.name,
-                    space_emoji=space.emoji,
-                    author=p.author,
-                    type=p.type.value if hasattr(p.type, "value") else str(p.type),
-                    content=p.content,
-                    created_at=(
-                        p.created_at.isoformat()
-                        if hasattr(p.created_at, "isoformat")
-                        else str(p.created_at)
-                    ),
-                ))
+                rows.append(
+                    FollowedSpacePost(
+                        post_id=p.id,
+                        space_id=space_id,
+                        space_name=space.name,
+                        space_emoji=space.emoji,
+                        author=p.author,
+                        type=p.type.value if hasattr(p.type, "value") else str(p.type),
+                        content=p.content,
+                        created_at=(
+                            p.created_at.isoformat()
+                            if hasattr(p.created_at, "isoformat")
+                            else str(p.created_at)
+                        ),
+                    )
+                )
 
         # Global newest-first sort + cap.
         rows.sort(key=lambda r: r.created_at, reverse=True)
@@ -288,16 +308,12 @@ class CornerService:
     async def _bazaar_summary(self, user_id: str) -> BazaarCornerSummary:
         try:
             mine = await self._bazaar.list_by_seller(user_id)
-        except Exception as exc:      # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: bazaar list failed: %s", exc)
             return BazaarCornerSummary(0, 0, 0)
 
-        active = [
-            lst for lst in mine if lst.status is BazaarStatus.ACTIVE
-        ]
-        ending_soon_cutoff = (
-            datetime.now(timezone.utc) + timedelta(hours=24)
-        )
+        active = [lst for lst in mine if lst.status is BazaarStatus.ACTIVE]
+        ending_soon_cutoff = datetime.now(timezone.utc) + timedelta(hours=24)
         ending_soon = 0
         pending_offers = 0
         for lst in active:
@@ -309,15 +325,14 @@ class CornerService:
                     end = end.replace(tzinfo=timezone.utc)
                 if end <= ending_soon_cutoff:
                     ending_soon += 1
-            except (ValueError, AttributeError):
+            except ValueError, AttributeError:
                 pass
             try:
                 bids = await self._bazaar.list_bids(lst.post_id)
-            except Exception:         # pragma: no cover — defensive
+            except Exception:  # pragma: no cover — defensive
                 bids = []
             pending_offers += sum(
-                1 for b in bids
-                if not b.accepted and not b.rejected and not b.withdrawn
+                1 for b in bids if not b.accepted and not b.rejected and not b.withdrawn
             )
         return BazaarCornerSummary(
             active_listings=len(active),
@@ -329,7 +344,7 @@ class CornerService:
 async def _safe_int(label: str, coro) -> int:
     try:
         return int(await coro)
-    except Exception as exc:          # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover — defensive
         log.debug("corner: %s failed: %s", label, exc)
         return 0
 

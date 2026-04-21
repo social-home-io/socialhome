@@ -41,6 +41,7 @@ class DomainEvent:
 
 # ─── Posts + comments ─────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class PostCreated(DomainEvent):
     post: "Post"
@@ -78,6 +79,7 @@ class CommentAdded(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class CommentUpdated(DomainEvent):
     """Comment body edited. Broadcast as ``comment.updated`` WS frame."""
+
     post_id: str
     comment: "Comment"
     space_id: str | None = None
@@ -87,6 +89,7 @@ class CommentUpdated(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class CommentDeleted(DomainEvent):
     """Comment removed. Broadcast as ``comment.deleted`` WS frame."""
+
     post_id: str
     comment_id: str
     space_id: str | None = None
@@ -94,6 +97,7 @@ class CommentDeleted(DomainEvent):
 
 
 # ─── Spaces ───────────────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class SpacePostCreated(DomainEvent):
@@ -141,17 +145,17 @@ class SpaceModerationRejected(DomainEvent):
 class ReportFiled(DomainEvent):
     """A user filed a report on a post / comment / user / space."""
 
-    report_id:   str
-    target_type: str            # 'post' | 'comment' | 'user' | 'space'
-    target_id:   str
-    category:    str
+    report_id: str
+    target_type: str  # 'post' | 'comment' | 'user' | 'space'
+    target_id: str
+    category: str
     reporter_user_id: str
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class ReportResolved(DomainEvent):
-    report_id:   str
+    report_id: str
     resolved_by: str
     occurred_at: datetime = field(default_factory=_now)
 
@@ -167,17 +171,18 @@ class SpaceConfigChanged(DomainEvent):
 
 # ─── Tasks ────────────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class TaskAssigned(DomainEvent):
     task: "Task"
-    assigned_to: str                     # user_id
+    assigned_to: str  # user_id
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class TaskCompleted(DomainEvent):
     task: "Task"
-    completed_by: str                    # user_id
+    completed_by: str  # user_id
     spawned_next: "Task | None" = None
     occurred_at: datetime = field(default_factory=_now)
 
@@ -198,6 +203,7 @@ class TaskCreated(DomainEvent):
     """Any new task is created. :class:`RealtimeService` broadcasts
     this as ``task.created`` so co-members see the row appear live
     (household scope — space scope fan-out is tighter)."""
+
     task: "Task"
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
@@ -207,6 +213,7 @@ class TaskCreated(DomainEvent):
 class TaskUpdated(DomainEvent):
     """Title / description / due / status / position / assignees
     change. Broadcast as ``task.updated``."""
+
     task: "Task"
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
@@ -215,6 +222,7 @@ class TaskUpdated(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class TaskDeleted(DomainEvent):
     """Task row removed. Broadcast as ``task.deleted``."""
+
     task_id: str
     list_id: str
     space_id: str | None = None
@@ -225,6 +233,7 @@ class TaskDeleted(DomainEvent):
 class TaskListCreated(DomainEvent):
     """New task list. Broadcast as ``task_list.created`` so sidebars
     refresh live when another tab adds a list."""
+
     list_id: str
     name: str
     space_id: str | None = None
@@ -234,6 +243,7 @@ class TaskListCreated(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class TaskListUpdated(DomainEvent):
     """Task-list rename / colour / emoji."""
+
     list_id: str
     name: str
     space_id: str | None = None
@@ -243,6 +253,7 @@ class TaskListUpdated(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class TaskListDeleted(DomainEvent):
     """Task-list removed (cascades to tasks via DB FK)."""
+
     list_id: str
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
@@ -259,6 +270,7 @@ class SchedulePollResponded(DomainEvent):
     so consumers can update aggregate counts without a full summary
     fetch.
     """
+
     post_id: str
     slot_id: str
     user_id: str
@@ -270,6 +282,7 @@ class SchedulePollResponded(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class PollCreated(DomainEvent):
     """A reply poll was attached to a post (§9)."""
+
     post_id: str
     question: str
     allow_multiple: bool
@@ -281,6 +294,7 @@ class PollCreated(DomainEvent):
 class PollVoted(DomainEvent):
     """A user cast or retracted a vote. ``option_ids`` is the full set
     after the change (empty = retracted)."""
+
     post_id: str
     voter_user_id: str
     option_ids: tuple[str, ...]
@@ -291,6 +305,7 @@ class PollVoted(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class PollClosed(DomainEvent):
     """Author closed the poll — no more votes accepted."""
+
     post_id: str
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
@@ -303,6 +318,7 @@ class SchedulePollFinalized(DomainEvent):
     Space-scoped polls trigger the calendar auto-create (§17.2 /
     §23.53) when the space's ``calendar`` feature is enabled.
     """
+
     post_id: str
     slot_id: str
     slot_date: str
@@ -315,6 +331,7 @@ class SchedulePollFinalized(DomainEvent):
 
 
 # ─── Calendar ─────────────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class CalendarEventCreated(DomainEvent):
@@ -336,10 +353,11 @@ class CalendarEventDeleted(DomainEvent):
 
 # ─── Users ────────────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class UserStatusChanged(DomainEvent):
     user_id: str
-    status: "UserStatus | None"          # None = status cleared
+    status: "UserStatus | None"  # None = status cleared
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -367,6 +385,7 @@ class UserProfileUpdated(DomainEvent):
     federation-outbound layer can fan them to paired peers; WS
     broadcasts drop it and send only the hash so the frame stays small.
     """
+
     user_id: str
     username: str
     display_name: str
@@ -382,6 +401,7 @@ class SpaceMemberProfileUpdated(DomainEvent):
 
     Same ``picture_webp`` discipline as :class:`UserProfileUpdated`.
     """
+
     space_id: str
     user_id: str
     space_display_name: str | None
@@ -391,6 +411,7 @@ class SpaceMemberProfileUpdated(DomainEvent):
 
 
 # ─── Gallery (§23.119) ────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class GalleryAlbumCreated(DomainEvent):
@@ -411,7 +432,7 @@ class GalleryAlbumDeleted(DomainEvent):
 class GalleryItemUploaded(DomainEvent):
     item_id: str
     album_id: str
-    item_type: str                       # 'photo' | 'video'
+    item_type: str  # 'photo' | 'video'
     uploader: str
     occurred_at: datetime = field(default_factory=_now)
 
@@ -424,6 +445,7 @@ class GalleryItemDeleted(DomainEvent):
 
 
 # ─── Bazaar events (§9, §23.15) ──────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class BazaarBidPlaced(DomainEvent):
@@ -459,7 +481,7 @@ class BazaarListingExpired(DomainEvent):
 
     listing_post_id: str
     seller_user_id: str
-    final_status: str          # "sold" | "expired"
+    final_status: str  # "sold" | "expired"
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -517,6 +539,7 @@ class BazaarBidWithdrawn(DomainEvent):
 
 # ─── DM contact request (§12) ────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class DmContactRequested(DomainEvent):
     """A user asked to start a DM with another user."""
@@ -532,6 +555,7 @@ class DmContactRequested(DomainEvent):
 # The shopping list is intentionally a local-household feature:
 # short-lived, low-signal items that don't benefit from cross-household
 # sync. These events feed the WebSocket fan-out only.
+
 
 @dataclass(slots=True, frozen=True)
 class ShoppingItemAdded(DomainEvent):
@@ -571,6 +595,7 @@ class ShoppingItemsCleared(DomainEvent):
 
 # ─── Presence + notification real-time events (§21, §22) ────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class PresenceUpdated(DomainEvent):
     """A household member's presence changed (state / zone / location).
@@ -581,7 +606,7 @@ class PresenceUpdated(DomainEvent):
     """
 
     username: str
-    state: str                            # "home" | "away" | "zone" | "unavailable"
+    state: str  # "home" | "away" | "zone" | "unavailable"
     zone_name: str | None = None
     latitude: float | None = None
     longitude: float | None = None
@@ -613,6 +638,7 @@ class NotificationReadChanged(DomainEvent):
 
 
 # ─── Pairing events (§11.9) ──────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class PairingIntroRelayReceived(DomainEvent):
@@ -660,8 +686,8 @@ class ConnectionReachable(DomainEvent):
 class PairingIntroReceived(DomainEvent):
     """Target side of §11.9 — a peer has introduced us to a new instance."""
 
-    from_instance: str           # the introducer
-    via_instance_id: str         # intermediary
+    from_instance: str  # the introducer
+    via_instance_id: str  # intermediary
     message: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
@@ -720,6 +746,7 @@ class PeerUnpaired(DomainEvent):
 
 
 # ─── Remote space-membership events (drive admin UI) ─────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class RemoteSpaceCreated(DomainEvent):
@@ -814,6 +841,7 @@ class RemoteSpaceMemberRemoved(DomainEvent):
 
 # ─── DM events (drive push notifications + WS fan-out) ──────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class DmMessageCreated(DomainEvent):
     """A new DM landed in a conversation.
@@ -838,6 +866,7 @@ class DmMessageCreated(DomainEvent):
 
 
 # ─── Page events (drive FTS5 indexing + conflict bookkeeping) ────────────
+
 
 @dataclass(slots=True, frozen=True)
 class PageCreated(DomainEvent):
@@ -871,6 +900,7 @@ class PageEditLockAcquired(DomainEvent):
     members, if the page is space-scoped) as a ``page.editing`` WS
     event so every open Pages viewer can disable its "Edit" button.
     """
+
     page_id: str
     space_id: str | None
     locked_by: str
@@ -881,6 +911,7 @@ class PageEditLockAcquired(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class PageEditLockReleased(DomainEvent):
     """Fired when the lock is released or expires (§23.72)."""
+
     page_id: str
     space_id: str | None
     occurred_at: datetime = field(default_factory=_now)
@@ -894,6 +925,7 @@ class PageConflictEmitted(DomainEvent):
     about to save sees the opposing body in real time rather than on
     the next PATCH round-trip.
     """
+
     page_id: str
     space_id: str | None
     theirs: str
@@ -912,6 +944,7 @@ class StickyCreated(DomainEvent):
     event — scoped to ``space_id`` members when set, household-wide
     otherwise.
     """
+
     sticky_id: str
     space_id: str | None
     author: str
@@ -925,6 +958,7 @@ class StickyCreated(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class StickyUpdated(DomainEvent):
     """Content / position / color change on a sticky."""
+
     sticky_id: str
     space_id: str | None
     content: str
@@ -938,12 +972,14 @@ class StickyUpdated(DomainEvent):
 class StickyDeleted(DomainEvent):
     """A sticky was removed. Only ``sticky_id`` + ``space_id`` travel —
     peers clear the row locally."""
+
     sticky_id: str
     space_id: str | None
     occurred_at: datetime = field(default_factory=_now)
 
 
 # ─── Space membership (§23.48 / §23.52) ──────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class SpaceMemberJoined(DomainEvent):
@@ -997,6 +1033,7 @@ class SpaceJoinDenied(DomainEvent):
 
 # ─── Child Protection (§CP / §23.107) ────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class CpProtectionEnabled(DomainEvent):
     minor_username: str
@@ -1047,6 +1084,7 @@ class CpSpaceAgeGateChanged(DomainEvent):
 
 
 # ─── Household feature toggles (§18 / §23.13) ────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class HouseholdConfigChanged(DomainEvent):

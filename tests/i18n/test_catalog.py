@@ -10,6 +10,7 @@ from social_home.i18n import Catalog
 
 # ─── Construction ────────────────────────────────────────────────────────
 
+
 def test_empty_catalog_returns_key_unchanged():
     c = Catalog()
     assert c.gettext("missing.key") == "missing.key"
@@ -26,6 +27,7 @@ def test_custom_default_locale():
 
 
 # ─── Lookup ──────────────────────────────────────────────────────────────
+
 
 def test_load_locale_then_gettext():
     c = Catalog()
@@ -72,6 +74,7 @@ def test_loaded_locales_listed_in_sorted_order():
 
 # ─── from_directory ──────────────────────────────────────────────────────
 
+
 def test_from_directory_loads_every_json(tmp_path):
     (tmp_path / "en.json").write_text(json.dumps({"greet": "Hello"}))
     (tmp_path / "de.json").write_text(json.dumps({"greet": "Hallo"}))
@@ -99,12 +102,22 @@ def test_bundled_messages_loadable():
     """Sanity: the bundled en/de/fr files all parse."""
     from pathlib import Path
     import social_home
+
     base = Path(social_home.__file__).parent / "i18n" / "messages"
     c = Catalog.from_directory(base)
     assert "en" in c.loaded_locales
     assert "de" in c.loaded_locales
     assert "fr" in c.loaded_locales
     # Pick a key present in all three.
-    assert c.gettext("notification.task.assigned", locale="en", title="X") != "notification.task.assigned"
-    assert c.gettext("notification.task.assigned", locale="de", title="X") != "notification.task.assigned"
-    assert c.gettext("notification.task.assigned", locale="fr", title="X") != "notification.task.assigned"
+    assert (
+        c.gettext("notification.task.assigned", locale="en", title="X")
+        != "notification.task.assigned"
+    )
+    assert (
+        c.gettext("notification.task.assigned", locale="de", title="X")
+        != "notification.task.assigned"
+    )
+    assert (
+        c.gettext("notification.task.assigned", locale="fr", title="X")
+        != "notification.task.assigned"
+    )

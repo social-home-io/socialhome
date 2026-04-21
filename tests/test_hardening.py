@@ -15,15 +15,19 @@ from social_home.hardening import (
 
 # ─── Body-size middleware ────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def body_client(aiohttp_client):
     """Tiny app with the body-size middleware + an echo handler."""
+
     async def echo(request: web.Request) -> web.Response:
         return web.Response(text="ok")
 
-    app = web.Application(middlewares=[
-        build_body_size_middleware(json_max_bytes=1024, media_max_bytes=8192),
-    ])
+    app = web.Application(
+        middlewares=[
+            build_body_size_middleware(json_max_bytes=1024, media_max_bytes=8192),
+        ]
+    )
     app.router.add_post("/", echo)
     return await aiohttp_client(app)
 
@@ -45,7 +49,8 @@ async def test_body_size_under_cap_passes(body_client):
 async def test_body_size_json_over_cap_413(body_client):
     big = b'{"x":"' + (b"y" * 2000) + b'"}'
     r = await body_client.post(
-        "/", data=big,
+        "/",
+        data=big,
         headers={"Content-Type": "application/json"},
     )
     assert r.status == 413
@@ -54,7 +59,8 @@ async def test_body_size_json_over_cap_413(body_client):
 async def test_body_size_media_separate_cap(body_client):
     """Media uses the larger cap; 5 KiB octet-stream is fine."""
     r = await body_client.post(
-        "/", data=b"x" * 5000,
+        "/",
+        data=b"x" * 5000,
         headers={"Content-Type": "application/octet-stream"},
     )
     assert r.status == 200
@@ -68,6 +74,7 @@ async def test_bad_content_length_classified_as_400():
     handler directly with a mocked request.
     """
     from aiohttp.test_utils import make_mocked_request
+
     mw = build_body_size_middleware(json_max_bytes=1024, media_max_bytes=1024)
 
     async def _h(_):
@@ -86,16 +93,19 @@ async def test_body_size_no_content_length_passes(body_client):
 
 # ─── CORS-deny middleware ────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def cors_client(aiohttp_client):
     async def echo(request: web.Request) -> web.Response:
         return web.Response(text="ok")
 
-    app = web.Application(middlewares=[
-        build_cors_deny_middleware(
-            allowed_origins=("https://allowed.example",),
-        ),
-    ])
+    app = web.Application(
+        middlewares=[
+            build_cors_deny_middleware(
+                allowed_origins=("https://allowed.example",),
+            ),
+        ]
+    )
     app.router.add_get("/", echo)
     app.router.add_post("/", echo)
     app.router.add_route("OPTIONS", "/", echo)
@@ -115,7 +125,8 @@ async def test_unallowed_origin_403(cors_client):
 
 async def test_allowed_origin_passes_with_acao(cors_client):
     r = await cors_client.get(
-        "/", headers={"Origin": "https://allowed.example"},
+        "/",
+        headers={"Origin": "https://allowed.example"},
     )
     assert r.status == 200
     assert r.headers["Access-Control-Allow-Origin"] == "https://allowed.example"
@@ -149,9 +160,12 @@ async def test_unallowed_preflight_403(cors_client):
 async def test_default_deny_all_when_allowlist_empty(aiohttp_client):
     async def echo(request: web.Request) -> web.Response:
         return web.Response(text="ok")
-    app = web.Application(middlewares=[
-        build_cors_deny_middleware(allowed_origins=()),
-    ])
+
+    app = web.Application(
+        middlewares=[
+            build_cors_deny_middleware(allowed_origins=()),
+        ]
+    )
     app.router.add_get("/", echo)
     tc = await aiohttp_client(app)
     # No Origin: pass.

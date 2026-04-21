@@ -37,8 +37,14 @@ class CalendarReminderScheduler:
     """Background task that pushes "upcoming event" notifications."""
 
     __slots__ = (
-        "_calendar_repo", "_user_repo", "_notif_service",
-        "_interval", "_window", "_fired", "_task", "_stop",
+        "_calendar_repo",
+        "_user_repo",
+        "_notif_service",
+        "_interval",
+        "_window",
+        "_fired",
+        "_task",
+        "_stop",
     )
 
     def __init__(
@@ -51,10 +57,10 @@ class CalendarReminderScheduler:
         reminder_window_minutes: int = 10,
     ) -> None:
         self._calendar_repo = calendar_repo
-        self._user_repo     = user_repo
+        self._user_repo = user_repo
         self._notif_service = notif_service
-        self._interval      = interval_seconds
-        self._window        = timedelta(minutes=reminder_window_minutes)
+        self._interval = interval_seconds
+        self._window = timedelta(minutes=reminder_window_minutes)
         self._fired: set[tuple[str, str]] = set()
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -70,7 +76,7 @@ class CalendarReminderScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -80,11 +86,12 @@ class CalendarReminderScheduler:
                 fired = await self.tick_once()
                 if fired:
                     log.debug("calendar-reminder: fired %d", fired)
-            except Exception as exc:                   # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("calendar-reminder tick failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue
@@ -101,12 +108,15 @@ class CalendarReminderScheduler:
         for user in users:
             try:
                 events = await self._calendar_repo.list_events_for_user_in_range(
-                    user.username, start=now, end=horizon,
+                    user.username,
+                    start=now,
+                    end=horizon,
                 )
-            except Exception as exc:                   # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug(
                     "calendar-reminder: list events failed user=%s: %s",
-                    user.username, exc,
+                    user.username,
+                    exc,
                 )
                 continue
             for event in events:

@@ -16,11 +16,19 @@ class ConversationCollectionView(BaseView):
         ctx = self.user
         svc = self.svc(dm_service_key)
         convos = await svc.list_conversations(ctx.username)
-        return web.json_response([
-            {"id": c.id, "type": c.type.value, "name": c.name,
-             "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None}
-            for c in convos
-        ])
+        return web.json_response(
+            [
+                {
+                    "id": c.id,
+                    "type": c.type.value,
+                    "name": c.name,
+                    "last_message_at": c.last_message_at.isoformat()
+                    if c.last_message_at
+                    else None,
+                }
+                for c in convos
+            ]
+        )
 
 
 class ConversationDmView(BaseView):
@@ -62,18 +70,31 @@ class ConversationMessageView(BaseView):
         before = self.request.query.get("before")
         limit = min(max(int(self.request.query.get("limit", 50)), 1), 100)
         msgs = await svc.list_messages(
-            conv_id, reader_username=ctx.username, before=before, limit=limit,
+            conv_id,
+            reader_username=ctx.username,
+            before=before,
+            limit=limit,
         )
-        return web.json_response([
-            sanitise_for_api({
-                "id": m.id, "sender_user_id": m.sender_user_id,
-                "content": m.content, "type": m.type,
-                "media_url": m.media_url, "reply_to_id": m.reply_to_id,
-                "deleted": m.deleted,
-                "created_at": m.created_at.isoformat() if m.created_at else None,
-                "edited_at": m.edited_at.isoformat() if m.edited_at else None,
-            }) for m in msgs
-        ])
+        return web.json_response(
+            [
+                sanitise_for_api(
+                    {
+                        "id": m.id,
+                        "sender_user_id": m.sender_user_id,
+                        "content": m.content,
+                        "type": m.type,
+                        "media_url": m.media_url,
+                        "reply_to_id": m.reply_to_id,
+                        "deleted": m.deleted,
+                        "created_at": m.created_at.isoformat()
+                        if m.created_at
+                        else None,
+                        "edited_at": m.edited_at.isoformat() if m.edited_at else None,
+                    }
+                )
+                for m in msgs
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -81,7 +102,8 @@ class ConversationMessageView(BaseView):
         conv_id = self.match("id")
         body = await self.body()
         msg = await svc.send_message(
-            conv_id, sender_username=ctx.username,
+            conv_id,
+            sender_username=ctx.username,
             content=body.get("content", ""),
             type=body.get("type", "text"),
             media_url=body.get("media_url"),

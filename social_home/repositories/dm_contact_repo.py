@@ -24,7 +24,10 @@ from .base import row_to_dict, rows_to_dicts
 @runtime_checkable
 class AbstractDmContactRepo(Protocol):
     async def save_request(
-        self, *, from_user_id: str, to_user_id: str,
+        self,
+        *,
+        from_user_id: str,
+        to_user_id: str,
     ) -> str: ...
     async def list_pending_for(self, to_user_id: str) -> list[dict]: ...
     async def set_status(self, request_id: str, status: str) -> None: ...
@@ -37,7 +40,10 @@ class SqliteDmContactRepo:
         self._db = db
 
     async def save_request(
-        self, *, from_user_id: str, to_user_id: str,
+        self,
+        *,
+        from_user_id: str,
+        to_user_id: str,
     ) -> str:
         """Insert a new pending request. Returns the generated request id."""
         request_id = uuid.uuid4().hex
@@ -70,6 +76,7 @@ class SqliteDmContactRepo:
 
     async def get(self, request_id: str) -> dict | None:
         row = await self._db.fetchone(
-            "SELECT * FROM dm_contact_requests WHERE id=?", (request_id,),
+            "SELECT * FROM dm_contact_requests WHERE id=?",
+            (request_id,),
         )
         return row_to_dict(row)

@@ -9,6 +9,7 @@ async def test_media_serve_file(client):
     h = _auth(client._tok)
     # Write a test file to media_path
     from social_home.app_keys import config_key
+
     config = client.app[config_key]
     media_dir = config.media_path
     os.makedirs(media_dir, exist_ok=True)
@@ -50,6 +51,7 @@ async def test_media_upload_image(client):
     # Create a minimal JPEG
     from PIL import Image
     import io
+
     img = Image.new("RGB", (50, 50), color="red")
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
@@ -57,6 +59,7 @@ async def test_media_upload_image(client):
 
     # Multipart upload
     import aiohttp
+
     data = aiohttp.FormData()
     data.add_field("file", jpeg_bytes, filename="test.jpg", content_type="image/jpeg")
     r = await client.post("/api/media/upload", data=data, headers=h)
@@ -70,7 +73,7 @@ async def test_media_upload_image(client):
 async def test_media_upload_not_multipart(client):
     """POST /api/media/upload without multipart returns 400."""
     h = {**_auth(client._tok), "Content-Type": "application/json"}
-    r = await client.post("/api/media/upload", data=b'{}', headers=h)
+    r = await client.post("/api/media/upload", data=b"{}", headers=h)
     assert r.status == 400
 
 
@@ -78,8 +81,11 @@ async def test_media_upload_invalid_image(client):
     """POST /api/media/upload with garbage data returns 422."""
     h = _auth(client._tok)
     import aiohttp
+
     data = aiohttp.FormData()
-    data.add_field("file", b"not an image", filename="bad.jpg", content_type="image/jpeg")
+    data.add_field(
+        "file", b"not an image", filename="bad.jpg", content_type="image/jpeg"
+    )
     r = await client.post("/api/media/upload", data=data, headers=h)
     assert r.status == 422
 
@@ -89,13 +95,17 @@ async def test_media_serve_webp(client):
     h = _auth(client._tok)
     from PIL import Image
     import io
+
     img = Image.new("RGB", (30, 30), color="blue")
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
 
     import aiohttp
+
     data = aiohttp.FormData()
-    data.add_field("file", buf.getvalue(), filename="blue.jpg", content_type="image/jpeg")
+    data.add_field(
+        "file", buf.getvalue(), filename="blue.jpg", content_type="image/jpeg"
+    )
     r = await client.post("/api/media/upload", data=data, headers=h)
     body = await r.json()
     filename = body["filename"]

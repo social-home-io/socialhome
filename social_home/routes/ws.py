@@ -44,7 +44,8 @@ class WebSocketView(BaseView):
         await manager.register(ctx.user_id, ws)
         log.info(
             "ws connected: user=%s total=%d",
-            ctx.user_id, manager.connection_count(),
+            ctx.user_id,
+            manager.connection_count(),
         )
 
         try:
@@ -65,7 +66,8 @@ class WebSocketView(BaseView):
             await manager.unregister(ctx.user_id, ws)
             log.info(
                 "ws disconnected: user=%s total=%d",
-                ctx.user_id, manager.connection_count(),
+                ctx.user_id,
+                manager.connection_count(),
             )
 
         return ws

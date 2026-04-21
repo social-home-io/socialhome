@@ -16,14 +16,20 @@ from enum import StrEnum
 
 
 class ConversationType(StrEnum):
-    DM       = "dm"         # exactly 2 participants
-    GROUP_DM = "group_dm"   # 3+ participants; may carry an optional name
+    DM = "dm"  # exactly 2 participants
+    GROUP_DM = "group_dm"  # 3+ participants; may carry an optional name
 
 
 # Allowed ``type`` values for a :class:`ConversationMessage`.
-MESSAGE_TYPES: frozenset[str] = frozenset({
-    "text", "image", "video", "transcript", "location",
-})
+MESSAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "text",
+        "image",
+        "video",
+        "transcript",
+        "location",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,9 +38,9 @@ class Conversation:
     type: ConversationType
     created_at: datetime
 
-    name: str | None = None              # set for group DMs, None for 1:1
+    name: str | None = None  # set for group DMs, None for 1:1
     last_message_at: datetime | None = None
-    notify_enabled: bool = False         # True → exposed as HA notify entity
+    notify_enabled: bool = False  # True → exposed as HA notify entity
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,7 +83,7 @@ class ConversationMember:
     """One participant row of a :class:`Conversation` (local users only)."""
 
     conversation_id: str
-    username: str                        # local username (FK to users)
+    username: str  # local username (FK to users)
     joined_at: str
     last_read_at: str | None = None
     history_visible_from: str | None = None

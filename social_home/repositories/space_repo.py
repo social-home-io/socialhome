@@ -48,7 +48,9 @@ class AbstractSpaceRepo(Protocol):
     async def save(self, space: Space) -> Space: ...
     async def get(self, space_id: str) -> Space | None: ...
     async def set_cover_hash(
-        self, space_id: str, cover_hash: str | None,
+        self,
+        space_id: str,
+        cover_hash: str | None,
     ) -> None: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
@@ -86,8 +88,13 @@ class AbstractSpaceRepo(Protocol):
 
     # ── Bans ───────────────────────────────────────────────────────────
     async def ban_member(
-        self, space_id: str, user_id: str, banned_by: str,
-        *, identity_pk: str | None = None, reason: str | None = None,
+        self,
+        space_id: str,
+        user_id: str,
+        banned_by: str,
+        *,
+        identity_pk: str | None = None,
+        reason: str | None = None,
     ) -> None: ...
     async def unban_member(self, space_id: str, user_id: str) -> None: ...
     async def is_banned(self, space_id: str, user_id: str) -> bool: ...
@@ -96,29 +103,44 @@ class AbstractSpaceRepo(Protocol):
     # ── Moderation queue ──────────────────────────────────────────────
     async def save_moderation_item(self, item: SpaceModerationItem) -> None: ...
     async def list_moderation_queue(
-        self, space_id: str, *,
-        status: ModerationStatus | None = None, limit: int = 100,
+        self,
+        space_id: str,
+        *,
+        status: ModerationStatus | None = None,
+        limit: int = 100,
     ) -> list[SpaceModerationItem]: ...
     async def get_moderation_item(
-        self, item_id: str,
+        self,
+        item_id: str,
     ) -> SpaceModerationItem | None: ...
     async def update_moderation_item_status(
-        self, item_id: str, *,
-        status: ModerationStatus, reviewed_by: str,
+        self,
+        item_id: str,
+        *,
+        status: ModerationStatus,
+        reviewed_by: str,
         rejection_reason: str | None = None,
     ) -> None: ...
 
     # ── Invite tokens ──────────────────────────────────────────────────
     async def create_invite_token(
-        self, space_id: str, created_by: str,
-        *, uses: int = 1, expires_at: str | None = None,
+        self,
+        space_id: str,
+        created_by: str,
+        *,
+        uses: int = 1,
+        expires_at: str | None = None,
     ) -> str: ...
     async def consume_invite_token(self, token: str) -> dict | None: ...
 
     # ── Invitations ────────────────────────────────────────────────────
     async def save_invitation(
-        self, space_id: str, invited_user_id: str, invited_by: str,
-        *, ttl_days: int = 7,
+        self,
+        space_id: str,
+        invited_user_id: str,
+        invited_by: str,
+        *,
+        ttl_days: int = 7,
     ) -> str: ...
     async def save_remote_invitation(
         self,
@@ -134,40 +156,60 @@ class AbstractSpaceRepo(Protocol):
     async def get_invitation(self, invitation_id: str) -> dict | None: ...
     async def get_invitation_by_token(self, token: str) -> dict | None: ...
     async def list_pending_remote_invites_for(
-        self, user_id: str,
+        self,
+        user_id: str,
     ) -> list[dict]: ...
     async def update_invitation_status(
-        self, invitation_id: str, status: str,
+        self,
+        invitation_id: str,
+        status: str,
     ) -> None: ...
 
     # ── Join requests ──────────────────────────────────────────────────
     async def save_join_request(
-        self, space_id: str, user_id: str,
-        *, message: str | None = None, ttl_days: int = 7,
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        message: str | None = None,
+        ttl_days: int = 7,
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
     ) -> str: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
     async def update_join_request_status(
-        self, request_id: str, status: str, *, reviewed_by: str | None = None,
+        self,
+        request_id: str,
+        status: str,
+        *,
+        reviewed_by: str | None = None,
     ) -> None: ...
     async def list_expired_join_requests(self) -> list[dict]: ...
 
     # ── Sidebar + aliases ──────────────────────────────────────────────
     async def pin_sidebar(
-        self, user_id: str, space_id: str, position: int,
+        self,
+        user_id: str,
+        space_id: str,
+        position: int,
     ) -> None: ...
     async def unpin_sidebar(self, user_id: str, space_id: str) -> None: ...
     async def set_space_alias(
-        self, space_id: str, local_username: str, alias: str,
+        self,
+        space_id: str,
+        local_username: str,
+        alias: str,
     ) -> None: ...
     async def get_space_alias(
-        self, space_id: str, local_username: str,
+        self,
+        space_id: str,
+        local_username: str,
     ) -> str | None: ...
 
 
 # ─── Concrete SQLite implementation ───────────────────────────────────────
+
 
 class SqliteSpaceRepo:
     """SQLite-backed :class:`AbstractSpaceRepo`."""
@@ -249,30 +291,54 @@ class SqliteSpaceRepo:
                 cover_hash=excluded.cover_hash
             """,
             (
-                space.id, space.name, space.description, space.emoji,
-                space.owner_instance_id, space.owner_username,
+                space.id,
+                space.name,
+                space.description,
+                space.emoji,
+                space.owner_instance_id,
+                space.owner_username,
                 space.identity_public_key,
-                space.config_sequence, space.space_type.value,
-                space.join_mode.value, space.join_code,
-                space.retention_days, dump_json(list(space.retention_exempt_types)),
-                cols["feature_calendar"], cols["feature_todo"], cols["feature_location"],
-                cols["feature_stickies"], cols["feature_pages"], cols["location_mode"],
-                cols["posts_access"], cols["pages_access"], cols["stickies_access"],
-                cols["calendar_access"], cols["tasks_access"],
-                cols["allow_post_text"], cols["allow_post_image"], cols["allow_post_video"],
-                cols["allow_post_transcript"], cols["allow_post_poll"],
-                cols["allow_post_schedule"], cols["allow_post_file"],
+                space.config_sequence,
+                space.space_type.value,
+                space.join_mode.value,
+                space.join_code,
+                space.retention_days,
+                dump_json(list(space.retention_exempt_types)),
+                cols["feature_calendar"],
+                cols["feature_todo"],
+                cols["feature_location"],
+                cols["feature_stickies"],
+                cols["feature_pages"],
+                cols["location_mode"],
+                cols["posts_access"],
+                cols["pages_access"],
+                cols["stickies_access"],
+                cols["calendar_access"],
+                cols["tasks_access"],
+                cols["allow_post_text"],
+                cols["allow_post_image"],
+                cols["allow_post_video"],
+                cols["allow_post_transcript"],
+                cols["allow_post_poll"],
+                cols["allow_post_schedule"],
+                cols["allow_post_file"],
                 cols["allow_post_bazaar"],
-                space.lat, space.lon, space.radius_km,
-                int(space.notify_enabled), int(space.allow_here_mention),
+                space.lat,
+                space.lon,
+                space.radius_km,
+                int(space.notify_enabled),
+                int(space.allow_here_mention),
                 int(space.dissolved),
-                space.about_markdown, space.cover_hash,
+                space.about_markdown,
+                space.cover_hash,
             ),
         )
         return space
 
     async def set_cover_hash(
-        self, space_id: str, cover_hash: str | None,
+        self,
+        space_id: str,
+        cover_hash: str | None,
     ) -> None:
         await self._db.enqueue(
             "UPDATE spaces SET cover_hash=? WHERE id=?",
@@ -281,19 +347,17 @@ class SqliteSpaceRepo:
 
     async def get(self, space_id: str) -> Space | None:
         row = await self._db.fetchone(
-            "SELECT * FROM spaces WHERE id=?", (space_id,),
+            "SELECT * FROM spaces WHERE id=?",
+            (space_id,),
         )
         return _row_to_space(row_to_dict(row))
 
     async def list_by_type(self, space_type: SpaceType) -> list[Space]:
         rows = await self._db.fetchall(
-            "SELECT * FROM spaces WHERE space_type=? AND dissolved=0 "
-            "ORDER BY name",
+            "SELECT * FROM spaces WHERE space_type=? AND dissolved=0 ORDER BY name",
             (space_type.value,),
         )
-        return [
-            s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s
-        ]
+        return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
 
     async def list_for_user(self, user_id: str) -> list[Space]:
         """Return every active space *user_id* is a member of (§23.48).
@@ -309,9 +373,7 @@ class SqliteSpaceRepo:
             """,
             (user_id,),
         )
-        return [
-            s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s
-        ]
+        return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
 
     async def list_all(self) -> list[Space]:
         """Return every active space hosted on this instance (admin).
@@ -322,13 +384,12 @@ class SqliteSpaceRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM spaces WHERE dissolved=0 ORDER BY name",
         )
-        return [
-            s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s
-        ]
+        return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
 
     async def mark_dissolved(self, space_id: str) -> None:
         await self._db.enqueue(
-            "UPDATE spaces SET dissolved=1 WHERE id=?", (space_id,),
+            "UPDATE spaces SET dissolved=1 WHERE id=?",
+            (space_id,),
         )
 
     async def update_age_gate(
@@ -370,10 +431,10 @@ class SqliteSpaceRepo:
         strictly increasing sequence numbers, even on SQLite builds that
         predate the ``RETURNING`` clause.
         """
+
         def _run(conn):
             cur = conn.execute(
-                "UPDATE spaces SET config_sequence = config_sequence + 1 "
-                "WHERE id=?",
+                "UPDATE spaces SET config_sequence = config_sequence + 1 WHERE id=?",
                 (space_id,),
             )
             if cur.rowcount == 0:
@@ -404,9 +465,14 @@ class SqliteSpaceRepo:
                 picture_hash=excluded.picture_hash
             """,
             (
-                member.space_id, member.user_id, member.role, member.joined_at,
-                member.history_visible_from, int(member.location_share_enabled),
-                member.space_display_name, member.picture_hash,
+                member.space_id,
+                member.user_id,
+                member.role,
+                member.joined_at,
+                member.history_visible_from,
+                int(member.location_share_enabled),
+                member.space_display_name,
+                member.picture_hash,
             ),
         )
         return member
@@ -447,9 +513,7 @@ class SqliteSpaceRepo:
             "SELECT * FROM space_members WHERE space_id=? ORDER BY joined_at",
             (space_id,),
         )
-        return [
-            m for m in (_row_to_member(d) for d in rows_to_dicts(rows)) if m
-        ]
+        return [m for m in (_row_to_member(d) for d in rows_to_dicts(rows)) if m]
 
     async def delete_member(self, space_id: str, user_id: str) -> None:
         await self._db.enqueue(
@@ -458,7 +522,10 @@ class SqliteSpaceRepo:
         )
 
     async def set_role(
-        self, space_id: str, user_id: str, role: str,
+        self,
+        space_id: str,
+        user_id: str,
+        role: str,
     ) -> None:
         if role not in ("owner", "admin", "member"):
             raise ValueError(f"invalid role {role!r}")
@@ -486,7 +553,9 @@ class SqliteSpaceRepo:
     # ── Member instances ───────────────────────────────────────────────
 
     async def add_space_instance(
-        self, space_id: str, instance_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -499,7 +568,9 @@ class SqliteSpaceRepo:
         )
 
     async def remove_space_instance(
-        self, space_id: str, instance_id: str,
+        self,
+        space_id: str,
+        instance_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM space_instances WHERE space_id=? AND instance_id=?",
@@ -516,8 +587,13 @@ class SqliteSpaceRepo:
     # ── Bans ───────────────────────────────────────────────────────────
 
     async def ban_member(
-        self, space_id: str, user_id: str, banned_by: str,
-        *, identity_pk: str | None = None, reason: str | None = None,
+        self,
+        space_id: str,
+        user_id: str,
+        banned_by: str,
+        *,
+        identity_pk: str | None = None,
+        reason: str | None = None,
     ) -> None:
         # Atomic: insert the ban and drop the membership in the same batch.
         await self._db.enqueue(
@@ -556,7 +632,8 @@ class SqliteSpaceRepo:
     # ── Moderation queue ──────────────────────────────────────────────
 
     async def save_moderation_item(
-        self, item: SpaceModerationItem,
+        self,
+        item: SpaceModerationItem,
     ) -> None:
         await self._db.enqueue(
             """
@@ -568,19 +645,28 @@ class SqliteSpaceRepo:
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                item.id, item.space_id, item.feature, item.action,
-                item.submitted_by, dump_json(item.payload),
+                item.id,
+                item.space_id,
+                item.feature,
+                item.action,
+                item.submitted_by,
+                dump_json(item.payload),
                 item.current_snapshot,
-                _iso_ts(item.submitted_at), _iso_ts(item.expires_at),
+                _iso_ts(item.submitted_at),
+                _iso_ts(item.expires_at),
                 item.status.value,
-                item.reviewed_by, _iso_ts(item.reviewed_at),
+                item.reviewed_by,
+                _iso_ts(item.reviewed_at),
                 item.rejection_reason,
             ),
         )
 
     async def list_moderation_queue(
-        self, space_id: str, *,
-        status: ModerationStatus | None = None, limit: int = 100,
+        self,
+        space_id: str,
+        *,
+        status: ModerationStatus | None = None,
+        limit: int = 100,
     ) -> list[SpaceModerationItem]:
         if status is None:
             rows = await self._db.fetchall(
@@ -596,21 +682,27 @@ class SqliteSpaceRepo:
                 (space_id, status.value, int(limit)),
             )
         return [
-            item for item in (_row_to_moderation_item(d) for d in rows_to_dicts(rows))
+            item
+            for item in (_row_to_moderation_item(d) for d in rows_to_dicts(rows))
             if item
         ]
 
     async def get_moderation_item(
-        self, item_id: str,
+        self,
+        item_id: str,
     ) -> SpaceModerationItem | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_moderation_queue WHERE id=?", (item_id,),
+            "SELECT * FROM space_moderation_queue WHERE id=?",
+            (item_id,),
         )
         return _row_to_moderation_item(row_to_dict(row))
 
     async def update_moderation_item_status(
-        self, item_id: str, *,
-        status: ModerationStatus, reviewed_by: str,
+        self,
+        item_id: str,
+        *,
+        status: ModerationStatus,
+        reviewed_by: str,
         rejection_reason: str | None = None,
     ) -> None:
         await self._db.enqueue(
@@ -626,8 +718,12 @@ class SqliteSpaceRepo:
     # ── Invite tokens ──────────────────────────────────────────────────
 
     async def create_invite_token(
-        self, space_id: str, created_by: str,
-        *, uses: int = 1, expires_at: str | None = None,
+        self,
+        space_id: str,
+        created_by: str,
+        *,
+        uses: int = 1,
+        expires_at: str | None = None,
     ) -> str:
         token = uuid.uuid4().hex
         await self._db.enqueue(
@@ -647,6 +743,7 @@ class SqliteSpaceRepo:
         already been fully consumed. When it has uses left, decrements the
         counter atomically and returns the row as a dict.
         """
+
         def _run(conn):
             cur = conn.execute(
                 """
@@ -670,10 +767,10 @@ class SqliteSpaceRepo:
             if row is None:
                 return None
             return {
-                "space_id":      row[0],
-                "created_by":    row[1],
+                "space_id": row[0],
+                "created_by": row[1],
                 "uses_remaining": row[2],
-                "expires_at":    row[3],
+                "expires_at": row[3],
             }
 
         return await self._db.transact(_run)
@@ -681,13 +778,15 @@ class SqliteSpaceRepo:
     # ── Invitations ────────────────────────────────────────────────────
 
     async def save_invitation(
-        self, space_id: str, invited_user_id: str, invited_by: str,
-        *, ttl_days: int = 7,
+        self,
+        space_id: str,
+        invited_user_id: str,
+        invited_by: str,
+        *,
+        ttl_days: int = 7,
     ) -> str:
         invitation_id = uuid.uuid4().hex
-        expires = (
-            datetime.now(timezone.utc) + timedelta(days=ttl_days)
-        ).isoformat()
+        expires = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO space_invitations(
@@ -730,17 +829,23 @@ class SqliteSpaceRepo:
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                invitation_id, space_id,
-                remote_user_id, invited_by,
-                remote_instance_id, remote_user_id,
-                invite_token, space_display_hint, expires,
+                invitation_id,
+                space_id,
+                remote_user_id,
+                invited_by,
+                remote_instance_id,
+                remote_user_id,
+                invite_token,
+                space_display_hint,
+                expires,
             ),
         )
         return invitation_id
 
     async def get_invitation(self, invitation_id: str) -> dict | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_invitations WHERE id=?", (invitation_id,),
+            "SELECT * FROM space_invitations WHERE id=?",
+            (invitation_id,),
         )
         return row_to_dict(row)
 
@@ -753,7 +858,8 @@ class SqliteSpaceRepo:
         return row_to_dict(row)
 
     async def list_pending_remote_invites_for(
-        self, user_id: str,
+        self,
+        user_id: str,
     ) -> list[dict]:
         """Inbound cross-household invites still waiting on the user's
         accept/decline. ``remote_user_id`` is the invitee on both sides
@@ -773,7 +879,9 @@ class SqliteSpaceRepo:
         return rows_to_dicts(rows)
 
     async def update_invitation_status(
-        self, invitation_id: str, status: str,
+        self,
+        invitation_id: str,
+        status: str,
     ) -> None:
         if status not in ("pending", "accepted", "declined", "expired"):
             raise ValueError(f"invalid invitation status {status!r}")
@@ -785,8 +893,12 @@ class SqliteSpaceRepo:
     # ── Join requests ──────────────────────────────────────────────────
 
     async def save_join_request(
-        self, space_id: str, user_id: str,
-        *, message: str | None = None, ttl_days: int = 7,
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        message: str | None = None,
+        ttl_days: int = 7,
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
@@ -798,9 +910,7 @@ class SqliteSpaceRepo:
         :data:`SPACE_JOIN_REQUEST_APPROVED` round-trips match.
         """
         rid = request_id or uuid.uuid4().hex
-        expires = (
-            datetime.now(timezone.utc) + timedelta(days=ttl_days)
-        ).isoformat()
+        expires = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO space_join_requests(
@@ -810,14 +920,20 @@ class SqliteSpaceRepo:
             ON CONFLICT(id) DO NOTHING
             """,
             (
-                rid, space_id, user_id, message, expires,
-                remote_applicant_instance_id, remote_applicant_pk,
+                rid,
+                space_id,
+                user_id,
+                message,
+                expires,
+                remote_applicant_instance_id,
+                remote_applicant_pk,
             ),
         )
         return rid
 
     async def list_pending_join_requests(
-        self, space_id: str,
+        self,
+        space_id: str,
     ) -> list[dict]:
         rows = await self._db.fetchall(
             """
@@ -830,8 +946,11 @@ class SqliteSpaceRepo:
         return rows_to_dicts(rows)
 
     async def update_join_request_status(
-        self, request_id: str, status: str,
-        *, reviewed_by: str | None = None,
+        self,
+        request_id: str,
+        status: str,
+        *,
+        reviewed_by: str | None = None,
     ) -> None:
         if status not in ("pending", "approved", "denied", "expired", "withdrawn"):
             raise ValueError(f"invalid join request status {status!r}")
@@ -856,7 +975,10 @@ class SqliteSpaceRepo:
     # ── Sidebar + aliases ──────────────────────────────────────────────
 
     async def pin_sidebar(
-        self, user_id: str, space_id: str, position: int,
+        self,
+        user_id: str,
+        space_id: str,
+        position: int,
     ) -> None:
         await self._db.enqueue(
             """
@@ -874,7 +996,10 @@ class SqliteSpaceRepo:
         )
 
     async def set_space_alias(
-        self, space_id: str, local_username: str, alias: str,
+        self,
+        space_id: str,
+        local_username: str,
+        alias: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -888,11 +1013,12 @@ class SqliteSpaceRepo:
         )
 
     async def get_space_alias(
-        self, space_id: str, local_username: str,
+        self,
+        space_id: str,
+        local_username: str,
     ) -> str | None:
         row = await self._db.fetchone(
-            "SELECT alias FROM space_aliases "
-            "WHERE space_id=? AND local_username=?",
+            "SELECT alias FROM space_aliases WHERE space_id=? AND local_username=?",
             (space_id, local_username),
         )
         return row["alias"] if row else None
@@ -900,11 +1026,12 @@ class SqliteSpaceRepo:
 
 # ─── Row → domain mapping ─────────────────────────────────────────────────
 
+
 def _row_to_space(row: dict | None) -> Space | None:
     if row is None:
         return None
     features = SpaceFeatures.from_row(row)
-    exempt   = tuple(load_json(row.get("retention_exempt_json"), []))
+    exempt = tuple(load_json(row.get("retention_exempt_json"), []))
     return Space(
         id=row["id"],
         name=row["name"],
@@ -980,10 +1107,8 @@ def _row_to_moderation_item(row: dict | None) -> SpaceModerationItem | None:
         submitted_by=row.get("submitted_by", ""),
         payload=load_json(row.get("payload_json"), default={}),
         current_snapshot=row.get("current_snapshot"),
-        submitted_at=_parse_ts(row.get("submitted_at"))
-                     or datetime.now(timezone.utc),
-        expires_at=_parse_ts(row.get("expires_at"))
-                   or datetime.now(timezone.utc),
+        submitted_at=_parse_ts(row.get("submitted_at")) or datetime.now(timezone.utc),
+        expires_at=_parse_ts(row.get("expires_at")) or datetime.now(timezone.utc),
         status=status,
         reviewed_by=row.get("reviewed_by"),
         reviewed_at=_parse_ts(row.get("reviewed_at")),

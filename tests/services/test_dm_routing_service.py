@@ -34,6 +34,7 @@ from social_home.services.dm_routing_service import (
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
+
 class _FakeFed:
     def __init__(self, own: str = "self-iid"):
         self.own_instance_id = own
@@ -60,11 +61,15 @@ class _Event:
 
 def _remote(iid: str, *, status=PairingStatus.CONFIRMED) -> RemoteInstance:
     return RemoteInstance(
-        id=iid, display_name=iid,
+        id=iid,
+        display_name=iid,
         remote_identity_pk="aa" * 32,
-        key_self_to_remote="enc", key_remote_to_self="enc",
-        remote_webhook_url="https://x/wh", local_webhook_id=f"wh-{iid}",
-        status=status, source=InstanceSource.MANUAL,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_webhook_url="https://x/wh",
+        local_webhook_id=f"wh-{iid}",
+        status=status,
+        source=InstanceSource.MANUAL,
     )
 
 
@@ -88,7 +93,8 @@ async def env(tmp_dir):
     fed_repo = SqliteFederationRepo(db)
     fed = _FakeFed("self-iid")
     svc = DmRoutingService(
-        SqliteDmRoutingRepo(db), fed_repo,
+        SqliteDmRoutingRepo(db),
+        fed_repo,
         federation_service=fed,
         own_instance_id="self-iid",
     )
@@ -97,6 +103,7 @@ async def env(tmp_dir):
 
 
 # ─── Constants ───────────────────────────────────────────────────────────
+
 
 def test_max_hops_matches_spec():
     assert MAX_HOPS == 3
@@ -111,6 +118,7 @@ def test_dedup_ttl_one_hour():
 
 
 # ─── Graph queries ───────────────────────────────────────────────────────
+
 
 async def test_get_own_peers_lists_confirmed(env):
     _, fed_repo, svc, _ = env
@@ -161,12 +169,13 @@ async def test_record_network_sync_ignores_non_string(env):
     _, _, svc, _ = env
     n = await svc.record_network_sync(
         source_instance_id="m",
-        peer_ids=["ok", 123, None, "also-ok"],        # type: ignore[list-item]
+        peer_ids=["ok", 123, None, "also-ok"],  # type: ignore[list-item]
     )
     assert n == 2
 
 
 # ─── BFS ─────────────────────────────────────────────────────────────────
+
 
 async def test_find_relay_path_direct_target(env):
     _, fed_repo, svc, _ = env
@@ -187,8 +196,8 @@ async def test_find_relay_path_two_hops_via_m(env):
 async def test_find_relay_path_three_hops(env):
     _, fed_repo, svc, _ = env
     await fed_repo.save_instance(_remote("m"))
-    await svc.record_network_sync(source_instance_id="m",     peer_ids=["n"])
-    await svc.record_network_sync(source_instance_id="n",     peer_ids=["target"])
+    await svc.record_network_sync(source_instance_id="m", peer_ids=["n"])
+    await svc.record_network_sync(source_instance_id="n", peer_ids=["target"])
     paths = await svc.find_relay_paths("target")
     assert paths == [["m", "n", "target"]]
 
@@ -229,6 +238,7 @@ async def test_find_relay_path_multiple_paths_sorted_by_length(env):
 
 # ─── Path selection (deterministic) ──────────────────────────────────────
 
+
 async def test_select_conversation_path_is_deterministic(env):
     _, fed_repo, svc, _ = env
     await fed_repo.save_instance(_remote("m"))
@@ -248,14 +258,19 @@ async def test_select_conversation_path_raises_when_unreachable(env):
 
 # ─── Send outbound ───────────────────────────────────────────────────────
 
+
 async def test_send_relay_envelope_direct_target(env):
     _, fed_repo, svc, fed = env
     await fed_repo.save_instance(_remote("target"))
     envelope = await svc.send_relay_envelope(
-        conversation_id="c1", sender_user_id="alice",
-        target_instance_id="target", target_user_id="bob",
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance_id="target",
+        target_user_id="bob",
         inner_event_type="dm_message",
-        sender_ephemeral_pk="pk", encrypted_payload="ct", payload_iv="iv",
+        sender_ephemeral_pk="pk",
+        encrypted_payload="ct",
+        payload_iv="iv",
     )
     assert envelope.destination_instance_id == "target"
     assert fed.sent, "federation.send_event should have been called"
@@ -270,24 +285,31 @@ async def test_send_relay_envelope_two_hops(env):
     await fed_repo.save_instance(_remote("m"))
     await svc.record_network_sync(source_instance_id="m", peer_ids=["target"])
     _envelope = await svc.send_relay_envelope(
-        conversation_id="c1", sender_user_id="alice",
-        target_instance_id="target", target_user_id="bob",
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance_id="target",
+        target_user_id="bob",
         inner_event_type="dm_message",
-        sender_ephemeral_pk="pk", encrypted_payload="ct", payload_iv="iv",
+        sender_ephemeral_pk="pk",
+        encrypted_payload="ct",
+        payload_iv="iv",
     )
     target, _, _ = fed.sent[0]
-    assert target == "m"                          # first hop, not final dest
+    assert target == "m"  # first hop, not final dest
 
 
 async def test_send_relay_no_route_raises(env):
     _, _, svc, _ = env
     with pytest.raises(NoRouteError):
         await svc.send_relay_envelope(
-            conversation_id="c1", sender_user_id="alice",
-            target_instance_id="nowhere", target_user_id="bob",
+            conversation_id="c1",
+            sender_user_id="alice",
+            target_instance_id="nowhere",
+            target_user_id="bob",
             inner_event_type="dm_message",
             sender_ephemeral_pk="pk",
-            encrypted_payload="ct", payload_iv="iv",
+            encrypted_payload="ct",
+            payload_iv="iv",
         )
 
 
@@ -297,11 +319,14 @@ async def test_send_relay_blocked_for_minor(env):
     await fed_repo.save_instance(_remote("target"))
     with pytest.raises(RelayBlockedError):
         await svc.send_relay_envelope(
-            conversation_id="c1", sender_user_id="minor-id",
-            target_instance_id="target", target_user_id="bob",
+            conversation_id="c1",
+            sender_user_id="minor-id",
+            target_instance_id="target",
+            target_user_id="bob",
             inner_event_type="dm_message",
             sender_ephemeral_pk="pk",
-            encrypted_payload="ct", payload_iv="iv",
+            encrypted_payload="ct",
+            payload_iv="iv",
         )
 
 
@@ -309,44 +334,57 @@ async def test_send_relay_sender_seq_increments(env):
     _, fed_repo, svc, fed = env
     await fed_repo.save_instance(_remote("target"))
     e1 = await svc.send_relay_envelope(
-        conversation_id="c1", sender_user_id="alice",
-        target_instance_id="target", target_user_id="bob",
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance_id="target",
+        target_user_id="bob",
         inner_event_type="dm_message",
-        sender_ephemeral_pk="pk", encrypted_payload="ct", payload_iv="iv",
+        sender_ephemeral_pk="pk",
+        encrypted_payload="ct",
+        payload_iv="iv",
     )
     e2 = await svc.send_relay_envelope(
-        conversation_id="c1", sender_user_id="alice",
-        target_instance_id="target", target_user_id="bob",
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance_id="target",
+        target_user_id="bob",
         inner_event_type="dm_message",
-        sender_ephemeral_pk="pk", encrypted_payload="ct", payload_iv="iv",
+        sender_ephemeral_pk="pk",
+        encrypted_payload="ct",
+        payload_iv="iv",
     )
     assert e2.sender_seq == e1.sender_seq + 1
 
 
 # ─── Inbound forwarding ──────────────────────────────────────────────────
 
+
 def _envelope_dict(
-    *, dest: str, hop_count: int = 0, msg_id: str = "m-1",
+    *,
+    dest: str,
+    hop_count: int = 0,
+    msg_id: str = "m-1",
 ) -> dict:
     return {
         "destination_instance_id": dest,
-        "destination_user_id":     "bob",
-        "hop_count":               hop_count,
-        "inner_event_type":        "dm_message",
-        "message_id":              msg_id,
-        "sender_seq":              1,
-        "created_at":              datetime.now(timezone.utc).isoformat(),
-        "sender_ephemeral_pk":     "pk",
-        "encrypted_payload":       "ct",
-        "payload_iv":              "iv",
-        "return_path":             [],
+        "destination_user_id": "bob",
+        "hop_count": hop_count,
+        "inner_event_type": "dm_message",
+        "message_id": msg_id,
+        "sender_seq": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "sender_ephemeral_pk": "pk",
+        "encrypted_payload": "ct",
+        "payload_iv": "iv",
+        "return_path": [],
     }
 
 
 async def test_handle_inbound_relay_delivered_at_destination(env):
     _, _, svc, _ = env
     event = _Event(
-        FederationEventType.DM_RELAY, "upstream",
+        FederationEventType.DM_RELAY,
+        "upstream",
         _envelope_dict(dest="self-iid"),
     )
     assert await svc.handle_inbound_relay(event) == "delivered"
@@ -356,7 +394,8 @@ async def test_handle_inbound_relay_drops_duplicate(env):
     _, fed_repo, svc, _ = env
     await fed_repo.save_instance(_remote("target"))
     event = _Event(
-        FederationEventType.DM_RELAY, "upstream",
+        FederationEventType.DM_RELAY,
+        "upstream",
         _envelope_dict(dest="target"),
     )
     assert await svc.handle_inbound_relay(event) == "forwarded"
@@ -368,7 +407,8 @@ async def test_handle_inbound_relay_too_many_hops(env):
     _, fed_repo, svc, _ = env
     await fed_repo.save_instance(_remote("target"))
     event = _Event(
-        FederationEventType.DM_RELAY, "upstream",
+        FederationEventType.DM_RELAY,
+        "upstream",
         _envelope_dict(dest="target", hop_count=MAX_HOPS, msg_id="over"),
     )
     assert await svc.handle_inbound_relay(event) == "dropped:too_many_hops"
@@ -377,7 +417,8 @@ async def test_handle_inbound_relay_too_many_hops(env):
 async def test_handle_inbound_relay_no_route(env):
     _, _, svc, _ = env
     event = _Event(
-        FederationEventType.DM_RELAY, "upstream",
+        FederationEventType.DM_RELAY,
+        "upstream",
         _envelope_dict(dest="unreachable", msg_id="m-nope"),
     )
     assert await svc.handle_inbound_relay(event) == "dropped:no_route"
@@ -387,7 +428,8 @@ async def test_handle_inbound_relay_forwards_and_increments_hop(env):
     _, fed_repo, svc, fed = env
     await fed_repo.save_instance(_remote("target"))
     event = _Event(
-        FederationEventType.DM_RELAY, "upstream",
+        FederationEventType.DM_RELAY,
+        "upstream",
         _envelope_dict(dest="target", hop_count=1, msg_id="fwd-1"),
     )
     result = await svc.handle_inbound_relay(event)
@@ -401,12 +443,15 @@ async def test_handle_inbound_relay_forwards_and_increments_hop(env):
 async def test_handle_inbound_relay_malformed(env):
     _, _, svc, _ = env
     event = _Event(
-        FederationEventType.DM_RELAY, "upstream", {"missing": "fields"},
+        FederationEventType.DM_RELAY,
+        "upstream",
+        {"missing": "fields"},
     )
     assert await svc.handle_inbound_relay(event) == "dropped:malformed"
 
 
 # ─── Dedup ring ──────────────────────────────────────────────────────────
+
 
 async def test_mark_seen_and_prune(env):
     db, _, svc, _ = env
@@ -423,6 +468,7 @@ async def test_mark_seen_and_prune(env):
 
 
 # ─── Envelope round-trip ────────────────────────────────────────────────
+
 
 def test_envelope_to_dict_from_dict_roundtrip():
     env = RelayEnvelope(
@@ -449,6 +495,7 @@ def test_envelope_from_dict_rejects_missing_fields():
 
 
 # ─── Hash helper ─────────────────────────────────────────────────────────
+
 
 def test_hash_mod_deterministic():
     assert _hash_mod("a", 10) == _hash_mod("a", 10)

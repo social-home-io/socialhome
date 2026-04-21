@@ -119,6 +119,7 @@ def test_write_example_config_refuses_overwrite(tmp_dir):
     write_example_config(target)
     assert target.is_file()
     import pytest
+
     with pytest.raises(FileExistsError):
         write_example_config(target)
 

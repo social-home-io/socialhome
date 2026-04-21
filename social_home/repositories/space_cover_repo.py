@@ -16,7 +16,8 @@ from ..db import AsyncDatabase
 @runtime_checkable
 class AbstractSpaceCoverRepo(Protocol):
     async def get(
-        self, space_id: str,
+        self,
+        space_id: str,
     ) -> tuple[bytes, str] | None: ...
     async def set(
         self,
@@ -37,7 +38,8 @@ class SqliteSpaceCoverRepo:
         self._db = db
 
     async def get(
-        self, space_id: str,
+        self,
+        space_id: str,
     ) -> tuple[bytes, str] | None:
         row = await self._db.fetchone(
             "SELECT bytes_webp, hash FROM space_covers WHERE space_id=?",

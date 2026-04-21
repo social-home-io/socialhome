@@ -34,6 +34,7 @@ from social_home.services.realtime_service import RealtimeService, _safe
 
 # ─── _safe serialisation ─────────────────────────────────────────────────
 
+
 def test_safe_handles_none():
     assert _safe(None) is None
 
@@ -65,6 +66,7 @@ def test_safe_handles_frozenset():
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
+
 class _FakeUserRepo:
     def __init__(self, users):
         self._users = users
@@ -87,7 +89,9 @@ def _user(uid, name="x"):
 
 def _post(pid="p1", content="hi"):
     return Post(
-        id=pid, author="u1", type=PostType.TEXT,
+        id=pid,
+        author="u1",
+        type=PostType.TEXT,
         content=content,
         created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
@@ -117,6 +121,7 @@ class _FakeWS:
 
 
 # ─── Event handlers fan out correctly ────────────────────────────────────
+
 
 async def test_post_created_fans_to_household(env):
     svc, bus, ws = env
@@ -156,8 +161,11 @@ async def test_comment_added_fans(env):
     sock = _FakeWS()
     await ws.register("u1", sock)
     comment = Comment(
-        id="c1", post_id="p1", author="u1",
-        type=CommentType.TEXT, content="hi",
+        id="c1",
+        post_id="p1",
+        author="u1",
+        type=CommentType.TEXT,
+        content="hi",
         created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
     await bus.publish(CommentAdded(post_id="p1", comment=comment))
@@ -176,25 +184,36 @@ async def test_space_config_changed_fans(env):
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
-    await bus.publish(SpaceConfigChanged(
-        space_id="sp-1", event_type="rename", payload={"name": "X"}, sequence=1,
-    ))
+    await bus.publish(
+        SpaceConfigChanged(
+            space_id="sp-1",
+            event_type="rename",
+            payload={"name": "X"},
+            sequence=1,
+        )
+    )
     assert any("space.config.changed" in m for m in sock.sent)
 
 
 def _task(*, status=TaskStatus.TODO, assignees=()):
     now = datetime(2026, 4, 15, tzinfo=timezone.utc)
     return Task(
-        id="t1", list_id="l1", title="X",
-        status=status, position=0, created_by="me",
-        created_at=now, updated_at=now, assignees=assignees,
+        id="t1",
+        list_id="l1",
+        title="X",
+        status=status,
+        position=0,
+        created_by="me",
+        created_at=now,
+        updated_at=now,
+        assignees=assignees,
     )
 
 
 async def test_task_assigned_fans_only_to_assignee(env):
     svc, bus, ws = env
     sock_alice = _FakeWS()
-    sock_bob   = _FakeWS()
+    sock_bob = _FakeWS()
     await ws.register("alice", sock_alice)
     await ws.register("bob", sock_bob)
     await bus.publish(TaskAssigned(task=_task(), assigned_to="alice"))
@@ -206,7 +225,9 @@ async def test_task_completed_fans_to_household(env):
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
-    await bus.publish(TaskCompleted(task=_task(status=TaskStatus.DONE), completed_by="u1"))
+    await bus.publish(
+        TaskCompleted(task=_task(status=TaskStatus.DONE), completed_by="u1")
+    )
     assert any("task.completed" in m for m in sock.sent)
 
 
@@ -233,7 +254,10 @@ async def test_calendar_created_updated_deleted_fan(env):
     sock = _FakeWS()
     await ws.register("u1", sock)
     e = CalendarEvent(
-        id="e1", calendar_id="c1", summary="X", created_by="me",
+        id="e1",
+        calendar_id="c1",
+        summary="X",
+        created_by="me",
         start=datetime(2026, 4, 15, tzinfo=timezone.utc),
         end=datetime(2026, 4, 15, 1, tzinfo=timezone.utc),
     )
@@ -267,43 +291,60 @@ async def test_space_post_moderated_fans_to_space_members(env):
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u3", sock)
-    await bus.publish(SpacePostModerated(
-        space_id="sp-1", post=_post(), moderated_by="admin",
-    ))
+    await bus.publish(
+        SpacePostModerated(
+            space_id="sp-1",
+            post=_post(),
+            moderated_by="admin",
+        )
+    )
     assert any("space.post.moderated" in m for m in sock.sent)
 
 
 # ─── Presence + notification + bazaar WS frames ────────────────────────────
 
+
 async def test_presence_updated_fans_to_household(env):
     from social_home.domain.events import PresenceUpdated
+
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
-    await bus.publish(PresenceUpdated(
-        username="anna", state="home", zone_name="Home",
-        latitude=52.37, longitude=4.89,
-    ))
+    await bus.publish(
+        PresenceUpdated(
+            username="anna",
+            state="home",
+            zone_name="Home",
+            latitude=52.37,
+            longitude=4.89,
+        )
+    )
     assert any("presence.updated" in m for m in sock.sent)
 
 
 async def test_notification_new_targets_one_user(env):
     from social_home.domain.events import NotificationCreated
+
     svc, bus, ws = env
     me = _FakeWS()
     other = _FakeWS()
     await ws.register("u1", me)
     await ws.register("u2", other)
-    await bus.publish(NotificationCreated(
-        user_id="u1", notification_id="n-1",
-        type="post_created", title="Anna posted",
-    ))
+    await bus.publish(
+        NotificationCreated(
+            user_id="u1",
+            notification_id="n-1",
+            type="post_created",
+            title="Anna posted",
+        )
+    )
     assert any("notification.new" in m for m in me.sent)
     assert all("notification.new" not in m for m in other.sent)
 
 
 async def test_notification_unread_count_targets_one_user(env):
     from social_home.domain.events import NotificationReadChanged
+
     svc, bus, ws = env
     me = _FakeWS()
     other = _FakeWS()
@@ -316,25 +357,34 @@ async def test_notification_unread_count_targets_one_user(env):
 
 async def test_bazaar_bid_placed_broadcast(env):
     from social_home.domain.events import BazaarBidPlaced
+
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
-    await bus.publish(BazaarBidPlaced(
-        listing_post_id="L-1",
-        seller_user_id="seller", bidder_user_id="bidder",
-        amount=200, new_end_time="2099-01-01T00:00:00+00:00",
-    ))
+    await bus.publish(
+        BazaarBidPlaced(
+            listing_post_id="L-1",
+            seller_user_id="seller",
+            bidder_user_id="bidder",
+            amount=200,
+            new_end_time="2099-01-01T00:00:00+00:00",
+        )
+    )
     assert any('"bazaar.bid_placed"' in m for m in sock.sent)
     assert any('"new_end_time"' in m for m in sock.sent)
 
 
 async def test_bazaar_listing_closed_broadcast(env):
     from social_home.domain.events import BazaarListingExpired
+
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
-    await bus.publish(BazaarListingExpired(
-        listing_post_id="L-1", seller_user_id="seller",
-        final_status="sold",
-    ))
+    await bus.publish(
+        BazaarListingExpired(
+            listing_post_id="L-1",
+            seller_user_id="seller",
+            final_status="sold",
+        )
+    )
     assert any('"bazaar.listing_closed"' in m for m in sock.sent)

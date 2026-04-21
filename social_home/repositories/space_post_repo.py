@@ -45,16 +45,28 @@ class AbstractSpacePostRepo(Protocol):
     async def save(self, space_id: str, post: Post) -> Post: ...
     async def get(self, post_id: str) -> tuple[str, Post] | None: ...
     async def list_feed(
-        self, space_id: str, *, before: str | None = None, limit: int = 20,
+        self,
+        space_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 20,
     ) -> list[Post]: ...
-    async def soft_delete(self, post_id: str, *, moderated_by: str | None = None) -> None: ...
+    async def soft_delete(
+        self, post_id: str, *, moderated_by: str | None = None
+    ) -> None: ...
     async def edit(self, post_id: str, new_content: str) -> None: ...
 
     async def add_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post: ...
     async def remove_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post: ...
 
     async def increment_comment_count(self, post_id: str) -> None: ...
@@ -65,7 +77,9 @@ class AbstractSpacePostRepo(Protocol):
     async def list_comments(self, post_id: str) -> list[Comment]: ...
     async def soft_delete_comment(self, comment_id: str) -> None: ...
     async def edit_comment(
-        self, comment_id: str, new_content: str,
+        self,
+        comment_id: str,
+        new_content: str,
     ) -> None: ...
 
 
@@ -98,11 +112,20 @@ class SqliteSpacePostRepo:
                 file_meta_json=excluded.file_meta_json
             """,
             (
-                post.id, space_id, post.author, post.type.value, post.content,
-                post.media_url, _encode_reactions(post.reactions),
-                int(post.comment_count), int(post.pinned), int(post.deleted),
-                _iso_or_none(post.edited_at), int(post.no_link_preview),
-                int(post.moderated), _encode_file_meta(post.file_meta),
+                post.id,
+                space_id,
+                post.author,
+                post.type.value,
+                post.content,
+                post.media_url,
+                _encode_reactions(post.reactions),
+                int(post.comment_count),
+                int(post.pinned),
+                int(post.deleted),
+                _iso_or_none(post.edited_at),
+                int(post.no_link_preview),
+                int(post.moderated),
+                _encode_file_meta(post.file_meta),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -111,7 +134,8 @@ class SqliteSpacePostRepo:
     async def get(self, post_id: str) -> tuple[str, Post] | None:
         """Return ``(space_id, post)`` — space id lives only on the row."""
         row = await self._db.fetchone(
-            "SELECT * FROM space_posts WHERE id=?", (post_id,),
+            "SELECT * FROM space_posts WHERE id=?",
+            (post_id,),
         )
         d = row_to_dict(row)
         if d is None:
@@ -119,7 +143,11 @@ class SqliteSpacePostRepo:
         return d["space_id"], _row_to_space_post(d)
 
     async def list_feed(
-        self, space_id: str, *, before: str | None = None, limit: int = 20,
+        self,
+        space_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 20,
     ) -> list[Post]:
         if before is None:
             rows = await self._db.fetchall(
@@ -138,7 +166,10 @@ class SqliteSpacePostRepo:
         return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
 
     async def soft_delete(
-        self, post_id: str, *, moderated_by: str | None = None,
+        self,
+        post_id: str,
+        *,
+        moderated_by: str | None = None,
     ) -> None:
         """Soft-delete a space post. ``moderated_by`` sets the
         ``moderated=1`` flag so the service layer can distinguish a
@@ -156,15 +187,17 @@ class SqliteSpacePostRepo:
 
     async def edit(self, post_id: str, new_content: str) -> None:
         await self._db.enqueue(
-            "UPDATE space_posts SET content=?, edited_at=datetime('now') "
-            "WHERE id=?",
+            "UPDATE space_posts SET content=?, edited_at=datetime('now') WHERE id=?",
             (new_content, post_id),
         )
 
     # ── Reactions (atomic) ─────────────────────────────────────────────
 
     async def add_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post:
         def _run(conn):
             row = conn.execute(
@@ -175,7 +208,10 @@ class SqliteSpacePostRepo:
                 raise KeyError(f"space post {post_id!r} not found or deleted")
             row_dict = {k: row[k] for k in row.keys()}
             reactions = _decode_reactions(row_dict["reactions"])
-            if emoji not in reactions and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST:
+            if (
+                emoji not in reactions
+                and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
+            ):
                 raise ValueError("too many distinct reactions on this post")
             reactions.setdefault(emoji, set()).add(user_id)
             conn.execute(
@@ -183,7 +219,8 @@ class SqliteSpacePostRepo:
                 (_encode_reactions(_to_frozenset(reactions)), post_id),
             )
             row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=?", (post_id,),
+                "SELECT * FROM space_posts WHERE id=?",
+                (post_id,),
             ).fetchone()
             return {k: row[k] for k in row.keys()}
 
@@ -191,11 +228,15 @@ class SqliteSpacePostRepo:
         return _row_to_space_post(row)
 
     async def remove_reaction(
-        self, post_id: str, emoji: str, user_id: str,
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
     ) -> Post:
         def _run(conn):
             row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=?", (post_id,),
+                "SELECT * FROM space_posts WHERE id=?",
+                (post_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"space post {post_id!r} not found")
@@ -211,7 +252,8 @@ class SqliteSpacePostRepo:
                     (_encode_reactions(_to_frozenset(reactions)), post_id),
                 )
                 row = conn.execute(
-                    "SELECT * FROM space_posts WHERE id=?", (post_id,),
+                    "SELECT * FROM space_posts WHERE id=?",
+                    (post_id,),
                 ).fetchone()
             return {k: row[k] for k in row.keys()}
 
@@ -244,9 +286,14 @@ class SqliteSpacePostRepo:
             ) VALUES(?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             """,
             (
-                comment.id, comment.post_id, comment.parent_id,
-                comment.author, comment.type.value, comment.content,
-                comment.media_url, int(comment.deleted),
+                comment.id,
+                comment.post_id,
+                comment.parent_id,
+                comment.author,
+                comment.type.value,
+                comment.content,
+                comment.media_url,
+                int(comment.deleted),
                 _iso_or_none(comment.created_at),
             ),
         )
@@ -254,7 +301,8 @@ class SqliteSpacePostRepo:
 
     async def get_comment(self, comment_id: str) -> Comment | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_post_comments WHERE id=?", (comment_id,),
+            "SELECT * FROM space_post_comments WHERE id=?",
+            (comment_id,),
         )
         return _row_to_space_comment(row_to_dict(row))
 
@@ -263,10 +311,7 @@ class SqliteSpacePostRepo:
             "SELECT * FROM space_post_comments WHERE post_id=? ORDER BY created_at",
             (post_id,),
         )
-        return [
-            c for c in (_row_to_space_comment(d) for d in rows_to_dicts(rows))
-            if c
-        ]
+        return [c for c in (_row_to_space_comment(d) for d in rows_to_dicts(rows)) if c]
 
     async def soft_delete_comment(self, comment_id: str) -> None:
         await self._db.enqueue(
@@ -279,7 +324,9 @@ class SqliteSpacePostRepo:
         )
 
     async def edit_comment(
-        self, comment_id: str, new_content: str,
+        self,
+        comment_id: str,
+        new_content: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -293,13 +340,17 @@ class SqliteSpacePostRepo:
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
 
+
 def _row_to_space_post(row: dict) -> Post:
-    reactions = {k: frozenset(v) for k, v in _decode_reactions(row.get("reactions")).items()}
+    reactions = {
+        k: frozenset(v) for k, v in _decode_reactions(row.get("reactions")).items()
+    }
     return Post(
         id=row["id"],
         author=row["author"],
         type=PostType(row["type"]),
-        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at"))
+        or datetime.now(timezone.utc),
         content=row.get("content"),
         media_url=row.get("media_url"),
         reactions=reactions,
@@ -321,7 +372,8 @@ def _row_to_space_comment(row: dict | None) -> Comment | None:
         post_id=row["post_id"],
         author=row["author"],
         type=CommentType(row.get("type", "text")),
-        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at"))
+        or datetime.now(timezone.utc),
         parent_id=row.get("parent_id"),
         content=row.get("content"),
         media_url=row.get("media_url"),

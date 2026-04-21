@@ -36,6 +36,7 @@ async def env(tmp_dir):
 
 # ─── Reads ───────────────────────────────────────────────────────────────
 
+
 async def test_get_returns_defaults_when_unset(env):
     svc, _ = env
     feats = await svc.get()
@@ -46,6 +47,7 @@ async def test_get_returns_defaults_when_unset(env):
 
 
 # ─── Writes ──────────────────────────────────────────────────────────────
+
 
 async def test_update_admin_changes_household_name(env):
     svc, _ = env
@@ -118,6 +120,7 @@ async def test_require_enabled_passes_when_section_on(env):
 
 async def test_require_enabled_raises_when_section_off(env):
     from social_home.domain.household_features import FeatureDisabledError
+
     svc, _ = env
     await svc.update(actor_is_admin=True, toggles={"feat_tasks": False})
     with pytest.raises(FeatureDisabledError) as exc:
@@ -127,6 +130,7 @@ async def test_require_enabled_raises_when_section_off(env):
 
 async def test_require_enabled_raises_on_unknown_section(env):
     from social_home.domain.household_features import FeatureDisabledError
+
     svc, _ = env
     # Unknown section name → refuse. New features must flip the toggle
     # in the schema before being visible server-side.
@@ -136,6 +140,7 @@ async def test_require_enabled_raises_on_unknown_section(env):
 
 async def test_require_post_type_blocks_disallowed_type(env):
     from social_home.domain.household_features import FeatureDisabledError
+
     svc, _ = env
     await svc.update(actor_is_admin=True, toggles={"allow_video": False})
     with pytest.raises(FeatureDisabledError) as exc:
@@ -158,6 +163,7 @@ async def test_update_publishes_household_config_changed(env, tmp_dir):
     from social_home.repositories.household_features_repo import (
         SqliteHouseholdFeaturesRepo,
     )
+
     _, db = env
     bus = EventBus()
     received = []
@@ -167,7 +173,8 @@ async def test_update_publishes_household_config_changed(env, tmp_dir):
 
     bus.subscribe(HouseholdConfigChanged, _capture)
     svc_bus = HouseholdFeaturesService(
-        SqliteHouseholdFeaturesRepo(db), bus=bus,
+        SqliteHouseholdFeaturesRepo(db),
+        bus=bus,
     )
     await svc_bus.update(actor_is_admin=True, toggles={"feat_bazaar": False})
     assert received
@@ -180,6 +187,7 @@ async def test_update_no_change_no_event(env, tmp_dir):
     from social_home.repositories.household_features_repo import (
         SqliteHouseholdFeaturesRepo,
     )
+
     _, db = env
     bus = EventBus()
     received = []
@@ -188,7 +196,8 @@ async def test_update_no_change_no_event(env, tmp_dir):
         lambda e: received.append(e),  # type: ignore[arg-type]
     )
     svc_bus = HouseholdFeaturesService(
-        SqliteHouseholdFeaturesRepo(db), bus=bus,
+        SqliteHouseholdFeaturesRepo(db),
+        bus=bus,
     )
     # Setting the same value as the current default → no change → no event.
     await svc_bus.update(actor_is_admin=True, toggles={"feat_feed": True})

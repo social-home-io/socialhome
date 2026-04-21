@@ -45,8 +45,12 @@ class DmHistoryScheduler:
     """
 
     __slots__ = (
-        "_bus", "_federation", "_conversation_repo", "_queue",
-        "_own_instance_id", "_last_request_at",
+        "_bus",
+        "_federation",
+        "_conversation_repo",
+        "_queue",
+        "_own_instance_id",
+        "_last_request_at",
     )
 
     def __init__(
@@ -85,7 +89,8 @@ class DmHistoryScheduler:
         await self._enqueue_for_peer(event.instance_id)
 
     async def _on_connection_reachable(
-        self, event: ConnectionReachable,
+        self,
+        event: ConnectionReachable,
     ) -> None:
         if event.instance_id == self._own_instance_id:
             return
@@ -96,12 +101,16 @@ class DmHistoryScheduler:
         ``instance_id``. Returns the count enqueued (after rate-limiting).
         """
         try:
-            conversation_ids = await self._conversation_repo \
-                .list_conversations_with_remote_member(instance_id)
-        except Exception as exc:                             # pragma: no cover
+            conversation_ids = (
+                await self._conversation_repo.list_conversations_with_remote_member(
+                    instance_id
+                )
+            )
+        except Exception as exc:  # pragma: no cover
             log.warning(
                 "dm history: failed to list conversations for %s: %s",
-                instance_id, exc,
+                instance_id,
+                exc,
             )
             return 0
 
@@ -120,7 +129,10 @@ class DmHistoryScheduler:
     # ─── Public API (admin route / tests) ────────────────────────────────
 
     async def enqueue_request(
-        self, *, instance_id: str, conversation_id: str,
+        self,
+        *,
+        instance_id: str,
+        conversation_id: str,
     ) -> bool:
         """Force a single DM_HISTORY_REQUEST regardless of rate limit.
         Returns ``True`` if the item landed on the queue.
@@ -164,7 +176,8 @@ class DmHistoryScheduler:
     async def _latest_message_iso(self, conversation_id: str) -> str | None:
         # Most recent message first; take its created_at as the cursor.
         latest = await self._conversation_repo.list_messages(
-            conversation_id, limit=1,
+            conversation_id,
+            limit=1,
         )
         if not latest:
             return None

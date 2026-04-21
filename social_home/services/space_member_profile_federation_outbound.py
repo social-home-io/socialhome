@@ -41,17 +41,19 @@ class SpaceMemberProfileFederationOutbound:
 
     def wire(self) -> None:
         self._bus.subscribe(
-            SpaceMemberProfileUpdated, self._on_updated,
+            SpaceMemberProfileUpdated,
+            self._on_updated,
         )
 
     async def _on_updated(
-        self, event: SpaceMemberProfileUpdated,
+        self,
+        event: SpaceMemberProfileUpdated,
     ) -> None:
         payload: dict = {
-            "space_id":           event.space_id,
-            "user_id":            event.user_id,
+            "space_id": event.space_id,
+            "user_id": event.user_id,
             "space_display_name": event.space_display_name,
-            "picture_hash":       event.picture_hash,
+            "picture_hash": event.picture_hash,
         }
         if event.picture_webp is not None:
             payload["picture_webp_base64"] = base64.b64encode(
@@ -61,7 +63,7 @@ class SpaceMemberProfileFederationOutbound:
             peers = await self._space_repo.list_member_instances(
                 event.space_id,
             )
-        except Exception as exc:          # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("sm-profile-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -71,14 +73,13 @@ class SpaceMemberProfileFederationOutbound:
             try:
                 await self._federation.send_event(
                     to_instance_id=instance_id,
-                    event_type=(
-                        FederationEventType.SPACE_MEMBER_PROFILE_UPDATED
-                    ),
+                    event_type=(FederationEventType.SPACE_MEMBER_PROFILE_UPDATED),
                     payload=payload,
                     space_id=event.space_id,
                 )
-            except Exception as exc:       # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "sm-profile-outbound: send to %s failed: %s",
-                    instance_id, exc,
+                    instance_id,
+                    exc,
                 )

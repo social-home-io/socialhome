@@ -91,7 +91,7 @@ async def test_register_instance_returns_registered(gfs_client):
         "/gfs/register",
         json={
             "instance_id": "inst-abc",
-            "public_key":  "aa" * 32,
+            "public_key": "aa" * 32,
             "webhook_url": "http://example.com/webhook",
         },
     )
@@ -113,13 +113,14 @@ async def test_register_missing_field_returns_400(gfs_client):
 async def test_register_returns_pending_when_auto_accept_off(gfs_client):
     """When policy has auto_accept_clients=0 the register response is 'pending'."""
     from social_home.global_server.app_keys import gfs_admin_repo_key
+
     app = gfs_client.server.app
     await app[gfs_admin_repo_key].set_config("auto_accept_clients", "0")
     resp = await gfs_client.post(
         "/gfs/register",
         json={
             "instance_id": "new-pending.home",
-            "public_key":  "aa" * 32,
+            "public_key": "aa" * 32,
             "webhook_url": "http://p/wh",
         },
     )
@@ -150,7 +151,7 @@ async def test_subscribe_returns_subscribed(gfs_client):
         "/gfs/register",
         json={
             "instance_id": "inst-sub",
-            "public_key":  "bb" * 32,
+            "public_key": "bb" * 32,
             "webhook_url": "http://example.com/wh",
         },
     )
@@ -169,7 +170,7 @@ async def test_subscribe_unsubscribe_roundtrip(gfs_client):
         "/gfs/register",
         json={
             "instance_id": "inst-unsub",
-            "public_key":  "cc" * 32,
+            "public_key": "cc" * 32,
             "webhook_url": "http://example.com/wh2",
         },
     )
@@ -179,7 +180,11 @@ async def test_subscribe_unsubscribe_roundtrip(gfs_client):
     )
     resp = await gfs_client.post(
         "/gfs/subscribe",
-        json={"instance_id": "inst-unsub", "space_id": "space-X", "action": "unsubscribe"},
+        json={
+            "instance_id": "inst-unsub",
+            "space_id": "space-X",
+            "action": "unsubscribe",
+        },
     )
     assert resp.status == 200
     body = await resp.json()

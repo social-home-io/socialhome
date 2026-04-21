@@ -30,6 +30,7 @@ async def test_ws_upgrade_succeeds_with_token(client):
 async def test_ws_receives_realtime_post_event(client):
     """Creating a post should fan out a post.created frame to the user's WS."""
     from social_home.app_keys import ws_manager_key
+
     ws = await client.ws_connect(f"/api/ws?token={client._tok}")
     try:
         # Wait until the manager actually has the registration.

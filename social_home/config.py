@@ -29,10 +29,12 @@ from typing import Any, Mapping
 # ── XDG-compliant default paths ──────────────────────────────────────────
 
 _XDG_DATA_HOME = os.environ.get(
-    "XDG_DATA_HOME", os.path.expanduser("~/.local/share"),
+    "XDG_DATA_HOME",
+    os.path.expanduser("~/.local/share"),
 )
 _XDG_CONFIG_HOME = os.environ.get(
-    "XDG_CONFIG_HOME", os.path.expanduser("~/.config"),
+    "XDG_CONFIG_HOME",
+    os.path.expanduser("~/.config"),
 )
 
 DEFAULT_DATA_DIR = f"{_XDG_DATA_HOME}/social-home"
@@ -47,9 +49,14 @@ DEFAULT_TOML_FILE = f"{DEFAULT_CONFIG_DIR}/social_home.toml"
 _PREFIXED_SECTIONS: dict[str, str] = {
     "webrtc": "webrtc_",
 }
-_CORE_SECTIONS: frozenset[str] = frozenset({
-    "server", "storage", "federation", "webrtc",
-})
+_CORE_SECTIONS: frozenset[str] = frozenset(
+    {
+        "server",
+        "storage",
+        "federation",
+        "webrtc",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -130,7 +137,7 @@ class Config:
             try:
                 raw_toml = tomllib.loads(toml_path.read_text(encoding="utf-8"))
                 toml_options, platform_options = _split_toml(raw_toml)
-            except (OSError, ValueError, tomllib.TOMLDecodeError):
+            except OSError, ValueError, tomllib.TOMLDecodeError:
                 toml_options = {}
                 platform_options = {}
 
@@ -139,7 +146,9 @@ class Config:
         # the rest of the section as pure platform_options.
         ha_section = platform_options.get("homeassistant")
         if ha_section is not None and ("url" in ha_section or "token" in ha_section):
-            remaining = {k: v for k, v in ha_section.items() if k not in ("url", "token")}
+            remaining = {
+                k: v for k, v in ha_section.items() if k not in ("url", "token")
+            }
             platform_options["homeassistant"] = MappingProxyType(remaining)
             if "url" in ha_section:
                 toml_options.setdefault("ha_url", ha_section["url"])
@@ -167,58 +176,87 @@ class Config:
         data_dir = str(_opt("data_dir", "SH_DATA_DIR", DEFAULT_DATA_DIR))
         return cls(
             data_dir=data_dir,
-            db_path=str(_opt(
-                "db_path", "SH_DB_PATH",
-                f"{data_dir}/{DEFAULT_DB_FILENAME}",
-            )),
-            media_path=str(_opt(
-                "media_path", "SH_MEDIA_PATH",
-                f"{data_dir}/{DEFAULT_MEDIA_DIR}",
-            )),
+            db_path=str(
+                _opt(
+                    "db_path",
+                    "SH_DB_PATH",
+                    f"{data_dir}/{DEFAULT_DB_FILENAME}",
+                )
+            ),
+            media_path=str(
+                _opt(
+                    "media_path",
+                    "SH_MEDIA_PATH",
+                    f"{data_dir}/{DEFAULT_MEDIA_DIR}",
+                )
+            ),
             instance_name=_str_opt("instance_name", "SH_INSTANCE_NAME", "My Home"),
             listen_host=_str_opt("listen_host", "SH_LISTEN_HOST", "0.0.0.0"),
             listen_port=_int_opt("listen_port", "SH_LISTEN_PORT", 8099),
             log_level=_str_opt("log_level", "SH_LOG_LEVEL", "INFO").upper(),
             max_storage_bytes=_int_opt(
-                "max_storage_bytes", "SH_MAX_STORAGE_BYTES", 10 * 1024 * 1024 * 1024,
+                "max_storage_bytes",
+                "SH_MAX_STORAGE_BYTES",
+                10 * 1024 * 1024 * 1024,
             ),
             cors_allowed_origins=tuple(
-                v for v in str(
+                v
+                for v in str(
                     _opt("cors_allowed_origins", "SH_CORS_ALLOWED_ORIGINS", "")
-                ).split(",") if v.strip()
+                ).split(",")
+                if v.strip()
             ),
             mode=_str_opt("mode", "SH_MODE", "standalone").lower(),
             ha_url=_str_opt(
-                "ha_url", "SH_HA_URL", "http://homeassistant.local:8123",
+                "ha_url",
+                "SH_HA_URL",
+                "http://homeassistant.local:8123",
             ),
             ha_token=_str_opt("ha_token", "SH_HA_TOKEN", ""),
             webrtc_stun_url=_str_opt(
-                "webrtc_stun_url", "SH_WEBRTC_STUN_URL",
+                "webrtc_stun_url",
+                "SH_WEBRTC_STUN_URL",
                 "stun:stun.l.google.com:19302",
             ),
             webrtc_turn_url=(
-                str(v) if (v := _opt("webrtc_turn_url", "SH_WEBRTC_TURN_URL", None)) else None
+                str(v)
+                if (v := _opt("webrtc_turn_url", "SH_WEBRTC_TURN_URL", None))
+                else None
             ),
             webrtc_turn_user=(
-                str(v) if (v := _opt("webrtc_turn_user", "SH_WEBRTC_TURN_USER", None)) else None
+                str(v)
+                if (v := _opt("webrtc_turn_user", "SH_WEBRTC_TURN_USER", None))
+                else None
             ),
             webrtc_turn_cred=(
-                str(v) if (v := _opt("webrtc_turn_cred", "SH_WEBRTC_TURN_CRED", None)) else None
+                str(v)
+                if (v := _opt("webrtc_turn_cred", "SH_WEBRTC_TURN_CRED", None))
+                else None
             ),
             webrtc_turn_secret=_str_opt(
-                "webrtc_turn_secret", "SH_WEBRTC_TURN_SECRET", "",
+                "webrtc_turn_secret",
+                "SH_WEBRTC_TURN_SECRET",
+                "",
             ),
             webrtc_turn_ttl_seconds=_int_opt(
-                "webrtc_turn_ttl_seconds", "SH_WEBRTC_TURN_TTL_SECONDS", 3600,
+                "webrtc_turn_ttl_seconds",
+                "SH_WEBRTC_TURN_TTL_SECONDS",
+                3600,
             ),
             federation_sig_suite=_str_opt(
-                "federation_sig_suite", "SH_FEDERATION_SIG_SUITE", "ed25519",
+                "federation_sig_suite",
+                "SH_FEDERATION_SIG_SUITE",
+                "ed25519",
             ),
             db_write_batch_max=_int_opt(
-                "db_write_batch_max", "SH_DB_WRITE_BATCH_MAX", 50,
+                "db_write_batch_max",
+                "SH_DB_WRITE_BATCH_MAX",
+                50,
             ),
             db_write_batch_timeout_ms=_int_opt(
-                "db_write_batch_timeout_ms", "SH_DB_WRITE_BATCH_TIMEOUT_MS", 500,
+                "db_write_batch_timeout_ms",
+                "SH_DB_WRITE_BATCH_TIMEOUT_MS",
+                500,
             ),
             platform_options=MappingProxyType(platform_options),
         )

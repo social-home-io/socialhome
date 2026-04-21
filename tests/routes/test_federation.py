@@ -7,7 +7,6 @@ matrix; this file just covers the route's own error branches.
 """
 
 
-
 async def test_webhook_unknown_id_404(client):
     """POST /webhook/{id} with no matching peer → 404 NOT FOUND.
 
@@ -18,14 +17,14 @@ async def test_webhook_unknown_id_404(client):
     r = await client.post(
         "/webhook/no-such-webhook",
         json={
-            "msg_id":            "x",
-            "event_type":        "presence_updated",
-            "from_instance":     "a",
-            "to_instance":       "b",
-            "timestamp":         "2026-01-01T00:00:00+00:00",
+            "msg_id": "x",
+            "event_type": "presence_updated",
+            "from_instance": "a",
+            "to_instance": "b",
+            "timestamp": "2026-01-01T00:00:00+00:00",
             "encrypted_payload": "x:y",
-            "sig_suite":         "ed25519",
-            "signatures":        {"ed25519": "z"},
+            "sig_suite": "ed25519",
+            "signatures": {"ed25519": "z"},
         },
     )
     # Either 404 (no instance found) or 400 (timestamp/format) — never
@@ -42,6 +41,7 @@ async def test_webhook_invalid_json_400(client):
 async def test_webhook_missing_fields_400(client):
     """Envelope missing required fields → 400."""
     r = await client.post(
-        "/webhook/anything", json={"msg_id": "only-this"},
+        "/webhook/anything",
+        json={"msg_id": "only-this"},
     )
     assert r.status == 400

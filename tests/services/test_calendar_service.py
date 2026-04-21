@@ -10,7 +10,10 @@ import pytest
 from social_home.crypto import generate_identity_keypair, derive_instance_id
 from social_home.db.database import AsyncDatabase
 from social_home.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
-from social_home.repositories.calendar_repo import SqliteCalendarRepo, SqliteSpaceCalendarRepo
+from social_home.repositories.calendar_repo import (
+    SqliteCalendarRepo,
+    SqliteSpaceCalendarRepo,
+)
 from social_home.services.calendar_service import CalendarService
 
 
@@ -46,13 +49,17 @@ async def test_personal_calendar_crud(env):
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("anna", "uid-anna", "Anna"),
     )
-    cal = await env.cal_svc.create_calendar(name="Personal", owner_username="anna", color="#FF0000")
+    cal = await env.cal_svc.create_calendar(
+        name="Personal", owner_username="anna", color="#FF0000"
+    )
     assert cal.name == "Personal"
 
     now = datetime.now(timezone.utc)
     event = await env.cal_svc.create_event(
-        calendar_id=cal.id, summary="Lunch",
-        start=now.isoformat(), end=(now + timedelta(hours=1)).isoformat(),
+        calendar_id=cal.id,
+        summary="Lunch",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
         created_by="uid-anna",
     )
     assert event.summary == "Lunch"
@@ -98,14 +105,20 @@ async def test_space_calendar_with_rsvps(env):
     )
 
     event = CalendarEvent(
-        id=uuid.uuid4().hex, calendar_id="space-1", summary="Team meeting",
-        start=now, end=now + timedelta(hours=1), created_by="u1",
+        id=uuid.uuid4().hex,
+        calendar_id="space-1",
+        summary="Team meeting",
+        start=now,
+        end=now + timedelta(hours=1),
+        created_by="u1",
     )
     await env.space_cal_repo.save_event("space-1", event)
 
     rsvp_going = CalendarRSVP(
-        event_id=event.id, user_id="u1",
-        status=RSVPStatus.GOING, updated_at=now.isoformat(),
+        event_id=event.id,
+        user_id="u1",
+        status=RSVPStatus.GOING,
+        updated_at=now.isoformat(),
     )
     await env.space_cal_repo.upsert_rsvp(rsvp_going)
     rsvps = await env.space_cal_repo.list_rsvps(event.id)
@@ -113,8 +126,10 @@ async def test_space_calendar_with_rsvps(env):
     assert rsvps[0].status == RSVPStatus.GOING
 
     rsvp_declined = CalendarRSVP(
-        event_id=event.id, user_id="u1",
-        status=RSVPStatus.DECLINED, updated_at=now.isoformat(),
+        event_id=event.id,
+        user_id="u1",
+        status=RSVPStatus.DECLINED,
+        updated_at=now.isoformat(),
     )
     await env.space_cal_repo.upsert_rsvp(rsvp_declined)
     rsvps2 = await env.space_cal_repo.list_rsvps(event.id)
@@ -129,17 +144,24 @@ async def test_list_events_in_range(env):
     """list_events_in_range returns events within the given time window."""
     await env.db.enqueue(
         "INSERT INTO users(username,user_id,display_name) VALUES(?,?,?)",
-        ("anna", "u1", "A"))
-    cal = await env.cal_svc.create_calendar(name="W", owner_username="anna", color="#00F")
+        ("anna", "u1", "A"),
+    )
+    cal = await env.cal_svc.create_calendar(
+        name="W", owner_username="anna", color="#00F"
+    )
     now = datetime.now(timezone.utc)
     await env.cal_svc.create_event(
-        calendar_id=cal.id, summary="E",
-        start=now.isoformat(), end=(now + timedelta(hours=1)).isoformat(),
-        created_by="u1")
+        calendar_id=cal.id,
+        summary="E",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u1",
+    )
     events = await env.cal_svc.list_events_in_range(
         cal.id,
         start=(now - timedelta(hours=1)).isoformat(),
-        end=(now + timedelta(hours=2)).isoformat())
+        end=(now + timedelta(hours=2)).isoformat(),
+    )
     assert len(events) >= 1
 
 
@@ -165,14 +187,18 @@ async def test_create_event_empty_summary(env):
     """Empty event summary raises ValueError."""
     await env.db.enqueue(
         "INSERT OR IGNORE INTO users(username,user_id,display_name) VALUES(?,?,?)",
-        ("bob", "u2", "B"))
+        ("bob", "u2", "B"),
+    )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="bob")
     now = datetime.now(timezone.utc)
     with pytest.raises(ValueError, match="empty"):
         await env.cal_svc.create_event(
-            calendar_id=cal.id, summary="  ",
-            start=now.isoformat(), end=(now + timedelta(hours=1)).isoformat(),
-            created_by="u2")
+            calendar_id=cal.id,
+            summary="  ",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u2",
+        )
 
 
 async def test_create_event_nonexistent_calendar(env):
@@ -180,35 +206,47 @@ async def test_create_event_nonexistent_calendar(env):
     now = datetime.now(timezone.utc)
     with pytest.raises(KeyError):
         await env.cal_svc.create_event(
-            calendar_id="nonexistent", summary="X",
-            start=now.isoformat(), end=(now + timedelta(hours=1)).isoformat(),
-            created_by="u1")
+            calendar_id="nonexistent",
+            summary="X",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u1",
+        )
 
 
 async def test_create_event_end_before_start(env):
     """Event with end < start raises ValueError."""
     await env.db.enqueue(
         "INSERT OR IGNORE INTO users(username,user_id,display_name) VALUES(?,?,?)",
-        ("carl", "u3", "C"))
+        ("carl", "u3", "C"),
+    )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="carl")
     now = datetime.now(timezone.utc)
     with pytest.raises(ValueError, match="before start"):
         await env.cal_svc.create_event(
-            calendar_id=cal.id, summary="Bad",
+            calendar_id=cal.id,
+            summary="Bad",
             start=(now + timedelta(hours=2)).isoformat(),
-            end=now.isoformat(), created_by="u3")
+            end=now.isoformat(),
+            created_by="u3",
+        )
 
 
 async def test_create_event_invalid_datetime(env):
     """Invalid datetime string raises ValueError."""
     await env.db.enqueue(
         "INSERT OR IGNORE INTO users(username,user_id,display_name) VALUES(?,?,?)",
-        ("dan", "u4", "D"))
+        ("dan", "u4", "D"),
+    )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="dan")
     with pytest.raises(ValueError, match="invalid datetime"):
         await env.cal_svc.create_event(
-            calendar_id=cal.id, summary="X",
-            start="not-a-date", end="also-not", created_by="u4")
+            calendar_id=cal.id,
+            summary="X",
+            start="not-a-date",
+            end="also-not",
+            created_by="u4",
+        )
 
 
 async def test_get_nonexistent_event(env):
@@ -227,7 +265,8 @@ async def test_list_calendars(env):
     """list_calendars returns calendars for the given user."""
     await env.db.enqueue(
         "INSERT OR IGNORE INTO users(username,user_id,display_name) VALUES(?,?,?)",
-        ("eve", "u5", "E"))
+        ("eve", "u5", "E"),
+    )
     await env.cal_svc.create_calendar(name="C1", owner_username="eve")
     cals = await env.cal_svc.list_calendars("eve")
     assert len(cals) >= 1
@@ -236,31 +275,36 @@ async def test_list_calendars(env):
 async def test_space_calendar_service_list(env):
     """SpaceCalendarService.list_events_in_range works."""
     from social_home.services.calendar_service import SpaceCalendarService
+
     svc = SpaceCalendarService(env.space_cal_repo)
     # Need a space
     kp2 = generate_identity_keypair()
     await env.db.enqueue(
         "INSERT OR IGNORE INTO users(username,user_id,display_name) VALUES(?,?,?)",
-        ("spown", "uid-sp", "SP"))
+        ("spown", "uid-sp", "SP"),
+    )
     sid = uuid.uuid4().hex
     await env.db.enqueue(
         """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
            identity_public_key, config_sequence, space_type, join_mode)
            VALUES(?,?,?,?,?,0,'private','invite_only')""",
-        (sid, "SpCal", env.iid, "spown", kp2.public_key.hex()))
+        (sid, "SpCal", env.iid, "spown", kp2.public_key.hex()),
+    )
     now = datetime.now(timezone.utc)
     events = await svc.list_events_in_range(
-        sid, start=(now - timedelta(hours=1)).isoformat(),
-        end=(now + timedelta(hours=1)).isoformat())
+        sid,
+        start=(now - timedelta(hours=1)).isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+    )
     assert isinstance(events, list)
 
 
 # ─── CalendarService publishes domain events (B1) ─────────────────────
 
+
 async def _seed_user(db, username="owner"):
     await db.enqueue(
-        "INSERT OR IGNORE INTO users(username, user_id, display_name)"
-        " VALUES(?,?,?)",
+        "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
         (username, f"uid-{username}", username),
     )
 

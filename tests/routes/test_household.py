@@ -106,7 +106,8 @@ async def _disable(client, **toggles):
 async def test_disabled_pages_blocks_post(client):
     await _disable(client, feat_pages=False)
     r = await client.post(
-        "/api/pages", json={"title": "Nope", "content": ""},
+        "/api/pages",
+        json={"title": "Nope", "content": ""},
         headers=_auth(client._tok),
     )
     assert r.status == 403
@@ -128,7 +129,8 @@ async def test_disabled_stickies_blocks_post(client):
 async def test_disabled_tasks_blocks_create_list(client):
     await _disable(client, feat_tasks=False)
     r = await client.post(
-        "/api/tasks/lists", json={"name": "Groceries"},
+        "/api/tasks/lists",
+        json={"name": "Groceries"},
         headers=_auth(client._tok),
     )
     assert r.status == 403
@@ -137,7 +139,8 @@ async def test_disabled_tasks_blocks_create_list(client):
 async def test_disabled_calendar_blocks_create(client):
     await _disable(client, feat_calendar=False)
     r = await client.post(
-        "/api/calendars", json={"name": "Fam"},
+        "/api/calendars",
+        json={"name": "Fam"},
         headers=_auth(client._tok),
     )
     assert r.status == 403
@@ -148,12 +151,14 @@ async def test_disallowed_video_post_type_blocks_feed(client):
     r = await client.post(
         "/api/feed/posts",
         json={
-            "type":      "video",
-            "content":   "clip",
+            "type": "video",
+            "content": "clip",
             "media_url": "http://x/y.mp4",
             "file_meta": {
-                "filename": "v.mp4", "mime": "video/mp4",
-                "size_bytes": 100, "hash": "abc",
+                "filename": "v.mp4",
+                "mime": "video/mp4",
+                "size_bytes": 100,
+                "hash": "abc",
             },
         },
         headers=_auth(client._tok),
@@ -177,7 +182,8 @@ async def test_toggle_change_is_live(client):
     """Re-enabling a toggle immediately lifts the block."""
     await _disable(client, feat_pages=False)
     r = await client.post(
-        "/api/pages", json={"title": "x", "content": ""},
+        "/api/pages",
+        json={"title": "x", "content": ""},
         headers=_auth(client._tok),
     )
     assert r.status == 403
@@ -188,7 +194,8 @@ async def test_toggle_change_is_live(client):
         headers=_auth(client._tok),
     )
     r = await client.post(
-        "/api/pages", json={"title": "ok", "content": ""},
+        "/api/pages",
+        json={"title": "ok", "content": ""},
         headers=_auth(client._tok),
     )
     assert r.status == 201

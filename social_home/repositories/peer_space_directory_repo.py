@@ -37,15 +37,20 @@ class PeerSpaceDirectoryEntry:
 @runtime_checkable
 class AbstractPeerSpaceDirectoryRepo(Protocol):
     async def replace_snapshot(
-        self, instance_id: str, entries: list[PeerSpaceDirectoryEntry],
+        self,
+        instance_id: str,
+        entries: list[PeerSpaceDirectoryEntry],
     ) -> None: ...
 
     async def list_all(
-        self, *, max_min_age: int | None = None,
+        self,
+        *,
+        max_min_age: int | None = None,
     ) -> list[PeerSpaceDirectoryEntry]: ...
 
     async def list_for_instance(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> list[PeerSpaceDirectoryEntry]: ...
 
     async def clear_instance(self, instance_id: str) -> None: ...
@@ -60,17 +65,24 @@ class SqlitePeerSpaceDirectoryRepo:
         self._db = db
 
     async def replace_snapshot(
-        self, instance_id: str, entries: list[PeerSpaceDirectoryEntry],
+        self,
+        instance_id: str,
+        entries: list[PeerSpaceDirectoryEntry],
     ) -> None:
         cached = datetime.now(timezone.utc).isoformat()
         rows = [
             (
-                instance_id, e.space_id, e.name, e.description, e.emoji,
+                instance_id,
+                e.space_id,
+                e.name,
+                e.description,
+                e.emoji,
                 int(e.member_count or 0),
                 e.join_mode or "request",
                 int(e.min_age or 0),
                 e.target_audience or "all",
-                e.updated_at, cached,
+                e.updated_at,
+                cached,
             )
             for e in entries
         ]
@@ -95,7 +107,9 @@ class SqlitePeerSpaceDirectoryRepo:
         await self._db.transact(_swap)
 
     async def list_all(
-        self, *, max_min_age: int | None = None,
+        self,
+        *,
+        max_min_age: int | None = None,
     ) -> list[PeerSpaceDirectoryEntry]:
         if max_min_age is not None:
             rows = await self._db.fetchall(
@@ -114,7 +128,8 @@ class SqlitePeerSpaceDirectoryRepo:
         return [_row(r) for r in rows_to_dicts(rows)]
 
     async def list_for_instance(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> list[PeerSpaceDirectoryEntry]:
         rows = await self._db.fetchall(
             "SELECT * FROM peer_space_directory WHERE instance_id=?"

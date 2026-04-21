@@ -205,20 +205,26 @@ async def test_poll_allow_multiple_toggle(client):
         "VALUES('mo-b', 'p-multi', 'B', 1)",
     )
     # Select A, then B — both should stick since multi is allowed.
-    await client.post("/api/posts/p-multi/poll/vote",
-                      json={"option_id": "mo-a"},
-                      headers=_auth(client._tok))
-    r = await client.post("/api/posts/p-multi/poll/vote",
-                          json={"option_id": "mo-b"},
-                          headers=_auth(client._tok))
+    await client.post(
+        "/api/posts/p-multi/poll/vote",
+        json={"option_id": "mo-a"},
+        headers=_auth(client._tok),
+    )
+    r = await client.post(
+        "/api/posts/p-multi/poll/vote",
+        json={"option_id": "mo-b"},
+        headers=_auth(client._tok),
+    )
     data = await r.json()
     counts = {o["id"]: o["vote_count"] for o in data["options"]}
     assert counts == {"mo-a": 1, "mo-b": 1}
     assert set(data["user_vote"]) == {"mo-a", "mo-b"}
     # Re-click A — toggles it off, B still set.
-    r2 = await client.post("/api/posts/p-multi/poll/vote",
-                           json={"option_id": "mo-a"},
-                           headers=_auth(client._tok))
+    r2 = await client.post(
+        "/api/posts/p-multi/poll/vote",
+        json={"option_id": "mo-a"},
+        headers=_auth(client._tok),
+    )
     data2 = await r2.json()
     counts2 = {o["id"]: o["vote_count"] for o in data2["options"]}
     assert counts2 == {"mo-a": 0, "mo-b": 1}
@@ -292,17 +298,24 @@ async def test_schedule_respond_and_summary(client):
     assert r.status == 200
     data = await r.json()
     # Per-user response rows, not aggregate counts.
-    yes_rows = [x for x in data["responses"]
-                if x["slot_id"] == "slot-A" and x["availability"] == "yes"]
+    yes_rows = [
+        x
+        for x in data["responses"]
+        if x["slot_id"] == "slot-A" and x["availability"] == "yes"
+    ]
     assert len(yes_rows) == 1
     assert yes_rows[0]["user_id"] == client._uid
 
 
 async def test_schedule_respond_updates_existing(client):
     await _seed_schedule_post(client, "sp-2")
-    await _create_poll(client, "sp-2", [
-        {"id": "slot-A", "slot_date": "2026-05-01"},
-    ])
+    await _create_poll(
+        client,
+        "sp-2",
+        [
+            {"id": "slot-A", "slot_date": "2026-05-01"},
+        ],
+    )
     await client.post(
         "/api/schedule-polls/sp-2/respond",
         json={"slot_id": "slot-A", "response": "yes"},
@@ -335,6 +348,7 @@ async def test_schedule_finalize_sets_winner_and_closes(client):
 
 async def test_schedule_finalize_non_author_403(client):
     from social_home.auth import sha256_token_hash
+
     await _seed_schedule_post(client, "sp-4")
     await _create_poll(client, "sp-4")
     # Seed a second user who isn't the author.
@@ -392,7 +406,8 @@ async def test_schedule_retract_deletes_response(client):
     assert r.status == 200
     data = await r.json()
     yes_for_slot = [
-        x for x in data["responses"]
+        x
+        for x in data["responses"]
         if x["slot_id"] == "slot-A" and x["availability"] == "yes"
     ]
     assert yes_for_slot == []

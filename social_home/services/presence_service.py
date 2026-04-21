@@ -56,7 +56,10 @@ class PresenceService:
         return await self._repo.list_active()
 
     async def list_presence_for_members(
-        self, user_ids: set[str], *, location_mode: str = "gps",
+        self,
+        user_ids: set[str],
+        *,
+        location_mode: str = "gps",
     ) -> list[PersonPresence]:
         """§23.80 — presence snapshot filtered to a specific member set
         + per-space privacy mode.
@@ -81,9 +84,14 @@ class PresenceService:
             if p.user_id not in user_ids:
                 continue
             if location_mode == "zone_only":
-                out.append(replace(
-                    p, latitude=None, longitude=None, gps_accuracy_m=None,
-                ))
+                out.append(
+                    replace(
+                        p,
+                        latitude=None,
+                        longitude=None,
+                        gps_accuracy_m=None,
+                    )
+                )
             else:
                 out.append(p)
         return out
@@ -128,13 +136,15 @@ class PresenceService:
         # without polling. The event carries the post-truncation
         # coordinates (§25 GPS rule).
         if self._bus is not None:
-            await self._bus.publish(PresenceUpdated(
-                username=update.username,
-                state=update.state,
-                zone_name=update.zone_name,
-                latitude=lat,
-                longitude=lon,
-            ))
+            await self._bus.publish(
+                PresenceUpdated(
+                    username=update.username,
+                    state=update.state,
+                    zone_name=update.zone_name,
+                    latitude=lat,
+                    longitude=lon,
+                )
+            )
 
     async def apply_remote(self, *, from_instance: str, payload: dict) -> None:
         """Apply a ``PRESENCE_UPDATED`` federation event from a remote peer.
@@ -153,7 +163,9 @@ class PresenceService:
             return
         if state not in PRESENCE_STATES:
             log.debug(
-                "PRESENCE_UPDATED: invalid state %r from %s", state, from_instance,
+                "PRESENCE_UPDATED: invalid state %r from %s",
+                state,
+                from_instance,
             )
             return
 

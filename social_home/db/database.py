@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 class _PendingWrite:
     sql: str
     params: tuple[Any, ...]
-    future: "asyncio.Future[int]"         # resolves to cursor.lastrowid
+    future: "asyncio.Future[int]"  # resolves to cursor.lastrowid
 
 
 class AsyncDatabase:
@@ -83,7 +83,9 @@ class AsyncDatabase:
         # can do a brief I/O stall on first WAL setup) and configure it.
         def _open() -> sqlite3.Connection:
             conn = sqlite3.connect(
-                self._path, isolation_level=None, check_same_thread=False,
+                self._path,
+                isolation_level=None,
+                check_same_thread=False,
             )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
@@ -111,7 +113,7 @@ class AsyncDatabase:
         if self._writer_task is not None:
             # Send a sentinel None so the writer exits cleanly after draining.
             assert self._write_queue is not None
-            await self._write_queue.put(None)        # type: ignore[arg-type]
+            await self._write_queue.put(None)  # type: ignore[arg-type]
             await self._writer_task
             self._writer_task = None
         if self._conn is not None:
@@ -122,17 +124,24 @@ class AsyncDatabase:
     # ── Reads (direct) ───────────────────────────────────────────────────
 
     async def fetchone(
-        self, sql: str, params: Sequence[Any] = (),
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
     ) -> sqlite3.Row | None:
         return await self._read(lambda c: c.execute(sql, params).fetchone())
 
     async def fetchall(
-        self, sql: str, params: Sequence[Any] = (),
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
     ) -> list[sqlite3.Row]:
         return await self._read(lambda c: c.execute(sql, params).fetchall())
 
     async def fetchval(
-        self, sql: str, params: Sequence[Any] = (), default: Any = None,
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
+        default: Any = None,
     ) -> Any:
         row = await self.fetchone(sql, params)
         if row is None:
@@ -142,7 +151,9 @@ class AsyncDatabase:
     # ── Writes (queued / coalesced) ──────────────────────────────────────
 
     async def enqueue(
-        self, sql: str, params: Sequence[Any] = (),
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
     ) -> int:
         """Queue a write statement. Returns the resulting ``lastrowid``.
 
@@ -159,7 +170,9 @@ class AsyncDatabase:
         return await fut
 
     async def executemany(
-        self, sql: str, seq_of_params: Iterable[Sequence[Any]],
+        self,
+        sql: str,
+        seq_of_params: Iterable[Sequence[Any]],
     ) -> None:
         """Convenience for bulk inserts — each row awaits its own write."""
         for row in seq_of_params:
@@ -179,7 +192,7 @@ class AsyncDatabase:
         self._assert_running()
         assert self._conn is not None
         assert self._writer_lock is not None
-        conn = self._conn                    # capture for mypy narrowing
+        conn = self._conn  # capture for mypy narrowing
         loop = asyncio.get_running_loop()
 
         def _run():
@@ -249,7 +262,7 @@ class AsyncDatabase:
         loop = asyncio.get_running_loop()
         while True:
             first = await self._write_queue.get()
-            if first is None:   # sentinel — shutdown
+            if first is None:  # sentinel — shutdown
                 return
             batch: list[_PendingWrite] = [first]
             deadline = loop.time() + self._batch_timeout
@@ -261,7 +274,8 @@ class AsyncDatabase:
                     break
                 try:
                     nxt = await asyncio.wait_for(
-                        self._write_queue.get(), timeout=remaining,
+                        self._write_queue.get(),
+                        timeout=remaining,
                     )
                 except asyncio.TimeoutError:
                     break

@@ -29,6 +29,7 @@ async def env(tmp_dir):
 
 async def _seed_post(db, post_id, *, days_old, type_="text"):
     from datetime import datetime, timedelta, timezone
+
     created = (datetime.now(timezone.utc) - timedelta(days=days_old)).strftime(
         "%Y-%m-%d %H:%M:%S",
     )
@@ -48,7 +49,8 @@ async def test_prune_deletes_old_posts(env):
     n = await sched._prune_once()
     assert n == 1
     rows = {
-        r["id"]: r["deleted"] for r in await db.fetchall(
+        r["id"]: r["deleted"]
+        for r in await db.fetchall(
             "SELECT id, deleted FROM space_posts",
         )
     }
@@ -67,7 +69,8 @@ async def test_exempt_types_are_kept(env):
     n = await sched._prune_once()
     assert n == 1
     rows = {
-        r["id"]: r["deleted"] for r in await db.fetchall(
+        r["id"]: r["deleted"]
+        for r in await db.fetchall(
             "SELECT id, deleted FROM space_posts",
         )
     }

@@ -25,7 +25,8 @@ async def repo(db):
 
 
 def _call(
-    *, call_id: str = "c1",
+    *,
+    call_id: str = "c1",
     conversation_id: str = "conv-1",
     initiator: str = "u-alice",
     callee: str | None = "u-bob",
@@ -76,12 +77,14 @@ async def test_save_call_upserts_on_conflict(repo):
 
 
 async def test_save_call_persists_participants(repo):
-    await repo.save_call(_call(
-        call_id="grp",
-        conversation_id="conv-2",
-        callee=None,
-        participants=("u-a", "u-b", "u-c"),
-    ))
+    await repo.save_call(
+        _call(
+            call_id="grp",
+            conversation_id="conv-2",
+            callee=None,
+            participants=("u-a", "u-b", "u-c"),
+        )
+    )
     fetched = await repo.get_call("grp")
     assert fetched is not None
     assert set(fetched.participant_user_ids) == {"u-a", "u-b", "u-c"}
@@ -104,11 +107,15 @@ async def test_list_active_matches_callee(repo):
 
 
 async def test_list_active_matches_participant(repo):
-    await repo.save_call(_call(
-        call_id="grp", conversation_id="conv-2",
-        callee=None, participants=("u-x", "u-y"),
-        status="active",
-    ))
+    await repo.save_call(
+        _call(
+            call_id="grp",
+            conversation_id="conv-2",
+            callee=None,
+            participants=("u-x", "u-y"),
+            status="active",
+        )
+    )
     rows = await repo.list_active(user_id="u-y")
     assert [r.id for r in rows] == ["grp"]
 
@@ -145,7 +152,8 @@ async def test_history_respects_limit(repo):
 async def test_transition_updates_status_and_lifecycle(repo):
     await repo.save_call(_call())
     updated = await repo.transition(
-        "c1", status="active",
+        "c1",
+        status="active",
         connected_at="2026-01-01T12:00:00+00:00",
     )
     assert updated is not None
@@ -155,10 +163,12 @@ async def test_transition_updates_status_and_lifecycle(repo):
 
 async def test_transition_preserves_unspecified_fields(repo):
     await repo.save_call(_call())
-    await repo.transition("c1", status="active",
-                          connected_at="2026-01-01T12:00:00+00:00")
+    await repo.transition(
+        "c1", status="active", connected_at="2026-01-01T12:00:00+00:00"
+    )
     updated = await repo.transition(
-        "c1", status="ended",
+        "c1",
+        status="ended",
         ended_at="2026-01-01T12:05:00+00:00",
         duration_seconds=300,
     )
@@ -170,7 +180,8 @@ async def test_transition_preserves_unspecified_fields(repo):
 async def test_transition_updates_participants(repo):
     await repo.save_call(_call(participants=("u-a", "u-b")))
     updated = await repo.transition(
-        "c1", status="active",
+        "c1",
+        status="active",
         participant_user_ids=("u-a", "u-b", "u-c"),
     )
     assert updated is not None
@@ -188,8 +199,7 @@ async def test_end_stale_calls_marks_missed_and_returns_them(repo, db):
     await repo.save_call(_call())
     # Backdate to 200 s ago so it's past the 90 s TTL.
     await db.enqueue(
-        "UPDATE call_sessions "
-        "SET started_at=datetime('now','-200 seconds') WHERE id=?",
+        "UPDATE call_sessions SET started_at=datetime('now','-200 seconds') WHERE id=?",
         ("c1",),
     )
     missed = await repo.end_stale_calls(older_than_seconds=90)
@@ -207,8 +217,7 @@ async def test_end_stale_calls_ignores_fresh_ringing(repo):
 async def test_end_stale_calls_ignores_non_ringing(repo, db):
     await repo.save_call(_call(status="active"))
     await db.enqueue(
-        "UPDATE call_sessions "
-        "SET started_at=datetime('now','-300 seconds') WHERE id=?",
+        "UPDATE call_sessions SET started_at=datetime('now','-300 seconds') WHERE id=?",
         ("c1",),
     )
     missed = await repo.end_stale_calls(older_than_seconds=90)
@@ -220,15 +229,26 @@ async def test_end_stale_calls_ignores_non_ringing(repo, db):
 
 async def test_save_and_list_quality_samples(repo):
     await repo.save_call(_call())
-    await repo.save_quality_sample(CallQualitySample(
-        call_id="c1", reporter_user_id="u-alice",
-        sampled_at=1700000000, rtt_ms=50, loss_pct=0.1,
-    ))
-    await repo.save_quality_sample(CallQualitySample(
-        call_id="c1", reporter_user_id="u-bob",
-        sampled_at=1700000010, rtt_ms=60, jitter_ms=5,
-        audio_bitrate=32000, video_bitrate=640000,
-    ))
+    await repo.save_quality_sample(
+        CallQualitySample(
+            call_id="c1",
+            reporter_user_id="u-alice",
+            sampled_at=1700000000,
+            rtt_ms=50,
+            loss_pct=0.1,
+        )
+    )
+    await repo.save_quality_sample(
+        CallQualitySample(
+            call_id="c1",
+            reporter_user_id="u-bob",
+            sampled_at=1700000010,
+            rtt_ms=60,
+            jitter_ms=5,
+            audio_bitrate=32000,
+            video_bitrate=640000,
+        )
+    )
     samples = await repo.list_quality_samples("c1")
     assert len(samples) == 2
     assert samples[0].rtt_ms == 50
@@ -242,8 +262,12 @@ async def test_list_quality_samples_empty_when_none(repo):
 
 async def test_quality_samples_cascade_with_call(repo, db):
     await repo.save_call(_call())
-    await repo.save_quality_sample(CallQualitySample(
-        call_id="c1", reporter_user_id="u", sampled_at=1,
-    ))
+    await repo.save_quality_sample(
+        CallQualitySample(
+            call_id="c1",
+            reporter_user_id="u",
+            sampled_at=1,
+        )
+    )
     await db.enqueue("DELETE FROM call_sessions WHERE id=?", ("c1",))
     assert await repo.list_quality_samples("c1") == []

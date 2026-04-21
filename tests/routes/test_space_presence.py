@@ -6,14 +6,20 @@ Scenarios covered:
 * feature_location on, mode=zone_only → coordinates stripped
 * non-member → 403
 """
+
 from __future__ import annotations
 
 from .conftest import _auth
 
 
 async def _create_space(
-    client, *, space_type="household", join_mode="open",
-    lat=None, lon=None, radius_km=None,
+    client,
+    *,
+    space_type="household",
+    join_mode="open",
+    lat=None,
+    lon=None,
+    radius_km=None,
 ):
     body = {"name": "Location Test", "space_type": space_type, "join_mode": join_mode}
     if lat is not None:
@@ -56,10 +62,12 @@ async def test_non_member_gets_403(client):
     space_id = await _create_space(client)
     # drop ourselves from membership to simulate a non-member caller
     await client._db.enqueue(
-        "DELETE FROM space_members WHERE space_id=?", (space_id,),
+        "DELETE FROM space_members WHERE space_id=?",
+        (space_id,),
     )
     r = await client.get(
-        f"/api/spaces/{space_id}/presence", headers=_auth(client._tok),
+        f"/api/spaces/{space_id}/presence",
+        headers=_auth(client._tok),
     )
     assert r.status == 403
 
@@ -67,7 +75,8 @@ async def test_non_member_gets_403(client):
 async def test_feature_disabled_returns_empty(client):
     space_id = await _create_space(client)
     r = await client.get(
-        f"/api/spaces/{space_id}/presence", headers=_auth(client._tok),
+        f"/api/spaces/{space_id}/presence",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.json()
@@ -80,11 +89,16 @@ async def test_gps_mode_returns_coordinates(client):
     space_id = await _create_space(client)
     await _set_location_mode(client, space_id, enabled=True, mode="gps")
     await _seed_presence(
-        client, username="admin", user_id=client._uid,
-        lat=47.3769, lon=8.5417, accuracy=12.0,
+        client,
+        username="admin",
+        user_id=client._uid,
+        lat=47.3769,
+        lon=8.5417,
+        accuracy=12.0,
     )
     r = await client.get(
-        f"/api/spaces/{space_id}/presence", headers=_auth(client._tok),
+        f"/api/spaces/{space_id}/presence",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.json()
@@ -100,14 +114,22 @@ async def test_gps_mode_returns_coordinates(client):
 async def test_zone_only_strips_coordinates(client):
     space_id = await _create_space(client)
     await _set_location_mode(
-        client, space_id, enabled=True, mode="zone_only",
+        client,
+        space_id,
+        enabled=True,
+        mode="zone_only",
     )
     await _seed_presence(
-        client, username="admin", user_id=client._uid,
-        lat=47.3769, lon=8.5417, accuracy=12.0,
+        client,
+        username="admin",
+        user_id=client._uid,
+        lat=47.3769,
+        lon=8.5417,
+        accuracy=12.0,
     )
     r = await client.get(
-        f"/api/spaces/{space_id}/presence", headers=_auth(client._tok),
+        f"/api/spaces/{space_id}/presence",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.json()
@@ -126,8 +148,11 @@ async def test_only_space_members_surface(client):
     await _set_location_mode(client, space_id, enabled=True, mode="gps")
     # Caller (admin) is a member. Seed caller's presence.
     await _seed_presence(
-        client, username="admin", user_id=client._uid,
-        lat=47.1, lon=8.0,
+        client,
+        username="admin",
+        user_id=client._uid,
+        lat=47.1,
+        lon=8.0,
     )
     # Seed a non-member user's presence — should NOT surface.
     await client._db.enqueue(
@@ -135,11 +160,15 @@ async def test_only_space_members_surface(client):
         ("stranger", "outsider_uid", "Stranger"),
     )
     await _seed_presence(
-        client, username="stranger", user_id="outsider_uid",
-        lat=47.5, lon=8.5,
+        client,
+        username="stranger",
+        user_id="outsider_uid",
+        lat=47.5,
+        lon=8.5,
     )
     r = await client.get(
-        f"/api/spaces/{space_id}/presence", headers=_auth(client._tok),
+        f"/api/spaces/{space_id}/presence",
+        headers=_auth(client._tok),
     )
     body = await r.json()
     user_ids = {e["user_id"] for e in body["entries"]}

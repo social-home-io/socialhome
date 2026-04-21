@@ -98,7 +98,8 @@ async def test_full_dm_lifecycle(client):
     """Create DM, send, list, mark-read, get unread count."""
     raw = await _seed_partner(client)
     r = await client.post(
-        "/api/conversations/dm", json={"username": "bob"},
+        "/api/conversations/dm",
+        json={"username": "bob"},
         headers=_auth(client._tok),
     )
     cid = (await r.json())["id"]

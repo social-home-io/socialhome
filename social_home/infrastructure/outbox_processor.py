@@ -33,7 +33,19 @@ log = logging.getLogger(__name__)
 #: Base retry schedule in seconds — index == attempt number after the
 #: first failure. The last entry is the ceiling.
 BACKOFF_SECONDS: tuple[int, ...] = (
-    5, 10, 20, 40, 80, 160, 320, 640, 1280, 2560, 5120, 10240, 14400,
+    5,
+    10,
+    20,
+    40,
+    80,
+    160,
+    320,
+    640,
+    1280,
+    2560,
+    5120,
+    10240,
+    14400,
 )
 
 #: How far to perturb the base delay — ±30%.
@@ -49,15 +61,17 @@ MAX_ATTEMPTS: int = len(BACKOFF_SECONDS)
 #: must eventually see, even if the peer is offline for weeks.  Instead
 #: of giving up after :data:`MAX_ATTEMPTS`, we keep retrying on the
 #: ceiling backoff (4 hours) indefinitely.
-NEVER_DROP: frozenset[FederationEventType] = frozenset({
-    FederationEventType.SPACE_MEMBER_BANNED,
-    FederationEventType.SPACE_MEMBER_UNBANNED,
-    FederationEventType.SPACE_KEY_EXCHANGE,
-    FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
-    FederationEventType.SPACE_ADMIN_KEY_SHARE,
-    FederationEventType.SPACE_DISSOLVED,
-    FederationEventType.UNPAIR,
-})
+NEVER_DROP: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.SPACE_MEMBER_BANNED,
+        FederationEventType.SPACE_MEMBER_UNBANNED,
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.UNPAIR,
+    }
+)
 
 
 #: Delivery callback signature. Return ``True`` on success, ``False`` on a
@@ -77,8 +91,12 @@ class OutboxProcessor:
     """
 
     __slots__ = (
-        "_repo", "_deliver", "_poll_interval",
-        "_task", "_stop", "_jitter",
+        "_repo",
+        "_deliver",
+        "_poll_interval",
+        "_task",
+        "_stop",
+        "_jitter",
     )
 
     def __init__(
@@ -89,11 +107,11 @@ class OutboxProcessor:
         poll_interval_seconds: float = 5.0,
         rng: Callable[[], float] | None = None,
     ) -> None:
-        self._repo           = repo
-        self._deliver        = deliver
-        self._poll_interval  = poll_interval_seconds
+        self._repo = repo
+        self._deliver = deliver
+        self._poll_interval = poll_interval_seconds
         self._task: asyncio.Task | None = None
-        self._stop           = asyncio.Event()
+        self._stop = asyncio.Event()
         # ``rng`` is injectable for deterministic tests. Default uses
         # ``random.random`` — uniform in [0, 1).
         self._jitter = rng or random.random
@@ -111,7 +129,7 @@ class OutboxProcessor:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -123,7 +141,8 @@ class OutboxProcessor:
                 log.exception("OutboxProcessor tick failed")
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._poll_interval,
+                    self._stop.wait(),
+                    timeout=self._poll_interval,
                 )
             except asyncio.TimeoutError:
                 continue
@@ -146,7 +165,8 @@ class OutboxProcessor:
             except Exception as exc:
                 log.warning(
                     "OutboxProcessor delivery raised for %s: %s",
-                    entry.id, exc,
+                    entry.id,
+                    exc,
                 )
                 ok = False
             if ok:
@@ -162,19 +182,23 @@ class OutboxProcessor:
                     log.info(
                         "OutboxProcessor: %s entry %s past MAX_ATTEMPTS"
                         " — pinning at ceiling backoff",
-                        entry.event_type, entry.id,
+                        entry.event_type,
+                        entry.id,
                     )
                     delay = self._delay_for(MAX_ATTEMPTS)
                     next_at = (
                         datetime.now(timezone.utc) + timedelta(seconds=delay)
                     ).isoformat()
                     await self._repo.reschedule(
-                        entry.id, next_at, attempts=new_attempts,
+                        entry.id,
+                        next_at,
+                        attempts=new_attempts,
                     )
                     continue
                 log.warning(
                     "OutboxProcessor giving up on %s after %d attempts",
-                    entry.id, new_attempts,
+                    entry.id,
+                    new_attempts,
                 )
                 await self._repo.mark_failed(entry.id)
                 continue
@@ -183,7 +207,9 @@ class OutboxProcessor:
                 datetime.now(timezone.utc) + timedelta(seconds=delay)
             ).isoformat()
             await self._repo.reschedule(
-                entry.id, next_at, attempts=new_attempts,
+                entry.id,
+                next_at,
+                attempts=new_attempts,
             )
         return len(entries)
 
@@ -195,7 +221,7 @@ class OutboxProcessor:
         ``attempt`` is 1-based (first retry is ``1``). Attempts beyond
         ``len(BACKOFF_SECONDS)`` reuse the last (ceiling) base delay.
         """
-        idx  = min(attempt, len(BACKOFF_SECONDS)) - 1
+        idx = min(attempt, len(BACKOFF_SECONDS)) - 1
         base = BACKOFF_SECONDS[idx]
         # Convert jitter sample ``[0,1)`` into the range ``[-1, 1]`` then
         # scale by JITTER_RATIO so the perturbation is ±30 %.

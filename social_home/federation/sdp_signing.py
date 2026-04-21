@@ -30,7 +30,7 @@ class SignedSDP:
     """
 
     sdp: str
-    sdp_type: str   # "offer" | "answer"
+    sdp_type: str  # "offer" | "answer"
     signature: str  # b64url Ed25519
 
 

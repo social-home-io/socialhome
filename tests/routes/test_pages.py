@@ -5,15 +5,19 @@ from .conftest import _auth
 
 async def test_create_page(client):
     """POST /api/pages creates a page."""
-    r = await client.post("/api/pages", json={"title": "Wiki", "content": "Hello"},
-                           headers=_auth(client._tok))
+    r = await client.post(
+        "/api/pages",
+        json={"title": "Wiki", "content": "Hello"},
+        headers=_auth(client._tok),
+    )
     assert r.status == 201
 
 
 async def test_list_pages(client):
     """GET /api/pages returns household pages."""
-    await client.post("/api/pages", json={"title": "T", "content": "C"},
-                       headers=_auth(client._tok))
+    await client.post(
+        "/api/pages", json={"title": "T", "content": "C"}, headers=_auth(client._tok)
+    )
     r = await client.get("/api/pages", headers=_auth(client._tok))
     assert r.status == 200
     assert len(await r.json()) >= 1
@@ -21,8 +25,9 @@ async def test_list_pages(client):
 
 async def test_get_page(client):
     """GET /api/pages/{id} returns a single page."""
-    r = await client.post("/api/pages", json={"title": "T", "content": "C"},
-                           headers=_auth(client._tok))
+    r = await client.post(
+        "/api/pages", json={"title": "T", "content": "C"}, headers=_auth(client._tok)
+    )
     pid = (await r.json())["id"]
     r2 = await client.get(f"/api/pages/{pid}", headers=_auth(client._tok))
     assert r2.status == 200
@@ -31,8 +36,9 @@ async def test_get_page(client):
 
 async def test_acquire_release_lock(client):
     """POST /api/pages/{id}/lock then DELETE releases it."""
-    r = await client.post("/api/pages", json={"title": "L", "content": "C"},
-                           headers=_auth(client._tok))
+    r = await client.post(
+        "/api/pages", json={"title": "L", "content": "C"}, headers=_auth(client._tok)
+    )
     pid = (await r.json())["id"]
     r2 = await client.post(f"/api/pages/{pid}/lock", headers=_auth(client._tok))
     assert r2.status == 200
@@ -45,14 +51,16 @@ async def test_acquire_release_lock(client):
 
 async def test_patch_with_stale_base_returns_409(client):
     r = await client.post(
-        "/api/pages", json={"title": "P", "content": "v1"},
+        "/api/pages",
+        json={"title": "P", "content": "v1"},
         headers=_auth(client._tok),
     )
     body = await r.json()
     pid = body["id"]
     # Bake a first edit so updated_at advances.
     r1 = await client.patch(
-        f"/api/pages/{pid}", json={"content": "v2"},
+        f"/api/pages/{pid}",
+        json={"content": "v2"},
         headers=_auth(client._tok),
     )
     await r1.json()
@@ -76,7 +84,8 @@ async def test_patch_with_stale_base_returns_409(client):
 
 async def test_patch_with_fresh_base_succeeds(client):
     r = await client.post(
-        "/api/pages", json={"title": "P", "content": "v1"},
+        "/api/pages",
+        json={"title": "P", "content": "v1"},
         headers=_auth(client._tok),
     )
     body = await r.json()
@@ -93,7 +102,8 @@ async def test_patch_with_fresh_base_succeeds(client):
 
 async def test_get_lock_returns_null_when_unlocked(client):
     r = await client.post(
-        "/api/pages", json={"title": "L", "content": ""},
+        "/api/pages",
+        json={"title": "L", "content": ""},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
@@ -104,7 +114,8 @@ async def test_get_lock_returns_null_when_unlocked(client):
 
 async def test_get_lock_returns_row_after_acquire(client):
     r = await client.post(
-        "/api/pages", json={"title": "L", "content": ""},
+        "/api/pages",
+        json={"title": "L", "content": ""},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
@@ -117,13 +128,15 @@ async def test_get_lock_returns_row_after_acquire(client):
 
 async def test_refresh_lock_204(client):
     r = await client.post(
-        "/api/pages", json={"title": "L", "content": ""},
+        "/api/pages",
+        json={"title": "L", "content": ""},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
     await client.post(f"/api/pages/{pid}/lock", headers=_auth(client._tok))
     r2 = await client.post(
-        f"/api/pages/{pid}/lock/refresh", headers=_auth(client._tok),
+        f"/api/pages/{pid}/lock/refresh",
+        headers=_auth(client._tok),
     )
     assert r2.status == 204
 
@@ -143,7 +156,8 @@ async def test_refresh_lock_held_by_other_returns_409(client):
         (sha256_token_hash("bob-tok"),),
     )
     r = await client.post(
-        "/api/pages", json={"title": "L", "content": ""},
+        "/api/pages",
+        json={"title": "L", "content": ""},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
@@ -175,18 +189,21 @@ async def test_revert_non_admin_403(client):
         (sha256_token_hash("carol-tok"),),
     )
     r = await client.post(
-        "/api/pages", json={"title": "H", "content": "v1"},
+        "/api/pages",
+        json={"title": "H", "content": "v1"},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
     # Bake a version via PATCH.
     await client.patch(
-        f"/api/pages/{pid}", json={"content": "v2"},
+        f"/api/pages/{pid}",
+        json={"content": "v2"},
         headers=_auth(client._tok),
     )
     # Carol (non-admin) tries to revert → 403.
     r3 = await client.post(
-        f"/api/pages/{pid}/revert", json={"version": 1},
+        f"/api/pages/{pid}/revert",
+        json={"version": 1},
         headers={"Authorization": "Bearer carol-tok"},
     )
     assert r3.status == 403
@@ -197,13 +214,15 @@ async def test_revert_non_admin_403(client):
 
 async def test_delete_request_then_admin_approve(client):
     r = await client.post(
-        "/api/pages", json={"title": "D", "content": "bye"},
+        "/api/pages",
+        json={"title": "D", "content": "bye"},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
     # Seed a second user who raises the request so admin-approve is
     # a distinct actor.
     from social_home.auth import sha256_token_hash
+
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
         "VALUES('dave', 'dave-id', 'Dave', 0)",
@@ -231,6 +250,7 @@ async def test_delete_request_then_admin_approve(client):
 
 async def test_delete_approve_requires_admin(client):
     from social_home.auth import sha256_token_hash
+
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
         "VALUES('eve', 'eve-id', 'Eve', 0)",
@@ -241,7 +261,8 @@ async def test_delete_approve_requires_admin(client):
         (sha256_token_hash("eve-tok"),),
     )
     r = await client.post(
-        "/api/pages", json={"title": "E", "content": ""},
+        "/api/pages",
+        json={"title": "E", "content": ""},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
@@ -259,7 +280,8 @@ async def test_delete_approve_requires_admin(client):
 
 async def test_delete_approve_rejects_self_approval(client):
     r = await client.post(
-        "/api/pages", json={"title": "S", "content": ""},
+        "/api/pages",
+        json={"title": "S", "content": ""},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
@@ -286,8 +308,7 @@ async def _seed_space_with_member(client, *, space_id: str = "sp-x") -> str:
         (space_id, "ab" * 32),
     )
     await client._db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role)"
-        " VALUES(?, ?, 'admin')",
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'admin')",
         (space_id, client._uid),
     )
     return space_id
@@ -307,6 +328,7 @@ async def test_space_page_create_requires_member(client):
 
 async def test_space_page_non_member_403(client):
     from social_home.auth import sha256_token_hash
+
     sid = await _seed_space_with_member(client)
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
@@ -329,18 +351,21 @@ async def test_space_page_non_member_403(client):
 
 async def test_history_trimmed_to_5(client):
     r = await client.post(
-        "/api/pages", json={"title": "T", "content": "v0"},
+        "/api/pages",
+        json={"title": "T", "content": "v0"},
         headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
     # Seven edits → snapshot becomes 7 rows before trim; trim caps at 5.
     for i in range(1, 8):
         await client.patch(
-            f"/api/pages/{pid}", json={"content": f"v{i}"},
+            f"/api/pages/{pid}",
+            json={"content": f"v{i}"},
             headers=_auth(client._tok),
         )
     r2 = await client.get(
-        f"/api/pages/{pid}/versions", headers=_auth(client._tok),
+        f"/api/pages/{pid}/versions",
+        headers=_auth(client._tok),
     )
     versions = await r2.json()
     assert len(versions) == 5

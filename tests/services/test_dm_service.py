@@ -57,6 +57,7 @@ async def test_1to1_dm(stack):
     dm2 = await stack.dm_svc.create_dm(creator_username="bob", other_username="anna")
     assert dm2.id == dm.id
 
+
 async def test_send_and_list(stack):
     """Messages sent to a DM are retrievable via list_messages."""
     await stack.provision_user("anna")
@@ -65,6 +66,7 @@ async def test_send_and_list(stack):
     await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
     msgs = await stack.dm_svc.list_messages(dm.id, reader_username="anna")
     assert len(msgs) == 1 and msgs[0].content == "hi"
+
 
 async def test_unread_and_mark_read(stack):
     """count_unread increments on new message; mark_read resets it to 0."""
@@ -75,6 +77,7 @@ async def test_unread_and_mark_read(stack):
     assert await stack.dm_svc.count_unread(dm.id, username="bob") == 1
     await stack.dm_svc.mark_read(dm.id, username="bob")
     assert await stack.dm_svc.count_unread(dm.id, username="bob") == 0
+
 
 async def test_edit_delete_sender_only(stack):
     """Only the sender can edit or delete their message."""
@@ -89,14 +92,18 @@ async def test_edit_delete_sender_only(stack):
     with pytest.raises(PermissionError):
         await stack.dm_svc.delete_message(m.id, actor_username="bob")
 
+
 async def test_group_dm(stack):
     """Creating a group DM produces a GROUP_DM conversation."""
     for name in ["anna", "bob", "carl"]:
         await stack.provision_user(name)
     gdm = await stack.dm_svc.create_group_dm(
-        creator_username="anna", member_usernames=["bob", "carl"], name="Crew",
+        creator_username="anna",
+        member_usernames=["bob", "carl"],
+        name="Crew",
     )
     assert gdm.type is ConversationType.GROUP_DM
+
 
 async def test_leave(stack):
     """Leaving a DM removes it from the user's conversation list."""
@@ -107,11 +114,13 @@ async def test_leave(stack):
     convos = await stack.dm_svc.list_conversations("anna")
     assert dm.id not in {c.id for c in convos}
 
+
 async def test_self_dm_rejected(stack):
     """Creating a DM to yourself raises ValueError."""
     await stack.provision_user("a")
     with pytest.raises(ValueError, match="yourself"):
         await stack.dm_svc.create_dm(creator_username="a", other_username="a")
+
 
 async def test_send_bad_type(stack):
     """Sending with invalid message type raises ValueError."""
@@ -119,8 +128,10 @@ async def test_send_bad_type(stack):
     await stack.provision_user("b")
     dm = await stack.dm_svc.create_dm(creator_username="a", other_username="b")
     with pytest.raises(ValueError, match="invalid"):
-        await stack.dm_svc.send_message(dm.id, sender_username="a",
-                                          content="x", type="bogus")
+        await stack.dm_svc.send_message(
+            dm.id, sender_username="a", content="x", type="bogus"
+        )
+
 
 async def test_non_member_cannot_send(stack):
     """Non-member sending a message raises PermissionError."""
@@ -131,6 +142,7 @@ async def test_non_member_cannot_send(stack):
     with pytest.raises(PermissionError):
         await stack.dm_svc.send_message(dm.id, sender_username="c", content="x")
 
+
 async def test_add_to_1on1_rejected(stack):
     """Adding a member to a 1:1 DM raises ValueError."""
     await stack.provision_user("a")
@@ -138,8 +150,8 @@ async def test_add_to_1on1_rejected(stack):
     await stack.provision_user("c")
     dm = await stack.dm_svc.create_dm(creator_username="a", other_username="b")
     with pytest.raises(ValueError, match="1:1"):
-        await stack.dm_svc.add_group_member(dm.id, actor_username="a",
-                                              new_username="c")
+        await stack.dm_svc.add_group_member(dm.id, actor_username="a", new_username="c")
+
 
 async def test_edit_empty_content(stack):
     """Editing a message to empty content raises ValueError."""
@@ -153,40 +165,51 @@ async def test_edit_empty_content(stack):
 
 # ─── §23.47 length cap ────────────────────────────────────────────────────
 
+
 async def test_send_message_rejects_over_max_length(stack):
     from social_home.services.dm_service import MAX_DM_LENGTH
+
     await stack.provision_user("a")
     await stack.provision_user("b")
     dm = await stack.dm_svc.create_dm(creator_username="a", other_username="b")
     too_long = "x" * (MAX_DM_LENGTH + 1)
     with pytest.raises(ValueError, match="exceeds"):
         await stack.dm_svc.send_message(
-            dm.id, sender_username="a", content=too_long,
+            dm.id,
+            sender_username="a",
+            content=too_long,
         )
 
 
 async def test_send_message_at_max_length_succeeds(stack):
     from social_home.services.dm_service import MAX_DM_LENGTH
+
     await stack.provision_user("a")
     await stack.provision_user("b")
     dm = await stack.dm_svc.create_dm(creator_username="a", other_username="b")
     msg = await stack.dm_svc.send_message(
-        dm.id, sender_username="a", content="x" * MAX_DM_LENGTH,
+        dm.id,
+        sender_username="a",
+        content="x" * MAX_DM_LENGTH,
     )
     assert len(msg.content) == MAX_DM_LENGTH
 
 
 async def test_edit_message_rejects_over_max_length(stack):
     from social_home.services.dm_service import MAX_DM_LENGTH
+
     await stack.provision_user("a")
     await stack.provision_user("b")
     dm = await stack.dm_svc.create_dm(creator_username="a", other_username="b")
     msg = await stack.dm_svc.send_message(
-        dm.id, sender_username="a", content="hi",
+        dm.id,
+        sender_username="a",
+        content="hi",
     )
     with pytest.raises(ValueError, match="exceeds"):
         await stack.dm_svc.edit_message(
-            msg.id, editor_username="a",
+            msg.id,
+            editor_username="a",
             new_content="x" * (MAX_DM_LENGTH + 1),
         )
 
@@ -201,11 +224,13 @@ class _FakeFederationService:
         self.sent: list[dict] = []
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
-        self.sent.append({
-            "to":      to_instance_id,
-            "type":    event_type,
-            "payload": payload,
-        })
+        self.sent.append(
+            {
+                "to": to_instance_id,
+                "type": event_type,
+                "payload": payload,
+            }
+        )
 
 
 class _FakeFederationRepo:
@@ -222,6 +247,7 @@ def _confirmed_peer(instance_id: str):
     from types import SimpleNamespace
 
     from social_home.domain.federation import PairingStatus
+
     return SimpleNamespace(id=instance_id, status=PairingStatus.CONFIRMED)
 
 
@@ -229,6 +255,7 @@ def _unconfirmed_peer(instance_id: str):
     from types import SimpleNamespace
 
     from social_home.domain.federation import PairingStatus
+
     return SimpleNamespace(id=instance_id, status=PairingStatus.PENDING_SENT)
 
 
@@ -256,11 +283,15 @@ async def test_send_federates_to_confirmed_peer(stack):
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
     await _attach_remote_member(
-        stack, conversation_id=dm.id, instance_id="peer-a", username="bob",
+        stack,
+        conversation_id=dm.id,
+        instance_id="peer-a",
+        username="bob",
     )
     await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
 
     from social_home.domain.federation import FederationEventType
+
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     assert len(sent) == 1
     assert sent[0]["to"] == "peer-a"
@@ -276,7 +307,10 @@ async def test_send_skips_unconfirmed_peer(stack):
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
     await _attach_remote_member(
-        stack, conversation_id=dm.id, instance_id="peer-a", username="bob",
+        stack,
+        conversation_id=dm.id,
+        instance_id="peer-a",
+        username="bob",
     )
     await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
     assert fed.sent == []
@@ -290,7 +324,10 @@ async def test_send_skips_own_instance(stack):
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
     await _attach_remote_member(
-        stack, conversation_id=dm.id, instance_id="self", username="bob",
+        stack,
+        conversation_id=dm.id,
+        instance_id="self",
+        username="bob",
     )
     await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
     assert fed.sent == []
@@ -304,7 +341,10 @@ async def test_edit_resends_dm_message_with_edited_at(stack):
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
     await _attach_remote_member(
-        stack, conversation_id=dm.id, instance_id="peer-a", username="bob",
+        stack,
+        conversation_id=dm.id,
+        instance_id="peer-a",
+        username="bob",
     )
     msg = await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
     fed.sent.clear()
@@ -316,6 +356,7 @@ async def test_edit_resends_dm_message_with_edited_at(stack):
 
 async def test_delete_federates_deletion(stack):
     from social_home.domain.federation import FederationEventType
+
     fed = _FakeFederationService()
     repo = _FakeFederationRepo({"peer-a": _confirmed_peer("peer-a")})
     stack.dm_svc.attach_federation(fed, repo, own_instance_id="self")
@@ -323,7 +364,10 @@ async def test_delete_federates_deletion(stack):
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
     await _attach_remote_member(
-        stack, conversation_id=dm.id, instance_id="peer-a", username="bob",
+        stack,
+        conversation_id=dm.id,
+        instance_id="peer-a",
+        username="bob",
     )
     msg = await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
     fed.sent.clear()
@@ -335,6 +379,7 @@ async def test_delete_federates_deletion(stack):
 
 async def test_reactions_federate_add_and_remove(stack):
     from social_home.domain.federation import FederationEventType
+
     fed = _FakeFederationService()
     repo = _FakeFederationRepo({"peer-a": _confirmed_peer("peer-a")})
     stack.dm_svc.attach_federation(fed, repo, own_instance_id="self")
@@ -342,15 +387,19 @@ async def test_reactions_federate_add_and_remove(stack):
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
     await _attach_remote_member(
-        stack, conversation_id=dm.id, instance_id="peer-a", username="bob",
+        stack,
+        conversation_id=dm.id,
+        instance_id="peer-a",
+        username="bob",
     )
     msg = await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
     fed.sent.clear()
     anna = await stack.user_svc.get("anna")
     await stack.dm_svc.add_reaction(msg.id, user_id=anna.user_id, emoji="👍")
     await stack.dm_svc.remove_reaction(msg.id, user_id=anna.user_id, emoji="👍")
-    reacts = [s for s in fed.sent
-              if s["type"] == FederationEventType.DM_MESSAGE_REACTION]
+    reacts = [
+        s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE_REACTION
+    ]
     assert [s["payload"]["action"] for s in reacts] == ["add", "remove"]
     assert all(s["payload"]["emoji"] == "👍" for s in reacts)
 
@@ -368,25 +417,36 @@ async def test_send_without_federation_attached_is_noop(stack):
 async def test_fan_out_mixes_confirmed_and_unconfirmed_peers(stack):
     """One confirmed + one unconfirmed peer → only the confirmed gets send_event."""
     fed = _FakeFederationService()
-    repo = _FakeFederationRepo({
-        "peer-ok":  _confirmed_peer("peer-ok"),
-        "peer-new": _unconfirmed_peer("peer-new"),
-    })
+    repo = _FakeFederationRepo(
+        {
+            "peer-ok": _confirmed_peer("peer-ok"),
+            "peer-new": _unconfirmed_peer("peer-new"),
+        }
+    )
     stack.dm_svc.attach_federation(fed, repo, own_instance_id="self")
     await stack.provision_user("anna")
     await stack.provision_user("bob")
     await stack.provision_user("carl")
     gdm = await stack.dm_svc.create_group_dm(
-        creator_username="anna", member_usernames=["bob", "carl"], name="Crew",
+        creator_username="anna",
+        member_usernames=["bob", "carl"],
+        name="Crew",
     )
     await _attach_remote_member(
-        stack, conversation_id=gdm.id, instance_id="peer-ok", username="bob-ok",
+        stack,
+        conversation_id=gdm.id,
+        instance_id="peer-ok",
+        username="bob-ok",
     )
     await _attach_remote_member(
-        stack, conversation_id=gdm.id, instance_id="peer-new", username="carl-new",
+        stack,
+        conversation_id=gdm.id,
+        instance_id="peer-new",
+        username="carl-new",
     )
     await stack.dm_svc.send_message(gdm.id, sender_username="anna", content="hi")
     from social_home.domain.federation import FederationEventType
+
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     # Only the confirmed peer received the event. peer-new takes the DM
     # history sync path when it becomes reachable.
@@ -402,16 +462,25 @@ async def test_fan_out_deduplicates_same_instance(stack):
     await stack.provision_user("bob")
     await stack.provision_user("carl")
     gdm = await stack.dm_svc.create_group_dm(
-        creator_username="anna", member_usernames=["bob", "carl"], name="Crew",
+        creator_username="anna",
+        member_usernames=["bob", "carl"],
+        name="Crew",
     )
     await _attach_remote_member(
-        stack, conversation_id=gdm.id, instance_id="peer-a", username="bob-remote",
+        stack,
+        conversation_id=gdm.id,
+        instance_id="peer-a",
+        username="bob-remote",
     )
     await _attach_remote_member(
-        stack, conversation_id=gdm.id, instance_id="peer-a", username="carl-remote",
+        stack,
+        conversation_id=gdm.id,
+        instance_id="peer-a",
+        username="carl-remote",
     )
     await stack.dm_svc.send_message(gdm.id, sender_username="anna", content="hi")
     from social_home.domain.federation import FederationEventType
+
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     assert len(sent) == 1
     assert sent[0]["to"] == "peer-a"

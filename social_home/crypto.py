@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 # ─── Base helpers ──────────────────────────────────────────────────────────
 
+
 def b64url_encode(data: bytes) -> str:
     """URL-safe base64 without trailing ``=`` padding."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -55,6 +56,7 @@ def b64url_decode(text: str) -> bytes:
 
 
 # ─── Identifier derivation (§4.1.2 / §4.1.3) ──────────────────────────────
+
 
 def derive_instance_id(identity_public_key_bytes: bytes) -> str:
     """Derive a stable, verifiable instance identifier from an Ed25519 public key.
@@ -117,6 +119,7 @@ def derive_user_id(instance_public_key_bytes: bytes, username: str) -> str:
 
 # ─── Ed25519 keypair lifecycle ────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class Ed25519Keypair:
     """Raw bytes of an Ed25519 keypair.
@@ -125,8 +128,8 @@ class Ed25519Keypair:
     ``public_key`` is the 32-byte public key bytes.
     """
 
-    private_key: bytes   # 32-byte seed
-    public_key: bytes    # 32-byte public key
+    private_key: bytes  # 32-byte seed
+    public_key: bytes  # 32-byte public key
 
 
 def generate_identity_keypair() -> Ed25519Keypair:
@@ -170,10 +173,11 @@ def verify_ed25519(public_key: bytes, message: bytes, signature: bytes) -> bool:
 
 # ─── X25519 (ECDH) ────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class X25519Keypair:
-    private_key: bytes   # 32 bytes
-    public_key: bytes    # 32 bytes
+    private_key: bytes  # 32 bytes
+    public_key: bytes  # 32 bytes
 
 
 def generate_x25519_keypair() -> X25519Keypair:
@@ -200,6 +204,7 @@ def x25519_exchange(private_key: bytes, peer_public_key: bytes) -> bytes:
 
 
 # ─── UserIdentityAssertion encoding (§4.1.4) ──────────────────────────────
+
 
 def _lv(b: bytes) -> bytes:
     """Length-prefix a byte string with a 4-byte big-endian length."""
@@ -294,6 +299,7 @@ def verify_user_identity_assertion(
 
 # ─── Replay cache (§24.11 validation pipeline) ────────────────────────────
 
+
 class ReplayCache:
     """A bounded-window replay cache keyed by ``(msg_id, from_instance)``.
 
@@ -351,16 +357,15 @@ class ReplayCache:
                 continue
 
     def load_scoped(
-        self, entries: list[tuple[str, str, str]],
+        self,
+        entries: list[tuple[str, str, str]],
     ) -> None:
         """Warm the cache from ``(from_instance, msg_id, received_at)``
         rows. Used by callers that persist replay keys with sender
         scoping."""
         for from_instance, msg_id, received_at in entries:
             try:
-                self._seen[(from_instance, msg_id)] = (
-                    parse_iso8601_strict(received_at)
-                )
+                self._seen[(from_instance, msg_id)] = parse_iso8601_strict(received_at)
             except ValueError:
                 continue
 
@@ -375,6 +380,7 @@ class ReplayCache:
 
 
 # ─── Misc primitives ──────────────────────────────────────────────────────
+
 
 def generate_routing_secret() -> str:
     """32 random bytes, hex-encoded. Used to keyed-hash relay path selection.

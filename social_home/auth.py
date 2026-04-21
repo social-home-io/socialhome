@@ -42,9 +42,9 @@ log = logging.getLogger(__name__)
 # every additional path is an attack surface.
 _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
     "/healthz",
-    "/api/pairing/accept",       # pairing handshake — uses its own auth
-    "/api/auth/token",           # standalone login — issues the token
-    "/webhook/",                 # federation inbound — envelope-signed
+    "/api/pairing/accept",  # pairing handshake — uses its own auth
+    "/api/auth/token",  # standalone login — issues the token
+    "/webhook/",  # federation inbound — envelope-signed
     "/.well-known/",
 )
 
@@ -63,15 +63,19 @@ class AuthContext:
     is_admin: bool
 
     #: How the request was authenticated. Mostly for telemetry / logs.
-    auth_method: str   # "session" | "api_token" | "ha_ingress" | "standalone"
+    auth_method: str  # "session" | "api_token" | "ha_ingress" | "standalone"
 
     #: Free-form metadata carried through from the strategy (e.g. the
     #: specific token id used). Always present, possibly empty.
-    metadata: dict = None   # type: ignore[assignment]
+    metadata: dict = None  # type: ignore[assignment]
 
     @classmethod
     def from_user(
-        cls, user: "User", *, auth_method: str, metadata: dict | None = None,
+        cls,
+        user: "User",
+        *,
+        auth_method: str,
+        metadata: dict | None = None,
     ) -> "AuthContext":
         return cls(
             user_id=user.user_id,
@@ -167,6 +171,7 @@ def require_admin(request: "web.Request") -> AuthContext:
 
 # ─── Concrete strategies ─────────────────────────────────────────────────
 
+
 class BearerTokenStrategy:
     """Authenticate via ``Authorization: Bearer <raw_token>``.
 
@@ -232,7 +237,7 @@ class HaIngressStrategy:
 
     async def authenticate(self, request: "web.Request") -> AuthContext | None:
         username = request.headers.get("X-Ingress-User")
-        token    = request.headers.get("X-Ingress-Token")
+        token = request.headers.get("X-Ingress-Token")
         if not username or not token:
             return None
         if self._validate_token is not None:

@@ -34,7 +34,8 @@ class PeerDirectoryHandler:
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry  # noqa: SLF001
         registry.register(
-            FederationEventType.SPACE_DIRECTORY_SYNC, self._on_snapshot,
+            FederationEventType.SPACE_DIRECTORY_SYNC,
+            self._on_snapshot,
         )
 
     async def _on_snapshot(self, event: "FederationEvent") -> None:
@@ -51,22 +52,25 @@ class PeerDirectoryHandler:
             if not isinstance(item, dict):
                 continue
             try:
-                entries.append(PeerSpaceDirectoryEntry(
-                    instance_id=event.from_instance,
-                    space_id=str(item["space_id"]),
-                    name=str(item.get("name") or ""),
-                    description=item.get("description"),
-                    emoji=item.get("emoji"),
-                    member_count=int(item.get("member_count") or 0),
-                    join_mode=str(item.get("join_mode") or "request"),
-                    min_age=int(item.get("min_age") or 0),
-                    target_audience=str(item.get("target_audience") or "all"),
-                    updated_at=item.get("updated_at"),
-                ))
-            except (KeyError, TypeError, ValueError):
+                entries.append(
+                    PeerSpaceDirectoryEntry(
+                        instance_id=event.from_instance,
+                        space_id=str(item["space_id"]),
+                        name=str(item.get("name") or ""),
+                        description=item.get("description"),
+                        emoji=item.get("emoji"),
+                        member_count=int(item.get("member_count") or 0),
+                        join_mode=str(item.get("join_mode") or "request"),
+                        min_age=int(item.get("min_age") or 0),
+                        target_audience=str(item.get("target_audience") or "all"),
+                        updated_at=item.get("updated_at"),
+                    )
+                )
+            except KeyError, TypeError, ValueError:
                 continue
         await self._repo.replace_snapshot(event.from_instance, entries)
         log.debug(
             "SPACE_DIRECTORY_SYNC from %s: stored %d entries",
-            event.from_instance, len(entries),
+            event.from_instance,
+            len(entries),
         )

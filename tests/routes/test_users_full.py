@@ -1,4 +1,5 @@
 """Full route coverage for user endpoints."""
+
 from .conftest import _auth
 
 
@@ -15,7 +16,9 @@ async def test_get_me_strips_sensitive(client):
 async def test_patch_me(client):
     """PATCH /api/me updates profile fields."""
     h = _auth(client._tok)
-    r = await client.patch("/api/me", json={"display_name": "Updated Admin", "bio": "test"}, headers=h)
+    r = await client.patch(
+        "/api/me", json={"display_name": "Updated Admin", "bio": "test"}, headers=h
+    )
     assert r.status == 200
     body = await r.json()
     assert body["display_name"] == "Updated Admin"

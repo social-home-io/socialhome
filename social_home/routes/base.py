@@ -117,9 +117,13 @@ class BaseView(web.View):
         try:
             return await super()._iter()
         except web.HTTPException:
-            raise                                  # aiohttp errors pass through
-        except (PageNotFoundError, PollNotFoundError, ListingNotFoundError,
-                GalleryNotFoundError) as exc:
+            raise  # aiohttp errors pass through
+        except (
+            PageNotFoundError,
+            PollNotFoundError,
+            ListingNotFoundError,
+            GalleryNotFoundError,
+        ) as exc:
             return error_response(404, "NOT_FOUND", str(exc))
         except KeyError as exc:
             return error_response(404, "NOT_FOUND", str(exc).strip("'\""))
@@ -136,15 +140,20 @@ class BaseView(web.View):
             return error_response(507, "STORAGE_FULL", str(exc))
         except FeatureDisabledError as exc:
             return error_response(
-                403, "FEATURE_DISABLED", str(exc),
+                403,
+                "FEATURE_DISABLED",
+                str(exc),
                 extra={"section": exc.section},
             )
         except NoActiveConflictError as exc:
             return error_response(409, "NO_CONFLICT", str(exc))
         except PageLockError as exc:
             return error_response(409, "LOCKED", str(exc))
-        except (SpacePermissionError, GalleryPermissionError,
-                GuardianRequiredError) as exc:
+        except (
+            SpacePermissionError,
+            GalleryPermissionError,
+            GuardianRequiredError,
+        ) as exc:
             return error_response(403, "FORBIDDEN", str(exc))
         except PermissionError as exc:
             return error_response(403, "FORBIDDEN", str(exc))

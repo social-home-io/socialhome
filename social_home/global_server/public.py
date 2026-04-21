@@ -20,7 +20,7 @@ import secrets
 import time
 from typing import TYPE_CHECKING
 
-import qrcode                   # type: ignore[import-untyped]
+import qrcode  # type: ignore[import-untyped]
 from aiohttp import web
 
 from . import app_keys as K
@@ -41,6 +41,7 @@ LISTING_MAX_PER_MINUTE: int = 30
 
 
 # ─── Token service ──────────────────────────────────────────────────────
+
 
 class PairingTokenService:
     """Issue + consume single-use pairing tokens."""
@@ -70,6 +71,7 @@ class PairingTokenService:
 
 # ─── Listing rate-limit middleware ─────────────────────────────────────
 
+
 def build_listing_rate_limit():
     """Simple in-memory per-IP rate limiter for the public listing.
 
@@ -88,7 +90,8 @@ def build_listing_rate_limit():
         hits = [t for t in counters.get(ip, []) if now - t < 60.0]
         if len(hits) >= LISTING_MAX_PER_MINUTE:
             resp = web.json_response(
-                {"error": "rate_limited"}, status=429,
+                {"error": "rate_limited"},
+                status=429,
             )
             resp.headers["Retry-After"] = "60"
             return resp
@@ -100,6 +103,7 @@ def build_listing_rate_limit():
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
+
 
 def _client_ip(request: web.Request) -> str:
     fwd = request.headers.get("X-Forwarded-For", "")
@@ -130,7 +134,7 @@ def _audience_filter(value: str | None) -> tuple[str, int | None]:
     if value == "teen":
         return "Teen", 13
     if value == "adult":
-        return "Adult", None    # only min_age >= 18 — handled separately
+        return "Adult", None  # only min_age >= 18 — handled separately
     return "All", None
 
 
@@ -151,20 +155,19 @@ def _render_landing(
         accent = _escape(sp.get("accent_color") or "#6366f1")
         rows.append(f"""
           <li class="card" style="border-left:6px solid {accent}">
-            <a href="/spaces/{_escape(sp['space_id'])}">
-              <strong>{_escape(sp.get('name') or '—')}</strong>
+            <a href="/spaces/{_escape(sp["space_id"])}">
+              <strong>{_escape(sp.get("name") or "—")}</strong>
             </a>
-            <div class="muted">{sp.get('subscriber_count', 0)} members
-              · {sp.get('posts_per_week', 0):.1f} posts/week</div>
-            <p>{_escape((sp.get('description') or '')[:120])}</p>
+            <div class="muted">{sp.get("subscriber_count", 0)} members
+              · {sp.get("posts_per_week", 0):.1f} posts/week</div>
+            <p>{_escape((sp.get("description") or "")[:120])}</p>
           </li>
         """)
-    rows_html = "\n".join(rows) or (
-      "<li class=\"muted\">No active spaces yet.</li>"
-    )
+    rows_html = "\n".join(rows) or ('<li class="muted">No active spaces yet.</li>')
     header_html = (
         f'<img src="{_escape(header_image_url)}" alt="" class="hero-image" />'
-        if header_image_url else ""
+        if header_image_url
+        else ""
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -233,13 +236,13 @@ def _render_landing(
                placeholder="Search spaces…" value="{_escape(search)}" />
       </form>
       <div class="filters">
-        <a href="/" class="{'active' if not audience else ''}">All</a>
+        <a href="/" class="{"active" if not audience else ""}">All</a>
         <a href="/?audience=family"
-           class="{'active' if audience == 'family' else ''}">Family</a>
+           class="{"active" if audience == "family" else ""}">Family</a>
         <a href="/?audience=teen"
-           class="{'active' if audience == 'teen' else ''}">Teen (13+)</a>
+           class="{"active" if audience == "teen" else ""}">Teen (13+)</a>
         <a href="/?audience=adult"
-           class="{'active' if audience == 'adult' else ''}">Adult (18+)</a>
+           class="{"active" if audience == "adult" else ""}">Adult (18+)</a>
       </div>
       <ul>
         {rows_html}
@@ -280,7 +283,7 @@ def _render_space_page(
   <meta property="og:title"       content="{og_title}" />
   <meta property="og:description" content="{og_desc}" />
   <meta property="og:image"       content="{og_image}" />
-  <meta property="og:url"         content="{_escape(base_url)}/spaces/{_escape(space['space_id'])}" />
+  <meta property="og:url"         content="{_escape(base_url)}/spaces/{_escape(space["space_id"])}" />
   <meta name="twitter:card"       content="summary_large_image" />
   <style>
     body {{ font: 15px/1.5 system-ui, sans-serif; margin: 0; color: #1f2937;
@@ -298,12 +301,12 @@ def _render_space_page(
   </style>
 </head>
 <body>
-  {'<img class="cover" src="' + og_image + '" alt="" />' if og_image else ''}
+  {'<img class="cover" src="' + og_image + '" alt="" />' if og_image else ""}
   <main>
     <div class="accent-bar"></div>
     <a href="/" class="secondary">← {_escape(server_name)}</a>
-    <h1>{_escape(space.get('name') or '—')}</h1>
-    <p class="muted">{space.get('subscriber_count', 0)} members</p>
+    <h1>{_escape(space.get("name") or "—")}</h1>
+    <p class="muted">{space.get("subscriber_count", 0)} members</p>
 
     <section>
       <a class="cta" href="{_escape(deep_link)}">Open in Social Home</a>
@@ -311,8 +314,8 @@ def _render_space_page(
 
     <section>
       <h2>About</h2>
-      <p>{_escape(space.get('description') or '')}</p>
-      {space.get('about_markdown') or ''}
+      <p>{_escape(space.get("description") or "")}</p>
+      {space.get("about_markdown") or ""}
     </section>
   </main>
 </body>
@@ -335,7 +338,7 @@ def _render_invite_page(
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Join {_escape(space.get('name') or '')} — {_escape(server_name)}</title>
+  <title>Join {_escape(space.get("name") or "")} — {_escape(server_name)}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body {{ font: 15px/1.5 system-ui, sans-serif; margin: 0; color: #1f2937;
@@ -351,7 +354,7 @@ def _render_invite_page(
 <body>
   <main>
     <div class="accent-bar"></div>
-    <h1>You're invited to {_escape(space.get('name') or '')}</h1>
+    <h1>You're invited to {_escape(space.get("name") or "")}</h1>
     <p>on {_escape(server_name)}.</p>
     <p><a class="cta" href="{_escape(deep_link)}">Open in Social Home</a></p>
     <p class="muted">Opens the invite in your Social Home app — you join
@@ -364,6 +367,7 @@ def _render_invite_page(
 
 # ─── Handlers ────────────────────────────────────────────────────────────
 
+
 async def handle_landing(request: web.Request) -> web.Response:
     """GET / — public landing page."""
     cfg = request.app[K.gfs_config_key]
@@ -372,9 +376,7 @@ async def handle_landing(request: web.Request) -> web.Response:
     token_svc: PairingTokenService = request.app["gfs_token_service"]
 
     # Settings pulled fresh (admin portal may have changed them).
-    server_name = (
-        await admin_repo.get_config("server_name")
-    ) or cfg.server_name
+    server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
     landing_markdown = (
         await admin_repo.get_config("landing_markdown")
     ) or cfg.landing_markdown
@@ -387,7 +389,8 @@ async def handle_landing(request: web.Request) -> web.Response:
         token = "please-wait"
     qr_payload = (
         f"sh://gfs-pair/{cfg.base_url}?token={token}"
-        if cfg.base_url else f"gfs:token={token}"
+        if cfg.base_url
+        else f"gfs:token={token}"
     )
     qr_data = _render_qr_png_data_uri(qr_payload)
 
@@ -406,14 +409,16 @@ async def handle_landing(request: web.Request) -> web.Response:
             continue
         if audience == "adult" and sp.min_age < 18:
             continue
-        items.append({
-            "space_id":         sp.space_id,
-            "name":             sp.name,
-            "description":      sp.description or "",
-            "accent_color":     sp.accent_color,
-            "subscriber_count": sp.subscriber_count,
-            "posts_per_week":   sp.posts_per_week,
-        })
+        items.append(
+            {
+                "space_id": sp.space_id,
+                "name": sp.name,
+                "description": sp.description or "",
+                "accent_color": sp.accent_color,
+                "subscriber_count": sp.subscriber_count,
+                "posts_per_week": sp.posts_per_week,
+            }
+        )
 
     header_image_url = (
         f"{cfg.base_url}/media/{header_image_file}" if header_image_file else ""
@@ -443,20 +448,20 @@ async def handle_space_page(request: web.Request) -> web.Response:
     if space is None or space.status != "active":
         raise web.HTTPNotFound(reason="Space not found or not published")
 
-    server_name = (
-        await admin_repo.get_config("server_name")
-    ) or cfg.server_name
+    server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
     space_dict = {
-        "space_id":         space.space_id,
-        "name":             space.name,
-        "description":      space.description,
-        "about_markdown":   space.about_markdown,
-        "cover_url":        space.cover_url,
-        "accent_color":     space.accent_color,
+        "space_id": space.space_id,
+        "name": space.name,
+        "description": space.description,
+        "about_markdown": space.about_markdown,
+        "cover_url": space.cover_url,
+        "accent_color": space.accent_color,
         "subscriber_count": space.subscriber_count,
     }
     html = _render_space_page(
-        space=space_dict, server_name=server_name, base_url=cfg.base_url,
+        space=space_dict,
+        server_name=server_name,
+        base_url=cfg.base_url,
     )
     return web.Response(text=html, content_type="text/html")
 
@@ -479,15 +484,15 @@ async def handle_invite_page(request: web.Request) -> web.Response:
             space_row = await fed_repo.get_space(row["space_id"])
             if space_row is not None and space_row.status == "active":
                 space = {
-                    "name":         space_row.name,
+                    "name": space_row.name,
                     "accent_color": space_row.accent_color,
-                    "space_id":     space_row.space_id,
+                    "space_id": space_row.space_id,
                 }
-    server_name = (
-        await admin_repo.get_config("server_name")
-    ) or cfg.server_name
+    server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
     html = _render_invite_page(
-        token=token, space=space, server_name=server_name,
+        token=token,
+        space=space,
+        server_name=server_name,
         base_url=cfg.base_url,
     )
     return web.Response(

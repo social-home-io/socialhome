@@ -31,16 +31,18 @@ log = logging.getLogger(__name__)
 #: Fields scrubbed from every exported row. These are either cryptographic
 #: secrets (useless to the subject, dangerous if leaked) or structural
 #: hashes that do not reveal anything the subject didn't already know.
-_SCRUB_FIELDS: frozenset[str] = frozenset({
-    "password_hash",
-    "identity_private_key",
-    "routing_secret",
-    "private_key",
-    "session_key",
-    "auth_secret",
-    "p256dh",
-    "token_hash",
-})
+_SCRUB_FIELDS: frozenset[str] = frozenset(
+    {
+        "password_hash",
+        "identity_private_key",
+        "routing_secret",
+        "private_key",
+        "session_key",
+        "auth_secret",
+        "p256dh",
+        "token_hash",
+    }
+)
 
 
 def _scrub(row: dict) -> dict:
@@ -48,38 +50,38 @@ def _scrub(row: dict) -> dict:
 
 
 EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
-    ("users",                   "WHERE user_id = ?"),
-    ("feed_posts",              "WHERE author = ?"),
-    ("feed_comments",           "WHERE author = ?"),
-    ("saved_posts",             "WHERE user_id = ?"),
-    ("space_post_comments",     "WHERE author = ?"),
-    ("space_posts",             "WHERE author = ?"),
-    ("conversation_messages",   "WHERE sender_user_id = ?"),
-    ("message_reactions",       "WHERE user_id = ?"),
-    ("tasks",                   "WHERE created_by = ?"),
-    ("task_comments",           "WHERE author = ?"),
-    ("calendar_events",         "WHERE created_by = ?"),
-    ("calendar_rsvps",          "WHERE user_id = ?"),
-    ("pages",                   "WHERE author = ?"),
-    ("stickies",                "WHERE author = ?"),
-    ("polls",                   "WHERE author = ?"),
-    ("poll_votes",              "WHERE user_id = ?"),
-    ("schedule_responses",      "WHERE user_id = ?"),
-    ("bazaar_listings",         "WHERE seller_user_id = ?"),
-    ("bazaar_bids",             "WHERE bidder_user_id = ?"),
-    ("notifications",           "WHERE user_id = ?"),
-    ("shopping_list_items",     "WHERE added_by = ?"),
-    ("user_blocks",             "WHERE blocker_user_id = ?"),
-    ("gallery_albums",          "WHERE owner_user_id = ?"),
-    ("gallery_items",           "WHERE uploaded_by = ?"),
-    ("push_subscriptions",      "WHERE user_id = ?"),
-    ("hidden_public_spaces",    "WHERE user_id = ?"),
-    ("dashboard_widgets",       "WHERE user_id = ?"),
-    ("space_notif_prefs",       "WHERE user_id = ?"),
-    ("dm_contact_requests",     "WHERE from_user_id = ? OR to_user_id = ?"),
-    ("call_sessions",           "WHERE initiator_user_id = ? OR callee_user_id = ?"),
-    ("following_spaces",        "WHERE user_id = ?"),
-    ("drafts",                  "WHERE user_id = ?"),
+    ("users", "WHERE user_id = ?"),
+    ("feed_posts", "WHERE author = ?"),
+    ("feed_comments", "WHERE author = ?"),
+    ("saved_posts", "WHERE user_id = ?"),
+    ("space_post_comments", "WHERE author = ?"),
+    ("space_posts", "WHERE author = ?"),
+    ("conversation_messages", "WHERE sender_user_id = ?"),
+    ("message_reactions", "WHERE user_id = ?"),
+    ("tasks", "WHERE created_by = ?"),
+    ("task_comments", "WHERE author = ?"),
+    ("calendar_events", "WHERE created_by = ?"),
+    ("calendar_rsvps", "WHERE user_id = ?"),
+    ("pages", "WHERE author = ?"),
+    ("stickies", "WHERE author = ?"),
+    ("polls", "WHERE author = ?"),
+    ("poll_votes", "WHERE user_id = ?"),
+    ("schedule_responses", "WHERE user_id = ?"),
+    ("bazaar_listings", "WHERE seller_user_id = ?"),
+    ("bazaar_bids", "WHERE bidder_user_id = ?"),
+    ("notifications", "WHERE user_id = ?"),
+    ("shopping_list_items", "WHERE added_by = ?"),
+    ("user_blocks", "WHERE blocker_user_id = ?"),
+    ("gallery_albums", "WHERE owner_user_id = ?"),
+    ("gallery_items", "WHERE uploaded_by = ?"),
+    ("push_subscriptions", "WHERE user_id = ?"),
+    ("hidden_public_spaces", "WHERE user_id = ?"),
+    ("dashboard_widgets", "WHERE user_id = ?"),
+    ("space_notif_prefs", "WHERE user_id = ?"),
+    ("dm_contact_requests", "WHERE from_user_id = ? OR to_user_id = ?"),
+    ("call_sessions", "WHERE initiator_user_id = ? OR callee_user_id = ?"),
+    ("following_spaces", "WHERE user_id = ?"),
+    ("drafts", "WHERE user_id = ?"),
 )
 
 
@@ -119,9 +121,10 @@ class DataExportService:
             params = (user_id,) if where_clause.count("?") == 1 else (user_id, user_id)
             try:
                 rows = await self._db.fetchall(
-                    f"SELECT * FROM {table} {where_clause}", params,
+                    f"SELECT * FROM {table} {where_clause}",
+                    params,
                 )
-            except Exception as exc:                  # defensive
+            except Exception as exc:  # defensive
                 log.debug("data_export: skipping %s: %s", table, exc)
                 continue
             if not rows:
@@ -136,8 +139,12 @@ class DataExportService:
     async def export_to_bytes(self, user_id: str) -> bytes:
         """Convenience: build the export and serialise to UTF-8 JSON."""
         export = await self.export_for_user(user_id)
-        return json.dumps({
-            "user_id":     export.user_id,
-            "exported_at": export.exported_at,
-            "tables":      export.tables,
-        }, indent=2, default=str).encode("utf-8")
+        return json.dumps(
+            {
+                "user_id": export.user_id,
+                "exported_at": export.exported_at,
+                "tables": export.tables,
+            },
+            indent=2,
+            default=str,
+        ).encode("utf-8")

@@ -27,6 +27,7 @@ pytestmark = pytest.mark.security
 
 # ─── Truncation primitive ───────────────────────────────────────────────
 
+
 def test_truncate_coord_drops_high_precision():
     """Spec §4: 4 decimal places, no more."""
     assert truncate_coord(47.123456789) == 47.1235
@@ -43,6 +44,7 @@ def test_truncate_coord_none_passthrough():
 
 
 # ─── PresenceService persistence ────────────────────────────────────────
+
 
 @pytest.fixture
 async def env(tmp_dir):
@@ -64,11 +66,15 @@ async def env(tmp_dir):
 
 async def test_stored_lat_lon_is_truncated(env):
     db, svc = env
-    await svc.update_location(LocationUpdate(
-        username="alice", state="home",
-        latitude=47.123456789, longitude=8.987654321,
-        gps_accuracy_m=20,
-    ))
+    await svc.update_location(
+        LocationUpdate(
+            username="alice",
+            state="home",
+            latitude=47.123456789,
+            longitude=8.987654321,
+            gps_accuracy_m=20,
+        )
+    )
     row = await db.fetchone(
         "SELECT latitude, longitude FROM presence WHERE username='alice'",
     )
@@ -79,11 +85,15 @@ async def test_stored_lat_lon_is_truncated(env):
 async def test_inaccurate_gps_dropped_with_500m_gate(env):
     """gps_accuracy_m > 500 → coords nulled, state=='unknown'."""
     db, svc = env
-    await svc.update_location(LocationUpdate(
-        username="alice", state="home",
-        latitude=47.0, longitude=8.0,
-        gps_accuracy_m=1500,                # too inaccurate
-    ))
+    await svc.update_location(
+        LocationUpdate(
+            username="alice",
+            state="home",
+            latitude=47.0,
+            longitude=8.0,
+            gps_accuracy_m=1500,  # too inaccurate
+        )
+    )
     row = await db.fetchone(
         "SELECT latitude, longitude FROM presence WHERE username='alice'",
     )
@@ -93,10 +103,16 @@ async def test_inaccurate_gps_dropped_with_500m_gate(env):
 
 async def test_zone_only_state_omits_coords(env):
     db, svc = env
-    await svc.update_location(LocationUpdate(
-        username="alice", state="away", zone_name="Office",
-        latitude=None, longitude=None, gps_accuracy_m=None,
-    ))
+    await svc.update_location(
+        LocationUpdate(
+            username="alice",
+            state="away",
+            zone_name="Office",
+            latitude=None,
+            longitude=None,
+            gps_accuracy_m=None,
+        )
+    )
     row = await db.fetchone(
         "SELECT latitude, longitude, zone_name FROM presence WHERE username='alice'",
     )

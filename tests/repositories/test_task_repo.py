@@ -50,8 +50,12 @@ def _list_(list_id: str = "lst-1", name: str = "Chores") -> TaskList:
     return TaskList(id=list_id, name=name, created_by="uid-alice")
 
 
-def _task(task_id: str, list_id: str = "lst-1",
-           title: str = "Do something", status: TaskStatus = TaskStatus.TODO) -> Task:
+def _task(
+    task_id: str,
+    list_id: str = "lst-1",
+    title: str = "Do something",
+    status: TaskStatus = TaskStatus.TODO,
+) -> Task:
     now = datetime.now(timezone.utc)
     return Task(
         id=task_id,
@@ -66,6 +70,7 @@ def _task(task_id: str, list_id: str = "lst-1",
 
 
 # ── Household task lists ───────────────────────────────────────────────────
+
 
 async def test_save_and_get_list(env):
     """save_list persists a list; get_list retrieves it."""
@@ -99,6 +104,7 @@ async def test_delete_list(env):
 
 
 # ── Household tasks ────────────────────────────────────────────────────────
+
 
 async def test_save_and_get_task(env):
     """save persists a task; get retrieves it."""
@@ -152,10 +158,14 @@ async def test_list_by_assignee(env):
     await env.repo.save_list(_list_("lst-assign"))
     now = datetime.now(timezone.utc)
     assigned = Task(
-        id="t-assigned", list_id="lst-assign",
-        title="Assigned task", status=TaskStatus.TODO,
-        position=0, created_by="uid-alice",
-        created_at=now, updated_at=now,
+        id="t-assigned",
+        list_id="lst-assign",
+        title="Assigned task",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="uid-alice",
+        created_at=now,
+        updated_at=now,
         assignees=("uid-alice",),
     )
     unassigned = _task("t-unassigned", "lst-assign")
@@ -172,9 +182,15 @@ async def test_list_due_on(env):
     today = date(2025, 7, 4)
     now = datetime.now(timezone.utc)
     due_task = Task(
-        id="t-due", list_id="lst-due", title="Due today",
-        status=TaskStatus.TODO, position=0, created_by="uid-alice",
-        created_at=now, updated_at=now, due_date=today,
+        id="t-due",
+        list_id="lst-due",
+        title="Due today",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="uid-alice",
+        created_at=now,
+        updated_at=now,
+        due_date=today,
     )
     await env.repo.save(due_task)
     results = await env.repo.list_due_on(today)
@@ -191,6 +207,7 @@ async def test_delete_task(env):
 
 
 # ── Space tasks ────────────────────────────────────────────────────────────
+
 
 async def test_space_save_and_get_list(env):
     """SqliteSpaceTaskRepo save_list / get_list roundtrip."""
@@ -209,9 +226,14 @@ async def test_space_save_and_get_task(env):
     await env.space_repo.save_list("sp-1", tl)
     now = datetime.now(timezone.utc)
     task = Task(
-        id="sp-t1", list_id="spl-t", title="Space task",
-        status=TaskStatus.TODO, position=0, created_by="uid-alice",
-        created_at=now, updated_at=now,
+        id="sp-t1",
+        list_id="spl-t",
+        title="Space task",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="uid-alice",
+        created_at=now,
+        updated_at=now,
     )
     await env.space_repo.save("sp-1", task)
     result = await env.space_repo.get("sp-t1")
@@ -228,9 +250,14 @@ async def test_space_list_by_list(env):
     now = datetime.now(timezone.utc)
     for i in range(3):
         t = Task(
-            id=f"sp-tlbl-{i}", list_id="spl-lbl", title=f"T{i}",
-            status=TaskStatus.TODO, position=i, created_by="uid-alice",
-            created_at=now, updated_at=now,
+            id=f"sp-tlbl-{i}",
+            list_id="spl-lbl",
+            title=f"T{i}",
+            status=TaskStatus.TODO,
+            position=i,
+            created_by="uid-alice",
+            created_at=now,
+            updated_at=now,
         )
         await env.space_repo.save("sp-1", t)
     results = await env.space_repo.list_by_list("spl-lbl")
@@ -244,10 +271,26 @@ async def test_space_list_by_space(env):
     await env.space_repo.save_list("sp-1", tl1)
     await env.space_repo.save_list("sp-1", tl2)
     now = datetime.now(timezone.utc)
-    t1 = Task(id="sp-tbs1", list_id="spl-bs1", title="T1", status=TaskStatus.TODO,
-              position=0, created_by="uid-alice", created_at=now, updated_at=now)
-    t2 = Task(id="sp-tbs2", list_id="spl-bs2", title="T2", status=TaskStatus.TODO,
-              position=0, created_by="uid-alice", created_at=now, updated_at=now)
+    t1 = Task(
+        id="sp-tbs1",
+        list_id="spl-bs1",
+        title="T1",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="uid-alice",
+        created_at=now,
+        updated_at=now,
+    )
+    t2 = Task(
+        id="sp-tbs2",
+        list_id="spl-bs2",
+        title="T2",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="uid-alice",
+        created_at=now,
+        updated_at=now,
+    )
     await env.space_repo.save("sp-1", t1)
     await env.space_repo.save("sp-1", t2)
     results = await env.space_repo.list_by_space("sp-1")
@@ -260,9 +303,16 @@ async def test_space_delete_task(env):
     tl = _list_("spl-del")
     await env.space_repo.save_list("sp-1", tl)
     now = datetime.now(timezone.utc)
-    task = Task(id="sp-tdel", list_id="spl-del", title="Del",
-                status=TaskStatus.TODO, position=0, created_by="uid-alice",
-                created_at=now, updated_at=now)
+    task = Task(
+        id="sp-tdel",
+        list_id="spl-del",
+        title="Del",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="uid-alice",
+        created_at=now,
+        updated_at=now,
+    )
     await env.space_repo.save("sp-1", task)
     await env.space_repo.delete("sp-tdel")
     assert await env.space_repo.get("sp-tdel") is None

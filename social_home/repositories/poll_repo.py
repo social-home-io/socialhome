@@ -36,21 +36,33 @@ class AbstractPollRepo(Protocol):
     ) -> None: ...
     async def get_meta(self, post_id: str) -> dict | None: ...
     async def option_belongs_to_post(
-        self, *, option_id: str, post_id: str,
+        self,
+        *,
+        option_id: str,
+        post_id: str,
     ) -> bool: ...
     async def clear_user_votes(
-        self, *, post_id: str, voter_user_id: str,
+        self,
+        *,
+        post_id: str,
+        voter_user_id: str,
     ) -> None: ...
     async def insert_vote(
-        self, *, option_id: str, voter_user_id: str,
+        self,
+        *,
+        option_id: str,
+        voter_user_id: str,
     ) -> None: ...
     async def get_post_author(self, post_id: str) -> str | None: ...
     async def close(self, post_id: str) -> None: ...
     async def list_options_with_counts(
-        self, post_id: str,
+        self,
+        post_id: str,
     ) -> list[dict]: ...
     async def list_user_votes(
-        self, post_id: str, voter_user_id: str,
+        self,
+        post_id: str,
+        voter_user_id: str,
     ) -> list[str]: ...
 
     # Schedule-poll metadata ----------------------------------------------
@@ -65,18 +77,29 @@ class AbstractPollRepo(Protocol):
     async def get_schedule_meta(self, post_id: str) -> dict | None: ...
     async def list_schedule_slots(self, post_id: str) -> list[dict]: ...
     async def list_schedule_responses(
-        self, post_id: str,
+        self,
+        post_id: str,
     ) -> list[dict]: ...
     async def finalize_schedule_poll(
-        self, *, post_id: str, slot_id: str,
+        self,
+        *,
+        post_id: str,
+        slot_id: str,
     ) -> dict | None: ...
 
     # Schedule-poll voting -------------------------------------------------
     async def upsert_schedule_response(
-        self, *, slot_id: str, user_id: str, response: str,
+        self,
+        *,
+        slot_id: str,
+        user_id: str,
+        response: str,
     ) -> None: ...
     async def delete_schedule_response(
-        self, *, slot_id: str, user_id: str,
+        self,
+        *,
+        slot_id: str,
+        user_id: str,
     ) -> None: ...
 
 
@@ -126,7 +149,9 @@ class SqlitePollRepo:
                     position=excluded.position
                 """,
                 (
-                    opt["id"], post_id, opt["text"],
+                    opt["id"],
+                    post_id,
+                    opt["text"],
                     int(opt.get("position", 0)),
                 ),
             )
@@ -145,7 +170,10 @@ class SqlitePollRepo:
         return d
 
     async def option_belongs_to_post(
-        self, *, option_id: str, post_id: str,
+        self,
+        *,
+        option_id: str,
+        post_id: str,
     ) -> bool:
         row = await self._db.fetchone(
             "SELECT 1 FROM poll_options WHERE id=? AND post_id=?",
@@ -154,7 +182,10 @@ class SqlitePollRepo:
         return row is not None
 
     async def clear_user_votes(
-        self, *, post_id: str, voter_user_id: str,
+        self,
+        *,
+        post_id: str,
+        voter_user_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM poll_votes WHERE voter_user_id=? AND option_id IN "
@@ -163,7 +194,10 @@ class SqlitePollRepo:
         )
 
     async def insert_vote(
-        self, *, option_id: str, voter_user_id: str,
+        self,
+        *,
+        option_id: str,
+        voter_user_id: str,
     ) -> None:
         await self._db.enqueue(
             "INSERT INTO poll_votes(option_id, voter_user_id) VALUES(?, ?)",
@@ -172,17 +206,21 @@ class SqlitePollRepo:
 
     async def get_post_author(self, post_id: str) -> str | None:
         row = await self._db.fetchone(
-            "SELECT author FROM feed_posts WHERE id=?", (post_id,),
+            "SELECT author FROM feed_posts WHERE id=?",
+            (post_id,),
         )
         return row["author"] if row else None
 
     async def close(self, post_id: str) -> None:
         await self._db.enqueue(
-            "UPDATE polls SET closed=1 WHERE post_id=?", (post_id,),
+            "UPDATE polls SET closed=1 WHERE post_id=?",
+            (post_id,),
         )
 
     async def list_user_votes(
-        self, post_id: str, voter_user_id: str,
+        self,
+        post_id: str,
+        voter_user_id: str,
     ) -> list[str]:
         rows = await self._db.fetchall(
             "SELECT pv.option_id FROM poll_votes pv "
@@ -193,7 +231,8 @@ class SqlitePollRepo:
         return [r["option_id"] for r in rows]
 
     async def list_options_with_counts(
-        self, post_id: str,
+        self,
+        post_id: str,
     ) -> list[dict]:
         rows = await self._db.fetchall(
             "SELECT id, text, (SELECT COUNT(*) FROM poll_votes "
@@ -202,8 +241,7 @@ class SqlitePollRepo:
             (post_id,),
         )
         return [
-            {"id": r["id"], "text": r["text"], "count": int(r["count"])}
-            for r in rows
+            {"id": r["id"], "text": r["text"], "count": int(r["count"])} for r in rows
         ]
 
     # ── schedule polls ─────────────────────────────────────────────────
@@ -246,8 +284,11 @@ class SqlitePollRepo:
                     position=excluded.position
                 """,
                 (
-                    s["id"], post_id, s["slot_date"],
-                    s.get("start_time"), s.get("end_time"),
+                    s["id"],
+                    post_id,
+                    s["slot_date"],
+                    s.get("start_time"),
+                    s.get("end_time"),
                     int(s.get("position", 0)),
                 ),
             )
@@ -261,11 +302,11 @@ class SqlitePollRepo:
         if row is None:
             return None
         return {
-            "post_id":           row["post_id"],
-            "title":             row["title"],
-            "deadline":          row["deadline"],
+            "post_id": row["post_id"],
+            "title": row["title"],
+            "deadline": row["deadline"],
             "finalized_slot_id": row["finalized_slot_id"],
-            "closed":            bool(row["closed"]),
+            "closed": bool(row["closed"]),
         }
 
     async def list_schedule_slots(self, post_id: str) -> list[dict]:
@@ -276,17 +317,18 @@ class SqlitePollRepo:
         )
         return [
             {
-                "id":         r["id"],
-                "slot_date":  r["slot_date"],
+                "id": r["id"],
+                "slot_date": r["slot_date"],
                 "start_time": r["start_time"],
-                "end_time":   r["end_time"],
-                "position":   int(r["position"] or 0),
+                "end_time": r["end_time"],
+                "position": int(r["position"] or 0),
             }
             for r in rows
         ]
 
     async def list_schedule_responses(
-        self, post_id: str,
+        self,
+        post_id: str,
     ) -> list[dict]:
         rows = await self._db.fetchall(
             """
@@ -299,15 +341,18 @@ class SqlitePollRepo:
         )
         return [
             {
-                "slot_id":      r["slot_id"],
-                "user_id":      r["user_id"],
+                "slot_id": r["slot_id"],
+                "user_id": r["user_id"],
                 "availability": r["availability"],
             }
             for r in rows
         ]
 
     async def finalize_schedule_poll(
-        self, *, post_id: str, slot_id: str,
+        self,
+        *,
+        post_id: str,
+        slot_id: str,
     ) -> dict | None:
         """Stamp the chosen slot. Returns the canonical slot dict or
         None if the slot doesn't belong to this poll."""
@@ -324,15 +369,19 @@ class SqlitePollRepo:
             (slot_id, post_id),
         )
         return {
-            "id":         row["id"],
-            "slot_date":  row["slot_date"],
+            "id": row["id"],
+            "slot_date": row["slot_date"],
             "start_time": row["start_time"],
-            "end_time":   row["end_time"],
-            "position":   int(row["position"] or 0),
+            "end_time": row["end_time"],
+            "position": int(row["position"] or 0),
         }
 
     async def upsert_schedule_response(
-        self, *, slot_id: str, user_id: str, response: str,
+        self,
+        *,
+        slot_id: str,
+        user_id: str,
+        response: str,
     ) -> None:
         await self._db.enqueue(
             """
@@ -343,13 +392,18 @@ class SqlitePollRepo:
                 responded_at=excluded.responded_at
             """,
             (
-                slot_id, user_id, response,
+                slot_id,
+                user_id,
+                response,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
 
     async def delete_schedule_response(
-        self, *, slot_id: str, user_id: str,
+        self,
+        *,
+        slot_id: str,
+        user_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM schedule_responses WHERE slot_id=? AND user_id=?",

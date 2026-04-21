@@ -33,6 +33,7 @@ def _build_envelope(
     timestamp: str | None = None,
 ) -> bytes:
     from datetime import datetime, timezone
+
     aead = AESGCM(session_key)
     nonce = os.urandom(12)
     pj = json.dumps(payload, separators=(",", ":"))
@@ -40,15 +41,15 @@ def _build_envelope(
     encrypted = b64url_encode(nonce) + ":" + b64url_encode(ct)
 
     envelope: dict = {
-        "msg_id":            msg_id,
-        "event_type":        event_type.value,
-        "from_instance":     derive_instance_id(peer_kp.public_key),
-        "to_instance":       own_iid,
-        "timestamp":         timestamp or datetime.now(timezone.utc).isoformat(),
+        "msg_id": msg_id,
+        "event_type": event_type.value,
+        "from_instance": derive_instance_id(peer_kp.public_key),
+        "to_instance": own_iid,
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "encrypted_payload": encrypted,
-        "space_id":          None,
-        "proto_version":     1,
-        "sig_suite":         "ed25519",
+        "space_id": None,
+        "proto_version": 1,
+        "sig_suite": "ed25519",
     }
     sig = sign_ed25519(
         peer_kp.private_key,
@@ -66,6 +67,7 @@ async def env(client):
         federation_service_key,
         key_manager_key,
     )
+
     db = client._db
     iid_row = await db.fetchone(
         "SELECT instance_id FROM instance_identity WHERE id='self'",
@@ -80,23 +82,32 @@ async def env(client):
     wrapped = kek.encrypt(session_key)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh", local_webhook_id="wh-test",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_webhook_url="https://x/wh",
+        local_webhook_id="wh-test",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
     return {
-        "own_iid": own_iid, "peer_kp": peer_kp,
-        "session_key": session_key, "peer": peer, "fed_svc": fed_svc,
+        "own_iid": own_iid,
+        "peer_kp": peer_kp,
+        "session_key": session_key,
+        "peer": peer,
+        "fed_svc": fed_svc,
     }
 
 
 # ─── Happy path ──────────────────────────────────────────────────────────
 
+
 async def test_inbound_valid_envelope_returns_ok(client, env):
     body = _build_envelope(
-        own_iid=env["own_iid"], peer_kp=env["peer_kp"],
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
         session_key=env["session_key"],
         payload={"user_id": "alice", "state": "home"},
     )
@@ -107,10 +118,13 @@ async def test_inbound_valid_envelope_returns_ok(client, env):
 
 # ─── Validation rejections ──────────────────────────────────────────────
 
+
 async def test_inbound_unknown_webhook_404(client, env):
     body = _build_envelope(
-        own_iid=env["own_iid"], peer_kp=env["peer_kp"],
-        session_key=env["session_key"], payload={},
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={},
     )
     r = await client.post("/webhook/nonexistent", data=body)
     assert r.status == 404
@@ -136,14 +150,14 @@ async def test_inbound_oversized_envelope_rejected(client):
 
 async def test_inbound_unknown_event_type_400(client, env):
     body_dict = {
-        "msg_id":            "x",
-        "event_type":        "totally_made_up_event",
-        "from_instance":     "a",
-        "to_instance":       "b",
-        "timestamp":         "2026-01-01T00:00:00+00:00",
+        "msg_id": "x",
+        "event_type": "totally_made_up_event",
+        "from_instance": "a",
+        "to_instance": "b",
+        "timestamp": "2026-01-01T00:00:00+00:00",
         "encrypted_payload": "x:y",
-        "sig_suite":         "ed25519",
-        "signatures":        {"ed25519": "z"},
+        "sig_suite": "ed25519",
+        "signatures": {"ed25519": "z"},
     }
     r = await client.post(
         "/webhook/wh-test",
@@ -155,8 +169,10 @@ async def test_inbound_unknown_event_type_400(client, env):
 async def test_inbound_old_timestamp_410(client, env):
     """Timestamp >5min skew → 410 (gone)."""
     body = _build_envelope(
-        own_iid=env["own_iid"], peer_kp=env["peer_kp"],
-        session_key=env["session_key"], payload={},
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={},
         timestamp="2020-01-01T00:00:00+00:00",
     )
     r = await client.post("/webhook/wh-test", data=body)
@@ -166,14 +182,17 @@ async def test_inbound_old_timestamp_410(client, env):
 async def test_inbound_bad_signature_403(client, env):
     """Tampering the envelope → 403."""
     body = _build_envelope(
-        own_iid=env["own_iid"], peer_kp=env["peer_kp"],
-        session_key=env["session_key"], payload={},
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={},
     )
     # Mutate one byte of the encrypted_payload → signature mismatch.
     obj = json.loads(body)
     obj["encrypted_payload"] = "AA" + obj["encrypted_payload"][2:]
     r = await client.post(
-        "/webhook/wh-test", data=json.dumps(obj).encode(),
+        "/webhook/wh-test",
+        data=json.dumps(obj).encode(),
     )
     assert r.status == 403
 
@@ -181,8 +200,10 @@ async def test_inbound_bad_signature_403(client, env):
 async def test_inbound_replay_410(client, env):
     """Same msg_id twice → second returns 410 (gone)."""
     body = _build_envelope(
-        own_iid=env["own_iid"], peer_kp=env["peer_kp"],
-        session_key=env["session_key"], payload={"x": 1},
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"x": 1},
         msg_id="dup-msg-1",
     )
     r1 = await client.post("/webhook/wh-test", data=body)
@@ -193,11 +214,14 @@ async def test_inbound_replay_410(client, env):
 
 # ─── Public path / no auth required ─────────────────────────────────────
 
+
 async def test_inbound_does_not_require_bearer_token(client, env):
     """The webhook is in _DEFAULT_PUBLIC_PATHS — no Authorization needed."""
     body = _build_envelope(
-        own_iid=env["own_iid"], peer_kp=env["peer_kp"],
-        session_key=env["session_key"], payload={"user_id": "alice"},
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice"},
         msg_id="no-auth-msg",
     )
     # No headers — auth middleware must let this through.

@@ -22,23 +22,31 @@ async def client(aiohttp_client, tmp_dir):
     admin user_id, then seeds a user + API token.
     """
     cfg = Config(
-        data_dir=str(tmp_dir), db_path=str(tmp_dir / "test.db"),
-        media_path=str(tmp_dir / "media"), mode="standalone", log_level="WARNING", db_write_batch_timeout_ms=10,
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     tc = await aiohttp_client(app)
 
     db = app[_db_key]
-    row = await db.fetchone("SELECT identity_public_key FROM instance_identity WHERE id='self'")
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
     pk_bytes = bytes.fromhex(row["identity_public_key"])
     uid = derive_user_id(pk_bytes, "admin")
     await db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,1)",
-        ("admin", uid, "Admin"))
+        ("admin", uid, "Admin"),
+    )
     raw = "test-tok"
     await db.enqueue(
         "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
-        ("t1", uid, "t", sha256_token_hash(raw)))
+        ("t1", uid, "t", sha256_token_hash(raw)),
+    )
     tc._tok = raw
     tc._uid = uid
     tc._db = db

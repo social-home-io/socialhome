@@ -20,13 +20,22 @@ class AbstractReportRepo(Protocol):
     async def save(self, report: ContentReport) -> None: ...
     async def get(self, report_id: str) -> ContentReport | None: ...
     async def list_by_status(
-        self, status: ReportStatus, *, limit: int = 200,
+        self,
+        status: ReportStatus,
+        *,
+        limit: int = 200,
     ) -> list[ContentReport]: ...
     async def count_recent_by_reporter(
-        self, reporter_user_id: str, *, hours: int = 24,
+        self,
+        reporter_user_id: str,
+        *,
+        hours: int = 24,
     ) -> int: ...
     async def resolve(
-        self, report_id: str, *, resolved_by: str,
+        self,
+        report_id: str,
+        *,
+        resolved_by: str,
         status: ReportStatus = ReportStatus.RESOLVED,
     ) -> None: ...
 
@@ -47,46 +56,60 @@ class SqliteReportRepo:
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                report.id, report.target_type.value, report.target_id,
-                report.reporter_user_id, report.reporter_instance_id,
-                report.category.value, report.notes,
+                report.id,
+                report.target_type.value,
+                report.target_id,
+                report.reporter_user_id,
+                report.reporter_instance_id,
+                report.category.value,
+                report.notes,
                 report.status.value,
                 _iso(report.created_at),
-                report.resolved_by, _iso(report.resolved_at),
+                report.resolved_by,
+                _iso(report.resolved_at),
             ),
         )
 
     async def get(self, report_id: str) -> ContentReport | None:
         row = await self._db.fetchone(
-            "SELECT * FROM content_reports WHERE id=?", (report_id,),
+            "SELECT * FROM content_reports WHERE id=?",
+            (report_id,),
         )
         return _row_to_report(row_to_dict(row))
 
     async def list_by_status(
-        self, status: ReportStatus, *, limit: int = 200,
+        self,
+        status: ReportStatus,
+        *,
+        limit: int = 200,
     ) -> list[ContentReport]:
         rows = await self._db.fetchall(
             "SELECT * FROM content_reports WHERE status=? "
             "ORDER BY created_at DESC LIMIT ?",
             (status.value, int(limit)),
         )
-        return [
-            r for r in (_row_to_report(d) for d in rows_to_dicts(rows))
-            if r
-        ]
+        return [r for r in (_row_to_report(d) for d in rows_to_dicts(rows)) if r]
 
     async def count_recent_by_reporter(
-        self, reporter_user_id: str, *, hours: int = 24,
+        self,
+        reporter_user_id: str,
+        *,
+        hours: int = 24,
     ) -> int:
-        return int(await self._db.fetchval(
-            "SELECT COUNT(*) FROM content_reports "
-            "WHERE reporter_user_id=? AND created_at > datetime('now', ?)",
-            (reporter_user_id, f"-{int(hours)} hours"),
-            default=0,
-        ))
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM content_reports "
+                "WHERE reporter_user_id=? AND created_at > datetime('now', ?)",
+                (reporter_user_id, f"-{int(hours)} hours"),
+                default=0,
+            )
+        )
 
     async def resolve(
-        self, report_id: str, *, resolved_by: str,
+        self,
+        report_id: str,
+        *,
+        resolved_by: str,
         status: ReportStatus = ReportStatus.RESOLVED,
     ) -> None:
         await self._db.enqueue(
@@ -97,6 +120,7 @@ class SqliteReportRepo:
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
+
 
 def _iso(value) -> str | None:
     if value is None:
@@ -124,9 +148,10 @@ def _row_to_report(row: dict | None) -> ContentReport | None:
         target_type = ReportTargetType(row["target_type"])
         category = ReportCategory(row["category"])
         status = ReportStatus(row["status"])
-    except (KeyError, ValueError):
+    except KeyError, ValueError:
         return None
     from datetime import timezone
+
     return ContentReport(
         id=row["id"],
         target_type=target_type,

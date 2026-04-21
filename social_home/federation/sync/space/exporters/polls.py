@@ -35,9 +35,11 @@ class PollsExporter:
             if meta is None:
                 continue
             options = await self._poll_repo.list_options_with_counts(p.id)
-            out.append({
-                "post_id":  p.id,
-                "meta":     meta,
-                "options":  options,
-            })
+            out.append(
+                {
+                    "post_id": p.id,
+                    "meta": meta,
+                    "options": options,
+                }
+            )
         return out

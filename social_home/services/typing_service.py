@@ -41,8 +41,12 @@ class TypingService:
     """Relay + dedup typing indicators across conversation members."""
 
     __slots__ = (
-        "_convo_repo", "_user_repo", "_ws", "_federation",
-        "_own_instance_id", "_active",
+        "_convo_repo",
+        "_user_repo",
+        "_ws",
+        "_federation",
+        "_own_instance_id",
+        "_active",
     )
 
     def __init__(
@@ -55,8 +59,8 @@ class TypingService:
         own_instance_id: str = "",
     ) -> None:
         self._convo_repo = conversation_repo
-        self._user_repo  = user_repo
-        self._ws         = ws_manager
+        self._user_repo = user_repo
+        self._ws = ws_manager
         self._federation = federation_service
         self._own_instance_id = own_instance_id
         # (conversation_id, user_id) → _TypingState
@@ -99,9 +103,9 @@ class TypingService:
         delivered = await self._ws.broadcast_to_users(
             local_targets,
             {
-                "type":            "conversation.user_typing",
+                "type": "conversation.user_typing",
                 "conversation_id": conversation_id,
-                "sender_user_id":  sender_user_id,
+                "sender_user_id": sender_user_id,
                 "sender_username": sender_username,
             },
         )
@@ -156,18 +160,22 @@ class TypingService:
         return await self._ws.broadcast_to_users(
             local_targets,
             {
-                "type":            "conversation.user_typing",
+                "type": "conversation.user_typing",
                 "conversation_id": cid,
-                "sender_user_id":  sender_uid,
+                "sender_user_id": sender_uid,
                 "sender_username": sender_username,
-                "from_instance":   event.from_instance,
+                "from_instance": event.from_instance,
             },
         )
 
     # ─── Inspection ───────────────────────────────────────────────────────
 
     def is_typing(
-        self, conversation_id: str, user_id: str, *, now: float | None = None,
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        now: float | None = None,
     ) -> bool:
         now = now if now is not None else time.monotonic()
         state = self._active.get((conversation_id, user_id))
@@ -176,11 +184,15 @@ class TypingService:
         return (now - state.last_seen_at) <= TYPING_TTL_SECONDS
 
     def active_typers(
-        self, conversation_id: str, *, now: float | None = None,
+        self,
+        conversation_id: str,
+        *,
+        now: float | None = None,
     ) -> list[str]:
         now = now if now is not None else time.monotonic()
         return [
-            uid for (cid, uid), state in self._active.items()
+            uid
+            for (cid, uid), state in self._active.items()
             if cid == conversation_id
             and (now - state.last_seen_at) <= TYPING_TTL_SECONDS
         ]
@@ -221,9 +233,9 @@ class TypingService:
                     event_type=FederationEventType.DM_USER_TYPING,
                     payload={
                         "conversation_id": conversation_id,
-                        "sender_user_id":  sender_user_id,
+                        "sender_user_id": sender_user_id,
                         "sender_username": sender_username,
                     },
                 )
-            except Exception as exc:                 # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug("typing: failed to relay to %s: %s", inst, exc)

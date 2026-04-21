@@ -38,9 +38,7 @@ def test_discover_valid_sql_file(tmp_path):
 
 def test_discover_valid_python_file(tmp_path):
     """discover_migrations picks up a valid NNNN_description.py file."""
-    (tmp_path / "0002_migrate.py").write_text(
-        "def migrate(conn):\n    pass\n"
-    )
+    (tmp_path / "0002_migrate.py").write_text("def migrate(conn):\n    pass\n")
     result = discover_migrations(tmp_path)
     assert len(result) == 1
     assert result[0].version == 2
@@ -110,8 +108,7 @@ def test_run_migrations_idempotent(tmp_path):
 def test_run_python_migration(tmp_path):
     """run_migrations executes a Python migration's migrate(conn) callable."""
     (tmp_path / "0001_py_test.py").write_text(
-        "def migrate(conn):\n"
-        "    conn.execute('CREATE TABLE py_test (x TEXT);')\n"
+        "def migrate(conn):\n    conn.execute('CREATE TABLE py_test (x TEXT);')\n"
     )
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.row_factory = sqlite3.Row

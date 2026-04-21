@@ -40,7 +40,7 @@ class TaskDeadlineScheduler:
         db: "AsyncDatabase",
         bus: "EventBus",
         *,
-        interval_seconds: float = 300.0,     # 5 min
+        interval_seconds: float = 300.0,  # 5 min
     ) -> None:
         self._repo = repo
         self._db = db
@@ -60,7 +60,7 @@ class TaskDeadlineScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -70,11 +70,12 @@ class TaskDeadlineScheduler:
                 fired = await self.tick_once()
                 if fired:
                     log.debug("task-deadline: fired %d", fired)
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("task-deadline tick failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue
@@ -89,17 +90,19 @@ class TaskDeadlineScheduler:
                 continue
             if await self._already_notified(task.id, today):
                 continue
-            await self._bus.publish(TaskDeadlineDue(
-                task=task, due_date=today,
-            ))
+            await self._bus.publish(
+                TaskDeadlineDue(
+                    task=task,
+                    due_date=today,
+                )
+            )
             await self._record_notification(task.id, today)
             fired += 1
         return fired
 
     async def _already_notified(self, task_id: str, due: date) -> bool:
         row = await self._db.fetchone(
-            "SELECT 1 FROM task_deadline_notifications"
-            " WHERE task_id=? AND due_date=?",
+            "SELECT 1 FROM task_deadline_notifications WHERE task_id=? AND due_date=?",
             (task_id, due.isoformat()),
         )
         return row is not None

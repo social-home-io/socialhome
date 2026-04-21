@@ -1,4 +1,5 @@
 """Full route coverage for tasks endpoints."""
+
 from .conftest import _auth
 
 
@@ -12,7 +13,9 @@ async def test_task_full_lifecycle(client):
     r = await client.get(f"/api/tasks/lists/{lid}", headers=h)
     assert r.status == 200
 
-    r = await client.post(f"/api/tasks/lists/{lid}/tasks", json={"title": "Vacuum"}, headers=h)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "Vacuum"}, headers=h
+    )
     assert r.status == 201
     tid = (await r.json())["id"]
 

@@ -40,6 +40,7 @@ async def env(tmp_dir):
 
 # ─── Empty user export ───────────────────────────────────────────────────
 
+
 async def test_export_only_returns_users_row_when_no_other_data(env):
     _, svc = env
     out = await svc.export_for_user("alice-id")
@@ -50,6 +51,7 @@ async def test_export_only_returns_users_row_when_no_other_data(env):
 
 
 # ─── Includes authored content ──────────────────────────────────────────
+
 
 async def test_export_includes_user_authored_posts(env):
     db, svc = env
@@ -80,6 +82,7 @@ async def test_export_excludes_other_users_data(env):
 
 # ─── Two-condition WHERE (e.g. dm_contact_requests / call_sessions) ─────
 
+
 async def test_export_handles_two_param_clauses(env):
     db, svc = env
     await db.enqueue(
@@ -97,6 +100,7 @@ async def test_export_handles_two_param_clauses(env):
 
 # ─── Skip unknown tables silently ───────────────────────────────────────
 
+
 async def test_export_skips_table_that_doesnt_exist(env, monkeypatch):
     """A table missing from the schema is logged and skipped."""
     _, svc = env
@@ -111,6 +115,7 @@ async def test_export_skips_table_that_doesnt_exist(env, monkeypatch):
 
 # ─── export_to_bytes ────────────────────────────────────────────────────
 
+
 async def test_export_to_bytes_is_valid_json(env):
     _, svc = env
     blob = await svc.export_to_bytes("alice-id")
@@ -122,12 +127,21 @@ async def test_export_to_bytes_is_valid_json(env):
 
 # ─── Coverage of EXPORTABLE_QUERIES ─────────────────────────────────────
 
+
 def test_exportable_queries_cover_user_facing_surfaces():
     """Smoke check: the allowlist mentions the major surfaces."""
     names = {t for t, _ in EXPORTABLE_QUERIES}
     for required in (
-        "users", "feed_posts", "feed_comments", "conversation_messages",
-        "tasks", "calendar_events", "gallery_albums", "gallery_items",
-        "notifications", "push_subscriptions", "dashboard_widgets",
+        "users",
+        "feed_posts",
+        "feed_comments",
+        "conversation_messages",
+        "tasks",
+        "calendar_events",
+        "gallery_albums",
+        "gallery_items",
+        "notifications",
+        "push_subscriptions",
+        "dashboard_widgets",
     ):
         assert required in names

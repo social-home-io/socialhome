@@ -57,8 +57,14 @@ class PublicSpaceDiscoveryService:
     """
 
     __slots__ = (
-        "_repo", "_gfs_connection_repo", "_poll_interval", "_cache_ttl",
-        "_http_client", "_task", "_running", "_refresh_event",
+        "_repo",
+        "_gfs_connection_repo",
+        "_poll_interval",
+        "_cache_ttl",
+        "_http_client",
+        "_task",
+        "_running",
+        "_refresh_event",
     )
 
     def __init__(
@@ -98,7 +104,8 @@ class PublicSpaceDiscoveryService:
         self._refresh_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         self._task = loop.create_task(
-            self._poll_loop(), name="PublicSpaceDiscoveryPoller",
+            self._poll_loop(),
+            name="PublicSpaceDiscoveryPoller",
         )
 
     async def stop(self) -> None:
@@ -110,7 +117,7 @@ class PublicSpaceDiscoveryService:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError, Exception:
                 pass
             self._task = None
 
@@ -191,7 +198,8 @@ class PublicSpaceDiscoveryService:
                 if resp.status != 200:
                     log.debug(
                         "public_space_discovery: GFS %s returned HTTP %d",
-                        gfs_url, resp.status,
+                        gfs_url,
+                        resp.status,
                     )
                     return []
                 body = await resp.json()
@@ -207,24 +215,23 @@ class PublicSpaceDiscoveryService:
             if not isinstance(item, dict):
                 continue
             try:
-                out.append(PublicSpaceListing(
-                    space_id=str(item["space_id"]),
-                    instance_id=str(
-                        item.get("instance_id")
-                        or item.get("owning_instance", ""),
-                    ),
-                    name=str(item.get("name", "")),
-                    description=item.get("description"),
-                    emoji=item.get("emoji"),
-                    lat=item.get("lat"),
-                    lon=item.get("lon"),
-                    radius_km=item.get("radius_km"),
-                    member_count=int(item.get("member_count", 0) or 0),
-                    min_age=int(item.get("min_age", 0) or 0),
-                    target_audience=str(item.get("target_audience", "all")),
-                ))
-            except (KeyError, TypeError, ValueError):
+                out.append(
+                    PublicSpaceListing(
+                        space_id=str(item["space_id"]),
+                        instance_id=str(
+                            item.get("instance_id") or item.get("owning_instance", ""),
+                        ),
+                        name=str(item.get("name", "")),
+                        description=item.get("description"),
+                        emoji=item.get("emoji"),
+                        lat=item.get("lat"),
+                        lon=item.get("lon"),
+                        radius_km=item.get("radius_km"),
+                        member_count=int(item.get("member_count", 0) or 0),
+                        min_age=int(item.get("min_age", 0) or 0),
+                        target_audience=str(item.get("target_audience", "all")),
+                    )
+                )
+            except KeyError, TypeError, ValueError:
                 continue
         return out
-
-

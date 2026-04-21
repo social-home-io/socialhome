@@ -50,14 +50,12 @@ class KeyManager:
 
     __slots__ = ("_aead",)
 
-    NONCE_BYTES = 12                     # AES-GCM standard
-    KEK_BYTES   = 32
+    NONCE_BYTES = 12  # AES-GCM standard
+    KEK_BYTES = 32
 
     def __init__(self, kek: bytes) -> None:
         if len(kek) != self.KEK_BYTES:
-            raise KeyManagerError(
-                f"KEK must be {self.KEK_BYTES} bytes, got {len(kek)}"
-            )
+            raise KeyManagerError(f"KEK must be {self.KEK_BYTES} bytes, got {len(kek)}")
         self._aead = AESGCM(kek)
 
     # ── Factories ────────────────────────────────────────────────────────
@@ -84,13 +82,18 @@ class KeyManager:
 
     @classmethod
     def from_passphrase(
-        cls, passphrase: str, salt: bytes,
+        cls,
+        passphrase: str,
+        salt: bytes,
     ) -> "KeyManager":
         """Derive a KEK from a passphrase and a stable 32-byte salt."""
         if len(salt) != cls.KEK_BYTES:
             raise KeyManagerError("Passphrase salt must be 32 bytes")
-        return cls(_derive(passphrase.encode("utf-8") + b":" + salt,
-                           b"social-home/kek/passphrase"))
+        return cls(
+            _derive(
+                passphrase.encode("utf-8") + b":" + salt, b"social-home/kek/passphrase"
+            )
+        )
 
     # ── Encrypt / decrypt ────────────────────────────────────────────────
 
@@ -102,7 +105,7 @@ class KeyManager:
         so a stolen ciphertext cannot be swapped into a different row.
         """
         nonce = os.urandom(self.NONCE_BYTES)
-        ct    = self._aead.encrypt(nonce, plaintext, associated_data)
+        ct = self._aead.encrypt(nonce, plaintext, associated_data)
         return f"{b64url_encode(nonce)}:{b64url_encode(ct)}"
 
     def decrypt(self, wire: str, *, associated_data: bytes | None = None) -> bytes:
@@ -115,7 +118,7 @@ class KeyManager:
         try:
             nonce_b, ct_b = wire.split(":", 1)
             nonce = b64url_decode(nonce_b)
-            ct    = b64url_decode(ct_b)
+            ct = b64url_decode(ct_b)
         except ValueError as exc:
             raise KeyManagerError("Malformed KEK wire format") from exc
         if len(nonce) != self.NONCE_BYTES:
@@ -127,6 +130,7 @@ class KeyManager:
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────
+
 
 def _derive(material: bytes, info: bytes) -> bytes:
     """HKDF-SHA256 → 32 raw bytes.

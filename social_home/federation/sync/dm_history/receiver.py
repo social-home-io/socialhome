@@ -80,10 +80,10 @@ class DmHistoryReceiver:
                     event_type=FederationEventType.DM_HISTORY_CHUNK_ACK,
                     payload={
                         "conversation_id": conversation_id,
-                        "chunk_index":     chunk_index,
+                        "chunk_index": chunk_index,
                     },
                 )
-            except Exception as exc:                  # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug("DM_HISTORY_CHUNK_ACK send failed: %s", exc)
         return saved
 
@@ -95,11 +95,13 @@ class DmHistoryReceiver:
             return
         key = (event.from_instance, conversation_id)
         chunks = self._counts.pop(key, int(payload.get("chunks_sent") or 0))
-        await self._bus.publish(DmHistorySyncComplete(
-            conversation_id=conversation_id,
-            from_instance=event.from_instance,
-            chunks_received=chunks,
-        ))
+        await self._bus.publish(
+            DmHistorySyncComplete(
+                conversation_id=conversation_id,
+                from_instance=event.from_instance,
+                chunks_received=chunks,
+            )
+        )
 
 
 def _dict_to_message(raw: dict, conversation_id: str) -> ConversationMessage | None:

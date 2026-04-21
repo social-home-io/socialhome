@@ -107,17 +107,23 @@ async def test_federation_replay_cache(env):
 async def test_federation_instance_filtering(env):
     """Save two instances, filter by status, mark unreachable/reachable, then delete."""
     inst1 = RemoteInstance(
-        id="peer-001", display_name="Alpha",
+        id="peer-001",
+        display_name="Alpha",
         remote_identity_pk="11" * 32,
-        key_self_to_remote="k1", key_remote_to_self="k2",
-        remote_webhook_url="https://alpha/wh", local_webhook_id="wh-1",
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_webhook_url="https://alpha/wh",
+        local_webhook_id="wh-1",
         status=PairingStatus.CONFIRMED,
     )
     inst2 = RemoteInstance(
-        id="peer-002", display_name="Beta",
+        id="peer-002",
+        display_name="Beta",
         remote_identity_pk="22" * 32,
-        key_self_to_remote="k3", key_remote_to_self="k4",
-        remote_webhook_url="https://beta/wh", local_webhook_id="wh-2",
+        key_self_to_remote="k3",
+        key_remote_to_self="k4",
+        remote_webhook_url="https://beta/wh",
+        local_webhook_id="wh-2",
         status=PairingStatus.UNPAIRING,
     )
     await env.fed_repo.save_instance(inst1)

@@ -55,7 +55,8 @@ class SpaceInviteInboundHandlers:
 
         registry.register(FederationEventType.SPACE_JOIN_REQUEST, self._on_join_request)
         registry.register(
-            FederationEventType.SPACE_JOIN_REQUEST_VIA, self._on_join_request_via,
+            FederationEventType.SPACE_JOIN_REQUEST_VIA,
+            self._on_join_request_via,
         )
         registry.register(
             FederationEventType.SPACE_JOIN_REQUEST_REPLY_VIA,
@@ -94,11 +95,13 @@ class SpaceInviteInboundHandlers:
             invited_user_id=invitee,
             invited_by=inviter,
         )
-        await self._bus.publish(RemoteSpaceInviteReceived(
-            space_id=space_id,
-            inviter_user_id=inviter,
-            invitee_user_id=invitee,
-        ))
+        await self._bus.publish(
+            RemoteSpaceInviteReceived(
+                space_id=space_id,
+                inviter_user_id=inviter,
+                invitee_user_id=invitee,
+            )
+        )
 
     async def _on_invite_via(self, event: "FederationEvent") -> None:
         """Relayed invite via an intermediary. Same persistence as _on_invite."""
@@ -121,14 +124,15 @@ class SpaceInviteInboundHandlers:
             user_id=user_id,
             message=str(message) if message else None,
             remote_applicant_instance_id=event.from_instance,
-            remote_applicant_pk=(
-                str(applicant_pk) if applicant_pk else None
-            ),
+            remote_applicant_pk=(str(applicant_pk) if applicant_pk else None),
             request_id=str(request_id) if request_id else None,
         )
-        await self._bus.publish(RemoteSpaceJoinRequestReceived(
-            space_id=space_id, requester_user_id=user_id,
-        ))
+        await self._bus.publish(
+            RemoteSpaceJoinRequestReceived(
+                space_id=space_id,
+                requester_user_id=user_id,
+            )
+        )
 
     async def _on_join_request_via(self, event: "FederationEvent") -> None:
         """Relayed join request via an intermediary."""
@@ -163,19 +167,25 @@ class SpaceInviteInboundHandlers:
             status,
             reviewed_by=str(reviewed_by) if reviewed_by else None,
         )
-        if (event.event_type == FederationEventType.SPACE_JOIN_REQUEST_APPROVED
-                and event.payload.get("invite_token")):
-            await self._bus.publish(RemoteJoinRequestApproved(
-                request_id=request_id,
-                space_id=str(
-                    event.payload.get("space_id") or event.space_id or "",
-                ),
-                invite_token=str(event.payload.get("invite_token")),
-            ))
+        if (
+            event.event_type == FederationEventType.SPACE_JOIN_REQUEST_APPROVED
+            and event.payload.get("invite_token")
+        ):
+            await self._bus.publish(
+                RemoteJoinRequestApproved(
+                    request_id=request_id,
+                    space_id=str(
+                        event.payload.get("space_id") or event.space_id or "",
+                    ),
+                    invite_token=str(event.payload.get("invite_token")),
+                )
+            )
         elif event.event_type == FederationEventType.SPACE_JOIN_REQUEST_DENIED:
-            await self._bus.publish(RemoteJoinRequestDenied(
-                request_id=request_id,
-                space_id=str(
-                    event.payload.get("space_id") or event.space_id or "",
-                ),
-            ))
+            await self._bus.publish(
+                RemoteJoinRequestDenied(
+                    request_id=request_id,
+                    space_id=str(
+                        event.payload.get("space_id") or event.space_id or "",
+                    ),
+                )
+            )

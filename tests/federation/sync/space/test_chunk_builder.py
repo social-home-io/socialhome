@@ -40,16 +40,27 @@ class _FakeCrypto:
         self.last_aad: bytes | None = None
 
     async def encrypt_chunk(
-        self, *, space_id: str, sync_id: str, plaintext: bytes,
+        self,
+        *,
+        space_id: str,
+        sync_id: str,
+        plaintext: bytes,
     ) -> tuple[int, str]:
         self.last_aad = f"{space_id}:{self.epoch}:{sync_id}".encode("utf-8")
         import base64
+
         return self.epoch, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
     async def decrypt_chunk(
-        self, *, space_id: str, epoch: int, sync_id: str, ciphertext: str,
+        self,
+        *,
+        space_id: str,
+        epoch: int,
+        sync_id: str,
+        ciphertext: str,
     ) -> bytes:
         import base64
+
         return base64.urlsafe_b64decode(ciphertext)
 
 
@@ -70,10 +81,15 @@ async def test_build_chunks_yields_one_envelope_per_page(builder):
         resource="members",
         records=[{"user_id": f"u-{i}", "role": "member"} for i in range(3)],
     )
-    chunks = [c async for c in builder.build_chunks(
-        exporter=exporter, space_id="sp-1", sync_id="sync-x",
-        sig_suite="ed25519",
-    )]
+    chunks = [
+        c
+        async for c in builder.build_chunks(
+            exporter=exporter,
+            space_id="sp-1",
+            sync_id="sync-x",
+            sig_suite="ed25519",
+        )
+    ]
     assert len(chunks) == 1
     assert chunks[0]["resource"] == "members"
     assert chunks[0]["sync_id"] == "sync-x"
@@ -83,24 +99,32 @@ async def test_build_chunks_yields_one_envelope_per_page(builder):
 
 async def test_build_chunks_empty_exporter_yields_nothing(builder):
     exporter = _FakeExporter(resource="members", records=[])
-    chunks = [c async for c in builder.build_chunks(
-        exporter=exporter, space_id="sp-1", sync_id="sync-x",
-        sig_suite="ed25519",
-    )]
+    chunks = [
+        c
+        async for c in builder.build_chunks(
+            exporter=exporter,
+            space_id="sp-1",
+            sync_id="sync-x",
+            sig_suite="ed25519",
+        )
+    ]
     assert chunks == []
 
 
 async def test_build_chunks_splits_when_over_budget(builder):
     """A single page that overflows the budget gets halved."""
     # Each record is ~1 KB of JSON — 20 of them blow the 8 KB budget.
-    big_records = [
-        {"id": f"{i}", "blob": "x" * 1000} for i in range(20)
-    ]
+    big_records = [{"id": f"{i}", "blob": "x" * 1000} for i in range(20)]
     exporter = _FakeExporter(resource="posts", records=big_records)
-    chunks = [c async for c in builder.build_chunks(
-        exporter=exporter, space_id="sp-1", sync_id="sync-x",
-        sig_suite="ed25519",
-    )]
+    chunks = [
+        c
+        async for c in builder.build_chunks(
+            exporter=exporter,
+            space_id="sp-1",
+            sync_id="sync-x",
+            sig_suite="ed25519",
+        )
+    ]
     # Must have produced multiple chunks.
     assert len(chunks) > 1
     # Every chunk must stay under the budget.
@@ -113,7 +137,9 @@ async def test_build_chunks_splits_when_over_budget(builder):
 
 async def test_build_sentinel_is_signed_not_encrypted(builder):
     sentinel = await builder.build_sentinel(
-        space_id="sp-1", sync_id="sync-x", sig_suite="ed25519",
+        space_id="sp-1",
+        sync_id="sync-x",
+        sig_suite="ed25519",
     )
     assert sentinel["resource"] == SENTINEL_RESOURCE
     assert sentinel["is_last"] is True
@@ -126,7 +152,9 @@ async def test_build_chunks_rejects_unknown_resource(builder):
     exporter = _FakeExporter(resource="not_a_real_resource", records=[{"x": 1}])
     with pytest.raises(ValueError, match="not in ALLOWED_RESOURCES"):
         async for _ in builder.build_chunks(
-            exporter=exporter, space_id="sp-1", sync_id="sync-x",
+            exporter=exporter,
+            space_id="sp-1",
+            sync_id="sync-x",
             sig_suite="ed25519",
         ):
             pass

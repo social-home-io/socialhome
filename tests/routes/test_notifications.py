@@ -24,15 +24,20 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
         db = app[_db_key]
-        _row = await db.fetchone("SELECT identity_public_key FROM instance_identity WHERE id='self'")
+        _row = await db.fetchone(
+            "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+        )
         _pk = bytes.fromhex(_row["identity_public_key"])
+
         class _KP:
             public_key = _pk
+
         kp = _KP()
         uid = derive_user_id(kp.public_key, "pascal")
         await db.enqueue(

@@ -36,34 +36,34 @@ class GfsConfig:
     """Top-level GFS configuration."""
 
     # [server]
-    host:        str = "0.0.0.0"
-    port:        int = 8765
-    base_url:    str = ""            # public URL, e.g. "https://gfs.example.com"
-    data_dir:    str = DEFAULT_DATA_DIR
+    host: str = "0.0.0.0"
+    port: int = 8765
+    base_url: str = ""  # public URL, e.g. "https://gfs.example.com"
+    data_dir: str = DEFAULT_DATA_DIR
     instance_id: str = "gfs-node-0"
 
     # [branding] — start values; admin portal overrides via DB.
-    server_name:        str = "My Global Server"
-    landing_markdown:   str = ""
-    header_image_file:  str = ""
+    server_name: str = "My Global Server"
+    landing_markdown: str = ""
+    header_image_file: str = ""
 
     # [policy] — start values; admin portal overrides via DB.
     auto_accept_clients: bool = True
-    auto_accept_spaces:  bool = False
-    fraud_threshold:     int  = 5
+    auto_accept_spaces: bool = False
+    fraud_threshold: int = 5
 
     # [admin]
     admin_password_hash: str = ""
 
     # [webrtc]
-    stun_urls:   tuple[str, ...] = ("stun:stun.l.google.com:19302",)
-    turn_url:    str = ""
+    stun_urls: tuple[str, ...] = ("stun:stun.l.google.com:19302",)
+    turn_url: str = ""
     turn_secret: str = ""
 
     # [cluster]
     cluster_enabled: bool = False
-    cluster_node_id: str  = ""
-    cluster_peers:   tuple[str, ...] = ()
+    cluster_node_id: str = ""
+    cluster_peers: tuple[str, ...] = ()
 
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
@@ -90,33 +90,33 @@ class GfsConfig:
         if not p.is_file():
             raise FileNotFoundError(f"GFS config not found at {p}")
         data = tomllib.loads(p.read_text(encoding="utf-8"))
-        server    = data.get("server", {})
-        branding  = data.get("branding", {})
-        policy    = data.get("policy", {})
-        admin     = data.get("admin", {})
-        webrtc    = data.get("webrtc", {})
-        cluster   = data.get("cluster", {})
+        server = data.get("server", {})
+        branding = data.get("branding", {})
+        policy = data.get("policy", {})
+        admin = data.get("admin", {})
+        webrtc = data.get("webrtc", {})
+        cluster = data.get("cluster", {})
         default_stun = ("stun:stun.l.google.com:19302",)
         cfg = cls(
-            host        = str(server.get("host") or "0.0.0.0"),
-            port        = int(server.get("port") or 8765),
-            base_url    = str(server.get("base_url") or ""),
-            data_dir    = str(server.get("data_dir") or DEFAULT_DATA_DIR),
-            instance_id = str(server.get("instance_id") or "gfs-node-0"),
-            server_name       = str(branding.get("server_name") or "My Global Server"),
-            landing_markdown  = str(branding.get("landing_markdown") or ""),
-            header_image_file = str(branding.get("header_image_file") or ""),
-            auto_accept_clients = bool(policy.get("auto_accept_clients", True)),
-            auto_accept_spaces  = bool(policy.get("auto_accept_spaces",  False)),
-            fraud_threshold     = int(policy.get("fraud_threshold", 5)),
-            admin_password_hash = str(admin.get("password_hash") or ""),
-            stun_urls   = tuple(webrtc.get("stun_urls") or default_stun),
-            turn_url    = str(webrtc.get("turn_url") or ""),
-            turn_secret = str(webrtc.get("turn_secret") or ""),
-            cluster_enabled = bool(cluster.get("enabled", False)),
-            cluster_node_id = str(cluster.get("node_id") or ""),
-            cluster_peers   = tuple(cluster.get("peers") or ()),
-            source_path = str(p),
+            host=str(server.get("host") or "0.0.0.0"),
+            port=int(server.get("port") or 8765),
+            base_url=str(server.get("base_url") or ""),
+            data_dir=str(server.get("data_dir") or DEFAULT_DATA_DIR),
+            instance_id=str(server.get("instance_id") or "gfs-node-0"),
+            server_name=str(branding.get("server_name") or "My Global Server"),
+            landing_markdown=str(branding.get("landing_markdown") or ""),
+            header_image_file=str(branding.get("header_image_file") or ""),
+            auto_accept_clients=bool(policy.get("auto_accept_clients", True)),
+            auto_accept_spaces=bool(policy.get("auto_accept_spaces", False)),
+            fraud_threshold=int(policy.get("fraud_threshold", 5)),
+            admin_password_hash=str(admin.get("password_hash") or ""),
+            stun_urls=tuple(webrtc.get("stun_urls") or default_stun),
+            turn_url=str(webrtc.get("turn_url") or ""),
+            turn_secret=str(webrtc.get("turn_secret") or ""),
+            cluster_enabled=bool(cluster.get("enabled", False)),
+            cluster_node_id=str(cluster.get("node_id") or ""),
+            cluster_peers=tuple(cluster.get("peers") or ()),
+            source_path=str(p),
         )
         if not cfg.base_url:
             raise ValueError(
@@ -137,16 +137,16 @@ class GfsConfig:
         host = os.environ.get("GFS_HOST", "0.0.0.0")
         port = int(os.environ.get("GFS_PORT", "8765"))
         data_dir = os.environ.get("GFS_DATA_DIR", DEFAULT_DATA_DIR)
-        db_path  = os.environ.get("GFS_DB_PATH")
+        db_path = os.environ.get("GFS_DB_PATH")
         # Prefer an explicit GFS_DB_PATH — override data_dir if it's outside.
         if db_path:
             data_dir = str(Path(db_path).resolve().parent)
         return cls(
-            host        = host,
-            port        = port,
-            base_url    = os.environ.get("GFS_BASE_URL", f"http://{host}:{port}"),
-            data_dir    = data_dir,
-            instance_id = os.environ.get("GFS_INSTANCE_ID", "gfs-node-0"),
+            host=host,
+            port=port,
+            base_url=os.environ.get("GFS_BASE_URL", f"http://{host}:{port}"),
+            data_dir=data_dir,
+            instance_id=os.environ.get("GFS_INSTANCE_ID", "gfs-node-0"),
         )
 
     @classmethod
@@ -239,7 +239,7 @@ def set_password_in_toml(path: str | Path, bcrypt_hash: str) -> None:
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            in_admin = (stripped == "[admin]")
+            in_admin = stripped == "[admin]"
             continue
         if in_admin and stripped.startswith("password_hash"):
             # Preserve any leading whitespace / commenting style.

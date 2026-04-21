@@ -41,6 +41,7 @@ async def test_create_app_has_routes(cfg):
 async def test_create_app_stores_config(cfg):
     """create_app() stores the Config in the app dict under config_key."""
     from social_home.app_keys import config_key
+
     app = create_app(cfg)
     assert app[config_key] is cfg
 
@@ -60,6 +61,7 @@ async def test_startup_hook_runs_without_error(tmp_dir):
         assert resp.status == 200
         # ensure_instance_identity ran — row exists, instance_id is in app dict.
         from social_home.app_keys import instance_id_key
+
         assert app[instance_id_key] != "unknown"
         assert len(app[instance_id_key]) > 0
 
@@ -67,6 +69,7 @@ async def test_startup_hook_runs_without_error(tmp_dir):
 async def test_shared_http_session_lifecycle(tmp_dir):
     """A single aiohttp.ClientSession is created at startup and closed on cleanup."""
     from social_home.app_keys import http_session_key
+
     cfg = Config(
         data_dir=str(tmp_dir),
         db_path=str(tmp_dir / "test.db"),
@@ -88,6 +91,7 @@ async def test_shared_http_session_lifecycle(tmp_dir):
 async def test_create_app_without_config_uses_env_defaults():
     """create_app(None) falls back to Config.from_env() — doesn't raise."""
     import os
+
     with tempfile.TemporaryDirectory() as d:
         os.environ["SH_DATA_DIR"] = d
         os.environ["SH_DB_PATH"] = str(Path(d) / "test.db")

@@ -42,18 +42,18 @@ async def env(tmp_dir):
         pass
 
     e = E()
-    e.db   = db
+    e.db = db
     e.repo = SqliteBazaarRepo(db)
-    e.bus  = EventBus()
-    e.svc  = BazaarService(e.repo, e.bus)
+    e.bus = EventBus()
+    e.svc = BazaarService(e.repo, e.bus)
     e.events: list = []
 
     async def _capture(evt):
         e.events.append(evt)
 
-    e.bus.subscribe(BazaarBidPlaced,        _capture)
-    e.bus.subscribe(BazaarOfferAccepted,    _capture)
-    e.bus.subscribe(BazaarListingExpired,   _capture)
+    e.bus.subscribe(BazaarBidPlaced, _capture)
+    e.bus.subscribe(BazaarOfferAccepted, _capture)
+    e.bus.subscribe(BazaarListingExpired, _capture)
     yield e
     await db.shutdown()
 
@@ -69,22 +69,33 @@ async def _seed_listing(env, *, mode: BazaarMode, end_in: timedelta) -> str:
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
     end_iso = (datetime.now(timezone.utc) + end_in).isoformat()
-    await env.repo.save_listing(BazaarListing(
-        post_id=pid, seller_user_id="u-seller",
-        mode=mode, title="Item",
-        end_time=end_iso, currency="EUR",
-        status=BazaarStatus.ACTIVE, created_at=None,
-        start_price=100, step_price=10, price=100,
-    ))
+    await env.repo.save_listing(
+        BazaarListing(
+            post_id=pid,
+            seller_user_id="u-seller",
+            mode=mode,
+            title="Item",
+            end_time=end_iso,
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=None,
+            start_price=100,
+            step_price=10,
+            price=100,
+        )
+    )
     return pid
 
 
 # ─── place_bid ────────────────────────────────────────────────────────────
 
+
 async def test_place_bid_publishes_bid_placed_event(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(hours=1))
     await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-bidder", amount=110,
+        listing_post_id=pid,
+        bidder_user_id="u-bidder",
+        amount=110,
     )
     placed = [e for e in env.events if isinstance(e, BazaarBidPlaced)]
     assert len(placed) == 1
@@ -95,9 +106,13 @@ async def test_place_bid_publishes_bid_placed_event(env):
 
 async def test_place_bid_carries_extended_end_time(env):
     """Anti-snipe: bid in last 5 min pushes end_time and the event reflects it."""
-    pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(seconds=60))
+    pid = await _seed_listing(
+        env, mode=BazaarMode.AUCTION, end_in=timedelta(seconds=60)
+    )
     await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-bidder", amount=110,
+        listing_post_id=pid,
+        bidder_user_id="u-bidder",
+        amount=110,
     )
     placed = [e for e in env.events if isinstance(e, BazaarBidPlaced)]
     new_end = datetime.fromisoformat(
@@ -112,16 +127,21 @@ async def test_place_bid_carries_extended_end_time(env):
 async def test_place_bid_unknown_listing_raises(env):
     with pytest.raises(ListingNotFoundError):
         await env.svc.place_bid(
-            listing_post_id="ghost", bidder_user_id="u", amount=100,
+            listing_post_id="ghost",
+            bidder_user_id="u",
+            amount=100,
         )
 
 
 # ─── accept_offer ─────────────────────────────────────────────────────────
 
+
 async def test_accept_offer_marks_sold_and_publishes(env):
     pid = await _seed_listing(env, mode=BazaarMode.OFFER, end_in=timedelta(days=1))
     bid = await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-bidder", amount=120,
+        listing_post_id=pid,
+        bidder_user_id="u-bidder",
+        amount=120,
     )
     await env.svc.accept_offer(bid_id=bid.id, actor_user_id="u-seller")
     listing = await env.repo.get_listing(pid)
@@ -134,7 +154,9 @@ async def test_accept_offer_marks_sold_and_publishes(env):
 async def test_accept_offer_by_non_seller_forbidden(env):
     pid = await _seed_listing(env, mode=BazaarMode.OFFER, end_in=timedelta(days=1))
     bid = await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-bidder", amount=120,
+        listing_post_id=pid,
+        bidder_user_id="u-bidder",
+        amount=120,
     )
     with pytest.raises(PermissionError):
         await env.svc.accept_offer(bid_id=bid.id, actor_user_id="u-stranger")
@@ -147,10 +169,13 @@ async def test_accept_unknown_bid_raises(env):
 
 # ─── expire_due ───────────────────────────────────────────────────────────
 
+
 async def test_expire_due_closes_past_auctions_with_winner(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(hours=1))
     await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-bidder", amount=200,
+        listing_post_id=pid,
+        bidder_user_id="u-bidder",
+        amount=200,
     )
     # Force the listing into the past.
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
@@ -179,6 +204,7 @@ async def test_expire_due_closes_no_bid_listing_as_expired(env):
 
 
 # ─── Scheduler ────────────────────────────────────────────────────────────
+
 
 async def test_scheduler_double_start_idempotent(env):
     s = BazaarExpiryScheduler(env.svc, interval_seconds=10.0)

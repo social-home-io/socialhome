@@ -25,15 +25,20 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
         db = app[_db_key]
-        _row = await db.fetchone("SELECT identity_public_key FROM instance_identity WHERE id='self'")
+        _row = await db.fetchone(
+            "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+        )
         _pk = bytes.fromhex(_row["identity_public_key"])
+
         class _KP:
             public_key = _pk
+
         kp = _KP()
         uid = derive_user_id(kp.public_key, "pascal")
         await db.enqueue(
@@ -111,17 +116,20 @@ async def test_update_space(client):
 async def test_patch_sets_retention_days(client):
     """PATCH /api/spaces/{id} accepts retention_days and persists it."""
     r = await client.post(
-        "/api/spaces", json={"name": "RetentionSpace"},
+        "/api/spaces",
+        json={"name": "RetentionSpace"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
     resp = await client.patch(
-        f"/api/spaces/{sid}", json={"retention_days": 30},
+        f"/api/spaces/{sid}",
+        json={"retention_days": 30},
         headers=_auth(client._admin_token),
     )
     assert resp.status == 200
     got = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     body = await got.json()
     assert body["retention_days"] == 30
@@ -130,21 +138,25 @@ async def test_patch_sets_retention_days(client):
 async def test_patch_retention_days_zero_clears(client):
     """PATCH retention_days=0 clears the setting (coerced to null)."""
     r = await client.post(
-        "/api/spaces", json={"name": "RetClear"},
+        "/api/spaces",
+        json={"name": "RetClear"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
     await client.patch(
-        f"/api/spaces/{sid}", json={"retention_days": 14},
+        f"/api/spaces/{sid}",
+        json={"retention_days": 14},
         headers=_auth(client._admin_token),
     )
     resp = await client.patch(
-        f"/api/spaces/{sid}", json={"retention_days": 0},
+        f"/api/spaces/{sid}",
+        json={"retention_days": 0},
         headers=_auth(client._admin_token),
     )
     assert resp.status == 200
     got = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     assert (await got.json())["retention_days"] is None
 
@@ -152,7 +164,8 @@ async def test_patch_retention_days_zero_clears(client):
 async def test_patch_sets_retention_exempt_types(client):
     """PATCH retention_exempt_types is persisted and echoed on GET."""
     r = await client.post(
-        "/api/spaces", json={"name": "ExemptSpace"},
+        "/api/spaces",
+        json={"name": "ExemptSpace"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -163,7 +176,8 @@ async def test_patch_sets_retention_exempt_types(client):
     )
     assert resp.status == 200
     got = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     body = await got.json()
     assert set(body["retention_exempt_types"]) == {"list", "poll"}
@@ -172,12 +186,14 @@ async def test_patch_sets_retention_exempt_types(client):
 async def test_get_includes_retention_fields(client):
     """Fresh spaces report null retention_days + empty exempt list."""
     r = await client.post(
-        "/api/spaces", json={"name": "FreshSpace"},
+        "/api/spaces",
+        json={"name": "FreshSpace"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
     got = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     body = await got.json()
     assert body["retention_days"] is None
@@ -187,13 +203,15 @@ async def test_get_includes_retention_fields(client):
 async def test_create_space_accepts_retention_days(client):
     """POST /api/spaces with retention_days stores it."""
     r = await client.post(
-        "/api/spaces", json={"name": "BornWithRetention", "retention_days": 7},
+        "/api/spaces",
+        json={"name": "BornWithRetention", "retention_days": 7},
         headers=_auth(client._admin_token),
     )
     assert r.status == 201
     sid = (await r.json())["id"]
     got = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     assert (await got.json())["retention_days"] == 7
 
@@ -400,7 +418,8 @@ async def test_list_spaces_returns_empty_when_no_memberships(client):
 
 async def test_list_spaces_returns_members_spaces(client):
     r = await client.post(
-        "/api/spaces", json={"name": "Crew"},
+        "/api/spaces",
+        json={"name": "Crew"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -412,7 +431,8 @@ async def test_list_spaces_returns_members_spaces(client):
 
 async def test_leave_via_members_me(client):
     r = await client.post(
-        "/api/spaces", json={"name": "LeaveMe"},
+        "/api/spaces",
+        json={"name": "LeaveMe"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -430,7 +450,8 @@ async def test_leave_via_members_me(client):
 
 async def test_set_role_owner_promotes_admin(client):
     r = await client.post(
-        "/api/spaces", json={"name": "Promote"},
+        "/api/spaces",
+        json={"name": "Promote"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -450,7 +471,8 @@ async def test_set_role_owner_promotes_admin(client):
 
 async def test_set_role_non_owner_forbidden(client):
     r = await client.post(
-        "/api/spaces", json={"name": "RoleGuard"},
+        "/api/spaces",
+        json={"name": "RoleGuard"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -469,7 +491,8 @@ async def test_set_role_non_owner_forbidden(client):
 
 async def test_set_role_invalid_value_422(client):
     r = await client.post(
-        "/api/spaces", json={"name": "BadRole"},
+        "/api/spaces",
+        json={"name": "BadRole"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -488,7 +511,8 @@ async def test_set_role_invalid_value_422(client):
 
 async def test_ownership_transfer_owner_only(client):
     r = await client.post(
-        "/api/spaces", json={"name": "Transfer"},
+        "/api/spaces",
+        json={"name": "Transfer"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -509,12 +533,14 @@ async def test_ownership_transfer_owner_only(client):
 
 async def test_ownership_transfer_requires_to_user_id(client):
     r = await client.post(
-        "/api/spaces", json={"name": "TransferBad"},
+        "/api/spaces",
+        json={"name": "TransferBad"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
     r = await client.post(
-        f"/api/spaces/{sid}/ownership", json={},
+        f"/api/spaces/{sid}/ownership",
+        json={},
         headers=_auth(client._admin_token),
     )
     assert r.status == 422
@@ -528,7 +554,8 @@ async def test_join_request_lifecycle(client):
     )
     sid = (await r.json())["id"]
     r = await client.post(
-        f"/api/spaces/{sid}/join-requests", json={"message": "please"},
+        f"/api/spaces/{sid}/join-requests",
+        json={"message": "please"},
         headers=_auth(client._bob_token),
     )
     assert r.status == 201
@@ -559,7 +586,8 @@ async def test_join_request_deny_closes_flow(client):
     )
     sid = (await r.json())["id"]
     r = await client.post(
-        f"/api/spaces/{sid}/join-requests", json={},
+        f"/api/spaces/{sid}/join-requests",
+        json={},
         headers=_auth(client._bob_token),
     )
     request_id = (await r.json())["request_id"]
@@ -579,7 +607,8 @@ async def test_join_request_unknown_action_422(client):
     )
     sid = (await r.json())["id"]
     r = await client.post(
-        f"/api/spaces/{sid}/join-requests", json={},
+        f"/api/spaces/{sid}/join-requests",
+        json={},
         headers=_auth(client._bob_token),
     )
     request_id = (await r.json())["request_id"]
@@ -592,7 +621,8 @@ async def test_join_request_unknown_action_422(client):
 
 async def test_join_requests_list_requires_admin(client):
     r = await client.post(
-        "/api/spaces", json={"name": "Guarded"},
+        "/api/spaces",
+        json={"name": "Guarded"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -605,7 +635,8 @@ async def test_join_requests_list_requires_admin(client):
 
 async def test_space_post_reaction_add_and_remove(client):
     r = await client.post(
-        "/api/spaces", json={"name": "Reacts"},
+        "/api/spaces",
+        json={"name": "Reacts"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -622,6 +653,7 @@ async def test_space_post_reaction_add_and_remove(client):
     )
     assert r.status == 201
     from urllib.parse import quote
+
     r = await client.delete(
         f"/api/spaces/{sid}/posts/{pid}/reactions/{quote('👍')}",
         headers=_auth(client._admin_token),
@@ -631,7 +663,8 @@ async def test_space_post_reaction_add_and_remove(client):
 
 async def test_space_post_comment_happy_path(client):
     r = await client.post(
-        "/api/spaces", json={"name": "Chatty"},
+        "/api/spaces",
+        json={"name": "Chatty"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -652,7 +685,8 @@ async def test_space_post_comment_happy_path(client):
 
 async def test_space_post_comment_empty_content_422(client):
     r = await client.post(
-        "/api/spaces", json={"name": "EmptyComment"},
+        "/api/spaces",
+        json={"name": "EmptyComment"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -683,7 +717,8 @@ _TINY_PNG = bytes.fromhex(
 
 async def test_space_about_markdown_roundtrips(client):
     r = await client.post(
-        "/api/spaces", json={"name": "WithAbout"},
+        "/api/spaces",
+        json={"name": "WithAbout"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -694,7 +729,8 @@ async def test_space_about_markdown_roundtrips(client):
     )
     assert patch.status == 200
     get = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     body = await get.json()
     assert body["about_markdown"] == "## Welcome\n\n**bold** text."
@@ -702,7 +738,8 @@ async def test_space_about_markdown_roundtrips(client):
 
 async def test_space_cover_upload_and_fetch(client, tmp_path):
     r = await client.post(
-        "/api/spaces", json={"name": "WithCover"},
+        "/api/spaces",
+        json={"name": "WithCover"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -710,10 +747,14 @@ async def test_space_cover_upload_and_fetch(client, tmp_path):
     # Upload via multipart.
     form = aiohttp.FormData()
     form.add_field(
-        "file", _TINY_PNG, filename="x.png", content_type="image/png",
+        "file",
+        _TINY_PNG,
+        filename="x.png",
+        content_type="image/png",
     )
     up = await client.post(
-        f"/api/spaces/{sid}/cover", data=form,
+        f"/api/spaces/{sid}/cover",
+        data=form,
         headers=_auth(client._admin_token),
     )
     assert up.status == 200
@@ -729,11 +770,12 @@ async def test_space_cover_upload_and_fetch(client, tmp_path):
     assert fetch.status == 200
     assert fetch.headers["Content-Type"] == "image/webp"
     payload = await fetch.read()
-    assert payload[:4] == b"RIFF"      # WebP magic
+    assert payload[:4] == b"RIFF"  # WebP magic
 
     # GET space detail shows cover_url.
     detail = await client.get(
-        f"/api/spaces/{sid}", headers=_auth(client._admin_token),
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
     )
     dbody = await detail.json()
     assert dbody["cover_hash"] == body["cover_hash"]
@@ -754,7 +796,8 @@ async def test_space_cover_upload_and_fetch(client, tmp_path):
 
 async def test_space_cover_non_admin_forbidden(client):
     r = await client.post(
-        "/api/spaces", json={"name": "LockedCover"},
+        "/api/spaces",
+        json={"name": "LockedCover"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -766,10 +809,14 @@ async def test_space_cover_non_admin_forbidden(client):
     )
     form = aiohttp.FormData()
     form.add_field(
-        "file", _TINY_PNG, filename="x.png", content_type="image/png",
+        "file",
+        _TINY_PNG,
+        filename="x.png",
+        content_type="image/png",
     )
     r2 = await client.post(
-        f"/api/spaces/{sid}/cover", data=form,
+        f"/api/spaces/{sid}/cover",
+        data=form,
         headers=_auth(client._bob_token),
     )
     assert r2.status == 403

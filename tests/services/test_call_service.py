@@ -60,15 +60,21 @@ class _FakePush:
         self.missed: list[dict] = []
 
     async def notify_missed_call(
-        self, *, recipient_user_ids, caller_user_id, call_id,
+        self,
+        *,
+        recipient_user_ids,
+        caller_user_id,
+        call_id,
         conversation_id,
     ):
-        self.missed.append({
-            "recipients": list(recipient_user_ids),
-            "caller":     caller_user_id,
-            "call_id":    call_id,
-            "conversation_id": conversation_id,
-        })
+        self.missed.append(
+            {
+                "recipients": list(recipient_user_ids),
+                "caller": caller_user_id,
+                "call_id": call_id,
+                "conversation_id": conversation_id,
+            }
+        )
 
 
 class _FakeUserRepo:
@@ -81,10 +87,12 @@ class _FakeUserRepo:
         self._instance_for_user: dict[str, str] = {}
         self._remotes: dict[str, list[RemoteUser]] = {}
 
-    def add_user(self, username: str, user_id: str,
-                 *, instance_id: str = "self-instance"):
+    def add_user(
+        self, username: str, user_id: str, *, instance_id: str = "self-instance"
+    ):
         u = User(
-            user_id=user_id, username=username,
+            user_id=user_id,
+            username=username,
             display_name=username,
         )
         self._by_username[username] = u
@@ -92,10 +100,15 @@ class _FakeUserRepo:
         self._instance_for_user[user_id] = instance_id
 
     def add_remote(
-        self, *, user_id: str, instance_id: str, remote_username: str,
+        self,
+        *,
+        user_id: str,
+        instance_id: str,
+        remote_username: str,
     ):
         ru = RemoteUser(
-            user_id=user_id, instance_id=instance_id,
+            user_id=user_id,
+            instance_id=instance_id,
             remote_username=remote_username,
             display_name=remote_username,
         )
@@ -125,15 +138,20 @@ class _FakeConversationRepo:
         self.touched: list[str] = []
 
     def add_conversation(
-        self, conversation_id: str, usernames: list[str],
-        *, remotes: list[tuple[str, str, str]] = (),
+        self,
+        conversation_id: str,
+        usernames: list[str],
+        *,
+        remotes: list[tuple[str, str, str]] = (),
     ):
         """``remotes`` is a list of (instance_id, remote_username, user_id)."""
         self._members[conversation_id] = [
             ConversationMember(
-                conversation_id=conversation_id, username=u,
+                conversation_id=conversation_id,
+                username=u,
                 joined_at="2026-01-01T00:00:00+00:00",
-                last_read_at=None, history_visible_from=None,
+                last_read_at=None,
+                history_visible_from=None,
                 deleted_at=None,
             )
             for u in usernames
@@ -141,7 +159,8 @@ class _FakeConversationRepo:
         self._remote_members[conversation_id] = [
             RemoteConversationMember(
                 conversation_id=conversation_id,
-                instance_id=inst, remote_username=ru,
+                instance_id=inst,
+                remote_username=ru,
                 joined_at="2026-01-01T00:00:00+00:00",
             )
             for inst, ru, _uid in remotes
@@ -198,7 +217,8 @@ class _FakeCallRepo:
 
     async def list_active(self, *, user_id):
         return [
-            c for c in self._sessions.values()
+            c
+            for c in self._sessions.values()
             if c.status in ("ringing", "active")
             and (
                 c.initiator_user_id == user_id
@@ -208,18 +228,26 @@ class _FakeCallRepo:
         ]
 
     async def list_history_for_conversation(
-        self, conversation_id, *, limit=50,
+        self,
+        conversation_id,
+        *,
+        limit=50,
     ):
         rows = [
-            c for c in self._sessions.values()
-            if c.conversation_id == conversation_id
+            c for c in self._sessions.values() if c.conversation_id == conversation_id
         ]
         rows.sort(key=lambda c: c.started_at, reverse=True)
         return rows[:limit]
 
     async def transition(
-        self, call_id, *, status, connected_at=None, ended_at=None,
-        duration_seconds=None, participant_user_ids=None,
+        self,
+        call_id,
+        *,
+        status,
+        connected_at=None,
+        ended_at=None,
+        duration_seconds=None,
+        participant_user_ids=None,
     ):
         cur = self._sessions.get(call_id)
         if cur is None:
@@ -256,12 +284,11 @@ class _FakeCallRepo:
                 started = datetime.fromisoformat(c.started_at)
             except ValueError:
                 continue
-            age = (
-                datetime.now(timezone.utc) - started
-            ).total_seconds()
+            age = (datetime.now(timezone.utc) - started).total_seconds()
             if age > older_than_seconds:
                 await self.transition(
-                    cid, status="missed",
+                    cid,
+                    status="missed",
                     ended_at=datetime.now(timezone.utc).isoformat(),
                 )
                 missed.append(self._sessions[cid])
@@ -302,10 +329,19 @@ def env():
         ws_manager=ws,
     )
     svc.attach_push_service(push)
-    return type("Env", (), {
-        "svc": svc, "users": users, "convos": convos,
-        "fed": fed, "ws": ws, "push": push, "call_repo": call_repo,
-    })()
+    return type(
+        "Env",
+        (),
+        {
+            "svc": svc,
+            "users": users,
+            "convos": convos,
+            "fed": fed,
+            "ws": ws,
+            "push": push,
+            "call_repo": call_repo,
+        },
+    )()
 
 
 # ─── initiate_call ────────────────────────────────────────────────────────
@@ -316,7 +352,8 @@ async def test_initiate_call_validates_call_type(env):
         await env.svc.initiate_call(
             caller_user_id="uid-alice",
             conversation_id="conv-ab",
-            call_type="hologram", sdp_offer="v=0\r\n",
+            call_type="hologram",
+            sdp_offer="v=0\r\n",
         )
 
 
@@ -325,7 +362,8 @@ async def test_initiate_call_rejects_empty_offer(env):
         await env.svc.initiate_call(
             caller_user_id="uid-alice",
             conversation_id="conv-ab",
-            call_type="audio", sdp_offer="",
+            call_type="audio",
+            sdp_offer="",
         )
 
 
@@ -334,7 +372,8 @@ async def test_initiate_call_rejects_unknown_caller(env):
         await env.svc.initiate_call(
             caller_user_id="uid-who",
             conversation_id="conv-ab",
-            call_type="audio", sdp_offer="v=0\r\n",
+            call_type="audio",
+            sdp_offer="v=0\r\n",
         )
 
 
@@ -344,7 +383,8 @@ async def test_initiate_call_rejects_non_member(env):
         await env.svc.initiate_call(
             caller_user_id="uid-carol",
             conversation_id="conv-ab",
-            call_type="audio", sdp_offer="v=0\r\n",
+            call_type="audio",
+            sdp_offer="v=0\r\n",
         )
 
 
@@ -354,7 +394,8 @@ async def test_initiate_call_rejects_empty_conversation(env):
         await env.svc.initiate_call(
             caller_user_id="uid-alice",
             conversation_id="solo",
-            call_type="audio", sdp_offer="v=0\r\n",
+            call_type="audio",
+            sdp_offer="v=0\r\n",
         )
 
 
@@ -362,7 +403,8 @@ async def test_initiate_call_local_path_emits_ws_ringing(env):
     result = await env.svc.initiate_call(
         caller_user_id="uid-alice",
         conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     assert result["status"] == "ringing"
     assert result["callee_user_id"] == "uid-bob"
@@ -376,7 +418,8 @@ async def test_initiate_call_persists_session_and_emits_started_message(env):
     result = await env.svc.initiate_call(
         caller_user_id="uid-alice",
         conversation_id="conv-ab",
-        call_type="video", sdp_offer="v=0\r\n",
+        call_type="video",
+        sdp_offer="v=0\r\n",
     )
     cid = result["call_id"]
     persisted = await env.call_repo.get_call(cid)
@@ -394,17 +437,20 @@ async def test_initiate_call_persists_session_and_emits_started_message(env):
 
 async def test_initiate_call_federated_path_emits_call_offer(env):
     env.users.add_remote(
-        user_id="uid-remote", instance_id="other-inst",
+        user_id="uid-remote",
+        instance_id="other-inst",
         remote_username="remote_user",
     )
     env.convos.add_conversation(
-        "conv-remote", ["alice"],
+        "conv-remote",
+        ["alice"],
         remotes=[("other-inst", "remote_user", "uid-remote")],
     )
     result = await env.svc.initiate_call(
         caller_user_id="uid-alice",
         conversation_id="conv-remote",
-        call_type="video", sdp_offer="v=0\r\n",
+        call_type="video",
+        sdp_offer="v=0\r\n",
     )
     assert result["callee_instance_id"] == "other-inst"
     assert len(env.fed.sent) == 1
@@ -420,14 +466,18 @@ async def test_initiate_call_enforces_per_user_cap(env):
         env.users.add_user(f"b{i}", f"uid-b{i}")
         env.convos.add_conversation(f"cc{i}", ["alice", f"b{i}"])
         await env.svc.initiate_call(
-            caller_user_id="uid-alice", conversation_id=f"cc{i}",
-            call_type="audio", sdp_offer="v=0\r\n",
+            caller_user_id="uid-alice",
+            conversation_id=f"cc{i}",
+            call_type="audio",
+            sdp_offer="v=0\r\n",
         )
     env.convos.add_conversation("overflow", ["alice", "bob"])
     with pytest.raises(RuntimeError):
         await env.svc.initiate_call(
-            caller_user_id="uid-alice", conversation_id="overflow",
-            call_type="audio", sdp_offer="v=0\r\n",
+            caller_user_id="uid-alice",
+            conversation_id="overflow",
+            call_type="audio",
+            sdp_offer="v=0\r\n",
         )
 
 
@@ -436,12 +486,15 @@ async def test_initiate_call_enforces_per_user_cap(env):
 
 async def test_answer_call_only_callee_may_answer(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     with pytest.raises(PermissionError):
         await env.svc.answer_call(
-            call_id=r["call_id"], answerer_user_id="uid-alice",
+            call_id=r["call_id"],
+            answerer_user_id="uid-alice",
             sdp_answer="v=0\r\n",
         )
 
@@ -449,17 +502,22 @@ async def test_answer_call_only_callee_may_answer(env):
 async def test_answer_call_unknown_id(env):
     with pytest.raises(CallNotFoundError):
         await env.svc.answer_call(
-            call_id="missing", answerer_user_id="uid-bob", sdp_answer="x",
+            call_id="missing",
+            answerer_user_id="uid-bob",
+            sdp_answer="x",
         )
 
 
 async def test_answer_call_marks_active_and_persists(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     await env.svc.answer_call(
-        call_id=r["call_id"], answerer_user_id="uid-bob",
+        call_id=r["call_id"],
+        answerer_user_id="uid-bob",
         sdp_answer="v=0\r\nans\r\n",
     )
     rec = env.svc.get_call(r["call_id"])
@@ -474,11 +532,14 @@ async def test_answer_call_marks_active_and_persists(env):
 
 async def test_add_ice_candidate_routes_to_other_party(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     await env.svc.add_ice_candidate(
-        call_id=r["call_id"], from_user_id="uid-alice",
+        call_id=r["call_id"],
+        from_user_id="uid-alice",
         candidate={"candidate": "x", "sdpMid": "0"},
     )
     ice = [c for c in env.ws.calls if c[1].get("type") == "call.ice_candidate"]
@@ -488,29 +549,35 @@ async def test_add_ice_candidate_routes_to_other_party(env):
 async def test_add_ice_candidate_unknown_call_raises(env):
     with pytest.raises(CallNotFoundError):
         await env.svc.add_ice_candidate(
-            call_id="nope", from_user_id="uid-alice",
+            call_id="nope",
+            from_user_id="uid-alice",
             candidate={"candidate": "x"},
         )
 
 
 async def test_hangup_persists_ended_with_duration(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     await env.svc.answer_call(
-        call_id=r["call_id"], answerer_user_id="uid-bob",
+        call_id=r["call_id"],
+        answerer_user_id="uid-bob",
         sdp_answer="ans",
     )
     # Simulate a small gap before hangup.
     persisted = await env.call_repo.get_call(r["call_id"])
     # Back-date connected_at so duration > 0.
     await env.call_repo.transition(
-        r["call_id"], status=persisted.status,
+        r["call_id"],
+        status=persisted.status,
         connected_at="2020-01-01T00:00:00+00:00",
     )
     await env.svc.hangup(
-        call_id=r["call_id"], hanger_user_id="uid-alice",
+        call_id=r["call_id"],
+        hanger_user_id="uid-alice",
     )
     ended = await env.call_repo.get_call(r["call_id"])
     assert ended.status == "ended"
@@ -518,9 +585,9 @@ async def test_hangup_persists_ended_with_duration(env):
     assert ended.duration_seconds > 0
     # call_event 'ended' written.
     ends = [
-        m for m in env.convos.messages
-        if m.type == "call_event"
-        and json.loads(m.content)["event"] == "ended"
+        m
+        for m in env.convos.messages
+        if m.type == "call_event" and json.loads(m.content)["event"] == "ended"
     ]
     assert ends
 
@@ -528,40 +595,49 @@ async def test_hangup_persists_ended_with_duration(env):
 async def test_hangup_rejects_non_participant(env):
     env.users.add_user("carol", "uid-carol")
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     with pytest.raises(PermissionError):
         await env.svc.hangup(
-            call_id=r["call_id"], hanger_user_id="uid-carol",
+            call_id=r["call_id"],
+            hanger_user_id="uid-carol",
         )
 
 
 async def test_decline_only_callee_may_decline(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     with pytest.raises(PermissionError):
         await env.svc.decline(
-            call_id=r["call_id"], decliner_user_id="uid-alice",
+            call_id=r["call_id"],
+            decliner_user_id="uid-alice",
         )
 
 
 async def test_decline_writes_declined_row_and_message(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     await env.svc.decline(
-        call_id=r["call_id"], decliner_user_id="uid-bob",
+        call_id=r["call_id"],
+        decliner_user_id="uid-bob",
     )
     ended = await env.call_repo.get_call(r["call_id"])
     assert ended.status == "declined"
     decl = [
-        m for m in env.convos.messages
-        if m.type == "call_event"
-        and json.loads(m.content)["event"] == "declined"
+        m
+        for m in env.convos.messages
+        if m.type == "call_event" and json.loads(m.content)["event"] == "declined"
     ]
     assert decl
 
@@ -571,12 +647,14 @@ async def test_decline_writes_declined_row_and_message(env):
 
 async def test_gc_expired_marks_missed_and_emits_call_event(env):
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-ab",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     # Back-date to 200 s so it's past the 90 s TTL.
     persisted = await env.call_repo.get_call(r["call_id"])
-    past = (datetime.now(timezone.utc).timestamp() - 200)
+    past = datetime.now(timezone.utc).timestamp() - 200
     back = datetime.fromtimestamp(past, tz=timezone.utc).isoformat()
     env.call_repo._sessions[r["call_id"]] = CallSession(
         id=persisted.id,
@@ -593,9 +671,9 @@ async def test_gc_expired_marks_missed_and_emits_call_event(env):
     ended = await env.call_repo.get_call(r["call_id"])
     assert ended.status == "missed"
     msgs = [
-        m for m in env.convos.messages
-        if m.type == "call_event"
-        and json.loads(m.content)["event"] == "missed"
+        m
+        for m in env.convos.messages
+        if m.type == "call_event" and json.loads(m.content)["event"] == "missed"
     ]
     assert msgs
     # And a push was fired to the callee.
@@ -607,15 +685,18 @@ async def test_gc_expired_marks_missed_and_emits_call_event(env):
 
 async def test_join_call_membership_guard(env):
     env.users.add_user("carol", "uid-carol")
-    env.users.add_user("eve",   "uid-eve")
+    env.users.add_user("eve", "uid-eve")
     env.convos.add_conversation("conv-abc", ["alice", "bob", "carol"])
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-abc",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-abc",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     with pytest.raises(PermissionError):
         await env.svc.join_call(
-            call_id=r["call_id"], joiner_user_id="uid-eve",
+            call_id=r["call_id"],
+            joiner_user_id="uid-eve",
             sdp_offers={"uid-alice": "v=0\r\n"},
         )
 
@@ -624,11 +705,14 @@ async def test_join_call_adds_participant_and_fanouts(env):
     env.users.add_user("carol", "uid-carol")
     env.convos.add_conversation("conv-abc", ["alice", "bob", "carol"])
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-abc",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-abc",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     result = await env.svc.join_call(
-        call_id=r["call_id"], joiner_user_id="uid-carol",
+        call_id=r["call_id"],
+        joiner_user_id="uid-carol",
         sdp_offers={"uid-alice": "offer-a", "uid-bob": "offer-b"},
     )
     assert set(result["joined"]) == {"uid-alice", "uid-bob"}
@@ -639,7 +723,8 @@ async def test_join_call_adds_participant_and_fanouts(env):
 async def test_join_call_unknown_is_404(env):
     with pytest.raises(CallNotFoundError):
         await env.svc.join_call(
-            call_id="no-such", joiner_user_id="uid-alice",
+            call_id="no-such",
+            joiner_user_id="uid-alice",
             sdp_offers={},
         )
 
@@ -649,28 +734,33 @@ async def test_join_call_unknown_is_404(env):
 
 async def test_record_quality_sample_persists_and_federates(env):
     env.users.add_remote(
-        user_id="uid-remote", instance_id="other-inst",
+        user_id="uid-remote",
+        instance_id="other-inst",
         remote_username="remote_user",
     )
     env.convos.add_conversation(
-        "conv-remote", ["alice"],
+        "conv-remote",
+        ["alice"],
         remotes=[("other-inst", "remote_user", "uid-remote")],
     )
     r = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="conv-remote",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="conv-remote",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     sample = CallQualitySample(
-        call_id=r["call_id"], reporter_user_id="uid-alice",
-        sampled_at=int(time.time()), rtt_ms=42,
+        call_id=r["call_id"],
+        reporter_user_id="uid-alice",
+        sampled_at=int(time.time()),
+        rtt_ms=42,
     )
     await env.svc.record_quality_sample(sample)
     saved = await env.call_repo.list_quality_samples(r["call_id"])
     assert len(saved) == 1
     # Federated peer received a CALL_QUALITY event.
     quality_events = [
-        s for s in env.fed.sent
-        if s[1] == FederationEventType.CALL_QUALITY
+        s for s in env.fed.sent if s[1] == FederationEventType.CALL_QUALITY
     ]
     assert len(quality_events) == 1
 
@@ -682,15 +772,19 @@ async def test_handle_federated_call_quality_persists_sample(env):
             self.from_instance = from_inst
             self.payload = payload
 
-    await env.svc.handle_federated_signal(_Event(
-        FederationEventType.CALL_QUALITY, "other-inst",
-        {
-            "call_id": "c-remote",
-            "reporter_user": "uid-remote",
-            "sampled_at": 1700000000,
-            "rtt_ms": 55, "jitter_ms": 3,
-        },
-    ))
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_QUALITY,
+            "other-inst",
+            {
+                "call_id": "c-remote",
+                "reporter_user": "uid-remote",
+                "sampled_at": 1700000000,
+                "rtt_ms": 55,
+                "jitter_ms": 3,
+            },
+        )
+    )
     samples = await env.call_repo.list_quality_samples("c-remote")
     assert samples and samples[0].rtt_ms == 55
 
@@ -706,16 +800,19 @@ class _Event:
 
 
 async def test_handle_federated_call_offer_creates_record_and_rings(env):
-    await env.svc.handle_federated_signal(_Event(
-        FederationEventType.CALL_OFFER, "remote-inst",
-        {
-            "call_id":         "c1",
-            "conversation_id": "conv-ab",
-            "from_user":       "uid-alice",
-            "to_user":         "uid-bob",
-            "call_type":       "audio",
-        },
-    ))
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_OFFER,
+            "remote-inst",
+            {
+                "call_id": "c1",
+                "conversation_id": "conv-ab",
+                "from_user": "uid-alice",
+                "to_user": "uid-bob",
+                "call_type": "audio",
+            },
+        )
+    )
     rec = env.svc.get_call("c1")
     assert rec is not None
     assert rec.callee_user_id == "uid-bob"
@@ -726,27 +823,37 @@ async def test_handle_federated_call_offer_creates_record_and_rings(env):
 
 
 async def test_handle_federated_hangup_cleans_record(env):
-    await env.svc.handle_federated_signal(_Event(
-        FederationEventType.CALL_OFFER, "remote-inst",
-        {
-            "call_id":         "c1",
-            "conversation_id": "conv-ab",
-            "from_user":       "uid-alice",
-            "to_user":         "uid-bob",
-            "call_type":       "audio",
-        },
-    ))
-    await env.svc.handle_federated_signal(_Event(
-        FederationEventType.CALL_HANGUP, "remote-inst",
-        {"call_id": "c1", "hanger_user": "uid-alice"},
-    ))
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_OFFER,
+            "remote-inst",
+            {
+                "call_id": "c1",
+                "conversation_id": "conv-ab",
+                "from_user": "uid-alice",
+                "to_user": "uid-bob",
+                "call_type": "audio",
+            },
+        )
+    )
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_HANGUP,
+            "remote-inst",
+            {"call_id": "c1", "hanger_user": "uid-alice"},
+        )
+    )
     assert env.svc.get_call("c1") is None
 
 
 async def test_handle_federated_signal_ignores_missing_call_id(env):
-    await env.svc.handle_federated_signal(_Event(
-        FederationEventType.CALL_OFFER, "remote-inst", {},
-    ))
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_OFFER,
+            "remote-inst",
+            {},
+        )
+    )
 
 
 # ─── list_calls_for_user ──────────────────────────────────────────────────
@@ -758,12 +865,16 @@ async def test_list_calls_for_user_covers_initiator(env):
     env.convos.add_conversation("cc1", ["alice", "c1"])
     env.convos.add_conversation("cc2", ["alice", "c2"])
     r1 = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="cc1",
-        call_type="audio", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="cc1",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
     )
     r2 = await env.svc.initiate_call(
-        caller_user_id="uid-alice", conversation_id="cc2",
-        call_type="video", sdp_offer="v=0\r\n",
+        caller_user_id="uid-alice",
+        conversation_id="cc2",
+        call_type="video",
+        sdp_offer="v=0\r\n",
     )
     out = env.svc.list_calls_for_user("uid-alice")
     ids = {c.call_id for c in out}

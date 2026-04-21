@@ -28,10 +28,10 @@ from ..domain.theme import HouseholdTheme, SpaceTheme  # noqa: F401,E402
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
-ALLOWED_MODES         = frozenset({"light", "dark", "auto"})
-ALLOWED_FONTS         = frozenset({"system", "serif", "rounded", "mono"})
-ALLOWED_DENSITIES     = frozenset({"compact", "comfortable", "spacious"})
-ALLOWED_POST_LAYOUTS  = frozenset({"card", "compact", "magazine"})
+ALLOWED_MODES = frozenset({"light", "dark", "auto"})
+ALLOWED_FONTS = frozenset({"system", "serif", "rounded", "mono"})
+ALLOWED_DENSITIES = frozenset({"compact", "comfortable", "spacious"})
+ALLOWED_POST_LAYOUTS = frozenset({"card", "compact", "magazine"})
 
 
 def validate_color(value: str) -> str:
@@ -54,7 +54,9 @@ def _validate_choice(value: str, allowed: frozenset[str], label: str) -> str:
 
 
 def _validate_optional_choice(
-    value: str | None, allowed: frozenset[str], label: str,
+    value: str | None,
+    allowed: frozenset[str],
+    label: str,
 ) -> str | None:
     if value is None:
         return None
@@ -80,7 +82,10 @@ class AbstractThemeRepo(Protocol):
     async def get_space(self, space_id: str) -> SpaceTheme | None: ...
 
     async def upsert_space(
-        self, *, space_id: str, **patch,
+        self,
+        *,
+        space_id: str,
+        **patch,
     ) -> SpaceTheme: ...
 
 
@@ -114,18 +119,24 @@ class SqliteThemeRepo:
 
     async def update_household(self, **patch) -> HouseholdTheme:
         current = await self.get_household()
-        primary       = validate_color(patch.get("primary_color", current.primary_color))
-        accent        = validate_color(patch.get("accent_color", current.accent_color))
-        surface       = _validate_optional_color(patch.get("surface_color", current.surface_color))
-        surface_dark  = _validate_optional_color(patch.get("surface_dark", current.surface_dark))
-        mode          = _validate_choice(patch.get("mode", current.mode), ALLOWED_MODES, "mode")
-        font          = _validate_choice(
-            patch.get("font_family", current.font_family),
-            ALLOWED_FONTS, "font_family",
+        primary = validate_color(patch.get("primary_color", current.primary_color))
+        accent = validate_color(patch.get("accent_color", current.accent_color))
+        surface = _validate_optional_color(
+            patch.get("surface_color", current.surface_color)
         )
-        density       = _validate_choice(
+        surface_dark = _validate_optional_color(
+            patch.get("surface_dark", current.surface_dark)
+        )
+        mode = _validate_choice(patch.get("mode", current.mode), ALLOWED_MODES, "mode")
+        font = _validate_choice(
+            patch.get("font_family", current.font_family),
+            ALLOWED_FONTS,
+            "font_family",
+        )
+        density = _validate_choice(
             patch.get("density", current.density),
-            ALLOWED_DENSITIES, "density",
+            ALLOWED_DENSITIES,
+            "density",
         )
         corner_radius = _validate_corner_radius(
             patch.get("corner_radius", current.corner_radius),
@@ -148,14 +159,28 @@ class SqliteThemeRepo:
                 corner_radius=excluded.corner_radius,
                 updated_at=excluded.updated_at
             """,
-            (primary, accent, surface, surface_dark, mode, font,
-             density, corner_radius, ts),
+            (
+                primary,
+                accent,
+                surface,
+                surface_dark,
+                mode,
+                font,
+                density,
+                corner_radius,
+                ts,
+            ),
         )
         return HouseholdTheme(
-            primary_color=primary, accent_color=accent,
-            surface_color=surface, surface_dark=surface_dark,
-            mode=mode, font_family=font, density=density,
-            corner_radius=corner_radius, updated_at=ts,
+            primary_color=primary,
+            accent_color=accent,
+            surface_color=surface,
+            surface_dark=surface_dark,
+            mode=mode,
+            font_family=font,
+            density=density,
+            corner_radius=corner_radius,
+            updated_at=ts,
         )
 
     # ── Space ──────────────────────────────────────────────────────────────
@@ -184,25 +209,28 @@ class SqliteThemeRepo:
 
     async def upsert_space(self, *, space_id: str, **patch) -> SpaceTheme:
         current = await self.get_space(space_id) or SpaceTheme(space_id=space_id)
-        primary   = validate_color(patch.get("primary_color", current.primary_color))
-        accent    = validate_color(patch.get("accent_color", current.accent_color))
-        header    = patch.get("header_image_file", current.header_image_file)
+        primary = validate_color(patch.get("primary_color", current.primary_color))
+        accent = validate_color(patch.get("accent_color", current.accent_color))
+        header = patch.get("header_image_file", current.header_image_file)
         if header is not None and not isinstance(header, str):
             raise ValueError("header_image_file must be a string or null")
-        tint      = _validate_optional_color(
+        tint = _validate_optional_color(
             patch.get("background_tint", current.background_tint),
         )
         mode_override = _validate_optional_choice(
             patch.get("mode_override", current.mode_override),
-            ALLOWED_MODES, "mode_override",
+            ALLOWED_MODES,
+            "mode_override",
         )
-        font      = _validate_choice(
+        font = _validate_choice(
             patch.get("font_family", current.font_family),
-            ALLOWED_FONTS, "font_family",
+            ALLOWED_FONTS,
+            "font_family",
         )
-        layout    = _validate_choice(
+        layout = _validate_choice(
             patch.get("post_layout", current.post_layout),
-            ALLOWED_POST_LAYOUTS, "post_layout",
+            ALLOWED_POST_LAYOUTS,
+            "post_layout",
         )
         ts = datetime.now(timezone.utc).isoformat()
         await self._db.enqueue(
@@ -222,14 +250,16 @@ class SqliteThemeRepo:
                 post_layout=excluded.post_layout,
                 updated_at=excluded.updated_at
             """,
-            (space_id, primary, accent, header, tint, mode_override,
-             font, layout, ts),
+            (space_id, primary, accent, header, tint, mode_override, font, layout, ts),
         )
         return SpaceTheme(
             space_id=space_id,
-            primary_color=primary, accent_color=accent,
-            header_image_file=header, background_tint=tint,
+            primary_color=primary,
+            accent_color=accent,
+            header_image_file=header,
+            background_tint=tint,
             mode_override=mode_override,
-            font_family=font, post_layout=layout,
+            font_family=font,
+            post_layout=layout,
             updated_at=ts,
         )

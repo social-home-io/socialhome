@@ -81,7 +81,13 @@ class NotificationService:
     """
 
     __slots__ = (
-        "_notifs", "_users", "_spaces", "_bus", "_i18n", "_push", "_adapter",
+        "_notifs",
+        "_users",
+        "_spaces",
+        "_bus",
+        "_i18n",
+        "_push",
+        "_adapter",
     )
 
     def __init__(
@@ -94,12 +100,12 @@ class NotificationService:
         i18n: Catalog | None = None,
     ) -> None:
         self._notifs = notification_repo
-        self._users  = user_repo
+        self._users = user_repo
         self._spaces = space_repo
-        self._bus    = bus
-        self._i18n   = i18n
-        self._push   = None       # attach_push_service(PushService)
-        self._adapter = None      # attach_platform_adapter(PlatformAdapter)
+        self._bus = bus
+        self._i18n = i18n
+        self._push = None  # attach_push_service(PushService)
+        self._adapter = None  # attach_platform_adapter(PlatformAdapter)
 
     def attach_push_service(self, push_service) -> None:
         """Attach a :class:`PushService` to fan out Web Push alongside the
@@ -125,12 +131,14 @@ class NotificationService:
         translate the title and tap-open the app to see the full row.
         """
         saved = await self._notifs.save(note)
-        await self._bus.publish(NotificationCreated(
-            user_id=saved.user_id,
-            notification_id=saved.id,
-            type=saved.type,
-            title=saved.title,
-        ))
+        await self._bus.publish(
+            NotificationCreated(
+                user_id=saved.user_id,
+                notification_id=saved.id,
+                type=saved.type,
+                title=saved.title,
+            )
+        )
         # Web Push (browsers that registered via pywebpush).
         if self._push is not None:
             try:
@@ -150,7 +158,9 @@ class NotificationService:
                 user = await self._users.get_by_user_id(saved.user_id)
                 if user is not None:
                     await self._adapter.send_push(
-                        user, saved.title, "",
+                        user,
+                        saved.title,
+                        "",
                         data={"type": saved.type, "url": saved.link_url},
                     )
             except Exception as exc:
@@ -188,7 +198,7 @@ class NotificationService:
         if self._i18n is None:
             try:
                 return fallback.format(**fmt)
-            except (KeyError, IndexError):
+            except KeyError, IndexError:
                 return fallback
         return self._i18n.gettext(key, locale=locale, **fmt)
 
@@ -200,30 +210,32 @@ class NotificationService:
         """Register all event handlers on the bus. Idempotent (but
         calling twice subscribes twice — callers should call once).
         """
-        self._bus.subscribe(PostCreated,          self.on_post_created)
-        self._bus.subscribe(CommentAdded,         self.on_comment_added)
-        self._bus.subscribe(TaskAssigned,         self.on_task_assigned)
-        self._bus.subscribe(TaskDeadlineDue,      self.on_task_deadline_due)
-        self._bus.subscribe(SpacePostCreated,     self.on_space_post_created)
+        self._bus.subscribe(PostCreated, self.on_post_created)
+        self._bus.subscribe(CommentAdded, self.on_comment_added)
+        self._bus.subscribe(TaskAssigned, self.on_task_assigned)
+        self._bus.subscribe(TaskDeadlineDue, self.on_task_deadline_due)
+        self._bus.subscribe(SpacePostCreated, self.on_space_post_created)
         self._bus.subscribe(SpaceModerationQueued, self.on_moderation_queued)
-        self._bus.subscribe(DmMessageCreated,     self.on_dm_message_created)
-        self._bus.subscribe(BazaarBidPlaced,      self.on_bazaar_bid_placed)
-        self._bus.subscribe(BazaarOfferAccepted,  self.on_bazaar_offer_accepted)
-        self._bus.subscribe(BazaarOfferRejected,  self.on_bazaar_offer_rejected)
+        self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
+        self._bus.subscribe(BazaarBidPlaced, self.on_bazaar_bid_placed)
+        self._bus.subscribe(BazaarOfferAccepted, self.on_bazaar_offer_accepted)
+        self._bus.subscribe(BazaarOfferRejected, self.on_bazaar_offer_rejected)
         self._bus.subscribe(BazaarListingExpired, self.on_bazaar_listing_expired)
-        self._bus.subscribe(DmContactRequested,   self.on_dm_contact_requested)
+        self._bus.subscribe(DmContactRequested, self.on_dm_contact_requested)
         self._bus.subscribe(CalendarEventCreated, self.on_calendar_event_created)
-        self._bus.subscribe(TaskCompleted,        self.on_task_completed)
-        self._bus.subscribe(SpacePostModerated,   self.on_space_post_moderated)
-        self._bus.subscribe(SpaceMemberJoined,    self.on_space_member_joined)
-        self._bus.subscribe(SpaceJoinRequested,   self.on_space_join_requested)
-        self._bus.subscribe(SpaceJoinApproved,    self.on_space_join_approved)
-        self._bus.subscribe(SpaceJoinDenied,      self.on_space_join_denied)
+        self._bus.subscribe(TaskCompleted, self.on_task_completed)
+        self._bus.subscribe(SpacePostModerated, self.on_space_post_moderated)
+        self._bus.subscribe(SpaceMemberJoined, self.on_space_member_joined)
+        self._bus.subscribe(SpaceJoinRequested, self.on_space_join_requested)
+        self._bus.subscribe(SpaceJoinApproved, self.on_space_join_approved)
+        self._bus.subscribe(SpaceJoinDenied, self.on_space_join_denied)
         self._bus.subscribe(
-            RemoteSpaceInviteAccepted, self.on_remote_invite_accepted,
+            RemoteSpaceInviteAccepted,
+            self.on_remote_invite_accepted,
         )
         self._bus.subscribe(
-            RemoteSpaceInviteDeclined, self.on_remote_invite_declined,
+            RemoteSpaceInviteDeclined,
+            self.on_remote_invite_declined,
         )
 
     # ── Handlers ───────────────────────────────────────────────────────
@@ -237,17 +249,19 @@ class NotificationService:
         for user in users:
             if user.user_id == author_id:
                 continue
-            await self._save_notif(new_notification(
-                user_id=user.user_id,
-                type="post_created",
-                title=self._t(
-                    "notification.post.created",
-                    locale=self._locale(user),
-                    fallback="{author} posted",
-                    author=name,
-                ),
-                link_url=f"/post/{event.post.id}",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=user.user_id,
+                    type="post_created",
+                    title=self._t(
+                        "notification.post.created",
+                        locale=self._locale(user),
+                        fallback="{author} posted",
+                        author=name,
+                    ),
+                    link_url=f"/post/{event.post.id}",
+                )
+            )
 
     async def on_comment_added(self, event: CommentAdded) -> None:
         """Notify the post author when someone else comments."""
@@ -263,28 +277,32 @@ class NotificationService:
         for user in users:
             if user.user_id == commenter_id:
                 continue
-            await self._save_notif(new_notification(
-                user_id=user.user_id,
-                type="comment_added",
-                title=f"{name} commented on a post",
-                link_url=f"/post/{event.post_id}",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=user.user_id,
+                    type="comment_added",
+                    title=f"{name} commented on a post",
+                    link_url=f"/post/{event.post_id}",
+                )
+            )
 
     async def on_task_assigned(self, event: TaskAssigned) -> None:
         """Notify the assignee (unless they assigned themselves)."""
         if event.task.created_by == event.assigned_to:
             return
         recipient = await self._users.get_by_user_id(event.assigned_to)
-        await self._save_notif(new_notification(
-            user_id=event.assigned_to,
-            type="task_assigned",
-            title=self._t(
-                "notification.task.assigned",
-                locale=self._locale(recipient),
-                fallback="You were assigned: {title}",
-                title=event.task.title,
-            ),
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.assigned_to,
+                type="task_assigned",
+                title=self._t(
+                    "notification.task.assigned",
+                    locale=self._locale(recipient),
+                    fallback="You were assigned: {title}",
+                    title=event.task.title,
+                ),
+            )
+        )
 
     async def on_task_deadline_due(self, event: TaskDeadlineDue) -> None:
         """Notify every assignee that a task is due today."""
@@ -296,17 +314,17 @@ class NotificationService:
                 fallback="Task due today: {title}",
                 title=event.task.title,
             )
-            await self._save_notif(new_notification(
-                user_id=assignee_id,
-                type="task_deadline",
-                title=title,
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=assignee_id,
+                    type="task_deadline",
+                    title=title,
+                )
+            )
         if event.task.assignees:
             await self._fan_push(
                 event.task.assignees,
-                title=(
-                    f"Task due today: {event.task.title}"
-                ),
+                title=(f"Task due today: {event.task.title}"),
                 tag="task_deadline",
                 click_url=f"/tasks/{event.task.id}",
             )
@@ -337,12 +355,14 @@ class NotificationService:
             fallback="{name} wants to message you",
             name=event.requester_display_name,
         )
-        await self._save_notif(new_notification(
-            user_id=event.recipient_user_id,
-            type="dm_contact_requested",
-            title=title,
-            link_url="/dms",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.recipient_user_id,
+                type="dm_contact_requested",
+                title=title,
+                link_url="/dms",
+            )
+        )
         await self._fan_push(
             [event.recipient_user_id],
             title=title,
@@ -360,12 +380,14 @@ class NotificationService:
             locale=self._locale(recipient),
             fallback="New bid on your listing",
         )
-        await self._save_notif(new_notification(
-            user_id=event.seller_user_id,
-            type="bazaar_bid_placed",
-            title=title,
-            link_url=f"/bazaar/{event.listing_post_id}",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.seller_user_id,
+                type="bazaar_bid_placed",
+                title=title,
+                link_url=f"/bazaar/{event.listing_post_id}",
+            )
+        )
         await self._fan_push(
             [event.seller_user_id],
             title=title,
@@ -374,7 +396,8 @@ class NotificationService:
         )
 
     async def on_bazaar_offer_accepted(
-        self, event: BazaarOfferAccepted,
+        self,
+        event: BazaarOfferAccepted,
     ) -> None:
         """Notify the buyer that the seller accepted their offer."""
         recipient = await self._users.get_by_user_id(event.buyer_user_id)
@@ -383,12 +406,14 @@ class NotificationService:
             locale=self._locale(recipient),
             fallback="Your offer was accepted",
         )
-        await self._save_notif(new_notification(
-            user_id=event.buyer_user_id,
-            type="bazaar_offer_accepted",
-            title=title,
-            link_url=f"/bazaar/{event.listing_post_id}",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.buyer_user_id,
+                type="bazaar_offer_accepted",
+                title=title,
+                link_url=f"/bazaar/{event.listing_post_id}",
+            )
+        )
         await self._fan_push(
             [event.buyer_user_id],
             title=title,
@@ -397,7 +422,8 @@ class NotificationService:
         )
 
     async def on_bazaar_offer_rejected(
-        self, event: BazaarOfferRejected,
+        self,
+        event: BazaarOfferRejected,
     ) -> None:
         recipient = await self._users.get_by_user_id(event.bidder_user_id)
         title = self._t(
@@ -405,12 +431,14 @@ class NotificationService:
             locale=self._locale(recipient),
             fallback="Your offer was declined",
         )
-        await self._save_notif(new_notification(
-            user_id=event.bidder_user_id,
-            type="bazaar_offer_rejected",
-            title=title,
-            link_url=f"/bazaar/{event.listing_post_id}",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.bidder_user_id,
+                type="bazaar_offer_rejected",
+                title=title,
+                link_url=f"/bazaar/{event.listing_post_id}",
+            )
+        )
         await self._fan_push(
             [event.bidder_user_id],
             title=title,
@@ -419,7 +447,8 @@ class NotificationService:
         )
 
     async def on_bazaar_listing_expired(
-        self, event: BazaarListingExpired,
+        self,
+        event: BazaarListingExpired,
     ) -> None:
         """Notify the seller whenever a listing transitions to sold/expired."""
         recipient = await self._users.get_by_user_id(event.seller_user_id)
@@ -435,12 +464,14 @@ class NotificationService:
                 locale=self._locale(recipient),
                 fallback="Your listing expired without a buyer",
             )
-        await self._save_notif(new_notification(
-            user_id=event.seller_user_id,
-            type=f"bazaar_listing_{event.final_status}",
-            title=title,
-            link_url=f"/bazaar/{event.listing_post_id}",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.seller_user_id,
+                type=f"bazaar_listing_{event.final_status}",
+                title=title,
+                link_url=f"/bazaar/{event.listing_post_id}",
+            )
+        )
         await self._fan_push(
             [event.seller_user_id],
             title=title,
@@ -463,17 +494,20 @@ class NotificationService:
             if member.user_id == author_id:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
-            await self._save_notif(new_notification(
-                user_id=member.user_id,
-                type="space_post_created",
-                title=self._t(
-                    "notification.space.post.created",
-                    locale=self._locale(recipient),
-                    fallback="{author} posted in {space_name}",
-                    author=name, space_name=space.name,
-                ),
-                link_url=f"/spaces/{event.space_id}",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_post_created",
+                    title=self._t(
+                        "notification.space.post.created",
+                        locale=self._locale(recipient),
+                        fallback="{author} posted in {space_name}",
+                        author=name,
+                        space_name=space.name,
+                    ),
+                    link_url=f"/spaces/{event.space_id}",
+                )
+            )
 
     async def on_moderation_queued(self, event: SpaceModerationQueued) -> None:
         """Notify space admins/owners that content is pending review."""
@@ -484,20 +518,23 @@ class NotificationService:
         for member in members:
             if member.role in ("owner", "admin"):
                 recipient = await self._users.get_by_user_id(member.user_id)
-                await self._save_notif(new_notification(
-                    user_id=member.user_id,
-                    type="moderation_pending",
-                    title=self._t(
-                        "notification.space.moderation.queued",
-                        locale=self._locale(recipient),
-                        fallback="New content pending review in {space_name}",
-                        space_name=space.name,
-                    ),
-                    link_url=f"/spaces/{event.item.space_id}/moderation",
-                ))
+                await self._save_notif(
+                    new_notification(
+                        user_id=member.user_id,
+                        type="moderation_pending",
+                        title=self._t(
+                            "notification.space.moderation.queued",
+                            locale=self._locale(recipient),
+                            fallback="New content pending review in {space_name}",
+                            space_name=space.name,
+                        ),
+                        link_url=f"/spaces/{event.item.space_id}/moderation",
+                    )
+                )
 
     async def on_calendar_event_created(
-        self, event: CalendarEventCreated,
+        self,
+        event: CalendarEventCreated,
     ) -> None:
         """Notify household members about a new calendar event."""
         cal_event = event.event
@@ -505,17 +542,19 @@ class NotificationService:
         for user in users:
             if user.user_id == cal_event.created_by:
                 continue
-            await self._save_notif(new_notification(
-                user_id=user.user_id,
-                type="calendar_event_created",
-                title=self._t(
-                    "notification.calendar.created",
-                    locale=self._locale(user),
-                    fallback="New event: {summary}",
-                    summary=cal_event.summary,
-                ),
-                link_url="/calendar",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=user.user_id,
+                    type="calendar_event_created",
+                    title=self._t(
+                        "notification.calendar.created",
+                        locale=self._locale(user),
+                        fallback="New event: {summary}",
+                        summary=cal_event.summary,
+                    ),
+                    link_url="/calendar",
+                )
+            )
 
     async def on_task_completed(self, event: TaskCompleted) -> None:
         """Notify task assignees when a task is completed."""
@@ -527,30 +566,35 @@ class NotificationService:
             if uid == completed_by:
                 continue
             recipient = await self._users.get_by_user_id(uid)
-            await self._save_notif(new_notification(
-                user_id=uid,
-                type="task_completed",
-                title=self._t(
-                    "notification.task.completed",
-                    locale=self._locale(recipient),
-                    fallback="{name} completed: {title}",
-                    name=name,
-                    title=task.title,
-                ),
-                link_url=f"/tasks/{task.list_id}",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=uid,
+                    type="task_completed",
+                    title=self._t(
+                        "notification.task.completed",
+                        locale=self._locale(recipient),
+                        fallback="{name} completed: {title}",
+                        name=name,
+                        title=task.title,
+                    ),
+                    link_url=f"/tasks/{task.list_id}",
+                )
+            )
 
     async def on_space_post_moderated(
-        self, event: SpacePostModerated,
+        self,
+        event: SpacePostModerated,
     ) -> None:
         """Notify the post author that their post was moderated."""
         post = event.post
-        await self._save_notif(new_notification(
-            user_id=post.author,
-            type="post_moderated",
-            title="Your post was moderated",
-            link_url=f"/spaces/{event.space_id}",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=post.author,
+                type="post_moderated",
+                title="Your post was moderated",
+                link_url=f"/spaces/{event.space_id}",
+            )
+        )
 
     async def on_space_member_joined(self, event: SpaceMemberJoined) -> None:
         """Tell existing members that a new person joined (§23.52)."""
@@ -564,20 +608,24 @@ class NotificationService:
             if member.user_id == event.user_id:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
-            await self._save_notif(new_notification(
-                user_id=member.user_id,
-                type="space_member_joined",
-                title=self._t(
-                    "notification.space.member.joined",
-                    locale=self._locale(recipient),
-                    fallback="{name} joined {space_name}",
-                    name=name, space_name=space.name,
-                ),
-                link_url=f"/spaces/{event.space_id}",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_member_joined",
+                    title=self._t(
+                        "notification.space.member.joined",
+                        locale=self._locale(recipient),
+                        fallback="{name} joined {space_name}",
+                        name=name,
+                        space_name=space.name,
+                    ),
+                    link_url=f"/spaces/{event.space_id}",
+                )
+            )
 
     async def on_space_join_requested(
-        self, event: SpaceJoinRequested,
+        self,
+        event: SpaceJoinRequested,
     ) -> None:
         """Notify space admins + owner that a new join request is pending."""
         space = await self._spaces.get(event.space_id)
@@ -590,40 +638,47 @@ class NotificationService:
             if member.role not in ("owner", "admin"):
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
-            await self._save_notif(new_notification(
-                user_id=member.user_id,
-                type="space_join_requested",
-                title=self._t(
-                    "notification.space.join.requested",
-                    locale=self._locale(recipient),
-                    fallback="{name} wants to join {space_name}",
-                    name=name, space_name=space.name,
-                ),
-                link_url=f"/spaces/{event.space_id}#join-requests",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_join_requested",
+                    title=self._t(
+                        "notification.space.join.requested",
+                        locale=self._locale(recipient),
+                        fallback="{name} wants to join {space_name}",
+                        name=name,
+                        space_name=space.name,
+                    ),
+                    link_url=f"/spaces/{event.space_id}#join-requests",
+                )
+            )
 
     async def on_space_join_approved(
-        self, event: SpaceJoinApproved,
+        self,
+        event: SpaceJoinApproved,
     ) -> None:
         """Tell the requester their join was approved."""
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
         recipient = await self._users.get_by_user_id(event.user_id)
-        await self._save_notif(new_notification(
-            user_id=event.user_id,
-            type="space_join_approved",
-            title=self._t(
-                "notification.space.join.approved",
-                locale=self._locale(recipient),
-                fallback="You're in: {space_name}",
-                space_name=space.name,
-            ),
-            link_url=f"/spaces/{event.space_id}",
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.user_id,
+                type="space_join_approved",
+                title=self._t(
+                    "notification.space.join.approved",
+                    locale=self._locale(recipient),
+                    fallback="You're in: {space_name}",
+                    space_name=space.name,
+                ),
+                link_url=f"/spaces/{event.space_id}",
+            )
+        )
 
     async def on_space_join_denied(
-        self, event: SpaceJoinDenied,
+        self,
+        event: SpaceJoinDenied,
     ) -> None:
         """§D2 — tell the requester their join was declined.
 
@@ -631,19 +686,22 @@ class NotificationService:
         because the notification may surface on a lock screen.
         """
         recipient = await self._users.get_by_user_id(event.user_id)
-        await self._save_notif(new_notification(
-            user_id=event.user_id,
-            type="space_join_denied",
-            title=self._t(
-                "notification.space.join.denied",
-                locale=self._locale(recipient),
-                fallback="Your join request was declined.",
-            ),
-            link_url=None,
-        ))
+        await self._save_notif(
+            new_notification(
+                user_id=event.user_id,
+                type="space_join_denied",
+                title=self._t(
+                    "notification.space.join.denied",
+                    locale=self._locale(recipient),
+                    fallback="Your join request was declined.",
+                ),
+                link_url=None,
+            )
+        )
 
     async def on_remote_invite_accepted(
-        self, event: RemoteSpaceInviteAccepted,
+        self,
+        event: RemoteSpaceInviteAccepted,
     ) -> None:
         """§D1b — inviter learns the remote user accepted. Title-only."""
         space = await self._spaces.get(event.space_id)
@@ -655,19 +713,22 @@ class NotificationService:
             if m.role not in ("owner", "admin"):
                 continue
             recipient = await self._users.get_by_user_id(m.user_id)
-            await self._save_notif(new_notification(
-                user_id=m.user_id,
-                type="space_remote_invite_accepted",
-                title=self._t(
-                    "notification.space.remote_invite.accepted",
-                    locale=self._locale(recipient),
-                    fallback="Your invite was accepted.",
-                ),
-                link_url=f"/spaces/{event.space_id}",
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=m.user_id,
+                    type="space_remote_invite_accepted",
+                    title=self._t(
+                        "notification.space.remote_invite.accepted",
+                        locale=self._locale(recipient),
+                        fallback="Your invite was accepted.",
+                    ),
+                    link_url=f"/spaces/{event.space_id}",
+                )
+            )
 
     async def on_remote_invite_declined(
-        self, event: RemoteSpaceInviteDeclined,
+        self,
+        event: RemoteSpaceInviteDeclined,
     ) -> None:
         space = await self._spaces.get(event.space_id)
         if space is None:
@@ -677,13 +738,15 @@ class NotificationService:
             if m.role not in ("owner", "admin"):
                 continue
             recipient = await self._users.get_by_user_id(m.user_id)
-            await self._save_notif(new_notification(
-                user_id=m.user_id,
-                type="space_remote_invite_declined",
-                title=self._t(
-                    "notification.space.remote_invite.declined",
-                    locale=self._locale(recipient),
-                    fallback="Your invite was declined.",
-                ),
-                link_url=None,
-            ))
+            await self._save_notif(
+                new_notification(
+                    user_id=m.user_id,
+                    type="space_remote_invite_declined",
+                    title=self._t(
+                        "notification.space.remote_invite.declined",
+                        locale=self._locale(recipient),
+                        fallback="Your invite was declined.",
+                    ),
+                    link_url=None,
+                )
+            )

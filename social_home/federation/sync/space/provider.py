@@ -67,13 +67,16 @@ class SpaceSyncService:
                 ):
                     await _send(session, envelope)
             sentinel = await self._builder.build_sentinel(
-                space_id=space_id, sync_id=sync_id, sig_suite=self._sig_suite,
+                space_id=space_id,
+                sync_id=sync_id,
+                sig_suite=self._sig_suite,
             )
             await _send(session, sentinel)
-        except Exception:                                  # pragma: no cover
+        except Exception:  # pragma: no cover
             log.exception(
                 "stream_initial failed for sync_id=%s space=%s",
-                sync_id, space_id,
+                sync_id,
+                space_id,
             )
 
     async def stream_request_more(
@@ -91,7 +94,8 @@ class SpaceSyncService:
         exporter = self._exporters.get(resource)
         if exporter is None:
             log.debug(
-                "REQUEST_MORE for %s has no exporter — skipping", resource,
+                "REQUEST_MORE for %s has no exporter — skipping",
+                resource,
             )
             return
         try:
@@ -102,10 +106,11 @@ class SpaceSyncService:
                 sig_suite=self._sig_suite,
             ):
                 await _send(session, envelope)
-        except Exception:                                  # pragma: no cover
+        except Exception:  # pragma: no cover
             log.exception(
                 "stream_request_more failed for sync_id=%s resource=%s",
-                session.sync_id, resource,
+                session.sync_id,
+                resource,
             )
 
 

@@ -10,6 +10,7 @@ If a new plaintext field sneaks in here, this test fails. Any new
 allow-listed plaintext field must be added to
 :data:`_PLAINTEXT_ALLOW_LIST` below after a reviewer sign-off.
 """
+
 from __future__ import annotations
 
 import os
@@ -39,9 +40,13 @@ from social_home.services.user_service import UserService
 # The only kwargs permitted on the send_event call for
 # ``SPACE_PRIVATE_INVITE`` outbound. ``space_id`` is NOT in the list on
 # purpose — for private invites it rides inside the encrypted payload.
-_PLAINTEXT_ALLOW_LIST = frozenset({
-    "to_instance_id", "event_type", "payload",
-})
+_PLAINTEXT_ALLOW_LIST = frozenset(
+    {
+        "to_instance_id",
+        "event_type",
+        "payload",
+    }
+)
 
 
 @pytest.fixture
@@ -64,11 +69,15 @@ async def space_stack(tmp_dir):
         user_svc = UserService(user_repo, bus, own_instance_public_key=kp.public_key)
         await user_svc.provision(username="alice", display_name="Alice")
         svc = SpaceService(
-            space_repo, SqliteSpacePostRepo(db), user_repo, bus,
+            space_repo,
+            SqliteSpacePostRepo(db),
+            user_repo,
+            bus,
             own_instance_id=iid,
         )
         space = await svc.create_space(
-            owner_username="alice", name="Chess Strategy",
+            owner_username="alice",
+            name="Chess Strategy",
             description="Invite-only tactics",
             emoji="♟",
             space_type=SpaceType.PRIVATE,
@@ -102,7 +111,8 @@ async def space_stack(tmp_dir):
 async def test_private_invite_envelope_has_no_space_id_in_plaintext(space_stack):
     svc, fed, _repo, space = space_stack
     token = await svc.invite_remote_user(
-        space.id, actor_username="alice",
+        space.id,
+        actor_username="alice",
         invitee_instance_id="peer-instance-id",
         invitee_user_id="bob_user",
     )
@@ -134,7 +144,8 @@ async def test_private_invite_refuses_unpaired_peer(space_stack):
     repo.get_instance = AsyncMock(return_value=None)
     with pytest.raises(Exception):
         await svc.invite_remote_user(
-            space.id, actor_username="alice",
+            space.id,
+            actor_username="alice",
             invitee_instance_id="unknown",
             invitee_user_id="x",
         )

@@ -54,6 +54,7 @@ TIMESTAMP_SKEW_SECONDS = 300
 
 # ─── Validation context ─────────────────────────────────────────────────
 
+
 @dataclass
 class InboundContext:
     """Mutable bag of state threaded through the pipeline.
@@ -125,6 +126,7 @@ class _WebhookInstance:
 
 # ─── Individual steps ────────────────────────────────────────────────────
 
+
 def make_parse_json(*, loads) -> InboundStep:
     """Step 1: parse raw bytes → envelope dict."""
 
@@ -135,9 +137,14 @@ def make_parse_json(*, loads) -> InboundStep:
             raise ValueError(f"Invalid JSON body: {exc}") from exc
 
         required = (
-            "msg_id", "event_type", "from_instance",
-            "to_instance", "timestamp", "encrypted_payload",
-            "sig_suite", "signatures",
+            "msg_id",
+            "event_type",
+            "from_instance",
+            "to_instance",
+            "timestamp",
+            "encrypted_payload",
+            "sig_suite",
+            "signatures",
         )
         missing = [f for f in required if f not in ctx.envelope]
         if missing:
@@ -163,9 +170,7 @@ def make_lookup_instance(*, repo, lookup_fn) -> InboundStep:
     async def lookup_instance(ctx: InboundContext) -> None:
         instance = await lookup_fn(repo, ctx.webhook_id)
         if instance is None:
-            raise ValueError(
-                f"No instance found for webhook_id={ctx.webhook_id!r}"
-            )
+            raise ValueError(f"No instance found for webhook_id={ctx.webhook_id!r}")
         ctx.instance = instance
 
     return lookup_instance
@@ -183,9 +188,7 @@ def make_lookup_instance_by_id(*, repo) -> InboundStep:
     async def lookup_instance_by_id(ctx: InboundContext) -> None:
         instance = await repo.get_instance(ctx.instance_id)
         if instance is None:
-            raise ValueError(
-                f"No instance found for instance_id={ctx.instance_id!r}"
-            )
+            raise ValueError(f"No instance found for instance_id={ctx.instance_id!r}")
         # Wrap in the same shape the webhook lookup returns so the
         # remaining pipeline steps (sig verify, decrypt) work unchanged.
         ctx.instance = _WebhookInstance(instance)
@@ -203,14 +206,11 @@ def make_check_timestamp() -> InboundStep:
                 timestamp_str.replace("Z", "+00:00"),
             )
         except ValueError as exc:
-            raise ValueError(
-                f"Unparseable timestamp: {timestamp_str!r}"
-            ) from exc
+            raise ValueError(f"Unparseable timestamp: {timestamp_str!r}") from exc
         skew = abs((datetime.now(timezone.utc) - envelope_ts).total_seconds())
         if skew > TIMESTAMP_SKEW_SECONDS:
             raise ValueError(
-                f"Timestamp skew too large: {skew:.1f}s "
-                f"(max {TIMESTAMP_SKEW_SECONDS}s)"
+                f"Timestamp skew too large: {skew:.1f}s (max {TIMESTAMP_SKEW_SECONDS}s)"
             )
 
     return check_timestamp
@@ -287,7 +287,8 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
 
         try:
             decrypted_json = encoder.decrypt_payload(
-                data["encrypted_payload"], session_key,
+                data["encrypted_payload"],
+                session_key,
             )
         except Exception as exc:
             raise ValueError(f"Failed to decrypt payload: {exc}") from exc
@@ -295,9 +296,7 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
         try:
             inner = loads(decrypted_json)
         except Exception as exc:
-            raise ValueError(
-                f"Decrypted payload is not valid JSON: {exc}"
-            ) from exc
+            raise ValueError(f"Decrypted payload is not valid JSON: {exc}") from exc
 
         ctx.event = FederationEvent(
             msg_id=data["msg_id"],
@@ -332,7 +331,8 @@ def make_idempotency_check(*, cache_holder) -> InboundStep:
         if not cache.check_and_mark(key):
             log.debug(
                 "inbound: dropped idempotent duplicate event_type=%s key=%s",
-                ctx.event.event_type.value, ik,
+                ctx.event.event_type.value,
+                ik,
             )
             ctx.early_response = {"status": "ok", "deduped": True}
 
@@ -348,12 +348,12 @@ def make_ban_check(*, federation_repo) -> InboundStep:
             return
         from_instance = ctx.envelope["from_instance"]
         banned = await federation_repo.is_instance_banned_from_space(
-            space_id, from_instance,
+            space_id,
+            from_instance,
         )
         if banned:
             raise ValueError(
-                f"Instance {from_instance!r} is banned from "
-                f"space {space_id!r}"
+                f"Instance {from_instance!r} is banned from space {space_id!r}"
             )
 
     return ban_check
@@ -369,6 +369,7 @@ def make_persist_replay(*, federation_repo) -> InboundStep:
 
 
 # ─── Pipeline runner ─────────────────────────────────────────────────────
+
 
 class InboundPipeline:
     """Compose :class:`InboundStep` callables into a linear pipeline.

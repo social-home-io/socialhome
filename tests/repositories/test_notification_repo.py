@@ -46,9 +46,13 @@ async def test_notification_cap(env):
     uid = "uid-notif-user"
 
     for i in range(15):
-        await env.notif_repo.save(new_notification(
-            user_id=uid, type="test", title=f"Notification {i}",
-        ))
+        await env.notif_repo.save(
+            new_notification(
+                user_id=uid,
+                type="test",
+                title=f"Notification {i}",
+            )
+        )
 
     notes = await env.notif_repo.list(uid, limit=50)
     assert len(notes) == 10

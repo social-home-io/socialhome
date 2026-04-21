@@ -27,12 +27,15 @@ class PollVoteView(BaseView):
         option_id = str(body.get("option_id") or "")
         if not option_id:
             return error_response(
-                422, "UNPROCESSABLE", "option_id is required.",
+                422,
+                "UNPROCESSABLE",
+                "option_id is required.",
             )
         svc = self.svc(poll_service_key)
         try:
             await svc.cast_vote(
-                post_id=post_id, option_id=option_id,
+                post_id=post_id,
+                option_id=option_id,
                 voter_user_id=ctx.user_id,
             )
         except ValueError as exc:
@@ -102,7 +105,8 @@ class PollSummaryView(BaseView):
         # poll immediately without another round-trip.
         return web.json_response(
             await svc.summary(post_id, voter_user_id=ctx.user_id)
-            if summary.get("question") else summary,
+            if summary.get("question")
+            else summary,
             status=201,
         )
 
@@ -140,14 +144,17 @@ class SchedulePollRespondView(BaseView):
         response = str(body.get("response") or "")
         if not slot_id or not response:
             return error_response(
-                422, "UNPROCESSABLE",
+                422,
+                "UNPROCESSABLE",
                 "slot_id and response are required.",
             )
         svc = self.svc(poll_service_key)
         try:
             await svc.respond_schedule(
-                poll_id=poll_id, slot_id=slot_id,
-                user_id=ctx.user_id, response=response,
+                poll_id=poll_id,
+                slot_id=slot_id,
+                user_id=ctx.user_id,
+                response=response,
             )
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
@@ -163,7 +170,9 @@ class SchedulePollSlotResponseView(BaseView):
         slot_id = self.match("slot_id")
         svc = self.svc(poll_service_key)
         await svc.retract_schedule(
-            poll_id=poll_id, slot_id=slot_id, user_id=ctx.user_id,
+            poll_id=poll_id,
+            slot_id=slot_id,
+            user_id=ctx.user_id,
         )
         return web.json_response(await svc.schedule_summary(poll_id))
 
@@ -178,12 +187,15 @@ class SchedulePollFinalizeView(BaseView):
         slot_id = str(body.get("slot_id") or "")
         if not slot_id:
             return error_response(
-                422, "UNPROCESSABLE", "slot_id is required.",
+                422,
+                "UNPROCESSABLE",
+                "slot_id is required.",
             )
         svc = self.svc(poll_service_key)
         try:
             summary = await svc.finalize_schedule_poll(
-                post_id=poll_id, slot_id=slot_id,
+                post_id=poll_id,
+                slot_id=slot_id,
                 actor_user_id=ctx.user_id,
             )
         except PermissionError as exc:
@@ -209,6 +221,7 @@ class SchedulePollSummaryView(BaseView):
 class _SpaceScheduleBase(BaseView):
     async def _require_member(self, space_id: str, user_id: str) -> bool:
         from .. import app_keys as K
+
         space_repo = self.svc(K.space_repo_key)
         return await space_repo.get_member(space_id, user_id) is not None
 
@@ -251,13 +264,17 @@ class SpaceSchedulePollRespondView(_SpaceScheduleBase):
         response = str(body.get("response") or "")
         if not slot_id or not response:
             return error_response(
-                422, "UNPROCESSABLE", "slot_id and response are required.",
+                422,
+                "UNPROCESSABLE",
+                "slot_id and response are required.",
             )
         svc = self.svc(poll_service_key)
         try:
             await svc.respond_schedule(
-                poll_id=post_id, slot_id=slot_id,
-                user_id=ctx.user_id, response=response,
+                poll_id=post_id,
+                slot_id=slot_id,
+                user_id=ctx.user_id,
+                response=response,
                 space_id=space_id,
             )
         except ValueError as exc:
@@ -280,13 +297,17 @@ class SpaceSchedulePollFinalizeView(_SpaceScheduleBase):
         slot_id = str(body.get("slot_id") or "")
         if not slot_id:
             return error_response(
-                422, "UNPROCESSABLE", "slot_id is required.",
+                422,
+                "UNPROCESSABLE",
+                "slot_id is required.",
             )
         svc = self.svc(poll_service_key)
         try:
             summary = await svc.finalize_schedule_poll(
-                post_id=post_id, slot_id=slot_id,
-                actor_user_id=ctx.user_id, space_id=space_id,
+                post_id=post_id,
+                slot_id=slot_id,
+                actor_user_id=ctx.user_id,
+                space_id=space_id,
             )
         except PermissionError as exc:
             return error_response(403, "FORBIDDEN", str(exc))

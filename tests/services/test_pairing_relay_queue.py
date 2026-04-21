@@ -21,9 +21,13 @@ class _FakeFederation:
         self._ok = ok
 
     async def send_event(self, *, to_instance_id, event_type, payload):
-        self.calls.append({
-            "to": to_instance_id, "type": event_type, "payload": payload,
-        })
+        self.calls.append(
+            {
+                "to": to_instance_id,
+                "type": event_type,
+                "payload": payload,
+            }
+        )
         return SimpleNamespace(ok=self._ok)
 
 
@@ -33,11 +37,13 @@ async def test_queue_collects_relay_events_from_bus():
     q = PairingRelayQueue(bus=bus, federation=fed, own_instance_id="self")
     q.wire()
 
-    await bus.publish(PairingIntroRelayReceived(
-        from_instance="peer-a",
-        target_instance_id="peer-b",
-        message="please intro",
-    ))
+    await bus.publish(
+        PairingIntroRelayReceived(
+            from_instance="peer-a",
+            target_instance_id="peer-b",
+            message="please intro",
+        )
+    )
     pending = q.list_pending()
     assert len(pending) == 1
     assert pending[0].from_instance == "peer-a"
@@ -51,11 +57,13 @@ async def test_approve_forwards_pairing_intro_to_target():
     q = PairingRelayQueue(bus=bus, federation=fed, own_instance_id="self")
     q.wire()
 
-    await bus.publish(PairingIntroRelayReceived(
-        from_instance="peer-a",
-        target_instance_id="peer-b",
-        message="hi",
-    ))
+    await bus.publish(
+        PairingIntroRelayReceived(
+            from_instance="peer-a",
+            target_instance_id="peer-b",
+            message="hi",
+        )
+    )
     [req] = q.list_pending()
 
     approved = await q.approve(req.id)
@@ -73,10 +81,12 @@ async def test_decline_drops_without_sending():
     q = PairingRelayQueue(bus=bus, federation=fed, own_instance_id="self")
     q.wire()
 
-    await bus.publish(PairingIntroRelayReceived(
-        from_instance="peer-a",
-        target_instance_id="peer-b",
-    ))
+    await bus.publish(
+        PairingIntroRelayReceived(
+            from_instance="peer-a",
+            target_instance_id="peer-b",
+        )
+    )
     [req] = q.list_pending()
 
     dropped = q.decline(req.id)
@@ -102,8 +112,10 @@ async def test_queue_caps_at_max_size():
     q.wire()
 
     for i in range(_MAX_QUEUE_SIZE + 5):
-        await bus.publish(PairingIntroRelayReceived(
-            from_instance=f"peer-{i}",
-            target_instance_id="peer-t",
-        ))
+        await bus.publish(
+            PairingIntroRelayReceived(
+                from_instance=f"peer-{i}",
+                target_instance_id="peer-t",
+            )
+        )
     assert len(q.list_pending()) == _MAX_QUEUE_SIZE

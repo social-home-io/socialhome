@@ -38,6 +38,7 @@ async def env(tmp_dir):
 
 # ─── validate_color ──────────────────────────────────────────────────────
 
+
 def test_validate_color_accepts_six_digit_hex():
     assert validate_color("#abcdef") == "#abcdef"
     assert validate_color("#ABCDEF") == "#abcdef"
@@ -60,24 +61,26 @@ def test_validate_color_rejects_non_hex():
 
 def test_validate_color_rejects_non_string():
     with pytest.raises(ValueError):
-        validate_color(0xabcdef)  # type: ignore[arg-type]
+        validate_color(0xABCDEF)  # type: ignore[arg-type]
 
 
 # ─── household ───────────────────────────────────────────────────────────
+
 
 async def test_get_household_returns_defaults_when_unset(env):
     theme = await env.get_household()
     assert isinstance(theme, HouseholdTheme)
     assert theme.primary_color == "#4A90E2"
-    assert theme.accent_color  == "#F5A623"
+    assert theme.accent_color == "#F5A623"
 
 
 async def test_update_household_persists(env):
     theme = await env.update_household(
-        primary_color="#112233", accent_color="#445566",
+        primary_color="#112233",
+        accent_color="#445566",
     )
     assert theme.primary_color == "#112233"
-    assert theme.accent_color  == "#445566"
+    assert theme.accent_color == "#445566"
     # Re-read to confirm.
     again = await env.get_household()
     assert again.primary_color == "#112233"
@@ -92,13 +95,16 @@ async def test_update_household_is_upsert(env):
 
 # ─── space ───────────────────────────────────────────────────────────────
 
+
 async def test_get_space_returns_none_when_unset(env):
     assert await env.get_space("sp-1") is None
 
 
 async def test_upsert_space_persists(env):
     theme = await env.upsert_space(
-        space_id="sp-1", primary_color="#abcdef", accent_color="#fedcba",
+        space_id="sp-1",
+        primary_color="#abcdef",
+        accent_color="#fedcba",
     )
     assert theme.primary_color == "#abcdef"
     again = await env.get_space("sp-1")

@@ -64,9 +64,10 @@ class BidNotFoundError(BazaarServiceError):
 
 class _Unset:
     """Sentinel for update-listing partial patches."""
+
     __slots__ = ()
 
-    def __repr__(self) -> str:   # pragma: no cover
+    def __repr__(self) -> str:  # pragma: no cover
         return "_UNSET"
 
 
@@ -80,7 +81,7 @@ class BazaarService:
 
     def __init__(self, repo: AbstractBazaarRepo, bus: EventBus) -> None:
         self._repo = repo
-        self._bus  = bus
+        self._bus = bus
         self._feed: FeedService | None = None
 
     def attach_feed(self, feed_service: "FeedService") -> None:
@@ -100,7 +101,8 @@ class BazaarService:
         return await self._repo.list_active()
 
     async def list_by_seller(
-        self, seller_user_id: str,
+        self,
+        seller_user_id: str,
     ) -> list[BazaarListing]:
         return await self._repo.list_by_seller(seller_user_id)
 
@@ -144,9 +146,8 @@ class BazaarService:
         end_time = (now + timedelta(days=duration_days)).isoformat()
 
         # Mint the parent feed post first so ``post_id`` is stable.
-        caption = (
-            f"🛍 {title_clean}"
-            + (f" — {description.strip()}" if description else "")
+        caption = f"🛍 {title_clean}" + (
+            f" — {description.strip()}" if description else ""
         )
         post = await self._feed.create_post(
             author_user_id=seller_user_id,
@@ -170,12 +171,14 @@ class BazaarService:
             step_price=step_price,
         )
         await self._repo.save_listing(listing)
-        await self._bus.publish(BazaarListingCreated(
-            listing_post_id=listing.post_id,
-            seller_user_id=seller_user_id,
-            mode=mode_val.value,
-            title=listing.title,
-        ))
+        await self._bus.publish(
+            BazaarListingCreated(
+                listing_post_id=listing.post_id,
+                seller_user_id=seller_user_id,
+                mode=mode_val.value,
+                title=listing.title,
+            )
+        )
         return listing
 
     async def update_listing(
@@ -203,9 +206,7 @@ class BazaarService:
                 raise ValueError("title too long")
             next_title = cleaned
         if not isinstance(description, _Unset):
-            next_description = (
-                description.strip() if description else None
-            )
+            next_description = description.strip() if description else None
 
         updated = BazaarListing(
             post_id=listing.post_id,
@@ -226,14 +227,19 @@ class BazaarService:
             sold_at=listing.sold_at,
         )
         await self._repo.save_listing(updated)
-        await self._bus.publish(BazaarListingUpdated(
-            listing_post_id=updated.post_id,
-            seller_user_id=updated.seller_user_id,
-        ))
+        await self._bus.publish(
+            BazaarListingUpdated(
+                listing_post_id=updated.post_id,
+                seller_user_id=updated.seller_user_id,
+            )
+        )
         return updated
 
     async def cancel_listing(
-        self, *, post_id: str, actor_user_id: str,
+        self,
+        *,
+        post_id: str,
+        actor_user_id: str,
     ) -> None:
         """Seller pulls a listing. Only allowed while ACTIVE."""
         listing = await self.get_listing(post_id)
@@ -244,10 +250,12 @@ class BazaarService:
         if listing.status is not BazaarStatus.ACTIVE:
             raise BazaarServiceError("listing is not active")
         await self._repo.mark_cancelled(post_id)
-        await self._bus.publish(BazaarListingCancelled(
-            listing_post_id=post_id,
-            seller_user_id=listing.seller_user_id,
-        ))
+        await self._bus.publish(
+            BazaarListingCancelled(
+                listing_post_id=post_id,
+                seller_user_id=listing.seller_user_id,
+            )
+        )
 
     # ─── Bids ────────────────────────────────────────────────────────────
 
@@ -294,13 +302,15 @@ class BazaarService:
         bid = await self._repo.place_bid(bid)
         # Reload to surface any anti-snipe extension to subscribers.
         refreshed = await self._repo.get_listing(listing_post_id)
-        await self._bus.publish(BazaarBidPlaced(
-            listing_post_id=listing_post_id,
-            seller_user_id=listing.seller_user_id,
-            bidder_user_id=bidder_user_id,
-            amount=int(amount),
-            new_end_time=refreshed.end_time if refreshed else listing.end_time,
-        ))
+        await self._bus.publish(
+            BazaarBidPlaced(
+                listing_post_id=listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=bidder_user_id,
+                amount=int(amount),
+                new_end_time=refreshed.end_time if refreshed else listing.end_time,
+            )
+        )
         return bid
 
     async def accept_offer(self, *, bid_id: str, actor_user_id: str) -> None:
@@ -320,12 +330,14 @@ class BazaarService:
             winner_user_id=bid.bidder_user_id,
             winning_price=bid.amount,
         )
-        await self._bus.publish(BazaarOfferAccepted(
-            listing_post_id=listing.post_id,
-            seller_user_id=listing.seller_user_id,
-            buyer_user_id=bid.bidder_user_id,
-            price=bid.amount,
-        ))
+        await self._bus.publish(
+            BazaarOfferAccepted(
+                listing_post_id=listing.post_id,
+                seller_user_id=listing.seller_user_id,
+                buyer_user_id=bid.bidder_user_id,
+                price=bid.amount,
+            )
+        )
 
     async def reject_offer(
         self,
@@ -344,16 +356,21 @@ class BazaarService:
             await self._repo.reject_offer(bid_id, reason=reason)
         except BidStateError as exc:
             raise BazaarServiceError(str(exc)) from exc
-        await self._bus.publish(BazaarOfferRejected(
-            listing_post_id=listing.post_id,
-            seller_user_id=listing.seller_user_id,
-            bidder_user_id=bid.bidder_user_id,
-            bid_id=bid_id,
-            reason=reason,
-        ))
+        await self._bus.publish(
+            BazaarOfferRejected(
+                listing_post_id=listing.post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=bid.bidder_user_id,
+                bid_id=bid_id,
+                reason=reason,
+            )
+        )
 
     async def withdraw_bid(
-        self, *, bid_id: str, actor_user_id: str,
+        self,
+        *,
+        bid_id: str,
+        actor_user_id: str,
     ) -> None:
         """Bidder withdraws their own bid while the listing is still open."""
         bid = await self._repo.get_bid(bid_id)
@@ -366,12 +383,14 @@ class BazaarService:
             await self._repo.withdraw_bid(bid_id)
         except BidStateError as exc:
             raise BazaarServiceError(str(exc)) from exc
-        await self._bus.publish(BazaarBidWithdrawn(
-            listing_post_id=listing.post_id,
-            seller_user_id=listing.seller_user_id,
-            bidder_user_id=bid.bidder_user_id,
-            bid_id=bid_id,
-        ))
+        await self._bus.publish(
+            BazaarBidWithdrawn(
+                listing_post_id=listing.post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=bid.bidder_user_id,
+                bid_id=bid_id,
+            )
+        )
 
     async def list_bids(self, post_id: str) -> list[BazaarBid]:
         return await self._repo.list_bids(post_id)
@@ -389,32 +408,33 @@ class BazaarService:
         n = 0
         for listing in listings:
             highest = await self._repo.highest_bid(listing.post_id)
-            if (
-                listing.mode.value == "auction"
-                and highest is not None
-            ):
+            if listing.mode.value == "auction" and highest is not None:
                 await self._repo.mark_sold(
                     listing.post_id,
                     winner_user_id=highest.bidder_user_id,
                     winning_price=highest.amount,
                 )
-                await self._bus.publish(BazaarOfferAccepted(
-                    listing_post_id=listing.post_id,
-                    seller_user_id=listing.seller_user_id,
-                    buyer_user_id=highest.bidder_user_id,
-                    price=highest.amount,
-                ))
+                await self._bus.publish(
+                    BazaarOfferAccepted(
+                        listing_post_id=listing.post_id,
+                        seller_user_id=listing.seller_user_id,
+                        buyer_user_id=highest.bidder_user_id,
+                        price=highest.amount,
+                    )
+                )
             else:
                 await self._repo.mark_expired(listing.post_id)
-            await self._bus.publish(BazaarListingExpired(
-                listing_post_id=listing.post_id,
-                seller_user_id=listing.seller_user_id,
-                final_status=(
-                    BazaarStatus.SOLD.value
-                    if (listing.mode.value == "auction" and highest is not None)
-                    else BazaarStatus.EXPIRED.value
-                ),
-            ))
+            await self._bus.publish(
+                BazaarListingExpired(
+                    listing_post_id=listing.post_id,
+                    seller_user_id=listing.seller_user_id,
+                    final_status=(
+                        BazaarStatus.SOLD.value
+                        if (listing.mode.value == "auction" and highest is not None)
+                        else BazaarStatus.EXPIRED.value
+                    ),
+                )
+            )
             n += 1
         return n
 
@@ -448,6 +468,7 @@ def _validate_price_fields(
 
 # ─── Scheduler ───────────────────────────────────────────────────────────
 
+
 class BazaarExpiryScheduler:
     """Background loop that closes due auctions on a fixed cadence."""
 
@@ -459,7 +480,7 @@ class BazaarExpiryScheduler:
         *,
         interval_seconds: float = 60.0,
     ) -> None:
-        self._svc      = service
+        self._svc = service
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -475,7 +496,7 @@ class BazaarExpiryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -485,11 +506,12 @@ class BazaarExpiryScheduler:
                 n = await self._svc.expire_due()
                 if n:
                     log.info("bazaar: closed %d expired listings", n)
-            except Exception as exc:                      # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.warning("bazaar expiry loop failed: %s", exc)
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval,
+                    self._stop.wait(),
+                    timeout=self._interval,
                 )
             except asyncio.TimeoutError:
                 continue

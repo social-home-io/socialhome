@@ -30,7 +30,9 @@ async def env(tmp_dir):
     e = Env()
     e.db = db
     e.user_repo = SqliteUserRepo(db)
-    e.user_svc = UserService(e.user_repo, EventBus(), own_instance_public_key=kp.public_key)
+    e.user_svc = UserService(
+        e.user_repo, EventBus(), own_instance_public_key=kp.public_key
+    )
     yield e
     await db.shutdown()
 

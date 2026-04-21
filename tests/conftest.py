@@ -214,6 +214,9 @@ async def feed_service(seeded_db, bus):
 async def space_service(seeded_db, bus):
     db, iid = seeded_db
     return SpaceService(
-        SqliteSpaceRepo(db), SqliteSpacePostRepo(db), SqliteUserRepo(db),
-        bus, own_instance_id=iid,
+        SqliteSpaceRepo(db),
+        SqliteSpacePostRepo(db),
+        SqliteUserRepo(db),
+        bus,
+        own_instance_id=iid,
     )

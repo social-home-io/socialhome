@@ -45,7 +45,9 @@ class EventBus:
         self._handlers: dict[type[DomainEvent], list[Handler]] = defaultdict(list)
 
     def subscribe(
-        self, event_type: type[E], handler: "Handler[E]",
+        self,
+        event_type: type[E],
+        handler: "Handler[E]",
     ) -> None:
         """Register ``handler`` for ``event_type``.
 
@@ -56,7 +58,9 @@ class EventBus:
         self._handlers[event_type].append(handler)
 
     def unsubscribe(
-        self, event_type: type[E], handler: "Handler[E]",
+        self,
+        event_type: type[E],
+        handler: "Handler[E]",
     ) -> None:
         """Remove ``handler`` from ``event_type``.
 
@@ -65,7 +69,7 @@ class EventBus:
         """
         try:
             self._handlers[event_type].remove(handler)
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             return
 
     async def publish(self, event: DomainEvent) -> None:

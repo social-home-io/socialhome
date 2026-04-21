@@ -44,14 +44,12 @@ class RateLimiter:
         self._windows: dict[str, list[float]] = {}
         self._monotonic = monotonic
 
-    async def check(
-        self, user_id: str, path: str, limit: int, window_s: int
-    ) -> bool:
+    async def check(self, user_id: str, path: str, limit: int, window_s: int) -> bool:
         """Return ``True`` if the request is allowed, ``False`` if not."""
         bucket = self._bucket(user_id, path)
-        now    = self._monotonic()
+        now = self._monotonic()
         cutoff = now - window_s
-        times  = [t for t in self._windows.get(bucket, ()) if t > cutoff]
+        times = [t for t in self._windows.get(bucket, ()) if t > cutoff]
         if len(times) >= limit:
             self._windows[bucket] = times
             return False
@@ -65,9 +63,9 @@ class RateLimiter:
         Useful in places where ``check()`` would require contriving a
         ``path`` — e.g. background workers. Returns the same semantics.
         """
-        now    = self._monotonic()
+        now = self._monotonic()
         cutoff = now - window_s
-        times  = [t for t in self._windows.get(key, ()) if t > cutoff]
+        times = [t for t in self._windows.get(key, ()) if t > cutoff]
         if len(times) >= limit:
             self._windows[key] = times
             return False

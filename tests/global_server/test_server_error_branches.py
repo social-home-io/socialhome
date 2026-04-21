@@ -36,7 +36,8 @@ from social_home.global_server.server import (
 
 def _config(tmp, *, instance_id="gfs-a"):
     return GfsConfig(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1",
+        port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp),
         instance_id=instance_id,
@@ -53,10 +54,14 @@ def _gen_ed25519():
         format=serialization.PrivateFormat.Raw,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    pub_hex = priv.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    ).hex()
+    pub_hex = (
+        priv.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        .hex()
+    )
     return seed, pub_hex
 
 
@@ -76,18 +81,21 @@ async def client(tmp_dir):
     app = create_gfs_app(_config(tmp_dir))
     async with TestClient(TestServer(app)) as tc:
         await app[gfs_admin_repo_key].set_config(
-            "admin_password_hash", hash_password("admin-pw"),
+            "admin_password_hash",
+            hash_password("admin-pw"),
         )
         await tc.post("/admin/login", json={"password": "admin-pw"})
         # Pre-register a single active peer for signature-aware tests.
         seed, pub_hex = _gen_ed25519()
-        await app[gfs_fed_repo_key].upsert_instance(ClientInstance(
-            instance_id="peer.home",
-            display_name="Peer",
-            public_key=pub_hex,
-            endpoint_url="http://peer.home/wh",
-            status="active",
-        ))
+        await app[gfs_fed_repo_key].upsert_instance(
+            ClientInstance(
+                instance_id="peer.home",
+                display_name="Peer",
+                public_key=pub_hex,
+                endpoint_url="http://peer.home/wh",
+                status="active",
+            )
+        )
         tc._seed = seed
         tc._pub_hex = pub_hex
         tc._app = app
@@ -98,13 +106,16 @@ async def client(tmp_dir):
 
 
 async def test_publish_happy_path_delivers_zero_when_no_subscribers(client):
-    resp = await client.post("/gfs/publish", json={
-        "space_id":      "sp-empty",
-        "event_type":    "TEST",
-        "payload":       {"x": 1},
-        "from_instance": "peer.home",
-        "signature":     "",
-    })
+    resp = await client.post(
+        "/gfs/publish",
+        json={
+            "space_id": "sp-empty",
+            "event_type": "TEST",
+            "payload": {"x": 1},
+            "from_instance": "peer.home",
+            "signature": "",
+        },
+    )
     assert resp.status == 200
     body = await resp.json()
     assert body["delivered_to"] == []
@@ -117,16 +128,24 @@ async def test_publish_missing_field_is_400(client):
 
 async def test_subscribe_then_unsubscribe(client):
     # Subscribe first — creates a pending global_space row.
-    resp = await client.post("/gfs/subscribe", json={
-        "instance_id": "peer.home", "space_id": "sp-sub",
-    })
+    resp = await client.post(
+        "/gfs/subscribe",
+        json={
+            "instance_id": "peer.home",
+            "space_id": "sp-sub",
+        },
+    )
     assert resp.status == 200
     assert (await resp.json())["status"] == "subscribed"
     # Unsubscribe action.
-    resp = await client.post("/gfs/subscribe", json={
-        "instance_id": "peer.home", "space_id": "sp-sub",
-        "action": "unsubscribe",
-    })
+    resp = await client.post(
+        "/gfs/subscribe",
+        json={
+            "instance_id": "peer.home",
+            "space_id": "sp-sub",
+            "action": "unsubscribe",
+        },
+    )
     assert (await resp.json())["status"] == "unsubscribed"
 
 
@@ -140,22 +159,29 @@ async def test_subscribe_missing_field_is_400(client):
 
 async def test_cluster_sync_invalid_json_is_400(client):
     resp = await client.post(
-        "/cluster/sync", data=b"not json",
-        headers={"Content-Type": "application/json",
-                 "X-Node-Signature": "sig",
-                 "X-Node-Id": "n"},
+        "/cluster/sync",
+        data=b"not json",
+        headers={
+            "Content-Type": "application/json",
+            "X-Node-Signature": "sig",
+            "X-Node-Id": "n",
+        },
     )
     assert resp.status == 400
 
 
 async def test_cluster_sync_missing_type_is_400(client):
-    canonical = json.dumps({"from": "n"},
-                           separators=(",", ":"), sort_keys=True).encode()
+    canonical = json.dumps(
+        {"from": "n"}, separators=(",", ":"), sort_keys=True
+    ).encode()
     resp = await client.post(
-        "/cluster/sync", data=canonical,
-        headers={"Content-Type": "application/json",
-                 "X-Node-Signature": "sig",
-                 "X-Node-Id": "n"},
+        "/cluster/sync",
+        data=canonical,
+        headers={
+            "Content-Type": "application/json",
+            "X-Node-Signature": "sig",
+            "X-Node-Id": "n",
+        },
     )
     assert resp.status == 400
 
@@ -165,20 +191,29 @@ async def test_cluster_sync_known_node_bad_sig_is_401(client):
     # signed with a DIFFERENT key so verification fails.
     from social_home.global_server.app_keys import gfs_cluster_repo_key
     from social_home.global_server.domain import ClusterNode
+
     _real_seed, real_pub = _gen_ed25519()
-    await client._app[gfs_cluster_repo_key].upsert_node(ClusterNode(
-        node_id="peer", url="http://peer", public_key=real_pub,
-        status="online",
-    ))
+    await client._app[gfs_cluster_repo_key].upsert_node(
+        ClusterNode(
+            node_id="peer",
+            url="http://peer",
+            public_key=real_pub,
+            status="online",
+        )
+    )
     wrong_seed, _ = _gen_ed25519()
     canonical, sig = _sign_canonical(
         {"type": "NODE_HEARTBEAT", "from": "peer", "ts": 0, "payload": {}},
         wrong_seed,
     )
     resp = await client.post(
-        "/cluster/sync", data=canonical,
-        headers={"Content-Type": "application/json",
-                 "X-Node-Signature": sig, "X-Node-Id": "peer"},
+        "/cluster/sync",
+        data=canonical,
+        headers={
+            "Content-Type": "application/json",
+            "X-Node-Signature": sig,
+            "X-Node-Id": "peer",
+        },
     )
     assert resp.status == 401
 
@@ -188,20 +223,28 @@ async def test_cluster_sync_unknown_node_type_dispatches_silently(client):
     # type that isn't in the match list — server logs + 200s.
     from social_home.global_server.app_keys import gfs_cluster_repo_key
     from social_home.global_server.domain import ClusterNode
+
     seed, pub = _gen_ed25519()
-    await client._app[gfs_cluster_repo_key].upsert_node(ClusterNode(
-        node_id="peer2", url="http://peer2", public_key=pub,
-        status="online",
-    ))
+    await client._app[gfs_cluster_repo_key].upsert_node(
+        ClusterNode(
+            node_id="peer2",
+            url="http://peer2",
+            public_key=pub,
+            status="online",
+        )
+    )
     canonical, sig = _sign_canonical(
-        {"type": "NODE_FLYING_SPAGHETTI",
-         "from": "peer2", "ts": 0, "payload": {}},
+        {"type": "NODE_FLYING_SPAGHETTI", "from": "peer2", "ts": 0, "payload": {}},
         seed,
     )
     resp = await client.post(
-        "/cluster/sync", data=canonical,
-        headers={"Content-Type": "application/json",
-                 "X-Node-Signature": sig, "X-Node-Id": "peer2"},
+        "/cluster/sync",
+        data=canonical,
+        headers={
+            "Content-Type": "application/json",
+            "X-Node-Signature": sig,
+            "X-Node-Id": "peer2",
+        },
     )
     assert resp.status == 200
 
@@ -216,36 +259,52 @@ async def test_appeal_missing_fields_is_422(client):
 
 async def test_appeal_invalid_json_is_400(client):
     resp = await client.post(
-        "/gfs/appeal", data=b"not-json",
+        "/gfs/appeal",
+        data=b"not-json",
         headers={"Content-Type": "application/json"},
     )
     assert resp.status == 400
 
 
 async def test_appeal_unknown_sender_is_403(client):
-    body = _sign({
-        "target_type": "space", "target_id": "sp",
-        "from_instance": "ghost.home", "message": "please",
-    }, client._seed)  # wrong key anyway but sender is unknown first
+    body = _sign(
+        {
+            "target_type": "space",
+            "target_id": "sp",
+            "from_instance": "ghost.home",
+            "message": "please",
+        },
+        client._seed,
+    )  # wrong key anyway but sender is unknown first
     resp = await client.post("/gfs/appeal", json=body)
     assert resp.status == 403
 
 
 async def test_appeal_bad_signature_is_401(client):
     other_seed, _ = _gen_ed25519()
-    body = _sign({
-        "target_type": "space", "target_id": "sp",
-        "from_instance": "peer.home", "message": "please",
-    }, other_seed)
+    body = _sign(
+        {
+            "target_type": "space",
+            "target_id": "sp",
+            "from_instance": "peer.home",
+            "message": "please",
+        },
+        other_seed,
+    )
     resp = await client.post("/gfs/appeal", json=body)
     assert resp.status == 401
 
 
 async def test_appeal_happy_path_creates_pending_row(client):
-    body = _sign({
-        "target_type": "space", "target_id": "sp",
-        "from_instance": "peer.home", "message": "please",
-    }, client._seed)
+    body = _sign(
+        {
+            "target_type": "space",
+            "target_id": "sp",
+            "from_instance": "peer.home",
+            "message": "please",
+        },
+        client._seed,
+    )
     resp = await client.post("/gfs/appeal", json=body)
     assert resp.status == 201
     data = await resp.json()
@@ -259,17 +318,23 @@ async def test_report_missing_fields_is_422(client):
 
 async def test_report_bad_signature_is_401(client):
     other_seed, _ = _gen_ed25519()
-    body = _sign({
-        "target_type": "space", "target_id": "sp", "category": "spam",
-        "reporter_instance_id": "peer.home",
-    }, other_seed)
+    body = _sign(
+        {
+            "target_type": "space",
+            "target_id": "sp",
+            "category": "spam",
+            "reporter_instance_id": "peer.home",
+        },
+        other_seed,
+    )
     resp = await client.post("/gfs/report", json=body)
     assert resp.status == 401
 
 
 async def test_report_invalid_json_is_400(client):
     resp = await client.post(
-        "/gfs/report", data=b"{bad",
+        "/gfs/report",
+        data=b"{bad",
         headers={"Content-Type": "application/json"},
     )
     assert resp.status == 400
@@ -280,28 +345,35 @@ async def test_report_invalid_json_is_400(client):
 
 async def test_rtc_ice_invalid_candidate_is_422(client):
     # candidate must be a dict; sending a string triggers 422.
-    body = _sign({
-        "instance_id": "peer.home",
-        "session_id":  "sess",
-        "candidate":   "not-a-dict",
-    }, client._seed)
+    body = _sign(
+        {
+            "instance_id": "peer.home",
+            "session_id": "sess",
+            "candidate": "not-a-dict",
+        },
+        client._seed,
+    )
     resp = await client.post("/gfs/rtc/ice", json=body)
     assert resp.status == 422
 
 
 async def test_rtc_ice_unknown_session_is_404(client):
-    body = _sign({
-        "instance_id": "peer.home",
-        "session_id":  "does-not-exist",
-        "candidate":   {"candidate": "x", "sdpMid": "0"},
-    }, client._seed)
+    body = _sign(
+        {
+            "instance_id": "peer.home",
+            "session_id": "does-not-exist",
+            "candidate": {"candidate": "x", "sdpMid": "0"},
+        },
+        client._seed,
+    )
     resp = await client.post("/gfs/rtc/ice", json=body)
     assert resp.status == 404
 
 
 async def test_rtc_authenticate_invalid_json_raises_400(client):
     resp = await client.post(
-        "/gfs/rtc/offer", data=b"{not-json",
+        "/gfs/rtc/offer",
+        data=b"{not-json",
         headers={"Content-Type": "application/json"},
     )
     assert resp.status == 400
@@ -327,9 +399,14 @@ async def test_admin_ban_client_tolerates_bad_body(client):
 async def test_admin_ban_space_tolerates_bad_body(client):
     # Seed a space first.
     from social_home.global_server.domain import GlobalSpace
-    await client._app[gfs_fed_repo_key].upsert_space(GlobalSpace(
-        space_id="sp-ban", owning_instance="peer.home", status="active",
-    ))
+
+    await client._app[gfs_fed_repo_key].upsert_space(
+        GlobalSpace(
+            space_id="sp-ban",
+            owning_instance="peer.home",
+            status="active",
+        )
+    )
     resp = await client.post(
         "/admin/api/spaces/sp-ban/ban",
         data=b"{not-json",
@@ -412,35 +489,38 @@ async def test_admin_list_audit_clamps_limit(client):
 async def test_header_image_upload_missing_file(client):
     # Multipart with no "file" field.
     from aiohttp import FormData
+
     fd = FormData()
     fd.add_field("other", "value")
     resp = await client.post(
-        "/admin/api/branding/header-image", data=fd,
+        "/admin/api/branding/header-image",
+        data=fd,
     )
     assert resp.status == 400
 
 
 async def test_header_image_upload_rejects_oversize(client):
     from aiohttp import FormData
+
     # 3 MiB > 2 MiB cap.
     big = b"\x00" * (3 * 1024 * 1024)
     fd = FormData()
-    fd.add_field("file", big, filename="big.jpg",
-                 content_type="image/jpeg")
+    fd.add_field("file", big, filename="big.jpg", content_type="image/jpeg")
     resp = await client.post(
-        "/admin/api/branding/header-image", data=fd,
+        "/admin/api/branding/header-image",
+        data=fd,
     )
     assert resp.status == 413
 
 
 async def test_header_image_upload_rejects_non_image(client):
     from aiohttp import FormData
+
     fd = FormData()
-    fd.add_field("file", b"not an image",
-                 filename="bad.txt",
-                 content_type="text/plain")
+    fd.add_field("file", b"not an image", filename="bad.txt", content_type="text/plain")
     resp = await client.post(
-        "/admin/api/branding/header-image", data=fd,
+        "/admin/api/branding/header-image",
+        data=fd,
     )
     assert resp.status == 415
 
@@ -449,7 +529,8 @@ async def test_header_image_upload_rejects_non_image(client):
 
 
 async def test_fan_out_delivers_to_real_subscriber_webhook(
-    tmp_dir, tmp_path_factory,
+    tmp_dir,
+    tmp_path_factory,
 ):
     """A real subscriber webhook receives the published event over HTTP.
 
@@ -472,31 +553,42 @@ async def test_fan_out_delivers_to_real_subscriber_webhook(
         gfs_app = create_gfs_app(_config(tmp_path_factory.mktemp("gfs-pub")))
         async with TestClient(TestServer(gfs_app)) as tc:
             # Seed the subscriber into the fed repo + subscribe to a space.
-            await gfs_app[gfs_fed_repo_key].upsert_instance(ClientInstance(
-                instance_id="sub.home",
-                display_name="Sub",
-                public_key="aa" * 32,
-                endpoint_url=sub_url,
-                status="active",
-            ))
-            await gfs_app[gfs_fed_repo_key].upsert_instance(ClientInstance(
-                instance_id="pub.home",
-                display_name="Pub",
-                public_key="bb" * 32,
-                endpoint_url="http://pub",
-                status="active",
-            ))
-            resp = await tc.post("/gfs/subscribe", json={
-                "instance_id": "sub.home", "space_id": "sp-xyz",
-            })
+            await gfs_app[gfs_fed_repo_key].upsert_instance(
+                ClientInstance(
+                    instance_id="sub.home",
+                    display_name="Sub",
+                    public_key="aa" * 32,
+                    endpoint_url=sub_url,
+                    status="active",
+                )
+            )
+            await gfs_app[gfs_fed_repo_key].upsert_instance(
+                ClientInstance(
+                    instance_id="pub.home",
+                    display_name="Pub",
+                    public_key="bb" * 32,
+                    endpoint_url="http://pub",
+                    status="active",
+                )
+            )
+            resp = await tc.post(
+                "/gfs/subscribe",
+                json={
+                    "instance_id": "sub.home",
+                    "space_id": "sp-xyz",
+                },
+            )
             assert resp.status == 200
-            resp = await tc.post("/gfs/publish", json={
-                "space_id":      "sp-xyz",
-                "event_type":    "POST_PUBLISH",
-                "payload":       {"kind": "hello"},
-                "from_instance": "pub.home",
-                "signature":     "",
-            })
+            resp = await tc.post(
+                "/gfs/publish",
+                json={
+                    "space_id": "sp-xyz",
+                    "event_type": "POST_PUBLISH",
+                    "payload": {"kind": "hello"},
+                    "from_instance": "pub.home",
+                    "signature": "",
+                },
+            )
             assert resp.status == 200
             assert (await resp.json())["delivered_to"] == ["sub.home"]
         # Wait for the webhook to capture the event.
@@ -558,7 +650,8 @@ def test_main_init_short_circuits_without_starting_server(tmp_path, monkeypatch)
     """``social-home-global-server --init <path>`` writes config + exits."""
     target = tmp_path / "from_main.toml"
     monkeypatch.setattr(
-        sys, "argv",
+        sys,
+        "argv",
         ["social-home-global-server", "--config", str(target), "--init"],
     )
     with pytest.raises(SystemExit) as exc:
@@ -571,9 +664,9 @@ def test_main_set_password_short_circuits(tmp_path, monkeypatch):
     target = tmp_path / "cli.toml"
     assert _cli_init(target) == 0
     monkeypatch.setattr(
-        sys, "argv",
-        ["social-home-global-server",
-         "--config", str(target), "--set-password"],
+        sys,
+        "argv",
+        ["social-home-global-server", "--config", str(target), "--set-password"],
     )
     monkeypatch.setattr(
         "social_home.global_server.server.getpass.getpass",
@@ -590,12 +683,16 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
     assert _cli_init(target) == 0
     # Fill the config with a password + base_url so `GfsConfig.load` passes.
     content = target.read_text()
-    target.write_text(content.replace(
-        'base_url = ""', 'base_url = "http://gfs.test"',
-    ))
+    target.write_text(
+        content.replace(
+            'base_url = ""',
+            'base_url = "http://gfs.test"',
+        )
+    )
 
     monkeypatch.setattr(
-        sys, "argv",
+        sys,
+        "argv",
         ["social-home-global-server", "--config", str(target)],
     )
     # Stub out run_app so we don't actually bind a port.
@@ -619,43 +716,55 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
 
 async def test_rtc_answer_rejects_unknown_instance(client):
     other_seed, _ = _gen_ed25519()
-    body = _sign({
-        "instance_id": "ghost.home",
-        "session_id":  "x",
-        "sdp":         "y",
-    }, other_seed)
+    body = _sign(
+        {
+            "instance_id": "ghost.home",
+            "session_id": "x",
+            "sdp": "y",
+        },
+        other_seed,
+    )
     resp = await client.post("/gfs/rtc/answer", json=body)
     assert resp.status == 403
 
 
 async def test_rtc_answer_bad_signature(client):
     other_seed, _ = _gen_ed25519()
-    body = _sign({
-        "instance_id": "peer.home",
-        "session_id":  "x",
-        "sdp":         "y",
-    }, other_seed)
+    body = _sign(
+        {
+            "instance_id": "peer.home",
+            "session_id": "x",
+            "sdp": "y",
+        },
+        other_seed,
+    )
     resp = await client.post("/gfs/rtc/answer", json=body)
     assert resp.status == 401
 
 
 async def test_rtc_ice_unknown_instance(client):
     other_seed, _ = _gen_ed25519()
-    body = _sign({
-        "instance_id": "ghost.home",
-        "session_id":  "x",
-        "candidate":   {"c": "x"},
-    }, other_seed)
+    body = _sign(
+        {
+            "instance_id": "ghost.home",
+            "session_id": "x",
+            "candidate": {"c": "x"},
+        },
+        other_seed,
+    )
     resp = await client.post("/gfs/rtc/ice", json=body)
     assert resp.status == 403
 
 
 async def test_rtc_ping_bad_signature(client):
     other_seed, _ = _gen_ed25519()
-    body = _sign({
-        "instance_id": "peer.home",
-        "transport":   "webrtc",
-    }, other_seed)
+    body = _sign(
+        {
+            "instance_id": "peer.home",
+            "transport": "webrtc",
+        },
+        other_seed,
+    )
     resp = await client.post("/gfs/rtc/ping", json=body)
     assert resp.status == 401
 

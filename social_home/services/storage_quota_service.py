@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 # ─── Errors ──────────────────────────────────────────────────────────────
 
+
 class StorageQuotaExceeded(Exception):
     """Upload would exceed the household's byte budget."""
 
@@ -43,8 +44,8 @@ class StorageQuotaExceeded(Exception):
 
 @dataclass(slots=True, frozen=True)
 class StorageUsage:
-    used_bytes:      int
-    quota_bytes:     int
+    used_bytes: int
+    quota_bytes: int
     available_bytes: int
 
     @property
@@ -56,15 +57,19 @@ class StorageUsage:
 
 # ─── Service ─────────────────────────────────────────────────────────────
 
+
 class StorageQuotaService:
     """Per-household storage usage + quota enforcement."""
 
     __slots__ = ("_repo", "_quota_bytes")
 
     def __init__(
-        self, repo: AbstractStorageStatsRepo, *, quota_bytes: int,
+        self,
+        repo: AbstractStorageStatsRepo,
+        *,
+        quota_bytes: int,
     ) -> None:
-        self._repo        = repo
+        self._repo = repo
         self._quota_bytes = quota_bytes
 
     @property
@@ -115,12 +120,13 @@ class StorageQuotaService:
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
+
 def _sum_meta_sizes(json_blobs: Iterable[str]) -> int:
     total = 0
     for blob in json_blobs:
         try:
             data = json.loads(blob)
-        except (TypeError, json.JSONDecodeError):
+        except TypeError, json.JSONDecodeError:
             continue
         size = data.get("size_bytes") if isinstance(data, dict) else 0
         if isinstance(size, int) and size > 0:

@@ -113,6 +113,7 @@ async def test_offer_with_empty_sdp_is_accepted(rtc):
 
 # ─── Integration tests — /gfs/rtc/* signalling endpoints ─────────────
 
+
 def _gen_ed25519():
     """Return (seed_bytes, public_key_hex) for a fresh Ed25519 keypair."""
     priv = ed25519.Ed25519PrivateKey.generate()
@@ -121,10 +122,14 @@ def _gen_ed25519():
         format=serialization.PrivateFormat.Raw,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    pub_hex = priv.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    ).hex()
+    pub_hex = (
+        priv.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        .hex()
+    )
     return seed, pub_hex
 
 
@@ -138,7 +143,8 @@ def _sign(body: dict, seed: bytes) -> dict:
 async def rtc_client(tmp_dir):
     """GFS app with one active registered peer wired in."""
     cfg = GfsConfig(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1",
+        port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
         instance_id="gfs-node-a",
@@ -150,13 +156,15 @@ async def rtc_client(tmp_dir):
     seed, pub_hex = _gen_ed25519()
     async with TestClient(TestServer(app)) as tc:
         fed_repo = app[gfs_fed_repo_key]
-        await fed_repo.upsert_instance(ClientInstance(
-            instance_id="peer.home",
-            display_name="Peer",
-            public_key=pub_hex,
-            endpoint_url="http://peer.home/wh",
-            status="active",
-        ))
+        await fed_repo.upsert_instance(
+            ClientInstance(
+                instance_id="peer.home",
+                display_name="Peer",
+                public_key=pub_hex,
+                endpoint_url="http://peer.home/wh",
+                status="active",
+            )
+        )
         tc._seed = seed
         tc._app = app
         yield tc
@@ -203,8 +211,7 @@ async def test_rtc_answer_attaches_sdp(rtc_client):
     resp = await rtc_client.post("/gfs/rtc/offer", json=body)
     session_id = (await resp.json())["session_id"]
     answer = _sign(
-        {"instance_id": "peer.home",
-         "session_id": session_id, "sdp": "answer-body"},
+        {"instance_id": "peer.home", "session_id": session_id, "sdp": "answer-body"},
         rtc_client._seed,
     )
     resp = await rtc_client.post("/gfs/rtc/answer", json=answer)
@@ -215,8 +222,7 @@ async def test_rtc_answer_attaches_sdp(rtc_client):
 
 async def test_rtc_answer_unknown_session_404(rtc_client):
     body = _sign(
-        {"instance_id": "peer.home",
-         "session_id": "missing", "sdp": "x"},
+        {"instance_id": "peer.home", "session_id": "missing", "sdp": "x"},
         rtc_client._seed,
     )
     resp = await rtc_client.post("/gfs/rtc/answer", json=body)
@@ -228,14 +234,17 @@ async def test_rtc_ice_relays_candidate(rtc_client):
         {"instance_id": "peer.home", "sdp": "o"},
         rtc_client._seed,
     )
-    session_id = (await (
-        await rtc_client.post("/gfs/rtc/offer", json=body)
-    ).json())["session_id"]
-    ice = _sign({
-        "instance_id": "peer.home",
-        "session_id": session_id,
-        "candidate": {"candidate": "candidate:0 1 UDP ...", "sdpMid": "0"},
-    }, rtc_client._seed)
+    session_id = (await (await rtc_client.post("/gfs/rtc/offer", json=body)).json())[
+        "session_id"
+    ]
+    ice = _sign(
+        {
+            "instance_id": "peer.home",
+            "session_id": session_id,
+            "candidate": {"candidate": "candidate:0 1 UDP ...", "sdpMid": "0"},
+        },
+        rtc_client._seed,
+    )
     resp = await rtc_client.post("/gfs/rtc/ice", json=ice)
     assert resp.status == 200
     rtc: GfsRtcSession = rtc_client._app[gfs_rtc_key]
@@ -248,15 +257,15 @@ async def test_rtc_session_poll_returns_state(rtc_client):
         {"instance_id": "peer.home", "sdp": "initiator-offer"},
         rtc_client._seed,
     )
-    session_id = (await (
-        await rtc_client.post("/gfs/rtc/offer", json=body)
-    ).json())["session_id"]
+    session_id = (await (await rtc_client.post("/gfs/rtc/offer", json=body)).json())[
+        "session_id"
+    ]
     resp = await rtc_client.get(f"/gfs/rtc/session/{session_id}")
     assert resp.status == 200
     data = await resp.json()
-    assert data["initiator_id"]   == "peer.home"
-    assert data["offer_sdp"]      == "initiator-offer"
-    assert data["answer_sdp"]     is None
+    assert data["initiator_id"] == "peer.home"
+    assert data["offer_sdp"] == "initiator-offer"
+    assert data["answer_sdp"] is None
     assert data["ice_candidates"] == []
 
 

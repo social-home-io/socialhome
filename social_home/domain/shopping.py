@@ -12,6 +12,6 @@ class ShoppingItem:
     id: str
     text: str
     completed: bool
-    created_by: str                      # user_id
+    created_by: str  # user_id
     created_at: str
     completed_at: str | None = None

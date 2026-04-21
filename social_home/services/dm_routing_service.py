@@ -59,6 +59,7 @@ DEDUP_TTL_SECONDS: int = 3600
 
 # ─── Errors ──────────────────────────────────────────────────────────────
 
+
 class DmRoutingError(Exception):
     """Base error class."""
 
@@ -73,6 +74,7 @@ class RelayBlockedError(DmRoutingError):
 
 # ─── Envelope ────────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class RelayEnvelope:
     """The outer envelope relay hops see.
@@ -82,30 +84,30 @@ class RelayEnvelope:
     """
 
     destination_instance_id: str
-    destination_user_id:     str
-    hop_count:               int
-    inner_event_type:        str
-    message_id:              str
-    sender_seq:              int
-    created_at:              str
-    sender_ephemeral_pk:     str
-    encrypted_payload:       str
-    payload_iv:              str
-    return_path:             tuple[str, ...] = ()
+    destination_user_id: str
+    hop_count: int
+    inner_event_type: str
+    message_id: str
+    sender_seq: int
+    created_at: str
+    sender_ephemeral_pk: str
+    encrypted_payload: str
+    payload_iv: str
+    return_path: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
             "destination_instance_id": self.destination_instance_id,
-            "destination_user_id":     self.destination_user_id,
-            "hop_count":               self.hop_count,
-            "inner_event_type":        self.inner_event_type,
-            "message_id":              self.message_id,
-            "sender_seq":              self.sender_seq,
-            "created_at":              self.created_at,
-            "sender_ephemeral_pk":     self.sender_ephemeral_pk,
-            "encrypted_payload":       self.encrypted_payload,
-            "payload_iv":              self.payload_iv,
-            "return_path":             list(self.return_path),
+            "destination_user_id": self.destination_user_id,
+            "hop_count": self.hop_count,
+            "inner_event_type": self.inner_event_type,
+            "message_id": self.message_id,
+            "sender_seq": self.sender_seq,
+            "created_at": self.created_at,
+            "sender_ephemeral_pk": self.sender_ephemeral_pk,
+            "encrypted_payload": self.encrypted_payload,
+            "payload_iv": self.payload_iv,
+            "return_path": list(self.return_path),
         }
 
     @classmethod
@@ -117,8 +119,9 @@ class RelayEnvelope:
             inner_event_type=str(data.get("inner_event_type", "dm_message")),
             message_id=str(data["message_id"]),
             sender_seq=int(data.get("sender_seq", 0)),
-            created_at=str(data.get("created_at") or
-                           datetime.now(timezone.utc).isoformat()),
+            created_at=str(
+                data.get("created_at") or datetime.now(timezone.utc).isoformat()
+            ),
             sender_ephemeral_pk=str(data.get("sender_ephemeral_pk", "")),
             encrypted_payload=str(data.get("encrypted_payload", "")),
             payload_iv=str(data.get("payload_iv", "")),
@@ -128,12 +131,16 @@ class RelayEnvelope:
 
 # ─── Service ─────────────────────────────────────────────────────────────
 
+
 class DmRoutingService:
     """BFS-based DM relay routing across the paired instance graph."""
 
     __slots__ = (
-        "_repo", "_fed_repo", "_federation",
-        "_own_instance_id", "_child_protection",
+        "_repo",
+        "_fed_repo",
+        "_federation",
+        "_own_instance_id",
+        "_child_protection",
     )
 
     def __init__(
@@ -145,14 +152,17 @@ class DmRoutingService:
         own_instance_id: str = "",
         child_protection_service=None,
     ) -> None:
-        self._repo       = repo
-        self._fed_repo   = federation_repo
+        self._repo = repo
+        self._fed_repo = federation_repo
         self._federation = federation_service
         self._own_instance_id = own_instance_id
         self._child_protection = child_protection_service
 
     def attach_federation(
-        self, federation_service, *, own_instance_id: str,
+        self,
+        federation_service,
+        *,
+        own_instance_id: str,
     ) -> None:
         self._federation = federation_service
         self._own_instance_id = own_instance_id
@@ -204,7 +214,8 @@ class DmRoutingService:
     # ─── BFS ──────────────────────────────────────────────────────────────
 
     async def find_relay_paths(
-        self, target_instance_id: str,
+        self,
+        target_instance_id: str,
     ) -> list[list[str]]:
         """Return every valid relay path to ``target`` within MAX_HOPS.
 
@@ -232,7 +243,7 @@ class DmRoutingService:
                     continue
                 new_path = path + [peer]
                 if peer == target_instance_id:
-                    paths.append(new_path[1:])     # drop leading own_id
+                    paths.append(new_path[1:])  # drop leading own_id
                     continue
                 queue.append(new_path)
 
@@ -318,7 +329,9 @@ class DmRoutingService:
                 )
 
         path = await self.select_conversation_path(
-            conversation_id, sender_user_id, target_instance_id,
+            conversation_id,
+            sender_user_id,
+            target_instance_id,
         )
         next_hop = path[0]
         seq = await self._next_sender_seq(conversation_id, sender_user_id)
@@ -350,7 +363,8 @@ class DmRoutingService:
             log.warning(
                 "DM relay skipped: federation service not attached "
                 "(msg_id=%s, next_hop=%s)",
-                envelope.message_id, next_hop,
+                envelope.message_id,
+                next_hop,
             )
         return envelope
 
@@ -379,7 +393,8 @@ class DmRoutingService:
         if envelope.hop_count >= MAX_HOPS:
             log.warning(
                 "DM_RELAY dropped: %d hops exceeded for msg=%s",
-                envelope.hop_count, envelope.message_id,
+                envelope.hop_count,
+                envelope.message_id,
             )
             return "dropped:too_many_hops"
 
@@ -392,7 +407,8 @@ class DmRoutingService:
         if path is None:
             log.debug(
                 "DM_RELAY no route from %s to %s",
-                self._own_instance_id, envelope.destination_instance_id,
+                self._own_instance_id,
+                envelope.destination_instance_id,
             )
             return "dropped:no_route"
 
@@ -415,7 +431,8 @@ class DmRoutingService:
             log.warning(
                 "DM relay forward skipped: federation not attached "
                 "(msg_id=%s, next_hop=%s)",
-                envelope.message_id, next_hop,
+                envelope.message_id,
+                next_hop,
             )
         return "forwarded"
 
@@ -437,7 +454,9 @@ class DmRoutingService:
     # ─── Sender sequence ─────────────────────────────────────────────────
 
     async def _next_sender_seq(
-        self, conversation_id: str, sender_user_id: str,
+        self,
+        conversation_id: str,
+        sender_user_id: str,
     ) -> int:
         """Atomically increment + return the next sender_seq."""
         return await self._repo.next_sender_seq(
@@ -447,6 +466,7 @@ class DmRoutingService:
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
+
 
 def _hash_mod(key: str, n: int) -> int:
     """Deterministic non-cryptographic hash mod *n*.

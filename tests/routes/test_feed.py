@@ -24,15 +24,20 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
         db = app[_db_key]
-        _row = await db.fetchone("SELECT identity_public_key FROM instance_identity WHERE id='self'")
+        _row = await db.fetchone(
+            "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+        )
         _pk = bytes.fromhex(_row["identity_public_key"])
+
         class _KP:
             public_key = _pk
+
         kp = _KP()
         uid = derive_user_id(kp.public_key, "pascal")
         await db.enqueue(
@@ -248,6 +253,7 @@ async def test_add_reaction_empty_emoji_422(client):
 
 # ─── Saved posts (§10) ────────────────────────────────────────────────────
 
+
 async def test_save_and_list_saved_posts(client):
     r = await client.post(
         "/api/feed/posts",
@@ -263,7 +269,8 @@ async def test_save_and_list_saved_posts(client):
     assert (await r.json())["saved"] is True
 
     r = await client.get(
-        "/api/feed/saved", headers=_auth(client._admin_token),
+        "/api/feed/saved",
+        headers=_auth(client._admin_token),
     )
     assert r.status == 200
     saved = await r.json()
@@ -287,7 +294,8 @@ async def test_unsave_post_removes_bookmark(client):
     )
     assert r.status == 200
     r = await client.get(
-        "/api/feed/saved", headers=_auth(client._admin_token),
+        "/api/feed/saved",
+        headers=_auth(client._admin_token),
     )
     saved = await r.json()
     assert all(p["id"] != pid for p in saved)

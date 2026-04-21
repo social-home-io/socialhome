@@ -17,40 +17,41 @@ from enum import StrEnum
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
+
 class PostType(StrEnum):
-    TEXT       = "text"
-    IMAGE      = "image"
-    VIDEO      = "video"
+    TEXT = "text"
+    IMAGE = "image"
+    VIDEO = "video"
     TRANSCRIPT = "transcript"
-    POLL       = "poll"
-    SCHEDULE   = "schedule"
-    FILE       = "file"
-    BAZAAR     = "bazaar"
+    POLL = "poll"
+    SCHEDULE = "schedule"
+    FILE = "file"
+    BAZAAR = "bazaar"
 
 
 class CommentType(StrEnum):
-    TEXT  = "text"
+    TEXT = "text"
     IMAGE = "image"
 
 
 class Availability(StrEnum):
-    YES   = "yes"
-    NO    = "no"
+    YES = "yes"
+    NO = "no"
     MAYBE = "maybe"
 
 
 class BazaarMode(StrEnum):
-    FIXED      = "fixed"
-    OFFER      = "offer"
-    BID_FROM   = "bid_from"
+    FIXED = "fixed"
+    OFFER = "offer"
+    BID_FROM = "bid_from"
     NEGOTIABLE = "negotiable"
-    AUCTION    = "auction"
+    AUCTION = "auction"
 
 
 class BazaarStatus(StrEnum):
-    ACTIVE    = "active"
-    SOLD      = "sold"
-    EXPIRED   = "expired"
+    ACTIVE = "active"
+    SOLD = "sold"
+    EXPIRED = "expired"
     CANCELLED = "cancelled"
 
 
@@ -69,23 +70,25 @@ MAX_DISTINCT_REACTIONS_PER_POST: int = 20
 FILE_MAX_BYTES: int = 10 * 1024 * 1024
 
 #: Allowed MIME types for file attachments. Anything else is rejected.
-ALLOWED_FILE_MIME_TYPES: frozenset[str] = frozenset({
-    "application/pdf",
-    "application/vnd.oasis.opendocument.text",
-    "application/vnd.oasis.opendocument.spreadsheet",
-    "application/vnd.oasis.opendocument.presentation",
-    "text/plain",
-    "text/csv",
-})
+ALLOWED_FILE_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+        "application/vnd.oasis.opendocument.text",
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "application/vnd.oasis.opendocument.presentation",
+        "text/plain",
+        "text/csv",
+    }
+)
 
 #: Map MIME type → filename extension used when serving downloads.
 FILE_EXTENSION_MAP: dict[str, str] = {
-    "application/pdf":                                 ".pdf",
-    "application/vnd.oasis.opendocument.text":         ".odt",
-    "application/vnd.oasis.opendocument.spreadsheet":  ".ods",
+    "application/pdf": ".pdf",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
     "application/vnd.oasis.opendocument.presentation": ".odp",
-    "text/plain":                                      ".txt",
-    "text/csv":                                        ".csv",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
 }
 
 
@@ -106,12 +109,36 @@ BAZAAR_MAX_DURATION_DAYS: int = 7
 
 #: ISO 4217 currencies → number of fractional digits.
 BAZAAR_CURRENCIES: dict[str, int] = {
-    "AUD": 2, "BGN": 2, "BRL": 2, "CAD": 2, "CHF": 2,
-    "CNY": 2, "CZK": 2, "DKK": 2, "EUR": 2, "GBP": 2,
-    "HKD": 2, "HUF": 2, "IDR": 2, "ILS": 2, "INR": 2,
-    "ISK": 0, "JPY": 0, "KRW": 0, "MXN": 2, "MYR": 2,
-    "NOK": 2, "NZD": 2, "PHP": 2, "PLN": 2, "RON": 2,
-    "SEK": 2, "SGD": 2, "THB": 2, "TRY": 2, "USD": 2,
+    "AUD": 2,
+    "BGN": 2,
+    "BRL": 2,
+    "CAD": 2,
+    "CHF": 2,
+    "CNY": 2,
+    "CZK": 2,
+    "DKK": 2,
+    "EUR": 2,
+    "GBP": 2,
+    "HKD": 2,
+    "HUF": 2,
+    "IDR": 2,
+    "ILS": 2,
+    "INR": 2,
+    "ISK": 0,
+    "JPY": 0,
+    "KRW": 0,
+    "MXN": 2,
+    "MYR": 2,
+    "NOK": 2,
+    "NZD": 2,
+    "PHP": 2,
+    "PLN": 2,
+    "RON": 2,
+    "SEK": 2,
+    "SGD": 2,
+    "THB": 2,
+    "TRY": 2,
+    "USD": 2,
     "ZAR": 2,
 }
 
@@ -171,6 +198,7 @@ class BazaarBid:
 
 
 # ─── Polls ────────────────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class PollOption:
@@ -243,6 +271,7 @@ class PollData:
 
 # ─── Schedule polls (Doodle-style) ────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class ScheduleSlot:
     id: str
@@ -300,7 +329,8 @@ class SchedulePoll:
         if not any(s.id == slot_id for s in self.slots):
             raise ValueError(f"Slot {slot_id!r} not found in this schedule poll")
         filtered = tuple(
-            r for r in self.responses
+            r
+            for r in self.responses
             if not (r.user_id == user_id and r.slot_id == slot_id)
         )
         new_response = ScheduleResponse(
@@ -315,7 +345,8 @@ class SchedulePoll:
         return copy.replace(
             self,
             responses=tuple(
-                r for r in self.responses
+                r
+                for r in self.responses
                 if not (r.user_id == user_id and r.slot_id == slot_id)
             ),
         )
@@ -335,12 +366,12 @@ class SchedulePoll:
 
     def responses_for_user(self, user_id: str) -> dict[str, Availability]:
         return {
-            r.slot_id: r.availability for r in self.responses
-            if r.user_id == user_id
+            r.slot_id: r.availability for r in self.responses if r.user_id == user_id
         }
 
 
 # ─── Post + Comment ───────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class Post:
@@ -350,7 +381,7 @@ class Post:
     """
 
     id: str
-    author: str                          # user_id
+    author: str  # user_id
     type: PostType
     created_at: datetime
 
@@ -405,7 +436,7 @@ class Post:
 
 
 #: Household-scope post. Structurally identical to a space post.
-FeedPost  = Post
+FeedPost = Post
 #: Space-scope post. Structurally identical to a household post.
 SpacePost = Post
 
@@ -416,7 +447,7 @@ class Comment:
 
     id: str
     post_id: str
-    author: str                          # user_id
+    author: str  # user_id
     type: CommentType
     created_at: datetime
 

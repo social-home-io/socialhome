@@ -54,8 +54,12 @@ class DmService:
     """Conversation + message CRUD for household DMs."""
 
     __slots__ = (
-        "_convos", "_users", "_bus",
-        "_federation", "_federation_repo", "_own_instance_id",
+        "_convos",
+        "_users",
+        "_bus",
+        "_federation",
+        "_federation_repo",
+        "_own_instance_id",
     )
 
     def __init__(
@@ -69,8 +73,8 @@ class DmService:
         own_instance_id: str = "",
     ) -> None:
         self._convos = conversation_repo
-        self._users  = user_repo
-        self._bus    = bus
+        self._users = user_repo
+        self._bus = bus
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._own_instance_id = own_instance_id
@@ -98,7 +102,7 @@ class DmService:
         two participants — returns the existing conversation.
         """
         creator = await self._require_user(creator_username)
-        other   = await self._require_user(other_username)
+        other = await self._require_user(other_username)
         if creator.username == other.username:
             raise ValueError("cannot DM yourself")
 
@@ -120,11 +124,15 @@ class DmService:
         await self._convos.create(conv)
         now = datetime.now(timezone.utc).isoformat()
         await self._convos.add_member(
-            ConversationMember(conversation_id=conv.id,
-                               username=creator.username, joined_at=now))
+            ConversationMember(
+                conversation_id=conv.id, username=creator.username, joined_at=now
+            )
+        )
         await self._convos.add_member(
-            ConversationMember(conversation_id=conv.id,
-                               username=other.username, joined_at=now))
+            ConversationMember(
+                conversation_id=conv.id, username=other.username, joined_at=now
+            )
+        )
         return conv
 
     async def create_group_dm(
@@ -152,8 +160,10 @@ class DmService:
         now = datetime.now(timezone.utc).isoformat()
         for uname in sorted(all_names):
             await self._convos.add_member(
-                ConversationMember(conversation_id=conv.id,
-                                   username=uname, joined_at=now))
+                ConversationMember(
+                    conversation_id=conv.id, username=uname, joined_at=now
+                )
+            )
         return conv
 
     async def add_group_member(
@@ -174,7 +184,8 @@ class DmService:
                 conversation_id=conversation_id,
                 username=new_username,
                 joined_at=datetime.now(timezone.utc).isoformat(),
-            ))
+            )
+        )
 
     async def list_conversations(self, username: str) -> list[Conversation]:
         return await self._convos.list_for_user(username)
@@ -207,9 +218,7 @@ class DmService:
         if not content and type == "text":
             raise ValueError("message content must not be empty")
         if len(content) > MAX_DM_LENGTH:
-            raise ValueError(
-                f"message content exceeds {MAX_DM_LENGTH} chars"
-            )
+            raise ValueError(f"message content exceeds {MAX_DM_LENGTH} chars")
 
         msg = ConversationMessage(
             id=uuid.uuid4().hex,
@@ -233,28 +242,30 @@ class DmService:
             u = await self._users.get(m.username)
             if u is not None:
                 recipients.append(u.user_id)
-        await self._bus.publish(DmMessageCreated(
-            conversation_id=conversation_id,
-            message_id=msg.id,
-            sender_user_id=sender.user_id,
-            sender_display_name=sender.display_name,
-            recipient_user_ids=tuple(recipients),
-            content=content,
-        ))
+        await self._bus.publish(
+            DmMessageCreated(
+                conversation_id=conversation_id,
+                message_id=msg.id,
+                sender_user_id=sender.user_id,
+                sender_display_name=sender.display_name,
+                recipient_user_ids=tuple(recipients),
+                content=content,
+            )
+        )
         await self._fan_to_remote(
             conversation_id=conversation_id,
             event_type=FederationEventType.DM_MESSAGE,
             payload={
-                "conversation_id":     conversation_id,
-                "message_id":          msg.id,
-                "sender_user_id":      sender.user_id,
+                "conversation_id": conversation_id,
+                "message_id": msg.id,
+                "sender_user_id": sender.user_id,
                 "sender_display_name": sender.display_name,
-                "type":                type,
-                "content":             content,
-                "media_url":           media_url,
-                "reply_to_id":         reply_to_id,
-                "occurred_at":         msg.created_at.isoformat(),
-                "recipient_user_ids":  recipients,
+                "type": type,
+                "content": content,
+                "media_url": media_url,
+                "reply_to_id": reply_to_id,
+                "occurred_at": msg.created_at.isoformat(),
+                "recipient_user_ids": recipients,
             },
         )
         return msg
@@ -273,9 +284,7 @@ class DmService:
         if not new_content:
             raise ValueError("content must not be empty")
         if len(new_content) > MAX_DM_LENGTH:
-            raise ValueError(
-                f"message content exceeds {MAX_DM_LENGTH} chars"
-            )
+            raise ValueError(f"message content exceeds {MAX_DM_LENGTH} chars")
         await self._convos.edit_message(message_id, new_content)
         # Receiver upserts on message_id (save_message ON CONFLICT UPDATE),
         # so a re-send of DM_MESSAGE with updated content + edited_at is
@@ -284,16 +293,16 @@ class DmService:
             conversation_id=msg.conversation_id,
             event_type=FederationEventType.DM_MESSAGE,
             payload={
-                "conversation_id":    msg.conversation_id,
-                "message_id":         msg.id,
-                "sender_user_id":     msg.sender_user_id,
+                "conversation_id": msg.conversation_id,
+                "message_id": msg.id,
+                "sender_user_id": msg.sender_user_id,
                 "sender_display_name": editor.display_name,
-                "type":               msg.type,
-                "content":            new_content,
-                "media_url":          msg.media_url,
-                "reply_to_id":        msg.reply_to_id,
-                "occurred_at":        msg.created_at.isoformat(),
-                "edited_at":          datetime.now(timezone.utc).isoformat(),
+                "type": msg.type,
+                "content": new_content,
+                "media_url": msg.media_url,
+                "reply_to_id": msg.reply_to_id,
+                "occurred_at": msg.created_at.isoformat(),
+                "edited_at": datetime.now(timezone.utc).isoformat(),
             },
         )
 
@@ -313,7 +322,7 @@ class DmService:
             event_type=FederationEventType.DM_MESSAGE_DELETED,
             payload={
                 "conversation_id": msg.conversation_id,
-                "message_id":      msg.id,
+                "message_id": msg.id,
             },
         )
 
@@ -328,7 +337,9 @@ class DmService:
         await self._require_membership(conversation_id, reader_username)
         limit = max(1, min(int(limit), 100))
         return await self._convos.list_messages(
-            conversation_id, before=before, limit=limit,
+            conversation_id,
+            before=before,
+            limit=limit,
         )
 
     # ── Read tracking ──────────────────────────────────────────────────
@@ -377,10 +388,10 @@ class DmService:
             event_type=FederationEventType.DM_MESSAGE_REACTION,
             payload={
                 "conversation_id": msg.conversation_id,
-                "message_id":      msg.id,
-                "user_id":         user_id,
-                "emoji":           clean,
-                "action":          "add",
+                "message_id": msg.id,
+                "user_id": user_id,
+                "emoji": clean,
+                "action": "add",
             },
         )
 
@@ -399,10 +410,10 @@ class DmService:
             event_type=FederationEventType.DM_MESSAGE_REACTION,
             payload={
                 "conversation_id": msg.conversation_id,
-                "message_id":      msg.id,
-                "user_id":         user_id,
-                "emoji":           clean,
-                "action":          "remove",
+                "message_id": msg.id,
+                "user_id": user_id,
+                "emoji": clean,
+                "action": "remove",
             },
         )
 
@@ -437,7 +448,8 @@ class DmService:
         return user
 
     async def _require_conversation(
-        self, conversation_id: str,
+        self,
+        conversation_id: str,
     ) -> Conversation:
         conv = await self._convos.get(conversation_id)
         if conv is None:
@@ -445,18 +457,19 @@ class DmService:
         return conv
 
     async def _require_membership(
-        self, conversation_id: str, username: str,
+        self,
+        conversation_id: str,
+        username: str,
     ) -> ConversationMember:
         members = await self._convos.list_members(conversation_id)
         for m in members:
             if m.username == username and m.deleted_at is None:
                 return m
-        raise PermissionError(
-            f"user {username!r} is not a member of this conversation"
-        )
+        raise PermissionError(f"user {username!r} is not a member of this conversation")
 
     async def _require_message(
-        self, message_id: str,
+        self,
+        message_id: str,
     ) -> ConversationMessage:
         msg = await self._convos.get_message(message_id)
         if msg is None:
@@ -488,7 +501,7 @@ class DmService:
             remote_members = await self._convos.list_remote_members(
                 conversation_id,
             )
-        except Exception:                                # pragma: no cover
+        except Exception:  # pragma: no cover
             return
         seen: set[str] = set()
         for rm in remote_members:
@@ -498,7 +511,8 @@ class DmService:
             seen.add(inst)
             if not await self._peer_is_confirmed(inst):
                 log.debug(
-                    "dm fan-out skipped: peer %s not confirmed", inst,
+                    "dm fan-out skipped: peer %s not confirmed",
+                    inst,
                 )
                 continue
             try:
@@ -507,10 +521,12 @@ class DmService:
                     event_type=event_type,
                     payload=payload,
                 )
-            except Exception as exc:                     # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 log.debug(
                     "dm fan-out failed to %s (%s): %s",
-                    inst, event_type.value, exc,
+                    inst,
+                    event_type.value,
+                    exc,
                 )
 
     async def _peer_is_confirmed(self, instance_id: str) -> bool:
@@ -525,7 +541,7 @@ class DmService:
             return True
         try:
             instance = await self._federation_repo.get_instance(instance_id)
-        except Exception:                                # pragma: no cover
+        except Exception:  # pragma: no cover
             return False
         if instance is None:
             return False

@@ -47,7 +47,9 @@ class IdempotencyCache:
 
     __slots__ = ("_ttl", "_max", "_entries", "_index")
 
-    def __init__(self, *, ttl_seconds: float = 3600, max_entries: int = 100_000) -> None:
+    def __init__(
+        self, *, ttl_seconds: float = 3600, max_entries: int = 100_000
+    ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be > 0")
         self._ttl = ttl_seconds

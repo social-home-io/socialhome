@@ -39,6 +39,7 @@ pytestmark = pytest.mark.security
 
 # ─── Test environment ────────────────────────────────────────────────────
 
+
 class _CapturingClient:
     """aiohttp-style fake that records POST bodies instead of sending."""
 
@@ -79,8 +80,11 @@ async def fed(tmp_dir):
     kek = KeyManager.from_data_dir(tmp_dir)
 
     svc = FederationService(
-        db=db, federation_repo=fed_repo, outbox_repo=outbox,
-        key_manager=kek, bus=bus,
+        db=db,
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=kek,
+        bus=bus,
         own_instance_id=own_iid,
         own_identity_seed=own_kp.private_key,
         own_identity_pk=own_kp.public_key,
@@ -92,11 +96,14 @@ async def fed(tmp_dir):
     wrapped = kek.encrypt(session_key)
     peer = RemoteInstance(
         id=derive_instance_id(peer_kp.public_key),
-        display_name="peer", remote_identity_pk=peer_kp.public_key.hex(),
-        key_self_to_remote=wrapped, key_remote_to_self=wrapped,
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
         remote_webhook_url="https://peer.invalid/wh",
         local_webhook_id="wh-peer",
-        status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL,
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
     )
     await fed_repo.save_instance(peer)
 
@@ -108,6 +115,7 @@ async def fed(tmp_dir):
 
 # ─── DM_MESSAGE encryption ──────────────────────────────────────────────
 
+
 async def test_dm_message_envelope_has_no_plaintext_content(fed):
     svc, peer, capture = fed
     sensitive_text = "hello pascal — pin code is 4242"
@@ -116,9 +124,9 @@ async def test_dm_message_envelope_has_no_plaintext_content(fed):
         event_type=FederationEventType.DM_MESSAGE,
         payload={
             "conversation_id": "conv-1",
-            "message_id":      "msg-1",
-            "sender":          "alice",
-            "content":         sensitive_text,
+            "message_id": "msg-1",
+            "sender": "alice",
+            "content": sensitive_text,
         },
     )
     assert len(capture.bodies) == 1

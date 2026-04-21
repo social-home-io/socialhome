@@ -84,7 +84,7 @@ _UNSET_MEMBER_PROFILE = object()
 MAX_PUBLIC_SPACES = 5
 
 #: Post content caps — matches FeedService values.
-MAX_POST_LENGTH    = 10_000
+MAX_POST_LENGTH = 10_000
 MAX_COMMENT_LENGTH = 2_000
 
 
@@ -92,9 +92,18 @@ class SpaceService:
     """Orchestrates space lifecycle + member + post flows."""
 
     __slots__ = (
-        "_spaces", "_posts", "_users", "_bus", "_own_instance_id",
-        "_child_protection", "_pictures", "_covers", "_gfs",
-        "_federation_repo", "_federation", "_remote_members",
+        "_spaces",
+        "_posts",
+        "_users",
+        "_bus",
+        "_own_instance_id",
+        "_child_protection",
+        "_pictures",
+        "_covers",
+        "_gfs",
+        "_federation_repo",
+        "_federation",
+        "_remote_members",
     )
 
     def __init__(
@@ -107,9 +116,9 @@ class SpaceService:
         own_instance_id: str,
     ) -> None:
         self._spaces = space_repo
-        self._posts  = space_post_repo
-        self._users  = user_repo
-        self._bus    = bus
+        self._posts = space_post_repo
+        self._users = user_repo
+        self._bus = bus
         self._own_instance_id = own_instance_id
         self._child_protection = None
         self._pictures = None
@@ -139,7 +148,10 @@ class SpaceService:
         self._gfs = gfs_service
 
     def attach_federation(
-        self, federation_service, federation_repo, remote_member_repo,
+        self,
+        federation_service,
+        federation_repo,
+        remote_member_repo,
     ) -> None:
         """Wire §D1b cross-household-invite outbound. Optional: when
         federation isn't initialised yet (early boot) or tests don't
@@ -158,14 +170,20 @@ class SpaceService:
         )
 
     async def _on_remote_join_request_approved_bus(
-        self, event: RemoteJoinRequestApproved,
+        self,
+        event: RemoteJoinRequestApproved,
     ) -> None:
         await self.on_remote_join_request_approved(
-            event.request_id, invite_token=event.invite_token,
+            event.request_id,
+            invite_token=event.invite_token,
         )
 
     async def _auto_publish_on_type(
-        self, space_id: str, *, was_global: bool, is_global: bool,
+        self,
+        space_id: str,
+        *,
+        was_global: bool,
+        is_global: bool,
     ) -> None:
         """Fan publish/unpublish calls out to every active GFS when a
         space crosses the global boundary. Failures are logged inside
@@ -179,7 +197,11 @@ class SpaceService:
             await self._gfs.unpublish_space_from_all(space_id)
 
     async def set_cover(
-        self, space_id: str, *, actor_username: str, raw_bytes: bytes,
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        raw_bytes: bytes,
     ) -> Space:
         """Transcode the upload to WebP, persist, bump cover_hash, and
         publish :class:`SpaceConfigChanged` so federation + WS fan out.
@@ -189,28 +211,35 @@ class SpaceService:
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes, size=SPACE_COVER_MAX_DIMENSION,
+            raw_bytes,
+            size=SPACE_COVER_MAX_DIMENSION,
         )
         hash_ = compute_picture_hash(webp)
         await self._covers.set(
             space_id,
-            bytes_webp=webp, hash=hash_,
+            bytes_webp=webp,
+            hash=hash_,
             width=SPACE_COVER_MAX_DIMENSION,
             height=SPACE_COVER_MAX_DIMENSION,
         )
         await self._spaces.set_cover_hash(space_id, hash_)
         sequence = await self._spaces.increment_config_sequence(space_id)
         updated = replace(space, cover_hash=hash_)
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=SpaceConfigEventType.COVER_UPDATED.value,
-            payload={"cover_hash": hash_},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.COVER_UPDATED.value,
+                payload={"cover_hash": hash_},
+                sequence=sequence,
+            )
+        )
         return updated
 
     async def clear_cover(
-        self, space_id: str, *, actor_username: str,
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
     ) -> Space:
         if self._covers is None:
             raise RuntimeError("cover repo not attached")
@@ -220,12 +249,14 @@ class SpaceService:
         await self._spaces.set_cover_hash(space_id, None)
         sequence = await self._spaces.increment_config_sequence(space_id)
         updated = replace(space, cover_hash=None)
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=SpaceConfigEventType.COVER_UPDATED.value,
-            payload={"cover_hash": None},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.COVER_UPDATED.value,
+                payload={"cover_hash": None},
+                sequence=sequence,
+            )
+        )
         return updated
 
     # ── Space lifecycle ────────────────────────────────────────────────
@@ -283,27 +314,37 @@ class SpaceService:
             join_mode=jmode,
             description=description.strip() if description else None,
             emoji=emoji,
-            retention_days=retention_days if (retention_days is None or retention_days > 0) else None,
+            retention_days=retention_days
+            if (retention_days is None or retention_days > 0)
+            else None,
             retention_exempt_types=exempt_types,
-            lat=_round4(lat), lon=_round4(lon),
+            lat=_round4(lat),
+            lon=_round4(lon),
             radius_km=radius_km,
         )
         await self._spaces.save(space)
         # Seat the creator as owner.
-        await self._spaces.save_member(SpaceMember(
-            space_id=space.id,
-            user_id=owner.user_id,
-            role="owner",
-            joined_at=datetime.now(timezone.utc).isoformat(),
-        ))
+        await self._spaces.save_member(
+            SpaceMember(
+                space_id=space.id,
+                user_id=owner.user_id,
+                role="owner",
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
         await self._spaces.add_space_instance(space.id, self._own_instance_id)
         await self._auto_publish_on_type(
-            space.id, was_global=False, is_global=stype is SpaceType.GLOBAL,
+            space.id,
+            was_global=False,
+            is_global=stype is SpaceType.GLOBAL,
         )
         return space
 
     async def dissolve_space(
-        self, space_id: str, *, actor_username: str,
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
     ) -> None:
         """Mark a space dissolved (owner only)."""
         space = await self._require_space(space_id)
@@ -315,12 +356,14 @@ class SpaceService:
             is_global=False,
         )
         sequence = await self._spaces.increment_config_sequence(space_id)
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=SpaceConfigEventType.DISSOLVED.value,
-            payload={},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.DISSOLVED.value,
+                payload={},
+                sequence=sequence,
+            )
+        )
 
     async def update_config(
         self,
@@ -384,14 +427,19 @@ class SpaceService:
             will_be_global = stype is SpaceType.GLOBAL
         if retention_days is not None:
             # Zero or negative means "no retention limit" → None
-            new_fields["retention_days"] = retention_days if retention_days > 0 else None
+            new_fields["retention_days"] = (
+                retention_days if retention_days > 0 else None
+            )
             payload["retention_days"] = new_fields["retention_days"]
         if retention_exempt_types is not None:
             exempt = _normalise_exempt_types(retention_exempt_types)
             new_fields["retention_exempt_types"] = exempt
             payload["retention_exempt_types"] = list(exempt)
         if about_markdown is not _UNSET_MEMBER_PROFILE:
-            cleaned = (about_markdown or "").strip() or None
+            # Narrow the ``str | None | object`` sentinel to a ``str | None``
+            # for mypy — once past the sentinel check, only real values remain.
+            raw: str | None = about_markdown  # type: ignore[assignment]
+            cleaned = (raw or "").strip() or None
             if cleaned and len(cleaned) > 8000:
                 raise ValueError("about_markdown must be ≤ 8000 chars")
             new_fields["about_markdown"] = cleaned
@@ -409,14 +457,18 @@ class SpaceService:
             event_type = SpaceConfigEventType.RENAME.value
         else:
             event_type = SpaceConfigEventType.FEATURE_CHANGED.value
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=event_type,
-            payload=payload,
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=event_type,
+                payload=payload,
+                sequence=sequence,
+            )
+        )
         await self._auto_publish_on_type(
-            space_id, was_global=was_global, is_global=will_be_global,
+            space_id,
+            was_global=was_global,
+            is_global=will_be_global,
         )
         return updated
 
@@ -442,23 +494,34 @@ class SpaceService:
         await self._require_admin_or_owner(space, actor_username)
         if await self._spaces.is_banned(space_id, user_id):
             raise SpacePermissionError(
-                f"user {user_id!r} is banned from this space", banned=True,
+                f"user {user_id!r} is banned from this space",
+                banned=True,
             )
         # §CP.F1 — block underage minors when CP is wired in.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
         member = SpaceMember(
-            space_id=space_id, user_id=user_id, role=role,
+            space_id=space_id,
+            user_id=user_id,
+            role=role,
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
-        await self._bus.publish(SpaceMemberJoined(
-            space_id=space_id, user_id=user_id, role=role,
-        ))
+        await self._bus.publish(
+            SpaceMemberJoined(
+                space_id=space_id,
+                user_id=user_id,
+                role=role,
+            )
+        )
         return member
 
     async def remove_member(
-        self, space_id: str, *, actor_username: str, user_id: str,
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        user_id: str,
     ) -> None:
         """Remove a member. Admin/owner can remove anyone; a member can
         remove themselves.
@@ -474,17 +537,24 @@ class SpaceService:
         if target is None:
             return
         if target.role == "owner":
-            raise SpacePermissionError("owner cannot be removed (transfer ownership first)")
+            raise SpacePermissionError(
+                "owner cannot be removed (transfer ownership first)"
+            )
         await self._spaces.delete_member(space_id, user_id)
-        await self._bus.publish(SpaceMemberLeft(
-            space_id=space_id, user_id=user_id,
-        ))
+        await self._bus.publish(
+            SpaceMemberLeft(
+                space_id=space_id,
+                user_id=user_id,
+            )
+        )
 
     async def set_role(
         self,
         space_id: str,
         *,
-        actor_username: str, user_id: str, role: str,
+        actor_username: str,
+        user_id: str,
+        role: str,
     ) -> None:
         """Only the owner can promote/demote admins. Owner cannot be demoted."""
         space = await self._require_space(space_id)
@@ -500,13 +570,17 @@ class SpaceService:
         sequence = await self._spaces.increment_config_sequence(space_id)
         evt = (
             SpaceConfigEventType.ADMIN_GRANTED
-            if role == "admin" else SpaceConfigEventType.ADMIN_REVOKED
+            if role == "admin"
+            else SpaceConfigEventType.ADMIN_REVOKED
         )
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id, event_type=evt.value,
-            payload={"user_id": user_id, "role": role},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=evt.value,
+                payload={"user_id": user_id, "role": role},
+                sequence=sequence,
+            )
+        )
 
     # ── Per-space profile (§4.1.6) ─────────────────────────────────────
 
@@ -525,24 +599,28 @@ class SpaceService:
         if member is None:
             raise KeyError(f"user {user_id!r} is not a member")
         await self._require_self_or_space_admin(
-            space_id, member=member, actor_user_id=actor_user_id,
+            space_id,
+            member=member,
+            actor_user_id=actor_user_id,
         )
         if space_display_name is not _UNSET_MEMBER_PROFILE:
-            next_name = (
-                space_display_name.strip() if space_display_name else None
-            ) or None
+            raw: str | None = space_display_name  # type: ignore[assignment]
+            next_name = (raw.strip() if raw else None) or None
             await self._spaces.set_member_profile(
-                space_id, user_id,
+                space_id,
+                user_id,
                 space_display_name=next_name,
                 picture_hash=member.picture_hash,
             )
             member = replace(member, space_display_name=next_name)
-        await self._bus.publish(SpaceMemberProfileUpdated(
-            space_id=space_id,
-            user_id=user_id,
-            space_display_name=member.space_display_name,
-            picture_hash=member.picture_hash,
-        ))
+        await self._bus.publish(
+            SpaceMemberProfileUpdated(
+                space_id=space_id,
+                user_id=user_id,
+                space_display_name=member.space_display_name,
+                picture_hash=member.picture_hash,
+            )
+        )
         return member
 
     async def set_member_picture(
@@ -559,31 +637,39 @@ class SpaceService:
         if member is None:
             raise KeyError(f"user {user_id!r} is not a member")
         await self._require_self_or_space_admin(
-            space_id, member=member, actor_user_id=actor_user_id,
+            space_id,
+            member=member,
+            actor_user_id=actor_user_id,
         )
         webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes, size=PROFILE_PICTURE_MAX_DIMENSION,
+            raw_bytes,
+            size=PROFILE_PICTURE_MAX_DIMENSION,
         )
         hash_ = compute_picture_hash(webp)
         await self._pictures.set_member_picture(
-            space_id, user_id,
-            bytes_webp=webp, hash=hash_,
+            space_id,
+            user_id,
+            bytes_webp=webp,
+            hash=hash_,
             width=PROFILE_PICTURE_MAX_DIMENSION,
             height=PROFILE_PICTURE_MAX_DIMENSION,
         )
         await self._spaces.set_member_profile(
-            space_id, user_id,
+            space_id,
+            user_id,
             space_display_name=member.space_display_name,
             picture_hash=hash_,
         )
         updated = replace(member, picture_hash=hash_)
-        await self._bus.publish(SpaceMemberProfileUpdated(
-            space_id=space_id,
-            user_id=user_id,
-            space_display_name=updated.space_display_name,
-            picture_hash=hash_,
-            picture_webp=webp,
-        ))
+        await self._bus.publish(
+            SpaceMemberProfileUpdated(
+                space_id=space_id,
+                user_id=user_id,
+                space_display_name=updated.space_display_name,
+                picture_hash=hash_,
+                picture_webp=webp,
+            )
+        )
         return updated
 
     async def clear_member_picture(
@@ -599,21 +685,26 @@ class SpaceService:
         if member is None:
             raise KeyError(f"user {user_id!r} is not a member")
         await self._require_self_or_space_admin(
-            space_id, member=member, actor_user_id=actor_user_id,
+            space_id,
+            member=member,
+            actor_user_id=actor_user_id,
         )
         await self._pictures.clear_member_picture(space_id, user_id)
         await self._spaces.set_member_profile(
-            space_id, user_id,
+            space_id,
+            user_id,
             space_display_name=member.space_display_name,
             picture_hash=None,
         )
         updated = replace(member, picture_hash=None)
-        await self._bus.publish(SpaceMemberProfileUpdated(
-            space_id=space_id,
-            user_id=user_id,
-            space_display_name=updated.space_display_name,
-            picture_hash=None,
-        ))
+        await self._bus.publish(
+            SpaceMemberProfileUpdated(
+                space_id=space_id,
+                user_id=user_id,
+                space_display_name=updated.space_display_name,
+                picture_hash=None,
+            )
+        )
         return updated
 
     async def _require_self_or_space_admin(
@@ -635,7 +726,8 @@ class SpaceService:
         self,
         space_id: str,
         *,
-        actor_username: str, to_user_id: str,
+        actor_username: str,
+        to_user_id: str,
     ) -> None:
         space = await self._require_space(space_id)
         await self._require_owner(space, actor_username)
@@ -658,12 +750,14 @@ class SpaceService:
         )
         await self._spaces.save(updated)
         sequence = await self._spaces.increment_config_sequence(space_id)
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=SpaceConfigEventType.OWNERSHIP_TRANSFERRED.value,
-            payload={"new_owner_user_id": to_user_id},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.OWNERSHIP_TRANSFERRED.value,
+                payload={"new_owner_user_id": to_user_id},
+                sequence=sequence,
+            )
+        )
 
     async def ban(
         self,
@@ -681,15 +775,20 @@ class SpaceService:
         actor = await self._users.get(actor_username)
         assert actor is not None
         await self._spaces.ban_member(
-            space_id, user_id, banned_by=actor.user_id, reason=reason,
+            space_id,
+            user_id,
+            banned_by=actor.user_id,
+            reason=reason,
         )
         sequence = await self._spaces.increment_config_sequence(space_id)
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=SpaceConfigEventType.MEMBER_BANNED.value,
-            payload={"user_id": user_id, "reason": reason},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.MEMBER_BANNED.value,
+                payload={"user_id": user_id, "reason": reason},
+                sequence=sequence,
+            )
+        )
 
     async def unban(
         self,
@@ -702,12 +801,14 @@ class SpaceService:
         await self._require_admin_or_owner(space, actor_username)
         await self._spaces.unban_member(space_id, user_id)
         sequence = await self._spaces.increment_config_sequence(space_id)
-        await self._bus.publish(SpaceConfigChanged(
-            space_id=space_id,
-            event_type=SpaceConfigEventType.MEMBER_UNBANNED.value,
-            payload={"user_id": user_id},
-            sequence=sequence,
-        ))
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space_id,
+                event_type=SpaceConfigEventType.MEMBER_UNBANNED.value,
+                payload={"user_id": user_id},
+                sequence=sequence,
+            )
+        )
 
     # ── Invites / join requests ────────────────────────────────────────
 
@@ -724,8 +825,10 @@ class SpaceService:
         actor = await self._users.get(actor_username)
         assert actor is not None
         return await self._spaces.create_invite_token(
-            space_id, created_by=actor.user_id,
-            uses=max(1, int(uses)), expires_at=expires_at,
+            space_id,
+            created_by=actor.user_id,
+            uses=max(1, int(uses)),
+            expires_at=expires_at,
         )
 
     async def invite_remote_user(
@@ -745,8 +848,7 @@ class SpaceService:
         Returns the invite token so callers can echo it in their own
         audit log.
         """
-        if (self._federation is None
-                or self._federation_repo is None):
+        if self._federation is None or self._federation_repo is None:
             raise RuntimeError(
                 "space_service: federation not attached; "
                 "remote invites require a live FederationService",
@@ -765,12 +867,12 @@ class SpaceService:
         # Short-TTL (5 min) single-use token minted by create_invite_token;
         # reusable with the existing POST /api/spaces/join path once the
         # invitee accepts.
-        expires = (
-            datetime.now(timezone.utc) + timedelta(minutes=5)
-        ).isoformat()
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
         token = await self._spaces.create_invite_token(
-            space_id, created_by=actor.user_id,
-            uses=1, expires_at=expires,
+            space_id,
+            created_by=actor.user_id,
+            uses=1,
+            expires_at=expires,
         )
         await self._spaces.save_remote_invitation(
             space_id=space_id,
@@ -787,20 +889,21 @@ class SpaceService:
             to_instance_id=invitee_instance_id,
             event_type=FederationEventType.SPACE_PRIVATE_INVITE,
             payload={
-                "space_id":           space_id,
-                "invite_token":       token,
-                "inviter_user_id":    actor.user_id,
-                "inviter_display_name": (
-                    actor.display_name or actor.username
-                ),
+                "space_id": space_id,
+                "invite_token": token,
+                "inviter_user_id": actor.user_id,
+                "inviter_display_name": (actor.display_name or actor.username),
                 "space_display_hint": space.name,
-                "expires_at":         expires,
+                "expires_at": expires,
             },
         )
         return token
 
     async def accept_remote_invite(
-        self, *, token: str, user_id: str,
+        self,
+        *,
+        token: str,
+        user_id: str,
     ) -> None:
         """§D1b — invitee side: accept a cross-household private-space
         invite. Sends a SPACE_PRIVATE_INVITE_ACCEPT back to the host.
@@ -825,18 +928,22 @@ class SpaceService:
             to_instance_id=host_instance,
             event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
             payload={
-                "invite_token":        token,
-                "invitee_user_id":     user_id,
-                "invitee_public_key":  user_pk,
+                "invite_token": token,
+                "invitee_user_id": user_id,
+                "invitee_public_key": user_pk,
                 "invitee_display_name": display,
             },
         )
         await self._spaces.update_invitation_status(
-            invite["id"], "accepted",
+            invite["id"],
+            "accepted",
         )
 
     async def decline_remote_invite(
-        self, *, token: str, user_id: str,
+        self,
+        *,
+        token: str,
+        user_id: str,
     ) -> None:
         if self._federation is None:
             raise RuntimeError("federation not attached")
@@ -850,12 +957,13 @@ class SpaceService:
             to_instance_id=host_instance,
             event_type=FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
             payload={
-                "invite_token":     token,
-                "invitee_user_id":  user_id,
+                "invite_token": token,
+                "invitee_user_id": user_id,
             },
         )
         await self._spaces.update_invitation_status(
-            invite["id"], "declined",
+            invite["id"],
+            "declined",
         )
 
     async def remove_remote_member(
@@ -879,7 +987,10 @@ class SpaceService:
         )
 
     async def accept_invite_token(
-        self, token: str, *, user_id: str,
+        self,
+        token: str,
+        *,
+        user_id: str,
     ) -> SpaceMember:
         """Consume an invite token and enroll ``user_id`` as a member."""
         row = await self._spaces.consume_invite_token(token)
@@ -888,16 +999,23 @@ class SpaceService:
         space_id = row["space_id"]
         if await self._spaces.is_banned(space_id, user_id):
             raise SpacePermissionError(
-                "banned from this space", banned=True,
+                "banned from this space",
+                banned=True,
             )
         member = SpaceMember(
-            space_id=space_id, user_id=user_id, role="member",
+            space_id=space_id,
+            user_id=user_id,
+            role="member",
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
-        await self._bus.publish(SpaceMemberJoined(
-            space_id=space_id, user_id=user_id, role="member",
-        ))
+        await self._bus.publish(
+            SpaceMemberJoined(
+                space_id=space_id,
+                user_id=user_id,
+                role="member",
+            )
+        )
         return member
 
     async def request_join(
@@ -916,12 +1034,18 @@ class SpaceService:
         if existing is not None:
             raise ValueError("already a member")
         request_id = await self._spaces.save_join_request(
-            space_id, user_id, message=message,
+            space_id,
+            user_id,
+            message=message,
         )
-        await self._bus.publish(SpaceJoinRequested(
-            space_id=space_id, user_id=user_id,
-            request_id=request_id, message=message,
-        ))
+        await self._bus.publish(
+            SpaceJoinRequested(
+                space_id=space_id,
+                user_id=user_id,
+                request_id=request_id,
+                message=message,
+            )
+        )
         return request_id
 
     async def approve_join_request(
@@ -956,7 +1080,9 @@ class SpaceService:
         await self._require_admin_or_owner(space, actor_username)
         remote_instance = row.get("remote_applicant_instance_id")
         await self._spaces.update_join_request_status(
-            request_id, "approved", reviewed_by=actor.user_id,
+            request_id,
+            "approved",
+            reviewed_by=actor.user_id,
         )
         if remote_instance:
             # §D2 — cross-household approval. Mint an invite token and
@@ -967,27 +1093,31 @@ class SpaceService:
                     "space_service: federation not attached; "
                     "cannot approve remote join request",
                 )
-            expires = (
-                datetime.now(timezone.utc) + timedelta(minutes=5)
-            ).isoformat()
+            expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
             token = await self._spaces.create_invite_token(
-                row["space_id"], created_by=actor.user_id,
-                uses=1, expires_at=expires,
+                row["space_id"],
+                created_by=actor.user_id,
+                uses=1,
+                expires_at=expires,
             )
             await self._federation.send_event(
                 to_instance_id=remote_instance,
                 event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
                 payload={
-                    "request_id":   request_id,
-                    "space_id":     row["space_id"],
+                    "request_id": request_id,
+                    "space_id": row["space_id"],
                     "invite_token": token,
-                    "reviewed_by":  actor.user_id,
+                    "reviewed_by": actor.user_id,
                 },
             )
-            await self._bus.publish(SpaceJoinApproved(
-                space_id=row["space_id"], user_id=row["user_id"],
-                request_id=request_id, approved_by=actor.user_id,
-            ))
+            await self._bus.publish(
+                SpaceJoinApproved(
+                    space_id=row["space_id"],
+                    user_id=row["user_id"],
+                    request_id=request_id,
+                    approved_by=actor.user_id,
+                )
+            )
             return None
 
         member = SpaceMember(
@@ -997,13 +1127,21 @@ class SpaceService:
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
-        await self._bus.publish(SpaceJoinApproved(
-            space_id=row["space_id"], user_id=row["user_id"],
-            request_id=request_id, approved_by=actor.user_id,
-        ))
-        await self._bus.publish(SpaceMemberJoined(
-            space_id=row["space_id"], user_id=row["user_id"], role="member",
-        ))
+        await self._bus.publish(
+            SpaceJoinApproved(
+                space_id=row["space_id"],
+                user_id=row["user_id"],
+                request_id=request_id,
+                approved_by=actor.user_id,
+            )
+        )
+        await self._bus.publish(
+            SpaceMemberJoined(
+                space_id=row["space_id"],
+                user_id=row["user_id"],
+                role="member",
+            )
+        )
         return member
 
     async def deny_join_request(
@@ -1024,7 +1162,9 @@ class SpaceService:
         )
         r = row_to_dict(row)
         await self._spaces.update_join_request_status(
-            request_id, "denied", reviewed_by=actor.user_id,
+            request_id,
+            "denied",
+            reviewed_by=actor.user_id,
         )
         if r is not None:
             remote_instance = r.get("remote_applicant_instance_id")
@@ -1033,15 +1173,19 @@ class SpaceService:
                     to_instance_id=remote_instance,
                     event_type=FederationEventType.SPACE_JOIN_REQUEST_DENIED,
                     payload={
-                        "request_id":  request_id,
-                        "space_id":    r["space_id"],
+                        "request_id": request_id,
+                        "space_id": r["space_id"],
                         "reviewed_by": actor.user_id,
                     },
                 )
-            await self._bus.publish(SpaceJoinDenied(
-                space_id=r["space_id"], user_id=r["user_id"],
-                request_id=request_id, denied_by=actor.user_id,
-            ))
+            await self._bus.publish(
+                SpaceJoinDenied(
+                    space_id=r["space_id"],
+                    user_id=r["user_id"],
+                    request_id=request_id,
+                    denied_by=actor.user_id,
+                )
+            )
 
     async def request_join_remote(
         self,
@@ -1057,8 +1201,7 @@ class SpaceService:
         ``request_id`` so :meth:`on_remote_join_request_approved` can
         match the inbound approval back to this user.
         """
-        if (self._federation is None
-                or self._federation_repo is None):
+        if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
         peer = await self._federation_repo.get_instance(host_instance_id)
         if peer is None or peer.status is not PairingStatus.CONFIRMED:
@@ -1068,7 +1211,7 @@ class SpaceService:
         request_id = uuid.uuid4().hex
         # Persist locally so the inbound APPROVED handler can look up
         # the applicant_user_id; there's no host-side space row locally.
-        await self._spaces._db.enqueue(  # type: ignore[attr-defined]
+        await self._spaces._db.enqueue(
             """
             INSERT INTO space_join_requests(
                 id, space_id, user_id, message, expires_at,
@@ -1078,7 +1221,10 @@ class SpaceService:
             )
             """,
             (
-                request_id, space_id, applicant_user_id, message,
+                request_id,
+                space_id,
+                applicant_user_id,
+                message,
                 host_instance_id,
             ),
         )
@@ -1087,16 +1233,19 @@ class SpaceService:
             event_type=FederationEventType.SPACE_JOIN_REQUEST,
             payload={
                 "request_id": request_id,
-                "space_id":   space_id,
-                "user_id":    applicant_user_id,
-                "message":    message,
+                "space_id": space_id,
+                "user_id": applicant_user_id,
+                "message": message,
             },
             space_id=space_id,
         )
         return request_id
 
     async def on_remote_join_request_approved(
-        self, request_id: str, *, invite_token: str,
+        self,
+        request_id: str,
+        *,
+        invite_token: str,
     ) -> None:
         """Auto-consume the invite token returned with a
         :data:`SPACE_JOIN_REQUEST_APPROVED` envelope so the applicant
@@ -1114,7 +1263,7 @@ class SpaceService:
             return
         try:
             await self.accept_invite_token(invite_token, user_id=user_id)
-        except (KeyError, SpacePermissionError):
+        except KeyError, SpacePermissionError:
             # Token already consumed or user now banned.
             pass
 
@@ -1145,9 +1294,7 @@ class SpaceService:
         if member is None:
             raise SpacePermissionError("not a member of this space")
         if not space.features.allows(type):
-            raise SpacePermissionError(
-                f"space does not allow {type!r} posts"
-            )
+            raise SpacePermissionError(f"space does not allow {type!r} posts")
 
         post_type = _coerce_post_type(type)
         _validate_space_content(post_type, content, file_meta)
@@ -1174,8 +1321,10 @@ class SpaceService:
                 action="create",
                 submitted_by=author.user_id,
                 payload={
-                    "post_id": post.id, "type": post_type.value,
-                    "content": content, "media_url": media_url,
+                    "post_id": post.id,
+                    "type": post_type.value,
+                    "content": content,
+                    "media_url": media_url,
                     "file_meta": _file_meta_to_payload(file_meta),
                 },
                 current_snapshot=None,
@@ -1198,25 +1347,36 @@ class SpaceService:
         broadcasts.
         """
         await self._posts.save(space_id, post)
-        await self._bus.publish(SpacePostCreated(
-            post=post, space_id=space_id,
-        ))
+        await self._bus.publish(
+            SpacePostCreated(
+                post=post,
+                space_id=space_id,
+            )
+        )
         return post
 
     # ── Moderation queue admin API ─────────────────────────────────────
 
     async def list_pending_moderation(
-        self, space_id: str, *, actor_username: str,
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
     ) -> list[SpaceModerationItem]:
         """List pending queue items (admin-only)."""
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         return await self._spaces.list_moderation_queue(
-            space_id, status=ModerationStatus.PENDING,
+            space_id,
+            status=ModerationStatus.PENDING,
         )
 
     async def approve_moderation_item(
-        self, space_id: str, item_id: str, *, actor_username: str,
+        self,
+        space_id: str,
+        item_id: str,
+        *,
+        actor_username: str,
     ) -> Post:
         """Approve a queued post. Persists the post and marks the item
         APPROVED. Raises :class:`ModerationAlreadyDecidedError` if the
@@ -1235,18 +1395,26 @@ class SpaceService:
         post = _post_from_queue_payload(item)
         await self._persist_post(space_id, post)
         await self._spaces.update_moderation_item_status(
-            item_id, status=ModerationStatus.APPROVED,
+            item_id,
+            status=ModerationStatus.APPROVED,
             reviewed_by=actor.user_id,
         )
-        approved = replace(item, status=ModerationStatus.APPROVED,
-                           reviewed_by=actor.user_id,
-                           reviewed_at=datetime.now(timezone.utc))
+        approved = replace(
+            item,
+            status=ModerationStatus.APPROVED,
+            reviewed_by=actor.user_id,
+            reviewed_at=datetime.now(timezone.utc),
+        )
         await self._bus.publish(SpaceModerationApproved(item=approved))
         return post
 
     async def reject_moderation_item(
-        self, space_id: str, item_id: str,
-        *, actor_username: str, reason: str | None = None,
+        self,
+        space_id: str,
+        item_id: str,
+        *,
+        actor_username: str,
+        reason: str | None = None,
     ) -> None:
         """Reject a queued item; item status becomes REJECTED."""
         space = await self._require_space(space_id)
@@ -1260,14 +1428,18 @@ class SpaceService:
             )
 
         await self._spaces.update_moderation_item_status(
-            item_id, status=ModerationStatus.REJECTED,
+            item_id,
+            status=ModerationStatus.REJECTED,
             reviewed_by=actor.user_id,
             rejection_reason=reason,
         )
-        rejected = replace(item, status=ModerationStatus.REJECTED,
-                           reviewed_by=actor.user_id,
-                           reviewed_at=datetime.now(timezone.utc),
-                           rejection_reason=reason)
+        rejected = replace(
+            item,
+            status=ModerationStatus.REJECTED,
+            reviewed_by=actor.user_id,
+            reviewed_at=datetime.now(timezone.utc),
+            rejection_reason=reason,
+        )
         await self._bus.publish(SpaceModerationRejected(item=rejected))
 
     async def edit_post(
@@ -1322,9 +1494,13 @@ class SpaceService:
         if moderated_by is not None:
             refreshed = await self._posts.get(post_id)
             assert refreshed is not None  # just soft-deleted — row still exists
-            await self._bus.publish(SpacePostModerated(
-                space_id=space_id, post=refreshed[1], moderated_by=actor_user_id,
-            ))
+            await self._bus.publish(
+                SpacePostModerated(
+                    space_id=space_id,
+                    post=refreshed[1],
+                    moderated_by=actor_user_id,
+                )
+            )
 
     async def add_reaction(
         self,
@@ -1381,9 +1557,13 @@ class SpaceService:
                 raise KeyError(f"parent comment {parent_id!r} not in this post")
         comment = Comment(
             id=uuid.uuid4().hex,
-            post_id=post.id, author=author_user_id, type=ctype,
+            post_id=post.id,
+            author=author_user_id,
+            type=ctype,
             created_at=datetime.now(timezone.utc),
-            parent_id=parent_id, content=content, media_url=media_url,
+            parent_id=parent_id,
+            content=content,
+            media_url=media_url,
         )
         await self._posts.add_comment(comment)
         await self._posts.increment_comment_count(post_id)
@@ -1423,7 +1603,9 @@ class SpaceService:
         assert updated is not None
         await self._bus.publish(
             CommentUpdated(
-                post_id=updated.post_id, comment=updated, space_id=space_id,
+                post_id=updated.post_id,
+                comment=updated,
+                space_id=space_id,
             ),
         )
         return updated
@@ -1473,7 +1655,10 @@ class SpaceService:
     # ── Sidebar pins + aliases (convenience) ───────────────────────────
 
     async def pin(
-        self, user_id: str, space_id: str, position: int = 0,
+        self,
+        user_id: str,
+        space_id: str,
+        position: int = 0,
     ) -> None:
         await self._require_space(space_id)
         await self._spaces.pin_sidebar(user_id, space_id, int(position))
@@ -1482,7 +1667,11 @@ class SpaceService:
         await self._spaces.unpin_sidebar(user_id, space_id)
 
     async def set_alias(
-        self, space_id: str, *, username: str, alias: str,
+        self,
+        space_id: str,
+        *,
+        username: str,
+        alias: str,
     ) -> None:
         await self._require_space(space_id)
         await self._spaces.set_space_alias(space_id, username, alias)
@@ -1496,7 +1685,9 @@ class SpaceService:
         return space
 
     async def _require_member(
-        self, space_id: str, user_id: str,
+        self,
+        space_id: str,
+        user_id: str,
     ) -> SpaceMember:
         member = await self._spaces.get_member(space_id, user_id)
         if member is None:
@@ -1504,7 +1695,9 @@ class SpaceService:
         return member
 
     async def _require_admin_or_owner(
-        self, space: Space, actor_username: str,
+        self,
+        space: Space,
+        actor_username: str,
     ) -> SpaceMember:
         actor = await self._users.get(actor_username)
         if actor is None:
@@ -1515,7 +1708,9 @@ class SpaceService:
         return member
 
     async def _require_owner(
-        self, space: Space, actor_username: str,
+        self,
+        space: Space,
+        actor_username: str,
     ) -> SpaceMember:
         actor = await self._users.get(actor_username)
         if actor is None:
@@ -1527,6 +1722,7 @@ class SpaceService:
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
+
 
 def _coerce_space_type(value: SpaceType | str) -> SpaceType:
     if isinstance(value, SpaceType):
@@ -1565,7 +1761,9 @@ def _coerce_comment_type(value: CommentType | str) -> CommentType:
 
 
 def _validate_space_content(
-    post_type: PostType, content: str | None, file_meta: FileMeta | None,
+    post_type: PostType,
+    content: str | None,
+    file_meta: FileMeta | None,
 ) -> None:
     if post_type is PostType.FILE and file_meta is None:
         raise ValueError("file post requires file_meta")
@@ -1576,14 +1774,14 @@ def _validate_space_content(
 
 
 def _validate_text_length(
-    content: str | None, *, limit: int,
+    content: str | None,
+    *,
+    limit: int,
 ) -> None:
     if content is None:
         return
     if len(content) > limit:
-        raise ValueError(
-            f"content exceeds maximum length of {limit} characters"
-        )
+        raise ValueError(f"content exceeds maximum length of {limit} characters")
 
 
 def _round4(value: float | None) -> float | None:
@@ -1622,7 +1820,7 @@ def _post_from_queue_payload(item: SpaceModerationItem) -> Post:
                 original_name=str(raw_fm.get("original_name", "")),
                 size_bytes=int(raw_fm.get("size_bytes", 0)),
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             file_meta = None
     return Post(
         id=str(payload.get("post_id") or uuid.uuid4().hex),

@@ -13,32 +13,32 @@ from dataclasses import dataclass
 class ClientInstance:
     """A registered household instance."""
 
-    instance_id:  str
+    instance_id: str
     display_name: str
-    public_key:   str               # Ed25519 verify key (hex)
+    public_key: str  # Ed25519 verify key (hex)
     endpoint_url: str
-    status:       str = "pending"   # 'pending' | 'active' | 'banned'
-    auto_accept:  bool = False
-    connected_at: str = ""          # ISO 8601
+    status: str = "pending"  # 'pending' | 'active' | 'banned'
+    auto_accept: bool = False
+    connected_at: str = ""  # ISO 8601
 
 
 @dataclass(slots=True, frozen=True)
 class GlobalSpace:
     """A global (discoverable) space published to this GFS."""
 
-    space_id:         str
-    owning_instance:  str
-    name:             str = ""
-    description:      str | None = None
-    about_markdown:   str | None = None
-    cover_url:        str | None = None
-    min_age:          int = 0
-    target_audience:  str = "all"
-    accent_color:     str = "#6366f1"
-    status:           str = "pending"   # 'pending' | 'active' | 'banned'
+    space_id: str
+    owning_instance: str
+    name: str = ""
+    description: str | None = None
+    about_markdown: str | None = None
+    cover_url: str | None = None
+    min_age: int = 0
+    target_audience: str = "all"
+    accent_color: str = "#6366f1"
+    status: str = "pending"  # 'pending' | 'active' | 'banned'
     subscriber_count: int = 0
-    posts_per_week:   float = 0.0
-    published_at:     str = ""          # ISO 8601
+    posts_per_week: float = 0.0
+    published_at: str = ""  # ISO 8601
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,36 +53,36 @@ class GfsSubscriber:
 class GfsFraudReport:
     """A household-admin fraud report against a space or instance."""
 
-    id:                    str
-    target_type:           str          # 'space' | 'instance'
-    target_id:             str
-    category:              str
-    notes:                 str | None
-    reporter_instance_id:  str
-    reporter_user_id:      str | None
-    status:                str          # 'pending' | 'dismissed' | 'acted'
-    created_at:            int          # unix epoch
-    reviewed_by:           str | None = None
-    reviewed_at:           int | None = None
+    id: str
+    target_type: str  # 'space' | 'instance'
+    target_id: str
+    category: str
+    notes: str | None
+    reporter_instance_id: str
+    reporter_user_id: str | None
+    status: str  # 'pending' | 'dismissed' | 'acted'
+    created_at: int  # unix epoch
+    reviewed_by: str | None = None
+    reviewed_at: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class GfsAppeal:
     """A banned household's one-shot appeal message."""
 
-    id:          str
-    target_type: str            # 'space' | 'instance'
-    target_id:   str
-    message:     str
-    status:      str            # 'pending' | 'lifted' | 'dismissed'
-    created_at:  int
-    decided_at:  int | None = None
-    decided_by:  str | None = None
+    id: str
+    target_type: str  # 'space' | 'instance'
+    target_id: str
+    message: str
+    status: str  # 'pending' | 'lifted' | 'dismissed'
+    created_at: int
+    decided_at: int | None = None
+    decided_by: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class AdminSession:
-    token:      str
+    token: str
     expires_at: int
     created_at: int
 
@@ -91,12 +91,12 @@ class AdminSession:
 class ClusterNode:
     """A GFS cluster node (spec §24.10.3)."""
 
-    node_id:              str
-    url:                  str
-    public_key:           str = ""
-    status:               str = "unknown"   # 'online' | 'offline' | 'syncing' | 'unknown'
-    last_seen:            str | None = None
-    added_at:             str = ""
+    node_id: str
+    url: str
+    public_key: str = ""
+    status: str = "unknown"  # 'online' | 'offline' | 'syncing' | 'unknown'
+    last_seen: str | None = None
+    added_at: str = ""
     active_sync_sessions: int = 0
 
     @property
@@ -115,8 +115,8 @@ class RtcConnection:
     can show online/offline per peer.
     """
 
-    instance_id:  str
-    transport:    str = "webhook"
+    instance_id: str
+    transport: str = "webhook"
     connected_at: str = ""
     last_ping_at: str = ""
 
@@ -124,4 +124,4 @@ class RtcConnection:
 # Backwards-compatible aliases for the pre-spec stub names so existing
 # tests / imports keep working through the transition.
 GfsInstance = ClientInstance
-GfsSpace    = GlobalSpace
+GfsSpace = GlobalSpace

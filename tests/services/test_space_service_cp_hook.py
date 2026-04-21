@@ -54,7 +54,11 @@ async def env(tmp_dir):
     space_repo = SqliteSpaceRepo(db)
     space_post_repo = SqliteSpacePostRepo(db)
     space_svc = SpaceService(
-        space_repo, space_post_repo, user_repo, bus, own_instance_id=iid,
+        space_repo,
+        space_post_repo,
+        user_repo,
+        bus,
+        own_instance_id=iid,
     )
     cp_svc = ChildProtectionService(SqliteCpRepo(db), user_repo, bus)
     space_svc.attach_child_protection(cp_svc)
@@ -64,32 +68,45 @@ async def env(tmp_dir):
 
 # ─── §CP.F1 enforcement ──────────────────────────────────────────────────
 
+
 async def test_add_member_blocks_underage_minor(env):
     space_svc, cp_svc = env
     await cp_svc.enable_protection(
-        minor_username="lila", declared_age=12, actor_user_id="admin-id",
+        minor_username="lila",
+        declared_age=12,
+        actor_user_id="admin-id",
     )
     await cp_svc.update_space_age_gate(
-        "sp-adult", min_age=18, target_audience="adult",
+        "sp-adult",
+        min_age=18,
+        target_audience="adult",
         actor_user_id="admin-id",
     )
     with pytest.raises(SpacePermissionError, match="18"):
         await space_svc.add_member(
-            "sp-adult", actor_username="admin", user_id="lila-id",
+            "sp-adult",
+            actor_username="admin",
+            user_id="lila-id",
         )
 
 
 async def test_add_member_allows_minor_above_min_age(env):
     space_svc, cp_svc = env
     await cp_svc.enable_protection(
-        minor_username="lila", declared_age=15, actor_user_id="admin-id",
+        minor_username="lila",
+        declared_age=15,
+        actor_user_id="admin-id",
     )
     await cp_svc.update_space_age_gate(
-        "sp-adult", min_age=13, target_audience="teen",
+        "sp-adult",
+        min_age=13,
+        target_audience="teen",
         actor_user_id="admin-id",
     )
     member = await space_svc.add_member(
-        "sp-adult", actor_username="admin", user_id="lila-id",
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
     )
     assert member.user_id == "lila-id"
 
@@ -97,12 +114,16 @@ async def test_add_member_allows_minor_above_min_age(env):
 async def test_add_member_allows_unprotected_user(env):
     space_svc, cp_svc = env
     await cp_svc.update_space_age_gate(
-        "sp-adult", min_age=18, target_audience="adult",
+        "sp-adult",
+        min_age=18,
+        target_audience="adult",
         actor_user_id="admin-id",
     )
     # lila has no CP enabled → no age gate enforcement.
     member = await space_svc.add_member(
-        "sp-adult", actor_username="admin", user_id="lila-id",
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
     )
     assert member.user_id == "lila-id"
 
@@ -111,14 +132,20 @@ async def test_add_member_no_cp_attached_works_unchanged(env):
     space_svc, cp_svc = env
     space_svc.attach_child_protection(None)
     await cp_svc.enable_protection(
-        minor_username="lila", declared_age=12, actor_user_id="admin-id",
+        minor_username="lila",
+        declared_age=12,
+        actor_user_id="admin-id",
     )
     await cp_svc.update_space_age_gate(
-        "sp-adult", min_age=18, target_audience="adult",
+        "sp-adult",
+        min_age=18,
+        target_audience="adult",
         actor_user_id="admin-id",
     )
     # Detached CP → no enforcement.
     member = await space_svc.add_member(
-        "sp-adult", actor_username="admin", user_id="lila-id",
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
     )
     assert member.user_id == "lila-id"

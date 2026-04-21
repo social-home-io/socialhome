@@ -92,7 +92,7 @@ class PairingRelayQueue:
             event_type=FederationEventType.PAIRING_INTRO,
             payload={
                 "via_instance_id": pending.from_instance,
-                "message":         pending.message,
+                "message": pending.message,
             },
         )
         if not result.ok:

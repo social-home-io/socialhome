@@ -23,7 +23,8 @@ async def client(tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="standalone",
-        log_level="WARNING", db_write_batch_timeout_ms=10,
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
@@ -85,11 +86,13 @@ async def test_create_report_missing_fields_422(client):
 
 async def test_duplicate_report_409(client):
     payload = {"target_type": "post", "target_id": "p-1", "category": "spam"}
-    r = await client.post("/api/reports", json=payload,
-                          headers=_auth(client._bob_token))
+    r = await client.post(
+        "/api/reports", json=payload, headers=_auth(client._bob_token)
+    )
     assert r.status == 201
-    r2 = await client.post("/api/reports", json=payload,
-                           headers=_auth(client._bob_token))
+    r2 = await client.post(
+        "/api/reports", json=payload, headers=_auth(client._bob_token)
+    )
     assert r2.status == 409
 
 
@@ -100,7 +103,8 @@ async def test_admin_list_reports(client):
         headers=_auth(client._bob_token),
     )
     resp = await client.get(
-        "/api/admin/reports", headers=_auth(client._admin_token),
+        "/api/admin/reports",
+        headers=_auth(client._admin_token),
     )
     assert resp.status == 200
     body = await resp.json()
@@ -110,7 +114,8 @@ async def test_admin_list_reports(client):
 
 async def test_admin_list_forbidden_for_non_admin(client):
     resp = await client.get(
-        "/api/admin/reports", headers=_auth(client._bob_token),
+        "/api/admin/reports",
+        headers=_auth(client._bob_token),
     )
     assert resp.status == 403
 
@@ -127,9 +132,12 @@ async def test_admin_resolve_report(client):
         headers=_auth(client._admin_token),
     )
     assert resp.status == 200
-    listed = await (await client.get(
-        "/api/admin/reports", headers=_auth(client._admin_token),
-    )).json()
+    listed = await (
+        await client.get(
+            "/api/admin/reports",
+            headers=_auth(client._admin_token),
+        )
+    ).json()
     assert listed == []
 
 

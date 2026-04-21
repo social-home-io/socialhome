@@ -139,9 +139,7 @@ class FederationEncoder:
                 sig = self._pq_signer.sign(envelope_bytes)
                 signatures["mldsa65"] = b64url_encode(sig)
             else:
-                raise ValueError(
-                    f"sig_suite algorithm {algo!r} has no signer wired"
-                )
+                raise ValueError(f"sig_suite algorithm {algo!r} has no signer wired")
         return signatures
 
     def verify_signature(
@@ -197,7 +195,9 @@ class FederationEncoder:
                 if pq_public_key is None:
                     return False
                 if not PqSigner.verify(
-                    pq_public_key, envelope_bytes, sig_bytes,
+                    pq_public_key,
+                    envelope_bytes,
+                    sig_bytes,
                 ):
                     return False
             else:

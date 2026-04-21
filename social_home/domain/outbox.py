@@ -15,7 +15,7 @@ class OutboxEntry:
     instance_id: str
     event_type: FederationEventType
     payload_json: str
-    status: str                          # "pending" | "delivered" | "failed"
+    status: str  # "pending" | "delivered" | "failed"
     attempts: int
     next_attempt_at: str
     created_at: str

@@ -53,7 +53,9 @@ class SpaceMembershipInboundHandlers:
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_CREATED, self._on_created)
         registry.register(FederationEventType.SPACE_DISSOLVED, self._on_dissolved)
-        registry.register(FederationEventType.SPACE_INSTANCE_LEFT, self._on_instance_left)
+        registry.register(
+            FederationEventType.SPACE_INSTANCE_LEFT, self._on_instance_left
+        )
         registry.register(FederationEventType.SPACE_MEMBER_BANNED, self._on_banned)
         registry.register(FederationEventType.SPACE_MEMBER_UNBANNED, self._on_unbanned)
         registry.register(FederationEventType.SPACE_AGE_GATE_UPDATED, self._on_age_gate)
@@ -94,9 +96,12 @@ class SpaceMembershipInboundHandlers:
             emoji=p.get("emoji"),
         )
         await self._space_repo.save(space)
-        await self._bus.publish(RemoteSpaceCreated(
-            space_id=space_id, from_instance=event.from_instance,
-        ))
+        await self._bus.publish(
+            RemoteSpaceCreated(
+                space_id=space_id,
+                from_instance=event.from_instance,
+            )
+        )
 
     async def _on_dissolved(self, event: "FederationEvent") -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
@@ -124,11 +129,13 @@ class SpaceMembershipInboundHandlers:
             banned_by=str(banned_by) if banned_by else event.from_instance,
             reason=reason or None,
         )
-        await self._bus.publish(RemoteSpaceMemberBanned(
-            space_id=space_id,
-            user_id=user_id,
-            banned_by=str(banned_by) if banned_by else None,
-        ))
+        await self._bus.publish(
+            RemoteSpaceMemberBanned(
+                space_id=space_id,
+                user_id=user_id,
+                banned_by=str(banned_by) if banned_by else None,
+            )
+        )
 
     async def _on_unbanned(self, event: "FederationEvent") -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
@@ -172,26 +179,34 @@ class SpaceMembershipInboundHandlers:
         if space is None:
             log.debug(
                 "SPACE_CONFIG_CATCH_UP for unknown space %s from %s",
-                space_id, event.from_instance,
+                space_id,
+                event.from_instance,
             )
             return
         local_seq = int(space.config_sequence or 0)
         if remote_seq > local_seq:
             log.info(
-                "SPACE_CONFIG_CATCH_UP %s: we are behind peer %s "
-                "(local=%d remote=%d)",
-                space_id, event.from_instance, local_seq, remote_seq,
+                "SPACE_CONFIG_CATCH_UP %s: we are behind peer %s (local=%d remote=%d)",
+                space_id,
+                event.from_instance,
+                local_seq,
+                remote_seq,
             )
         elif remote_seq < local_seq:
             log.debug(
                 "SPACE_CONFIG_CATCH_UP %s: peer %s is behind us "
                 "(local=%d remote=%d); replaying latest config",
-                space_id, event.from_instance, local_seq, remote_seq,
+                space_id,
+                event.from_instance,
+                local_seq,
+                remote_seq,
             )
             await self._push_config_to(event.from_instance, space)
 
     async def _push_config_to(
-        self, to_instance_id: str, space: "Space",
+        self,
+        to_instance_id: str,
+        space: "Space",
     ) -> None:
         """Send ``SPACE_CONFIG_CHANGED`` to *to_instance_id* so they can
         catch their cached copy up to our sequence number."""
@@ -199,15 +214,15 @@ class SpaceMembershipInboundHandlers:
             log.debug("config catch-up requested but federation not wired")
             return
         payload = {
-            "space_id":     space.id,
-            "sequence":     space.config_sequence,
-            "event_type":   "snapshot",
-            "name":         space.name,
-            "description":  space.description,
-            "emoji":        space.emoji,
-            "join_mode":    space.join_mode.value,
-            "space_type":   space.space_type.value,
-            "features":     space.features.to_wire_dict(),
+            "space_id": space.id,
+            "sequence": space.config_sequence,
+            "event_type": "snapshot",
+            "name": space.name,
+            "description": space.description,
+            "emoji": space.emoji,
+            "join_mode": space.join_mode.value,
+            "space_type": space.space_type.value,
+            "features": space.features.to_wire_dict(),
             "retention_days": space.retention_days,
         }
         try:
@@ -216,5 +231,5 @@ class SpaceMembershipInboundHandlers:
                 event_type=FederationEventType.SPACE_CONFIG_CHANGED,
                 payload=payload,
             )
-        except Exception as exc:                        # pragma: no cover
+        except Exception as exc:  # pragma: no cover
             log.warning("SPACE_CONFIG_CATCH_UP push failed: %s", exc)

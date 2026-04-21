@@ -16,6 +16,7 @@ from social_home.services.gfs_connection_service import (
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 
+
 class _StubResp:
     __slots__ = ("status", "_body", "_text")
 
@@ -56,6 +57,7 @@ class _StubSession:
 
 # ─── Fixtures ───────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 async def env(tmp_dir):
     kp = generate_identity_keypair()
@@ -91,6 +93,7 @@ def _make_conn(
 
 # ─── Repo tests ─────────────────────────────────────────────────────────
 
+
 async def test_save_and_get(env):
     _, repo = env
     conn = _make_conn("gfs-1")
@@ -118,17 +121,23 @@ async def test_list_active_filters_status(env):
 
 # ── Service: report_fraud ──────────────────────────────────────────────
 
+
 async def test_report_fraud_signs_and_posts(env):
     _, repo = env
-    await repo.save(_make_conn("gfs-1", status="active",
-                                endpoint_url="https://gfs.test"))
+    await repo.save(
+        _make_conn("gfs-1", status="active", endpoint_url="https://gfs.test")
+    )
     session = _StubSession(status=200, body={"status": "recorded"})
     svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
     ok = await svc.report_fraud(
         "gfs-1",
-        target_type="space", target_id="s-1", category="spam",
-        notes="bad", reporter_instance_id="me.home",
-        reporter_user_id="u-1", signing_key=b"\x01" * 32,
+        target_type="space",
+        target_id="s-1",
+        category="spam",
+        notes="bad",
+        reporter_instance_id="me.home",
+        reporter_user_id="u-1",
+        signing_key=b"\x01" * 32,
     )
     assert ok is True
     assert session.calls and session.calls[0][0] == "POST"
@@ -137,16 +146,23 @@ async def test_report_fraud_signs_and_posts(env):
 
 async def test_report_fraud_returns_false_on_http_error(env):
     _, repo = env
-    await repo.save(_make_conn("gfs-2", status="active",
-                                endpoint_url="https://gfs.test"))
-    session = _StubSession(status=500, body={}, )
+    await repo.save(
+        _make_conn("gfs-2", status="active", endpoint_url="https://gfs.test")
+    )
+    session = _StubSession(
+        status=500,
+        body={},
+    )
     svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
     ok = await svc.report_fraud(
         "gfs-2",
-        target_type="instance", target_id="peer.home",
-        category="spam", notes=None,
+        target_type="instance",
+        target_id="peer.home",
+        category="spam",
+        notes=None,
         reporter_instance_id="me.home",
-        reporter_user_id=None, signing_key=b"\x02" * 32,
+        reporter_user_id=None,
+        signing_key=b"\x02" * 32,
     )
     assert ok is False
 
@@ -157,9 +173,12 @@ async def test_report_fraud_returns_false_for_unknown_gfs(env):
     svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
     ok = await svc.report_fraud(
         "nope",
-        target_type="space", target_id="s-1",
-        category="spam", notes=None,
-        reporter_instance_id="me.home", reporter_user_id=None,
+        target_type="space",
+        target_id="s-1",
+        category="spam",
+        notes=None,
+        reporter_instance_id="me.home",
+        reporter_user_id=None,
         signing_key=b"\x03" * 32,
     )
     assert ok is False
@@ -264,17 +283,20 @@ async def test_count_published_spaces(env):
 
 # ─── Service tests ──────────────────────────────────────────────────────
 
+
 async def test_pair_success(env):
     _, repo = env
     session = _StubSession(
         body={"gfs_instance_id": "remote-gfs-id", "display_name": "Test GFS"},
     )
     svc = GfsConnectionService(repo, http_client=session)
-    conn = await svc.pair({
-        "gfs_url": "https://gfs.example.com",
-        "token": "tok-123",
-        "public_key": "pk-hex",
-    })
+    conn = await svc.pair(
+        {
+            "gfs_url": "https://gfs.example.com",
+            "token": "tok-123",
+            "public_key": "pk-hex",
+        }
+    )
     assert conn.status == "active"
     assert conn.gfs_instance_id == "remote-gfs-id"
     assert conn.display_name == "Test GFS"
@@ -298,11 +320,13 @@ async def test_pair_gfs_rejects(env):
     session = _StubSession(status=403, body={})
     svc = GfsConnectionService(repo, http_client=session)
     with pytest.raises(GfsConnectionError, match="HTTP 403"):
-        await svc.pair({
-            "gfs_url": "https://gfs.example.com",
-            "token": "tok",
-            "public_key": "pk",
-        })
+        await svc.pair(
+            {
+                "gfs_url": "https://gfs.example.com",
+                "token": "tok",
+                "public_key": "pk",
+            }
+        )
 
 
 async def test_pair_no_instance_id_in_response(env):
@@ -310,11 +334,13 @@ async def test_pair_no_instance_id_in_response(env):
     session = _StubSession(body={"no_id": True})
     svc = GfsConnectionService(repo, http_client=session)
     with pytest.raises(GfsConnectionError, match="gfs_instance_id"):
-        await svc.pair({
-            "gfs_url": "https://gfs.example.com",
-            "token": "tok",
-            "public_key": "pk",
-        })
+        await svc.pair(
+            {
+                "gfs_url": "https://gfs.example.com",
+                "token": "tok",
+                "public_key": "pk",
+            }
+        )
 
 
 async def test_disconnect_success(env):

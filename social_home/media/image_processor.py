@@ -26,11 +26,11 @@ log = logging.getLogger(__name__)
 
 # MIME type → tuple of (offset, magic_bytes)
 MAGIC_BYTES: dict[str, tuple[int, bytes]] = {
-    "image/jpeg":  (0, b"\xff\xd8\xff"),
-    "image/png":   (0, b"\x89PNG\r\n\x1a\n"),
-    "image/gif":   (0, b"GIF8"),
-    "image/webp":  (8, b"WEBP"),
-    "image/heic":  (4, b"ftyp"),
+    "image/jpeg": (0, b"\xff\xd8\xff"),
+    "image/png": (0, b"\x89PNG\r\n\x1a\n"),
+    "image/gif": (0, b"GIF8"),
+    "image/webp": (8, b"WEBP"),
+    "image/heic": (4, b"ftyp"),
 }
 
 
@@ -52,7 +52,9 @@ class ImageProcessor:
     # ── Public API ────────────────────────────────────────────────────────
 
     async def process(
-        self, data: bytes, filename: str,
+        self,
+        data: bytes,
+        filename: str,
     ) -> tuple[bytes, str]:
         """Validate, orient, resize, and convert *data* to WebP.
 
@@ -110,7 +112,9 @@ class ImageProcessor:
         return webp_bytes, new_filename
 
     async def generate_thumbnail(
-        self, data: bytes, size: int = THUMBNAIL_PX,
+        self,
+        data: bytes,
+        size: int = THUMBNAIL_PX,
     ) -> bytes:
         """Return a square-bounded WebP thumbnail of *data*.
 

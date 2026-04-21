@@ -14,6 +14,7 @@ from social_home.services.calendar_import_service import (
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
+
 class _ScriptedAdapter:
     """Adapter whose ``generate_ai_data`` returns a pre-set reply."""
 
@@ -100,6 +101,7 @@ Hope that helps!
 
 # ─── import_ics ──────────────────────────────────────────────────────────
 
+
 async def test_import_ics_single_vevent_parses_summary_and_times():
     svc = CalendarImportService(_AdapterWithoutAi())
     events = await svc.import_ics(ics_bytes=_ICS_SINGLE)
@@ -148,6 +150,7 @@ async def test_import_ics_no_vevent_raises_parse_error():
 
 
 # ─── import_from_image ───────────────────────────────────────────────────
+
 
 async def test_import_from_image_happy_path():
     adapter = _ScriptedAdapter(_ICS_SINGLE.decode())
@@ -204,7 +207,8 @@ async def test_import_from_image_empty_bytes_raises():
 
 async def test_import_from_image_oversize_raises():
     svc = CalendarImportService(
-        _ScriptedAdapter(_ICS_SINGLE.decode()), max_image_bytes=10,
+        _ScriptedAdapter(_ICS_SINGLE.decode()),
+        max_image_bytes=10,
     )
     with pytest.raises(AICalendarImportError):
         await svc.import_from_image(image_bytes=b"x" * 100)
@@ -212,11 +216,13 @@ async def test_import_from_image_oversize_raises():
 
 # ─── import_from_prompt ──────────────────────────────────────────────────
 
+
 async def test_import_from_prompt_happy_path_passes_text_through():
     adapter = _ScriptedAdapter(_ICS_SINGLE.decode())
     svc = CalendarImportService(adapter)
     events = await svc.import_from_prompt(
-        prompt="school concert thursday 6pm", locale="de",
+        prompt="school concert thursday 6pm",
+        locale="de",
     )
     assert events[0].summary == "School concert"
     assert "school concert thursday 6pm" in adapter.received["instructions"]

@@ -12,17 +12,17 @@ from .base import BaseView
 
 def _task_dict(task) -> dict:
     return {
-        "id":          task.id,
-        "list_id":     task.list_id,
-        "title":       task.title,
-        "status":      task.status.value,
-        "position":    task.position,
-        "created_by":  task.created_by,
+        "id": task.id,
+        "list_id": task.list_id,
+        "title": task.title,
+        "status": task.status.value,
+        "position": task.position,
+        "created_by": task.created_by,
         "description": task.description,
-        "due_date":    task.due_date.isoformat() if task.due_date else None,
-        "assignees":   list(task.assignees),
-        "created_at":  task.created_at.isoformat() if task.created_at else None,
-        "updated_at":  task.updated_at.isoformat() if task.updated_at else None,
+        "due_date": task.due_date.isoformat() if task.due_date else None,
+        "assignees": list(task.assignees),
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
     }
 
 
@@ -36,10 +36,12 @@ class TaskListCollectionView(BaseView):
         self.user  # auth check
         svc = self.svc(task_service_key)
         lists = await svc.list_lists()
-        return web.json_response([
-            {"id": lst.id, "name": lst.name, "created_by": lst.created_by}
-            for lst in lists
-        ])
+        return web.json_response(
+            [
+                {"id": lst.id, "name": lst.name, "created_by": lst.created_by}
+                for lst in lists
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -50,7 +52,11 @@ class TaskListCollectionView(BaseView):
             created_by=ctx.user_id,
         )
         return web.json_response(
-            {"id": task_list.id, "name": task_list.name, "created_by": task_list.created_by},
+            {
+                "id": task_list.id,
+                "name": task_list.name,
+                "created_by": task_list.created_by,
+            },
             status=201,
         )
 
@@ -64,8 +70,11 @@ class TaskListDetailView(BaseView):
         svc = self.svc(task_service_key)
         task_list = await svc.get_list(list_id)
         return web.json_response(
-            {"id": task_list.id, "name": task_list.name,
-             "created_by": task_list.created_by},
+            {
+                "id": task_list.id,
+                "name": task_list.name,
+                "created_by": task_list.created_by,
+            },
         )
 
     async def patch(self) -> web.Response:
@@ -76,8 +85,11 @@ class TaskListDetailView(BaseView):
         name = str(body.get("name") or "")
         task_list = await svc.rename_list(list_id, name=name)
         return web.json_response(
-            {"id": task_list.id, "name": task_list.name,
-             "created_by": task_list.created_by},
+            {
+                "id": task_list.id,
+                "name": task_list.name,
+                "created_by": task_list.created_by,
+            },
         )
 
     async def delete(self) -> web.Response:
@@ -104,7 +116,9 @@ class TaskListTasksView(BaseView):
             offset = int(q.get("offset", "0"))
         except ValueError:
             return error_response(
-                422, "UNPROCESSABLE", "limit/offset must be integers.",
+                422,
+                "UNPROCESSABLE",
+                "limit/offset must be integers.",
             )
         svc = self.svc(task_service_key)
         tasks = await svc.list_tasks(
@@ -145,18 +159,24 @@ class TaskListReorderView(BaseView):
         ordered = body.get("order") or body.get("ordered_ids") or []
         if not isinstance(ordered, list):
             return error_response(
-                422, "UNPROCESSABLE", "'order' must be an array of task ids.",
+                422,
+                "UNPROCESSABLE",
+                "'order' must be an array of task ids.",
             )
         svc = self.svc(task_service_key)
         try:
             updated = await svc.reorder_tasks(
-                list_id, ordered_ids=[str(x) for x in ordered],
+                list_id,
+                ordered_ids=[str(x) for x in ordered],
             )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Task list not found.")
-        return web.json_response({
-            "ok": True, "count": len(updated),
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "count": len(updated),
+            }
+        )
 
 
 class TaskDetailView(BaseView):
@@ -197,16 +217,18 @@ class TaskCommentCollectionView(BaseView):
         self.user  # auth gate
         svc = self.svc(task_service_key)
         comments = await svc.list_comments(self.match("id"))
-        return web.json_response([
-            {
-                "id":        c.id,
-                "task_id":   c.task_id,
-                "author":    c.author,
-                "content":   c.content,
-                "created_at": c.created_at.isoformat() if c.created_at else None,
-            }
-            for c in comments
-        ])
+        return web.json_response(
+            [
+                {
+                    "id": c.id,
+                    "task_id": c.task_id,
+                    "author": c.author,
+                    "content": c.content,
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+                for c in comments
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -217,13 +239,16 @@ class TaskCommentCollectionView(BaseView):
             author_user_id=ctx.user_id,
             content=str(body.get("content") or ""),
         )
-        return web.json_response({
-            "id":         comment.id,
-            "task_id":    comment.task_id,
-            "author":     comment.author,
-            "content":    comment.content,
-            "created_at": comment.created_at.isoformat(),
-        }, status=201)
+        return web.json_response(
+            {
+                "id": comment.id,
+                "task_id": comment.task_id,
+                "author": comment.author,
+                "content": comment.content,
+                "created_at": comment.created_at.isoformat(),
+            },
+            status=201,
+        )
 
 
 class TaskCommentDetailView(BaseView):
@@ -233,7 +258,8 @@ class TaskCommentDetailView(BaseView):
         ctx = self.user
         svc = self.svc(task_service_key)
         await svc.delete_comment(
-            self.match("comment_id"), actor_user_id=ctx.user_id,
+            self.match("comment_id"),
+            actor_user_id=ctx.user_id,
         )
         return web.json_response({"ok": True})
 
@@ -249,19 +275,21 @@ class TaskAttachmentCollectionView(BaseView):
         self.user
         svc = self.svc(task_service_key)
         atts = await svc.list_attachments(self.match("id"))
-        return web.json_response([
-            {
-                "id":         a.id,
-                "task_id":    a.task_id,
-                "uploaded_by": a.uploaded_by,
-                "url":        a.url,
-                "filename":   a.filename,
-                "mime":       a.mime,
-                "size_bytes": a.size_bytes,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
-            }
-            for a in atts
-        ])
+        return web.json_response(
+            [
+                {
+                    "id": a.id,
+                    "task_id": a.task_id,
+                    "uploaded_by": a.uploaded_by,
+                    "url": a.url,
+                    "filename": a.filename,
+                    "mime": a.mime,
+                    "size_bytes": a.size_bytes,
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in atts
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -275,16 +303,19 @@ class TaskAttachmentCollectionView(BaseView):
             mime=str(body.get("mime") or "application/octet-stream"),
             size_bytes=int(body.get("size_bytes") or 0),
         )
-        return web.json_response({
-            "id":         attachment.id,
-            "task_id":    attachment.task_id,
-            "uploaded_by": attachment.uploaded_by,
-            "url":        attachment.url,
-            "filename":   attachment.filename,
-            "mime":       attachment.mime,
-            "size_bytes": attachment.size_bytes,
-            "created_at": attachment.created_at.isoformat(),
-        }, status=201)
+        return web.json_response(
+            {
+                "id": attachment.id,
+                "task_id": attachment.task_id,
+                "uploaded_by": attachment.uploaded_by,
+                "url": attachment.url,
+                "filename": attachment.filename,
+                "mime": attachment.mime,
+                "size_bytes": attachment.size_bytes,
+                "created_at": attachment.created_at.isoformat(),
+            },
+            status=201,
+        )
 
 
 class TaskAttachmentDetailView(BaseView):
@@ -318,10 +349,12 @@ class SpaceTaskListCollectionView(_SpaceTasksBase):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
         lists = await svc.list_lists(space_id)
-        return web.json_response([
-            {"id": lst.id, "name": lst.name, "created_by": lst.created_by}
-            for lst in lists
-        ])
+        return web.json_response(
+            [
+                {"id": lst.id, "name": lst.name, "created_by": lst.created_by}
+                for lst in lists
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -352,7 +385,8 @@ class SpaceTaskListDetailView(_SpaceTasksBase):
         body = await self.body()
         svc = self.svc(K.space_task_service_key)
         lst = await svc.rename_list(
-            self.match("lid"), name=str(body.get("name") or ""),
+            self.match("lid"),
+            name=str(body.get("name") or ""),
         )
         return web.json_response(
             {"id": lst.id, "name": lst.name, "created_by": lst.created_by},

@@ -70,6 +70,7 @@ def _comment(comment_id: str, post_id: str, author: str = "uid-alice") -> Commen
 
 # ── Posts ─────────────────────────────────────────────────────────────────
 
+
 async def test_save_and_get_post(env):
     """save persists a space post; get retrieves (space_id, post)."""
     post = _post("sp-p1")
@@ -126,6 +127,7 @@ async def test_edit_post(env):
 
 # ── Reactions ─────────────────────────────────────────────────────────────
 
+
 async def test_add_reaction(env):
     """add_reaction adds a user's reaction and returns updated post."""
     post = _post("sp-react-1")
@@ -158,6 +160,7 @@ async def test_add_reaction_concurrent(env):
 
 
 # ── Comments ──────────────────────────────────────────────────────────────
+
 
 async def test_add_and_list_comments(env):
     """add_comment persists a comment; list_comments retrieves it."""

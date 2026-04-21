@@ -20,10 +20,12 @@ from social_home.infrastructure.event_bus import EventBus
 class _FakeCrypto:
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
         import base64
+
         return 0, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
     async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
         import base64
+
         return base64.urlsafe_b64decode(ciphertext)
 
 
@@ -55,7 +57,9 @@ class _FakeRepos:
         self.members.append(member)
         return member
 
-    async def ban_member(self, *, space_id, user_id, banned_by, identity_pk=None, reason=None):
+    async def ban_member(
+        self, *, space_id, user_id, banned_by, identity_pk=None, reason=None
+    ):
         self.bans.append((space_id, user_id, banned_by, reason))
 
     # space_post_repo
@@ -64,7 +68,9 @@ class _FakeRepos:
         if len(args) == 2:
             self.posts.append(args)
         else:
-            self.pages.append(args[0]) if isinstance(args[0], type(None)) is False and hasattr(args[0], "title") else self.stickies.append(args[0])
+            self.pages.append(args[0]) if isinstance(
+                args[0], type(None)
+            ) is False and hasattr(args[0], "title") else self.stickies.append(args[0])
         return args[-1]
 
     async def add_comment(self, comment):
@@ -157,7 +163,9 @@ class _SpaceRepoStub:
         self._c.members.append(member)
         return member
 
-    async def ban_member(self, *, space_id, user_id, banned_by, identity_pk=None, reason=None):
+    async def ban_member(
+        self, *, space_id, user_id, banned_by, identity_pk=None, reason=None
+    ):
         self._c.bans.append((space_id, user_id, banned_by, reason))
 
 
@@ -211,16 +219,18 @@ async def _send(r, kp, resource, records, *, space_id="sp-1", sync_id="sync-1"):
     crypto = _FakeCrypto()
     plaintext = orjson.dumps({"records": records})
     _, ct = await crypto.encrypt_chunk(
-        space_id=space_id, sync_id=sync_id, plaintext=plaintext,
+        space_id=space_id,
+        sync_id=sync_id,
+        plaintext=plaintext,
     )
     envelope = {
-        "sync_id":           sync_id,
-        "resource":          resource,
-        "space_id":          space_id,
-        "epoch":             0,
-        "seq_start":         0,
-        "seq_end":           len(records),
-        "is_last":           False,
+        "sync_id": sync_id,
+        "resource": resource,
+        "space_id": space_id,
+        "epoch": 0,
+        "seq_start": 0,
+        "seq_end": len(records),
+        "is_last": False,
         "encrypted_payload": ct,
     }
     enc = FederationEncoder(kp.private_key)
@@ -228,27 +238,41 @@ async def _send(r, kp, resource, records, *, space_id="sp-1", sync_id="sync-1"):
         {k: v for k, v in envelope.items() if k != "signatures"},
     )
     envelope["signatures"] = enc.sign_envelope_all(
-        bytes_to_sign, suite="ed25519",
+        bytes_to_sign,
+        suite="ed25519",
     )
     await r.on_chunk(serialise_chunk(envelope), from_instance="peer-a")
 
 
 async def test_bans(setup):
     r, c, kp = setup
-    await _send(r, kp, "bans", [
-        {"user_id": "u-x", "banned_by": "admin-a", "reason": "spam"},
-    ])
+    await _send(
+        r,
+        kp,
+        "bans",
+        [
+            {"user_id": "u-x", "banned_by": "admin-a", "reason": "spam"},
+        ],
+    )
     assert c.bans == [("sp-1", "u-x", "admin-a", "spam")]
 
 
 async def test_posts(setup):
     r, c, kp = setup
-    await _send(r, kp, "posts", [
-        {
-            "id": "p-1", "author": "u-1", "type": "text",
-            "content": "hi", "created_at": "2026-04-18T00:00:00+00:00",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-1",
+                "author": "u-1",
+                "type": "text",
+                "content": "hi",
+                "created_at": "2026-04-18T00:00:00+00:00",
+            },
+        ],
+    )
     assert len(c.posts) == 1
     space_id, post = c.posts[0]
     assert space_id == "sp-1"
@@ -257,25 +281,41 @@ async def test_posts(setup):
 
 async def test_comments(setup):
     r, c, kp = setup
-    await _send(r, kp, "comments", [
-        {
-            "id": "c-1", "post_id": "p-1", "author": "u-1",
-            "type": "text", "content": "nice",
-            "created_at": "2026-04-18T00:00:00+00:00",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "comments",
+        [
+            {
+                "id": "c-1",
+                "post_id": "p-1",
+                "author": "u-1",
+                "type": "text",
+                "content": "nice",
+                "created_at": "2026-04-18T00:00:00+00:00",
+            },
+        ],
+    )
     assert len(c.comments) == 1
     assert c.comments[0].id == "c-1"
 
 
 async def test_tasks(setup):
     r, c, kp = setup
-    await _send(r, kp, "tasks", [
-        {
-            "id": "t-1", "list_id": "list-1", "title": "X",
-            "status": "todo", "created_by": "u-1",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "tasks",
+        [
+            {
+                "id": "t-1",
+                "list_id": "list-1",
+                "title": "X",
+                "status": "todo",
+                "created_by": "u-1",
+            },
+        ],
+    )
     assert len(c.tasks) == 1
     _, task = c.tasks[0]
     assert task.id == "t-1"
@@ -283,42 +323,65 @@ async def test_tasks(setup):
 
 async def test_pages(setup):
     r, c, kp = setup
-    await _send(r, kp, "pages", [
-        {
-            "id": "pg-1", "title": "Welcome", "content": "Hi",
-            "created_by": "u-1",
-            "created_at": "2026-04-18T00:00:00+00:00",
-            "updated_at": "2026-04-18T00:00:00+00:00",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "pages",
+        [
+            {
+                "id": "pg-1",
+                "title": "Welcome",
+                "content": "Hi",
+                "created_by": "u-1",
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "updated_at": "2026-04-18T00:00:00+00:00",
+            },
+        ],
+    )
     assert len(c.pages) == 1
     assert c.pages[0].id == "pg-1"
 
 
 async def test_stickies(setup):
     r, c, kp = setup
-    await _send(r, kp, "stickies", [
-        {
-            "id": "s-1", "author": "u-1", "content": "note",
-            "color": "yellow", "position_x": 1.0, "position_y": 2.0,
-            "created_at": "2026-04-18T00:00:00+00:00",
-            "updated_at": "2026-04-18T00:00:00+00:00",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "stickies",
+        [
+            {
+                "id": "s-1",
+                "author": "u-1",
+                "content": "note",
+                "color": "yellow",
+                "position_x": 1.0,
+                "position_y": 2.0,
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "updated_at": "2026-04-18T00:00:00+00:00",
+            },
+        ],
+    )
     assert len(c.stickies) == 1
     assert c.stickies[0].id == "s-1"
 
 
 async def test_calendar(setup):
     r, c, kp = setup
-    await _send(r, kp, "calendar", [
-        {
-            "id": "e-1", "calendar_id": "cal-1", "summary": "meeting",
-            "start": "2026-04-18T10:00:00+00:00",
-            "end":   "2026-04-18T11:00:00+00:00",
-            "created_by": "u-1",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "calendar",
+        [
+            {
+                "id": "e-1",
+                "calendar_id": "cal-1",
+                "summary": "meeting",
+                "start": "2026-04-18T10:00:00+00:00",
+                "end": "2026-04-18T11:00:00+00:00",
+                "created_by": "u-1",
+            },
+        ],
+    )
     assert len(c.calendar) == 1
     _, event = c.calendar[0]
     assert event.id == "e-1"
@@ -326,30 +389,51 @@ async def test_calendar(setup):
 
 async def test_gallery_album_then_item(setup):
     r, c, kp = setup
-    await _send(r, kp, "gallery", [
-        {
-            "kind": "album", "id": "a-1", "space_id": "sp-1",
-            "owner_user_id": "u-1", "name": "Trip",
-        },
-        {
-            "kind": "item", "id": "i-1", "album_id": "a-1",
-            "uploaded_by": "u-1", "item_type": "photo",
-            "url": "/m/x.jpg", "thumbnail_url": "/m/x-thumb.jpg",
-            "width": 1024, "height": 768,
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "gallery",
+        [
+            {
+                "kind": "album",
+                "id": "a-1",
+                "space_id": "sp-1",
+                "owner_user_id": "u-1",
+                "name": "Trip",
+            },
+            {
+                "kind": "item",
+                "id": "i-1",
+                "album_id": "a-1",
+                "uploaded_by": "u-1",
+                "item_type": "photo",
+                "url": "/m/x.jpg",
+                "thumbnail_url": "/m/x-thumb.jpg",
+                "width": 1024,
+                "height": 768,
+            },
+        ],
+    )
     assert len(c.gallery_albums) == 1 and c.gallery_albums[0].id == "a-1"
     assert len(c.gallery_items) == 1 and c.gallery_items[0].id == "i-1"
 
 
 async def test_tasks_archived_routes_to_task_repo(setup):
     r, c, kp = setup
-    await _send(r, kp, "tasks_archived", [
-        {
-            "id": "t-done", "list_id": "list-1", "title": "done one",
-            "status": "done", "created_by": "u-1",
-        },
-    ])
+    await _send(
+        r,
+        kp,
+        "tasks_archived",
+        [
+            {
+                "id": "t-done",
+                "list_id": "list-1",
+                "title": "done one",
+                "status": "done",
+                "created_by": "u-1",
+            },
+        ],
+    )
     assert len(c.tasks) == 1
 
 
@@ -372,7 +456,8 @@ async def test_missing_outer_fields_drops(setup):
     enc = FederationEncoder(kp.private_key)
     bytes_to_sign = orjson.dumps(envelope)
     envelope["signatures"] = enc.sign_envelope_all(
-        bytes_to_sign, suite="ed25519",
+        bytes_to_sign,
+        suite="ed25519",
     )
     await r.on_chunk(serialise_chunk(envelope), from_instance="peer-a")
     assert c.posts == []
@@ -386,18 +471,28 @@ async def test_decrypt_failure_drops(setup, monkeypatch):
         raise RuntimeError("wrong key")
 
     monkeypatch.setattr(r._crypto, "decrypt_chunk", _bad_decrypt)
-    await _send(r, kp, "posts", [
-        {"id": "p-1", "author": "u-1", "type": "text"},
-    ])
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {"id": "p-1", "author": "u-1", "type": "text"},
+        ],
+    )
     assert c.posts == []
 
 
 async def test_post_missing_required_field_drops(setup):
     """A post record without id/author is skipped by the helper."""
     r, c, kp = setup
-    await _send(r, kp, "posts", [
-        {"type": "text", "content": "orphan"},
-    ])
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {"type": "text", "content": "orphan"},
+        ],
+    )
     assert c.posts == []
 
 
@@ -405,9 +500,14 @@ async def test_member_without_user_id_records_nothing(setup):
     """SpaceMember requires user_id; a record without one still
     constructs with user_id='' — not crashing is enough here."""
     r, c, kp = setup
-    await _send(r, kp, "members", [
-        {"role": "member", "joined_at": "2026-04-18T00:00:00+00:00"},
-    ])
+    await _send(
+        r,
+        kp,
+        "members",
+        [
+            {"role": "member", "joined_at": "2026-04-18T00:00:00+00:00"},
+        ],
+    )
     # member row is saved with empty user_id — receiver doesn't filter,
     # the DB FK would catch it in production. Here we just confirm the
     # branch ran without raising.

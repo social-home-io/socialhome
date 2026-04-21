@@ -188,7 +188,9 @@ class HomeAssistantAdapter:
         if data:
             body["data"] = data
         await self._client.call_service(
-            "notify", f"mobile_app_{user.username}", body,
+            "notify",
+            f"mobile_app_{user.username}",
+            body,
         )
 
     # ── Home Assistant bridge (event firing for automations) ──────────────
@@ -217,7 +219,9 @@ class HomeAssistantAdapter:
             )
         if self._supervisor_token and self._supervisor_client is None:
             self._supervisor_client = SupervisorClient(
-                session, self._supervisor_url, self._supervisor_token,
+                session,
+                self._supervisor_url,
+                self._supervisor_token,
             )
         if self._supervisor_client is not None:
             await HaBootstrap(
@@ -230,15 +234,17 @@ class HomeAssistantAdapter:
             # set_picture is idempotent by hash. Failures only log.
             try:
                 await self._sync_admin_picture_from_ha(app)
-            except Exception as exc:        # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.warning(
-                    "ha_adapter: admin picture sync failed: %s", exc,
+                    "ha_adapter: admin picture sync failed: %s",
+                    exc,
                 )
         self._ha_bridge = HaBridgeService(app[K.event_bus_key], self)
         self._ha_bridge.wire()
 
     async def _sync_admin_picture_from_ha(
-        self, app: "web.Application",
+        self,
+        app: "web.Application",
     ) -> None:
         owner = await self._supervisor_client.get_owner_username()  # type: ignore[union-attr]
         if not owner:
@@ -281,18 +287,22 @@ class HomeAssistantAdapter:
         return bool(self._options.get("stt_entity_id"))
 
     async def transcribe_audio(
-        self, audio_bytes: bytes, language: str = "en",
+        self,
+        audio_bytes: bytes,
+        language: str = "en",
     ) -> str:
         """Buffered transcription — delegates to :meth:`stream_transcribe_audio`.
 
         Kept for callers that already have the full clip in memory.
         """
+
         async def _single_chunk() -> AsyncIterable[bytes]:
             if audio_bytes:
                 yield audio_bytes
 
         return await self.stream_transcribe_audio(
-            _single_chunk(), language=language,
+            _single_chunk(),
+            language=language,
         )
 
     async def stream_transcribe_audio(
@@ -349,7 +359,10 @@ class HomeAssistantAdapter:
         if entity_id:
             body["entity_id"] = entity_id
         payload = await self._client.call_service(
-            "ai_task", "generate_data", body, return_response=True,
+            "ai_task",
+            "generate_data",
+            body,
+            return_response=True,
         )
         if payload is None:
             return ""
@@ -389,7 +402,8 @@ class HomeAssistantAdapter:
         )
 
     async def fetch_entity_picture_bytes(
-        self, username: str,
+        self,
+        username: str,
     ) -> bytes | None:
         """Resolve + download the ``person.<username>`` ``entity_picture``.
 

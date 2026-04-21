@@ -18,6 +18,7 @@ from social_home.domain.federation import FederationEventType
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+
 def _make_entry(attempts: int = 0, entry_id: str = "e1") -> OutboxEntry:
     """Build a minimal OutboxEntry for testing."""
     return OutboxEntry(
@@ -34,11 +35,12 @@ def _make_entry(attempts: int = 0, entry_id: str = "e1") -> OutboxEntry:
 
 # ── Backoff schedule ──────────────────────────────────────────────────────
 
+
 def test_backoff_seconds_values():
     """BACKOFF_SECONDS follows the documented schedule."""
     assert BACKOFF_SECONDS[0] == 5
     assert BACKOFF_SECONDS[1] == 10
-    assert BACKOFF_SECONDS[-1] == 14400   # 4-hour ceiling
+    assert BACKOFF_SECONDS[-1] == 14400  # 4-hour ceiling
 
 
 def test_backoff_max_attempts_matches_schedule():
@@ -55,7 +57,11 @@ def test_delay_for_attempt_1():
     """_delay_for(1) produces a value near the base delay of 5 s (±30%)."""
     proc = OutboxProcessor(MagicMock(), AsyncMock(), rng=lambda: 0.5)
     delay = proc._delay_for(1)
-    assert BACKOFF_SECONDS[0] * (1 - JITTER_RATIO) <= delay <= BACKOFF_SECONDS[0] * (1 + JITTER_RATIO)
+    assert (
+        BACKOFF_SECONDS[0] * (1 - JITTER_RATIO)
+        <= delay
+        <= BACKOFF_SECONDS[0] * (1 + JITTER_RATIO)
+    )
 
 
 def test_delay_for_jitter_bounds():
@@ -76,10 +82,15 @@ def test_delay_for_beyond_max_uses_ceiling():
     proc = OutboxProcessor(MagicMock(), AsyncMock(), rng=lambda: 0.5)
     delay = proc._delay_for(MAX_ATTEMPTS + 10)
     # Base is the ceiling entry
-    assert BACKOFF_SECONDS[-1] * (1 - JITTER_RATIO) <= delay <= BACKOFF_SECONDS[-1] * (1 + JITTER_RATIO)
+    assert (
+        BACKOFF_SECONDS[-1] * (1 - JITTER_RATIO)
+        <= delay
+        <= BACKOFF_SECONDS[-1] * (1 + JITTER_RATIO)
+    )
 
 
 # ── drain_once ────────────────────────────────────────────────────────────
+
 
 async def test_drain_once_empty_repo():
     """drain_once returns 0 when no entries are due."""
@@ -171,6 +182,7 @@ async def test_drain_once_mixed_success_failure():
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────
+
 
 async def test_start_stop_lifecycle():
     """start() creates a background task; stop() cancels it cleanly."""

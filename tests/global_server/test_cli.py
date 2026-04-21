@@ -32,6 +32,7 @@ def test_cli_set_password_writes_hash(tmp_dir, monkeypatch, capsys):
     _cli_init(target)
     # Patch getpass to avoid stdin.
     import getpass as _gp
+
     monkeypatch.setattr(_gp, "getpass", lambda prompt="": "verysecretpw")
     rc = _cli_set_password(target)
     assert rc == 0
@@ -51,6 +52,7 @@ def test_cli_set_password_short_pw_rejected(tmp_dir, monkeypatch, capsys):
     target = tmp_dir / "global_server.toml"
     _cli_init(target)
     import getpass as _gp
+
     monkeypatch.setattr(_gp, "getpass", lambda prompt="": "short")
     rc = _cli_set_password(target)
     assert rc == 2
@@ -61,6 +63,7 @@ def test_cli_set_password_mismatch_rejected(tmp_dir, monkeypatch, capsys):
     _cli_init(target)
     answers = iter(["longerpw-one", "longerpw-two"])
     import getpass as _gp
+
     monkeypatch.setattr(_gp, "getpass", lambda prompt="": next(answers))
     rc = _cli_set_password(target)
     assert rc == 2

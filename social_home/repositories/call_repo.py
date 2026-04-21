@@ -26,7 +26,10 @@ class AbstractCallRepo(Protocol):
     async def get_call(self, call_id: str) -> CallSession | None: ...
     async def list_active(self, *, user_id: str) -> list[CallSession]: ...
     async def list_history_for_conversation(
-        self, conversation_id: str, *, limit: int = 50,
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 50,
     ) -> list[CallSession]: ...
     async def transition(
         self,
@@ -39,13 +42,17 @@ class AbstractCallRepo(Protocol):
         participant_user_ids: tuple[str, ...] | None = None,
     ) -> CallSession | None: ...
     async def end_stale_calls(
-        self, *, older_than_seconds: int = 90,
+        self,
+        *,
+        older_than_seconds: int = 90,
     ) -> list[CallSession]: ...
     async def save_quality_sample(
-        self, sample: CallQualitySample,
+        self,
+        sample: CallQualitySample,
     ) -> None: ...
     async def list_quality_samples(
-        self, call_id: str,
+        self,
+        call_id: str,
     ) -> list[CallQualitySample]: ...
 
 
@@ -77,12 +84,17 @@ class SqliteCallRepo:
                 duration_seconds     = excluded.duration_seconds
             """,
             (
-                call.id, call.conversation_id,
-                call.initiator_user_id, call.callee_user_id,
-                call.call_type, call.status,
+                call.id,
+                call.conversation_id,
+                call.initiator_user_id,
+                call.callee_user_id,
+                call.call_type,
+                call.status,
                 dump_json(list(call.participant_user_ids)),
                 call.started_at or None,
-                call.connected_at, call.ended_at, call.duration_seconds,
+                call.connected_at,
+                call.ended_at,
+                call.duration_seconds,
             ),
         )
         # Re-read so the caller sees DB defaults (started_at).
@@ -91,7 +103,8 @@ class SqliteCallRepo:
 
     async def get_call(self, call_id: str) -> CallSession | None:
         row = await self._db.fetchone(
-            "SELECT * FROM call_sessions WHERE id=?", (call_id,),
+            "SELECT * FROM call_sessions WHERE id=?",
+            (call_id,),
         )
         d = row_to_dict(row)
         return _row_to_session(d)
@@ -116,7 +129,10 @@ class SqliteCallRepo:
         return [_row_to_session(d) for d in rows_to_dicts(rows) if d]  # type: ignore[misc]
 
     async def list_history_for_conversation(
-        self, conversation_id: str, *, limit: int = 50,
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 50,
     ) -> list[CallSession]:
         rows = await self._db.fetchall(
             """
@@ -147,11 +163,13 @@ class SqliteCallRepo:
         existing = await self.get_call(call_id)
         if existing is None:
             return None
-        parts_sql = dump_json(list(
-            participant_user_ids
-            if participant_user_ids is not None
-            else existing.participant_user_ids
-        ))
+        parts_sql = dump_json(
+            list(
+                participant_user_ids
+                if participant_user_ids is not None
+                else existing.participant_user_ids
+            )
+        )
         await self._db.enqueue(
             """
             UPDATE call_sessions
@@ -163,14 +181,20 @@ class SqliteCallRepo:
              WHERE id = ?
             """,
             (
-                status, connected_at, ended_at, duration_seconds,
-                parts_sql, call_id,
+                status,
+                connected_at,
+                ended_at,
+                duration_seconds,
+                parts_sql,
+                call_id,
             ),
         )
         return await self.get_call(call_id)
 
     async def end_stale_calls(
-        self, *, older_than_seconds: int = 90,
+        self,
+        *,
+        older_than_seconds: int = 90,
     ) -> list[CallSession]:
         """Mark ringing calls past the TTL as ``missed`` and return them.
 
@@ -204,7 +228,8 @@ class SqliteCallRepo:
     # ── Quality samples ────────────────────────────────────────────────
 
     async def save_quality_sample(
-        self, sample: CallQualitySample,
+        self,
+        sample: CallQualitySample,
     ) -> None:
         await self._db.enqueue(
             """
@@ -215,14 +240,20 @@ class SqliteCallRepo:
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                sample.call_id, sample.reporter_user_id, sample.sampled_at,
-                sample.rtt_ms, sample.jitter_ms, sample.loss_pct,
-                sample.audio_bitrate, sample.video_bitrate,
+                sample.call_id,
+                sample.reporter_user_id,
+                sample.sampled_at,
+                sample.rtt_ms,
+                sample.jitter_ms,
+                sample.loss_pct,
+                sample.audio_bitrate,
+                sample.video_bitrate,
             ),
         )
 
     async def list_quality_samples(
-        self, call_id: str,
+        self,
+        call_id: str,
     ) -> list[CallQualitySample]:
         rows = await self._db.fetchall(
             """

@@ -76,15 +76,21 @@ class PollService:
             for i, t in enumerate(cleaned)
         ]
         await self._repo.create_poll(
-            post_id=post_id, question=question,
-            closes_at=closes_at, allow_multiple=allow_multiple,
+            post_id=post_id,
+            question=question,
+            closes_at=closes_at,
+            allow_multiple=allow_multiple,
             options=option_rows,
         )
         if self._bus is not None:
-            await self._bus.publish(PollCreated(
-                post_id=post_id, question=question,
-                allow_multiple=allow_multiple, space_id=space_id,
-            ))
+            await self._bus.publish(
+                PollCreated(
+                    post_id=post_id,
+                    question=question,
+                    allow_multiple=allow_multiple,
+                    space_id=space_id,
+                )
+            )
         return await self.summary(post_id, space_id=space_id)
 
     async def cast_vote(
@@ -107,7 +113,8 @@ class PollService:
         if meta["closed"]:
             raise PollClosedError(post_id)
         if not await self._repo.option_belongs_to_post(
-            option_id=option_id, post_id=post_id,
+            option_id=option_id,
+            post_id=post_id,
         ):
             raise ValueError(f"Unknown poll option {option_id!r}")
         current = set(
@@ -117,31 +124,40 @@ class PollService:
             if option_id in current:
                 # Toggle off — clear all + reinsert the rest.
                 await self._repo.clear_user_votes(
-                    post_id=post_id, voter_user_id=voter_user_id,
+                    post_id=post_id,
+                    voter_user_id=voter_user_id,
                 )
                 for oid in current - {option_id}:
                     await self._repo.insert_vote(
-                        option_id=oid, voter_user_id=voter_user_id,
+                        option_id=oid,
+                        voter_user_id=voter_user_id,
                     )
             else:
                 await self._repo.insert_vote(
-                    option_id=option_id, voter_user_id=voter_user_id,
+                    option_id=option_id,
+                    voter_user_id=voter_user_id,
                 )
         else:
             await self._repo.clear_user_votes(
-                post_id=post_id, voter_user_id=voter_user_id,
+                post_id=post_id,
+                voter_user_id=voter_user_id,
             )
             await self._repo.insert_vote(
-                option_id=option_id, voter_user_id=voter_user_id,
+                option_id=option_id,
+                voter_user_id=voter_user_id,
             )
         if self._bus is not None:
             new_votes = tuple(
                 await self._repo.list_user_votes(post_id, voter_user_id),
             )
-            await self._bus.publish(PollVoted(
-                post_id=post_id, voter_user_id=voter_user_id,
-                option_ids=new_votes, space_id=space_id,
-            ))
+            await self._bus.publish(
+                PollVoted(
+                    post_id=post_id,
+                    voter_user_id=voter_user_id,
+                    option_ids=new_votes,
+                    space_id=space_id,
+                )
+            )
 
     async def retract_vote(
         self,
@@ -153,13 +169,18 @@ class PollService:
         if await self._repo.get_meta(post_id) is None:
             raise PollNotFoundError(post_id)
         await self._repo.clear_user_votes(
-            post_id=post_id, voter_user_id=voter_user_id,
+            post_id=post_id,
+            voter_user_id=voter_user_id,
         )
         if self._bus is not None:
-            await self._bus.publish(PollVoted(
-                post_id=post_id, voter_user_id=voter_user_id,
-                option_ids=(), space_id=space_id,
-            ))
+            await self._bus.publish(
+                PollVoted(
+                    post_id=post_id,
+                    voter_user_id=voter_user_id,
+                    option_ids=(),
+                    space_id=space_id,
+                )
+            )
 
     async def close_poll(
         self,
@@ -177,9 +198,12 @@ class PollService:
             raise PermissionError("Only the post author may close this poll")
         await self._repo.close(post_id)
         if self._bus is not None:
-            await self._bus.publish(PollClosed(
-                post_id=post_id, space_id=space_id,
-            ))
+            await self._bus.publish(
+                PollClosed(
+                    post_id=post_id,
+                    space_id=space_id,
+                )
+            )
 
     async def summary(
         self,
@@ -206,18 +230,19 @@ class PollService:
         user_vote: list[str] = []
         if voter_user_id:
             user_vote = await self._repo.list_user_votes(
-                post_id, voter_user_id,
+                post_id,
+                voter_user_id,
             )
         return {
-            "post_id":        post_id,
-            "question":       meta["question"],
-            "options":        options,
+            "post_id": post_id,
+            "question": meta["question"],
+            "options": options,
             "allow_multiple": bool(meta["allow_multiple"]),
-            "closed":         bool(meta["closed"]),
-            "closes_at":      meta["closes_at"],
-            "total_votes":    total,
-            "user_vote":      user_vote,
-            "space_id":       space_id,
+            "closed": bool(meta["closed"]),
+            "closes_at": meta["closes_at"],
+            "total_votes": total,
+            "user_vote": user_vote,
+            "space_id": space_id,
         }
 
     # ─── Schedule polls ──────────────────────────────────────────────────
@@ -247,15 +272,20 @@ class PollService:
             sd = str(s.get("slot_date") or "").strip()
             if not sd:
                 raise ValueError("each slot needs a slot_date")
-            minted.append({
-                "id":         s.get("id") or uuid.uuid4().hex,
-                "slot_date":  sd,
-                "start_time": s.get("start_time") or None,
-                "end_time":   s.get("end_time") or None,
-                "position":   int(s.get("position", i)),
-            })
+            minted.append(
+                {
+                    "id": s.get("id") or uuid.uuid4().hex,
+                    "slot_date": sd,
+                    "start_time": s.get("start_time") or None,
+                    "end_time": s.get("end_time") or None,
+                    "position": int(s.get("position", i)),
+                }
+            )
         await self._repo.create_schedule_poll(
-            post_id=post_id, title=title, deadline=deadline, slots=minted,
+            post_id=post_id,
+            title=title,
+            deadline=deadline,
+            slots=minted,
         )
         return await self.schedule_summary(post_id, space_id=space_id)
 
@@ -269,35 +299,51 @@ class PollService:
         space_id: str | None = None,
     ) -> None:
         if response not in _SCHEDULE_RESPONSES:
-            raise ValueError(
-                f"response must be one of {sorted(_SCHEDULE_RESPONSES)}"
-            )
+            raise ValueError(f"response must be one of {sorted(_SCHEDULE_RESPONSES)}")
         await self._repo.upsert_schedule_response(
-            slot_id=slot_id, user_id=user_id, response=response,
+            slot_id=slot_id,
+            user_id=user_id,
+            response=response,
         )
         if self._bus is not None:
-            await self._bus.publish(SchedulePollResponded(
-                post_id=poll_id, slot_id=slot_id,
-                user_id=user_id, response=response,
-                space_id=space_id,
-            ))
+            await self._bus.publish(
+                SchedulePollResponded(
+                    post_id=poll_id,
+                    slot_id=slot_id,
+                    user_id=user_id,
+                    response=response,
+                    space_id=space_id,
+                )
+            )
 
     async def retract_schedule(
-        self, *, poll_id: str, slot_id: str, user_id: str,
+        self,
+        *,
+        poll_id: str,
+        slot_id: str,
+        user_id: str,
         space_id: str | None = None,
     ) -> None:
         await self._repo.delete_schedule_response(
-            slot_id=slot_id, user_id=user_id,
+            slot_id=slot_id,
+            user_id=user_id,
         )
         if self._bus is not None:
-            await self._bus.publish(SchedulePollResponded(
-                post_id=poll_id, slot_id=slot_id,
-                user_id=user_id, response="retracted",
-                space_id=space_id,
-            ))
+            await self._bus.publish(
+                SchedulePollResponded(
+                    post_id=poll_id,
+                    slot_id=slot_id,
+                    user_id=user_id,
+                    response="retracted",
+                    space_id=space_id,
+                )
+            )
 
     async def finalize_schedule_poll(
-        self, *, post_id: str, slot_id: str,
+        self,
+        *,
+        post_id: str,
+        slot_id: str,
         actor_user_id: str,
         space_id: str | None = None,
     ) -> dict:
@@ -309,26 +355,32 @@ class PollService:
                 "Only the post author may finalize this schedule poll",
             )
         slot = await self._repo.finalize_schedule_poll(
-            post_id=post_id, slot_id=slot_id,
+            post_id=post_id,
+            slot_id=slot_id,
         )
         if slot is None:
             raise ValueError(f"slot {slot_id!r} not in poll {post_id!r}")
         summary = await self.schedule_summary(post_id, space_id=space_id)
         if self._bus is not None:
-            await self._bus.publish(SchedulePollFinalized(
-                post_id=post_id,
-                slot_id=slot_id,
-                slot_date=slot["slot_date"],
-                start_time=slot["start_time"],
-                end_time=slot["end_time"],
-                title=summary.get("title") or "",
-                finalized_by=actor_user_id,
-                space_id=space_id,
-            ))
+            await self._bus.publish(
+                SchedulePollFinalized(
+                    post_id=post_id,
+                    slot_id=slot_id,
+                    slot_date=slot["slot_date"],
+                    start_time=slot["start_time"],
+                    end_time=slot["end_time"],
+                    title=summary.get("title") or "",
+                    finalized_by=actor_user_id,
+                    space_id=space_id,
+                )
+            )
         return summary
 
     async def schedule_summary(
-        self, poll_id: str, *, space_id: str | None = None,
+        self,
+        poll_id: str,
+        *,
+        space_id: str | None = None,
     ) -> dict:
         """Return the full poll payload matching ``ScheduleUI.ScheduleData``.
 
@@ -341,24 +393,24 @@ class PollService:
         if meta is None:
             # Caller can treat as "not a schedule poll" — return empty shell.
             return {
-                "post_id":           poll_id,
-                "title":             "",
-                "deadline":          None,
-                "slots":             [],
-                "responses":         [],
+                "post_id": poll_id,
+                "title": "",
+                "deadline": None,
+                "slots": [],
+                "responses": [],
                 "finalized_slot_id": None,
-                "closed":            False,
-                "space_id":          space_id,
+                "closed": False,
+                "space_id": space_id,
             }
         slots = await self._repo.list_schedule_slots(poll_id)
         responses = await self._repo.list_schedule_responses(poll_id)
         return {
-            "post_id":           poll_id,
-            "title":             meta["title"],
-            "deadline":          meta["deadline"],
-            "slots":             slots,
-            "responses":         responses,
+            "post_id": poll_id,
+            "title": meta["title"],
+            "deadline": meta["deadline"],
+            "slots": slots,
+            "responses": responses,
             "finalized_slot_id": meta["finalized_slot_id"],
-            "closed":            meta["closed"],
-            "space_id":          space_id,
+            "closed": meta["closed"],
+            "space_id": space_id,
         }

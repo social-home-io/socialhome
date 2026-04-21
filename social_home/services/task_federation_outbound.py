@@ -53,7 +53,8 @@ class TaskFederationOutbound:
         if event.space_id is None:
             return
         await self._fan_out(
-            event.space_id, FederationEventType.SPACE_TASK_CREATED,
+            event.space_id,
+            FederationEventType.SPACE_TASK_CREATED,
             _task_payload(event.task, event.space_id),
         )
 
@@ -61,7 +62,8 @@ class TaskFederationOutbound:
         if event.space_id is None:
             return
         await self._fan_out(
-            event.space_id, FederationEventType.SPACE_TASK_UPDATED,
+            event.space_id,
+            FederationEventType.SPACE_TASK_UPDATED,
             _task_payload(event.task, event.space_id),
         )
 
@@ -69,20 +71,24 @@ class TaskFederationOutbound:
         if event.space_id is None:
             return
         await self._fan_out(
-            event.space_id, FederationEventType.SPACE_TASK_DELETED,
+            event.space_id,
+            FederationEventType.SPACE_TASK_DELETED,
             {
-                "id":       event.task_id,
-                "list_id":  event.list_id,
+                "id": event.task_id,
+                "list_id": event.list_id,
                 "space_id": event.space_id,
             },
         )
 
     async def _fan_out(
-        self, space_id: str, event_type: FederationEventType, payload: dict,
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
     ) -> None:
         try:
             peers = await self._space_repo.list_member_instances(space_id)
-        except Exception as exc:             # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("task-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -96,9 +102,11 @@ class TaskFederationOutbound:
                     payload=payload,
                     space_id=space_id,
                 )
-            except Exception as exc:          # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
-                    "task-outbound: send to %s failed: %s", instance_id, exc,
+                    "task-outbound: send to %s failed: %s",
+                    instance_id,
+                    exc,
                 )
 
 

@@ -18,6 +18,7 @@ from social_home.infrastructure.reconnect_queue import (
 
 # ─── Construction ────────────────────────────────────────────────────────
 
+
 def test_zero_concurrency_rejected():
     with pytest.raises(ValueError):
         ReconnectSyncQueue(concurrency=0)
@@ -30,10 +31,13 @@ def test_default_concurrency_matches_constant():
 
 # ─── Enqueue ─────────────────────────────────────────────────────────────
 
+
 def test_enqueue_rejects_invalid_priority():
     q = ReconnectSyncQueue()
+
     async def noop():
         return
+
     with pytest.raises(ValueError):
         q.enqueue(0, noop)
     with pytest.raises(ValueError):
@@ -42,8 +46,10 @@ def test_enqueue_rejects_invalid_priority():
 
 def test_pending_count():
     q = ReconnectSyncQueue()
+
     async def noop():
         return
+
     assert q.pending_count() == 0
     q.enqueue(P5_CONTENT, noop, "a")
     q.enqueue(P5_CONTENT, noop, "b")
@@ -51,6 +57,7 @@ def test_pending_count():
 
 
 # ─── Drain order ─────────────────────────────────────────────────────────
+
 
 async def test_higher_priority_drained_first():
     """Priority order: P1 < P2 < P3 < ... Lowest number first."""
@@ -60,10 +67,11 @@ async def test_higher_priority_drained_first():
     def factory(label: str):
         async def task():
             order.append(label)
+
         return task
 
-    q.enqueue(P7_BULK,     factory("bulk1"))
-    q.enqueue(P5_CONTENT,  factory("content1"))
+    q.enqueue(P7_BULK, factory("bulk1"))
+    q.enqueue(P5_CONTENT, factory("content1"))
     q.enqueue(P1_SECURITY, factory("security"))
     q.enqueue(P2_STRUCTURAL, factory("struct"))
 
@@ -85,6 +93,7 @@ async def test_fifo_within_priority():
     def factory(label: str):
         async def task():
             order.append(label)
+
         return task
 
     q.enqueue(P5_CONTENT, factory("first"))
@@ -100,6 +109,7 @@ async def test_fifo_within_priority():
 
 
 # ─── Bounded concurrency ────────────────────────────────────────────────
+
 
 async def test_concurrency_cap_respected():
     """No more than `concurrency` tasks run simultaneously."""
@@ -137,6 +147,7 @@ async def test_concurrency_cap_respected():
 
 # ─── Failure isolation ───────────────────────────────────────────────────
 
+
 async def test_task_exception_does_not_crash_worker():
     q = ReconnectSyncQueue(concurrency=1)
     finished: list[str] = []
@@ -144,11 +155,13 @@ async def test_task_exception_does_not_crash_worker():
     def crash():
         async def t():
             raise RuntimeError("boom")
+
         return t
 
     def ok(label):
         async def t():
             finished.append(label)
+
         return t
 
     q.enqueue(P5_CONTENT, crash())
@@ -165,10 +178,13 @@ async def test_task_exception_does_not_crash_worker():
 
 # ─── Cancel pending ──────────────────────────────────────────────────────
 
+
 async def test_cancel_pending_drops_unstarted():
     q = ReconnectSyncQueue(concurrency=1)
+
     async def slow():
         await asyncio.sleep(10)
+
     for _ in range(5):
         q.enqueue(P5_CONTENT, lambda: slow())
     n = await q.cancel_pending()
@@ -177,6 +193,7 @@ async def test_cancel_pending_drops_unstarted():
 
 
 # ─── Lifecycle ───────────────────────────────────────────────────────────
+
 
 async def test_double_start_is_idempotent():
     q = ReconnectSyncQueue(concurrency=1)

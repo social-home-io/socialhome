@@ -47,6 +47,7 @@ from ..repositories.space_repo import AbstractSpaceRepo
 
 try:
     from PIL import ExifTags, Image
+
     _PIL_AVAILABLE = True
 except ImportError:
     _PIL_AVAILABLE = False
@@ -56,12 +57,13 @@ log = logging.getLogger(__name__)
 
 # ─── Limits (§14.927) ─────────────────────────────────────────────────────
 
-NAME_MAX:       int = 80
+NAME_MAX: int = 80
 DESCRIPTION_MAX: int = 500
 ALBUMS_PER_SPACE: int = 200
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
+
 
 class GalleryError(Exception):
     """Base error class for gallery operations."""
@@ -77,6 +79,7 @@ class GalleryPermissionError(GalleryError):
 
 # ─── Service ─────────────────────────────────────────────────────────────
 
+
 class GalleryService:
     """CRUD + upload pipeline for gallery albums and items."""
 
@@ -89,11 +92,11 @@ class GalleryService:
         bus: EventBus,
         config: Config,
     ) -> None:
-        self._repo       = repo
+        self._repo = repo
         self._space_repo = space_repo
-        self._bus        = bus
-        self._config     = config
-        self._media_dir  = pathlib.Path(config.media_path)
+        self._bus = bus
+        self._config = config
+        self._media_dir = pathlib.Path(config.media_path)
 
     # ─── Albums ───────────────────────────────────────────────────────────
 
@@ -120,7 +123,10 @@ class GalleryService:
         return out
 
     async def get_album(
-        self, album_id: str, *, actor_user_id: str,
+        self,
+        album_id: str,
+        *,
+        actor_user_id: str,
     ) -> GalleryAlbum:
         album = await self._repo.get_album(album_id)
         if album is None:
@@ -148,7 +154,9 @@ class GalleryService:
             )
         if space_id is not None:
             await self._require_member(space_id, owner_user_id)
-            existing = await self._repo.list_albums(space_id, limit=ALBUMS_PER_SPACE + 1)
+            existing = await self._repo.list_albums(
+                space_id, limit=ALBUMS_PER_SPACE + 1
+            )
             if len(existing) >= ALBUMS_PER_SPACE:
                 raise ValueError(
                     f"Space has reached the {ALBUMS_PER_SPACE}-album limit"
@@ -168,9 +176,13 @@ class GalleryService:
             updated_at=now,
         )
         await self._repo.create_album(album)
-        await self._bus.publish(GalleryAlbumCreated(
-            album_id=album.id, space_id=space_id, owner_id=owner_user_id,
-        ))
+        await self._bus.publish(
+            GalleryAlbumCreated(
+                album_id=album.id,
+                space_id=space_id,
+                owner_id=owner_user_id,
+            )
+        )
         return album
 
     async def update_album(
@@ -213,9 +225,12 @@ class GalleryService:
             return
         await self._require_album_owner_or_admin(album, actor_user_id)
         await self._repo.delete_album(album_id)
-        await self._bus.publish(GalleryAlbumDeleted(
-            album_id=album_id, space_id=album.space_id,
-        ))
+        await self._bus.publish(
+            GalleryAlbumDeleted(
+                album_id=album_id,
+                space_id=album.space_id,
+            )
+        )
 
     async def set_retention_exempt(
         self,
@@ -230,7 +245,9 @@ class GalleryService:
             raise GalleryNotFoundError(f"album {album_id!r} not found")
         await self._require_album_owner_or_admin(album, actor_user_id)
         await self._repo.set_retention_exempt(
-            album_id, exempt, space_id=album.space_id,
+            album_id,
+            exempt,
+            space_id=album.space_id,
         )
 
     # ─── Items ────────────────────────────────────────────────────────────
@@ -273,9 +290,7 @@ class GalleryService:
         if album.space_id is not None:
             await self._require_member(album.space_id, uploader_user_id)
         if caption and len(caption) > CAPTION_MAX:
-            raise ValueError(
-                f"Caption must be {CAPTION_MAX} characters or fewer"
-            )
+            raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
         if not data:
             raise ValueError("upload data is empty")
 
@@ -286,27 +301,38 @@ class GalleryService:
 
         if is_video:
             item = await self._upload_video(
-                album_id=album_id, data=data,
+                album_id=album_id,
+                data=data,
                 content_type=content_type or "video/mp4",
-                caption=caption, uploader_user_id=uploader_user_id,
+                caption=caption,
+                uploader_user_id=uploader_user_id,
             )
         else:
             item = await self._upload_photo(
-                album_id=album_id, data=data,
-                content_type=content_type, caption=caption,
+                album_id=album_id,
+                data=data,
+                content_type=content_type,
+                caption=caption,
                 uploader_user_id=uploader_user_id,
             )
 
         await self._repo.create_item(item)
         await self._repo.increment_item_count(album_id, +1)
-        await self._bus.publish(GalleryItemUploaded(
-            item_id=item.id, album_id=album_id,
-            item_type=item.item_type, uploader=uploader_user_id,
-        ))
+        await self._bus.publish(
+            GalleryItemUploaded(
+                item_id=item.id,
+                album_id=album_id,
+                item_type=item.item_type,
+                uploader=uploader_user_id,
+            )
+        )
         return item
 
     async def delete_item(
-        self, item_id: str, *, actor_user_id: str,
+        self,
+        item_id: str,
+        *,
+        actor_user_id: str,
     ) -> None:
         item = await self._repo.get_item(item_id)
         if item is None:
@@ -314,16 +340,19 @@ class GalleryService:
         album = await self._repo.get_album(item.album_id)
         if album is not None and album.space_id is not None:
             is_uploader = item.uploaded_by == actor_user_id
-            is_admin    = await self._is_space_admin(album.space_id, actor_user_id)
+            is_admin = await self._is_space_admin(album.space_id, actor_user_id)
             if not (is_uploader or is_admin):
                 raise GalleryPermissionError(
                     "Only the uploader or a space admin may delete this item"
                 )
         await self._repo.delete_item(item_id)
         await self._repo.increment_item_count(item.album_id, -1)
-        await self._bus.publish(GalleryItemDeleted(
-            item_id=item_id, album_id=item.album_id,
-        ))
+        await self._bus.publish(
+            GalleryItemDeleted(
+                item_id=item_id,
+                album_id=item.album_id,
+            )
+        )
 
     # ─── Internals: media pipeline ────────────────────────────────────────
 
@@ -362,7 +391,8 @@ class GalleryService:
             item_type="photo",
             url=f"/api/media/{out_name}",
             thumbnail_url=thumbnail_url,
-            width=w, height=h,
+            width=w,
+            height=h,
             duration_s=None,
             caption=caption,
             taken_at=taken_at,
@@ -432,11 +462,11 @@ class GalleryService:
     @staticmethod
     def _read_dims(path: pathlib.Path) -> tuple[int, int]:
         try:
-            if not _PIL_AVAILABLE:                     # pragma: no cover
+            if not _PIL_AVAILABLE:  # pragma: no cover
                 return 0, 0
             with Image.open(path) as img:
                 return int(img.width), int(img.height)
-        except Exception:                             # pragma: no cover
+        except Exception:  # pragma: no cover
             return 0, 0
 
     # ─── Internals: cover / permissions ───────────────────────────────────
@@ -460,12 +490,15 @@ class GalleryService:
         return member is not None and member.role in ("owner", "admin")
 
     async def _require_album_owner_or_admin(
-        self, album: GalleryAlbum, actor_user_id: str,
+        self,
+        album: GalleryAlbum,
+        actor_user_id: str,
     ) -> None:
         if album.owner_user_id == actor_user_id:
             return
         if album.space_id is not None and await self._is_space_admin(
-            album.space_id, actor_user_id,
+            album.space_id,
+            actor_user_id,
         ):
             return
         raise GalleryPermissionError(
@@ -474,6 +507,7 @@ class GalleryService:
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
+
 
 def _with_cover(album: GalleryAlbum, cover_url: str | None) -> GalleryAlbum:
     """Return a copy of *album* with ``cover_url`` filled in."""

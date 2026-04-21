@@ -20,18 +20,23 @@ class FeatureDisabledError(Exception):
 
 #: Feature sections (one per toggleable UI surface).
 SECTIONS: tuple[str, ...] = (
-    "feed", "pages", "tasks", "stickies", "calendar", "bazaar",
+    "feed",
+    "pages",
+    "tasks",
+    "stickies",
+    "calendar",
+    "bazaar",
 )
 
 #: Post types mapped to their ``allow_*`` attribute names.
 POST_TYPE_ALLOW: dict[str, str] = {
-    "text":     "allow_text",
-    "image":    "allow_image",
-    "video":    "allow_video",
-    "file":     "allow_file",
-    "poll":     "allow_poll",
+    "text": "allow_text",
+    "image": "allow_image",
+    "video": "allow_video",
+    "file": "allow_file",
+    "poll": "allow_poll",
     "schedule": "allow_schedule",
-    "bazaar":   "allow_bazaar",
+    "bazaar": "allow_bazaar",
 }
 
 
@@ -40,19 +45,19 @@ class HouseholdFeatures:
     """Household-wide feature toggles + post-type allowlist."""
 
     household_name: str = "Home"
-    feat_feed:     bool = True
-    feat_pages:    bool = True
-    feat_tasks:    bool = True
+    feat_feed: bool = True
+    feat_pages: bool = True
+    feat_tasks: bool = True
     feat_stickies: bool = True
     feat_calendar: bool = True
-    feat_bazaar:   bool = True
-    allow_text:     bool = True
-    allow_image:    bool = True
-    allow_video:    bool = True
-    allow_file:     bool = True
-    allow_poll:     bool = True
+    feat_bazaar: bool = True
+    allow_text: bool = True
+    allow_image: bool = True
+    allow_video: bool = True
+    allow_file: bool = True
+    allow_poll: bool = True
     allow_schedule: bool = True
-    allow_bazaar:   bool = True
+    allow_bazaar: bool = True
 
     def is_enabled(self, section: str) -> bool:
         """``True`` if the ``feat_{section}`` toggle is on."""

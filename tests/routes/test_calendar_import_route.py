@@ -43,12 +43,15 @@ def _swap_import_service(app, adapter):
 
 async def _create_calendar(client):
     r = await client.post(
-        "/api/calendars", json={"name": "X"}, headers=_auth(client._tok),
+        "/api/calendars",
+        json={"name": "X"},
+        headers=_auth(client._tok),
     )
     return (await r.json())["id"]
 
 
 # ─── /import_ics — always available (no AI needed) ──────────────────────
+
 
 async def test_import_ics_raw_body_creates_event(client):
     cid = await _create_calendar(client)
@@ -95,6 +98,7 @@ async def test_import_ics_malformed_422(client):
 
 
 # ─── /import_image — requires AI ────────────────────────────────────────
+
 
 async def test_import_image_503_without_ai_adapter(client):
     """Standalone adapter has no generate_ai_data → 503."""
@@ -148,6 +152,7 @@ async def test_import_image_ai_returns_no_vcalendar_422(client):
 
 
 # ─── /import_prompt — requires AI ───────────────────────────────────────
+
 
 async def test_import_prompt_503_without_ai_adapter(client):
     cid = await _create_calendar(client)

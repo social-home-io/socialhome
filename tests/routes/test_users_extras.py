@@ -30,12 +30,14 @@ async def test_create_token_no_body(client):
 
 async def test_revoke_token_succeeds(client):
     r = await client.post(
-        "/api/me/tokens", json={"label": "x"},
+        "/api/me/tokens",
+        json={"label": "x"},
         headers=_auth(client._tok),
     )
     tid = (await r.json())["token_id"]
     r = await client.delete(
-        f"/api/me/tokens/{tid}", headers=_auth(client._tok),
+        f"/api/me/tokens/{tid}",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
 

@@ -31,6 +31,7 @@ from .base import dump_json, load_json, row_to_dict, rows_to_dicts
 
 # ─── Shared helpers ───────────────────────────────────────────────────────
 
+
 def _iso(value) -> str | None:
     if value is None:
         return None
@@ -91,6 +92,7 @@ def _row_to_list(row: dict) -> TaskList:
 
 # ─── Household tasks ──────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class AbstractTaskRepo(Protocol):
     async def save_list(self, list_: TaskList) -> TaskList: ...
@@ -116,7 +118,8 @@ class AbstractTaskRepo(Protocol):
     async def list_by_assignee(self, user_id: str) -> list[Task]: ...
     async def list_due_on(self, due: date) -> list[Task]: ...
     async def list_recurring_overdue(
-        self, today: date,
+        self,
+        today: date,
     ) -> list[Task]: ...
     async def delete(self, task_id: str) -> None: ...
 
@@ -127,10 +130,12 @@ class AbstractTaskRepo(Protocol):
 
     # ── Attachments (§23.68) ─────────────────────────────────────────
     async def add_attachment(
-        self, attachment: TaskAttachment,
+        self,
+        attachment: TaskAttachment,
     ) -> TaskAttachment: ...
     async def list_attachments(
-        self, task_id: str,
+        self,
+        task_id: str,
     ) -> list[TaskAttachment]: ...
     async def delete_attachment(self, attachment_id: str) -> None: ...
 
@@ -158,7 +163,8 @@ class SqliteTaskRepo:
 
     async def get_list(self, list_id: str) -> TaskList | None:
         row = await self._db.fetchone(
-            "SELECT * FROM task_lists WHERE id=?", (list_id,),
+            "SELECT * FROM task_lists WHERE id=?",
+            (list_id,),
         )
         d = row_to_dict(row)
         return _row_to_list(d) if d else None
@@ -171,7 +177,8 @@ class SqliteTaskRepo:
 
     async def delete_list(self, list_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM task_lists WHERE id=?", (list_id,),
+            "DELETE FROM task_lists WHERE id=?",
+            (list_id,),
         )
 
     # ── Tasks ──────────────────────────────────────────────────────────
@@ -199,20 +206,28 @@ class SqliteTaskRepo:
                 updated_at=excluded.updated_at
             """,
             (
-                task.id, task.list_id, task.title, task.description,
-                _iso(task.due_date), dump_json(list(task.assignees)),
-                task.status.value, int(task.position), task.created_by,
+                task.id,
+                task.list_id,
+                task.title,
+                task.description,
+                _iso(task.due_date),
+                dump_json(list(task.assignees)),
+                task.status.value,
+                int(task.position),
+                task.created_by,
                 task.recurrence.rrule if task.recurrence else None,
                 _iso(task.recurrence.last_spawned_at) if task.recurrence else None,
                 task.recurrence_parent_id,
-                _iso(task.created_at), _iso(task.updated_at),
+                _iso(task.created_at),
+                _iso(task.updated_at),
             ),
         )
         return task
 
     async def get(self, task_id: str) -> Task | None:
         row = await self._db.fetchone(
-            "SELECT * FROM tasks WHERE id=?", (task_id,),
+            "SELECT * FROM tasks WHERE id=?",
+            (task_id,),
         )
         d = row_to_dict(row)
         return _row_to_task(d) if d else None
@@ -289,8 +304,7 @@ class SqliteTaskRepo:
 
     async def list_due_on(self, due: date) -> list[Task]:
         rows = await self._db.fetchall(
-            f"{self._SELECT_TASKS} WHERE due_date=? AND status != ? "
-            "ORDER BY position",
+            f"{self._SELECT_TASKS} WHERE due_date=? AND status != ? ORDER BY position",
             (due.isoformat(), TaskStatus.DONE.value),
         )
         return [_row_to_task(d) for d in rows_to_dicts(rows)]
@@ -315,7 +329,8 @@ class SqliteTaskRepo:
 
     async def delete(self, task_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM tasks WHERE id=?", (task_id,),
+            "DELETE FROM tasks WHERE id=?",
+            (task_id,),
         )
 
     # ── Task comments (§23.68) ─────────────────────────────────────
@@ -325,7 +340,10 @@ class SqliteTaskRepo:
             "INSERT INTO task_comments(id, task_id, author, content, created_at)"
             " VALUES(?, ?, ?, ?, ?)",
             (
-                comment.id, comment.task_id, comment.author, comment.content,
+                comment.id,
+                comment.task_id,
+                comment.author,
+                comment.content,
                 _iso(comment.created_at),
             ),
         )
@@ -333,51 +351,59 @@ class SqliteTaskRepo:
 
     async def list_comments(self, task_id: str) -> list[TaskComment]:
         rows = await self._db.fetchall(
-            "SELECT * FROM task_comments WHERE task_id=?"
-            " ORDER BY created_at",
+            "SELECT * FROM task_comments WHERE task_id=? ORDER BY created_at",
             (task_id,),
         )
         return [_row_to_task_comment(d) for d in rows_to_dicts(rows)]
 
     async def delete_comment(self, comment_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM task_comments WHERE id=?", (comment_id,),
+            "DELETE FROM task_comments WHERE id=?",
+            (comment_id,),
         )
 
     # ── Task attachments (§23.68) ──────────────────────────────────
 
     async def add_attachment(
-        self, attachment: TaskAttachment,
+        self,
+        attachment: TaskAttachment,
     ) -> TaskAttachment:
         await self._db.enqueue(
             "INSERT INTO task_attachments("
             "id, task_id, uploaded_by, url, filename, mime, size_bytes, created_at"
             ") VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                attachment.id, attachment.task_id, attachment.uploaded_by,
-                attachment.url, attachment.filename, attachment.mime,
-                attachment.size_bytes, _iso(attachment.created_at),
+                attachment.id,
+                attachment.task_id,
+                attachment.uploaded_by,
+                attachment.url,
+                attachment.filename,
+                attachment.mime,
+                attachment.size_bytes,
+                _iso(attachment.created_at),
             ),
         )
         return attachment
 
     async def list_attachments(
-        self, task_id: str,
+        self,
+        task_id: str,
     ) -> list[TaskAttachment]:
         rows = await self._db.fetchall(
-            "SELECT * FROM task_attachments WHERE task_id=?"
-            " ORDER BY created_at",
+            "SELECT * FROM task_attachments WHERE task_id=? ORDER BY created_at",
             (task_id,),
         )
         return [_row_to_task_attachment(d) for d in rows_to_dicts(rows)]
 
     async def delete_attachment(self, attachment_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM task_attachments WHERE id=?", (attachment_id,),
+            "DELETE FROM task_attachments WHERE id=?",
+            (attachment_id,),
         )
 
 
 # ─── Space tasks (space_task_lists / space_tasks) ─────────────────────────
+
 
 @runtime_checkable
 class AbstractSpaceTaskRepo(Protocol):
@@ -424,10 +450,12 @@ class SqliteSpaceTaskRepo:
         return list_
 
     async def get_list(
-        self, list_id: str,
+        self,
+        list_id: str,
     ) -> tuple[str, TaskList] | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_task_lists WHERE id=?", (list_id,),
+            "SELECT * FROM space_task_lists WHERE id=?",
+            (list_id,),
         )
         d = row_to_dict(row)
         if d is None:
@@ -436,15 +464,15 @@ class SqliteSpaceTaskRepo:
 
     async def list_lists(self, space_id: str) -> list[TaskList]:
         rows = await self._db.fetchall(
-            "SELECT * FROM space_task_lists WHERE space_id=? "
-            "ORDER BY created_at",
+            "SELECT * FROM space_task_lists WHERE space_id=? ORDER BY created_at",
             (space_id,),
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
 
     async def delete_list(self, list_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM space_task_lists WHERE id=?", (list_id,),
+            "DELETE FROM space_task_lists WHERE id=?",
+            (list_id,),
         )
 
     # ── Space tasks ────────────────────────────────────────────────────
@@ -473,20 +501,29 @@ class SqliteSpaceTaskRepo:
                 updated_at=excluded.updated_at
             """,
             (
-                task.id, task.list_id, space_id, task.title, task.description,
-                _iso(task.due_date), dump_json(list(task.assignees)),
-                task.status.value, int(task.position), task.created_by,
+                task.id,
+                task.list_id,
+                space_id,
+                task.title,
+                task.description,
+                _iso(task.due_date),
+                dump_json(list(task.assignees)),
+                task.status.value,
+                int(task.position),
+                task.created_by,
                 task.recurrence.rrule if task.recurrence else None,
                 _iso(task.recurrence.last_spawned_at) if task.recurrence else None,
                 task.recurrence_parent_id,
-                _iso(task.created_at), _iso(task.updated_at),
+                _iso(task.created_at),
+                _iso(task.updated_at),
             ),
         )
         return task
 
     async def get(self, task_id: str) -> tuple[str, Task] | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_tasks WHERE id=?", (task_id,),
+            "SELECT * FROM space_tasks WHERE id=?",
+            (task_id,),
         )
         d = row_to_dict(row)
         if d is None:
@@ -494,7 +531,10 @@ class SqliteSpaceTaskRepo:
         return d["space_id"], _row_to_task(d)
 
     async def list_by_list(
-        self, list_id: str, *, include_done: bool = True,
+        self,
+        list_id: str,
+        *,
+        include_done: bool = True,
     ) -> list[Task]:
         if include_done:
             rows = await self._db.fetchall(
@@ -519,7 +559,8 @@ class SqliteSpaceTaskRepo:
 
     async def delete(self, task_id: str) -> None:
         await self._db.enqueue(
-            "DELETE FROM space_tasks WHERE id=?", (task_id,),
+            "DELETE FROM space_tasks WHERE id=?",
+            (task_id,),
         )
 
 

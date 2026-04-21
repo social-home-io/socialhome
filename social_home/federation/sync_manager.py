@@ -53,16 +53,18 @@ MAX_ICE_CANDIDATE_BYTES: int = 2048
 #: Allowed resource types for SPACE_SYNC_REQUEST_MORE (S-12).  Anything
 #: else is silently dropped — never an unknown surface that an attacker
 #: can probe.
-ALLOWED_RESOURCES: frozenset[str] = frozenset({
-    "posts",
-    "comments",
-    "page_body",
-    "calendar_events_past",
-    "tasks_completed",
-    "stickies_archived",
-    "gallery_album",
-    "gallery_item_full",
-})
+ALLOWED_RESOURCES: frozenset[str] = frozenset(
+    {
+        "posts",
+        "comments",
+        "page_body",
+        "calendar_events_past",
+        "tasks_completed",
+        "stickies_archived",
+        "gallery_album",
+        "gallery_item_full",
+    }
+)
 
 #: Maximum number of space ids accepted in a single
 #: ``INSTANCE_SYNC_STATUS`` payload (S-17).
@@ -70,6 +72,7 @@ MAX_INSTANCE_SYNC_STATUS_SPACES: int = 100
 
 
 # ─── Dispatch outcomes ────────────────────────────────────────────────────
+
 
 @dataclass(slots=True, frozen=True)
 class SyncDecision:
@@ -91,6 +94,7 @@ class SyncDecision:
 
 
 # ─── Manager ──────────────────────────────────────────────────────────────
+
 
 class SyncSessionManager:
     """In-memory registry + protocol logic for direct-sync sessions.
@@ -148,8 +152,7 @@ class SyncSessionManager:
 
     def active_sessions_for_instance(self, instance_id: str) -> int:
         return sum(
-            1 for s in self._sessions.values()
-            if s.requester_instance_id == instance_id
+            1 for s in self._sessions.values() if s.requester_instance_id == instance_id
         )
 
     def close_session(self, sync_id: str) -> None:
@@ -160,7 +163,11 @@ class SyncSessionManager:
     # ─── S-6: rate limit ──────────────────────────────────────────────────
 
     def check_sync_begin_rate(
-        self, from_instance: str, space_id: str, *, now: float | None = None,
+        self,
+        from_instance: str,
+        space_id: str,
+        *,
+        now: float | None = None,
     ) -> bool:
         """Return True if this peer may start another sync for *space_id*.
 
@@ -207,8 +214,8 @@ class SyncSessionManager:
 
         try:
             before_seq = int(payload.get("before_seq", 0) or 0)
-            limit      = int(payload.get("limit", 50) or 50)
-        except (TypeError, ValueError):
+            limit = int(payload.get("limit", 50) or 50)
+        except TypeError, ValueError:
             return None
         limit = max(1, min(limit, 200))
 
@@ -220,11 +227,11 @@ class SyncSessionManager:
             before_seq = min(before_seq, space_max) if before_seq > 0 else space_max
 
         return {
-            "space_id":   space_id,
-            "resource":   resource,
+            "space_id": space_id,
+            "resource": resource,
             "before_seq": before_seq,
-            "limit":      limit,
-            "page_id":    payload.get("page_id"),
+            "limit": limit,
+            "page_id": payload.get("page_id"),
         }
 
     # ─── S-8 / S-6: session admission ─────────────────────────────────────
@@ -258,7 +265,10 @@ class SyncSessionManager:
                 next_payload={"sync_id": sync_id, "reason": "rate_limited"},
             )
 
-        if self.active_sessions_for_instance(requester_instance_id) >= MAX_ACTIVE_SESSIONS_PER_INSTANCE:
+        if (
+            self.active_sessions_for_instance(requester_instance_id)
+            >= MAX_ACTIVE_SESSIONS_PER_INSTANCE
+        ):
             return SyncDecision(
                 accepted=False,
                 reason="too_many_sessions",
@@ -308,8 +318,13 @@ class SyncSessionManager:
     # ─── S-13/S-14: offer / answer / ice apply ────────────────────────────
 
     async def apply_offer(
-        self, *, sync_id: str, sdp_offer: str, requester_instance_id: str,
-        space_id: str, sync_mode: str = "initial",
+        self,
+        *,
+        sync_id: str,
+        sdp_offer: str,
+        requester_instance_id: str,
+        space_id: str,
+        sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
@@ -326,7 +341,7 @@ class SyncSessionManager:
                 sync_id=sync_id,
                 space_id=space_id,
                 requester_instance_id=requester_instance_id,
-                provider_instance_id="",   # unknown at requester side
+                provider_instance_id="",  # unknown at requester side
                 sync_mode=sync_mode,
                 role="requester",
                 ice_servers=ice_servers,
@@ -342,13 +357,17 @@ class SyncSessionManager:
             )
             self._sessions[sync_id] = record
 
-        if record.rtc is None:                              # defensive
+        if record.rtc is None:  # defensive
             raise RuntimeError("sync record missing rtc handle")
 
-        return await record.rtc.create_answer(sdp_offer)    # S-13
+        return await record.rtc.create_answer(sdp_offer)  # S-13
 
     async def apply_answer(
-        self, *, sync_id: str, sdp_answer: str, from_instance: str,
+        self,
+        *,
+        sync_id: str,
+        sdp_answer: str,
+        from_instance: str,
     ) -> bool:
         """Provider-side handling of ``SPACE_SYNC_ANSWER`` (S-14 origin guard)."""
         record = self._sessions.get(sync_id)
@@ -359,7 +378,9 @@ class SyncSessionManager:
         if record.requester_instance_id != from_instance:
             log.warning(
                 "apply_answer: rejected — sync_id=%s from=%s expected=%s",
-                sync_id, from_instance, record.requester_instance_id,
+                sync_id,
+                from_instance,
+                record.requester_instance_id,
             )
             return False
         if record.rtc is None:
@@ -409,18 +430,21 @@ class SyncSessionManager:
             reason="relay_fallback",
             next_event=FederationEventType.SPACE_SYNC_BEGIN,
             next_payload={
-                "space_id":      record.space_id,
-                "sync_id":       new_sync_id,
-                "sync_mode":     record.sync_mode,
+                "space_id": record.space_id,
+                "sync_id": new_sync_id,
+                "sync_mode": record.sync_mode,
                 "prefer_direct": False,
-                "tier1_only":    record.sync_mode == "initial",
+                "tier1_only": record.sync_mode == "initial",
             },
         )
 
     # ─── S-17: instance_sync_status guard ─────────────────────────────────
 
     async def validate_instance_sync_status(
-        self, *, from_instance: str, payload: dict,
+        self,
+        *,
+        from_instance: str,
+        payload: dict,
     ) -> list[str]:
         """Return the list of space ids the receiver should resume.
 
@@ -443,7 +467,9 @@ class SyncSessionManager:
         if len(spaces) > MAX_INSTANCE_SYNC_STATUS_SPACES:
             log.warning(
                 "INSTANCE_SYNC_STATUS rejected: %d spaces from %s exceeds cap=%d",
-                len(spaces), from_instance, MAX_INSTANCE_SYNC_STATUS_SPACES,
+                len(spaces),
+                from_instance,
+                MAX_INSTANCE_SYNC_STATUS_SPACES,
             )
             return []
 
@@ -451,13 +477,20 @@ class SyncSessionManager:
         # space repo handy); we just validate shape here.
         out: list[str] = []
         for entry in spaces:
-            sid = entry if isinstance(entry, str) else entry.get("space_id") if isinstance(entry, dict) else None
+            sid = (
+                entry
+                if isinstance(entry, str)
+                else entry.get("space_id")
+                if isinstance(entry, dict)
+                else None
+            )
             if isinstance(sid, str) and sid:
                 out.append(sid)
         return out
 
 
 # ─── Helpers exposed for tests ────────────────────────────────────────────
+
 
 def new_sync_id() -> str:
     """Return a fresh 128-bit URL-safe sync id (S-2)."""

@@ -50,15 +50,20 @@ class SqliteGfsConnectionRepo:
                 paired_at=excluded.paired_at
             """,
             (
-                conn.id, conn.gfs_instance_id, conn.display_name,
-                conn.public_key, conn.endpoint_url, conn.status,
+                conn.id,
+                conn.gfs_instance_id,
+                conn.display_name,
+                conn.public_key,
+                conn.endpoint_url,
+                conn.status,
                 conn.paired_at,
             ),
         )
 
     async def get(self, gfs_id: str) -> GfsConnection | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gfs_connections WHERE id=?", (gfs_id,),
+            "SELECT * FROM gfs_connections WHERE id=?",
+            (gfs_id,),
         )
         if row is None:
             return None
@@ -83,7 +88,8 @@ class SqliteGfsConnectionRepo:
             (gfs_id,),
         )
         await self._db.enqueue(
-            "DELETE FROM gfs_connections WHERE id=?", (gfs_id,),
+            "DELETE FROM gfs_connections WHERE id=?",
+            (gfs_id,),
         )
 
     async def publish_space(self, space_id: str, gfs_id: str) -> None:

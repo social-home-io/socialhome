@@ -47,8 +47,11 @@ class IdentityMaterial:
     """
 
     __slots__ = (
-        "identity_seed", "identity_public_key", "instance_id",
-        "pq_seed", "pq_public_key",
+        "identity_seed",
+        "identity_public_key",
+        "instance_id",
+        "pq_seed",
+        "pq_public_key",
     )
 
     def __init__(
@@ -121,12 +124,15 @@ async def ensure_instance_identity(
                 ("mldsa65", key_manager.encrypt(pq_seed), pq_pk.hex()),
             )
             log.info(
-                "instance_identity: minted PQ keypair (mldsa65) "
-                "for instance_id=%s", instance_id,
+                "instance_identity: minted PQ keypair (mldsa65) for instance_id=%s",
+                instance_id,
             )
         return IdentityMaterial(
-            seed, public_key, instance_id,
-            pq_seed=pq_seed, pq_public_key=pq_pk,
+            seed,
+            public_key,
+            instance_id,
+            pq_seed=pq_seed,
+            pq_public_key=pq_pk,
         )
 
     # First-start path: mint fresh classical + (optionally) PQ keypairs.
@@ -171,9 +177,15 @@ async def ensure_instance_identity(
     log.info(
         "instance_identity: generated new identity instance_id=%s display=%s "
         "sig_suite=%s pq=%s",
-        instance_id, display_name, sig_suite, pq_algorithm or "none",
+        instance_id,
+        display_name,
+        sig_suite,
+        pq_algorithm or "none",
     )
     return IdentityMaterial(
-        keypair.private_key, keypair.public_key, instance_id,
-        pq_seed=pq_seed_bytes, pq_public_key=pq_pk_bytes,
+        keypair.private_key,
+        keypair.public_key,
+        instance_id,
+        pq_seed=pq_seed_bytes,
+        pq_public_key=pq_pk_bytes,
     )

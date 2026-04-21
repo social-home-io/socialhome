@@ -37,7 +37,18 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-import libdatachannel
+# ``libdatachannel`` is a WebRTC DataChannel transport — an
+# optimisation, not a correctness gate. When the library is
+# unavailable (e.g. on a stock `pip install social-home`), the
+# federation service falls back to the HTTPS webhook transport.
+# The tests' :mod:`conftest` injects a fake module into
+# ``sys.modules`` so production code can import unconditionally;
+# this guard only matters for runtimes without either the real
+# library or the fake.
+try:
+    import libdatachannel
+except ImportError:  # pragma: no cover — optional
+    libdatachannel = None
 import orjson
 from aiohttp import ClientTimeout
 
@@ -62,6 +73,7 @@ PING_INTERVAL_S: float = 30.0
 
 
 # ─── Webhook transport ─────────────────────────────────────────────────────
+
 
 class WebhookTransport:
     """HTTPS POST transport — always available, used as fallback.
@@ -112,7 +124,9 @@ class WebhookTransport:
                 return 200 <= status < 300, status
         except Exception as exc:
             log.warning(
-                "webhook send to %s failed: %s", instance.id, exc,
+                "webhook send to %s failed: %s",
+                instance.id,
+                exc,
             )
             return False, None
 
@@ -129,9 +143,15 @@ class _RtcPeer:
     """One DataChannel session for one paired peer."""
 
     __slots__ = (
-        "instance_id", "_ice_servers", "_signaling",
-        "_inbound", "_pc", "_channel",
-        "_open", "_closed", "_loop",
+        "instance_id",
+        "_ice_servers",
+        "_signaling",
+        "_inbound",
+        "_pc",
+        "_channel",
+        "_open",
+        "_closed",
+        "_loop",
         "_expected_answer_from",
     )
 
@@ -143,14 +163,14 @@ class _RtcPeer:
         signaling: Callable[[FederationEventType, dict], Awaitable[None]],
         inbound: _InboundCallback,
     ) -> None:
-        self.instance_id          = instance_id
-        self._ice_servers         = ice_servers or []
-        self._signaling           = signaling
-        self._inbound             = inbound
-        self._pc:      Any | None = None
+        self.instance_id = instance_id
+        self._ice_servers = ice_servers or []
+        self._signaling = signaling
+        self._inbound = inbound
+        self._pc: Any | None = None
         self._channel: Any | None = None
-        self._open                = asyncio.Event()
-        self._closed              = False
+        self._open = asyncio.Event()
+        self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
         # S-14: on the offerer side we lock the answer origin to the
         # peer we invited. Mismatches are rejected with a warning.
@@ -170,15 +190,18 @@ class _RtcPeer:
                 if url.startswith("stun:"):
                     cfg.iceServers.append(libdatachannel.IceServer(url))
                 elif url.startswith("turn:"):
-                    cfg.iceServers.append(libdatachannel.IceServer(
-                        url,
-                        username=srv.get("username", ""),
-                        password=srv.get("credential", ""),
-                    ))
+                    cfg.iceServers.append(
+                        libdatachannel.IceServer(
+                            url,
+                            username=srv.get("username", ""),
+                            password=srv.get("credential", ""),
+                        )
+                    )
         self._pc = libdatachannel.PeerConnection(cfg)
         self._channel = self._pc.createDataChannel(CHANNEL_LABEL)
 
         loop = self._loop
+
         def _ts(coro):
             loop.call_soon_threadsafe(asyncio.ensure_future, coro)
 
@@ -188,16 +211,21 @@ class _RtcPeer:
             lambda msg: _ts(self._on_message(msg)),
         )
         self._pc.onLocalCandidate(
-            lambda cand, mid: _ts(self._signaling(
-                FederationEventType.FEDERATION_RTC_ICE,
-                {"candidate": cand, "sdp_mid": mid},
-            )),
+            lambda cand, mid: _ts(
+                self._signaling(
+                    FederationEventType.FEDERATION_RTC_ICE,
+                    {"candidate": cand, "sdp_mid": mid},
+                )
+            ),
         )
         await loop.run_in_executor(
-            None, self._pc.setLocalDescription, "offer",
+            None,
+            self._pc.setLocalDescription,
+            "offer",
         )
         sdp = await loop.run_in_executor(
-            None, self._pc.localDescription,
+            None,
+            self._pc.localDescription,
         )
         await self._signaling(
             FederationEventType.FEDERATION_RTC_OFFER,
@@ -223,6 +251,7 @@ class _RtcPeer:
         self._pc = libdatachannel.PeerConnection(cfg)
 
         loop = self._loop
+
         def _ts(coro):
             loop.call_soon_threadsafe(asyncio.ensure_future, coro)
 
@@ -230,19 +259,27 @@ class _RtcPeer:
             lambda ch: _ts(self._on_remote_channel(ch)),
         )
         self._pc.onLocalCandidate(
-            lambda cand, mid: _ts(self._signaling(
-                FederationEventType.FEDERATION_RTC_ICE,
-                {"candidate": cand, "sdp_mid": mid},
-            )),
+            lambda cand, mid: _ts(
+                self._signaling(
+                    FederationEventType.FEDERATION_RTC_ICE,
+                    {"candidate": cand, "sdp_mid": mid},
+                )
+            ),
         )
         await loop.run_in_executor(
-            None, self._pc.setRemoteDescription, sdp, "offer",
+            None,
+            self._pc.setRemoteDescription,
+            sdp,
+            "offer",
         )
         await loop.run_in_executor(
-            None, self._pc.setLocalDescription, "answer",
+            None,
+            self._pc.setLocalDescription,
+            "answer",
         )
         local_sdp = await loop.run_in_executor(
-            None, self._pc.localDescription,
+            None,
+            self._pc.localDescription,
         )
         await self._signaling(
             FederationEventType.FEDERATION_RTC_ANSWER,
@@ -262,14 +299,18 @@ class _RtcPeer:
         ):
             log.warning(
                 "RTC answer for %s rejected — came from %s",
-                self._expected_answer_from, from_instance,
+                self._expected_answer_from,
+                from_instance,
             )
             return False
         self._expected_answer_from = None
         if self._pc is not None:
             loop = self._loop or asyncio.get_event_loop()
             await loop.run_in_executor(
-                None, self._pc.setRemoteDescription, sdp, "answer",
+                None,
+                self._pc.setRemoteDescription,
+                sdp,
+                "answer",
             )
         return True
 
@@ -279,7 +320,10 @@ class _RtcPeer:
         if self._pc is not None:
             loop = self._loop or asyncio.get_event_loop()
             await loop.run_in_executor(
-                None, self._pc.addRemoteCandidate, candidate, sdp_mid,
+                None,
+                self._pc.addRemoteCandidate,
+                candidate,
+                sdp_mid,
             )
 
     async def _on_remote_channel(self, channel) -> None:
@@ -287,8 +331,10 @@ class _RtcPeer:
             return
         self._channel = channel
         loop = self._loop or asyncio.get_event_loop()
+
         def _ts(coro):
             loop.call_soon_threadsafe(asyncio.ensure_future, coro)
+
         channel.onOpen(lambda: _ts(self._on_open()))
         channel.onClosed(lambda: _ts(self._on_close()))
         channel.onMessage(lambda msg: _ts(self._on_message(msg)))
@@ -329,7 +375,9 @@ class _RtcPeer:
             frame = orjson.dumps(envelope_dict)
             loop = self._loop or asyncio.get_event_loop()
             await loop.run_in_executor(
-                None, self._channel.sendMessage, frame,
+                None,
+                self._channel.sendMessage,
+                frame,
             )
             return True
         except Exception as exc:
@@ -351,12 +399,13 @@ class _RtcPeer:
 
 # ─── Facade ────────────────────────────────────────────────────────────────
 
+
 @dataclass(slots=True, frozen=True)
 class _TransportSendResult:
     """What :meth:`FederationTransport.send` returns to the caller."""
 
     ok: bool
-    via: str                # "rtc" | "webhook"
+    via: str  # "rtc" | "webhook"
     status_code: int | None = None
     error: str | None = None
 
@@ -392,11 +441,11 @@ class FederationTransport:
         inbound_handler: Callable[[str, bytes], Awaitable[dict]] | None = None,
     ) -> None:
         self._own_instance_id = own_instance_id
-        self._webhook         = webhook
-        self._signaling_send  = signaling_send
-        self._ice_servers     = ice_servers or []
+        self._webhook = webhook
+        self._signaling_send = signaling_send
+        self._ice_servers = ice_servers or []
         self._peers: dict[str, _RtcPeer] = {}
-        self._lock            = asyncio.Lock()
+        self._lock = asyncio.Lock()
         # Callback for inbound DataChannel frames → §24.11 pipeline.
         # Signature: ``async (instance_id, raw_body) -> dict``.
         # Attached by FederationService after construction.
@@ -422,7 +471,8 @@ class FederationTransport:
             except Exception as exc:
                 log.warning(
                     "fed RTC send to %s raised (%s) — falling back to webhook",
-                    instance.id, exc,
+                    instance.id,
+                    exc,
                 )
                 sent = False
             if sent:
@@ -437,10 +487,13 @@ class FederationTransport:
             await self._ensure_handshake(instance)
 
         ok, status = await self._webhook.send(
-            instance=instance, envelope_dict=envelope_dict,
+            instance=instance,
+            envelope_dict=envelope_dict,
         )
         return _TransportSendResult(
-            ok=ok, via="webhook", status_code=status,
+            ok=ok,
+            via="webhook",
+            status_code=status,
             error=None if ok else "webhook_failed",
         )
 
@@ -461,21 +514,27 @@ class FederationTransport:
             await peer.start_offer()
         except Exception as exc:
             log.warning(
-                "fed RTC handshake start failed for %s: %s", instance.id, exc,
+                "fed RTC handshake start failed for %s: %s",
+                instance.id,
+                exc,
             )
 
     def _signaling_factory(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> Callable[[FederationEventType, dict], Awaitable[None]]:
         async def _signal(et: FederationEventType, payload: dict) -> None:
             await self._signaling_send(instance_id, et, payload)
+
         return _signal
 
     def _inbound_factory(self, instance_id: str) -> _InboundCallback:
         async def _on_inbound(envelope: dict) -> None:
             log.debug(
                 "fed RTC frame received from %s (msg_id=%s, type=%s)",
-                instance_id, envelope.get("msg_id"), envelope.get("event_type"),
+                instance_id,
+                envelope.get("msg_id"),
+                envelope.get("event_type"),
             )
             # Feed inbound DataChannel frames through the same §24.11
             # validation pipeline the webhook path uses — but with the
@@ -488,14 +547,19 @@ class FederationTransport:
                 except ValueError as exc:
                     log.warning(
                         "fed RTC inbound rejected from %s: %s",
-                        instance_id, exc,
+                        instance_id,
+                        exc,
                     )
+
         return _on_inbound
 
     # ─── Inbound signalling ──────────────────────────────────────────────
 
     async def on_rtc_offer(
-        self, *, from_instance: str, payload: dict,
+        self,
+        *,
+        from_instance: str,
+        payload: dict,
     ) -> None:
         """Handle a ``FEDERATION_RTC_OFFER`` from a paired peer."""
         async with self._lock:
@@ -514,13 +578,17 @@ class FederationTransport:
         await peer.accept_offer(sdp=sdp, from_instance=from_instance)
 
     async def on_rtc_answer(
-        self, *, from_instance: str, payload: dict,
+        self,
+        *,
+        from_instance: str,
+        payload: dict,
     ) -> None:
         """Handle a ``FEDERATION_RTC_ANSWER`` (S-14 origin-guarded)."""
         peer = self._peers.get(from_instance)
         if peer is None:
             log.warning(
-                "RTC answer from %s ignored — no pending peer", from_instance,
+                "RTC answer from %s ignored — no pending peer",
+                from_instance,
             )
             return
         sdp = str(payload.get("sdp") or "")
@@ -529,7 +597,10 @@ class FederationTransport:
         await peer.apply_answer(sdp=sdp, from_instance=from_instance)
 
     async def on_rtc_ice(
-        self, *, from_instance: str, payload: dict,
+        self,
+        *,
+        from_instance: str,
+        payload: dict,
     ) -> None:
         """Handle a trickled ``FEDERATION_RTC_ICE`` candidate."""
         peer = self._peers.get(from_instance)

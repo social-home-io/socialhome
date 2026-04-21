@@ -81,11 +81,14 @@ class StickyFederationOutbound:
         )
 
     async def _fan_out(
-        self, space_id: str, event_type: FederationEventType, payload: dict,
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
     ) -> None:
         try:
             peers = await self._space_repo.list_member_instances(space_id)
-        except Exception as exc:         # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
             log.debug("sticky-outbound: list peers failed: %s", exc)
             return
         own = getattr(self._federation, "_own_instance_id", "")
@@ -99,9 +102,11 @@ class StickyFederationOutbound:
                     payload=payload,
                     space_id=space_id,
                 )
-            except Exception as exc:      # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
-                    "sticky-outbound: send to %s failed: %s", instance_id, exc,
+                    "sticky-outbound: send to %s failed: %s",
+                    instance_id,
+                    exc,
                 )
 
 

@@ -50,16 +50,22 @@ async def env(tmp_dir):
     space_repo = SqliteSpaceRepo(db)
 
     cat = Catalog()
-    cat.load_locale("en", {
-        "notification.post.created":      "{author} posted",
-        "notification.task.assigned":     "Assigned: {title}",
-        "notification.space.post.created": "{author} posted in {space_name}",
-    })
-    cat.load_locale("de", {
-        "notification.post.created":      "{author} hat gepostet",
-        "notification.task.assigned":     "Zugewiesen: {title}",
-        "notification.space.post.created": "{author} im Raum {space_name}",
-    })
+    cat.load_locale(
+        "en",
+        {
+            "notification.post.created": "{author} posted",
+            "notification.task.assigned": "Assigned: {title}",
+            "notification.space.post.created": "{author} posted in {space_name}",
+        },
+    )
+    cat.load_locale(
+        "de",
+        {
+            "notification.post.created": "{author} hat gepostet",
+            "notification.task.assigned": "Zugewiesen: {title}",
+            "notification.space.post.created": "{author} im Raum {space_name}",
+        },
+    )
 
     svc = NotificationService(notif_repo, user_repo, space_repo, bus, i18n=cat)
     svc.wire()
@@ -69,12 +75,16 @@ async def env(tmp_dir):
 
 def _post():
     return Post(
-        id="p1", author="a-id", type=PostType.TEXT,
-        content="hi", created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        id="p1",
+        author="a-id",
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
 
 
 # ─── Per-recipient locale ───────────────────────────────────────────────
+
 
 async def test_post_created_uses_recipient_locale(env):
     bus, repo, _ = env
@@ -92,8 +102,11 @@ async def test_post_created_alice_gets_english(env):
         "INSERT INTO feed_posts(id, author, type, content) VALUES('p2', 'b-id', 'text', 'hi')",
     )
     p2 = Post(
-        id="p2", author="b-id", type=PostType.TEXT,
-        content="hi", created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        id="p2",
+        author="b-id",
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
     )
     await bus.publish(PostCreated(post=p2))
     alice = await repo.list("a-id")
@@ -105,9 +118,14 @@ async def test_task_assigned_uses_recipient_locale(env):
     bus, repo, _ = env
     now = datetime(2026, 4, 15, tzinfo=timezone.utc)
     task = Task(
-        id="t1", list_id="l1", title="Buy milk",
-        status=TaskStatus.TODO, position=0, created_by="a-id",
-        created_at=now, updated_at=now,
+        id="t1",
+        list_id="l1",
+        title="Buy milk",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="a-id",
+        created_at=now,
+        updated_at=now,
     )
     await bus.publish(TaskAssigned(task=task, assigned_to="b-id"))
     bob = await repo.list("b-id")

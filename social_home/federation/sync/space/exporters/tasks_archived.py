@@ -28,7 +28,4 @@ class TasksArchivedExporter:
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         tasks = await self._repo.list_by_space(space_id)
-        return [
-            _task_to_dict(t) for t in tasks
-            if t.status is TaskStatus.DONE
-        ]
+        return [_task_to_dict(t) for t in tasks if t.status is TaskStatus.DONE]

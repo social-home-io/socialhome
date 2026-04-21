@@ -49,6 +49,7 @@ _VALID_AUDIENCES: frozenset[str] = frozenset({"all", "family", "teen", "adult"})
 
 # ─── Errors ──────────────────────────────────────────────────────────────
 
+
 class ChildProtectionError(Exception):
     """Base error class."""
 
@@ -58,6 +59,7 @@ class GuardianRequiredError(ChildProtectionError):
 
 
 # ─── Service ─────────────────────────────────────────────────────────────
+
 
 @runtime_checkable
 class _PublishesEvents(Protocol):
@@ -128,18 +130,26 @@ class ChildProtectionService:
             declared_age=declared_age,
             date_of_birth=date_of_birth,
         )
-        await self._bus.publish(CpProtectionEnabled(
-            minor_username=minor_username, declared_age=declared_age,
-        ))
+        await self._bus.publish(
+            CpProtectionEnabled(
+                minor_username=minor_username,
+                declared_age=declared_age,
+            )
+        )
 
     async def disable_protection(
-        self, *, minor_username: str, actor_user_id: str,
+        self,
+        *,
+        minor_username: str,
+        actor_user_id: str,
     ) -> None:
         await self._require_admin(actor_user_id)
         await self._repo.disable_protection(minor_username)
-        await self._bus.publish(CpProtectionDisabled(
-            minor_username=minor_username,
-        ))
+        await self._bus.publish(
+            CpProtectionDisabled(
+                minor_username=minor_username,
+            )
+        )
 
     # ─── Guardians ───────────────────────────────────────────────────────
 
@@ -158,10 +168,12 @@ class ChildProtectionService:
             guardian_user_id=guardian_user_id,
             granted_by=actor_user_id,
         )
-        await self._bus.publish(CpGuardianAdded(
-            minor_user_id=minor_user_id,
-            guardian_user_id=guardian_user_id,
-        ))
+        await self._bus.publish(
+            CpGuardianAdded(
+                minor_user_id=minor_user_id,
+                guardian_user_id=guardian_user_id,
+            )
+        )
 
     async def remove_guardian(
         self,
@@ -175,10 +187,12 @@ class ChildProtectionService:
             minor_user_id=minor_user_id,
             guardian_user_id=guardian_user_id,
         )
-        await self._bus.publish(CpGuardianRemoved(
-            minor_user_id=minor_user_id,
-            guardian_user_id=guardian_user_id,
-        ))
+        await self._bus.publish(
+            CpGuardianRemoved(
+                minor_user_id=minor_user_id,
+                guardian_user_id=guardian_user_id,
+            )
+        )
 
     async def list_guardians(self, minor_user_id: str) -> list[str]:
         return await self._repo.list_guardians(minor_user_id)
@@ -187,7 +201,9 @@ class ChildProtectionService:
         return await self._repo.list_minors_for_guardian(guardian_user_id)
 
     async def is_guardian_of(
-        self, guardian_user_id: str, minor_user_id: str,
+        self,
+        guardian_user_id: str,
+        minor_user_id: str,
     ) -> bool:
         return await self._repo.is_guardian_of(guardian_user_id, minor_user_id)
 
@@ -207,13 +223,17 @@ class ChildProtectionService:
             blocked_by=guardian_user_id,
         )
         await self.record_action(
-            minor_id=minor_user_id, guardian_id=guardian_user_id,
-            action="block_user", detail={"blocked_user_id": blocked_user_id},
+            minor_id=minor_user_id,
+            guardian_id=guardian_user_id,
+            action="block_user",
+            detail={"blocked_user_id": blocked_user_id},
         )
-        await self._bus.publish(CpBlockAdded(
-            minor_user_id=minor_user_id,
-            blocked_user_id=blocked_user_id,
-        ))
+        await self._bus.publish(
+            CpBlockAdded(
+                minor_user_id=minor_user_id,
+                blocked_user_id=blocked_user_id,
+            )
+        )
         # §CP.F2: drop the minor from any space that also has the
         # blocked user as a member. Failure here is logged but never
         # blocks the block itself.
@@ -222,11 +242,14 @@ class ChildProtectionService:
                 minor_user_id=minor_user_id,
                 blocked_user_id=blocked_user_id,
             )
-        except Exception as exc:          # defensive — schema may vary
+        except Exception as exc:  # defensive — schema may vary
             log.debug("CP.F2 space auto-removal skipped: %s", exc)
 
     async def list_blocks_for_minor(
-        self, *, minor_user_id: str, actor_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        actor_user_id: str,
     ) -> list[dict]:
         """Return the block list for *minor_user_id*.
 
@@ -240,7 +263,10 @@ class ChildProtectionService:
         return await self._repo.list_blocks_for_minor(minor_user_id)
 
     async def list_spaces_for_minor(
-        self, *, minor_user_id: str, actor_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        actor_user_id: str,
     ) -> list[dict]:
         """Return every space *minor_user_id* is currently a member of.
 
@@ -257,16 +283,19 @@ class ChildProtectionService:
         spaces = await self._space_repo.list_for_user(minor_user_id)
         return [
             {
-                "id":         s.id,
-                "name":       s.name,
-                "emoji":      s.emoji,
+                "id": s.id,
+                "name": s.name,
+                "emoji": s.emoji,
                 "space_type": s.space_type.value,
             }
             for s in spaces
         ]
 
     async def list_conversations_for_minor(
-        self, *, minor_user_id: str, actor_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        actor_user_id: str,
     ) -> list[dict]:
         """Return every DM conversation the minor actively participates in.
 
@@ -282,16 +311,19 @@ class ChildProtectionService:
         convs = await self._conv_repo.list_for_user(user.username)
         return [
             {
-                "id":              c.id,
-                "type":            c.type.value,
-                "name":            c.name,
+                "id": c.id,
+                "type": c.type.value,
+                "name": c.name,
                 "last_message_at": c.last_message_at,
             }
             for c in convs
         ]
 
     async def list_dm_contacts_for_minor(
-        self, *, minor_user_id: str, actor_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        actor_user_id: str,
     ) -> list[dict]:
         """Return every distinct peer the minor is in a DM with.
 
@@ -312,14 +344,18 @@ class ChildProtectionService:
                 if m.username == user.username or m.username in seen:
                     continue
                 seen.add(m.username)
-                contacts.append({
-                    "username":        m.username,
-                    "conversation_id": c.id,
-                })
+                contacts.append(
+                    {
+                        "username": m.username,
+                        "conversation_id": c.id,
+                    }
+                )
         return contacts
 
     async def _require_guardian_or_admin(
-        self, actor_user_id: str, minor_user_id: str,
+        self,
+        actor_user_id: str,
+        minor_user_id: str,
     ) -> None:
         if await self._repo.is_guardian_of(actor_user_id, minor_user_id):
             return
@@ -342,13 +378,17 @@ class ChildProtectionService:
             blocked_user_id=blocked_user_id,
         )
         await self.record_action(
-            minor_id=minor_user_id, guardian_id=guardian_user_id,
-            action="unblock_user", detail={"blocked_user_id": blocked_user_id},
+            minor_id=minor_user_id,
+            guardian_id=guardian_user_id,
+            action="unblock_user",
+            detail={"blocked_user_id": blocked_user_id},
         )
-        await self._bus.publish(CpBlockRemoved(
-            minor_user_id=minor_user_id,
-            blocked_user_id=blocked_user_id,
-        ))
+        await self._bus.publish(
+            CpBlockRemoved(
+                minor_user_id=minor_user_id,
+                blocked_user_id=blocked_user_id,
+            )
+        )
 
     # ─── Guardian-scoped space control (spec §CP) ────────────────────────
 
@@ -374,13 +414,17 @@ class ChildProtectionService:
             return False
         await self._space_repo.delete_member(space_id, minor_user_id)
         await self.record_action(
-            minor_id=minor_user_id, guardian_id=guardian_user_id,
+            minor_id=minor_user_id,
+            guardian_id=guardian_user_id,
             action="kick_from_space",
             detail={"space_id": space_id},
         )
-        await self._bus.publish(SpaceMemberLeft(
-            space_id=space_id, user_id=minor_user_id,
-        ))
+        await self._bus.publish(
+            SpaceMemberLeft(
+                space_id=space_id,
+                user_id=minor_user_id,
+            )
+        )
         return True
 
     # ─── Guardian audit log (§CP, §25.8 business logic) ──────────────────
@@ -399,22 +443,32 @@ class ChildProtectionService:
         admins can audit who did what.
         """
         await self._repo.append_audit(
-            minor_id=minor_id, guardian_id=guardian_id,
-            action=action, detail=detail,
+            minor_id=minor_id,
+            guardian_id=guardian_id,
+            action=action,
+            detail=detail,
         )
 
     async def list_audit_log(
-        self, minor_user_id: str, *, limit: int = 50,
+        self,
+        minor_user_id: str,
+        *,
+        limit: int = 50,
     ) -> list[dict]:
         """Recent guardian actions for a minor, newest first."""
         return await self._repo.list_audit_log(minor_user_id, limit=limit)
 
     async def get_audit_log(
-        self, minor_user_id: str, requester_user_id: str, *, limit: int = 50,
+        self,
+        minor_user_id: str,
+        requester_user_id: str,
+        *,
+        limit: int = 50,
     ) -> list[dict]:
         """Audit-log accessor with ACL — guardians or admins only."""
         is_guardian = await self.is_guardian_of(
-            requester_user_id, minor_user_id,
+            requester_user_id,
+            minor_user_id,
         )
         if not is_guardian:
             # Admin bypass — reuse the existing admin check.
@@ -427,10 +481,13 @@ class ChildProtectionService:
         return await self.list_audit_log(minor_user_id, limit=limit)
 
     async def is_blocked_for_minor(
-        self, minor_user_id: str, other_user_id: str,
+        self,
+        minor_user_id: str,
+        other_user_id: str,
     ) -> bool:
         return await self._repo.is_blocked_for_minor(
-            minor_user_id, other_user_id,
+            minor_user_id,
+            other_user_id,
         )
 
     # ─── Space age gate ──────────────────────────────────────────────────
@@ -455,18 +512,25 @@ class ChildProtectionService:
         if not await self._repo.space_exists(space_id):
             raise KeyError(f"space {space_id!r} not found")
         await self._repo.update_space_age_gate(
-            space_id=space_id, min_age=min_age, target_audience=target_audience,
-        )
-        await self._bus.publish(CpSpaceAgeGateChanged(
-            space_id=space_id, min_age=min_age,
+            space_id=space_id,
+            min_age=min_age,
             target_audience=target_audience,
-        ))
+        )
+        await self._bus.publish(
+            CpSpaceAgeGateChanged(
+                space_id=space_id,
+                min_age=min_age,
+                target_audience=target_audience,
+            )
+        )
 
     async def get_space_age_gate(self, space_id: str) -> dict:
         return await self._repo.get_space_age_gate(space_id)
 
     async def check_space_age_gate(
-        self, space_id: str, user_id: str,
+        self,
+        space_id: str,
+        user_id: str,
     ) -> None:
         """§CP.F1 enforcement — call before adding a member to a space.
 
@@ -490,7 +554,10 @@ class ChildProtectionService:
     # ─── DM enforcement (§CP.F3) ─────────────────────────────────────────
 
     async def is_dm_allowed(
-        self, *, sender_user_id: str, target_instance_id: str | None,
+        self,
+        *,
+        sender_user_id: str,
+        target_instance_id: str | None,
     ) -> bool:
         """True iff a protected minor may DM the given target.
 
@@ -517,7 +584,9 @@ class ChildProtectionService:
             raise SpacePermissionError("Only household admins may perform this action")
 
     async def _require_guardian(
-        self, guardian_user_id: str, minor_user_id: str,
+        self,
+        guardian_user_id: str,
+        minor_user_id: str,
     ) -> None:
         if not await self.is_guardian_of(guardian_user_id, minor_user_id):
             raise GuardianRequiredError(

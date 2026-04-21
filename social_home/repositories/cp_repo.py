@@ -27,6 +27,7 @@ from ..db import AsyncDatabase
 
 # ─── Protocol ────────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class AbstractCpRepo(Protocol):
     # Protection toggle
@@ -42,17 +43,27 @@ class AbstractCpRepo(Protocol):
 
     # Guardians
     async def add_guardian(
-        self, *, minor_user_id: str, guardian_user_id: str, granted_by: str,
+        self,
+        *,
+        minor_user_id: str,
+        guardian_user_id: str,
+        granted_by: str,
     ) -> None: ...
     async def remove_guardian(
-        self, *, minor_user_id: str, guardian_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        guardian_user_id: str,
     ) -> None: ...
     async def list_guardians(self, minor_user_id: str) -> list[str]: ...
     async def list_minors_for_guardian(
-        self, guardian_user_id: str,
+        self,
+        guardian_user_id: str,
     ) -> list[str]: ...
     async def is_guardian_of(
-        self, guardian_user_id: str, minor_user_id: str,
+        self,
+        guardian_user_id: str,
+        minor_user_id: str,
     ) -> bool: ...
 
     # Minor blocks (§CP.F2)
@@ -64,38 +75,59 @@ class AbstractCpRepo(Protocol):
         blocked_by: str,
     ) -> None: ...
     async def unblock_user(
-        self, *, minor_user_id: str, blocked_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        blocked_user_id: str,
     ) -> None: ...
     async def is_blocked_for_minor(
-        self, minor_user_id: str, other_user_id: str,
+        self,
+        minor_user_id: str,
+        other_user_id: str,
     ) -> bool: ...
     async def list_blocks_for_minor(
-        self, minor_user_id: str,
+        self,
+        minor_user_id: str,
     ) -> list[dict]: ...
     async def remove_minor_from_blocked_user_spaces(
-        self, *, minor_user_id: str, blocked_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        blocked_user_id: str,
     ) -> None: ...
 
     # Audit log
     async def append_audit(
-        self, *, minor_id: str, guardian_id: str, action: str,
+        self,
+        *,
+        minor_id: str,
+        guardian_id: str,
+        action: str,
         detail: dict | None = None,
     ) -> None: ...
     async def list_audit_log(
-        self, minor_user_id: str, *, limit: int,
+        self,
+        minor_user_id: str,
+        *,
+        limit: int,
     ) -> list[dict]: ...
 
     # Age gate (§CP.F1)
     async def space_exists(self, space_id: str) -> bool: ...
     async def update_space_age_gate(
-        self, *, space_id: str, min_age: int, target_audience: str,
+        self,
+        *,
+        space_id: str,
+        min_age: int,
+        target_audience: str,
     ) -> None: ...
     async def get_space_age_gate(self, space_id: str) -> dict: ...
     async def get_user_protection(self, user_id: str) -> dict | None: ...
 
     # DM gate (§CP.F3)
     async def get_remote_instance_status(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> dict | None: ...
 
     # Admin check
@@ -103,6 +135,7 @@ class AbstractCpRepo(Protocol):
 
 
 # ─── SQLite implementation ───────────────────────────────────────────────
+
 
 class SqliteCpRepo:
     """SQLite-backed :class:`AbstractCpRepo`."""
@@ -137,7 +170,11 @@ class SqliteCpRepo:
     # ── guardians ──────────────────────────────────────────────────────
 
     async def add_guardian(
-        self, *, minor_user_id: str, guardian_user_id: str, granted_by: str,
+        self,
+        *,
+        minor_user_id: str,
+        guardian_user_id: str,
+        granted_by: str,
     ) -> None:
         await self._db.enqueue(
             "INSERT OR IGNORE INTO cp_guardians("
@@ -146,7 +183,10 @@ class SqliteCpRepo:
         )
 
     async def remove_guardian(
-        self, *, minor_user_id: str, guardian_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        guardian_user_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM cp_guardians WHERE minor_user_id=? AND guardian_user_id=?",
@@ -161,7 +201,8 @@ class SqliteCpRepo:
         return [r["guardian_user_id"] for r in rows]
 
     async def list_minors_for_guardian(
-        self, guardian_user_id: str,
+        self,
+        guardian_user_id: str,
     ) -> list[str]:
         rows = await self._db.fetchall(
             "SELECT minor_user_id FROM cp_guardians WHERE guardian_user_id=?",
@@ -170,7 +211,9 @@ class SqliteCpRepo:
         return [r["minor_user_id"] for r in rows]
 
     async def is_guardian_of(
-        self, guardian_user_id: str, minor_user_id: str,
+        self,
+        guardian_user_id: str,
+        minor_user_id: str,
     ) -> bool:
         row = await self._db.fetchone(
             "SELECT 1 FROM cp_guardians WHERE guardian_user_id=? AND minor_user_id=?",
@@ -194,7 +237,10 @@ class SqliteCpRepo:
         )
 
     async def unblock_user(
-        self, *, minor_user_id: str, blocked_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        blocked_user_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM cp_minor_blocks WHERE minor_user_id=? AND blocked_user_id=?",
@@ -202,7 +248,9 @@ class SqliteCpRepo:
         )
 
     async def is_blocked_for_minor(
-        self, minor_user_id: str, other_user_id: str,
+        self,
+        minor_user_id: str,
+        other_user_id: str,
     ) -> bool:
         row = await self._db.fetchone(
             "SELECT 1 FROM cp_minor_blocks WHERE minor_user_id=? AND blocked_user_id=?",
@@ -211,7 +259,8 @@ class SqliteCpRepo:
         return row is not None
 
     async def list_blocks_for_minor(
-        self, minor_user_id: str,
+        self,
+        minor_user_id: str,
     ) -> list[dict]:
         """Return every ``{blocked_user_id, blocked_by, blocked_at}``
         row for *minor_user_id*. Used by the Parent Dashboard (§CP)."""
@@ -224,14 +273,17 @@ class SqliteCpRepo:
         return [
             {
                 "blocked_user_id": r["blocked_user_id"],
-                "blocked_by":      r["blocked_by"],
-                "blocked_at":      r["blocked_at"],
+                "blocked_by": r["blocked_by"],
+                "blocked_at": r["blocked_at"],
             }
             for r in rows
         ]
 
     async def remove_minor_from_blocked_user_spaces(
-        self, *, minor_user_id: str, blocked_user_id: str,
+        self,
+        *,
+        minor_user_id: str,
+        blocked_user_id: str,
     ) -> None:
         await self._db.enqueue(
             "DELETE FROM space_members WHERE user_id=? AND space_id IN "
@@ -242,20 +294,30 @@ class SqliteCpRepo:
     # ── audit log ──────────────────────────────────────────────────────
 
     async def append_audit(
-        self, *, minor_id: str, guardian_id: str, action: str,
+        self,
+        *,
+        minor_id: str,
+        guardian_id: str,
+        action: str,
         detail: dict | None = None,
     ) -> None:
         await self._db.enqueue(
             "INSERT INTO guardian_audit_log(id, minor_id, guardian_id, "
             "action, detail) VALUES(?,?,?,?,?)",
             (
-                uuid.uuid4().hex, minor_id, guardian_id, action,
+                uuid.uuid4().hex,
+                minor_id,
+                guardian_id,
+                action,
                 json.dumps(detail or {}),
             ),
         )
 
     async def list_audit_log(
-        self, minor_user_id: str, *, limit: int,
+        self,
+        minor_user_id: str,
+        *,
+        limit: int,
     ) -> list[dict]:
         rows = await self._db.fetchall(
             "SELECT id, minor_id, guardian_id, action, detail, occurred_at "
@@ -269,12 +331,17 @@ class SqliteCpRepo:
 
     async def space_exists(self, space_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT 1 FROM spaces WHERE id=?", (space_id,),
+            "SELECT 1 FROM spaces WHERE id=?",
+            (space_id,),
         )
         return row is not None
 
     async def update_space_age_gate(
-        self, *, space_id: str, min_age: int, target_audience: str,
+        self,
+        *,
+        space_id: str,
+        min_age: int,
+        target_audience: str,
     ) -> None:
         await self._db.enqueue(
             "UPDATE spaces SET min_age=?, target_audience=? WHERE id=?",
@@ -289,14 +356,13 @@ class SqliteCpRepo:
         if row is None:
             return {"min_age": 0, "target_audience": "all"}
         return {
-            "min_age":         int(row["min_age"] or 0),
+            "min_age": int(row["min_age"] or 0),
             "target_audience": row["target_audience"] or "all",
         }
 
     async def get_user_protection(self, user_id: str) -> dict | None:
         row = await self._db.fetchone(
-            "SELECT child_protection_enabled, declared_age"
-            " FROM users WHERE user_id=?",
+            "SELECT child_protection_enabled, declared_age FROM users WHERE user_id=?",
             (user_id,),
         )
         if row is None:
@@ -311,7 +377,8 @@ class SqliteCpRepo:
     # ── DM gate ────────────────────────────────────────────────────────
 
     async def get_remote_instance_status(
-        self, instance_id: str,
+        self,
+        instance_id: str,
     ) -> dict | None:
         row = await self._db.fetchone(
             "SELECT status, source FROM remote_instances WHERE id=?",
@@ -328,6 +395,7 @@ class SqliteCpRepo:
 
     async def is_admin(self, user_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT is_admin FROM users WHERE user_id=?", (user_id,),
+            "SELECT is_admin FROM users WHERE user_id=?",
+            (user_id,),
         )
         return row is not None and bool(int(row["is_admin"] or 0))

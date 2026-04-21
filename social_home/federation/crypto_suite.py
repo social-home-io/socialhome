@@ -32,10 +32,12 @@ from __future__ import annotations
 #: Adding a new entry here does NOT enable the algorithm — the encoder
 #: must also grow a signer for it. Wire-format identifiers should stay
 #: short, lowercase, no punctuation beyond digits.
-KNOWN_ALGORITHMS: frozenset[str] = frozenset({
-    "ed25519",
-    "mldsa65",        # ML-DSA-65 (FIPS 204); NIST security level 3.
-})
+KNOWN_ALGORITHMS: frozenset[str] = frozenset(
+    {
+        "ed25519",
+        "mldsa65",  # ML-DSA-65 (FIPS 204); NIST security level 3.
+    }
+)
 
 #: Suites this deployment recognises on the wire. The default suite
 #: (first listed) is used when no per-peer override is set. Keep the
@@ -74,8 +76,7 @@ def validate_suite(suite: str) -> None:
     """
     if suite not in SUPPORTED_SUITES:
         raise ValueError(
-            f"sig_suite={suite!r} not recognised; expected one of "
-            f"{SUPPORTED_SUITES}",
+            f"sig_suite={suite!r} not recognised; expected one of {SUPPORTED_SUITES}",
         )
 
 

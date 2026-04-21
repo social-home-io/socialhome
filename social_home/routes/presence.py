@@ -35,19 +35,21 @@ class PresenceCollectionView(BaseView):
     async def get(self) -> web.Response:
         self.user
         entries = await self.svc(presence_service_key).list_presence()
-        return self._json([
-            {
-                "username":       p.username,
-                "user_id":        p.user_id,
-                "display_name":   p.display_name,
-                "state":          p.state,
-                "zone_name":      p.zone_name,
-                "latitude":       p.latitude,
-                "longitude":      p.longitude,
-                "gps_accuracy_m": p.gps_accuracy_m,
-            }
-            for p in entries
-        ])
+        return self._json(
+            [
+                {
+                    "username": p.username,
+                    "user_id": p.user_id,
+                    "display_name": p.display_name,
+                    "state": p.state,
+                    "zone_name": p.zone_name,
+                    "latitude": p.latitude,
+                    "longitude": p.longitude,
+                    "gps_accuracy_m": p.gps_accuracy_m,
+                }
+                for p in entries
+            ]
+        )
 
 
 class PresenceLocationView(BaseView):
@@ -75,12 +77,14 @@ class PresenceLocationView(BaseView):
         lon = body.get("longitude")
         accuracy = body.get("accuracy_m")
 
-        await self.svc(presence_service_key).update_location(LocationUpdate(
-            username=username,
-            state=state,
-            zone_name=zone_name,
-            latitude=float(lat) if lat is not None else None,
-            longitude=float(lon) if lon is not None else None,
-            gps_accuracy_m=float(accuracy) if accuracy is not None else None,
-        ))
+        await self.svc(presence_service_key).update_location(
+            LocationUpdate(
+                username=username,
+                state=state,
+                zone_name=zone_name,
+                latitude=float(lat) if lat is not None else None,
+                longitude=float(lon) if lon is not None else None,
+                gps_accuracy_m=float(accuracy) if accuracy is not None else None,
+            )
+        )
         return web.Response(status=204)

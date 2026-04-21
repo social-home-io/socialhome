@@ -24,10 +24,14 @@ class _FakeAdapter:
         channels: int = 1,
     ) -> str:
         chunks = [c async for c in audio_stream]
-        self.calls.append({
-            "chunks": chunks, "language": language,
-            "sample_rate": sample_rate, "channels": channels,
-        })
+        self.calls.append(
+            {
+                "chunks": chunks,
+                "language": language,
+                "sample_rate": sample_rate,
+                "channels": channels,
+            }
+        )
         return self._result
 
 
@@ -48,12 +52,14 @@ async def test_transcribe_stream_forwards_all_args():
     )
 
     assert text == "hello world"
-    assert adapter.calls == [{
-        "chunks": [b"a", b"b"],
-        "language": "de",
-        "sample_rate": 22050,
-        "channels": 2,
-    }]
+    assert adapter.calls == [
+        {
+            "chunks": [b"a", b"b"],
+            "language": "de",
+            "sample_rate": 22050,
+            "channels": 2,
+        }
+    ]
 
 
 async def test_supported_mirrors_adapter():
@@ -70,6 +76,7 @@ async def test_raises_when_adapter_does_not_support_stt():
 
 async def test_supported_defaults_false_when_attribute_missing():
     """Defensive default: older adapter instances without supports_stt."""
+
     class _Legacy:
         async def stream_transcribe_audio(self, *args, **kwargs):
             return ""

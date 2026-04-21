@@ -160,19 +160,25 @@ class HaClient:
             url = f"{url}?return_response"
         try:
             async with self._session.post(
-                url, headers=self._headers(), json=data or {},
+                url,
+                headers=self._headers(),
+                json=data or {},
             ) as resp:
                 if resp.status not in (200, 201):
                     log.debug(
                         "ha_client: call_service %s.%s -> HTTP %d",
-                        domain, service, resp.status,
+                        domain,
+                        service,
+                        resp.status,
                     )
                     return None
                 return await resp.json(content_type=None)
         except aiohttp.ClientError as exc:
             log.debug(
                 "ha_client: call_service %s.%s failed: %s",
-                domain, service, exc,
+                domain,
+                service,
+                exc,
             )
             return None
 
@@ -181,12 +187,16 @@ class HaClient:
         url = f"{self._base_url}/api/events/{event_type}"
         try:
             async with self._session.post(
-                url, headers=self._headers(), json=data or {},
+                url,
+                headers=self._headers(),
+                json=data or {},
             ) as resp:
                 if 200 <= resp.status < 300:
                     return True
                 log.debug(
-                    "ha_client: fire_event %s -> HTTP %d", event_type, resp.status,
+                    "ha_client: fire_event %s -> HTTP %d",
+                    event_type,
+                    resp.status,
                 )
                 return False
         except aiohttp.ClientError as exc:
@@ -209,19 +219,25 @@ class HaClient:
         browser. Returns the parsed response body or ``None`` on error.
         """
         url = f"{self._base_url}/api/stt/{entity_id}"
-        headers = self._headers({
-            "X-Speech-Content": (
-                f"format=wav; codec=pcm; sample_rate={sample_rate}; "
-                f"bit_rate=16; channel={channels}; language={language}"
-            ),
-        })
+        headers = self._headers(
+            {
+                "X-Speech-Content": (
+                    f"format=wav; codec=pcm; sample_rate={sample_rate}; "
+                    f"bit_rate=16; channel={channels}; language={language}"
+                ),
+            }
+        )
         try:
             async with self._session.post(
-                url, headers=headers, data=audio,
+                url,
+                headers=headers,
+                data=audio,
             ) as resp:
                 if resp.status not in (200, 201):
                     log.debug(
-                        "ha_client: stt %s -> HTTP %d", entity_id, resp.status,
+                        "ha_client: stt %s -> HTTP %d",
+                        entity_id,
+                        resp.status,
                     )
                     return None
                 return await resp.json(content_type=None)

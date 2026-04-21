@@ -31,7 +31,9 @@ def test_empty_rrule_returns_only_seed_in_window():
     seed_s = _dt("2026-04-10T09:00:00")
     seed_e = _dt("2026-04-10T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, None,
+        seed_s,
+        seed_e,
+        None,
         window_start=_dt("2026-04-01T00:00:00"),
         window_end=_dt("2026-05-01T00:00:00"),
     )
@@ -42,7 +44,9 @@ def test_empty_rrule_seed_outside_window_returns_empty():
     seed_s = _dt("2025-01-01T00:00:00")
     seed_e = _dt("2025-01-01T01:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, None,
+        seed_s,
+        seed_e,
+        None,
         window_start=_dt("2026-04-01T00:00:00"),
         window_end=_dt("2026-05-01T00:00:00"),
     )
@@ -53,7 +57,9 @@ def test_daily_generates_five_days():
     seed_s = _dt("2026-04-10T09:00:00")
     seed_e = _dt("2026-04-10T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=DAILY",
+        seed_s,
+        seed_e,
+        "FREQ=DAILY",
         window_start=_dt("2026-04-10T00:00:00"),
         window_end=_dt("2026-04-15T00:00:00"),
     )
@@ -66,7 +72,9 @@ def test_daily_with_interval_2_skips_every_other():
     seed_s = _dt("2026-04-10T09:00:00")
     seed_e = _dt("2026-04-10T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=DAILY;INTERVAL=2",
+        seed_s,
+        seed_e,
+        "FREQ=DAILY;INTERVAL=2",
         window_start=_dt("2026-04-10T00:00:00"),
         window_end=_dt("2026-04-20T00:00:00"),
     )
@@ -79,7 +87,9 @@ def test_weekly_byday_monday_wednesday():
     seed_s = _dt("2026-04-06T09:00:00")
     seed_e = _dt("2026-04-06T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=WEEKLY;BYDAY=MO,WE",
+        seed_s,
+        seed_e,
+        "FREQ=WEEKLY;BYDAY=MO,WE",
         window_start=_dt("2026-04-06T00:00:00"),
         window_end=_dt("2026-04-20T00:00:00"),
     )
@@ -92,7 +102,9 @@ def test_count_terminator():
     seed_s = _dt("2026-04-10T09:00:00")
     seed_e = _dt("2026-04-10T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=DAILY;COUNT=3",
+        seed_s,
+        seed_e,
+        "FREQ=DAILY;COUNT=3",
         window_start=_dt("2026-04-10T00:00:00"),
         window_end=_dt("2026-05-01T00:00:00"),
     )
@@ -103,7 +115,9 @@ def test_until_terminator():
     seed_s = _dt("2026-04-10T09:00:00")
     seed_e = _dt("2026-04-10T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=DAILY;UNTIL=20260413T000000Z",
+        seed_s,
+        seed_e,
+        "FREQ=DAILY;UNTIL=20260413T000000Z",
         window_start=_dt("2026-04-10T00:00:00"),
         window_end=_dt("2026-05-01T00:00:00"),
     )
@@ -114,7 +128,9 @@ def test_monthly_same_day_of_month():
     seed_s = _dt("2026-01-15T09:00:00")
     seed_e = _dt("2026-01-15T10:00:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=MONTHLY;COUNT=3",
+        seed_s,
+        seed_e,
+        "FREQ=MONTHLY;COUNT=3",
         window_start=_dt("2026-01-01T00:00:00"),
         window_end=_dt("2026-12-31T00:00:00"),
     )
@@ -125,7 +141,9 @@ def test_yearly():
     seed_s = _dt("2020-07-04T00:00:00")
     seed_e = _dt("2020-07-04T23:59:00")
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=YEARLY;COUNT=5",
+        seed_s,
+        seed_e,
+        "FREQ=YEARLY;COUNT=5",
         window_start=_dt("2020-01-01T00:00:00"),
         window_end=_dt("2030-01-01T00:00:00"),
     )
@@ -137,7 +155,9 @@ def test_window_clamps_even_with_recurring():
     seed_e = _dt("2026-01-01T10:00:00")
     # Recurs daily forever — we stop iterating when we leave the window.
     occs = expand_rrule(
-        seed_s, seed_e, "FREQ=DAILY",
+        seed_s,
+        seed_e,
+        "FREQ=DAILY",
         window_start=_dt("2026-04-01T00:00:00"),
         window_end=_dt("2026-04-04T00:00:00"),
     )

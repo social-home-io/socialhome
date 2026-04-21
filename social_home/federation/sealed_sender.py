@@ -59,10 +59,10 @@ class SealedEnvelope:
 
     def to_dict(self) -> dict:
         return {
-            "sealed":            True,
-            "space_id":          self.space_id,
-            "epoch":             self.epoch,
-            "encrypted_sender":  self.encrypted_sender,
+            "sealed": True,
+            "space_id": self.space_id,
+            "epoch": self.epoch,
+            "encrypted_sender": self.encrypted_sender,
             "encrypted_payload": self.encrypted_payload,
         }
 
@@ -98,16 +98,20 @@ def seal_envelope(
     if len(space_content_key) != 32:
         raise ValueError("space_content_key must be 32 bytes")
     aead = AESGCM(space_content_key)
-    aad  = f"{space_id}:{epoch}".encode("utf-8")
+    aad = f"{space_id}:{epoch}".encode("utf-8")
 
-    sender_nonce  = os.urandom(_NONCE_BYTES)
+    sender_nonce = os.urandom(_NONCE_BYTES)
     payload_nonce = os.urandom(_NONCE_BYTES)
 
     sender_ct = aead.encrypt(
-        sender_nonce, sender_instance_id.encode("utf-8"), aad,
+        sender_nonce,
+        sender_instance_id.encode("utf-8"),
+        aad,
     )
     payload_ct = aead.encrypt(
-        payload_nonce, payload_json.encode("utf-8"), aad,
+        payload_nonce,
+        payload_json.encode("utf-8"),
+        aad,
     )
     return SealedEnvelope(
         space_id=space_id,
@@ -132,7 +136,7 @@ def unseal_envelope(
     if len(space_content_key) != 32:
         raise ValueError("space_content_key must be 32 bytes")
     aead = AESGCM(space_content_key)
-    aad  = f"{envelope.space_id}:{envelope.epoch}".encode("utf-8")
+    aad = f"{envelope.space_id}:{envelope.epoch}".encode("utf-8")
 
     sender_nonce, sender_ct = _unpack(envelope.encrypted_sender)
     payload_nonce, payload_ct = _unpack(envelope.encrypted_payload)
@@ -146,6 +150,7 @@ def unseal_envelope(
 
 
 # ─── Internal pack / unpack ──────────────────────────────────────────────
+
 
 def _pack(nonce: bytes, ct: bytes) -> str:
     return b64url_encode(nonce) + ":" + b64url_encode(ct)

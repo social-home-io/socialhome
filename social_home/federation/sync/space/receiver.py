@@ -68,9 +68,16 @@ class SpaceSyncReceiver:
     """Persist inbound space-sync chunks."""
 
     __slots__ = (
-        "_bus", "_encoder", "_crypto", "_federation_repo",
-        "_space_repo", "_space_post_repo", "_space_task_repo",
-        "_page_repo", "_sticky_repo", "_space_calendar_repo",
+        "_bus",
+        "_encoder",
+        "_crypto",
+        "_federation_repo",
+        "_space_repo",
+        "_space_post_repo",
+        "_space_task_repo",
+        "_page_repo",
+        "_sticky_repo",
+        "_space_calendar_repo",
         "_gallery_repo",
     )
 
@@ -146,16 +153,19 @@ class SpaceSyncReceiver:
         if not ok:
             log.warning(
                 "sync chunk signature mismatch (sync_id=%s resource=%s)",
-                sync_id, resource,
+                sync_id,
+                resource,
             )
             return
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:
-            await self._bus.publish(SpaceSyncComplete(
-                space_id=space_id,
-                from_instance=from_instance,
-            ))
+            await self._bus.publish(
+                SpaceSyncComplete(
+                    space_id=space_id,
+                    from_instance=from_instance,
+                )
+            )
             return
 
         if resource not in ALLOWED_RESOURCES:
@@ -175,7 +185,9 @@ class SpaceSyncReceiver:
         except Exception as exc:
             log.warning(
                 "sync chunk decrypt failed (sync_id=%s resource=%s): %s",
-                sync_id, resource, exc,
+                sync_id,
+                resource,
+                exc,
             )
             return
 
@@ -187,26 +199,34 @@ class SpaceSyncReceiver:
 
         try:
             await self._dispatch(resource, space_id, records)
-        except Exception:                                  # pragma: no cover
+        except Exception:  # pragma: no cover
             log.exception(
                 "sync chunk persist failed (resource=%s space=%s)",
-                resource, space_id,
+                resource,
+                space_id,
             )
 
     async def _dispatch(
-        self, resource: str, space_id: str, records: list[dict[str, Any]],
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
     ) -> None:
         if resource == "members":
             for r in records:
-                await self._space_repo.save_member(SpaceMember(
-                    space_id=space_id,
-                    user_id=str(r.get("user_id") or ""),
-                    role=str(r.get("role") or "member"),
-                    joined_at=str(r.get("joined_at") or ""),
-                    history_visible_from=r.get("history_visible_from"),
-                    location_share_enabled=bool(r.get("location_share_enabled", False)),
-                    space_display_name=r.get("space_display_name"),
-                ))
+                await self._space_repo.save_member(
+                    SpaceMember(
+                        space_id=space_id,
+                        user_id=str(r.get("user_id") or ""),
+                        role=str(r.get("role") or "member"),
+                        joined_at=str(r.get("joined_at") or ""),
+                        history_visible_from=r.get("history_visible_from"),
+                        location_share_enabled=bool(
+                            r.get("location_share_enabled", False)
+                        ),
+                        space_display_name=r.get("space_display_name"),
+                    )
+                )
         elif resource == "bans":
             for r in records:
                 user_id = str(r.get("user_id") or "")
@@ -214,7 +234,8 @@ class SpaceSyncReceiver:
                 if not user_id or not banned_by:
                     continue
                 await self._space_repo.ban_member(
-                    space_id=space_id, user_id=user_id,
+                    space_id=space_id,
+                    user_id=user_id,
                     banned_by=banned_by,
                     reason=r.get("reason"),
                 )
@@ -260,14 +281,21 @@ class SpaceSyncReceiver:
             # v1: polls ride along with posts (Post.poll field). The
             # standalone polls stream is informational — nothing to
             # persist here yet.
-            log.debug("received %d poll records — skipped (see Post.poll)", len(records))
+            log.debug(
+                "received %d poll records — skipped (see Post.poll)", len(records)
+            )
 
     async def _persist_album(self, record: dict[str, Any]) -> None:
-        from ....domain.gallery import GalleryAlbum     # local to avoid cycle at module load
+        from ....domain.gallery import (
+            GalleryAlbum,
+        )  # local to avoid cycle at module load
+
         album = GalleryAlbum(
             id=str(record["id"]),
             space_id=record.get("space_id"),
-            owner_user_id=str(record.get("owner_user_id") or record.get("owner_id") or ""),
+            owner_user_id=str(
+                record.get("owner_user_id") or record.get("owner_id") or ""
+            ),
             name=str(record.get("name") or ""),
             description=record.get("description"),
             cover_item_id=record.get("cover_item_id"),
@@ -277,12 +305,13 @@ class SpaceSyncReceiver:
         )
         try:
             await self._gallery_repo.create_album(album)
-        except Exception:                                  # pragma: no cover
+        except Exception:  # pragma: no cover
             # already exists → INSERT OR IGNORE-equivalent.
             pass
 
     async def _persist_gallery_item(self, record: dict[str, Any]) -> None:
         from ....domain.gallery import GalleryItem
+
         item = GalleryItem(
             id=str(record["id"]),
             album_id=str(record.get("album_id") or ""),
@@ -300,11 +329,12 @@ class SpaceSyncReceiver:
         )
         try:
             await self._gallery_repo.create_item(item)
-        except Exception:                                  # pragma: no cover
+        except Exception:  # pragma: no cover
             pass
 
 
 # ─── Record → domain helpers ────────────────────────────────────────
+
 
 def _post_from_record(r: dict[str, Any]) -> Post | None:
     post_id = r.get("id")
@@ -419,7 +449,9 @@ def _sticky_from_record(r: dict[str, Any], space_id: str) -> Sticky | None:
 
 def _calendar_from_record(r: dict[str, Any]) -> CalendarEvent | None:
     if (
-        not r.get("id") or not r.get("calendar_id") or not r.get("summary")
+        not r.get("id")
+        or not r.get("calendar_id")
+        or not r.get("summary")
         or not r.get("created_by")
     ):
         return None
