@@ -214,7 +214,7 @@ async def test_add_ice_candidate_rejects_empty():
 
 
 async def test_wait_ready_returns_false_in_stub_mode():
-    """Without libdatachannel, the channel never opens — caller must fall back."""
+    """Without aiolibdatachannel, the channel never opens — caller must fall back."""
     s = SyncRtcSession(
         sync_id="sid",
         space_id="sp1",

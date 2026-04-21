@@ -7,7 +7,7 @@ media / DataChannel itself never passes through the GFS (spec §26.6:
 "backend never in media path, DTLS-SRTP mandatory").
 
 This module implements the signalling side only — by design. SCTP /
-libdatachannel wiring lives on each *household* instance
+aiolibdatachannel wiring lives on each *household* instance
 (:mod:`social_home.federation.sync_rtc`), not on the relay.
 
 Each :class:`RtcSession` gains a wall-clock ``created_at`` so a

@@ -25,11 +25,11 @@ jobs:
         run: pip install -e .[dev]
 
       - name: Run tests with branch coverage
-        # Target 90% per §27.5 ("coverage gate"). Current baseline at
-        # v1.0.0 is 83% — ratchet upward as modules get targeted tests.
-        # Do not lower this number; add missing tests instead.
+        # §27.5 — 90% branch coverage gate. Ratchet upward as modules
+        # get more tests; never lower this number — add missing tests
+        # instead.
         run: |
-          pytest --cov=social_home --cov-branch --cov-fail-under=80 --tb=short -q
+          pytest --cov=social_home --cov-branch --cov-fail-under=90 --tb=short -q
 
       - name: Run protocol/security tests (release blocker)
         run: |

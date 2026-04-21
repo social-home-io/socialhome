@@ -1,4 +1,4 @@
-"""Federation delivery transport (§24.12, §4.2.3).
+"""Federation delivery transport (§24.12, §4.2.3) — aiolibdatachannel edition.
 
 The :class:`FederationTransport` facade is the single delivery seam for
 outbound federation events. It keeps one :class:`_RtcPeer` per paired
@@ -37,7 +37,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-import libdatachannel
+import aiolibdatachannel as rtc
 import orjson
 from aiohttp import ClientTimeout
 
@@ -128,6 +128,28 @@ class WebhookTransport:
 _InboundCallback = Callable[[dict], Awaitable[None]]
 
 
+def _build_rtc_config(ice_servers: list[dict]) -> rtc.RTCConfiguration:
+    """Flatten a Chrome-style ``ice_servers`` list into an
+    :class:`aiolibdatachannel.RTCConfiguration`.
+
+    Each entry may carry a single ``urls`` string or a list of them
+    plus optional TURN ``username`` / ``credential``. We map each URL
+    to an :class:`~aiolibdatachannel.IceServer` so credentials ride as
+    first-class fields rather than being spliced into URL userinfo.
+    """
+    servers: list[rtc.IceServer] = []
+    for srv in ice_servers:
+        url_field = srv["urls"]
+        raw_urls = url_field if isinstance(url_field, list) else [url_field]
+        username = srv.get("username") or None
+        credential = srv.get("credential") or None
+        for url in raw_urls:
+            servers.append(
+                rtc.IceServer(url=url, username=username, credential=credential),
+            )
+    return rtc.RTCConfiguration(ice_servers=servers)
+
+
 class _RtcPeer:
     """One DataChannel session for one paired peer."""
 
@@ -170,114 +192,33 @@ class _RtcPeer:
     async def start_offer(self) -> None:
         """Initiate the SDP offer/answer handshake (offerer role)."""
         self._expected_answer_from = self.instance_id
-
         self._loop = asyncio.get_running_loop()
-        cfg = libdatachannel.Configuration()
-        ice_servers: list = []
-        for srv in self._ice_servers:
-            urls = srv["urls"] if isinstance(srv["urls"], list) else [srv["urls"]]
-            for url in urls:
-                if url.startswith("stun:"):
-                    ice_servers.append(libdatachannel.IceServer(url))
-                elif url.startswith("turn:"):
-                    # Positional form: (url, username, password).
-                    ice_servers.append(
-                        libdatachannel.IceServer(
-                            url,
-                            srv.get("username", ""),
-                            srv.get("credential", ""),
-                        )
-                    )
-        cfg.ice_servers = ice_servers
-        self._pc = libdatachannel.PeerConnection(cfg)
-        self._channel = self._pc.createDataChannel(CHANNEL_LABEL)
+        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_servers))
+        self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
+        # Tasks bound to the pc: auto-cancelled on pc.close().
+        self._pc.spawn_task(self._drain_channel(self._channel))
+        self._pc.spawn_task(self._drain_ice())
 
-        loop = self._loop
-
-        def _ts(coro):
-            loop.call_soon_threadsafe(asyncio.ensure_future, coro)
-
-        self._channel.onOpen(lambda: _ts(self._on_open()))
-        self._channel.onClosed(lambda: _ts(self._on_close()))
-        self._channel.onMessage(
-            lambda msg: _ts(self._on_message(msg)),
-        )
-        self._pc.onLocalCandidate(
-            lambda cand, mid: _ts(
-                self._signaling(
-                    FederationEventType.FEDERATION_RTC_ICE,
-                    {"candidate": cand, "sdp_mid": mid},
-                )
-            ),
-        )
-        await loop.run_in_executor(
-            None,
-            self._pc.setLocalDescription,
-            "offer",
-        )
-        sdp = await loop.run_in_executor(
-            None,
-            self._pc.localDescription,
-        )
+        local = await self._pc.set_local_description("offer")
         await self._signaling(
             FederationEventType.FEDERATION_RTC_OFFER,
-            {"sdp": sdp, "sdp_type": "offer"},
+            {"sdp": local.sdp, "sdp_type": local.type},
         )
 
     async def accept_offer(self, *, sdp: str, from_instance: str) -> None:
-        """Receive an SDP offer (answerer role) and reply with an answer.
-
-        Always used on the inbound side. Sets up the PeerConnection,
-        wires handlers, and schedules the answer to be signed +
-        delivered via the webhook.
-        """
-        self._expected_answer_from = None  # we are answerer, no outstanding offer
-
+        """Receive an SDP offer (answerer role) and reply with an answer."""
+        self._expected_answer_from = None  # answerer, no outstanding offer
         self._loop = asyncio.get_running_loop()
-        cfg = libdatachannel.Configuration()
-        ice_servers: list = []
-        for srv in self._ice_servers:
-            urls = srv["urls"] if isinstance(srv["urls"], list) else [srv["urls"]]
-            for url in urls:
-                if url.startswith(("stun:", "turn:")):
-                    ice_servers.append(libdatachannel.IceServer(url))
-        cfg.ice_servers = ice_servers
-        self._pc = libdatachannel.PeerConnection(cfg)
+        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_servers))
 
-        loop = self._loop
+        self._pc.spawn_task(self._drain_incoming_channel())
+        self._pc.spawn_task(self._drain_ice())
 
-        def _ts(coro):
-            loop.call_soon_threadsafe(asyncio.ensure_future, coro)
-
-        self._pc.onDataChannel(
-            lambda ch: _ts(self._on_remote_channel(ch)),
-        )
-        self._pc.onLocalCandidate(
-            lambda cand, mid: _ts(
-                self._signaling(
-                    FederationEventType.FEDERATION_RTC_ICE,
-                    {"candidate": cand, "sdp_mid": mid},
-                )
-            ),
-        )
-        await loop.run_in_executor(
-            None,
-            self._pc.setRemoteDescription,
-            sdp,
-            "offer",
-        )
-        await loop.run_in_executor(
-            None,
-            self._pc.setLocalDescription,
-            "answer",
-        )
-        local_sdp = await loop.run_in_executor(
-            None,
-            self._pc.localDescription,
-        )
+        await self._pc.set_remote_description(sdp, "offer")
+        local = await self._pc.set_local_description("answer")
         await self._signaling(
             FederationEventType.FEDERATION_RTC_ANSWER,
-            {"sdp": local_sdp, "sdp_type": "answer"},
+            {"sdp": local.sdp, "sdp_type": local.type},
         )
 
     async def apply_answer(self, *, sdp: str, from_instance: str) -> bool:
@@ -299,56 +240,74 @@ class _RtcPeer:
             return False
         self._expected_answer_from = None
         if self._pc is not None:
-            loop = self._loop or asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self._pc.setRemoteDescription,
-                sdp,
-                "answer",
-            )
+            await self._pc.set_remote_description(sdp, "answer")
         return True
 
     async def add_ice_candidate(self, *, candidate: str, sdp_mid: str) -> None:
         if not candidate:
             return
         if self._pc is not None:
-            loop = self._loop or asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self._pc.addRemoteCandidate,
-                candidate,
-                sdp_mid,
-            )
+            await self._pc.add_remote_candidate(candidate, sdp_mid)
 
-    async def _on_remote_channel(self, channel) -> None:
-        if channel.getLabel() != CHANNEL_LABEL:
+    # ─── Internal drain loops ─────────────────────────────────────────────
+
+    async def _drain_ice(self) -> None:
+        """Pump local ICE candidates out to the peer over signalling."""
+        try:
+            async for cand in self._pc.ice_candidates():
+                await self._signaling(
+                    FederationEventType.FEDERATION_RTC_ICE,
+                    {"candidate": cand.candidate, "sdp_mid": cand.mid},
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.debug("fed RTC ICE drain to %s ended: %s", self.instance_id, exc)
+
+    async def _drain_incoming_channel(self) -> None:
+        """Answerer path: wait for the provider's DataChannel to arrive."""
+        try:
+            async for ch in self._pc.incoming_data_channels():
+                if ch.label != CHANNEL_LABEL:
+                    continue
+                self._channel = ch
+                self._pc.spawn_task(self._drain_channel(ch))
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("fed RTC incoming-channel wait ended: %s", exc)
+
+    async def _drain_channel(self, channel) -> None:
+        """Consume inbound frames on a DataChannel and mark open/closed."""
+        try:
+            await channel.wait_open()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fed RTC channel never opened to %s: %s", self.instance_id, exc)
             return
-        self._channel = channel
-        loop = self._loop or asyncio.get_event_loop()
-
-        def _ts(coro):
-            loop.call_soon_threadsafe(asyncio.ensure_future, coro)
-
-        channel.onOpen(lambda: _ts(self._on_open()))
-        channel.onClosed(lambda: _ts(self._on_close()))
-        channel.onMessage(lambda msg: _ts(self._on_message(msg)))
-
-    async def _on_open(self) -> None:
         log.info("fed RTC channel open to %s", self.instance_id)
         self._open.set()
-
-    async def _on_close(self) -> None:
+        try:
+            async for msg in channel:
+                try:
+                    data = orjson.loads(msg if isinstance(msg, (bytes, str)) else bytes(msg))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "fed RTC malformed frame from %s: %s",
+                        self.instance_id,
+                        exc,
+                    )
+                    continue
+                await self._inbound(data)
+        except asyncio.CancelledError:
+            raise
+        except rtc.ConnectionClosedError:
+            pass
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.debug("fed RTC recv loop to %s ended: %s", self.instance_id, exc)
         log.info("fed RTC channel closed to %s", self.instance_id)
         self._open.clear()
         self._closed = True
-
-    async def _on_message(self, raw: bytes | str) -> None:
-        try:
-            data = orjson.loads(raw if isinstance(raw, (bytes, str)) else bytes(raw))
-        except Exception as exc:
-            log.warning("fed RTC malformed frame from %s: %s", self.instance_id, exc)
-            return
-        await self._inbound(data)
 
     # ─── Sending ──────────────────────────────────────────────────────────
 
@@ -366,20 +325,19 @@ class _RtcPeer:
         if not self.is_ready or self._channel is None:
             return False
         try:
-            frame = orjson.dumps(envelope_dict)
-            loop = self._loop or asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self._channel.sendMessage,
-                frame,
-            )
+            await self._channel.send(orjson.dumps(envelope_dict))
             return True
         except Exception as exc:
             log.warning("fed RTC send to %s failed: %s", self.instance_id, exc)
             return False
 
     def close(self) -> None:
-        """Close the underlying connection and mark the peer closed."""
+        """Close the underlying connection and mark the peer closed.
+
+        ``pc.close()`` tears down the PeerConnection; aiolibdatachannel
+        auto-cancels any tasks registered via ``pc.spawn_task`` so we
+        don't need to track them ourselves.
+        """
         self._closed = True
         self._open.clear()
         if self._pc is not None:

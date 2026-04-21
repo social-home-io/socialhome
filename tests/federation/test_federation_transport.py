@@ -1,11 +1,11 @@
 """Tests for FederationTransport (§24.12.5).
 
-The test conftest injects a fake ``libdatachannel`` module into
+The test conftest injects a fake ``aiolibdatachannel`` module into
 ``sys.modules`` before any production imports, so the DataChannel
 state machine uses deterministic fake objects. The peer ``is_ready``
-flag is flipped explicitly via :meth:`_RtcPeer._on_open`. That's
-enough to exercise the facade's primary / fallback branches without
-the native binding.
+flag is flipped explicitly by marking ``_open`` / ``_closed`` on
+``_RtcPeer``. That's enough to exercise the facade's primary /
+fallback branches without the native binding.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ async def test_send_uses_rtc_when_peer_is_ready():
         def __init__(self):
             self.sent = []
 
-        def sendMessage(self, data):
+        async def send(self, data):
             self.sent.append(data)
 
     fake_ch = _FakeChannel()

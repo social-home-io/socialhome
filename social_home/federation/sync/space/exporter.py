@@ -63,7 +63,7 @@ SENTINEL_RESOURCE: str = "__complete__"
 
 #: Target chunk size in bytes (JSON-encoded envelope incl. encryption
 #: overhead). Comfortably below typical WebRTC DataChannel message
-#: limits across libdatachannel backends.
+#: limits across aiolibdatachannel backends.
 CHUNK_SIZE_BUDGET_BYTES: int = 8 * 1024
 
 

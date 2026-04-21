@@ -228,7 +228,7 @@ def _default_ice_servers(config: Config) -> list[dict]:
     The STUN URL is always included; TURN credentials are added only
     when the operator has configured them (TURN typically requires a
     paid relay). Returned in the form expected by both
-    ``RTCPeerConnection`` and ``libdatachannel``.
+    ``RTCPeerConnection`` and ``aiolibdatachannel``.
     """
     servers: list[dict] = []
     if config.webrtc_stun_url:

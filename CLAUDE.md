@@ -158,7 +158,7 @@ When adding a new federation event:
   simplify testing. Tests mock at the test boundary (`sys.modules`
   injection or `unittest.mock.patch`). Production code always uses the
   real dependency.
-- Import `libdatachannel` without alias — use the full module name
+- Import `aiolibdatachannel` without alias — use `import aiolibdatachannel as rtc`
 - Never add `import *`
 - Never commit `.env` files or secrets
 - Never change the LICENSE file or SPDX identifier without explicit instruction — all source code is Mozilla Public License 2.0 (MPL-2.0)

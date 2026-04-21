@@ -21,7 +21,7 @@ Concrete implementations:
   :class:`EncryptionStrategy`
 
 The protocols carry no runtime behaviour. Importing this module is
-side-effect free; it does not pull in aiohttp or libdatachannel.
+side-effect free; it does not pull in aiohttp or aiolibdatachannel.
 """
 
 from __future__ import annotations

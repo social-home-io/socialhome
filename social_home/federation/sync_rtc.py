@@ -5,7 +5,7 @@ instances for Tier 2 / Tier 3 progressive sync. The federation relay is
 used for the SDP / ICE handshake only — bulk sync data flows over the
 DataChannel itself, never through the relay.
 
-``libdatachannel`` is a hard runtime dependency — WebRTC is the primary
+``aiolibdatachannel`` is a hard runtime dependency — WebRTC is the primary
 transport for sync (and for federation in general, §24.12), with the
 relay webhook only as fallback. Missing the native binding is treated
 as a hard configuration error; tests that want to exercise the
@@ -31,9 +31,26 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-import libdatachannel
+import aiolibdatachannel as rtc
 
 log = logging.getLogger(__name__)
+
+
+def _build_rtc_config(ice_servers: list[dict]) -> rtc.RTCConfiguration:
+    """Flatten a Chrome-style ``ice_servers`` list. Same semantics as
+    :func:`social_home.federation.transport._build_rtc_config`.
+    """
+    servers: list[rtc.IceServer] = []
+    for srv in ice_servers:
+        url_field = srv["urls"]
+        raw_urls = url_field if isinstance(url_field, list) else [url_field]
+        username = srv.get("username") or None
+        credential = srv.get("credential") or None
+        for url in raw_urls:
+            servers.append(
+                rtc.IceServer(url=url, username=username, credential=credential),
+            )
+    return rtc.RTCConfiguration(ice_servers=servers)
 
 
 # ─── Constants ────────────────────────────────────────────────────────────
@@ -135,56 +152,54 @@ class SyncRtcSession:
 
         self._init_real_pc()
 
-    # ─── Real libdatachannel setup ────────────────────────────────────────
+    # ─── Real aiolibdatachannel setup ─────────────────────────────────────
 
     def _init_real_pc(self) -> None:
-        """Configure a real ``libdatachannel.PeerConnection``."""
-        cfg = libdatachannel.Configuration()
-        ice_servers: list = []
-        for srv in self._ice_servers:
-            urls = srv["urls"] if isinstance(srv["urls"], list) else [srv["urls"]]
-            for url in urls:
-                if url.startswith("stun:"):
-                    ice_servers.append(libdatachannel.IceServer(url))
-                elif url.startswith("turn:"):
-                    # Positional form: (url, username, password).
-                    ice_servers.append(
-                        libdatachannel.IceServer(
-                            url,
-                            srv.get("username", ""),
-                            srv.get("credential", ""),
-                        )
-                    )
-        cfg.ice_servers = ice_servers
+        """Configure a real ``aiolibdatachannel.PeerConnection``."""
+        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_servers))
 
-        self._pc = libdatachannel.PeerConnection(cfg)
-        loop = self._loop or asyncio.get_event_loop()
-        self._loop = loop
+    async def _open_channel_async(self) -> None:
+        """Lazy channel setup — started at offer/answer time so we are
+        inside an event loop with a known :class:`asyncio.get_running_loop`.
 
-        def _ts(coro):
-            loop.call_soon_threadsafe(asyncio.ensure_future, coro)
-
-        if self.role == "provider":
-            self._channel = self._pc.createDataChannel(CHANNEL_LABEL)
-            self._channel.onOpen(lambda: _ts(self._on_open()))
-            self._channel.onClosed(lambda: _ts(self._on_close()))
-        else:
-            # Requester accepts the channel created by the provider.
-            self._pc.onDataChannel(lambda ch: _ts(self._on_remote_channel(ch)))
-
-    async def _on_remote_channel(self, channel) -> None:
-        if channel.getLabel() != CHANNEL_LABEL:
+        Uses ``pc.spawn_task`` so tasks are auto-cancelled when the
+        PeerConnection closes.
+        """
+        if self._channel is not None:
             return
-        self._channel = channel
-        loop = self._loop or asyncio.get_event_loop()
+        if self.role == "provider":
+            self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
+            self._pc.spawn_task(self._watch_channel(self._channel))
+        else:
+            self._pc.spawn_task(self._watch_incoming())
 
-        def _ts(coro):
-            loop.call_soon_threadsafe(asyncio.ensure_future, coro)
+    async def _watch_incoming(self) -> None:
+        try:
+            async for ch in self._pc.incoming_data_channels():
+                if ch.label != CHANNEL_LABEL:
+                    continue
+                self._channel = ch
+                self._pc.spawn_task(self._watch_channel(ch))
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug(
+                "SyncRtcSession[%s]: incoming-channel wait ended: %s",
+                self.sync_id,
+                exc,
+            )
 
-        channel.onOpen(lambda: _ts(self._on_open()))
-        channel.onClosed(lambda: _ts(self._on_close()))
-
-    async def _on_open(self) -> None:
+    async def _watch_channel(self, channel) -> None:
+        try:
+            await channel.wait_open()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "SyncRtcSession[%s]: channel failed to open: %s",
+                self.sync_id,
+                exc,
+            )
+            return
         log.info(
             "SyncRtcSession[%s]: DataChannel open (space=%s, mode=%s)",
             self.sync_id,
@@ -192,27 +207,24 @@ class SyncRtcSession:
             self.sync_mode,
         )
         self._ready.set()
-
-    async def _on_close(self) -> None:
+        try:
+            await channel.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
         log.info("SyncRtcSession[%s]: DataChannel closed", self.sync_id)
         self._closed = True
 
     # ─── Provider role ────────────────────────────────────────────────────
 
     async def create_offer(self) -> str:
-        """Generate an SDP offer (provider role).
-
-        Returns the SDP string to embed in ``SPACE_SYNC_OFFER``.
-        Raises :class:`RuntimeError` when called on a requester session.
-        """
+        """Generate an SDP offer (provider role)."""
         if self.role != "provider":
             raise RuntimeError("create_offer is only valid for provider sessions")
 
-        loop = self._loop or asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._pc.setLocalDescription, "offer")
-        sdp = await loop.run_in_executor(None, self._pc.localDescription)
-        self._local_sdp = sdp
-        return sdp
+        await self._open_channel_async()
+        local = await self._pc.set_local_description("offer")
+        self._local_sdp = local.sdp
+        return local.sdp
 
     async def set_answer(self, sdp_answer: str) -> None:
         """Apply the SDP answer (provider role) — completes negotiation.
@@ -227,46 +239,23 @@ class SyncRtcSession:
             raise ValueError("Empty SDP answer")
 
         self._remote_sdp = sdp_answer
-
-        loop = self._loop or asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._pc.setRemoteDescription,
-            sdp_answer,
-            "answer",
-        )
+        await self._pc.set_remote_description(sdp_answer, "answer")
 
     # ─── Requester role ───────────────────────────────────────────────────
 
     async def create_answer(self, sdp_offer: str) -> str:
-        """Generate an SDP answer (requester role).
-
-        Sets the remote description from ``sdp_offer`` and returns the
-        local SDP answer for embedding in ``SPACE_SYNC_ANSWER``.
-
-        This is **not** ``set_answer`` — see **S-13** in §25.6.2: the
-        former implementation called ``set_answer(sdp_offer)`` here,
-        which bypassed answer generation and silently broke every
-        DataChannel handshake.
-        """
+        """Generate an SDP answer (requester role)."""
         if self.role != "requester":
             raise RuntimeError("create_answer is only valid for requester sessions")
         if not sdp_offer:
             raise ValueError("Empty SDP offer")
 
+        await self._open_channel_async()
         self._remote_sdp = sdp_offer
-
-        loop = self._loop or asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._pc.setRemoteDescription,
-            sdp_offer,
-            "offer",
-        )
-        await loop.run_in_executor(None, self._pc.setLocalDescription, "answer")
-        sdp = await loop.run_in_executor(None, self._pc.localDescription)
-        self._local_sdp = sdp
-        return sdp
+        await self._pc.set_remote_description(sdp_offer, "offer")
+        local = await self._pc.set_local_description("answer")
+        self._local_sdp = local.sdp
+        return local.sdp
 
     # ─── Shared ───────────────────────────────────────────────────────────
 
@@ -279,14 +268,7 @@ class SyncRtcSession:
         if not candidate:
             raise ValueError("Empty ICE candidate")
         self._ice_candidates.append(candidate)
-
-        loop = self._loop or asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._pc.addRemoteCandidate,
-            candidate,
-            sdp_mid,
-        )
+        await self._pc.add_remote_candidate(candidate, sdp_mid)
 
     async def wait_ready(self, timeout: float = ICE_TIMEOUT_SECONDS) -> bool:
         """Block until the DataChannel is open, or *timeout* seconds elapse.
@@ -306,12 +288,7 @@ class SyncRtcSession:
         """
         if self._channel is None or self._closed:
             raise ConnectionError("DataChannel not open")
-        loop = self._loop or asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._channel.sendMessage,
-            chunk_payload,
-        )
+        await self._channel.send(chunk_payload)
 
     @property
     def is_ready(self) -> bool:
@@ -324,7 +301,11 @@ class SyncRtcSession:
         return self._closed
 
     def close(self) -> None:
-        """Close the underlying connection and mark the session closed."""
+        """Close the underlying connection and mark the session closed.
+
+        ``pc.close()`` tears down the PeerConnection; aiolibdatachannel
+        auto-cancels any tasks registered via ``pc.spawn_task``.
+        """
         self._closed = True
         self._ready.clear()
         if self._pc is not None:

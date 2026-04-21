@@ -1,7 +1,7 @@
 # Social Home core image — the household instance (§4).
 #
 # Entry point: ``python -m social_home``.
-# Ports: 8099 (HTTP/WebSocket) + 8124 (libdatachannel signalling).
+# Ports: 8099 (HTTP/WebSocket) + 8124 (aiolibdatachannel signalling).
 # Runtime: Python 3.14-slim + ffmpeg (video transcoding in SpacePosts
 # + BazaarListing thumbnails) + libjpeg / libwebp (Pillow).
 #
