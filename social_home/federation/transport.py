@@ -173,19 +173,22 @@ class _RtcPeer:
 
         self._loop = asyncio.get_running_loop()
         cfg = libdatachannel.Configuration()
+        ice_servers: list = []
         for srv in self._ice_servers:
             urls = srv["urls"] if isinstance(srv["urls"], list) else [srv["urls"]]
             for url in urls:
                 if url.startswith("stun:"):
-                    cfg.iceServers.append(libdatachannel.IceServer(url))
+                    ice_servers.append(libdatachannel.IceServer(url))
                 elif url.startswith("turn:"):
-                    cfg.iceServers.append(
+                    # Positional form: (url, username, password).
+                    ice_servers.append(
                         libdatachannel.IceServer(
                             url,
-                            username=srv.get("username", ""),
-                            password=srv.get("credential", ""),
+                            srv.get("username", ""),
+                            srv.get("credential", ""),
                         )
                     )
+        cfg.ice_servers = ice_servers
         self._pc = libdatachannel.PeerConnection(cfg)
         self._channel = self._pc.createDataChannel(CHANNEL_LABEL)
 
@@ -232,11 +235,13 @@ class _RtcPeer:
 
         self._loop = asyncio.get_running_loop()
         cfg = libdatachannel.Configuration()
+        ice_servers: list = []
         for srv in self._ice_servers:
             urls = srv["urls"] if isinstance(srv["urls"], list) else [srv["urls"]]
             for url in urls:
                 if url.startswith(("stun:", "turn:")):
-                    cfg.iceServers.append(libdatachannel.IceServer(url))
+                    ice_servers.append(libdatachannel.IceServer(url))
+        cfg.ice_servers = ice_servers
         self._pc = libdatachannel.PeerConnection(cfg)
 
         loop = self._loop
