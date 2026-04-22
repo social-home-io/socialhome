@@ -129,8 +129,7 @@ async def _seed_space_with_admin(stack, *, sid="sp1"):
         (sid, "ab" * 32),
     )
     await stack.db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role) "
-        "VALUES(?, ?, 'admin')",
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'admin')",
         (sid, admin.user_id),
     )
     return sid, admin
@@ -140,7 +139,9 @@ async def test_remote_invite_accepted_notifies_admins(stack):
     sid, admin = await _seed_space_with_admin(stack)
     await stack.notif_svc.on_remote_invite_accepted(
         RemoteSpaceInviteAccepted(
-            space_id=sid, instance_id="peer", invitee_user_id="u-remote",
+            space_id=sid,
+            instance_id="peer",
+            invitee_user_id="u-remote",
         )
     )
     notifs = await stack.notif_repo.list(admin.user_id, limit=10)
@@ -150,7 +151,9 @@ async def test_remote_invite_accepted_notifies_admins(stack):
 async def test_remote_invite_accepted_unknown_space_noop(stack):
     await stack.notif_svc.on_remote_invite_accepted(
         RemoteSpaceInviteAccepted(
-            space_id="ghost-space", instance_id="peer", invitee_user_id="u",
+            space_id="ghost-space",
+            instance_id="peer",
+            invitee_user_id="u",
         )
     )
     # No crash; no notifications anywhere.
@@ -161,7 +164,9 @@ async def test_remote_invite_declined_notifies_admins(stack):
     sid, admin = await _seed_space_with_admin(stack, sid="sp2")
     await stack.notif_svc.on_remote_invite_declined(
         RemoteSpaceInviteDeclined(
-            space_id=sid, instance_id="peer", invitee_user_id="u-remote",
+            space_id=sid,
+            instance_id="peer",
+            invitee_user_id="u-remote",
         )
     )
     notifs = await stack.notif_repo.list(admin.user_id, limit=10)
@@ -171,7 +176,9 @@ async def test_remote_invite_declined_notifies_admins(stack):
 async def test_remote_invite_declined_unknown_space_noop(stack):
     await stack.notif_svc.on_remote_invite_declined(
         RemoteSpaceInviteDeclined(
-            space_id="ghost", instance_id="peer", invitee_user_id="u",
+            space_id="ghost",
+            instance_id="peer",
+            invitee_user_id="u",
         )
     )
 
@@ -181,19 +188,18 @@ async def test_remote_invite_skips_non_admin_members(stack):
     # Add a non-admin member whom we should skip.
     member = await _user(stack, "member")
     await stack.db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role) "
-        "VALUES(?, ?, 'member')",
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'member')",
         (sid, member.user_id),
     )
     await stack.notif_svc.on_remote_invite_accepted(
         RemoteSpaceInviteAccepted(
-            space_id=sid, instance_id="peer", invitee_user_id="u-remote",
+            space_id=sid,
+            instance_id="peer",
+            invitee_user_id="u-remote",
         )
     )
     admin_notifs = await stack.notif_repo.list(admin.user_id, limit=10)
     member_notifs = await stack.notif_repo.list(member.user_id, limit=10)
     assert admin_notifs  # admin got it
     # member did not
-    assert not any(
-        n.type == "space_remote_invite_accepted" for n in member_notifs
-    )
+    assert not any(n.type == "space_remote_invite_accepted" for n in member_notifs)

@@ -55,7 +55,9 @@ async def _seed_space(client, *, sid: str = "sp-x", role: str = "admin") -> str:
 
 async def test_pages_post_missing_title_422(client):
     r = await client.post(
-        "/api/pages", json={"content": "x"}, headers=_auth(client._tok),
+        "/api/pages",
+        json={"content": "x"},
+        headers=_auth(client._tok),
     )
     assert r.status == 422
 
@@ -120,14 +122,16 @@ async def test_pages_lock_taken_409(client):
 
 async def test_pages_lock_not_found_404(client):
     r = await client.post(
-        "/api/pages/does-not-exist/lock", headers=_auth(client._tok),
+        "/api/pages/does-not-exist/lock",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
 
 async def test_pages_refresh_not_found_404(client):
     r = await client.post(
-        "/api/pages/missing/lock/refresh", headers=_auth(client._tok),
+        "/api/pages/missing/lock/refresh",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -165,7 +169,9 @@ async def test_pages_revert_unknown_version_404(client):
     pid = (await r.json())["id"]
     # Create a version via patch.
     await client.patch(
-        f"/api/pages/{pid}", json={"content": "v2"}, headers=_auth(client._tok),
+        f"/api/pages/{pid}",
+        json={"content": "v2"},
+        headers=_auth(client._tok),
     )
     r2 = await client.post(
         f"/api/pages/{pid}/revert",
@@ -183,7 +189,9 @@ async def test_pages_revert_succeeds_with_valid_version(client):
     )
     pid = (await r.json())["id"]
     await client.patch(
-        f"/api/pages/{pid}", json={"content": "v2"}, headers=_auth(client._tok),
+        f"/api/pages/{pid}",
+        json={"content": "v2"},
+        headers=_auth(client._tok),
     )
     r2 = await client.post(
         f"/api/pages/{pid}/revert",
@@ -195,14 +203,16 @@ async def test_pages_revert_succeeds_with_valid_version(client):
 
 async def test_pages_delete_request_missing_404(client):
     r = await client.post(
-        "/api/pages/missing/delete-request", headers=_auth(client._tok),
+        "/api/pages/missing/delete-request",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
 
 async def test_pages_delete_approve_missing_404(client):
     r = await client.post(
-        "/api/pages/missing/delete-approve", headers=_auth(client._tok),
+        "/api/pages/missing/delete-approve",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -216,14 +226,16 @@ async def test_pages_delete_approve_not_requested_409(client):
     pid = (await r.json())["id"]
     # No delete-request happened; admin approves directly → 409.
     r2 = await client.post(
-        f"/api/pages/{pid}/delete-approve", headers=_auth(client._tok),
+        f"/api/pages/{pid}/delete-approve",
+        headers=_auth(client._tok),
     )
     assert r2.status == 409
 
 
 async def test_pages_delete_cancel_missing_404(client):
     r = await client.post(
-        "/api/pages/missing/delete-cancel", headers=_auth(client._tok),
+        "/api/pages/missing/delete-cancel",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -232,7 +244,10 @@ async def test_pages_delete_cancel_forbidden(client):
     """Non-requester, non-admin → 403."""
     await _add_second_user(client)
     await _add_second_user(
-        client, username="carl", user_id="carl-id", token="carl-tok",
+        client,
+        username="carl",
+        user_id="carl-id",
+        token="carl-tok",
     )
     r = await client.post(
         "/api/pages",
@@ -304,11 +319,14 @@ async def test_space_page_detail_wrong_space_404(client):
     sid = await _seed_space(client)
     # A household-scope page's space_id is None — detail in the space must 404.
     r = await client.post(
-        "/api/pages", json={"title": "H", "content": ""}, headers=_auth(client._tok),
+        "/api/pages",
+        json={"title": "H", "content": ""},
+        headers=_auth(client._tok),
     )
     pid = (await r.json())["id"]
     r2 = await client.get(
-        f"/api/spaces/{sid}/pages/{pid}", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/pages/{pid}",
+        headers=_auth(client._tok),
     )
     assert r2.status == 404
 
@@ -347,14 +365,16 @@ async def test_me_picture_delete_204(client):
 
 async def test_me_picture_refresh_non_ha_mode_501(client):
     r = await client.post(
-        "/api/me/picture/refresh-from-ha", headers=_auth(client._tok),
+        "/api/me/picture/refresh-from-ha",
+        headers=_auth(client._tok),
     )
     assert r.status == 501
 
 
 async def test_user_picture_missing_404(client):
     r = await client.get(
-        "/api/users/no-such-user/picture", headers=_auth(client._tok),
+        "/api/users/no-such-user/picture",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -372,7 +392,8 @@ async def test_admin_patch_user_non_admin_caller_403(client):
     await _add_second_user(client)
     # Caller demotes self first so they're not admin.
     await client._db.enqueue(
-        "UPDATE users SET is_admin=0 WHERE user_id=?", (client._uid,),
+        "UPDATE users SET is_admin=0 WHERE user_id=?",
+        (client._uid,),
     )
     r = await client.patch(
         "/api/users/bob-id",
@@ -422,11 +443,14 @@ async def test_me_tokens_create(client):
 
 async def test_me_tokens_delete(client):
     r = await client.post(
-        "/api/me/tokens", json={"label": "x"}, headers=_auth(client._tok),
+        "/api/me/tokens",
+        json={"label": "x"},
+        headers=_auth(client._tok),
     )
     tid = (await r.json())["token_id"]
     r2 = await client.delete(
-        f"/api/me/tokens/{tid}", headers=_auth(client._tok),
+        f"/api/me/tokens/{tid}",
+        headers=_auth(client._tok),
     )
     assert r2.status == 204
 
@@ -474,7 +498,8 @@ async def test_user_export_non_admin_403(client):
 
 async def test_user_export_admin_ok(client):
     r = await client.get(
-        f"/api/users/{client._uid}/export", headers=_auth(client._tok),
+        f"/api/users/{client._uid}/export",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
 
@@ -526,7 +551,8 @@ async def test_sticky_patch_updates_content_and_position_and_color(client):
 
 async def test_sticky_delete_not_found_404(client):
     r = await client.delete(
-        "/api/stickies/missing", headers=_auth(client._tok),
+        "/api/stickies/missing",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -539,7 +565,8 @@ async def test_sticky_delete_ok(client):
     )
     sid = (await r.json())["id"]
     r2 = await client.delete(
-        f"/api/stickies/{sid}", headers=_auth(client._tok),
+        f"/api/stickies/{sid}",
+        headers=_auth(client._tok),
     )
     assert r2.status == 200
 
@@ -583,7 +610,8 @@ async def test_space_sticky_full_crud(client):
     assert r2.status == 200
     # Delete
     r3 = await client.delete(
-        f"/api/spaces/{sid}/stickies/{stid}", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/stickies/{stid}",
+        headers=_auth(client._tok),
     )
     assert r3.status == 200
 
@@ -601,7 +629,8 @@ async def test_space_sticky_patch_missing_404(client):
 async def test_space_sticky_delete_missing_404(client):
     sid = await _seed_space(client)
     r = await client.delete(
-        f"/api/spaces/{sid}/stickies/missing", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/stickies/missing",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -692,7 +721,8 @@ async def test_poll_create_and_summary(client):
     )
     assert r.status == 201, await r.text()
     r2 = await client.get(
-        f"/api/posts/{pid}/poll", headers=_auth(client._tok),
+        f"/api/posts/{pid}/poll",
+        headers=_auth(client._tok),
     )
     assert r2.status == 200
 
@@ -727,7 +757,8 @@ async def test_schedule_poll_finalize_missing_slot_422(client):
 
 async def test_schedule_poll_summary_any_id_ok(client):
     r = await client.get(
-        "/api/schedule-polls/whatever/summary", headers=_auth(client._tok),
+        "/api/schedule-polls/whatever/summary",
+        headers=_auth(client._tok),
     )
     # summary tolerates unknown IDs (empty summary)
     assert r.status == 200
@@ -802,7 +833,8 @@ async def test_task_list_collection_full_crud(client):
     assert r4.status == 200
     # Delete
     r5 = await client.delete(
-        f"/api/tasks/lists/{lid}", headers=_auth(client._tok),
+        f"/api/tasks/lists/{lid}",
+        headers=_auth(client._tok),
     )
     assert r5.status == 200
 
@@ -832,7 +864,9 @@ async def test_task_list_tasks_filters_and_pagination(client):
 
 async def test_task_list_tasks_bad_limit_422(client):
     r = await client.post(
-        "/api/tasks/lists", json={"name": "L"}, headers=_auth(client._tok),
+        "/api/tasks/lists",
+        json={"name": "L"},
+        headers=_auth(client._tok),
     )
     lid = (await r.json())["id"]
     r2 = await client.get(
@@ -844,7 +878,9 @@ async def test_task_list_tasks_bad_limit_422(client):
 
 async def test_task_reorder_bad_payload_422(client):
     r = await client.post(
-        "/api/tasks/lists", json={"name": "L"}, headers=_auth(client._tok),
+        "/api/tasks/lists",
+        json={"name": "L"},
+        headers=_auth(client._tok),
     )
     lid = (await r.json())["id"]
     r2 = await client.post(
@@ -866,7 +902,9 @@ async def test_task_reorder_unknown_list_404(client):
 
 async def test_task_detail_patch_delete(client):
     r = await client.post(
-        "/api/tasks/lists", json={"name": "L"}, headers=_auth(client._tok),
+        "/api/tasks/lists",
+        json={"name": "L"},
+        headers=_auth(client._tok),
     )
     lid = (await r.json())["id"]
     r2 = await client.post(
@@ -887,7 +925,9 @@ async def test_task_detail_patch_delete(client):
 
 async def test_task_comments_full_flow(client):
     r = await client.post(
-        "/api/tasks/lists", json={"name": "L"}, headers=_auth(client._tok),
+        "/api/tasks/lists",
+        json={"name": "L"},
+        headers=_auth(client._tok),
     )
     lid = (await r.json())["id"]
     r2 = await client.post(
@@ -904,19 +944,23 @@ async def test_task_comments_full_flow(client):
     assert r3.status == 201
     cid = (await r3.json())["id"]
     r4 = await client.get(
-        f"/api/tasks/{tid}/comments", headers=_auth(client._tok),
+        f"/api/tasks/{tid}/comments",
+        headers=_auth(client._tok),
     )
     assert r4.status == 200
     assert len(await r4.json()) == 1
     r5 = await client.delete(
-        f"/api/tasks/{tid}/comments/{cid}", headers=_auth(client._tok),
+        f"/api/tasks/{tid}/comments/{cid}",
+        headers=_auth(client._tok),
     )
     assert r5.status == 200
 
 
 async def test_task_attachments_full_flow(client):
     r = await client.post(
-        "/api/tasks/lists", json={"name": "L"}, headers=_auth(client._tok),
+        "/api/tasks/lists",
+        json={"name": "L"},
+        headers=_auth(client._tok),
     )
     lid = (await r.json())["id"]
     r2 = await client.post(
@@ -938,11 +982,13 @@ async def test_task_attachments_full_flow(client):
     assert r3.status == 201
     aid = (await r3.json())["id"]
     r4 = await client.get(
-        f"/api/tasks/{tid}/attachments", headers=_auth(client._tok),
+        f"/api/tasks/{tid}/attachments",
+        headers=_auth(client._tok),
     )
     assert r4.status == 200
     r5 = await client.delete(
-        f"/api/tasks/{tid}/attachments/{aid}", headers=_auth(client._tok),
+        f"/api/tasks/{tid}/attachments/{aid}",
+        headers=_auth(client._tok),
     )
     assert r5.status == 200
 
@@ -951,7 +997,8 @@ async def test_space_tasks_full_flow(client):
     sid = await _seed_space(client)
     # list lists
     r0 = await client.get(
-        f"/api/spaces/{sid}/tasks/lists", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/tasks/lists",
+        headers=_auth(client._tok),
     )
     assert r0.status == 200
     # create list
@@ -992,12 +1039,14 @@ async def test_space_tasks_full_flow(client):
     assert r5.status == 200
     # delete task
     r6 = await client.delete(
-        f"/api/spaces/{sid}/tasks/{tid}", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/tasks/{tid}",
+        headers=_auth(client._tok),
     )
     assert r6.status == 200
     # delete list
     r7 = await client.delete(
-        f"/api/spaces/{sid}/tasks/lists/{lid}", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/tasks/lists/{lid}",
+        headers=_auth(client._tok),
     )
     assert r7.status == 200
 
@@ -1011,7 +1060,9 @@ async def test_space_task_non_member_all_403(client):
     ).status == 403
     assert (
         await client.post(
-            f"/api/spaces/{sid}/tasks/lists", json={"name": "L"}, headers=hdr,
+            f"/api/spaces/{sid}/tasks/lists",
+            json={"name": "L"},
+            headers=hdr,
         )
     ).status == 403
     assert (
@@ -1026,7 +1077,8 @@ async def test_space_task_non_member_all_403(client):
     ).status == 403
     assert (
         await client.get(
-            f"/api/spaces/{sid}/tasks/lists/x/tasks", headers=hdr,
+            f"/api/spaces/{sid}/tasks/lists/x/tasks",
+            headers=hdr,
         )
     ).status == 403
     assert (
@@ -1038,7 +1090,9 @@ async def test_space_task_non_member_all_403(client):
     ).status == 403
     assert (
         await client.patch(
-            f"/api/spaces/{sid}/tasks/x", json={"title": "t"}, headers=hdr,
+            f"/api/spaces/{sid}/tasks/x",
+            json={"title": "t"},
+            headers=hdr,
         )
     ).status == 403
     assert (
@@ -1125,7 +1179,8 @@ async def test_bazaar_post_invalid_price_422(client):
 
 async def test_bazaar_get_missing_404(client):
     r = await client.get(
-        "/api/bazaar/does-not-exist", headers=_auth(client._tok),
+        "/api/bazaar/does-not-exist",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1141,7 +1196,8 @@ async def test_bazaar_patch_missing_404(client):
 
 async def test_bazaar_delete_missing_404(client):
     r = await client.delete(
-        "/api/bazaar/does-not-exist", headers=_auth(client._tok),
+        "/api/bazaar/does-not-exist",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1166,7 +1222,8 @@ async def test_bazaar_bid_place_bad_amount_422(client):
 
 async def test_bazaar_bid_delete_missing_404(client):
     r = await client.delete(
-        "/api/bazaar/whatever/bids/missing", headers=_auth(client._tok),
+        "/api/bazaar/whatever/bids/missing",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1192,14 +1249,16 @@ async def test_bazaar_list_active_and_seller_me(client):
     r = await client.get("/api/bazaar", headers=_auth(client._tok))
     assert r.status == 200
     r2 = await client.get(
-        "/api/bazaar?seller=me", headers=_auth(client._tok),
+        "/api/bazaar?seller=me",
+        headers=_auth(client._tok),
     )
     assert r2.status == 200
 
 
 async def test_bazaar_bids_list(client):
     r = await client.get(
-        "/api/bazaar/whatever/bids", headers=_auth(client._tok),
+        "/api/bazaar/whatever/bids",
+        headers=_auth(client._tok),
     )
     assert r.status == 200  # empty list for unknown listing
 
@@ -1233,7 +1292,8 @@ async def test_gfs_connections_create_bad_payload_422(client):
 
 async def test_gfs_connection_get_missing_404(client):
     r = await client.get(
-        "/api/gfs/connections/does-not-exist", headers=_auth(client._tok),
+        "/api/gfs/connections/does-not-exist",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1249,7 +1309,8 @@ async def test_gfs_connection_delete_non_admin_403(client):
 
 async def test_gfs_connection_delete_missing_404(client):
     r = await client.delete(
-        "/api/gfs/connections/does-not-exist", headers=_auth(client._tok),
+        "/api/gfs/connections/does-not-exist",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1265,21 +1326,24 @@ async def test_gfs_space_publish_non_admin_403(client):
 
 async def test_gfs_space_publish_bad_422(client):
     r = await client.post(
-        "/api/spaces/nope/publish/nope", headers=_auth(client._tok),
+        "/api/spaces/nope/publish/nope",
+        headers=_auth(client._tok),
     )
     assert r.status == 422
 
 
 async def test_gfs_space_unpublish_bad_422(client):
     r = await client.delete(
-        "/api/spaces/nope/publish/nope", headers=_auth(client._tok),
+        "/api/spaces/nope/publish/nope",
+        headers=_auth(client._tok),
     )
     assert r.status == 422
 
 
 async def test_gfs_publications_list(client):
     r = await client.get(
-        "/api/gfs/publications", headers=_auth(client._tok),
+        "/api/gfs/publications",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
 
@@ -1339,7 +1403,8 @@ async def test_space_member_me_delete_leaves_space(client):
     sid = await _seed_space(client)
     # admin leaves — service decides whether this is allowed (last admin?)
     r = await client.delete(
-        f"/api/spaces/{sid}/members/me", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/members/me",
+        headers=_auth(client._tok),
     )
     # Either 200 ok or 403 — branch is hit either way.
     assert r.status in (200, 403, 409)
@@ -1376,7 +1441,8 @@ async def test_space_member_picture_missing_404(client):
 async def test_space_cover_get_missing_404(client):
     sid = await _seed_space(client)
     r = await client.get(
-        f"/api/spaces/{sid}/cover", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/cover",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1407,10 +1473,14 @@ async def test_space_member_detail_invalid_role_422(client):
 def _make_multipart(file_bytes: bytes, *, boundary: str = "BOUND") -> bytes:
     """Build a minimal multipart/form-data body with a single file field."""
     return (
-        f"--{boundary}\r\n"
-        f"Content-Disposition: form-data; name=\"file\"; filename=\"x.bin\"\r\n"
-        f"Content-Type: application/octet-stream\r\n\r\n"
-    ).encode() + file_bytes + f"\r\n--{boundary}--\r\n".encode()
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="x.bin"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        + file_bytes
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
 
 
 async def test_me_picture_upload_oversized_422(client):
@@ -1483,7 +1553,8 @@ async def test_space_page_patch_and_delete(client):
     assert r4.status == 422
     # DELETE
     r5 = await client.delete(
-        f"/api/spaces/{sid}/pages/{pid}", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/pages/{pid}",
+        headers=_auth(client._tok),
     )
     assert r5.status == 200
 
@@ -1534,7 +1605,8 @@ async def test_space_page_patch_missing_404(client):
 async def test_space_page_delete_missing_404(client):
     sid = await _seed_space(client)
     r = await client.delete(
-        f"/api/spaces/{sid}/pages/missing", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/pages/missing",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1581,7 +1653,8 @@ async def test_remote_invites_list_unauth_401(client):
 
 async def test_remote_invites_list_auth(client):
     r = await client.get(
-        "/api/remote_invites", headers=_auth(client._tok),
+        "/api/remote_invites",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     assert await r.json() == []
@@ -1594,7 +1667,8 @@ async def test_remote_invites_decision_unauth_401(client):
 
 async def test_remote_invites_decision_unknown_404(client):
     r = await client.post(
-        "/api/remote_invites/tkn/bogus", headers=_auth(client._tok),
+        "/api/remote_invites/tkn/bogus",
+        headers=_auth(client._tok),
     )
     # Unknown decision verb → route either 404 or 405 (falls through).
     assert r.status in (404, 405)
@@ -1626,14 +1700,16 @@ async def test_public_spaces_list_empty(client):
 
 async def test_public_spaces_list_with_limit(client):
     r = await client.get(
-        "/api/public_spaces?limit=10", headers=_auth(client._tok),
+        "/api/public_spaces?limit=10",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
 
 
 async def test_public_spaces_list_bad_limit_falls_back(client):
     r = await client.get(
-        "/api/public_spaces?limit=not-a-number", headers=_auth(client._tok),
+        "/api/public_spaces?limit=not-a-number",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
 
@@ -1641,12 +1717,12 @@ async def test_public_spaces_list_bad_limit_falls_back(client):
 async def test_public_spaces_list_with_cp_active(client):
     """User with child_protection enabled + declared_age filters view."""
     await client._db.enqueue(
-        "UPDATE users SET child_protection_enabled=1, declared_age=12"
-        " WHERE user_id=?",
+        "UPDATE users SET child_protection_enabled=1, declared_age=12 WHERE user_id=?",
         (client._uid,),
     )
     r = await client.get(
-        "/api/public_spaces", headers=_auth(client._tok),
+        "/api/public_spaces",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
 
@@ -1672,14 +1748,16 @@ async def test_public_spaces_hide_unauth_401(client):
 
 async def test_public_spaces_hide_ok(client):
     r = await client.post(
-        "/api/public_spaces/sp/hide", headers=_auth(client._tok),
+        "/api/public_spaces/sp/hide",
+        headers=_auth(client._tok),
     )
     assert r.status == 204
 
 
 async def test_public_spaces_refresh_admin_ok(client):
     r = await client.post(
-        "/api/public_spaces/refresh", headers=_auth(client._tok),
+        "/api/public_spaces/refresh",
+        headers=_auth(client._tok),
     )
     assert r.status == 202
 
@@ -1728,14 +1806,16 @@ async def test_public_spaces_block_instance_unauth_401(client):
 async def test_notifications_read_missing_id_404_or_ok(client):
     # read an unknown notification — should return 404 or ok gracefully.
     r = await client.post(
-        "/api/notifications/missing/read", headers=_auth(client._tok),
+        "/api/notifications/missing/read",
+        headers=_auth(client._tok),
     )
     assert r.status in (200, 204, 404)
 
 
 async def test_notifications_read_all_ok(client):
     r = await client.post(
-        "/api/notifications/read-all", headers=_auth(client._tok),
+        "/api/notifications/read-all",
+        headers=_auth(client._tok),
     )
     assert r.status in (200, 204)
 
@@ -1746,7 +1826,8 @@ async def test_notifications_read_all_ok(client):
 async def test_pages_space_page_get_missing_404(client):
     sid = await _seed_space(client)
     r = await client.get(
-        f"/api/spaces/{sid}/pages/missing", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/pages/missing",
+        headers=_auth(client._tok),
     )
     assert r.status == 404
 
@@ -1754,6 +1835,7 @@ async def test_pages_space_page_get_missing_404(client):
 async def test_space_cover_delete_no_cover_succeeds(client):
     sid = await _seed_space(client)
     r = await client.delete(
-        f"/api/spaces/{sid}/cover", headers=_auth(client._tok),
+        f"/api/spaces/{sid}/cover",
+        headers=_auth(client._tok),
     )
     assert r.status == 204

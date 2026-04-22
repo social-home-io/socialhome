@@ -230,6 +230,7 @@ async def test_watch_incoming_ignores_wrong_label():
             async def _gen():
                 yield _FakeCh("wrong")
                 yield good
+
             return _gen()
 
         def spawn_task(self, coro):

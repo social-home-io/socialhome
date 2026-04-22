@@ -3,8 +3,10 @@
 # Install:   pip install pre-commit && pre-commit install
 # Run once:  pre-commit run --all-files
 #
-# Hooks run only against staged files by default; the frontend hook
-# skips cleanly when no TS/TSX file is staged so most commits stay fast.
+# ruff + mypy run repo-wide (not just on staged files) so local hooks
+# match the CI scope. Without this, pre-existing failures in unrelated
+# files slip through commits and fail CI after push. The cost is a
+# ~5–10 s tree scan per commit, which is acceptable.
 
 default_language_version:
   python: python3.14
@@ -26,28 +28,35 @@ repos:
       - id: detect-private-key
 
   # ── Python lint + format via ruff ──────────────────────────────────────
+  # Run repo-wide (always_run + pass_filenames: false) so pre-commit
+  # matches CI's `ruff check .` / `ruff format --check .` scope.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.8.0
     hooks:
       - id: ruff
-        name: ruff (lint)
-        args: ["--fix"]
-        types_or: [python, pyi]
+        name: ruff (lint, repo-wide)
+        args: ["--fix", "."]
+        always_run: true
+        pass_filenames: false
       - id: ruff-format
-        name: ruff (format)
-        types_or: [python, pyi]
+        name: ruff (format, repo-wide)
+        args: ["."]
+        always_run: true
+        pass_filenames: false
 
   # ── Python type-check via mypy ─────────────────────────────────────────
-  # Uses the project's own mypy config from pyproject.toml.
+  # Uses the project's own mypy config from pyproject.toml. Run repo-wide
+  # so the scope matches CI's `mypy social_home/`.
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.13.0
     hooks:
       - id: mypy
-        name: mypy (social_home)
-        files: ^social_home/
+        name: mypy (social_home, repo-wide)
         additional_dependencies:
           - types-aiofiles
-        args: ["--config-file=pyproject.toml"]
+        args: ["--config-file=pyproject.toml", "social_home/"]
+        always_run: true
+        pass_filenames: false
 
   # ── Frontend: lint + typecheck + build ─────────────────────────────────
   # A local hook so pre-commit reuses the repo's pnpm install; CI still

@@ -71,8 +71,10 @@ class _FakeDataChannel:
         # stays empty so the async-for loop awaits until the channel
         # closes. Fake the behaviour by waiting on the close event.
         done, _ = await asyncio.wait(
-            [asyncio.create_task(self._inbox.get()),
-             asyncio.create_task(self._closed.wait())],
+            [
+                asyncio.create_task(self._inbox.get()),
+                asyncio.create_task(self._closed.wait()),
+            ],
             return_when=asyncio.FIRST_COMPLETED,
         )
         if self._closed.is_set():

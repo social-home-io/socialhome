@@ -117,7 +117,9 @@ async def test_update_listing_non_seller_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     with pytest.raises(PermissionError):
         await env.svc.update_listing(
-            post_id=pid, actor_user_id="u-stranger", title="X",
+            post_id=pid,
+            actor_user_id="u-stranger",
+            title="X",
         )
 
 
@@ -126,7 +128,9 @@ async def test_update_listing_inactive_raises(env):
     await env.repo.mark_cancelled(pid)
     with pytest.raises(BazaarServiceError):
         await env.svc.update_listing(
-            post_id=pid, actor_user_id="u-seller", title="X",
+            post_id=pid,
+            actor_user_id="u-seller",
+            title="X",
         )
 
 
@@ -134,7 +138,9 @@ async def test_update_listing_empty_title_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     with pytest.raises(ValueError):
         await env.svc.update_listing(
-            post_id=pid, actor_user_id="u-seller", title="   ",
+            post_id=pid,
+            actor_user_id="u-seller",
+            title="   ",
         )
 
 
@@ -167,7 +173,8 @@ async def test_cancel_listing_non_seller_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     with pytest.raises(PermissionError):
         await env.svc.cancel_listing(
-            post_id=pid, actor_user_id="u-stranger",
+            post_id=pid,
+            actor_user_id="u-stranger",
         )
 
 
@@ -176,14 +183,16 @@ async def test_cancel_listing_inactive_raises(env):
     await env.repo.mark_cancelled(pid)
     with pytest.raises(BazaarServiceError):
         await env.svc.cancel_listing(
-            post_id=pid, actor_user_id="u-seller",
+            post_id=pid,
+            actor_user_id="u-seller",
         )
 
 
 async def test_cancel_listing_happy(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     await env.svc.cancel_listing(
-        post_id=pid, actor_user_id="u-seller",
+        post_id=pid,
+        actor_user_id="u-seller",
     )
     listing = await env.repo.get_listing(pid)
     assert listing.status == BazaarStatus.CANCELLED
@@ -196,7 +205,9 @@ async def test_place_bid_self_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
     with pytest.raises(ValueError):
         await env.svc.place_bid(
-            listing_post_id=pid, bidder_user_id="u-seller", amount=200,
+            listing_post_id=pid,
+            bidder_user_id="u-seller",
+            amount=200,
         )
 
 
@@ -204,19 +215,25 @@ async def test_place_bid_non_positive_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
     with pytest.raises(ValueError):
         await env.svc.place_bid(
-            listing_post_id=pid, bidder_user_id="u-b", amount=0,
+            listing_post_id=pid,
+            bidder_user_id="u-b",
+            amount=0,
         )
 
 
 async def test_place_bid_below_floor_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
     await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-b", amount=110,
+        listing_post_id=pid,
+        bidder_user_id="u-b",
+        amount=110,
     )
     # Next bid must clear 110 + step=10 → 120.
     with pytest.raises(ValueError):
         await env.svc.place_bid(
-            listing_post_id=pid, bidder_user_id="u-c", amount=115,
+            listing_post_id=pid,
+            bidder_user_id="u-c",
+            amount=115,
         )
 
 
@@ -225,7 +242,9 @@ async def test_place_bid_on_inactive_raises(env):
     await env.repo.mark_cancelled(pid)
     with pytest.raises(ValueError):
         await env.svc.place_bid(
-            listing_post_id=pid, bidder_user_id="u-b", amount=500,
+            listing_post_id=pid,
+            bidder_user_id="u-b",
+            amount=500,
         )
 
 
@@ -240,18 +259,23 @@ async def test_reject_offer_unknown_bid_raises(env):
 async def test_reject_offer_non_seller_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.OFFER)
     bid = await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-b", amount=50,
+        listing_post_id=pid,
+        bidder_user_id="u-b",
+        amount=50,
     )
     with pytest.raises(PermissionError):
         await env.svc.reject_offer(
-            bid_id=bid.id, actor_user_id="u-stranger",
+            bid_id=bid.id,
+            actor_user_id="u-stranger",
         )
 
 
 async def test_reject_offer_happy(env):
     pid = await _seed_listing(env, mode=BazaarMode.OFFER)
     bid = await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-b", amount=50,
+        listing_post_id=pid,
+        bidder_user_id="u-b",
+        amount=50,
     )
     await env.svc.reject_offer(
         bid_id=bid.id,
@@ -268,21 +292,27 @@ async def test_withdraw_bid_unknown_raises(env):
 async def test_withdraw_bid_non_bidder_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
     bid = await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-b", amount=110,
+        listing_post_id=pid,
+        bidder_user_id="u-b",
+        amount=110,
     )
     with pytest.raises(PermissionError):
         await env.svc.withdraw_bid(
-            bid_id=bid.id, actor_user_id="u-other",
+            bid_id=bid.id,
+            actor_user_id="u-other",
         )
 
 
 async def test_withdraw_bid_happy(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
     bid = await env.svc.place_bid(
-        listing_post_id=pid, bidder_user_id="u-b", amount=110,
+        listing_post_id=pid,
+        bidder_user_id="u-b",
+        amount=110,
     )
     await env.svc.withdraw_bid(
-        bid_id=bid.id, actor_user_id="u-b",
+        bid_id=bid.id,
+        actor_user_id="u-b",
     )
 
 

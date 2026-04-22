@@ -33,8 +33,7 @@ async def test_peer_spaces_age_filter_branch(client):
     """Age-gated user: the CP path runs but the list is still empty."""
     # Enable CP on the users row so the route's max_min_age branch fires.
     await client._db.enqueue(
-        "UPDATE users SET child_protection_enabled=1, declared_age=10"
-        " WHERE user_id=?",
+        "UPDATE users SET child_protection_enabled=1, declared_age=10 WHERE user_id=?",
         (client._uid,),
     )
     r = await client.get("/api/peer_spaces", headers=_auth(client._tok))
@@ -56,7 +55,8 @@ async def test_calendar_ics_empty(client):
     assert r.status == 201
     cid = (await r.json())["id"]
     r = await client.get(
-        f"/api/calendar/{cid}/export.ics", headers=_auth(client._tok),
+        f"/api/calendar/{cid}/export.ics",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.text()
@@ -85,7 +85,8 @@ async def test_calendar_ics_with_event(client):
     )
     assert r.status == 201, await r.text()
     r = await client.get(
-        f"/api/calendar/{cid}/export.ics", headers=_auth(client._tok),
+        f"/api/calendar/{cid}/export.ics",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.text()
@@ -158,7 +159,8 @@ async def test_storage_quota_put_non_admin_returns_403(client):
     """Non-admin gets 403."""
     # Demote the caller first.
     await client._db.enqueue(
-        "UPDATE users SET is_admin=0 WHERE user_id=?", (client._uid,),
+        "UPDATE users SET is_admin=0 WHERE user_id=?",
+        (client._uid,),
     )
     r = await client.put(
         "/api/admin/storage/quota",
@@ -209,7 +211,8 @@ async def test_notifications_empty(client):
 
 async def test_notifications_unread_count(client):
     r = await client.get(
-        "/api/notifications/unread-count", headers=_auth(client._tok),
+        "/api/notifications/unread-count",
+        headers=_auth(client._tok),
     )
     assert r.status == 200
     body = await r.json()

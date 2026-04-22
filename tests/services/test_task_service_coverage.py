@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 import pytest
 
@@ -19,7 +19,7 @@ from social_home.domain.events import (
     TaskListUpdated,
     TaskUpdated,
 )
-from social_home.domain.task import RecurrenceRule, Task, TaskStatus
+from social_home.domain.task import RecurrenceRule
 from social_home.infrastructure.event_bus import EventBus
 from social_home.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 from social_home.services.task_service import (
@@ -38,7 +38,8 @@ def test_rrule_daily():
 
 def test_rrule_weekly_interval():
     assert _next_occurrence(
-        "FREQ=WEEKLY;INTERVAL=2", base=date(2026, 1, 1),
+        "FREQ=WEEKLY;INTERVAL=2",
+        base=date(2026, 1, 1),
     ) == date(2026, 1, 15)
 
 
@@ -56,7 +57,8 @@ def test_rrule_yearly_feb29_rolls_back():
 
 def test_rrule_yearly_normal():
     assert _next_occurrence(
-        "FREQ=YEARLY", base=date(2026, 5, 1),
+        "FREQ=YEARLY",
+        base=date(2026, 5, 1),
     ) == date(2027, 5, 1)
 
 
@@ -69,9 +71,13 @@ def test_rrule_missing_freq_returns_none():
 
 
 def test_rrule_invalid_interval_returns_none():
-    assert _next_occurrence(
-        "FREQ=DAILY;INTERVAL=not-a-number", base=date(2026, 1, 1),
-    ) is None
+    assert (
+        _next_occurrence(
+            "FREQ=DAILY;INTERVAL=not-a-number",
+            base=date(2026, 1, 1),
+        )
+        is None
+    )
 
 
 def test_rrule_base_not_date_returns_none():
@@ -87,7 +93,8 @@ def test_rrule_ignores_empty_chunks():
 def test_rrule_clamp_interval_to_one():
     # INTERVAL=0 clamps to 1.
     assert _next_occurrence(
-        "FREQ=DAILY;INTERVAL=0", base=date(2026, 1, 1),
+        "FREQ=DAILY;INTERVAL=0",
+        base=date(2026, 1, 1),
     ) == date(2026, 1, 2)
 
 
@@ -170,44 +177,61 @@ async def test_create_task_assignees_emit_assigned_events(env):
 async def test_update_task_invalid_status_raises(env):
     lst = await env.task_svc.create_list(name="S", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     with pytest.raises(ValueError):
         await env.task_svc.update_task(
-            task.id, actor_user_id="u1", status="not-a-status",
+            task.id,
+            actor_user_id="u1",
+            status="not-a-status",
         )
 
 
 async def test_update_task_invalid_due_date_raises(env):
     lst = await env.task_svc.create_list(name="S", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     with pytest.raises(ValueError):
         await env.task_svc.update_task(
-            task.id, actor_user_id="u1", due_date="not-a-date",
+            task.id,
+            actor_user_id="u1",
+            due_date="not-a-date",
         )
 
 
 async def test_update_task_empty_title_raises(env):
     lst = await env.task_svc.create_list(name="S", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     with pytest.raises(ValueError):
         await env.task_svc.update_task(
-            task.id, actor_user_id="u1", title="   ",
+            task.id,
+            actor_user_id="u1",
+            title="   ",
         )
 
 
 async def test_update_task_add_assignee_emits_assigned(env):
     lst = await env.task_svc.create_list(name="S", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1", assignees=["u1"],
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
+        assignees=["u1"],
     )
     env.events.clear()
     await env.task_svc.update_task(
-        task.id, actor_user_id="u1", assignees=["u1", "u2"],
+        task.id,
+        actor_user_id="u1",
+        assignees=["u1", "u2"],
     )
     # u2 is new and not the actor → TaskAssigned fired.
     assigned = [e for e in env.events if isinstance(e, TaskAssigned)]
@@ -217,11 +241,15 @@ async def test_update_task_add_assignee_emits_assigned(env):
 async def test_update_task_complete_emits_completed(env):
     lst = await env.task_svc.create_list(name="C", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     env.events.clear()
     await env.task_svc.update_task(
-        task.id, actor_user_id="u1", status="done",
+        task.id,
+        actor_user_id="u1",
+        status="done",
     )
     assert any(isinstance(e, TaskCompleted) for e in env.events)
 
@@ -229,10 +257,14 @@ async def test_update_task_complete_emits_completed(env):
 async def test_update_task_with_position(env):
     lst = await env.task_svc.create_list(name="P", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     updated = await env.task_svc.update_task(
-        task.id, actor_user_id="u1", position=5,
+        task.id,
+        actor_user_id="u1",
+        position=5,
     )
     assert updated.position == 5
 
@@ -250,12 +282,13 @@ async def test_complete_recurring_spawns_next(env):
     await env.task_repo.save(task)
     env.events.clear()
     await env.task_svc.update_task(
-        task.id, actor_user_id="u1", status="done",
+        task.id,
+        actor_user_id="u1",
+        status="done",
     )
-    # A new task with same list/title has been spawned.
-    created = [e for e in env.events if isinstance(e, TaskCreated)]
-    # (Not guaranteed since _spawn_recurrence calls save directly; just
-    # verify the repo now has ≥2 rows for the list.)
+    # A new task with same list/title has been spawned — verify the repo
+    # now has ≥2 rows for the list. (TaskCreated event emission is not
+    # guaranteed here since _spawn_recurrence calls save directly.)
     rows = await env.task_svc.list_tasks(lst.id)
     assert len(rows) >= 2
 
@@ -286,7 +319,9 @@ async def test_spawn_overdue_with_recurring_task(env):
 async def test_space_task_service_create_list_empty_raises(env):
     with pytest.raises(ValueError):
         await env.space_task_svc.create_list(
-            space_id="sp", name="   ", created_by="u1",
+            space_id="sp",
+            name="   ",
+            created_by="u1",
         )
 
 
@@ -302,7 +337,9 @@ async def test_space_task_service_full_crud(env):
     await _seed_space(env)
     env.events.clear()
     lst = await env.space_task_svc.create_list(
-        space_id="sp1", name="L", created_by="u1",
+        space_id="sp1",
+        name="L",
+        created_by="u1",
     )
     assert any(isinstance(e, TaskListCreated) for e in env.events)
 
@@ -325,15 +362,21 @@ async def test_space_task_service_full_crud(env):
     # Update branches: title empty/bad status/bad date
     with pytest.raises(ValueError):
         await env.space_task_svc.update_task(
-            task.id, actor_user_id="u1", title="   ",
+            task.id,
+            actor_user_id="u1",
+            title="   ",
         )
     with pytest.raises(ValueError):
         await env.space_task_svc.update_task(
-            task.id, actor_user_id="u1", status="bogus",
+            task.id,
+            actor_user_id="u1",
+            status="bogus",
         )
     with pytest.raises(ValueError):
         await env.space_task_svc.update_task(
-            task.id, actor_user_id="u1", due_date="not-a-date",
+            task.id,
+            actor_user_id="u1",
+            due_date="not-a-date",
         )
 
     env.events.clear()
@@ -352,7 +395,9 @@ async def test_space_task_service_full_crud(env):
     # Complete → TaskCompleted.
     env.events.clear()
     await env.space_task_svc.update_task(
-        task.id, actor_user_id="u1", status="done",
+        task.id,
+        actor_user_id="u1",
+        status="done",
     )
     assert any(isinstance(e, TaskCompleted) for e in env.events)
 
@@ -369,7 +414,9 @@ async def test_space_task_service_full_crud(env):
 async def test_space_task_service_update_missing_raises(env):
     with pytest.raises(KeyError):
         await env.space_task_svc.update_task(
-            "missing", actor_user_id="u1", title="x",
+            "missing",
+            actor_user_id="u1",
+            title="x",
         )
 
 
@@ -391,7 +438,9 @@ async def test_space_task_service_delete_list_missing_raises(env):
 async def test_space_task_service_create_task_bad_due_date_raises(env):
     await _seed_space(env, sid="sp-bad-date")
     await env.space_task_svc.create_list(
-        space_id="sp-bad-date", name="L", created_by="u1",
+        space_id="sp-bad-date",
+        name="L",
+        created_by="u1",
     )
     with pytest.raises(ValueError):
         await env.space_task_svc.create_task(
@@ -416,10 +465,15 @@ async def test_space_task_service_create_task_empty_title_raises(env):
 async def test_space_task_service_list_tasks_by_list(env):
     await _seed_space(env, sid="sp-list")
     lst = await env.space_task_svc.create_list(
-        space_id="sp-list", name="L", created_by="u1",
+        space_id="sp-list",
+        name="L",
+        created_by="u1",
     )
     await env.space_task_svc.create_task(
-        space_id="sp-list", list_id=lst.id, title="T", created_by="u1",
+        space_id="sp-list",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     rows = await env.space_task_svc.list_tasks_by_list(lst.id)
     assert len(rows) == 1

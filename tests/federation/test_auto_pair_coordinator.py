@@ -18,7 +18,6 @@ from social_home.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.domain.events import PairingConfirmed
 from social_home.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -122,8 +121,13 @@ def coord(fed_repo, kek_manager, bus, fed_service, identity, inbox):
 
 def test_vouch_blob_shape():
     b = _vouch_blob(
-        a_id="a", a_pk_hex="aa", a_webhook="http://x",
-        a_dh_pk_hex="bb", c_id="c", ts="2026-04-20T00:00:00Z", nonce="n",
+        a_id="a",
+        a_pk_hex="aa",
+        a_webhook="http://x",
+        a_dh_pk_hex="bb",
+        c_id="c",
+        ts="2026-04-20T00:00:00Z",
+        nonce="n",
     )
     assert b.startswith(b"vouch/v1|")
     assert b.endswith(b"|n")
@@ -131,8 +135,12 @@ def test_vouch_blob_shape():
 
 def test_ack_blob_shape():
     b = _ack_blob(
-        a_id="a", a_dh_pk_hex="aa", c_id="c", c_dh_pk_hex="bb",
-        ts="t", nonce="n",
+        a_id="a",
+        a_dh_pk_hex="aa",
+        c_id="c",
+        c_dh_pk_hex="bb",
+        ts="t",
+        nonce="n",
     )
     assert b.startswith(b"ack/v1|")
     assert b.endswith(b"|n")
@@ -216,8 +224,10 @@ async def test_request_via_happy_path_sends_intro(coord, fed_repo, fed_service):
 
 def _evt(from_instance: str, payload: dict) -> FederationEvent:
     return FederationEvent(
-        msg_id="m", event_type=FederationEventType.PAIRING_INTRO_AUTO,
-        from_instance=from_instance, to_instance="me",
+        msg_id="m",
+        event_type=FederationEventType.PAIRING_INTRO_AUTO,
+        from_instance=from_instance,
+        to_instance="me",
         timestamp="2026-04-20T00:00:00+00:00",
         payload=payload,
     )
@@ -229,47 +239,84 @@ async def test_on_intro_from_peer_missing_fields_noop(coord, fed_service):
 
 
 async def test_on_intro_from_peer_bad_ts(coord, fed_service):
-    await coord.on_intro_from_peer(_evt("any", {
-        "target_id": "t", "a_dh_pk": "dd", "ts": "not-a-ts",
-        "nonce": "n", "token": "tk",
-    }))
+    await coord.on_intro_from_peer(
+        _evt(
+            "any",
+            {
+                "target_id": "t",
+                "a_dh_pk": "dd",
+                "ts": "not-a-ts",
+                "nonce": "n",
+                "token": "tk",
+            },
+        )
+    )
     fed_service.send_event.assert_not_awaited()
 
 
 async def test_on_intro_from_peer_stale_ts(coord, fed_service):
     # Timestamp from year 2000 → blown past TTL.
-    await coord.on_intro_from_peer(_evt("any", {
-        "target_id": "t", "a_dh_pk": "dd", "ts": "2000-01-01T00:00:00+00:00",
-        "nonce": "n", "token": "tk",
-    }))
+    await coord.on_intro_from_peer(
+        _evt(
+            "any",
+            {
+                "target_id": "t",
+                "a_dh_pk": "dd",
+                "ts": "2000-01-01T00:00:00+00:00",
+                "nonce": "n",
+                "token": "tk",
+            },
+        )
+    )
     fed_service.send_event.assert_not_awaited()
 
 
 async def test_on_intro_from_peer_unknown_sender(coord, fed_service):
     from datetime import datetime, timezone
+
     ts = datetime.now(timezone.utc).isoformat()
-    await coord.on_intro_from_peer(_evt("no-sender", {
-        "target_id": "t", "a_dh_pk": "dd", "ts": ts,
-        "nonce": "n", "token": "tk", "a_webhook": "",
-    }))
+    await coord.on_intro_from_peer(
+        _evt(
+            "no-sender",
+            {
+                "target_id": "t",
+                "a_dh_pk": "dd",
+                "ts": ts,
+                "nonce": "n",
+                "token": "tk",
+                "a_webhook": "",
+            },
+        )
+    )
     fed_service.send_event.assert_not_awaited()
 
 
 async def test_on_intro_from_peer_unknown_target(coord, fed_repo, fed_service):
     from datetime import datetime, timezone
+
     a_kp = generate_identity_keypair()
     a = _make_peer_remote_instance(a_kp.public_key.hex())
     fed_repo.instances[a.id] = a
     ts = datetime.now(timezone.utc).isoformat()
-    await coord.on_intro_from_peer(_evt(a.id, {
-        "target_id": "unknown-target", "a_dh_pk": "dd", "ts": ts,
-        "nonce": "n", "token": "tk", "a_webhook": "",
-    }))
+    await coord.on_intro_from_peer(
+        _evt(
+            a.id,
+            {
+                "target_id": "unknown-target",
+                "a_dh_pk": "dd",
+                "ts": ts,
+                "nonce": "n",
+                "token": "tk",
+                "a_webhook": "",
+            },
+        )
+    )
     fed_service.send_event.assert_not_awaited()
 
 
 async def test_on_intro_from_peer_forwards_to_c(coord, fed_repo, fed_service):
     from datetime import datetime, timezone
+
     a_kp = generate_identity_keypair()
     a = _make_peer_remote_instance(a_kp.public_key.hex())
     fed_repo.instances[a.id] = a
@@ -277,10 +324,19 @@ async def test_on_intro_from_peer_forwards_to_c(coord, fed_repo, fed_service):
     c = _make_peer_remote_instance(c_kp.public_key.hex())
     fed_repo.instances[c.id] = c
     ts = datetime.now(timezone.utc).isoformat()
-    await coord.on_intro_from_peer(_evt(a.id, {
-        "target_id": c.id, "a_dh_pk": "dd" * 16, "ts": ts,
-        "nonce": "n" * 16, "token": "tk", "a_webhook": "http://a",
-    }))
+    await coord.on_intro_from_peer(
+        _evt(
+            a.id,
+            {
+                "target_id": c.id,
+                "a_dh_pk": "dd" * 16,
+                "ts": ts,
+                "nonce": "n" * 16,
+                "token": "tk",
+                "a_webhook": "http://a",
+            },
+        )
+    )
     fed_service.send_event.assert_awaited_once()
     fwd = fed_service.send_event.await_args.kwargs
     assert fwd["to_instance_id"] == c.id
@@ -293,7 +349,9 @@ async def test_on_intro_from_peer_forwards_to_c(coord, fed_repo, fed_service):
 # ── on_intro_at_target (C side) ────────────────────────────────────
 
 
-async def test_on_intro_at_target_routes_to_peer_handler_when_no_via(coord, fed_service):
+async def test_on_intro_at_target_routes_to_peer_handler_when_no_via(
+    coord, fed_service
+):
     # When payload lacks via_b_id, it's really an A→B message that
     # reached C (shouldn't happen in prod but the code handles it).
     await coord.on_intro_at_target(_evt("sender", {}))
@@ -306,12 +364,22 @@ async def test_on_intro_at_target_missing_fields_noop(coord, inbox):
 
 
 async def test_on_intro_at_target_unknown_via(coord, inbox):
-    await coord.on_intro_at_target(_evt("sender", {
-        "via_b_id": "no-such-b",
-        "from_a_id": "a", "from_a_pk": "aa", "from_a_webhook": "w",
-        "from_a_dh_pk": "dd", "vouch_sig": "ab",
-        "ts": "2026-04-20T00:00:00+00:00", "nonce": "n", "token": "tk",
-    }))
+    await coord.on_intro_at_target(
+        _evt(
+            "sender",
+            {
+                "via_b_id": "no-such-b",
+                "from_a_id": "a",
+                "from_a_pk": "aa",
+                "from_a_webhook": "w",
+                "from_a_dh_pk": "dd",
+                "vouch_sig": "ab",
+                "ts": "2026-04-20T00:00:00+00:00",
+                "nonce": "n",
+                "token": "tk",
+            },
+        )
+    )
     assert inbox.list_pending() == []
 
 
@@ -321,12 +389,22 @@ async def test_on_intro_at_target_bad_vouch_sig(coord, fed_repo, inbox):
     b_kp = generate_identity_keypair()
     b = _make_peer_remote_instance(b_kp.public_key.hex())
     fed_repo.instances[b.id] = b
-    await coord.on_intro_at_target(_evt(b.id, {
-        "via_b_id": b.id,
-        "from_a_id": "a", "from_a_pk": "aa" * 16, "from_a_webhook": "w",
-        "from_a_dh_pk": "dd" * 16, "vouch_sig": "ab" * 32,
-        "ts": "2026-04-20T00:00:00+00:00", "nonce": "n", "token": "tk",
-    }))
+    await coord.on_intro_at_target(
+        _evt(
+            b.id,
+            {
+                "via_b_id": b.id,
+                "from_a_id": "a",
+                "from_a_pk": "aa" * 16,
+                "from_a_webhook": "w",
+                "from_a_dh_pk": "dd" * 16,
+                "vouch_sig": "ab" * 32,
+                "ts": "2026-04-20T00:00:00+00:00",
+                "nonce": "n",
+                "token": "tk",
+            },
+        )
+    )
     assert inbox.list_pending() == []
 
 
@@ -374,16 +452,22 @@ async def test_full_auto_pair_handshake(
 
     # Step: A's intro arrives at B (coord).
     from social_home.crypto import generate_x25519_keypair
+
     a_dh = generate_x25519_keypair()
     ts = datetime.now(timezone.utc).isoformat()
-    await coord.on_intro_from_peer(_evt(a_id, {
-        "target_id": c_id,
-        "a_dh_pk": a_dh.public_key.hex(),
-        "a_webhook": "https://a.example/webhook",
-        "ts": ts,
-        "nonce": "n" * 16,
-        "token": "tk",
-    }))
+    await coord.on_intro_from_peer(
+        _evt(
+            a_id,
+            {
+                "target_id": c_id,
+                "a_dh_pk": a_dh.public_key.hex(),
+                "a_webhook": "https://a.example/webhook",
+                "ts": ts,
+                "nonce": "n" * 16,
+                "token": "tk",
+            },
+        )
+    )
     # B forwarded to C.
     assert fed_service.send_event.await_count == 1
     forward = fed_service.send_event.await_args.kwargs["payload"]
@@ -438,10 +522,17 @@ async def test_full_auto_pair_handshake(
 async def test_decline_pending_sends_abort(coord, inbox, fed_service):
     # Enqueue a fake pending request directly via the inbox.
     req = inbox.enqueue(
-        from_a_id="a1", from_a_pk="aa", from_a_webhook="w",
-        from_a_dh_pk="dd", via_b_id="b1", vouch_sig="vv",
-        ts="2026-04-20T00:00:00+00:00", nonce="n", token="tk",
-        from_a_display="A", via_b_display="B",
+        from_a_id="a1",
+        from_a_pk="aa",
+        from_a_webhook="w",
+        from_a_dh_pk="dd",
+        via_b_id="b1",
+        vouch_sig="vv",
+        ts="2026-04-20T00:00:00+00:00",
+        nonce="n",
+        token="tk",
+        from_a_display="A",
+        via_b_display="B",
     )
     fed_service.send_event.reset_mock()
     await coord.decline_pending(req.request_id, reason="spam")
@@ -471,9 +562,15 @@ async def test_on_ack_target_mismatch(coord, fed_repo):
         target_display_name="",
     )
     # Reply with a mismatched c_id → early return.
-    await coord.on_ack_at_originator(_evt("wrong", {
-        "token": r["token"], "c_id": "something-else",
-        "via_b_id": b.id,
-    }))
+    await coord.on_ack_at_originator(
+        _evt(
+            "wrong",
+            {
+                "token": r["token"],
+                "c_id": "something-else",
+                "via_b_id": b.id,
+            },
+        )
+    )
     # instance still PENDING_SENT
     assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT

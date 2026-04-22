@@ -95,7 +95,8 @@ async def stack(tmp_dir):
 
 async def _user(stack, username):
     return await stack.user_svc.provision(
-        username=username, display_name=username,
+        username=username,
+        display_name=username,
     )
 
 
@@ -138,9 +139,6 @@ async def test_invite_remote_user_happy(stack):
 
 async def test_invite_remote_user_requires_federation():
     """Direct SpaceService without attach_federation must raise."""
-    # Minimal setup: no federation.
-    kp = generate_identity_keypair()
-    iid = derive_instance_id(kp.public_key)
     svc = SpaceService.__new__(SpaceService)
     svc._federation = None
     svc._federation_repo = None
@@ -159,7 +157,8 @@ async def test_invite_remote_user_requires_federation():
 async def test_accept_remote_invite_unknown_token_raises(stack):
     with pytest.raises(KeyError):
         await stack.svc.accept_remote_invite(
-            token="bogus", user_id="u",
+            token="bogus",
+            user_id="u",
         )
 
 
@@ -167,7 +166,8 @@ async def test_accept_remote_invite_not_cross_household_raises(stack):
     """A remote-invitation row saved with no remote_instance_id yields ValueError."""
     await _user(stack, "alicehost")
     space = await stack.svc.create_space(
-        owner_username="alicehost", name="S",
+        owner_username="alicehost",
+        name="S",
     )
     # Directly insert a row without remote_instance_id.
     await stack.db.enqueue(
@@ -180,14 +180,16 @@ async def test_accept_remote_invite_not_cross_household_raises(stack):
     )
     with pytest.raises(ValueError):
         await stack.svc.accept_remote_invite(
-            token="local-tkn", user_id="u",
+            token="local-tkn",
+            user_id="u",
         )
 
 
 async def test_accept_remote_invite_happy(stack):
     await _user(stack, "alicehost")
     space = await stack.svc.create_space(
-        owner_username="alicehost", name="S",
+        owner_username="alicehost",
+        name="S",
     )
     # Seed a remote invitation row.
     await stack.space_repo.save_remote_invitation(
@@ -202,7 +204,8 @@ async def test_accept_remote_invite_happy(stack):
     # — the SqliteUserRepo does not expose get_by_id (it's optional),
     # so the code path hits the hasattr(False) branch.
     await stack.svc.accept_remote_invite(
-        token="tok-xyz", user_id="bob",
+        token="tok-xyz",
+        user_id="bob",
     )
     stack.fed_svc.send_event.assert_awaited()
 
@@ -210,14 +213,16 @@ async def test_accept_remote_invite_happy(stack):
 async def test_decline_remote_invite_unknown_token(stack):
     with pytest.raises(KeyError):
         await stack.svc.decline_remote_invite(
-            token="nope", user_id="u",
+            token="nope",
+            user_id="u",
         )
 
 
 async def test_decline_remote_invite_not_cross_household(stack):
     await _user(stack, "alicehost")
     space = await stack.svc.create_space(
-        owner_username="alicehost", name="S",
+        owner_username="alicehost",
+        name="S",
     )
     await stack.db.enqueue(
         """INSERT INTO space_invitations(
@@ -229,14 +234,16 @@ async def test_decline_remote_invite_not_cross_household(stack):
     )
     with pytest.raises(ValueError):
         await stack.svc.decline_remote_invite(
-            token="loc-dec", user_id="u",
+            token="loc-dec",
+            user_id="u",
         )
 
 
 async def test_decline_remote_invite_happy(stack):
     await _user(stack, "alicehost")
     space = await stack.svc.create_space(
-        owner_username="alicehost", name="S",
+        owner_username="alicehost",
+        name="S",
     )
     await stack.space_repo.save_remote_invitation(
         space_id=space.id,
@@ -247,7 +254,8 @@ async def test_decline_remote_invite_happy(stack):
         space_display_hint="S",
     )
     await stack.svc.decline_remote_invite(
-        token="tok-decline", user_id="bob",
+        token="tok-decline",
+        user_id="bob",
     )
     stack.fed_svc.send_event.assert_awaited()
 
@@ -258,7 +266,8 @@ async def test_decline_remote_invite_happy(stack):
 async def test_remove_remote_member_happy(stack):
     await _user(stack, "alicehost")
     space = await stack.svc.create_space(
-        owner_username="alicehost", name="S",
+        owner_username="alicehost",
+        name="S",
     )
     await stack.svc.remove_remote_member(
         space.id,
@@ -308,7 +317,8 @@ async def test_request_join_remote_happy(stack):
 async def test_on_remote_join_request_approved_unknown_noop(stack):
     # No row for this request_id — the handler silently returns.
     await stack.svc.on_remote_join_request_approved(
-        "missing", invite_token="x",
+        "missing",
+        invite_token="x",
     )
 
 
@@ -331,11 +341,13 @@ async def test_on_remote_join_request_approved_happy(stack):
     )
     # Mint a token to consume.
     token = await stack.svc.create_invite_token(
-        space.id, actor_username="alicehost",
+        space.id,
+        actor_username="alicehost",
     )
     # Handler auto-consumes it.
     await stack.svc.on_remote_join_request_approved(
-        rid, invite_token=token,
+        rid,
+        invite_token=token,
     )
 
 
@@ -351,12 +363,12 @@ async def test_deny_local_join_request(stack):
         join_mode=JoinMode.REQUEST,
     )
     rid = await stack.svc.request_join(
-        space.id, user_id=bob.user_id, message="please",
+        space.id,
+        user_id=bob.user_id,
+        message="please",
     )
     await stack.svc.deny_join_request(rid, actor_username="alicehost")
-    assert (
-        await stack.space_repo.get_member(space.id, bob.user_id)
-    ) is None
+    assert (await stack.space_repo.get_member(space.id, bob.user_id)) is None
 
 
 async def test_approve_local_join_request(stack):
@@ -368,10 +380,12 @@ async def test_approve_local_join_request(stack):
         join_mode=JoinMode.REQUEST,
     )
     rid = await stack.svc.request_join(
-        space.id, user_id=bob.user_id,
+        space.id,
+        user_id=bob.user_id,
     )
     member = await stack.svc.approve_join_request(
-        rid, actor_username="alicehost",
+        rid,
+        actor_username="alicehost",
     )
     assert member is not None
     assert member.user_id == bob.user_id
@@ -382,5 +396,6 @@ async def test_approve_unknown_request_raises(stack):
     await stack.svc.create_space(owner_username="alicehost", name="S")
     with pytest.raises(KeyError):
         await stack.svc.approve_join_request(
-            "missing-rid", actor_username="alicehost",
+            "missing-rid",
+            actor_username="alicehost",
         )

@@ -268,8 +268,10 @@ class _RtcPeer:
 
     async def _drain_ice(self) -> None:
         """Pump local ICE candidates out to the peer over signalling."""
+        pc = self._pc
+        assert pc is not None  # spawned from start_offer/accept_offer
         try:
-            async for cand in self._pc.ice_candidates():
+            async for cand in pc.ice_candidates():
                 await self._signaling(
                     FederationEventType.FEDERATION_RTC_ICE,
                     {"candidate": cand.candidate, "sdp_mid": cand.mid},
@@ -281,13 +283,15 @@ class _RtcPeer:
 
     async def _drain_incoming_channel(self) -> None:
         """Answerer path: wait for the provider's DataChannel to arrive."""
+        pc = self._pc
+        assert pc is not None  # spawned from accept_offer
         try:
-            async for ch in self._pc.incoming_data_channels():
+            async for ch in pc.incoming_data_channels():
                 if ch.label != CHANNEL_LABEL:
                     continue
                 self._channel = ch
                 ch.set_buffered_amount_low_threshold(self._send_hwm // 2)
-                self._pc.spawn_task(self._drain_channel(ch))
+                pc.spawn_task(self._drain_channel(ch))
                 return
         except asyncio.CancelledError:
             raise
@@ -300,7 +304,9 @@ class _RtcPeer:
             await channel.wait_open()
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning(
-                "fed RTC channel never opened to %s: %s", self.instance_id, exc,
+                "fed RTC channel never opened to %s: %s",
+                self.instance_id,
+                exc,
             )
             return
         log.info("fed RTC channel open to %s", self.instance_id)
@@ -308,7 +314,9 @@ class _RtcPeer:
         try:
             async for msg in channel:
                 try:
-                    data = orjson.loads(msg if isinstance(msg, (bytes, str)) else bytes(msg))
+                    data = orjson.loads(
+                        msg if isinstance(msg, (bytes, str)) else bytes(msg)
+                    )
                 except Exception as exc:  # noqa: BLE001 — orjson raises orjson.JSONDecodeError + anything
                     log.warning(
                         "fed RTC malformed frame from %s: %s",

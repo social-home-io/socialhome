@@ -219,7 +219,7 @@ class SyncRtcSession:
         self._ready.set()
         try:
             await channel.wait_closed()
-        except (rtc.RTCError, rtc.ConnectionClosedError):
+        except rtc.RTCError, rtc.ConnectionClosedError:
             pass
         log.info("SyncRtcSession[%s]: DataChannel closed", self.sync_id)
         self._closed = True

@@ -20,7 +20,6 @@ from social_home.domain.events import (
 )
 from social_home.domain.post import Comment, CommentType
 from social_home.domain.space import SpaceMember
-from social_home.infrastructure.event_bus import EventBus
 from social_home.services.federation_inbound_service import FederationInboundService
 
 
@@ -32,7 +31,13 @@ class _RecordingBus:
         self.events.append(event)
 
 
-def _evt(event_type: str, payload: dict, *, from_instance: str = "peer-1", space_id: str | None = None):
+def _evt(
+    event_type: str,
+    payload: dict,
+    *,
+    from_instance: str = "peer-1",
+    space_id: str | None = None,
+):
     return SimpleNamespace(
         event_type=event_type,
         payload=payload,
@@ -349,9 +354,7 @@ async def test_space_member_profile_updated_happy(svc):
         ),
     )
     svc.sp_repo.set_member_profile.assert_awaited_once()
-    assert any(
-        isinstance(e, SpaceMemberProfileUpdated) for e in svc.bus.events
-    )
+    assert any(isinstance(e, SpaceMemberProfileUpdated) for e in svc.bus.events)
 
 
 # ── User events ─────────────────────────────────────────────────────
@@ -426,8 +429,7 @@ async def test_user_status_cleared(svc):
         ),
     )
     assert any(
-        isinstance(e, UserStatusChanged) and e.status is None
-        for e in svc.bus.events
+        isinstance(e, UserStatusChanged) and e.status is None for e in svc.bus.events
     )
 
 
@@ -437,8 +439,7 @@ async def test_user_status_all_nil_emits_none(svc):
         _evt("USER_STATUS_UPDATED", {"user_id": "u"}),
     )
     assert any(
-        isinstance(e, UserStatusChanged) and e.status is None
-        for e in svc.bus.events
+        isinstance(e, UserStatusChanged) and e.status is None for e in svc.bus.events
     )
 
 
@@ -461,6 +462,7 @@ async def test_user_status_populated(svc):
 
 async def test_attach_to_registers_many_handlers(svc):
     """`attach_to` wires >= 16 event-type → handler bindings."""
+
     class _FakeRegistry:
         def __init__(self) -> None:
             self.bindings: dict = {}

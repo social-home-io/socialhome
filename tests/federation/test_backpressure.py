@@ -45,10 +45,10 @@ class _Channel:
 @pytest.mark.parametrize(
     "buffered, expect_send",
     [
-        (0, True),                 # empty buffer → send
-        (FED_HWM - 1, True),       # one byte below HWM → still sends
-        (FED_HWM, False),          # exactly at HWM → drop
-        (FED_HWM * 2, False),      # way over HWM → drop
+        (0, True),  # empty buffer → send
+        (FED_HWM - 1, True),  # one byte below HWM → still sends
+        (FED_HWM, False),  # exactly at HWM → drop
+        (FED_HWM * 2, False),  # way over HWM → drop
     ],
 )
 async def test_fed_peer_send_respects_hwm(buffered: int, expect_send: bool):

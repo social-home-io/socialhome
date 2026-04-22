@@ -56,7 +56,10 @@ def handler():
         remote_member_repo=remote_members,
     )
     return SimpleNamespace(
-        h=h, bus=bus, space_repo=space_repo, remote_members=remote_members,
+        h=h,
+        bus=bus,
+        space_repo=space_repo,
+        remote_members=remote_members,
     )
 
 
@@ -73,9 +76,7 @@ async def test_invite_happy_path(handler):
     )
     await handler.h._on_invite(ev)
     handler.space_repo.save_remote_invitation.assert_awaited_once()
-    assert any(
-        isinstance(e, RemoteSpaceInviteReceived) for e in handler.bus.events
-    )
+    assert any(isinstance(e, RemoteSpaceInviteReceived) for e in handler.bus.events)
 
 
 async def test_invite_missing_fields_noops(handler):
@@ -116,9 +117,7 @@ async def test_accept_happy_path(handler):
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_awaited_once()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "accepted")
-    assert any(
-        isinstance(e, RemoteSpaceInviteAccepted) for e in handler.bus.events
-    )
+    assert any(isinstance(e, RemoteSpaceInviteAccepted) for e in handler.bus.events)
 
 
 async def test_decline_no_token_noops(handler):
@@ -145,9 +144,7 @@ async def test_decline_happy_path(handler):
     )
     await handler.h._on_decline(ev)
     handler.space_repo.update_invitation_status.assert_awaited_with(5, "declined")
-    assert any(
-        isinstance(e, RemoteSpaceInviteDeclined) for e in handler.bus.events
-    )
+    assert any(isinstance(e, RemoteSpaceInviteDeclined) for e in handler.bus.events)
 
 
 async def test_member_removed_missing_fields_noops(handler):
@@ -163,11 +160,11 @@ async def test_member_removed_happy_path(handler):
     )
     await handler.h._on_member_removed(ev)
     handler.remote_members.remove.assert_awaited_once_with(
-        "sp-c", "peer-1", "u-bye",
+        "sp-c",
+        "peer-1",
+        "u-bye",
     )
-    assert any(
-        isinstance(e, RemoteSpaceMemberRemoved) for e in handler.bus.events
-    )
+    assert any(isinstance(e, RemoteSpaceMemberRemoved) for e in handler.bus.events)
 
 
 async def test_attach_to_registers_four_handlers():

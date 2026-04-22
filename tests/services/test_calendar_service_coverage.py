@@ -72,11 +72,15 @@ async def test_get_event_unknown_raises(env):
 
 async def test_list_events_in_range_bad_date_raises(env):
     cal = await env.svc.create_calendar(
-        name="C", owner_username="u1", color="#fff",
+        name="C",
+        owner_username="u1",
+        color="#fff",
     )
     with pytest.raises(ValueError):
         await env.svc.list_events_in_range(
-            cal.id, start="not-a-date", end="2026-01-01T00:00:00Z",
+            cal.id,
+            start="not-a-date",
+            end="2026-01-01T00:00:00Z",
         )
 
 
@@ -87,7 +91,9 @@ async def test_delete_event_unknown_raises(env):
 
 async def test_delete_event_emits_deleted(env):
     cal = await env.svc.create_calendar(
-        name="C", owner_username="u1", color="#fff",
+        name="C",
+        owner_username="u1",
+        color="#fff",
     )
     event = await env.svc.create_event(
         calendar_id=cal.id,
@@ -108,7 +114,9 @@ async def test_update_event_unknown_raises(env):
 
 async def test_update_event_empty_summary_raises(env):
     cal = await env.svc.create_calendar(
-        name="C", owner_username="u1", color="#fff",
+        name="C",
+        owner_username="u1",
+        color="#fff",
     )
     event = await env.svc.create_event(
         calendar_id=cal.id,
@@ -123,7 +131,9 @@ async def test_update_event_empty_summary_raises(env):
 
 async def test_update_event_end_before_start_raises(env):
     cal = await env.svc.create_calendar(
-        name="C", owner_username="u1", color="#fff",
+        name="C",
+        owner_username="u1",
+        color="#fff",
     )
     event = await env.svc.create_event(
         calendar_id=cal.id,
@@ -142,7 +152,9 @@ async def test_update_event_end_before_start_raises(env):
 
 async def test_update_event_full_happy(env):
     cal = await env.svc.create_calendar(
-        name="C", owner_username="u1", color="#fff",
+        name="C",
+        owner_username="u1",
+        color="#fff",
     )
     event = await env.svc.create_event(
         calendar_id=cal.id,
@@ -179,7 +191,9 @@ async def _seed_space(env, sid="sp1"):
 async def test_space_list_events_bad_date(env):
     with pytest.raises(ValueError):
         await env.space_svc.list_events_in_range(
-            "sp", start="bogus", end="2026-01-01T00:00:00Z",
+            "sp",
+            start="bogus",
+            end="2026-01-01T00:00:00Z",
         )
 
 
@@ -306,7 +320,9 @@ async def test_space_rsvp_happy(env):
         created_by="u1",
     )
     await env.space_svc.rsvp(
-        event_id=event.id, user_id="u2", status=RSVPStatus.GOING,
+        event_id=event.id,
+        user_id="u2",
+        status=RSVPStatus.GOING,
     )
     await env.space_svc.remove_rsvp(event_id=event.id, user_id="u2")
     rows = await env.space_svc.list_rsvps(event.id)

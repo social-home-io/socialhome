@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 
 import aiolibdatachannel as rtc
-import pytest
 
 from social_home.domain.federation import FederationEventType
 from social_home.federation.transport import (
@@ -478,6 +477,7 @@ async def test_peer_drain_ice_handles_rtc_errors():
             async def _it():
                 raise rtc.RTCError("gathering aborted")
                 yield  # pragma: no cover — after raise
+
             return _it()
 
     peer._pc = _BadPc()  # type: ignore[attr-defined]
@@ -520,6 +520,7 @@ async def test_peer_drain_incoming_channel_ignores_wrong_label():
             async def _gen():
                 yield _FakeCh("other-label")  # skipped
                 yield good  # accepted
+
             return _gen()
 
         def spawn_task(self, coro):

@@ -5,7 +5,7 @@ which covers the happy-path CRUD.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 import pytest
 
@@ -47,19 +47,27 @@ async def env(tmp_dir):
 async def test_comment_lifecycle(env):
     lst = await env.task_svc.create_list(name="L", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T", created_by="u1",
+        list_id=lst.id,
+        title="T",
+        created_by="u1",
     )
     # Empty comment is rejected.
     with pytest.raises(ValueError):
         await env.task_svc.add_comment(
-            task.id, author_user_id="u1", content="   ",
+            task.id,
+            author_user_id="u1",
+            content="   ",
         )
     # Add two comments.
     c1 = await env.task_svc.add_comment(
-        task.id, author_user_id="u1", content="first",
+        task.id,
+        author_user_id="u1",
+        content="first",
     )
     await env.task_svc.add_comment(
-        task.id, author_user_id="u1", content="second",
+        task.id,
+        author_user_id="u1",
+        content="second",
     )
     rows = await env.task_svc.list_comments(task.id)
     assert len(rows) == 2
@@ -76,19 +84,27 @@ async def test_comment_lifecycle(env):
 async def test_attachment_lifecycle(env):
     lst = await env.task_svc.create_list(name="L2", created_by="u1")
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="T2", created_by="u1",
+        list_id=lst.id,
+        title="T2",
+        created_by="u1",
     )
     # size_bytes 0 is rejected.
     with pytest.raises(ValueError):
         await env.task_svc.add_attachment(
-            task.id, uploaded_by="u1",
-            url="http://x", filename="f.pdf", mime="application/pdf",
+            task.id,
+            uploaded_by="u1",
+            url="http://x",
+            filename="f.pdf",
+            mime="application/pdf",
             size_bytes=0,
         )
     # Positive size ok.
     att = await env.task_svc.add_attachment(
-        task.id, uploaded_by="u1",
-        url="http://x/f.pdf", filename="f.pdf", mime="application/pdf",
+        task.id,
+        uploaded_by="u1",
+        url="http://x/f.pdf",
+        filename="f.pdf",
+        mime="application/pdf",
         size_bytes=1024,
     )
     rows = await env.task_svc.list_attachments(task.id)
@@ -97,8 +113,11 @@ async def test_attachment_lifecycle(env):
     # Attachment to unknown task raises.
     with pytest.raises(KeyError):
         await env.task_svc.add_attachment(
-            "missing-task", uploaded_by="u1",
-            url="http://x", filename="f.pdf", mime="application/pdf",
+            "missing-task",
+            uploaded_by="u1",
+            url="http://x",
+            filename="f.pdf",
+            mime="application/pdf",
             size_bytes=10,
         )
 
@@ -113,10 +132,12 @@ async def test_reorder_moves_positions(env):
     c = await env.task_svc.create_task(list_id=lst.id, title="C", created_by="u1")
     # Reverse order.
     await env.task_svc.reorder_tasks(
-        lst.id, ordered_ids=[c.id, b.id, a.id],
+        lst.id,
+        ordered_ids=[c.id, b.id, a.id],
     )
     rows = sorted(
-        await env.task_svc.list_tasks(lst.id), key=lambda t: t.position,
+        await env.task_svc.list_tasks(lst.id),
+        key=lambda t: t.position,
     )
     assert [r.id for r in rows] == [c.id, b.id, a.id]
 
@@ -130,14 +151,19 @@ async def test_reorder_skips_foreign_task_id(env):
     l1 = await env.task_svc.create_list(name="X", created_by="u1")
     l2 = await env.task_svc.create_list(name="Y", created_by="u1")
     t_in_l1 = await env.task_svc.create_task(
-        list_id=l1.id, title="a", created_by="u1",
+        list_id=l1.id,
+        title="a",
+        created_by="u1",
     )
     t_in_l2 = await env.task_svc.create_task(
-        list_id=l2.id, title="b", created_by="u1",
+        list_id=l2.id,
+        title="b",
+        created_by="u1",
     )
     # Passing l2's task into l1's reorder is a silent skip.
     updated = await env.task_svc.reorder_tasks(
-        l1.id, ordered_ids=[t_in_l2.id, t_in_l1.id],
+        l1.id,
+        ordered_ids=[t_in_l2.id, t_in_l1.id],
     )
     # t_in_l2 was skipped; t_in_l1 was unchanged (already at position 0 → 1).
     ids = {u.id for u in updated}
@@ -161,7 +187,9 @@ async def test_rename_list_unknown_raises(env):
 async def test_delete_list_cascades(env):
     lst = await env.task_svc.create_list(name="D", created_by="u1")
     await env.task_svc.create_task(
-        list_id=lst.id, title="t", created_by="u1",
+        list_id=lst.id,
+        title="t",
+        created_by="u1",
     )
     await env.task_svc.delete_list(lst.id)
     with pytest.raises(KeyError):
@@ -175,7 +203,10 @@ async def test_create_task_with_due_date(env):
     lst = await env.task_svc.create_list(name="DD", created_by="u1")
     due = (date.today() + timedelta(days=1)).isoformat()
     task = await env.task_svc.create_task(
-        list_id=lst.id, title="Review", created_by="u1", due_date=due,
+        list_id=lst.id,
+        title="Review",
+        created_by="u1",
+        due_date=due,
     )
     assert task.due_date is not None
 

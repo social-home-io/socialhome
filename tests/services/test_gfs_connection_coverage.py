@@ -294,6 +294,7 @@ async def test_publish_space_to_all_individual_failure_logs(env):
             # Second call raises.
             if self.calls > 1:
                 import aiohttp
+
                 raise aiohttp.ClientError("second fails")
             return _StubResp(204)
 
