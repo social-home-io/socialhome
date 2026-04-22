@@ -150,6 +150,37 @@ When adding a new federation event:
 - Never add a `"payload": plaintext_fallback` pattern
 - If `SpaceContentEncryption` is not configured, raise `RuntimeError` — never degrade silently
 
+### Keep docs in sync
+
+`docs/` is the public reference for the federation protocol and the
+HTTP API. Trust erodes fast when docs drift from code, so treat the
+matching doc file as part of the same change.
+
+- **Added or renamed a `FederationEventType`?** Update the `Event types`
+  list on the matching page under `docs/protocol/`. If the new event
+  belongs to a feature that doesn't have a page yet (new feature), add
+  one — copy the shape from `docs/protocol/pairing.md` (summary, scope,
+  event types, Mermaid sequence diagram, implementation pointers, spec
+  refs) and link it from `docs/protocol/README.md`.
+- **Changed a feature's message flow** (new signalling step, new
+  `_VIA` relay, transport swap)? Update the Mermaid sequence diagram
+  on the matching page. Diagrams exist to be accurate, not
+  decorative.
+- **Added or removed an HTTP endpoint?** Update the matching table in
+  `docs/api.md`. If the endpoint is rate-limited, add a row to the
+  "Rate limits" table too. If it's a new WebSocket frame type,
+  document it under the WebSocket row.
+- **Changed the crypto suite** (signature algorithm, key derivation,
+  envelope format)? Update `docs/crypto.md`.
+- **Added a new top-level doc file under `docs/`?** Link it from
+  `docs/README.md` and add a pointer in the repo-root `README.md`
+  under "Documentation".
+
+Reviewer checklist: if a PR adds a federation event, a route, or a
+crypto change and the docs aren't touched, push back. The check is
+"did the author update the matching doc?" — not "are the docs
+perfect?" Incremental accuracy beats big bang rewrites.
+
 ### What to Never Do
 
 - Never import inside a function or method body — all imports go at the
@@ -186,3 +217,6 @@ When adding a new federation event:
 - Never roll your own `_running: bool` scheduler loop — copy the
   `_stop: asyncio.Event` pattern from `replay_cache_scheduler.py`
 - Never create a new migration without incrementing the number
+- Never add / rename / remove a `FederationEventType` or an HTTP
+  endpoint without updating the matching page in `docs/protocol/` or
+  `docs/api.md` in the same commit. See "Keep docs in sync" above

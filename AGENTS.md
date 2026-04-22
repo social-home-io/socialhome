@@ -49,9 +49,24 @@ Canonical spec: spec_work.md — the spec is always right.
 - No row-shaped `@dataclass` declared in `repositories/`. Move it to `domain/`
   and re-export from the repo module so existing imports keep working.
 
+### Keep docs in sync
+Docs live in `docs/`. Ship the matching doc update in the same commit:
+- New / renamed / removed `FederationEventType` → the matching page
+  in `docs/protocol/` (event-type list, Mermaid diagram if the flow
+  changed). New feature → new page, copy `docs/protocol/pairing.md`
+  as the template, link from `docs/protocol/README.md`.
+- New / renamed / removed HTTP endpoint → the matching table in
+  `docs/api.md` (plus the "Rate limits" table if applicable).
+- New WebSocket frame type → the WebSocket section in `docs/api.md`.
+- Crypto suite change (signature, KDF, envelope format) →
+  `docs/crypto.md`.
+- New top-level doc file under `docs/` → link from `docs/README.md`
+  and from the repo-root `README.md`.
+
 ### File locations
 - Business logic: social_home/services/
 - Data access: social_home/repositories/
 - Domain types: social_home/domain/
 - Route handlers: social_home/routes/ (or app.py for small handlers)
 - Migrations: social_home/migrations/00NN_description.sql
+- Documentation: docs/ (protocol pages, API reference, crypto notes)
