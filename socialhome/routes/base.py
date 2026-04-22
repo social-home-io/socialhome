@@ -30,6 +30,11 @@ from ..domain.space import (
     PublicSpaceLimitError,
     SpacePermissionError,
 )
+from ..domain.space_bot import (
+    SpaceBotDisabledError,
+    SpaceBotError,
+    SpaceBotSlugTakenError,
+)
 from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_service import BazaarServiceError, ListingNotFoundError
@@ -133,6 +138,13 @@ class BaseView(web.View):
             return error_response(409, "ALREADY_DECIDED", str(exc))
         except PollClosedError as exc:
             return error_response(409, "POLL_CLOSED", str(exc))
+        except SpaceBotSlugTakenError as exc:
+            return error_response(409, "SLUG_TAKEN", str(exc))
+        except SpaceBotDisabledError as exc:
+            return error_response(403, "BOT_DISABLED", str(exc))
+        except SpaceBotError as exc:
+            # Generic validation error from the bot-bridge domain.
+            return error_response(422, "UNPROCESSABLE", str(exc))
         except StorageQuotaExceeded as exc:
             # Spec §5.2 maps storage-quota exceeded to HTTP 507
             # "Insufficient Storage" (not 413) so clients can

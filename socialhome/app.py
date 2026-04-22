@@ -90,6 +90,7 @@ from .repositories.gallery_repo import SqliteGalleryRepo
 from .repositories.household_features_repo import SqliteHouseholdFeaturesRepo
 from .repositories.poll_repo import SqlitePollRepo
 from .repositories.profile_picture_repo import SqliteProfilePictureRepo
+from .repositories.space_bot_repo import SqliteSpaceBotRepo
 from .repositories.space_cover_repo import SqliteSpaceCoverRepo
 from .repositories.presence_repo import SqlitePresenceRepo
 from .repositories.peer_space_directory_repo import SqlitePeerSpaceDirectoryRepo
@@ -111,6 +112,8 @@ from .services import (
 )
 from .services.backup_service import BackupService
 from .services.bazaar_service import BazaarExpiryScheduler, BazaarService
+from .services.bot_bridge_service import BotBridgeService
+from .services.space_bot_service import SpaceBotService
 from .services.calendar_import_service import CalendarImportService
 from .services.calendar_service import CalendarService, SpaceCalendarService
 from .services.child_protection_service import ChildProtectionService
@@ -293,6 +296,7 @@ def _build_repos(db: AsyncDatabase):
         call=SqliteCallRepo(db),
         profile_picture=SqliteProfilePictureRepo(db),
         space_cover=SqliteSpaceCoverRepo(db),
+        space_bot=SqliteSpaceBotRepo(db),
     )
 
 
@@ -752,6 +756,7 @@ def create_app(config: Config | None = None) -> web.Application:
     theme_repo = repos.theme
     profile_picture_repo = repos.profile_picture
     space_cover_repo = repos.space_cover
+    space_bot_repo = repos.space_bot
 
     # ── Event bus ────────────────────────────────────────────────────────
     bus = EventBus()
@@ -1052,6 +1057,23 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.calendar_service_key] = calendar_service
     app[K.space_cal_service_key] = space_cal_service
     app[K.shopping_service_key] = shopping_service
+    # Bot-bridge stack — HA automations post into spaces/DMs via a thin
+    # inbound service; SpaceBotService handles the admin/member CRUD.
+    bot_bridge_service = BotBridgeService(
+        space_post_repo,
+        space_repo,
+        conversation_repo,
+        bus,
+    )
+    space_bot_service = SpaceBotService(
+        space_bot_repo,
+        space_repo,
+        user_repo,
+        bus,
+    )
+    app[K.space_bot_repo_key] = space_bot_repo
+    app[K.space_bot_service_key] = space_bot_service
+    app[K.bot_bridge_service_key] = bot_bridge_service
     app[K.user_repo_key] = user_repo
     app[K.profile_picture_repo_key] = profile_picture_repo
     app[K.space_cover_repo_key] = space_cover_repo

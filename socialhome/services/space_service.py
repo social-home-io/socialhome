@@ -379,6 +379,7 @@ class SpaceService:
         retention_days: int | None = None,
         retention_exempt_types: tuple[str, ...] | list[str] | None = None,
         about_markdown: str | None | object = _UNSET_MEMBER_PROFILE,
+        bot_enabled: bool | None = None,
     ) -> Space:
         """Owner or admin may update space metadata. Atomically bumps
         ``config_sequence`` and publishes :class:`SpaceConfigChanged`.
@@ -444,6 +445,9 @@ class SpaceService:
                 raise ValueError("about_markdown must be ≤ 8000 chars")
             new_fields["about_markdown"] = cleaned
             payload["about_markdown"] = cleaned
+        if bot_enabled is not None:
+            new_fields["bot_enabled"] = bool(bot_enabled)
+            payload["bot_enabled"] = bool(bot_enabled)
 
         if not new_fields:
             return space

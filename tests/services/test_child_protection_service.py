@@ -596,7 +596,7 @@ async def _seed_conv(db, *, conv_id: str, members: list[str]) -> None:
     )
     await db.enqueue(
         "INSERT INTO conversations(id, type, name, created_at,"
-        " last_message_at, notify_enabled) VALUES(?, 'dm', NULL, ?, NULL, 0)",
+        " last_message_at, bot_enabled) VALUES(?, 'dm', NULL, ?, NULL, 0)",
         (c.id, c.created_at.isoformat()),
     )
     for u in members:

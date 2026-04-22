@@ -40,7 +40,7 @@ class Conversation:
 
     name: str | None = None  # set for group DMs, None for 1:1
     last_message_at: datetime | None = None
-    notify_enabled: bool = False  # True → exposed as HA notify entity
+    bot_enabled: bool = False  # True → HA bot-bridge may post to this DM
 
 
 @dataclass(slots=True, frozen=True)

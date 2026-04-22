@@ -94,6 +94,12 @@ from ..domain.events import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
+from .space_bot_service import (
+    SpaceBotCreated,
+    SpaceBotDeleted,
+    SpaceBotTokenRotated,
+    SpaceBotUpdated,
+)
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +175,13 @@ class RealtimeService:
         )
         self._bus.subscribe(SpacePostCreated, self._on_space_post_created)
         self._bus.subscribe(SpaceMemberJoined, self._on_space_member_joined)
+        # Bot persona lifecycle — frontend uses these to refresh the
+        # "Bots" tab in space settings and to invalidate cached bot data
+        # for feed posts when a bot is renamed/deleted.
+        self._bus.subscribe(SpaceBotCreated, self._on_space_bot_created)
+        self._bus.subscribe(SpaceBotUpdated, self._on_space_bot_updated)
+        self._bus.subscribe(SpaceBotDeleted, self._on_space_bot_deleted)
+        self._bus.subscribe(SpaceBotTokenRotated, self._on_space_bot_token_rotated)
         self._bus.subscribe(SpaceMemberLeft, self._on_space_member_left)
         self._bus.subscribe(SpaceJoinRequested, self._on_space_join_requested)
         self._bus.subscribe(SpaceJoinApproved, self._on_space_join_approved)
@@ -514,6 +527,52 @@ class RealtimeService:
                 "type": "space.member.left",
                 "space_id": event.space_id,
                 "user_id": event.user_id,
+            },
+        )
+
+    # ── Bot persona lifecycle ───────────────────────────────────────────
+
+    async def _on_space_bot_created(self, event: SpaceBotCreated) -> None:
+        # token_hash is on the SpaceBot dataclass; _safe uses the
+        # security.sanitise_for_api filter so it's stripped on the wire.
+        await self._broadcast_space(
+            event.bot.space_id,
+            {
+                "type": "space.bot.created",
+                "space_id": event.bot.space_id,
+                "bot": _safe(event.bot),
+            },
+        )
+
+    async def _on_space_bot_updated(self, event: SpaceBotUpdated) -> None:
+        await self._broadcast_space(
+            event.bot.space_id,
+            {
+                "type": "space.bot.updated",
+                "space_id": event.bot.space_id,
+                "bot": _safe(event.bot),
+            },
+        )
+
+    async def _on_space_bot_deleted(self, event: SpaceBotDeleted) -> None:
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "space.bot.deleted",
+                "space_id": event.space_id,
+                "bot_id": event.bot_id,
+            },
+        )
+
+    async def _on_space_bot_token_rotated(self, event: SpaceBotTokenRotated) -> None:
+        # No token in the payload — just a nudge for the HA integration to
+        # re-auth (it holds the old token and will start getting 401s).
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "space.bot.token_rotated",
+                "space_id": event.space_id,
+                "bot_id": event.bot_id,
             },
         )
 

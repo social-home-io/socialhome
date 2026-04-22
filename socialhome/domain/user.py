@@ -30,8 +30,18 @@ RESERVED_USERNAMES: frozenset[str] = frozenset(
         "root",
         "bot",
         "socialhome",
+        "system-integration",
     }
 )
+
+
+# Canonical pseudo-user that authors bot-bridge posts. The row is never
+# written to the ``users`` table; it exists only as a marker on
+# ``post.author`` / ``space_post.author`` so feed readers can branch the
+# renderer on ``author == SYSTEM_AUTHOR`` without a JOIN. The real
+# identity (which bot, which household member) lives on ``post.bot_id``.
+SYSTEM_AUTHOR: str = "system-integration"
+SYSTEM_USERNAME: str = SYSTEM_AUTHOR  # alias for call sites that prefer "username"
 
 
 @dataclass(slots=True, frozen=True)

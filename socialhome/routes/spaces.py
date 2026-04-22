@@ -13,11 +13,14 @@ from ..app_keys import (
     federation_repo_key,
     presence_service_key,
     profile_picture_repo_key,
+    space_bot_repo_key,
     space_cover_repo_key,
     space_repo_key,
     space_service_key,
     space_sync_scheduler_key,
+    user_repo_key,
 )
+from ..domain.user import SYSTEM_AUTHOR
 from ..domain.federation import PairingStatus
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..security import error_response, sanitise_for_api
@@ -109,6 +112,7 @@ class SpaceDetailView(BaseView):
                     "about_markdown": space.about_markdown,
                     "cover_hash": space.cover_hash,
                     "cover_url": cover_url,
+                    "bot_enabled": space.bot_enabled,
                 }
             )
         )
@@ -133,6 +137,7 @@ class SpaceDetailView(BaseView):
                 if "about_markdown" in body
                 else _UNSET_MEMBER_PROFILE
             ),
+            bot_enabled=body.get("bot_enabled"),
         )
         return web.json_response(
             {
@@ -734,14 +739,43 @@ class SpaceSyncTriggerView(BaseView):
 
 
 class SpaceFeedView(BaseView):
-    """GET /api/spaces/{id}/feed — space post feed."""
+    """GET /api/spaces/{id}/feed — space post feed.
+
+    Each post dict carries an optional ``bot`` sub-object when the post
+    was authored by the bot-bridge (``author == SYSTEM_AUTHOR``). The
+    frontend uses it to render the bot icon + name + attribution line
+    instead of the generic "Home Assistant" system chrome.
+    """
 
     async def get(self) -> web.Response:
         svc = self.svc(space_service_key)
+        bot_repo = self.svc(space_bot_repo_key)
+        user_repo = self.svc(user_repo_key)
         space_id = self.match("id")
         before = self.request.query.get("before")
         limit = min(max(int(self.request.query.get("limit", 20)), 1), 50)
         posts = await svc.list_feed(space_id, before=before, limit=limit)
+
+        # Resolve bot personas for any system-author posts in one round-trip
+        # per unique bot_id. The feed is capped at 50 so this is bounded.
+        bot_ids = {
+            p.bot_id
+            for p in posts
+            if p.author == SYSTEM_AUTHOR and p.bot_id is not None
+        }
+        bots_by_id = {}
+        creators_by_user_id: dict[str, str] = {}
+        for bid in bot_ids:
+            b = await bot_repo.get(bid)
+            if b is None:
+                continue
+            bots_by_id[bid] = b
+            if b.created_by not in creators_by_user_id:
+                creator = await user_repo.get_by_user_id(b.created_by)
+                creators_by_user_id[b.created_by] = (
+                    creator.display_name if creator else b.created_by
+                )
+
         return web.json_response(
             [
                 sanitise_for_api(
@@ -756,11 +790,40 @@ class SpaceFeedView(BaseView):
                         "created_at": p.created_at.isoformat()
                         if p.created_at
                         else None,
+                        "bot": _bot_view(p.bot_id, bots_by_id, creators_by_user_id)
+                        if p.author == SYSTEM_AUTHOR
+                        else None,
                     }
                 )
                 for p in posts
             ]
         )
+
+
+def _bot_view(
+    bot_id: str | None,
+    bots_by_id: dict,
+    creators_by_user_id: dict[str, str],
+) -> dict | None:
+    """Render the ``bot`` sub-object for a feed post, or ``None`` fallback.
+
+    None signals "this is a system-authored post but the bot has been
+    deleted" — the frontend falls back to the generic HA avatar.
+    """
+    if bot_id is None:
+        return None
+    bot = bots_by_id.get(bot_id)
+    if bot is None:
+        return None
+    return {
+        "bot_id": bot.bot_id,
+        "scope": bot.scope.value,
+        "name": bot.name,
+        "icon": bot.icon,
+        "created_by_display_name": creators_by_user_id.get(
+            bot.created_by, bot.created_by
+        ),
+    }
 
 
 class SpacePresenceView(BaseView):

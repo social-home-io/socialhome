@@ -168,6 +168,15 @@ from .shopping import (
     ShoppingItemDetailView,
     ShoppingItemUncompleteView,
 )
+from .bot_bridge import (
+    BotBridgeConversationPostView,
+    BotBridgeSpacePostView,
+)
+from .space_bots import (
+    SpaceBotCollectionView,
+    SpaceBotDetailView,
+    SpaceBotTokenView,
+)
 from .spaces import (
     AdminSpaceCollectionView,
     SpaceBanListView,
@@ -332,6 +341,17 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}/cover", SpaceCoverView)
     app.router.add_view("/api/spaces/{id}/posts", SpacePostCollectionView)
     app.router.add_view("/api/spaces/{id}/sync", SpaceSyncTriggerView)
+    # Bot personas (named bots that post into a space via the bot-bridge).
+    app.router.add_view("/api/spaces/{id}/bots", SpaceBotCollectionView)
+    app.router.add_view("/api/spaces/{id}/bots/{bot_id}", SpaceBotDetailView)
+    app.router.add_view("/api/spaces/{id}/bots/{bot_id}/token", SpaceBotTokenView)
+    # Bot-bridge (HA → SH). Space posts auth via per-bot Bearer tokens
+    # (route marked public in auth._DEFAULT_PUBLIC_PATHS; inline auth).
+    # Conversation posts use the normal user API token path.
+    app.router.add_view("/api/bot-bridge/spaces/{id}", BotBridgeSpacePostView)
+    app.router.add_view(
+        "/api/bot-bridge/conversations/{id}", BotBridgeConversationPostView
+    )
     app.router.add_view("/api/spaces/{id}/moderation", SpaceModerationQueueView)
     app.router.add_view(
         "/api/spaces/{id}/moderation/{item_id}/approve",

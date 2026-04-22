@@ -397,6 +397,12 @@ class Post:
     no_link_preview: bool = False
     moderated: bool = False
     file_meta: FileMeta | None = None
+    # SpaceBot that authored this post via the bot-bridge. Non-NULL iff
+    # ``author == SYSTEM_AUTHOR``; the feed renderer uses it to resolve
+    # bot icon, name and scope-based attribution. Nullable: when the bot
+    # is deleted the FK goes to NULL (ON DELETE SET NULL) so the post
+    # degrades gracefully to a generic "Home Assistant" system post.
+    bot_id: str | None = None
 
     def with_reaction(self, emoji: str, user_id: str) -> "Post":
         current = self.reactions.get(emoji, frozenset())

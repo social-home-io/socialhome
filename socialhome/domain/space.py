@@ -441,7 +441,7 @@ class Space:
     lat: float | None = None
     lon: float | None = None
     radius_km: float | None = None
-    notify_enabled: bool = False
+    bot_enabled: bool = False
     dissolved: bool = False
     allow_here_mention: bool = False
     # Rich-text "about" block rendered at the top of the space feed

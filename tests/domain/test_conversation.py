@@ -33,7 +33,7 @@ def test_conversation_dm():
     assert conv.type == ConversationType.DM
     assert conv.name is None
     assert conv.last_message_at is None
-    assert conv.notify_enabled is False
+    assert conv.bot_enabled is False
 
 
 def test_conversation_group_dm():

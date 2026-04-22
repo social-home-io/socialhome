@@ -121,7 +121,7 @@ class SqliteConversationRepo:
         await self._db.enqueue(
             """
             INSERT INTO conversations(
-                id, type, name, created_at, last_message_at, notify_enabled
+                id, type, name, created_at, last_message_at, bot_enabled
             ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?)
             """,
             (
@@ -130,7 +130,7 @@ class SqliteConversationRepo:
                 conv.name,
                 _iso(conv.created_at),
                 _iso(conv.last_message_at),
-                int(conv.notify_enabled),
+                int(conv.bot_enabled),
             ),
         )
         return conv
@@ -550,7 +550,7 @@ def _row_to_conv(row: dict | None) -> Conversation | None:
         created_at=_parse(row["created_at"]) or datetime.now(timezone.utc),
         name=row.get("name"),
         last_message_at=_parse(row.get("last_message_at")),
-        notify_enabled=bool_col(row.get("notify_enabled", 0)),
+        bot_enabled=bool_col(row.get("bot_enabled", 0)),
     )
 
 

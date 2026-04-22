@@ -95,10 +95,10 @@ class SqliteSpacePostRepo:
         await self._db.enqueue(
             """
             INSERT INTO space_posts(
-                id, space_id, author, type, content, media_url, reactions,
+                id, space_id, author, bot_id, type, content, media_url, reactions,
                 comment_count, pinned, deleted, edited_at, no_link_preview,
                 moderated, file_meta_json, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -115,6 +115,7 @@ class SqliteSpacePostRepo:
                 post.id,
                 space_id,
                 post.author,
+                post.bot_id,
                 post.type.value,
                 post.content,
                 post.media_url,
@@ -361,6 +362,7 @@ def _row_to_space_post(row: dict) -> Post:
         no_link_preview=bool_col(row.get("no_link_preview", 0)),
         moderated=bool_col(row.get("moderated", 0)),
         file_meta=_decode_file_meta(row.get("file_meta_json")),
+        bot_id=row.get("bot_id"),
     )
 
 

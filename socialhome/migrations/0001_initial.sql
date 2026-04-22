@@ -447,7 +447,11 @@ CREATE TABLE IF NOT EXISTS spaces (
     about_markdown         TEXT,
     feature_gallery        INTEGER NOT NULL DEFAULT 0,
     welcome_version        INTEGER NOT NULL DEFAULT 0,
-    notify_enabled         INTEGER NOT NULL DEFAULT 0,
+    -- When 1, the HA integration may post to this space via the bot-bridge
+    -- (one named SpaceBot persona per automation). Admin opt-in: bots cannot
+    -- appear in the space without this. Toggling to 0 is an admin kill-switch
+    -- — existing bot tokens stay valid, posting is blocked until re-enabled.
+    bot_enabled            INTEGER NOT NULL DEFAULT 0,
     allow_here_mention     INTEGER NOT NULL DEFAULT 0,
     dissolved              INTEGER NOT NULL DEFAULT 0,
     -- Child protection (§CP)
@@ -629,12 +633,41 @@ CREATE TABLE IF NOT EXISTS pinned_sidebar_spaces (
     PRIMARY KEY (user_id, space_id)
 );
 
+-- ── Bot personas for the bot-bridge ────────────────────────────────────────
+-- Named bots that post into a space via POST /api/bot-bridge/spaces/{id}.
+-- Must be declared before space_posts because of the bot_id FK.
+CREATE TABLE IF NOT EXISTS space_bots (
+    bot_id      TEXT PRIMARY KEY,
+    space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    scope       TEXT NOT NULL CHECK(scope IN ('space','member')),
+    -- 'space'  = admin-curated shared bot (no per-member attribution in feed)
+    -- 'member' = member-created personal bot (feed shows "via {member}")
+    slug        TEXT NOT NULL,               -- [a-z0-9_-], 1–32 chars
+    name        TEXT NOT NULL,               -- 1–48 chars
+    icon        TEXT NOT NULL,               -- emoji or HA entity_id
+    created_by  TEXT NOT NULL,               -- user_id of owner (space-scope: admin; member-scope: member)
+    -- sha256 of the raw Bearer token. The plaintext token is shown to the
+    -- caller exactly once (at create + rotate) and never stored.
+    token_hash  TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    -- One "doorbell" per (space, scope). Two members can each have a
+    -- personal "gym-timer" slug, but a space may have only one shared one.
+    UNIQUE (space_id, scope, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_space_bots_space ON space_bots(space_id);
+CREATE INDEX IF NOT EXISTS idx_space_bots_owner ON space_bots(space_id, created_by);
+
 -- ── Space content: posts, comments, moderation ─────────────────────────────
 
 CREATE TABLE IF NOT EXISTS space_posts (
     id              TEXT PRIMARY KEY,
     space_id        TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-    author          TEXT NOT NULL,                 -- user_id
+    author          TEXT NOT NULL,                 -- user_id or 'system-integration'
+    -- SpaceBot that authored this post via the bot-bridge. Non-NULL iff
+    -- author = 'system-integration'. ON DELETE SET NULL so deleting a bot
+    -- leaves its historical posts readable (they fall back to generic
+    -- "Home Assistant" rendering) rather than triggering a cascade wipe.
+    bot_id          TEXT REFERENCES space_bots(bot_id) ON DELETE SET NULL,
     type            TEXT NOT NULL,
     content         TEXT,
     media_url       TEXT,
@@ -862,7 +895,10 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_by       TEXT,                           -- user_id
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     last_message_at  TEXT,
-    notify_enabled   INTEGER NOT NULL DEFAULT 0
+    -- When 1, the HA integration may post into this DM via the bot-bridge
+    -- using the user's API token. DMs have no named bot personas (the 1:1
+    -- context makes "Home Assistant" adequate) — this is a simple on/off.
+    bot_enabled      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS conversation_members (

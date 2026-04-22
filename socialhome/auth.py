@@ -46,6 +46,11 @@ _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
     "/api/auth/token",  # standalone login — issues the token
     "/webhook/",  # federation inbound — envelope-signed
     "/.well-known/",
+    # Bot-bridge space posts authenticate via a per-bot Bearer token that
+    # is NOT an api_tokens row. The handler does its own lookup via
+    # SpaceBotRepo.get_by_token_hash. DM bot-bridge posts use a normal
+    # user token and go through the standard middleware.
+    "/api/bot-bridge/spaces/",
 )
 
 
