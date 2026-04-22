@@ -7,13 +7,13 @@ from typing import Any
 import orjson
 import pytest
 
-from social_home.crypto import generate_identity_keypair
-from social_home.federation.encoder import FederationEncoder
-from social_home.federation.sync.space.exporter import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.sync.space.exporter import (
     ChunkBuilder,
     SENTINEL_RESOURCE,
 )
-from social_home.federation.sync.space.provider import SpaceSyncService
+from socialhome.federation.sync.space.provider import SpaceSyncService
 
 
 class _FakeExporter:

@@ -1,13 +1,13 @@
-"""Tests for social_home.infrastructure.event_bus."""
+"""Tests for socialhome.infrastructure.event_bus."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 
-from social_home.domain.events import PostCreated
-from social_home.domain.post import Post, PostType
-from social_home.infrastructure.event_bus import EventBus
+from socialhome.domain.events import PostCreated
+from socialhome.domain.post import Post, PostType
+from socialhome.infrastructure.event_bus import EventBus
 
 
 async def test_publish_delivers():

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import orjson
 import pytest
 
-from social_home.federation.inbound_validator import (
+from socialhome.federation.inbound_validator import (
     InboundContext,
     InboundPipeline,
     make_ban_check,
@@ -165,7 +165,7 @@ class _FakeIdempotencyCache:
 
 
 async def test_idempotency_no_key_passes():
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     step = make_idempotency_check(
         cache_holder=lambda: _FakeIdempotencyCache(),
@@ -184,7 +184,7 @@ async def test_idempotency_no_key_passes():
 
 
 async def test_idempotency_duplicate_short_circuits():
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     step = make_idempotency_check(
         cache_holder=lambda: _FakeIdempotencyCache(accept=False),

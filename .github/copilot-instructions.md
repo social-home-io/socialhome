@@ -1,4 +1,4 @@
-# GitHub Copilot Instructions — social-home
+# GitHub Copilot Instructions — socialhome
 
 ### Project
 Social Home: privacy-first federated social platform for Home Assistant.

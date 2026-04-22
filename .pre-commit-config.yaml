@@ -1,4 +1,4 @@
-# Pre-commit hooks for social-home/core.
+# Pre-commit hooks for socialhome/core.
 #
 # Install:   pip install pre-commit && pre-commit install
 # Run once:  pre-commit run --all-files
@@ -46,15 +46,15 @@ repos:
 
   # ── Python type-check via mypy ─────────────────────────────────────────
   # Uses the project's own mypy config from pyproject.toml. Run repo-wide
-  # so the scope matches CI's `mypy social_home/`.
+  # so the scope matches CI's `mypy socialhome/`.
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.13.0
     hooks:
       - id: mypy
-        name: mypy (social_home, repo-wide)
+        name: mypy (socialhome, repo-wide)
         additional_dependencies:
           - types-aiofiles
-        args: ["--config-file=pyproject.toml", "social_home/"]
+        args: ["--config-file=pyproject.toml", "socialhome/"]
         always_run: true
         pass_filenames: false
 

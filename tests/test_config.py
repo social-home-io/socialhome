@@ -1,8 +1,8 @@
-"""Tests for social_home.config."""
+"""Tests for socialhome.config."""
 
 from __future__ import annotations
 
-from social_home.config import Config, _split_toml
+from socialhome.config import Config, _split_toml
 
 
 def test_defaults():
@@ -27,7 +27,7 @@ def test_media_fields_removed():
 
 def test_toml_loader(tmp_path, monkeypatch):
     """TOML file at $SH_CONFIG is loaded."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text(
         '[server]\nlisten_port = 7777\n\n[federation]\ninstance_name = "TOML Home"\n'
     )
@@ -39,7 +39,7 @@ def test_toml_loader(tmp_path, monkeypatch):
 
 def test_toml_webrtc_prefix(tmp_path, monkeypatch):
     """[webrtc] keys are prefixed with webrtc_ when flattened."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text('[webrtc]\nstun_url = "stun:example.com:3478"\n')
     monkeypatch.setenv("SH_CONFIG", str(toml_file))
     cfg = Config.from_env()
@@ -48,7 +48,7 @@ def test_toml_webrtc_prefix(tmp_path, monkeypatch):
 
 def test_env_overrides_toml(tmp_path, monkeypatch):
     """Environment variables take precedence over TOML values."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text("[server]\nlisten_port = 7777\n")
     monkeypatch.setenv("SH_CONFIG", str(toml_file))
     monkeypatch.setenv("SH_LISTEN_PORT", "5555")
@@ -76,7 +76,7 @@ def test_split_toml_core_and_platform():
 
 def test_platform_options_loaded_from_toml(tmp_path, monkeypatch):
     """[homeassistant] survives unchanged under config.platform_options."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text('[homeassistant]\nai_task_entity_id = "ai_task.openai"\n')
     monkeypatch.setenv("SH_CONFIG", str(toml_file))
     cfg = Config.from_env()
@@ -87,7 +87,7 @@ def test_platform_options_loaded_from_toml(tmp_path, monkeypatch):
 
 def test_malformed_toml_ignored(tmp_path, monkeypatch):
     """A malformed TOML file is silently ignored."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text("this is not valid TOML {{{")
     monkeypatch.setenv("SH_CONFIG", str(toml_file))
     cfg = Config.from_env()
@@ -103,7 +103,7 @@ def test_mode_defaults_to_standalone():
 def test_xdg_default_paths():
     """Default data_dir follows XDG_DATA_HOME convention."""
     cfg = Config()
-    assert "social-home" in cfg.data_dir
+    assert "socialhome" in cfg.data_dir
 
 
 # ── HA credentials ────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ def test_ha_url_from_env(monkeypatch):
 
 def test_ha_creds_from_toml(tmp_path, monkeypatch):
     """[homeassistant] url/token in TOML populate ha_url / ha_token."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text(
         "[homeassistant]\n"
         'url = "http://ha.toml:8123"\n'
@@ -145,7 +145,7 @@ def test_ha_creds_from_toml(tmp_path, monkeypatch):
 
 def test_ha_env_overrides_toml(tmp_path, monkeypatch):
     """SH_HA_URL wins over [homeassistant] url in TOML."""
-    toml_file = tmp_path / "social_home.toml"
+    toml_file = tmp_path / "socialhome.toml"
     toml_file.write_text(
         '[homeassistant]\nurl = "http://toml:8123"\ntoken = "toml-tok"\n'
     )

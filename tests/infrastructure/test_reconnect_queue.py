@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from social_home.infrastructure.reconnect_queue import (
+from socialhome.infrastructure.reconnect_queue import (
     P1_SECURITY,
     P2_STRUCTURAL,
     P5_CONTENT,

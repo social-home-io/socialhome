@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-from social_home.auth import sha256_token_hash
+from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
 

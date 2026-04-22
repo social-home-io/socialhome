@@ -8,7 +8,7 @@ async def test_media_serve_file(client):
     """GET /api/media/{filename} serves an existing file."""
     h = _auth(client._tok)
     # Write a test file to media_path
-    from social_home.app_keys import config_key
+    from socialhome.app_keys import config_key
 
     config = client.app[config_key]
     media_dir = config.media_path

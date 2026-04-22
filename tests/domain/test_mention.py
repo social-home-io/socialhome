@@ -1,8 +1,8 @@
-"""Tests for social_home.domain.mention."""
+"""Tests for socialhome.domain.mention."""
 
 from __future__ import annotations
 
-from social_home.domain.mention import MentionParser, MentionType
+from socialhome.domain.mention import MentionParser, MentionType
 
 
 def test_parse_here():

@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.app import _redeliver_envelope, _aiohttp_timeout
-from social_home.crypto import (
+from socialhome.app import _redeliver_envelope, _aiohttp_timeout
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation.federation_service import FederationService
-from social_home.infrastructure import EventBus, KeyManager
-from social_home.repositories import (
+from socialhome.federation.federation_service import FederationService
+from socialhome.infrastructure import EventBus, KeyManager
+from socialhome.repositories import (
     SqliteFederationRepo,
     SqliteOutboxRepo,
 )

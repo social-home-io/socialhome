@@ -61,12 +61,12 @@ so they federate identically.
 
 ## Implementation
 
-- `social_home/services/calendar_service.py`,
+- `socialhome/services/calendar_service.py`,
   `schedule_poll_service.py`.
-- `social_home/services/federation_inbound/space_content.py` —
+- `socialhome/services/federation_inbound/space_content.py` —
   `SPACE_CALENDAR_EVENT_*` and `SPACE_SCHEDULE_RESPONSE_UPDATED`.
-- `social_home/repositories/calendar_repo.py`.
-- `social_home/routes/calendar_routes.py`.
+- `socialhome/repositories/calendar_repo.py`.
+- `socialhome/routes/calendar_routes.py`.
 
 ## Spec references
 

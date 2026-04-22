@@ -1,11 +1,11 @@
-"""Tests for social_home.domain.task."""
+"""Tests for socialhome.domain.task."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 
-from social_home.domain.task import RecurrenceRule, Task, TaskStatus, TaskUpdate
+from socialhome.domain.task import RecurrenceRule, Task, TaskStatus, TaskUpdate
 
 
 def test_task_lifecycle():

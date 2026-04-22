@@ -77,13 +77,13 @@ These limits are per-user, enforced at the route layer.
 
 ## Implementation
 
-- `social_home/services/call_service.py`,
-  `social_home/federation/sdp_signing.py`.
-- `social_home/services/federation_inbound/calls.py` — inbound
+- `socialhome/services/call_service.py`,
+  `socialhome/federation/sdp_signing.py`.
+- `socialhome/services/federation_inbound/calls.py` — inbound
   handlers.
-- `social_home/repositories/call_repo.py`.
-- `social_home/routes/call_routes.py`,
-  `social_home/routes/webrtc_routes.py` (ICE server config).
+- `socialhome/repositories/call_repo.py`.
+- `socialhome/routes/call_routes.py`,
+  `socialhome/routes/webrtc_routes.py` (ICE server config).
 
 ## Spec references
 

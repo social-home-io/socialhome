@@ -81,13 +81,13 @@ contest a ban.
 
 ## Implementation
 
-- `social_home/services/public_space_service.py` — client side.
-- `social_home/global_server/public.py`,
-  `social_home/global_server/federation.py` — GFS directory.
-- `social_home/federation/peer_directory_handler.py` — peer
+- `socialhome/services/public_space_service.py` — client side.
+- `socialhome/global_server/public.py`,
+  `socialhome/global_server/federation.py` — GFS directory.
+- `socialhome/federation/peer_directory_handler.py` — peer
   directory sync on HFS.
-- `social_home/global_server/routes/public.py`,
-  `social_home/global_server/routes/admin/*.py` — GFS REST +
+- `socialhome/global_server/routes/public.py`,
+  `socialhome/global_server/routes/admin/*.py` — GFS REST +
   admin API.
 
 ## Spec references

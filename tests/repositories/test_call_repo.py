@@ -1,11 +1,11 @@
-"""Tests for social_home.repositories.call_repo."""
+"""Tests for socialhome.repositories.call_repo."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.domain.call import CallQualitySample, CallSession
-from social_home.repositories.call_repo import SqliteCallRepo
+from socialhome.domain.call import CallQualitySample, CallSession
+from socialhome.repositories.call_repo import SqliteCallRepo
 
 
 @pytest.fixture

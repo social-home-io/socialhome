@@ -8,16 +8,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair
-from social_home.domain.call import CallQualitySample, CallSession
-from social_home.domain.conversation import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.call import CallQualitySample, CallSession
+from socialhome.domain.conversation import (
     ConversationMember,
     ConversationMessage,
     RemoteConversationMember,
 )
-from social_home.domain.federation import FederationEventType
-from social_home.domain.user import RemoteUser, User
-from social_home.services.call_service import (
+from socialhome.domain.federation import FederationEventType
+from socialhome.domain.user import RemoteUser, User
+from socialhome.services.call_service import (
     MAX_CALLS_PER_USER,
     CallConversationError,
     CallNotFoundError,

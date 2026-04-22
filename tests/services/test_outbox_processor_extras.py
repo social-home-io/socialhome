@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 
-from social_home.domain.federation import FederationEventType
-from social_home.infrastructure.outbox_processor import (
+from socialhome.domain.federation import FederationEventType
+from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     JITTER_RATIO,
     MAX_ATTEMPTS,
     OutboxProcessor,
 )
-from social_home.repositories.outbox_repo import OutboxEntry
+from socialhome.repositories.outbox_repo import OutboxEntry
 
 
 # ─── Constants ───────────────────────────────────────────────────────────

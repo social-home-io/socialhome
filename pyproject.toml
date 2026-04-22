@@ -1,5 +1,5 @@
 [project]
-name = "social-home"
+name = "socialhome"
 version = "1.0.0"
 requires-python = ">=3.14"
 license = {text = "Mozilla Public License 2.0"}
@@ -40,22 +40,22 @@ dev = [
     "qrcode[pil]>=7",
 ]
 # Post-quantum signatures (hybrid Ed25519 + ML-DSA-65, FIPS 204).
-# Install with: pip install 'social-home[pq]'
+# Install with: pip install 'socialhome[pq]'
 # Requires the host to have liboqs C library available; see
 # docs/crypto.md for the migration rationale.
 pq = [
     "oqs @ git+https://github.com/open-quantum-safe/liboqs-python@0.10.0",
 ]
 # Global Federation Server (GFS) runtime deps — pulled by the
-# `social-home-global-server` console script.
-# Install with: pip install 'social-home[global-server]'
+# `socialhome-global-server` console script.
+# Install with: pip install 'socialhome[global-server]'
 global-server = [
     "bcrypt>=4",                 # admin password hashing (spec §24.9)
     "qrcode[pil]>=7",            # public-landing QR code rendering
 ]
 
 [project.scripts]
-social-home-global-server = "social_home.global_server.server:main"
+socialhome-global-server = "socialhome.global_server.server:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -78,7 +78,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["social_home"]
+source = ["socialhome"]
 parallel = true
 
 [tool.coverage.report]
@@ -100,7 +100,7 @@ disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_any_generics = false
 check_untyped_defs = true
-files = ["social_home"]
+files = ["socialhome"]
 # Tests use looser typing — fakes/mocks frequently disagree with
 # Protocols. Run mypy on production code only.
 exclude = '(^tests/|^client/)'
@@ -126,6 +126,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # PyAV C bindings have no type stubs; the video_processor module
 # uses PyAV's untyped union-return APIs extensively.
-module = ["av", "av.*", "social_home.media.video_processor"]
+module = ["av", "av.*", "socialhome.media.video_processor"]
 ignore_missing_imports = true
 disable_error_code = ["union-attr", "attr-defined", "arg-type"]

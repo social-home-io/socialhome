@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from social_home.domain.federation import FederationEventType
+from socialhome.domain.federation import FederationEventType
 
 from ._call_fakes import make_call_service
 

@@ -1,4 +1,4 @@
-"""Tests for social_home.repositories.base — shared repository helpers."""
+"""Tests for socialhome.repositories.base — shared repository helpers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import sqlite3
 
 
-from social_home.repositories.base import (
+from socialhome.repositories.base import (
     bool_col,
     dump_json,
     load_json,

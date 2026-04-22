@@ -13,8 +13,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from social_home.federation import pq_signer as pq_signer_module
-from social_home.federation.pq_signer import PqSigner, _OQS_UNAVAILABLE_MSG
+from socialhome.federation import pq_signer as pq_signer_module
+from socialhome.federation.pq_signer import PqSigner, _OQS_UNAVAILABLE_MSG
 
 
 class _FakeSignatureCtx:
@@ -94,7 +94,7 @@ def test_sign_without_liboqs_raises_runtime_error(monkeypatch):
     """When the ``pq`` extra is absent, sign() raises with an install hint."""
     monkeypatch.setattr(pq_signer_module, "_oqs", None)
     signer = PqSigner(secret_key=b"SK")
-    with pytest.raises(RuntimeError, match=r"social-home\[pq\]"):
+    with pytest.raises(RuntimeError, match=r"socialhome\[pq\]"):
         signer.sign(b"msg")
     # Message body must be stable for operator-facing scripts.
     assert "liboqs" in _OQS_UNAVAILABLE_MSG

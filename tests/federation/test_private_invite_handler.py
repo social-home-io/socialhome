@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
     RemoteSpaceMemberRemoved,
 )
-from social_home.federation.private_invite_handler import PrivateSpaceInviteHandler
-from social_home.infrastructure.event_bus import EventBus
+from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
+from socialhome.infrastructure.event_bus import EventBus
 
 
 class _RecordingBus:

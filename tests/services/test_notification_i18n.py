@@ -6,23 +6,23 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.events import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import (
     PostCreated,
     TaskAssigned,
 )
-from social_home.domain.post import Post, PostType
-from social_home.domain.task import Task, TaskStatus
-from social_home.i18n import Catalog
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.notification_repo import SqliteNotificationRepo
-from social_home.repositories.space_repo import SqliteSpaceRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.notification_service import NotificationService
+from socialhome.domain.post import Post, PostType
+from socialhome.domain.task import Task, TaskStatus
+from socialhome.i18n import Catalog
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.notification_repo import SqliteNotificationRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.notification_service import NotificationService
 
 
 @pytest.fixture

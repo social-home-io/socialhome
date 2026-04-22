@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.space import SpacePermissionError
-from social_home.repositories.household_features_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.space import SpacePermissionError
+from socialhome.repositories.household_features_repo import (
     SqliteHouseholdFeaturesRepo,
 )
-from social_home.services.household_features_service import (
+from socialhome.services.household_features_service import (
     HouseholdFeatures,
     HouseholdFeaturesService,
 )
@@ -119,7 +119,7 @@ async def test_require_enabled_passes_when_section_on(env):
 
 
 async def test_require_enabled_raises_when_section_off(env):
-    from social_home.domain.household_features import FeatureDisabledError
+    from socialhome.domain.household_features import FeatureDisabledError
 
     svc, _ = env
     await svc.update(actor_is_admin=True, toggles={"feat_tasks": False})
@@ -129,7 +129,7 @@ async def test_require_enabled_raises_when_section_off(env):
 
 
 async def test_require_enabled_raises_on_unknown_section(env):
-    from social_home.domain.household_features import FeatureDisabledError
+    from socialhome.domain.household_features import FeatureDisabledError
 
     svc, _ = env
     # Unknown section name → refuse. New features must flip the toggle
@@ -139,7 +139,7 @@ async def test_require_enabled_raises_on_unknown_section(env):
 
 
 async def test_require_post_type_blocks_disallowed_type(env):
-    from social_home.domain.household_features import FeatureDisabledError
+    from socialhome.domain.household_features import FeatureDisabledError
 
     svc, _ = env
     await svc.update(actor_is_admin=True, toggles={"allow_video": False})
@@ -158,9 +158,9 @@ async def test_require_post_type_allows_default(env):
 
 
 async def test_update_publishes_household_config_changed(env, tmp_dir):
-    from social_home.domain.events import HouseholdConfigChanged
-    from social_home.infrastructure.event_bus import EventBus
-    from social_home.repositories.household_features_repo import (
+    from socialhome.domain.events import HouseholdConfigChanged
+    from socialhome.infrastructure.event_bus import EventBus
+    from socialhome.repositories.household_features_repo import (
         SqliteHouseholdFeaturesRepo,
     )
 
@@ -182,9 +182,9 @@ async def test_update_publishes_household_config_changed(env, tmp_dir):
 
 
 async def test_update_no_change_no_event(env, tmp_dir):
-    from social_home.domain.events import HouseholdConfigChanged
-    from social_home.infrastructure.event_bus import EventBus
-    from social_home.repositories.household_features_repo import (
+    from socialhome.domain.events import HouseholdConfigChanged
+    from socialhome.infrastructure.event_bus import EventBus
+    from socialhome.repositories.household_features_repo import (
         SqliteHouseholdFeaturesRepo,
     )
 

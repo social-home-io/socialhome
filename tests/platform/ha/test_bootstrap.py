@@ -1,4 +1,4 @@
-"""Tests for social_home.platform.ha.bootstrap."""
+"""Tests for socialhome.platform.ha.bootstrap."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import os
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.platform.ha.bootstrap import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.platform.ha.bootstrap import (
     BOOTSTRAP_FLAG,
     INTEGRATION_TOKEN_FILENAME,
     INTEGRATION_TOKEN_LABEL,
@@ -170,7 +170,7 @@ async def test_run_provisions_admin_and_pushes_discovery(env):
     # Discovery pushed with the freshly-minted token — no url field.
     assert len(sv.pushed_payloads) == 1
     payload = sv.pushed_payloads[0]
-    assert payload["service"] == "social_home"
+    assert payload["service"] == "socialhome"
     assert set(payload["config"].keys()) == {"token"}
     with open(token_file) as f:
         assert payload["config"]["token"] == f.read().strip()

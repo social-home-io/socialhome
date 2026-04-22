@@ -1,4 +1,4 @@
-"""Tests for social_home.services.calendar_service."""
+"""Tests for socialhome.services.calendar_service."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
-from social_home.repositories.calendar_repo import (
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
-from social_home.services.calendar_service import CalendarService
+from socialhome.services.calendar_service import CalendarService
 
 
 @pytest.fixture
@@ -274,7 +274,7 @@ async def test_list_calendars(env):
 
 async def test_space_calendar_service_list(env):
     """SpaceCalendarService.list_events_in_range works."""
-    from social_home.services.calendar_service import SpaceCalendarService
+    from socialhome.services.calendar_service import SpaceCalendarService
 
     svc = SpaceCalendarService(env.space_cal_repo)
     # Need a space
@@ -311,7 +311,7 @@ async def _seed_user(db, username="owner"):
 
 async def test_create_event_publishes_calendar_event_created(env):
     """CalendarService.create_event publishes CalendarEventCreated on the bus."""
-    from social_home.domain.events import CalendarEventCreated
+    from socialhome.domain.events import CalendarEventCreated
 
     class _RecordingBus:
         def __init__(self):
@@ -340,7 +340,7 @@ async def test_create_event_publishes_calendar_event_created(env):
 
 async def test_delete_event_publishes_calendar_event_deleted(env):
     """CalendarService.delete_event publishes CalendarEventDeleted on the bus."""
-    from social_home.domain.events import CalendarEventDeleted
+    from socialhome.domain.events import CalendarEventDeleted
 
     class _RecordingBus:
         def __init__(self):

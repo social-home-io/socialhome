@@ -1,4 +1,4 @@
-"""Tests for social_home.db.database and social_home.db.migrations."""
+"""Tests for socialhome.db.database and socialhome.db.migrations."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.db.migrations import MigrationError, discover_migrations
+from socialhome.db.database import AsyncDatabase
+from socialhome.db.migrations import MigrationError, discover_migrations
 
 
 async def test_startup_creates_tables(tmp_dir):
@@ -25,7 +25,7 @@ async def test_enqueue_and_fetchone(tmp_dir):
     """enqueue writes a row that fetchone can retrieve."""
     db = AsyncDatabase(tmp_dir / "test.db", batch_timeout_ms=10)
     await db.startup()
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

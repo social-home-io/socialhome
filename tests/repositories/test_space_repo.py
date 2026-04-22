@@ -6,21 +6,21 @@ import asyncio
 
 import pytest
 
-from social_home.domain.space import (
+from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
     SpaceMember,
     SpaceType,
 )
-from social_home.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a space repo and a seeded user."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

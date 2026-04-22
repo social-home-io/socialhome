@@ -1,4 +1,4 @@
-"""Tests for social_home.routes.bazaar."""
+"""Tests for socialhome.routes.bazaar."""
 
 from .conftest import _auth
 

@@ -7,15 +7,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.post import Comment, CommentType, Post, PostType
-from social_home.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a space post repo and a seeded space + user."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

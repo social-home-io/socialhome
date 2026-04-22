@@ -93,14 +93,14 @@ home instance so the UI clears local state.
 
 ## Implementation
 
-- `social_home/services/federation_inbound/space_invites.py` —
+- `socialhome/services/federation_inbound/space_invites.py` —
   inbound handlers.
-- `social_home/federation/private_invite_handler.py` — encrypted
+- `socialhome/federation/private_invite_handler.py` — encrypted
   private-invite logic.
-- `social_home/services/space_service.py` —
+- `socialhome/services/space_service.py` —
   `invite_remote_user()`, `accept_remote_invite()`,
   `decline_remote_invite()`, `request_join_remote()`.
-- `social_home/repositories/space_invitation_repo.py` — pending
+- `socialhome/repositories/space_invitation_repo.py` — pending
   invitations.
 
 ## Spec references

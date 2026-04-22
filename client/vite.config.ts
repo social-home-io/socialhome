@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [preact()],
   base: './',
   build: {
-    outDir:   '../social_home/static',
+    outDir:   '../socialhome/static',
     emptyOutDir: true,
   },
   server: {

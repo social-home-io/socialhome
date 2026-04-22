@@ -5,10 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-from social_home.domain.events import DmHistorySyncComplete
-from social_home.domain.federation import FederationEventType
-from social_home.federation.sync.dm_history.receiver import DmHistoryReceiver
-from social_home.infrastructure.event_bus import EventBus
+from socialhome.domain.events import DmHistorySyncComplete
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.sync.dm_history.receiver import DmHistoryReceiver
+from socialhome.infrastructure.event_bus import EventBus
 
 
 class _FakeConvRepo:

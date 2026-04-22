@@ -87,7 +87,7 @@ async def test_update_household_theme_accepts_extended_fields(client):
 
 async def test_update_household_theme_rejects_non_admin(client):
     db = client._db
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     await db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",

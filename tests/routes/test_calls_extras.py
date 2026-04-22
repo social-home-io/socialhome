@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from social_home.auth import sha256_token_hash
+from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
 
@@ -113,7 +113,7 @@ async def test_calls_hangup_non_participant_403(client):
 
 
 async def test_ice_servers_includes_turn_when_configured(client):
-    from social_home.app_keys import config_key
+    from socialhome.app_keys import config_key
     import dataclasses as _dc
 
     cfg = client.server.app[config_key]

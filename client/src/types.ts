@@ -46,6 +46,37 @@ export interface FeedPost {
   pinned: boolean
   created_at: string
   edited_at: string | null
+  /** Present on system-authored posts (author = "system-integration") that
+   *  were created via the bot-bridge. Null when the originating bot has been
+   *  deleted — feed renderer falls back to a generic Home Assistant chrome. */
+  bot?: SpaceBotSummary | null
+}
+
+export type BotScope = 'space' | 'member'
+
+export interface SpaceBotSummary {
+  bot_id: string
+  scope: BotScope
+  name: string
+  icon: string
+  created_by_display_name: string
+}
+
+export interface SpaceBot {
+  bot_id: string
+  space_id: string
+  scope: BotScope
+  slug: string
+  name: string
+  icon: string
+  created_by: string
+  created_at: string
+}
+
+/** Shape of `POST /api/spaces/{id}/bots` and `POST .../{bot_id}/token`.
+ *  `token` is shown exactly once; the backend only stores its sha256 digest. */
+export interface SpaceBotWithToken extends SpaceBot {
+  token: string
 }
 
 export interface Comment {
@@ -70,6 +101,9 @@ export interface Space {
   join_mode: 'invite_only' | 'open' | 'link' | 'request'
   features: SpaceFeatures
   retention_days: number | null
+  /** When true, HA automations may post into this space via the
+   *  bot-bridge. Required before any SpaceBot is registered. */
+  bot_enabled?: boolean
 }
 
 export interface SpaceFeatures {
@@ -86,6 +120,9 @@ export interface Conversation {
   type: 'dm' | 'group_dm'
   name: string | null
   last_message_at: string | null
+  /** When true, HA automations may post system messages into this DM via
+   *  the bot-bridge (authenticated with the user's own API token). */
+  bot_enabled?: boolean
 }
 
 export interface Message {

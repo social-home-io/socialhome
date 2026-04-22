@@ -7,14 +7,14 @@ from datetime import datetime
 
 import pytest
 
-from social_home.domain.events import ConnectionReachable, PairingConfirmed
-from social_home.domain.federation import FederationEventType
-from social_home.federation.sync.dm_history.scheduler import (
+from socialhome.domain.events import ConnectionReachable, PairingConfirmed
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.sync.dm_history.scheduler import (
     RATE_LIMIT_SECONDS,
     DmHistoryScheduler,
 )
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.reconnect_queue import ReconnectSyncQueue
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.reconnect_queue import ReconnectSyncQueue
 
 
 class _FakeFederation:

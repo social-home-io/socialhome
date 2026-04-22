@@ -1,4 +1,4 @@
-"""Tests for social_home.services.notification_service."""
+"""Tests for socialhome.services.notification_service."""
 
 from __future__ import annotations
 
@@ -6,19 +6,19 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.domain.post import PostType
-from social_home.domain.task import Task, TaskStatus
-from social_home.domain.events import TaskAssigned
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.notification_repo import SqliteNotificationRepo
-from social_home.repositories.post_repo import SqlitePostRepo
-from social_home.repositories.space_repo import SqliteSpaceRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.feed_service import FeedService
-from social_home.services.notification_service import NotificationService
-from social_home.services.user_service import UserService
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.post import PostType
+from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.events import TaskAssigned
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.notification_repo import SqliteNotificationRepo
+from socialhome.repositories.post_repo import SqlitePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.feed_service import FeedService
+from socialhome.services.notification_service import NotificationService
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture
@@ -147,9 +147,9 @@ async def test_comment_notifies_others(stack):
 
 async def test_space_post_notifies_members(stack):
     """SpacePostCreated notifies space members except the author."""
-    from social_home.repositories.space_repo import SqliteSpaceRepo
-    from social_home.repositories.space_post_repo import SqliteSpacePostRepo
-    from social_home.services.space_service import SpaceService
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -173,10 +173,10 @@ async def test_space_post_notifies_members(stack):
 
 async def test_moderation_queued_notifies_admins(stack):
     """SpaceModerationQueued notifies space admins."""
-    from social_home.repositories.space_repo import SqliteSpaceRepo
-    from social_home.repositories.space_post_repo import SqliteSpacePostRepo
-    from social_home.services.space_service import SpaceService
-    from social_home.domain.space import SpaceFeatures, SpaceFeatureAccess
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+    from socialhome.domain.space import SpaceFeatures, SpaceFeatureAccess
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -208,7 +208,7 @@ async def test_moderation_queued_notifies_admins(stack):
 async def test_task_deadline_notifies_assignees(stack):
     """TaskDeadlineDue notifies all assignees."""
     from datetime import date
-    from social_home.domain.events import TaskDeadlineDue
+    from socialhome.domain.events import TaskDeadlineDue
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -250,7 +250,7 @@ class _CapturingPush:
 
 async def test_dm_message_triggers_push_without_body(stack):
     """§25.3: DM push carries only the title — no message body leaks."""
-    from social_home.domain.events import DmMessageCreated
+    from socialhome.domain.events import DmMessageCreated
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -275,7 +275,7 @@ async def test_dm_message_triggers_push_without_body(stack):
 
 
 async def test_dm_message_with_no_recipients_skips_push(stack):
-    from social_home.domain.events import DmMessageCreated
+    from socialhome.domain.events import DmMessageCreated
 
     a = await stack.provision_user("anna")
     fake = _CapturingPush()
@@ -295,7 +295,7 @@ async def test_dm_message_with_no_recipients_skips_push(stack):
 
 async def test_task_deadline_triggers_push(stack):
     from datetime import date
-    from social_home.domain.events import TaskDeadlineDue
+    from socialhome.domain.events import TaskDeadlineDue
 
     a = await stack.provision_user("anna")
     fake = _CapturingPush()
@@ -325,7 +325,7 @@ async def test_task_deadline_triggers_push(stack):
 
 
 async def test_bazaar_bid_placed_notifies_seller(stack):
-    from social_home.domain.events import BazaarBidPlaced
+    from socialhome.domain.events import BazaarBidPlaced
 
     seller = await stack.provision_user("seller")
     bidder = await stack.provision_user("bidder")
@@ -347,7 +347,7 @@ async def test_bazaar_bid_placed_notifies_seller(stack):
 
 
 async def test_bazaar_self_bid_does_not_notify(stack):
-    from social_home.domain.events import BazaarBidPlaced
+    from socialhome.domain.events import BazaarBidPlaced
 
     seller = await stack.provision_user("seller")
     fake = _CapturingPush()
@@ -367,7 +367,7 @@ async def test_bazaar_self_bid_does_not_notify(stack):
 
 
 async def test_bazaar_offer_accepted_notifies_buyer(stack):
-    from social_home.domain.events import BazaarOfferAccepted
+    from socialhome.domain.events import BazaarOfferAccepted
 
     seller = await stack.provision_user("seller")
     buyer = await stack.provision_user("buyer")
@@ -386,7 +386,7 @@ async def test_bazaar_offer_accepted_notifies_buyer(stack):
 
 
 async def test_dm_contact_request_notifies_recipient(stack):
-    from social_home.domain.events import DmContactRequested
+    from socialhome.domain.events import DmContactRequested
 
     recipient = await stack.provision_user("recipient")
     fake = _CapturingPush()
@@ -409,8 +409,8 @@ async def test_dm_contact_request_notifies_recipient(stack):
 
 
 async def test_calendar_event_created_notifies_household(stack):
-    from social_home.domain.calendar import CalendarEvent
-    from social_home.domain.events import CalendarEventCreated
+    from socialhome.domain.calendar import CalendarEvent
+    from socialhome.domain.events import CalendarEventCreated
 
     alice = await stack.provision_user("alice-cal")
     bob = await stack.provision_user("bob-cal")
@@ -434,7 +434,7 @@ async def test_calendar_event_created_notifies_household(stack):
 
 
 async def test_task_completed_notifies_assignees(stack):
-    from social_home.domain.events import TaskCompleted
+    from socialhome.domain.events import TaskCompleted
 
     alice = await stack.provision_user("alice-tc")
     bob = await stack.provision_user("bob-tc")
@@ -464,8 +464,8 @@ async def test_task_completed_notifies_assignees(stack):
 
 
 async def test_space_post_moderated_notifies_author(stack):
-    from social_home.domain.events import SpacePostModerated
-    from social_home.domain.post import Post, PostType
+    from socialhome.domain.events import SpacePostModerated
+    from socialhome.domain.post import Post, PostType
 
     author = await stack.provision_user("author-mod")
     post = Post(

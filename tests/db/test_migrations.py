@@ -1,4 +1,4 @@
-"""Tests for social_home.db.migrations — discover_migrations and run_migrations."""
+"""Tests for socialhome.db.migrations — discover_migrations and run_migrations."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from social_home.db.migrations import (
+from socialhome.db.migrations import (
     MigrationError,
     discover_migrations,
     run_migrations,

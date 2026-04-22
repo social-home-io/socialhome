@@ -1,4 +1,4 @@
-"""Tests for social_home.repositories.bazaar_repo."""
+"""Tests for socialhome.repositories.bazaar_repo."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import uuid
 
 import pytest
 
-from social_home.domain.post import BazaarListing, BazaarMode, BazaarStatus
-from social_home.repositories.bazaar_repo import (
+from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
+from socialhome.repositories.bazaar_repo import (
     BidStateError,
     SqliteBazaarRepo,
     new_bid,
@@ -17,9 +17,9 @@ from social_home.repositories.bazaar_repo import (
 @pytest.fixture
 async def env(tmp_dir):
     """Full repo stack wired to a single in-process SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
-    from social_home.infrastructure.event_bus import EventBus
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.infrastructure.event_bus import EventBus
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

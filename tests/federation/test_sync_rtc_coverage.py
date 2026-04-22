@@ -7,7 +7,7 @@ import asyncio
 import aiolibdatachannel as rtc
 import pytest
 
-from social_home.federation.sync_rtc import (
+from socialhome.federation.sync_rtc import (
     CHANNEL_LABEL,
     SEND_HWM_BYTES,
     SyncRtcSession,

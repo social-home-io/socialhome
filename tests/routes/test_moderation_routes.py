@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.app import create_app
-from social_home.app_keys import db_key as _db_key
-from social_home.auth import sha256_token_hash
-from social_home.config import Config
-from social_home.crypto import derive_user_id
+from socialhome.app import create_app
+from socialhome.app_keys import db_key as _db_key
+from socialhome.auth import sha256_token_hash
+from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 
 
 def _auth(token: str) -> dict:
@@ -76,10 +76,10 @@ async def _seed_moderated_space(client):
         headers=_auth(client._admin_token),
     )
     # Flip posts_access to moderated via PATCH.
-    from social_home.app_keys import space_service_key
+    from socialhome.app_keys import space_service_key
 
     app = client.server.app
-    from social_home.domain.space import SpaceFeatures, SpaceFeatureAccess
+    from socialhome.domain.space import SpaceFeatures, SpaceFeatureAccess
 
     await app[space_service_key].update_config(
         sid,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.server import _cli_init, _cli_set_password
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.server import _cli_init, _cli_set_password
 
 
 def test_cli_init_writes_example_config(tmp_dir, capsys):

@@ -6,14 +6,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     PairingAborted,
     PairingAcceptReceived,
     PairingConfirmed,
     PairingIntroReceived,
     PeerUnpaired,
 )
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
     InstanceSource,
@@ -21,8 +21,8 @@ from social_home.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.federation_inbound import PairingInboundHandlers
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.federation_inbound import PairingInboundHandlers
 
 
 class _FakeRegistry:

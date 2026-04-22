@@ -1,7 +1,7 @@
-"""Tests for social_home.media.video_processor."""
+"""Tests for socialhome.media.video_processor."""
 
 import pytest
-from social_home.media.video_processor import VideoProcessor
+from socialhome.media.video_processor import VideoProcessor
 
 
 def test_video_processor_instantiates():
@@ -41,7 +41,7 @@ async def test_thumbnail_caps_longest_side_at_400():
     import av
     from PIL import Image
 
-    from social_home.domain.media_constraints import THUMBNAIL_PX
+    from socialhome.domain.media_constraints import THUMBNAIL_PX
 
     # Build a tiny WebM clip at 1280x720 so _extract_thumbnail has
     # something larger than THUMBNAIL_PX to downsize.

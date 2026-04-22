@@ -1,8 +1,8 @@
-"""Tests for social_home.routes.media (media serving + upload views)."""
+"""Tests for socialhome.routes.media (media serving + upload views)."""
 
 from aiohttp import web
 
-from social_home.routes.media import MediaServeView, MediaUploadView
+from socialhome.routes.media import MediaServeView, MediaUploadView
 
 
 def test_media_views_are_importable():

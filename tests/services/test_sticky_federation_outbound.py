@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     StickyCreated,
     StickyDeleted,
     StickyUpdated,
 )
-from social_home.domain.federation import FederationEventType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.sticky_federation_outbound import (
+from socialhome.domain.federation import FederationEventType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.sticky_federation_outbound import (
     StickyFederationOutbound,
 )
 

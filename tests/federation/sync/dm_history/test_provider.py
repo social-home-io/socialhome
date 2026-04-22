@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 
-from social_home.domain.conversation import ConversationMessage
-from social_home.domain.federation import FederationEventType
-from social_home.federation.sync.dm_history.provider import (
+from socialhome.domain.conversation import ConversationMessage
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.sync.dm_history.provider import (
     CHUNK_SIZE,
     DmHistoryProvider,
 )

@@ -1,4 +1,4 @@
-"""Tests for social_home.services.user_service."""
+"""Tests for socialhome.services.user_service."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import json
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.user_service import UserService
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture
@@ -176,7 +176,7 @@ async def test_provision_rejects_invalid_source(stack):
 
 
 async def test_deprovision_ha_user_removes_row(stack):
-    from social_home.domain.events import UserDeprovisioned
+    from socialhome.domain.events import UserDeprovisioned
 
     await stack.user_svc.provision(
         username="alice",

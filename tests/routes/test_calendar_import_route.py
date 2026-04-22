@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import base64
 
-from social_home.app_keys import (
+from socialhome.app_keys import (
     calendar_import_service_key,
     platform_adapter_key,
 )
-from social_home.services.calendar_import_service import CalendarImportService
+from socialhome.services.calendar_import_service import CalendarImportService
 
 from .conftest import _auth
 

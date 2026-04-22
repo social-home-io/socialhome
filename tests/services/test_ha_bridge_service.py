@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     PostCreated,
     SpacePostCreated,
     TaskAssigned,
@@ -14,11 +14,11 @@ from social_home.domain.events import (
     TaskDeadlineDue,
     UserStatusChanged,
 )
-from social_home.domain.post import Post, PostType
-from social_home.domain.task import Task, TaskStatus
-from social_home.domain.user import UserStatus
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.ha_bridge_service import HaBridgeService
+from socialhome.domain.post import Post, PostType
+from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.user import UserStatus
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.ha_bridge_service import HaBridgeService
 
 
 class _FakeAdapter:
@@ -74,7 +74,7 @@ async def test_post_created_fires_namespaced_event(env):
     await bus.publish(PostCreated(post=_post()))
     assert adapter.calls
     et, data = adapter.calls[0]
-    assert et == "social_home.post_created"
+    assert et == "socialhome.post_created"
     assert data["post_id"] == "p1"
     assert data["author"] == "u1"
 
@@ -83,7 +83,7 @@ async def test_space_post_created_includes_space_id(env):
     bus, adapter = env
     await bus.publish(SpacePostCreated(post=_post(), space_id="sp-1"))
     et, data = adapter.calls[0]
-    assert et == "social_home.space_post_created"
+    assert et == "socialhome.space_post_created"
     assert data["space_id"] == "sp-1"
 
 
@@ -91,7 +91,7 @@ async def test_task_assigned_includes_assignee(env):
     bus, adapter = env
     await bus.publish(TaskAssigned(task=_task(), assigned_to="alice"))
     et, data = adapter.calls[0]
-    assert et == "social_home.task_assigned"
+    assert et == "socialhome.task_assigned"
     assert data["assigned_to"] == "alice"
     assert data["title"] == "Buy milk"
 
@@ -100,14 +100,14 @@ async def test_task_completed_fires(env):
     bus, adapter = env
     await bus.publish(TaskCompleted(task=_task(), completed_by="alice"))
     et, _ = adapter.calls[0]
-    assert et == "social_home.task_completed"
+    assert et == "socialhome.task_completed"
 
 
 async def test_task_deadline_due_fires(env):
     bus, adapter = env
     await bus.publish(TaskDeadlineDue(task=_task(), due_date=date(2026, 4, 15)))
     et, data = adapter.calls[0]
-    assert et == "social_home.task_deadline_due"
+    assert et == "socialhome.task_deadline_due"
     assert data["due_date"] == "2026-04-15"
 
 
@@ -116,7 +116,7 @@ async def test_user_status_changed_fires(env):
     status = UserStatus(emoji="👍", text="busy")
     await bus.publish(UserStatusChanged(user_id="u1", status=status))
     et, data = adapter.calls[0]
-    assert et == "social_home.user_status_changed"
+    assert et == "socialhome.user_status_changed"
     assert data["emoji"] == "👍"
 
 

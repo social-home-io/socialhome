@@ -6,10 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import FederationEvent, FederationEventType
-from social_home.federation.peer_directory_handler import PeerDirectoryHandler
-from social_home.repositories.peer_space_directory_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.federation.peer_directory_handler import PeerDirectoryHandler
+from socialhome.repositories.peer_space_directory_repo import (
     SqlitePeerSpaceDirectoryRepo,
 )
 

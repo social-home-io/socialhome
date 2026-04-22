@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.domain.calendar import RSVPStatus
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.calendar_repo import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.calendar import RSVPStatus
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
-from social_home.services.calendar_service import (
+from socialhome.services.calendar_service import (
     CalendarService,
     SpaceCalendarService,
     _parse_iso,

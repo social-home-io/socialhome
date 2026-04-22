@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from social_home.auth import sha256_token_hash
-from social_home.domain.federation import GfsConnection
-from social_home.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.auth import sha256_token_hash
+from socialhome.domain.federation import GfsConnection
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
 from .conftest import _auth
 

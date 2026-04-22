@@ -1,8 +1,8 @@
-"""Tests for social_home.domain.media_constraints."""
+"""Tests for socialhome.domain.media_constraints."""
 
 from __future__ import annotations
 
-from social_home.domain.media_constraints import (
+from socialhome.domain.media_constraints import (
     CAPTION_MAX,
     IMAGE_ACCEPTED_MIMES,
     IMAGE_MAX_DIMENSION,

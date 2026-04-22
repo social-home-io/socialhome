@@ -1,9 +1,9 @@
-"""Tests for social_home.domain.user."""
+"""Tests for socialhome.domain.user."""
 
 from __future__ import annotations
 
 
-from social_home.domain.user import (
+from socialhome.domain.user import (
     DisplayableUser,
     MemberRef,
     RESERVED_USERNAMES,

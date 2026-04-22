@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.app import create_app
-from social_home.config import Config
+from socialhome.app import create_app
+from socialhome.config import Config
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ async def test_healthz_returns_ok_body(client):
 
 async def test_healthz_db_failure_returns_503(client):
     """A broken DB probe surfaces as 503."""
-    from social_home.app_keys import db_key
+    from socialhome.app_keys import db_key
 
     real_db = client.app[db_key]
 

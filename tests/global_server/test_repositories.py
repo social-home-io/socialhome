@@ -6,13 +6,13 @@ import time
 
 import pytest
 
-from social_home.global_server.domain import (
+from socialhome.global_server.domain import (
     ClientInstance,
     GfsAppeal,
     GfsFraudReport,
     GlobalSpace,
 )
-from social_home.global_server.repositories import (
+from socialhome.global_server.repositories import (
     SqliteGfsAdminRepo,
     SqliteGfsFederationRepo,
 )

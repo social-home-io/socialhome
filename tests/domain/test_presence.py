@@ -1,8 +1,8 @@
-"""Tests for social_home.domain.presence."""
+"""Tests for socialhome.domain.presence."""
 
 from __future__ import annotations
 
-from social_home.domain.presence import (
+from socialhome.domain.presence import (
     LocationUpdate,
     PersonPresence,
     PRESENCE_STATES,

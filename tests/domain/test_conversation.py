@@ -1,11 +1,11 @@
-"""Tests for social_home.domain.conversation — Conversation, ConversationMessage, etc."""
+"""Tests for socialhome.domain.conversation — Conversation, ConversationMessage, etc."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 
-from social_home.domain.conversation import (
+from socialhome.domain.conversation import (
     Conversation,
     ConversationMember,
     ConversationMessage,
@@ -33,7 +33,7 @@ def test_conversation_dm():
     assert conv.type == ConversationType.DM
     assert conv.name is None
     assert conv.last_message_at is None
-    assert conv.notify_enabled is False
+    assert conv.bot_enabled is False
 
 
 def test_conversation_group_dm():

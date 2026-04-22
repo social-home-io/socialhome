@@ -9,15 +9,15 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from social_home.crypto import b64url_encode, sign_ed25519
-from social_home.global_server.app_keys import (
+from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_rtc_key,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.domain import ClientInstance
-from social_home.global_server.rtc_transport import GfsRtcSession
-from social_home.global_server.server import create_gfs_app
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.rtc_transport import GfsRtcSession
+from socialhome.global_server.server import create_gfs_app
 
 
 @pytest.fixture

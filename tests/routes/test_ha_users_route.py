@@ -5,18 +5,18 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.app import create_app
+from socialhome.app import create_app
 from dataclasses import replace
 
-from social_home.app_keys import (
+from socialhome.app_keys import (
     config_key,
     db_key as _db_key,
     platform_adapter_key,
 )
-from social_home.auth import sha256_token_hash
-from social_home.config import Config
-from social_home.crypto import derive_user_id
-from social_home.platform.adapter import ExternalUser
+from socialhome.auth import sha256_token_hash
+from socialhome.config import Config
+from socialhome.crypto import derive_user_id
+from socialhome.platform.adapter import ExternalUser
 
 
 def _auth(token: str) -> dict:

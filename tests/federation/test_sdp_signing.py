@@ -1,7 +1,7 @@
-"""Tests for social_home.federation.sdp_signing."""
+"""Tests for socialhome.federation.sdp_signing."""
 
-from social_home.crypto import generate_identity_keypair
-from social_home.federation.sdp_signing import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.federation.sdp_signing import (
     SignedSDP,
     sign_rtc_offer,
     signed_sdp_from_dict,

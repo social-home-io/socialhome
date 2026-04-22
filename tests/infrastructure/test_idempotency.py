@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.infrastructure.idempotency import IdempotencyCache
+from socialhome.infrastructure.idempotency import IdempotencyCache
 
 
 # ─── Construction ────────────────────────────────────────────────────────

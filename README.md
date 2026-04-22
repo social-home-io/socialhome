@@ -8,8 +8,8 @@ add-on or a standalone Docker container.
 ## Run
 
 ```sh
-docker build -t social-home:dev .
-docker run --rm -p 8099:8099 -v /tmp/sh-data:/data social-home:dev
+docker build -t socialhome:dev .
+docker run --rm -p 8099:8099 -v /tmp/sh-data:/data socialhome:dev
 ```
 
 For Home Assistant, set `SH_MODE=ha`; the Supervisor provides

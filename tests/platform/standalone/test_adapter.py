@@ -13,10 +13,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.config import Config
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.platform.standalone.adapter import StandaloneAdapter
+from socialhome.config import Config
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.platform.standalone.adapter import StandaloneAdapter
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

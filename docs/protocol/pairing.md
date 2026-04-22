@@ -77,13 +77,13 @@ the receiver still decrypts with a key it's about to delete.
 
 ## Implementation
 
-- `social_home/federation/pairing_coordinator.py` — state machine for
+- `socialhome/federation/pairing_coordinator.py` — state machine for
   direct + auto-pair flows.
-- `social_home/services/federation_inbound/pairing.py` — inbound
+- `socialhome/services/federation_inbound/pairing.py` — inbound
   handlers (one per event type, registered with the dispatch registry).
-- `social_home/routes/pairing_routes.py` — REST endpoints used by the
+- `socialhome/routes/pairing_routes.py` — REST endpoints used by the
   UI (`/api/pairing/*`).
-- `social_home/crypto.py` — key derivation primitives.
+- `socialhome/crypto.py` — key derivation primitives.
 
 ## Spec references
 

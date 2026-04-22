@@ -18,23 +18,23 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.domain.space import JoinMode, SpaceType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.space_post_repo import SqliteSpacePostRepo
-from social_home.repositories.space_remote_member_repo import (
+from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
-from social_home.repositories.space_repo import SqliteSpaceRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.space_service import SpaceService
-from social_home.services.user_service import UserService
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.space_service import SpaceService
+from socialhome.services.user_service import UserService
 
 
 # The only kwargs permitted on the send_event call for

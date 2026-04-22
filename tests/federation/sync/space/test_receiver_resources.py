@@ -5,16 +5,16 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from social_home.crypto import generate_identity_keypair
-from social_home.domain.federation import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation.encoder import FederationEncoder
-from social_home.federation.sync.space.exporter import serialise_chunk
-from social_home.federation.sync.space.receiver import SpaceSyncReceiver
-from social_home.infrastructure.event_bus import EventBus
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.sync.space.exporter import serialise_chunk
+from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
+from socialhome.infrastructure.event_bus import EventBus
 
 
 class _FakeCrypto:

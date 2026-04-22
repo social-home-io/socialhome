@@ -6,15 +6,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     SpaceModerationApproved,
     SpaceModerationQueued,
     SpaceModerationRejected,
 )
-from social_home.domain.space import SpaceModerationItem
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.ws_manager import WebSocketManager
-from social_home.services.realtime_service import RealtimeService
+from socialhome.domain.space import SpaceModerationItem
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.ws_manager import WebSocketManager
+from socialhome.services.realtime_service import RealtimeService
 
 
 class _FakeUserRepo:

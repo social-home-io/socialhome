@@ -1,4 +1,4 @@
-"""Tests for social_home.routes.federation.
+"""Tests for socialhome.routes.federation.
 
 The route was a placeholder in v1 — it now runs the full
 FederationService validation pipeline. See

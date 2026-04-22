@@ -1,4 +1,4 @@
-"""Tests for social_home.services.task_service."""
+"""Tests for socialhome.services.task_service."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.domain.task import Task, TaskList, TaskStatus
-from social_home.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
-from social_home.services.task_service import TaskService
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
+from socialhome.services.task_service import TaskService
 
 
 @pytest.fixture
@@ -258,7 +258,7 @@ async def test_update_task_invalid_due_date(env):
 
 
 def test_next_occurrence_daily():
-    from social_home.services.task_service import _next_occurrence
+    from socialhome.services.task_service import _next_occurrence
 
     assert _next_occurrence("FREQ=DAILY", base=date(2026, 4, 15)) == date(2026, 4, 16)
     assert _next_occurrence("FREQ=DAILY;INTERVAL=3", base=date(2026, 4, 15)) == date(
@@ -267,26 +267,26 @@ def test_next_occurrence_daily():
 
 
 def test_next_occurrence_weekly():
-    from social_home.services.task_service import _next_occurrence
+    from socialhome.services.task_service import _next_occurrence
 
     assert _next_occurrence("FREQ=WEEKLY", base=date(2026, 4, 15)) == date(2026, 4, 22)
 
 
 def test_next_occurrence_monthly_clamps_end_of_month():
-    from social_home.services.task_service import _next_occurrence
+    from socialhome.services.task_service import _next_occurrence
 
     # Jan 31 → Feb 28 (non-leap) when INTERVAL=1.
     assert _next_occurrence("FREQ=MONTHLY", base=date(2025, 1, 31)) == date(2025, 2, 28)
 
 
 def test_next_occurrence_yearly():
-    from social_home.services.task_service import _next_occurrence
+    from socialhome.services.task_service import _next_occurrence
 
     assert _next_occurrence("FREQ=YEARLY", base=date(2026, 4, 15)) == date(2027, 4, 15)
 
 
 def test_next_occurrence_unsupported_freq_returns_none():
-    from social_home.services.task_service import _next_occurrence
+    from socialhome.services.task_service import _next_occurrence
 
     assert _next_occurrence("FREQ=HOURLY", base=date(2026, 4, 15)) is None
     assert _next_occurrence("", base=date(2026, 4, 15)) is None
@@ -295,7 +295,7 @@ def test_next_occurrence_unsupported_freq_returns_none():
 async def test_complete_recurring_task_spawns_next_instance(env):
     """Transitioning a recurring task to DONE creates a child instance."""
     from dataclasses import replace
-    from social_home.domain.task import RecurrenceRule
+    from socialhome.domain.task import RecurrenceRule
 
     tl = await env.task_svc.create_list(name="Chores", created_by="u1")
     parent = await env.task_svc.create_task(
@@ -340,7 +340,7 @@ async def test_complete_non_recurring_task_does_not_spawn(env):
 
 async def test_space_task_service_list(env):
     """SpaceTaskService.list_lists and list_tasks work."""
-    from social_home.services.task_service import SpaceTaskService
+    from socialhome.services.task_service import SpaceTaskService
 
     svc = SpaceTaskService(env.space_task_repo)
     # Need a space

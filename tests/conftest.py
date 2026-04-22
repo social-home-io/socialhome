@@ -202,18 +202,18 @@ sys.modules["aiolibdatachannel"] = _fake_rtc
 
 import pytest  # noqa: E402
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id  # noqa: E402
-from social_home.db.database import AsyncDatabase  # noqa: E402
-from social_home.infrastructure.event_bus import EventBus  # noqa: E402
-from social_home.repositories.conversation_repo import SqliteConversationRepo  # noqa: E402
-from social_home.repositories.notification_repo import SqliteNotificationRepo  # noqa: E402
-from social_home.repositories.post_repo import SqlitePostRepo  # noqa: E402
-from social_home.repositories.space_post_repo import SqliteSpacePostRepo  # noqa: E402
-from social_home.repositories.space_repo import SqliteSpaceRepo  # noqa: E402
-from social_home.repositories.user_repo import SqliteUserRepo  # noqa: E402
-from social_home.services.feed_service import FeedService  # noqa: E402
-from social_home.services.space_service import SpaceService  # noqa: E402
-from social_home.services.user_service import UserService  # noqa: E402
+from socialhome.crypto import generate_identity_keypair, derive_instance_id  # noqa: E402
+from socialhome.db.database import AsyncDatabase  # noqa: E402
+from socialhome.infrastructure.event_bus import EventBus  # noqa: E402
+from socialhome.repositories.conversation_repo import SqliteConversationRepo  # noqa: E402
+from socialhome.repositories.notification_repo import SqliteNotificationRepo  # noqa: E402
+from socialhome.repositories.post_repo import SqlitePostRepo  # noqa: E402
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo  # noqa: E402
+from socialhome.repositories.space_repo import SqliteSpaceRepo  # noqa: E402
+from socialhome.repositories.user_repo import SqliteUserRepo  # noqa: E402
+from socialhome.services.feed_service import FeedService  # noqa: E402
+from socialhome.services.space_service import SpaceService  # noqa: E402
+from socialhome.services.user_service import UserService  # noqa: E402
 
 
 @pytest.fixture

@@ -97,15 +97,15 @@ which triggers an authenticated request to the user's own HFS.
 
 ## Implementation
 
-- `social_home/services/push_service.py` — Web Push + subscription
+- `socialhome/services/push_service.py` — Web Push + subscription
   CRUD.
-- `social_home/global_server/rtc_transport.py` — in-memory RTC
+- `socialhome/global_server/rtc_transport.py` — in-memory RTC
   session store + relay routing.
-- `social_home/federation/strategies.py` — `TransportStrategy`
+- `socialhome/federation/strategies.py` — `TransportStrategy`
   protocol that selects webhook / DataChannel / relay.
-- `social_home/global_server/routes/rtc.py` — RTC signalling
+- `socialhome/global_server/routes/rtc.py` — RTC signalling
   endpoints (`POST /gfs/rtc/offer`, `…/answer`, `…/ice`).
-- `social_home/global_server/federation.py` — inbound relay
+- `socialhome/global_server/federation.py` — inbound relay
   validation.
 
 ## Spec references

@@ -12,15 +12,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     CommentDeleted,
     CommentUpdated,
     SpaceMemberProfileUpdated,
     UserStatusChanged,
 )
-from social_home.domain.post import Comment, CommentType
-from social_home.domain.space import SpaceMember
-from social_home.services.federation_inbound_service import FederationInboundService
+from socialhome.domain.post import Comment, CommentType
+from socialhome.domain.space import SpaceMember
+from socialhome.services.federation_inbound_service import FederationInboundService
 
 
 class _RecordingBus:

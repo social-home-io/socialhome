@@ -7,9 +7,9 @@ from datetime import timedelta
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.repositories.federation_repo import SqliteFederationRepo
-from social_home.infrastructure.replay_cache_scheduler import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.infrastructure.replay_cache_scheduler import (
     ReplayCachePruneScheduler,
 )
 

@@ -111,8 +111,8 @@ Each feature page uses this shape:
 1. **Summary** — one paragraph on what the feature does.
 2. **Scope** — HFS role and GFS role in one line each.
 3. **Event types** — the `FederationEventType` values that belong to
-   this feature (defined in `social_home/domain/federation.py`).
+   this feature (defined in `socialhome/domain/federation.py`).
 4. **Flow** — a Mermaid sequence diagram of the happy path.
-5. **Implementation** — pointers into `social_home/` for the services,
+5. **Implementation** — pointers into `socialhome/` for the services,
    repos, routes, and inbound handlers.
 6. **Spec references** — "§NN" section numbers in `spec_work.md`.

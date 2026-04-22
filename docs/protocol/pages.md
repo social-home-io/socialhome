@@ -75,12 +75,12 @@ force-pick a winner on their local HFS and re-broadcast.
 
 ## Implementation
 
-- `social_home/services/page_service.py` — CRUD + lock + versions.
-- `social_home/services/federation_inbound/space_content.py` —
+- `socialhome/services/page_service.py` — CRUD + lock + versions.
+- `socialhome/services/federation_inbound/space_content.py` —
   `SPACE_PAGE_*` handlers.
-- `social_home/repositories/page_repo.py`,
+- `socialhome/repositories/page_repo.py`,
   `page_version_repo.py`.
-- `social_home/routes/page_routes.py` — REST endpoints.
+- `socialhome/routes/page_routes.py` — REST endpoints.
 
 ## Spec references
 

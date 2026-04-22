@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from social_home.auth import sha256_token_hash
-from social_home.repositories.public_space_repo import (
+from socialhome.auth import sha256_token_hash
+from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
     SqlitePublicSpaceRepo,
 )

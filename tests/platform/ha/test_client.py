@@ -1,11 +1,11 @@
-"""Tests for social_home.platform.ha.client."""
+"""Tests for socialhome.platform.ha.client."""
 
 from __future__ import annotations
 
 import pytest
 from aiohttp import web
 
-from social_home.platform.ha.client import HaClient, build_ha_client
+from socialhome.platform.ha.client import HaClient, build_ha_client
 
 
 # ─── Fake HA server ──────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ async def test_call_service_plain(client, ha_server):
 
 
 async def test_fire_event_true_on_2xx(client):
-    assert await client.fire_event("social_home.post_created", {"id": "p1"}) is True
+    assert await client.fire_event("socialhome.post_created", {"id": "p1"}) is True
 
 
 async def test_stream_stt_sends_metadata_header(client, ha_server):

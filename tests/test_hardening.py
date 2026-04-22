@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from aiohttp import web
 
-from social_home.hardening import (
+from socialhome.hardening import (
     DEFAULT_JSON_MAX_BYTES,
     DEFAULT_MEDIA_MAX_BYTES,
     build_body_size_middleware,

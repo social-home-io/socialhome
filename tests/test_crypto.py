@@ -1,4 +1,4 @@
-"""Tests for social_home.crypto."""
+"""Tests for socialhome.crypto."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     ReplayCache,
     b64url_decode,
     b64url_encode,
@@ -24,7 +24,7 @@ from social_home.crypto import (
     verify_user_identity_assertion,
     x25519_exchange,
 )
-from social_home.domain.user import UserIdentityAssertion
+from socialhome.domain.user import UserIdentityAssertion
 
 
 def test_derive_instance_id_deterministic():

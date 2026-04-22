@@ -1,4 +1,4 @@
-"""Tests for social_home.routes.pages."""
+"""Tests for socialhome.routes.pages."""
 
 from .conftest import _auth
 
@@ -143,7 +143,7 @@ async def test_refresh_lock_204(client):
 
 async def test_refresh_lock_held_by_other_returns_409(client):
     """Second user's refresh must fail with 409 so their client surrenders."""
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     # Seed a second user + token on the same client.
     await client._db.enqueue(
@@ -177,7 +177,7 @@ async def test_refresh_lock_held_by_other_returns_409(client):
 
 
 async def test_revert_non_admin_403(client):
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
@@ -221,7 +221,7 @@ async def test_delete_request_then_admin_approve(client):
     pid = (await r.json())["id"]
     # Seed a second user who raises the request so admin-approve is
     # a distinct actor.
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
@@ -249,7 +249,7 @@ async def test_delete_request_then_admin_approve(client):
 
 
 async def test_delete_approve_requires_admin(client):
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "
@@ -327,7 +327,7 @@ async def test_space_page_create_requires_member(client):
 
 
 async def test_space_page_non_member_403(client):
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     sid = await _seed_space_with_member(client)
     await client._db.enqueue(

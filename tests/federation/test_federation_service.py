@@ -1,4 +1,4 @@
-"""Tests for social_home.federation.FederationService.
+"""Tests for socialhome.federation.FederationService.
 
 All tests use in-memory stubs — no network, no real disk.
 """
@@ -11,22 +11,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     b64url_decode,
     b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
     generate_x25519_keypair,
 )
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     FederationEventType,
     PairingSession,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation import FederationService
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.key_manager import KeyManager
+from socialhome.federation import FederationService
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
 
 
 # ─── Shared fixtures & stubs ──────────────────────────────────────────────
@@ -390,7 +390,7 @@ async def test_send_event_prefers_attached_transport():
     exception or enqueue to outbox. Instead, the facade's fake
     returns ok=True and ok bubbles up.
     """
-    from social_home.federation.transport import _TransportSendResult
+    from socialhome.federation.transport import _TransportSendResult
 
     km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
@@ -458,7 +458,7 @@ def _make_valid_envelope(
         payload = {"data": "test"}
 
     # Encrypt payload with session key.
-    from social_home.federation.federation_service import _dumps
+    from socialhome.federation.federation_service import _dumps
 
     payload_json = _dumps(payload)
     import os
@@ -483,7 +483,7 @@ def _make_valid_envelope(
         "sig_suite": "ed25519",
     }
 
-    from social_home.crypto import sign_ed25519
+    from socialhome.crypto import sign_ed25519
 
     envelope_bytes = _dumps(envelope_dict).encode("utf-8")
     sig = sign_ed25519(peer_kp.private_key, envelope_bytes)
@@ -919,7 +919,7 @@ async def test_dispatch_users_sync():
     """USERS_SYNC dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m1",
@@ -936,7 +936,7 @@ async def test_dispatch_user_updated():
     """USER_UPDATED dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m2",
@@ -953,7 +953,7 @@ async def test_dispatch_user_removed():
     """USER_REMOVED dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m3",
@@ -970,7 +970,7 @@ async def test_dispatch_space_post_created():
     """SPACE_POST_CREATED dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m4",
@@ -988,7 +988,7 @@ async def test_dispatch_space_member_joined():
     """SPACE_MEMBER_JOINED dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m5",
@@ -1007,14 +1007,14 @@ async def test_dispatch_space_config_changed():
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
     events_seen = []
-    from social_home.domain.events import SpaceConfigChanged
+    from socialhome.domain.events import SpaceConfigChanged
 
     async def on_config(e):
         events_seen.append(e)
 
     bus.subscribe(SpaceConfigChanged, on_config)
 
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m6",
@@ -1034,7 +1034,7 @@ async def test_dispatch_dm_message():
     """DM_MESSAGE dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m7",
@@ -1051,7 +1051,7 @@ async def test_dispatch_presence_updated():
     """PRESENCE_UPDATED dispatch logs without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m8",
@@ -1068,7 +1068,7 @@ async def test_dispatch_pairing_event():
     """Pairing lifecycle events dispatch without error."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     for etype in [
         FederationEventType.PAIRING_INTRO,
@@ -1091,7 +1091,7 @@ async def test_dispatch_unknown_event():
     """Unknown event type is logged but doesn't crash."""
     bus = EventBus()
     svc, _ = _make_service(bus=bus)
-    from social_home.domain.federation import FederationEvent, FederationEventType
+    from socialhome.domain.federation import FederationEvent, FederationEventType
 
     event = FederationEvent(
         msg_id="m-unknown",

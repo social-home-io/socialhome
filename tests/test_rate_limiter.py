@@ -1,9 +1,9 @@
-"""Tests for social_home.rate_limiter."""
+"""Tests for socialhome.rate_limiter."""
 
 from __future__ import annotations
 
 
-from social_home.rate_limiter import RateLimiter
+from socialhome.rate_limiter import RateLimiter
 
 
 async def test_allows_within_limit():

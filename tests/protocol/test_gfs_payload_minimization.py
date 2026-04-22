@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from social_home.federation.sealed_sender import (
+from socialhome.federation.sealed_sender import (
     seal_envelope,
     unseal_envelope,
 )

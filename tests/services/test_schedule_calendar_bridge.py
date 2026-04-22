@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.domain.events import SchedulePollFinalized
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.household_features_service import (
+from socialhome.domain.events import SchedulePollFinalized
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.household_features_service import (
     FeatureDisabledError,
     HouseholdFeatures,
 )
-from social_home.services.schedule_calendar_bridge import (
+from socialhome.services.schedule_calendar_bridge import (
     ScheduleCalendarBridge,
 )
 

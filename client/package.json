@@ -1,5 +1,5 @@
 {
-  "name": "social-home-client",
+  "name": "socialhome-client",
   "license": "MPL-2.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,7 @@
     "lint": "eslint src --ext ts,tsx",
     "typecheck": "tsc --noEmit",
     "i18n:check": "node scripts/i18n-check.js",
-    "i18n:status": "curl -sf \"$WEBLATE_URL/api/components/social-home/ui/statistics/\" -H \"Authorization: Token $WEBLATE_TOKEN\""
+    "i18n:status": "curl -sf \"$WEBLATE_URL/api/components/socialhome/ui/statistics/\" -H \"Authorization: Token $WEBLATE_TOKEN\""
   },
   "dependencies": {
     "@preact/signals": "^1.2.0",

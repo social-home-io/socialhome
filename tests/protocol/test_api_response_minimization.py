@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.security import SENSITIVE_FIELDS, sanitise_for_api
+from socialhome.security import SENSITIVE_FIELDS, sanitise_for_api
 
 
 pytestmark = pytest.mark.security

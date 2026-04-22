@@ -1,4 +1,4 @@
-"""Tests for social_home.routes.stickies."""
+"""Tests for socialhome.routes.stickies."""
 
 from .conftest import _auth
 

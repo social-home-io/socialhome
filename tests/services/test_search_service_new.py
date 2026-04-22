@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.search_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.search_repo import (
     SCOPE_SPACE,
     SCOPE_USER,
     SqliteSearchRepo,
 )
-from social_home.services.search_service import MIN_QUERY_CHARS, SearchService
+from socialhome.services.search_service import MIN_QUERY_CHARS, SearchService
 
 
 @pytest.fixture

@@ -12,7 +12,7 @@ async def _ws_connect(client):
 
 async def test_ws_typing_event_routes_to_typing_service(client):
     """Sending a typing JSON frame triggers TypingService."""
-    from social_home.app_keys import typing_service_key
+    from socialhome.app_keys import typing_service_key
 
     db = client._db
     # Create a 1:1 conversation between admin and bob.

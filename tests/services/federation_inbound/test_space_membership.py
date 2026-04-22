@@ -6,15 +6,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     RemoteSpaceCreated,
     RemoteSpaceDissolved,
     RemoteSpaceMemberBanned,
 )
-from social_home.domain.federation import FederationEvent, FederationEventType
-from social_home.domain.space import JoinMode, SpaceType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.federation_inbound import SpaceMembershipInboundHandlers
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 
 
 class _FakeRegistry:
@@ -245,7 +245,7 @@ async def test_age_gate_empty_payload_is_noop(repo, handlers):
 
 async def test_config_catch_up_logs_when_behind(repo, handlers, caplog):
     """When remote sequence > local, log that we're behind."""
-    from social_home.domain.space import (
+    from socialhome.domain.space import (
         JoinMode,
         Space,
         SpaceFeatures,
@@ -265,7 +265,7 @@ async def test_config_catch_up_logs_when_behind(repo, handlers, caplog):
         join_mode=JoinMode.INVITE_ONLY,
     )
     with caplog.at_level(
-        logging.INFO, logger="social_home.services.federation_inbound.space_membership"
+        logging.INFO, logger="socialhome.services.federation_inbound.space_membership"
     ):
         await handlers._on_catch_up(
             _event(

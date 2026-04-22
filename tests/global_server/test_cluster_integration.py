@@ -12,20 +12,20 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.crypto import b64url_encode, sign_ed25519
-from social_home.global_server.admin import hash_password
-from social_home.global_server.app_keys import (
+from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.global_server.admin import hash_password
+from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_cluster_key,
     gfs_cluster_repo_key,
     gfs_fed_repo_key,
 )
-from social_home.global_server.cluster import (
+from socialhome.global_server.cluster import (
     NODE_HEARTBEAT,
     NODE_HELLO,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.server import create_gfs_app
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.server import create_gfs_app
 
 
 def _config(tmp_dir, *, cluster=True):

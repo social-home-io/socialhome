@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.domain.report import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.report import (
     DuplicateReportError,
     ReportRateLimitedError,
 )
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.report_repo import SqliteReportRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.report_service import ReportService
-from social_home.services.user_service import UserService
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.report_repo import SqliteReportRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.report_service import ReportService
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ async def stack(tmp_dir):
 
 
 async def test_create_report_publishes_event(stack):
-    from social_home.domain.events import ReportFiled
+    from socialhome.domain.events import ReportFiled
 
     reporter = await stack.provision("anna")
     await stack.provision("bob")
@@ -97,12 +97,12 @@ async def test_rate_limit_caps_reports_per_day(stack, monkeypatch):
     reporter = await stack.provision("anna")
     # Lower the cap for the test so we don't insert 20 rows.
     monkeypatch.setattr(
-        "social_home.services.report_service.MAX_REPORTS_PER_DAY",
+        "socialhome.services.report_service.MAX_REPORTS_PER_DAY",
         3,
     )
     # ReportService snapshots the constant at import time into the module,
     # so patch via the module attribute and re-reference.
-    from social_home.services import report_service as rs
+    from socialhome.services import report_service as rs
 
     rs.MAX_REPORTS_PER_DAY = 3
     for i in range(3):
@@ -137,7 +137,7 @@ async def test_list_pending_requires_admin(stack):
 
 
 async def test_resolve_marks_resolved_and_double_resolve_raises(stack):
-    from social_home.domain.space import ModerationAlreadyDecidedError
+    from socialhome.domain.space import ModerationAlreadyDecidedError
 
     await stack.provision("pascal", is_admin=True)
     reporter = await stack.provision("bob")
@@ -200,7 +200,7 @@ class _StubUserRepoWithInstance:
 
 async def test_create_report_federates_when_user_target_is_remote(stack):
     """Reporting a remote user → SPACE_REPORT sent to their instance."""
-    from social_home.domain.federation import FederationEventType
+    from socialhome.domain.federation import FederationEventType
 
     fed = _FakeFederation()
     reporter = await stack.provision("anna")
@@ -243,7 +243,7 @@ async def test_create_report_stays_local_when_target_is_local(stack):
 
 
 async def test_create_report_from_remote_persists_and_publishes(stack):
-    from social_home.domain.events import ReportFiled
+    from socialhome.domain.events import ReportFiled
 
     fired: list[ReportFiled] = []
 
@@ -461,7 +461,7 @@ async def test_resolve_target_instance_returns_none_for_missing_repos(stack):
     """When space_repo / space_post_repo aren't attached, target resolution
     falls through to None — no crash.
     """
-    from social_home.domain.report import ReportTargetType
+    from socialhome.domain.report import ReportTargetType
 
     # Drop the optional repos to simulate a minimal wiring.
     stack.svc._space_repo = None

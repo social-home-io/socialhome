@@ -29,7 +29,7 @@ jobs:
         # get more tests; never lower this number — add missing tests
         # instead.
         run: |
-          pytest --cov=social_home --cov-branch --cov-fail-under=90 --tb=short -q
+          pytest --cov=socialhome --cov-branch --cov-fail-under=90 --tb=short -q
 
       - name: Run protocol/security tests (release blocker)
         run: |
@@ -44,9 +44,9 @@ jobs:
           python-version: "3.14"
       - run: pip install ruff
       - name: ruff check
-        run: ruff check social_home/ tests/
+        run: ruff check socialhome/ tests/
       - name: ruff format
-        run: ruff format --check social_home/ tests/
+        run: ruff format --check socialhome/ tests/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -58,7 +58,7 @@ jobs:
       - name: Install dependencies
         run: pip install -e .[dev]
       - name: mypy
-        run: mypy social_home/
+        run: mypy socialhome/
 
   frontend:
     runs-on: ubuntu-latest

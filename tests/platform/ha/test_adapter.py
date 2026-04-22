@@ -1,4 +1,4 @@
-"""Tests for social_home.platform.ha.adapter — fake HaClient injection."""
+"""Tests for socialhome.platform.ha.adapter — fake HaClient injection."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from social_home.app_keys import db_key, event_bus_key, http_session_key
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.event_bus import EventBus
-from social_home.platform.ha.adapter import HomeAssistantAdapter
+from socialhome.app_keys import db_key, event_bus_key, http_session_key
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.platform.ha.adapter import HomeAssistantAdapter
 
 
 # ─── Fake HaClient ───────────────────────────────────────────────────────
@@ -234,7 +234,7 @@ async def test_get_instance_config_fallback_on_client_error():
 async def test_send_push_targets_mobile_app_service():
     client = _FakeHaClient()
     adapter = _build_adapter(client=client)
-    from social_home.platform.adapter import ExternalUser
+    from socialhome.platform.adapter import ExternalUser
 
     user = ExternalUser(
         username="pascal",
@@ -255,9 +255,9 @@ async def test_send_push_targets_mobile_app_service():
 async def test_fire_event_delegates():
     client = _FakeHaClient(fire_event_result=True)
     adapter = _build_adapter(client=client)
-    ok = await adapter.fire_event("social_home.post_created", {"id": "p1"})
+    ok = await adapter.fire_event("socialhome.post_created", {"id": "p1"})
     assert ok is True
-    assert ("fire_event", "social_home.post_created", {"id": "p1"}) in client.calls
+    assert ("fire_event", "socialhome.post_created", {"id": "p1"}) in client.calls
 
 
 # ─── STT ─────────────────────────────────────────────────────────────────

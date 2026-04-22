@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.app import create_app
-from social_home.app_keys import db_key as _db_key
-from social_home.auth import sha256_token_hash
-from social_home.config import Config
-from social_home.crypto import derive_user_id, generate_identity_keypair
+from socialhome.app import create_app
+from socialhome.app_keys import db_key as _db_key
+from socialhome.auth import sha256_token_hash
+from socialhome.config import Config
+from socialhome.crypto import derive_user_id, generate_identity_keypair
 
 
 def _auth(token: str) -> dict:
@@ -162,8 +162,8 @@ async def test_unread_count(client):
 async def test_create_group_dm(client):
     """POST /api/conversations/group creates a group DM and returns 201."""
     # Create a third user first (group DM requires at least 3 participants)
-    from social_home.app_keys import db_key as _db_key
-    from social_home.crypto import derive_user_id
+    from socialhome.app_keys import db_key as _db_key
+    from socialhome.crypto import derive_user_id
 
     db = client.app[_db_key]
     kp = generate_identity_keypair()

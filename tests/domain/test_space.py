@@ -1,10 +1,10 @@
-"""Tests for social_home.domain.space."""
+"""Tests for socialhome.domain.space."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.domain.space import (
+from socialhome.domain.space import (
     HouseholdFeatures,
     SpaceConfigGapError,
     SpaceFeatureAccess,

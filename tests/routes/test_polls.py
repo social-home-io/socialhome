@@ -347,7 +347,7 @@ async def test_schedule_finalize_sets_winner_and_closes(client):
 
 
 async def test_schedule_finalize_non_author_403(client):
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     await _seed_schedule_post(client, "sp-4")
     await _create_poll(client, "sp-4")

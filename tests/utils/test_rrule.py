@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from social_home.utils.rrule import expand_rrule, parse_rrule
+from socialhome.utils.rrule import expand_rrule, parse_rrule
 
 
 def _dt(iso: str) -> datetime:

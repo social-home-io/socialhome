@@ -11,12 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     b64url_decode,
     b64url_encode,
     generate_identity_keypair,
 )
-from social_home.federation.encoder import FederationEncoder
+from socialhome.federation.encoder import FederationEncoder
 
 
 def _make_encoder(pq_signer=None, suite="ed25519"):

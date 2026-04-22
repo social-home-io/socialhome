@@ -76,15 +76,15 @@ reason code.
 
 ## Implementation
 
-- `social_home/services/space_service.py` — creation, membership
+- `socialhome/services/space_service.py` — creation, membership
   mutations, permission guards.
-- `social_home/federation/sync/space/` — space-level sync machinery
+- `socialhome/federation/sync/space/` — space-level sync machinery
   (shared with [sync.md](./sync.md)).
-- `social_home/services/federation_inbound/space_membership.py` —
+- `socialhome/services/federation_inbound/space_membership.py` —
   inbound handlers for `SPACE_CREATED`, `SPACE_MEMBER_JOINED`, etc.
-- `social_home/repositories/space_repo.py`,
+- `socialhome/repositories/space_repo.py`,
   `space_remote_member_repo.py` — persistence.
-- `social_home/routes/space_routes.py` — REST endpoints
+- `socialhome/routes/space_routes.py` — REST endpoints
   (`/api/spaces/*`).
 
 ## Spec references

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from social_home.repositories.push_subscription_repo import PushSubscription
-from social_home.services.push_service import (
+from socialhome.repositories.push_subscription_repo import PushSubscription
+from socialhome.services.push_service import (
     PushPayload,
     PushService,
     VapidKeyPair,

@@ -1,4 +1,4 @@
-"""Tests for social_home.domain.calendar — Calendar, CalendarEvent, and related types."""
+"""Tests for socialhome.domain.calendar — Calendar, CalendarEvent, and related types."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.calendar import (
+from socialhome.domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarEventCreate,

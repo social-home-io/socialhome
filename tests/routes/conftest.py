@@ -6,11 +6,11 @@ handler. Each test still gets a fresh DB for isolation.
 
 import pytest
 
-from social_home.app import create_app
-from social_home.app_keys import db_key as _db_key
-from social_home.auth import sha256_token_hash
-from social_home.config import Config
-from social_home.crypto import derive_user_id
+from socialhome.app import create_app
+from socialhome.app_keys import db_key as _db_key
+from socialhome.auth import sha256_token_hash
+from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 
 
 @pytest.fixture

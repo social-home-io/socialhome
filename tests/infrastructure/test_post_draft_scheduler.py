@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.post_draft_scheduler import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.post_draft_scheduler import (
     PostDraftCleanupScheduler,
 )
 

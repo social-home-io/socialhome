@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
     CalendarEventUpdated,
@@ -23,13 +23,13 @@ from social_home.domain.events import (
     TaskDeadlineDue,
     UserStatusChanged,
 )
-from social_home.domain.calendar import CalendarEvent
-from social_home.domain.post import Comment, CommentType, Post, PostType
-from social_home.domain.task import Task, TaskStatus
-from social_home.domain.user import User, UserStatus
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.ws_manager import WebSocketManager
-from social_home.services.realtime_service import RealtimeService, _safe
+from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.user import User, UserStatus
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.ws_manager import WebSocketManager
+from socialhome.services.realtime_service import RealtimeService, _safe
 
 
 # ─── _safe serialisation ─────────────────────────────────────────────────
@@ -305,7 +305,7 @@ async def test_space_post_moderated_fans_to_space_members(env):
 
 
 async def test_presence_updated_fans_to_household(env):
-    from social_home.domain.events import PresenceUpdated
+    from socialhome.domain.events import PresenceUpdated
 
     svc, bus, ws = env
     sock = _FakeWS()
@@ -323,7 +323,7 @@ async def test_presence_updated_fans_to_household(env):
 
 
 async def test_notification_new_targets_one_user(env):
-    from social_home.domain.events import NotificationCreated
+    from socialhome.domain.events import NotificationCreated
 
     svc, bus, ws = env
     me = _FakeWS()
@@ -343,7 +343,7 @@ async def test_notification_new_targets_one_user(env):
 
 
 async def test_notification_unread_count_targets_one_user(env):
-    from social_home.domain.events import NotificationReadChanged
+    from socialhome.domain.events import NotificationReadChanged
 
     svc, bus, ws = env
     me = _FakeWS()
@@ -356,7 +356,7 @@ async def test_notification_unread_count_targets_one_user(env):
 
 
 async def test_bazaar_bid_placed_broadcast(env):
-    from social_home.domain.events import BazaarBidPlaced
+    from socialhome.domain.events import BazaarBidPlaced
 
     svc, bus, ws = env
     sock = _FakeWS()
@@ -375,7 +375,7 @@ async def test_bazaar_bid_placed_broadcast(env):
 
 
 async def test_bazaar_listing_closed_broadcast(env):
-    from social_home.domain.events import BazaarListingExpired
+    from socialhome.domain.events import BazaarListingExpired
 
     svc, bus, ws = env
     sock = _FakeWS()

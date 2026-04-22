@@ -11,14 +11,14 @@ fallback branches without the native binding.
 from __future__ import annotations
 
 
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     DeliveryResult,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation.transport import (
+from socialhome.federation.transport import (
     FederationTransport,
     WebhookTransport,
     _RtcPeer,

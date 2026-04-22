@@ -735,3 +735,179 @@ async def test_shopping_complete_nonexistent(client):
     h = _auth(client._tok)
     r = await client.patch("/api/shopping/nonexistent/complete", headers=h)
     assert r.status in (200, 404)
+
+
+# ── Bot-bridge: personas + inbound posts ─────────────────────────────────
+
+
+async def _new_space_with_bots_enabled(client, h) -> str:
+    """Create a space and turn on bot_enabled via a direct DB write.
+
+    The public API for toggling bot_enabled ships separately — this test
+    focuses on the bot-bridge flow, so we touch the column directly.
+    """
+    r = await client.post(
+        "/api/spaces", json={"name": "BotSpace", "emoji": "🏠"}, headers=h
+    )
+    assert r.status == 201
+    sid = (await r.json())["id"]
+    await client._db.enqueue("UPDATE spaces SET bot_enabled=1 WHERE id=?", (sid,))
+    return sid
+
+
+async def test_space_bots_crud(client):
+    """POST creates + returns plaintext token; GET lists; DELETE removes."""
+    h = _auth(client._tok)
+    sid = await _new_space_with_bots_enabled(client, h)
+    # Create a scope=space bot (owner always qualifies).
+    r = await client.post(
+        f"/api/spaces/{sid}/bots",
+        json={
+            "scope": "space",
+            "slug": "doorbell",
+            "name": "Doorbell",
+            "icon": "🔔",
+        },
+        headers=h,
+    )
+    assert r.status == 201, await r.text()
+    body = await r.json()
+    assert body["scope"] == "space"
+    assert body["slug"] == "doorbell"
+    assert body["token"].startswith("shb_")
+    assert "token_hash" not in body  # must never leak
+    bot_id = body["bot_id"]
+    bot_token = body["token"]
+
+    # List
+    r = await client.get(f"/api/spaces/{sid}/bots", headers=h)
+    assert r.status == 200
+    assert len(await r.json()) == 1
+
+    # Rotate → new token string returned
+    r = await client.post(f"/api/spaces/{sid}/bots/{bot_id}/token", headers=h)
+    assert r.status == 200
+    rotated = (await r.json())["token"]
+    assert rotated != bot_token
+
+    # Delete
+    r = await client.delete(f"/api/spaces/{sid}/bots/{bot_id}", headers=h)
+    assert r.status == 204
+    r = await client.get(f"/api/spaces/{sid}/bots", headers=h)
+    assert (await r.json()) == []
+
+
+async def test_bot_bridge_posts_with_bot_token(client):
+    """POST /api/bot-bridge/spaces/{id} using the bot token creates a feed post."""
+    h = _auth(client._tok)
+    sid = await _new_space_with_bots_enabled(client, h)
+    r = await client.post(
+        f"/api/spaces/{sid}/bots",
+        json={
+            "scope": "space",
+            "slug": "doorbell",
+            "name": "Doorbell",
+            "icon": "🔔",
+        },
+        headers=h,
+    )
+    bot_token = (await r.json())["token"]
+
+    # Post via the bot-bridge using the BOT token (not the user token).
+    r = await client.post(
+        f"/api/bot-bridge/spaces/{sid}",
+        json={"title": "Ding", "message": "Front door"},
+        headers={"Authorization": f"Bearer {bot_token}"},
+    )
+    assert r.status == 201, await r.text()
+    body = await r.json()
+    assert body["bot_id"]
+
+    # The user-token feed view now shows the post with bot metadata.
+    r = await client.get(f"/api/spaces/{sid}/feed", headers=h)
+    assert r.status == 200
+    feed = await r.json()
+    system_posts = [p for p in feed if p["author"] == "system-integration"]
+    assert system_posts, f"no system post in feed: {feed}"
+    bot_meta = system_posts[0]["bot"]
+    assert bot_meta["name"] == "Doorbell"
+    assert bot_meta["icon"] == "🔔"
+    assert bot_meta["scope"] == "space"
+
+
+async def test_bot_bridge_rejects_user_token(client):
+    """User API token must NOT authenticate against /api/bot-bridge/spaces/*."""
+    h = _auth(client._tok)
+    sid = await _new_space_with_bots_enabled(client, h)
+    r = await client.post(
+        f"/api/bot-bridge/spaces/{sid}",
+        json={"title": None, "message": "hi"},
+        headers=h,  # user token — not a bot token
+    )
+    assert r.status == 401
+
+
+async def test_bot_bridge_rejects_cross_space_token(client):
+    """Bot token for space A must not post to space B."""
+    h = _auth(client._tok)
+    sid_a = await _new_space_with_bots_enabled(client, h)
+    sid_b = await _new_space_with_bots_enabled(client, h)
+    r = await client.post(
+        f"/api/spaces/{sid_a}/bots",
+        json={
+            "scope": "space",
+            "slug": "doorbell",
+            "name": "Doorbell",
+            "icon": "🔔",
+        },
+        headers=h,
+    )
+    token_a = (await r.json())["token"]
+    r = await client.post(
+        f"/api/bot-bridge/spaces/{sid_b}",
+        json={"title": None, "message": "hi"},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert r.status == 401
+
+
+async def test_bot_bridge_honors_disable_switch(client):
+    """bot_enabled=0 on the space → 403 even for a valid bot token."""
+    h = _auth(client._tok)
+    sid = await _new_space_with_bots_enabled(client, h)
+    r = await client.post(
+        f"/api/spaces/{sid}/bots",
+        json={
+            "scope": "space",
+            "slug": "doorbell",
+            "name": "Doorbell",
+            "icon": "🔔",
+        },
+        headers=h,
+    )
+    token = (await r.json())["token"]
+    await client._db.enqueue("UPDATE spaces SET bot_enabled=0 WHERE id=?", (sid,))
+    r = await client.post(
+        f"/api/bot-bridge/spaces/{sid}",
+        json={"title": None, "message": "hi"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status == 403
+
+
+async def test_bot_bridge_rejects_slug_collision(client):
+    """Two space-scope bots with the same slug → 409."""
+    h = _auth(client._tok)
+    sid = await _new_space_with_bots_enabled(client, h)
+    for expected in (201, 409):
+        r = await client.post(
+            f"/api/spaces/{sid}/bots",
+            json={
+                "scope": "space",
+                "slug": "doorbell",
+                "name": "Doorbell",
+                "icon": "🔔",
+            },
+            headers=h,
+        )
+        assert r.status == expected

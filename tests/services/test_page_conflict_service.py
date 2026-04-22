@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.repositories.page_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.page_repo import (
     PageNotFoundError,
     SqlitePageRepo,
     new_page,
 )
-from social_home.services.page_conflict_service import (
+from socialhome.services.page_conflict_service import (
     CONFLICT_HEAD,
     CONFLICT_SEP,
     CONFLICT_TAIL,

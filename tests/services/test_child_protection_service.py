@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.space import SpacePermissionError
-from social_home.infrastructure.event_bus import EventBus
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.space import SpacePermissionError
+from socialhome.infrastructure.event_bus import EventBus
 from datetime import datetime, timezone
 
-from social_home.domain.conversation import Conversation, ConversationType
-from social_home.repositories.conversation_repo import SqliteConversationRepo
-from social_home.repositories.cp_repo import SqliteCpRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.child_protection_service import (
+from socialhome.domain.conversation import Conversation, ConversationType
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
+from socialhome.repositories.cp_repo import SqliteCpRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.child_protection_service import (
     ChildProtectionService,
     GuardianRequiredError,
 )
@@ -596,7 +596,7 @@ async def _seed_conv(db, *, conv_id: str, members: list[str]) -> None:
     )
     await db.enqueue(
         "INSERT INTO conversations(id, type, name, created_at,"
-        " last_message_at, notify_enabled) VALUES(?, 'dm', NULL, ?, NULL, 0)",
+        " last_message_at, bot_enabled) VALUES(?, 'dm', NULL, ?, NULL, 0)",
         (c.id, c.created_at.isoformat()),
     )
     for u in members:

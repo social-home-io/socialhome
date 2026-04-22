@@ -1,4 +1,4 @@
-"""Tests for social_home.repositories.page_repo."""
+"""Tests for socialhome.repositories.page_repo."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.repositories.page_repo import (
+from socialhome.repositories.page_repo import (
     PageLockError,
     PageNotFoundError,
     PageVersion,
@@ -19,8 +19,8 @@ from social_home.repositories.page_repo import (
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a page repo over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
@@ -45,7 +45,7 @@ async def env(tmp_dir):
 
 async def test_page_space_scope(env):
     """Space pages are stored separately from household pages."""
-    from social_home.crypto import generate_identity_keypair as _gkp
+    from socialhome.crypto import generate_identity_keypair as _gkp
 
     kp_sp = _gkp()
     sp_id = uuid.uuid4().hex

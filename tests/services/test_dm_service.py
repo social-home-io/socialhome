@@ -1,17 +1,17 @@
-"""Tests for social_home.services.dm_service."""
+"""Tests for socialhome.services.dm_service."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.domain.conversation import ConversationType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.conversation_repo import SqliteConversationRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.dm_service import DmService
-from social_home.services.user_service import UserService
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.conversation import ConversationType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.dm_service import DmService
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture
@@ -167,7 +167,7 @@ async def test_edit_empty_content(stack):
 
 
 async def test_send_message_rejects_over_max_length(stack):
-    from social_home.services.dm_service import MAX_DM_LENGTH
+    from socialhome.services.dm_service import MAX_DM_LENGTH
 
     await stack.provision_user("a")
     await stack.provision_user("b")
@@ -182,7 +182,7 @@ async def test_send_message_rejects_over_max_length(stack):
 
 
 async def test_send_message_at_max_length_succeeds(stack):
-    from social_home.services.dm_service import MAX_DM_LENGTH
+    from socialhome.services.dm_service import MAX_DM_LENGTH
 
     await stack.provision_user("a")
     await stack.provision_user("b")
@@ -196,7 +196,7 @@ async def test_send_message_at_max_length_succeeds(stack):
 
 
 async def test_edit_message_rejects_over_max_length(stack):
-    from social_home.services.dm_service import MAX_DM_LENGTH
+    from socialhome.services.dm_service import MAX_DM_LENGTH
 
     await stack.provision_user("a")
     await stack.provision_user("b")
@@ -246,7 +246,7 @@ class _FakeFederationRepo:
 def _confirmed_peer(instance_id: str):
     from types import SimpleNamespace
 
-    from social_home.domain.federation import PairingStatus
+    from socialhome.domain.federation import PairingStatus
 
     return SimpleNamespace(id=instance_id, status=PairingStatus.CONFIRMED)
 
@@ -254,7 +254,7 @@ def _confirmed_peer(instance_id: str):
 def _unconfirmed_peer(instance_id: str):
     from types import SimpleNamespace
 
-    from social_home.domain.federation import PairingStatus
+    from socialhome.domain.federation import PairingStatus
 
     return SimpleNamespace(id=instance_id, status=PairingStatus.PENDING_SENT)
 
@@ -262,7 +262,7 @@ def _unconfirmed_peer(instance_id: str):
 async def _attach_remote_member(stack, *, conversation_id, instance_id, username):
     from datetime import datetime, timezone
 
-    from social_home.domain.conversation import RemoteConversationMember
+    from socialhome.domain.conversation import RemoteConversationMember
 
     await stack.dm_svc._convos.add_remote_member(  # noqa: SLF001
         RemoteConversationMember(
@@ -290,7 +290,7 @@ async def test_send_federates_to_confirmed_peer(stack):
     )
     await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
 
-    from social_home.domain.federation import FederationEventType
+    from socialhome.domain.federation import FederationEventType
 
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     assert len(sent) == 1
@@ -355,7 +355,7 @@ async def test_edit_resends_dm_message_with_edited_at(stack):
 
 
 async def test_delete_federates_deletion(stack):
-    from social_home.domain.federation import FederationEventType
+    from socialhome.domain.federation import FederationEventType
 
     fed = _FakeFederationService()
     repo = _FakeFederationRepo({"peer-a": _confirmed_peer("peer-a")})
@@ -378,7 +378,7 @@ async def test_delete_federates_deletion(stack):
 
 
 async def test_reactions_federate_add_and_remove(stack):
-    from social_home.domain.federation import FederationEventType
+    from socialhome.domain.federation import FederationEventType
 
     fed = _FakeFederationService()
     repo = _FakeFederationRepo({"peer-a": _confirmed_peer("peer-a")})
@@ -445,7 +445,7 @@ async def test_fan_out_mixes_confirmed_and_unconfirmed_peers(stack):
         username="carl-new",
     )
     await stack.dm_svc.send_message(gdm.id, sender_username="anna", content="hi")
-    from social_home.domain.federation import FederationEventType
+    from socialhome.domain.federation import FederationEventType
 
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     # Only the confirmed peer received the event. peer-new takes the DM
@@ -479,7 +479,7 @@ async def test_fan_out_deduplicates_same_instance(stack):
         username="carl-remote",
     )
     await stack.dm_svc.send_message(gdm.id, sender_username="anna", content="hi")
-    from social_home.domain.federation import FederationEventType
+    from socialhome.domain.federation import FederationEventType
 
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     assert len(sent) == 1

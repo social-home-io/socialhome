@@ -1,4 +1,4 @@
-"""Tests for social_home.repositories.outbox_repo and infrastructure.outbox_processor."""
+"""Tests for socialhome.repositories.outbox_repo and infrastructure.outbox_processor."""
 
 from __future__ import annotations
 
@@ -6,20 +6,20 @@ import asyncio
 
 import pytest
 
-from social_home.domain.federation import FederationEventType
-from social_home.infrastructure.outbox_processor import (
+from socialhome.domain.federation import FederationEventType
+from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
     OutboxProcessor,
 )
-from social_home.repositories.outbox_repo import SqliteOutboxRepo
+from socialhome.repositories.outbox_repo import SqliteOutboxRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with an outbox repo over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

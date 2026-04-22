@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.presence import LocationUpdate, truncate_coord
-from social_home.repositories.presence_repo import SqlitePresenceRepo
-from social_home.services.presence_service import PresenceService
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.presence import LocationUpdate, truncate_coord
+from socialhome.repositories.presence_repo import SqlitePresenceRepo
+from socialhome.services.presence_service import PresenceService
 
 
 pytestmark = pytest.mark.security

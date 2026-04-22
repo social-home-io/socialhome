@@ -1,7 +1,7 @@
 """Coverage fill for the aiolibdatachannel-native transport.
 
 Exercises helpers and internal drain loops in
-:mod:`social_home.federation.transport` that end-to-end tests don't
+:mod:`socialhome.federation.transport` that end-to-end tests don't
 hit directly. Uses the fake aiolibdatachannel module installed by
 ``tests/conftest.py``.
 """
@@ -12,8 +12,8 @@ import asyncio
 
 import aiolibdatachannel as rtc
 
-from social_home.domain.federation import FederationEventType
-from social_home.federation.transport import (
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.transport import (
     _RtcPeer,
     _build_rtc_config,
 )

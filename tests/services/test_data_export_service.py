@@ -6,12 +6,12 @@ import json
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.services.data_export_service import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.services.data_export_service import (
     DataExport,
     DataExportService,
     EXPORTABLE_QUERIES,
@@ -106,7 +106,7 @@ async def test_export_skips_table_that_doesnt_exist(env, monkeypatch):
     _, svc = env
     # Inject a fake table reference at the start.
     monkeypatch.setattr(
-        "social_home.services.data_export_service.EXPORTABLE_QUERIES",
+        "socialhome.services.data_export_service.EXPORTABLE_QUERIES",
         (("definitely_not_a_table", "WHERE x = ?"),) + EXPORTABLE_QUERIES,
     )
     out = await svc.export_for_user("alice-id")

@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from social_home.domain.events import PairingIntroRelayReceived
-from social_home.domain.federation import FederationEventType
-from social_home.federation.federation_service import FederationService
+from socialhome.domain.events import PairingIntroRelayReceived
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.federation_service import FederationService
 
 
 def _event(

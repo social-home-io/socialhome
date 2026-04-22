@@ -8,22 +8,22 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation.federation_service import FederationService
-from social_home.federation.sync_manager import SyncSessionManager
-from social_home.infrastructure import EventBus, IdempotencyCache, KeyManager
-from social_home.repositories import SqliteFederationRepo, SqliteOutboxRepo
+from socialhome.federation.federation_service import FederationService
+from socialhome.federation.sync_manager import SyncSessionManager
+from socialhome.infrastructure import EventBus, IdempotencyCache, KeyManager
+from socialhome.repositories import SqliteFederationRepo, SqliteOutboxRepo
 
 
 # ─── Test environment ────────────────────────────────────────────────────
@@ -403,7 +403,7 @@ async def test_dispatch_presence_updated(env):
 async def test_dispatch_space_config_changed_publishes_domain_event(env):
     svc, _, _ = env
     received = []
-    from social_home.domain.events import SpaceConfigChanged
+    from socialhome.domain.events import SpaceConfigChanged
 
     svc._bus.subscribe(SpaceConfigChanged, lambda e: received.append(e))
     await svc._dispatch_event(

@@ -83,14 +83,14 @@ encrypted payload. GFS cannot tally votes even on public spaces.
 
 ## Implementation
 
-- `social_home/services/post_service.py` — space and household post CRUD.
-- `social_home/services/comment_service.py` — comment CRUD.
-- `social_home/services/reaction_service.py` — reaction toggling.
-- `social_home/services/poll_service.py`,
+- `socialhome/services/post_service.py` — space and household post CRUD.
+- `socialhome/services/comment_service.py` — comment CRUD.
+- `socialhome/services/reaction_service.py` — reaction toggling.
+- `socialhome/services/poll_service.py`,
   `schedule_poll_service.py` — polls.
-- `social_home/services/federation_inbound/space_content.py` —
+- `socialhome/services/federation_inbound/space_content.py` —
   inbound handlers for all of the above.
-- `social_home/routes/post_routes.py`, `comment_routes.py`,
+- `socialhome/routes/post_routes.py`, `comment_routes.py`,
   `reaction_routes.py` — REST endpoints.
 
 ## Spec references

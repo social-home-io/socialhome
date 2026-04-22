@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.global_server.config import (
+from socialhome.global_server.config import (
     GfsConfig,
     set_password_in_toml,
     write_example_config,

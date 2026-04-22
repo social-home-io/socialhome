@@ -1,11 +1,11 @@
-"""Tests for social_home.platform.ha.supervisor."""
+"""Tests for socialhome.platform.ha.supervisor."""
 
 from __future__ import annotations
 
 import pytest
 from aiohttp import web
 
-from social_home.platform.ha.supervisor import SupervisorClient
+from socialhome.platform.ha.supervisor import SupervisorClient
 
 
 @pytest.fixture
@@ -79,9 +79,9 @@ async def test_get_owner_username_returns_none_when_no_owner(client, sv_server):
 async def test_push_discovery_true_on_2xx(client, sv_server):
     _, captured = sv_server
     ok = await client.push_discovery(
-        {"service": "social_home", "config": {"token": "abc"}},
+        {"service": "socialhome", "config": {"token": "abc"}},
     )
     assert ok is True
     assert captured["discovery"] == [
-        {"service": "social_home", "config": {"token": "abc"}},
+        {"service": "socialhome", "config": {"token": "abc"}},
     ]

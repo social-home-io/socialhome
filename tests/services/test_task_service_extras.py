@@ -9,10 +9,10 @@ from datetime import date, timedelta
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
-from social_home.services.task_service import SpaceTaskService, TaskService
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
+from socialhome.services.task_service import SpaceTaskService, TaskService
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""Tests for social_home.infrastructure.key_manager."""
+"""Tests for socialhome.infrastructure.key_manager."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from social_home.infrastructure.key_manager import KeyManager, KeyManagerError
+from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 
 
 def test_encrypt_decrypt():

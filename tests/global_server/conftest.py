@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
+from socialhome.db.database import AsyncDatabase
 
 _GFS_MIGRATIONS = Path(__file__).resolve().parent.parent.parent / (
-    "social_home/global_server/migrations"
+    "socialhome/global_server/migrations"
 )
 
 

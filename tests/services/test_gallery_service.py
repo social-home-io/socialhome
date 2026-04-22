@@ -5,16 +5,16 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.config import Config
-from social_home.crypto import (
+from socialhome.config import Config
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.gallery_repo import SqliteGalleryRepo
-from social_home.repositories.space_repo import SqliteSpaceRepo
-from social_home.services.gallery_service import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.gallery_service import (
     DESCRIPTION_MAX,
     GalleryNotFoundError,
     GalleryPermissionError,

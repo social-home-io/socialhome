@@ -16,7 +16,7 @@ permissions:
 jobs:
   # ── Python package → PyPI via trusted publisher (OIDC) ──────────────────
   pypi:
-    name: Publish social-home to PyPI
+    name: Publish socialhome to PyPI
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -33,7 +33,7 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # Trusted publisher — configure at pypi.org/manage/account/publishing/
-        # Project: social-home, Workflow: publish.yml, Environment: pypi
+        # Project: socialhome, Workflow: publish.yml, Environment: pypi
 
   # ── Docker core image → GHCR ────────────────────────────────────────────
   docker-core:
@@ -66,8 +66,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/social-home-io/core:latest
-            ghcr.io/social-home-io/core:${{ steps.tag.outputs.ref }}
+            ghcr.io/social-home-io/socialhome:latest
+            ghcr.io/social-home-io/socialhome:${{ steps.tag.outputs.ref }}
           cache-from: type=gha
           cache-to:   type=gha,mode=max
 

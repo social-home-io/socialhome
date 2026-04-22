@@ -7,23 +7,23 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from social_home.domain.events import (
+from socialhome.domain.events import (
     CommentAdded,
     DmMessageCreated,
     PostDeleted,
     SpacePostCreated,
     UserStatusChanged,
 )
-from social_home.domain.federation import FederationEvent, FederationEventType
-from social_home.domain.post import Post, PostType
-from social_home.domain.space import JoinMode, SpaceType
-from social_home.repositories import (
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.post import Post, PostType
+from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
     SqliteSpaceRepo,
     SqliteUserRepo,
 )
-from social_home.services.federation_inbound_service import (
+from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
 
@@ -494,8 +494,8 @@ async def test_space_report_inbound_persists_remote_report(db, bus):
     """Inbound SPACE_REPORT calls through to ReportService, landing a row
     with ``reporter_instance_id = event.from_instance``.
     """
-    from social_home.repositories.report_repo import SqliteReportRepo
-    from social_home.services.report_service import ReportService
+    from socialhome.repositories.report_repo import SqliteReportRepo
+    from socialhome.services.report_service import ReportService
 
     report_repo = SqliteReportRepo(db)
     report_service = ReportService(

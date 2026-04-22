@@ -7,9 +7,9 @@ from datetime import date, timedelta
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.domain.events import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import (
     TaskAssigned,
     TaskCompleted,
     TaskCreated,
@@ -19,10 +19,10 @@ from social_home.domain.events import (
     TaskListUpdated,
     TaskUpdated,
 )
-from social_home.domain.task import RecurrenceRule
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
-from social_home.services.task_service import (
+from socialhome.domain.task import RecurrenceRule
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
+from socialhome.services.task_service import (
     SpaceTaskService,
     TaskService,
     _next_occurrence,

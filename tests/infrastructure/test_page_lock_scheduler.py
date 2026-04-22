@@ -6,11 +6,11 @@ import asyncio
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.page_lock_scheduler import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.page_lock_scheduler import (
     PageLockExpiryScheduler,
 )
-from social_home.repositories.page_repo import SqlitePageRepo
+from socialhome.repositories.page_repo import SqlitePageRepo
 
 
 @pytest.fixture

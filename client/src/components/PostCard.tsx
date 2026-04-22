@@ -5,6 +5,7 @@
 import { useState } from 'preact/hooks'
 import { Avatar } from './Avatar'
 import { BazaarPostBody } from './BazaarPostBody'
+import { BotAvatar } from './BotAvatar'
 import { FileRenderer, VideoRenderer, ImageRenderer } from './FileRenderer'
 import { renderMarkdown } from './markdown'
 import { openReport } from './ReportDialog'
@@ -13,6 +14,14 @@ import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { FeedPost } from '@/types'
+
+// DB-level marker for posts created by BotBridgeService. Matches
+// socialhome.domain.user.SYSTEM_AUTHOR on the backend.
+const SYSTEM_AUTHOR = 'system-integration'
+
+function isBotPost(post: FeedPost): boolean {
+  return post.author === SYSTEM_AUTHOR
+}
 
 interface PostCardProps {
   post: FeedPost
@@ -55,16 +64,37 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, show
   const hasMenu = post.content !== null
 
   const spaceId = showSpaceBadge ?? null
-  const avatarUrl = resolveAvatar(spaceId, post.author, null)
-  const authorName = resolveDisplayName(spaceId, post.author, post.author)
+  const bot = isBotPost(post) ? post.bot ?? null : null
+  const avatarUrl = bot ? null : resolveAvatar(spaceId, post.author, null)
+  const authorName = bot
+    ? bot.name
+    : resolveDisplayName(spaceId, post.author, post.author)
+  // Attribution subtext under the bot name:
+  //   scope=space  → "via Home Assistant" (shared household voice)
+  //   scope=member → "via {member.display_name}" (personal automation)
+  //   bot missing  → "via Home Assistant" fallback for posts whose bot was deleted
+  const botAttribution = !isBotPost(post)
+    ? null
+    : bot === null
+      ? 'via Home Assistant'
+      : bot.scope === 'space'
+        ? 'via Home Assistant'
+        : `via ${bot.created_by_display_name}`
 
   return (
     <>
       {/* Header */}
-      <div class="sh-post-header">
-        <Avatar name={authorName} src={avatarUrl} size={40} />
+      <div class={`sh-post-header ${isBotPost(post) ? 'sh-post-header--bot' : ''}`}>
+        {isBotPost(post) ? (
+          <BotAvatar bot={bot} size={40} />
+        ) : (
+          <Avatar name={authorName} src={avatarUrl} size={40} />
+        )}
         <div class="sh-post-meta">
           <span class="sh-post-author">{authorName}</span>
+          {botAttribution && (
+            <span class="sh-post-bot-attribution">{botAttribution}</span>
+          )}
           <span class="sh-post-time">{timeAgo}</span>
           {post.edited_at && <span class="sh-post-edited">(edited)</span>}
         </div>
@@ -166,8 +196,11 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, show
         )}
       </div>
 
-      {/* Actions */}
-      {post.content !== null && (
+      {/* Actions — bot posts intentionally hide the reaction bar and
+          comment button. They're system notifications, not conversation
+          starters; reactions/comments would muddy the signal and create
+          follow-up threads that can't be routed back to an HA entity. */}
+      {post.content !== null && !isBotPost(post) && (
         <div class="sh-post-actions">
           <div class="sh-reactions">
             {Object.entries(post.reactions || {}).map(([emoji, users]) => (

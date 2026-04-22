@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 
-from social_home.i18n import Catalog
+from socialhome.i18n import Catalog
 
 
 # ─── Construction ────────────────────────────────────────────────────────
@@ -101,9 +101,9 @@ def test_from_directory_skips_invalid_json(tmp_path):
 def test_bundled_messages_loadable():
     """Sanity: the bundled en/de/fr files all parse."""
     from pathlib import Path
-    import social_home
+    import socialhome
 
-    base = Path(social_home.__file__).parent / "i18n" / "messages"
+    base = Path(socialhome.__file__).parent / "i18n" / "messages"
     c = Catalog.from_directory(base)
     assert "en" in c.loaded_locales
     assert "de" in c.loaded_locales

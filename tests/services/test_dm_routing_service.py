@@ -7,20 +7,20 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.repositories.dm_routing_repo import SqliteDmRoutingRepo
-from social_home.repositories.federation_repo import SqliteFederationRepo
-from social_home.services.dm_routing_service import (
+from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.services.dm_routing_service import (
     DEDUP_TTL_SECONDS,
     MAX_HOPS,
     MAX_SEARCH_NODES,

@@ -7,17 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from social_home.domain.events import PairingConfirmed
-from social_home.domain.federation import FederationEventType, PairingStatus
-from social_home.domain.space import (
+from socialhome.domain.events import PairingConfirmed
+from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
     SpaceType,
 )
-from social_home.federation.sync.space.scheduler import SpaceSyncScheduler
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.reconnect_queue import ReconnectSyncQueue
+from socialhome.federation.sync.space.scheduler import SpaceSyncScheduler
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.reconnect_queue import ReconnectSyncQueue
 
 
 class _FakeFederation:

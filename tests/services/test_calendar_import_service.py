@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.services.calendar_import_service import (
+from socialhome.services.calendar_import_service import (
     AICalendarImportError,
     AICalendarImportParseError,
     AICalendarImportUnavailable,

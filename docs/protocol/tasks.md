@@ -71,14 +71,14 @@ envelopes but still lets every member see them.
 
 ## Implementation
 
-- `social_home/services/task_service.py`,
-  `social_home/services/space_task_service.py`.
-- `social_home/services/federation_inbound/space_content.py` —
+- `socialhome/services/task_service.py`,
+  `socialhome/services/space_task_service.py`.
+- `socialhome/services/federation_inbound/space_content.py` —
   `SPACE_TASK_*` handlers.
-- `social_home/repositories/task_repo.py` — `SqliteTaskRepo`,
+- `socialhome/repositories/task_repo.py` — `SqliteTaskRepo`,
   `SqliteSpaceTaskRepo`.
-- `social_home/utils/rrule.py` — recurrence rule parser.
-- `social_home/routes/task_routes.py` — REST endpoints.
+- `socialhome/utils/rrule.py` — recurrence rule parser.
+- `socialhome/routes/task_routes.py` — REST endpoints.
 
 ## Spec references
 

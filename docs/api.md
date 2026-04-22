@@ -138,6 +138,20 @@ events these routes fire.
 | GET / POST / DELETE | `/api/spaces/{id}/cover` | Space cover image. |
 | GET / PATCH | `/api/spaces/{id}/theme` | Space-level theme. |
 
+**Bot personas (bot-bridge)**
+
+Named bots that post into a space via the bot-bridge. Each bot has its
+own Bearer token; see the "Bot-bridge" section under *Integrations* for
+how those tokens are used to post.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/spaces/{id}/bots` | List bots visible to the caller (all members see all bots). |
+| POST | `/api/spaces/{id}/bots` | Create a bot. Body: `{scope, slug, name, icon}`. Admin required for `scope="space"`. Returns `{...bot, token}` — token is shown once. |
+| PATCH | `/api/spaces/{id}/bots/{bot_id}` | Update `name`/`icon`. Owner/admin for any bot; members for their own `scope="member"` bots. |
+| DELETE | `/api/spaces/{id}/bots/{bot_id}` | Delete. Same permissions as PATCH. Existing posts remain (author falls back to "Home Assistant"). |
+| POST | `/api/spaces/{id}/bots/{bot_id}/token` | Rotate the Bearer token. Returns the new plaintext token — show once. |
+
 **Space-scoped content** — posts, comments, reactions, pages,
 tasks, calendar, stickies, gallery, polls — follow identical
 patterns (`GET/POST/PATCH/DELETE`). See the per-feature endpoint
@@ -286,7 +300,7 @@ Same CRUD shape:
 
 ## HFS — Child protection
 
-`/api/cp/*` — see `social_home/routes/child_protection_routes.py`.
+`/api/cp/*` — see `socialhome/routes/child_protection_routes.py`.
 Guardian-scoped operations: manage guardians, list minor's spaces and
 conversations, set age gates, read guardian audit logs. All require
 the minor or their guardian.
@@ -298,6 +312,21 @@ the minor or their guardian.
 | GET / POST | `/api/reports` | Own reports. |
 | GET | `/api/admin/reports` | Admin queue. |
 | PATCH | `/api/admin/reports/{id}/resolve` | Resolve a report. |
+
+## HFS — Bot-bridge (Home Assistant → Social Home)
+
+Lets HA automations post into spaces and DMs via HTTP. See
+[protocol/bot-bridge.md](./protocol/bot-bridge.md) if present; the
+CRUD surface for the bot personas themselves is under
+**Spaces → Bot personas** above.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/bot-bridge/spaces/{space_id}` | **Per-bot** Bearer token (from `POST /api/spaces/{id}/bots`). User API tokens are rejected. | Post as the SpaceBot the token was issued to. Body: `{title?, message}`. Fails 403 when `space.bot_enabled=false`. |
+| POST | `/api/bot-bridge/conversations/{conversation_id}` | User Bearer token. | Post a system message into a DM. Fails 403 when `conversation.bot_enabled=false`. |
+
+Both endpoints reject requests carrying `X-Ingress-User` (403) so a
+UI-authenticated user cannot impersonate the integration.
 
 ## HFS — Storage, backup, misc
 

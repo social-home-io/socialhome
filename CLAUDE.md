@@ -1,4 +1,4 @@
-# CLAUDE.md — social-home
+# CLAUDE.md — socialhome
 
 This is the Claude Code instruction file for the Social Home core application.
 Read spec_work.md (the project specification) before making any changes.
@@ -8,13 +8,13 @@ The spec is the source of truth — if code and spec disagree, fix the code.
 
 - **Platform adapters:** `SOCIAL_HOME_MODE=ha` → `HomeAssistantAdapter`,
   `=standalone` → `StandaloneAdapter`. ALL adapter-specific code lives in
-  `social_home/platform/`. Never branch on `config.mode` outside `platform/`
+  `socialhome/platform/`. Never branch on `config.mode` outside `platform/`
   and `config.py`. Never `isinstance`-check concrete adapters — use protocol
   methods (e.g. `adapter.supports_bearer_token_auth`). Adapter lifecycle hooks
   (`on_startup`, `on_cleanup`, `get_extra_services`, `get_extra_routes`) handle
   mode-specific wiring. Platform events for HA automations are defined in
   `HaBridgeService` — add new event types there, not in `app.py`.
-- **Service layer:** all business logic lives in `social_home/services/`.
+- **Service layer:** all business logic lives in `socialhome/services/`.
   Route handlers in `routes/` are thin `BaseView` subclasses — one view class
   per REST resource, dispatched by HTTP method (`get()`, `post()`, `patch()`,
   `delete()`). Use `self.svc(key)` for service access, `self.user` for auth,
@@ -120,13 +120,13 @@ The spec is the source of truth — if code and spec disagree, fix the code.
 - Protocol tests in `tests/protocol/` are a **release blocker** — never skip them.
 - Run `pytest tests/protocol/ -m security` before every commit touching federation
   or presence code.
-- Coverage gate: 90% branch coverage. `pytest --cov=social_home --cov-fail-under=90`.
+- Coverage gate: 90% branch coverage. `pytest --cov=socialhome --cov-fail-under=90`.
 
 ### Pre-commit hooks
 
 - Config: `.pre-commit-config.yaml`. Install once per clone with
   `pip install pre-commit && pre-commit install`.
-- Hooks: ruff (lint + format), mypy (on `social_home/`), frontend
+- Hooks: ruff (lint + format), mypy (on `socialhome/`), frontend
   ESLint + `tsc --noEmit` on staged TS/TSX, and `pnpm build` at
   pre-push time.
 - If a hook fails, fix the underlying issue — never pass `--no-verify`.
@@ -136,7 +136,7 @@ The spec is the source of truth — if code and spec disagree, fix the code.
 - Triggered by pushing a `v*.*.*` git tag or publishing a GitHub
   Release. `.github/workflows/publish.yml` runs three jobs in
   parallel: PyPI (via OIDC trusted publishing), core Docker image
-  to `ghcr.io/social-home-io/core`, and GFS Docker image to
+  to `ghcr.io/social-home-io/socialhome`, and GFS Docker image to
   `ghcr.io/social-home-io/gfs`.
 - Bump the version in `pyproject.toml` before tagging.
 

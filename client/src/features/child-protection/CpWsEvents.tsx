@@ -5,7 +5,7 @@
  * toast notifications so admins + guardians see the effect of an action
  * immediately, even when it was triggered from another device.
  *
- * Event names match :mod:`social_home.services.realtime_service`:
+ * Event names match :mod:`socialhome.services.realtime_service`:
  *
  * * ``cp.protection_enabled``    — admin turned protection on for X
  * * ``cp.protection_disabled``   — admin turned protection off for X

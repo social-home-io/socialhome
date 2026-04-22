@@ -6,20 +6,20 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.domain.events import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import (
     CommentAdded,
     SpacePostModerated,
 )
-from social_home.domain.post import (
+from socialhome.domain.post import (
     Comment,
     CommentType,
     Post,
     PostType,
 )
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.search_repo import SqliteSearchRepo
-from social_home.services.search_service import SearchService
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.search_repo import SqliteSearchRepo
+from socialhome.services.search_service import SearchService
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ async def test_comment_added_does_not_index_separately(env):
 
 async def test_space_post_moderated_drops_index_entry(env):
     svc, bus, _ = env
-    from social_home.domain.events import SpacePostCreated
+    from socialhome.domain.events import SpacePostCreated
 
     await bus.publish(
         SpacePostCreated(post=_post("sp1", "moderated text"), space_id="sp-A")

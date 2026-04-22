@@ -1,18 +1,18 @@
-"""Tests for social_home.services.feed_service."""
+"""Tests for socialhome.services.feed_service."""
 
 from __future__ import annotations
 
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.domain.post import FileMeta, PostType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.post_repo import SqlitePostRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.feed_service import FeedService
-from social_home.services.user_service import UserService
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.post import FileMeta, PostType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.post_repo import SqlitePostRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.feed_service import FeedService
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture

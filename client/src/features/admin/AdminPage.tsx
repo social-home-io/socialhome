@@ -145,7 +145,7 @@ function MembersTab() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `social-home-export-${u.username}.json`
+      a.download = `socialhome-export-${u.username}.json`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
@@ -667,7 +667,7 @@ function BackupTab() {
       const a = document.createElement('a')
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       a.href = url
-      a.download = `social-home-backup-${stamp}.tar.gz`
+      a.download = `socialhome-backup-${stamp}.tar.gz`
       document.body.appendChild(a); a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)

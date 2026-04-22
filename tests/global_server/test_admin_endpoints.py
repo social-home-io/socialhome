@@ -7,15 +7,15 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
-from social_home.global_server.admin import hash_password
-from social_home.global_server.app_keys import (
+from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
+from socialhome.global_server.admin import hash_password
+from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.domain import ClientInstance, GlobalSpace
-from social_home.global_server.server import create_gfs_app
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.server import create_gfs_app
 
 
 def _config(tmp_dir):
@@ -261,7 +261,7 @@ async def test_threshold_crossing_auto_bans_space(client):
     # Lower the threshold for the test.
     await admin_repo.set_config("fraud_threshold", "2")
     # Rebuild the admin service with the new threshold (it cached at init).
-    from social_home.global_server.app_keys import gfs_admin_service_key
+    from socialhome.global_server.app_keys import gfs_admin_service_key
 
     app[gfs_admin_service_key]._fraud_threshold = 2
 
@@ -364,7 +364,7 @@ async def test_appeal_roundtrip(client):
     fed_repo = app[gfs_fed_repo_key]
     admin_svc = app[
         __import__(
-            "social_home.global_server.app_keys", fromlist=["*"]
+            "socialhome.global_server.app_keys", fromlist=["*"]
         ).gfs_admin_service_key
     ]
     # Seed a banned space.
@@ -417,7 +417,7 @@ async def test_appeal_decide_bad_action_is_422(client):
     app = client._app
     admin_svc = app[
         __import__(
-            "social_home.global_server.app_keys", fromlist=["*"]
+            "socialhome.global_server.app_keys", fromlist=["*"]
         ).gfs_admin_service_key
     ]
     appeal = await admin_svc.record_appeal(
@@ -648,7 +648,7 @@ async def test_fraud_report_reporter_cap_rate_limits(client, monkeypatch):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     # Tighten the cap for this test.
-    from social_home.global_server import admin_service as _as
+    from socialhome.global_server import admin_service as _as
 
     monkeypatch.setattr(_as, "MAX_REPORTS_PER_REPORTER_PER_DAY", 2)
     kp = generate_identity_keypair()
@@ -680,7 +680,7 @@ async def test_list_appeals_with_status_filter(client):
     app = client._app
     admin_svc = app[
         __import__(
-            "social_home.global_server.app_keys", fromlist=["*"]
+            "socialhome.global_server.app_keys", fromlist=["*"]
         ).gfs_admin_service_key
     ]
     await admin_svc.record_appeal(
@@ -770,7 +770,7 @@ async def test_header_image_upload_writes_file_and_updates_config(
     assert resp.status == 200
     body = await resp.json()
     assert body["header_image_file"].endswith(".webp")
-    from social_home.global_server.app_keys import gfs_config_key
+    from socialhome.global_server.app_keys import gfs_config_key
 
     cfg = app[gfs_config_key]
     assert (Path(cfg.media_dir) / body["header_image_file"]).is_file()

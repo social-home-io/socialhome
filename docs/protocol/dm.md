@@ -108,12 +108,12 @@ This applies even when the push notification service is GFS-mediated.
 
 ## Implementation
 
-- `social_home/services/dm_service.py` — CRUD + history.
-- `social_home/services/federation_inbound/dm.py` — inbound handlers.
-- `social_home/federation/sync/dm_history/` — history pull machinery.
-- `social_home/repositories/conversation_repo.py`,
+- `socialhome/services/dm_service.py` — CRUD + history.
+- `socialhome/services/federation_inbound/dm.py` — inbound handlers.
+- `socialhome/federation/sync/dm_history/` — history pull machinery.
+- `socialhome/repositories/conversation_repo.py`,
   `conversation_message_repo.py`.
-- `social_home/routes/conversation_routes.py`.
+- `socialhome/routes/conversation_routes.py`.
 
 ## Spec references
 

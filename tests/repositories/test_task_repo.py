@@ -6,15 +6,15 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from social_home.domain.task import Task, TaskList, TaskStatus
-from social_home.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
+from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Env with task repos over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

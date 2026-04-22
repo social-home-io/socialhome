@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 
-from social_home.auth import sha256_token_hash
+from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
 

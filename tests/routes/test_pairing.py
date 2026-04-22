@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from social_home.app_keys import federation_repo_key
-from social_home.domain.federation import (
+from socialhome.app_keys import federation_repo_key
+from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
@@ -217,9 +217,9 @@ async def test_relay_decline_unknown_returns_404(client):
 
 async def test_relay_list_approve_decline_full_flow(client):
     """Seed the queue via the bus, then approve / decline via HTTP."""
-    from social_home.app_keys import pairing_relay_queue_key
-    from social_home.domain.events import PairingIntroRelayReceived
-    from social_home.infrastructure.event_bus import EventBus
+    from socialhome.app_keys import pairing_relay_queue_key
+    from socialhome.domain.events import PairingIntroRelayReceived
+    from socialhome.infrastructure.event_bus import EventBus
 
     queue = client.app[pairing_relay_queue_key]
     # Inject two pending requests directly via the bus the queue subscribed to.
@@ -264,9 +264,9 @@ async def test_relay_list_approve_decline_full_flow(client):
 
 async def test_relay_requests_require_admin(client):
     """Non-admin user gets 403."""
-    from social_home.app_keys import db_key as _db_key
-    from social_home.auth import sha256_token_hash
-    from social_home.crypto import derive_user_id
+    from socialhome.app_keys import db_key as _db_key
+    from socialhome.auth import sha256_token_hash
+    from socialhome.crypto import derive_user_id
 
     db = client.app[_db_key]
     row = await db.fetchone(

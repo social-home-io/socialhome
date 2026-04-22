@@ -1,8 +1,8 @@
-"""Tests for social_home.domain.federation."""
+"""Tests for socialhome.domain.federation."""
 
 from __future__ import annotations
 
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     BroadcastResult,
     DecryptedPayload,
     DeliveryResult,

@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.global_server import create_gfs_app
+from socialhome.global_server import create_gfs_app
 
 
 @pytest.fixture
@@ -112,7 +112,7 @@ async def test_register_missing_field_returns_400(gfs_client):
 
 async def test_register_returns_pending_when_auto_accept_off(gfs_client):
     """When policy has auto_accept_clients=0 the register response is 'pending'."""
-    from social_home.global_server.app_keys import gfs_admin_repo_key
+    from socialhome.global_server.app_keys import gfs_admin_repo_key
 
     app = gfs_client.server.app
     await app[gfs_admin_repo_key].set_config("auto_accept_clients", "0")

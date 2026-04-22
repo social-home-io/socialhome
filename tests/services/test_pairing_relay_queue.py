@@ -5,9 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-from social_home.domain.events import PairingIntroRelayReceived
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.pairing_relay_queue import (
+from socialhome.domain.events import PairingIntroRelayReceived
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.pairing_relay_queue import (
     PairingRelayQueue,
     _MAX_QUEUE_SIZE,
 )

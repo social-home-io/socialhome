@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation.sync_manager import (
+from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
     MAX_INSTANCE_SYNC_STATUS_SPACES,

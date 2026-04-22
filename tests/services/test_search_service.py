@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.db.database import AsyncDatabase
-from social_home.domain.events import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import (
     PostCreated,
     PostDeleted,
     PostEdited,
@@ -13,14 +13,14 @@ from social_home.domain.events import (
 )
 from datetime import datetime, timezone
 
-from social_home.domain.post import Post, PostType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.search_repo import (
+from socialhome.domain.post import Post, PostType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.search_repo import (
     SCOPE_POST,
     SCOPE_SPACE_POST,
     SqliteSearchRepo,
 )
-from social_home.services.search_service import SearchService
+from socialhome.services.search_service import SearchService
 
 
 @pytest.fixture
@@ -101,8 +101,8 @@ async def test_post_with_empty_content_is_not_indexed(env):
 
 
 async def test_page_created_event_indexes_page(env):
-    from social_home.domain.events import PageCreated
-    from social_home.repositories.search_repo import SCOPE_PAGE
+    from socialhome.domain.events import PageCreated
+    from socialhome.repositories.search_repo import SCOPE_PAGE
 
     svc, bus, _ = env
     await bus.publish(
@@ -120,7 +120,7 @@ async def test_page_created_event_indexes_page(env):
 
 
 async def test_page_updated_event_replaces_index_entry(env):
-    from social_home.domain.events import PageCreated, PageUpdated
+    from socialhome.domain.events import PageCreated, PageUpdated
 
     svc, bus, _ = env
     await bus.publish(
@@ -144,7 +144,7 @@ async def test_page_updated_event_replaces_index_entry(env):
 
 
 async def test_page_deleted_event_removes_index_entry(env):
-    from social_home.domain.events import PageCreated, PageDeleted
+    from socialhome.domain.events import PageCreated, PageDeleted
 
     svc, bus, _ = env
     await bus.publish(
@@ -160,7 +160,7 @@ async def test_page_deleted_event_removes_index_entry(env):
 
 
 async def test_empty_page_not_indexed(env):
-    from social_home.domain.events import PageCreated
+    from socialhome.domain.events import PageCreated
 
     svc, bus, _ = env
     await bus.publish(
@@ -178,8 +178,8 @@ async def test_empty_page_not_indexed(env):
 
 
 async def test_dm_message_is_indexed_with_scope_message(env):
-    from social_home.domain.events import DmMessageCreated
-    from social_home.repositories.search_repo import SCOPE_MESSAGE
+    from socialhome.domain.events import DmMessageCreated
+    from socialhome.repositories.search_repo import SCOPE_MESSAGE
 
     svc, bus, _ = env
     await bus.publish(
@@ -199,7 +199,7 @@ async def test_dm_message_is_indexed_with_scope_message(env):
 
 
 async def test_empty_dm_message_not_indexed(env):
-    from social_home.domain.events import DmMessageCreated
+    from socialhome.domain.events import DmMessageCreated
 
     svc, bus, _ = env
     await bus.publish(

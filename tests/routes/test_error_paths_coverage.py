@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from social_home.auth import sha256_token_hash
+from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
 
@@ -1486,7 +1486,7 @@ def _make_multipart(file_bytes: bytes, *, boundary: str = "BOUND") -> bytes:
 async def test_me_picture_upload_oversized_422(client):
     """Upload exceeding MAX_UPLOAD_BYTES is rejected with 422."""
     # Build a payload larger than the 10 MiB cap (PROFILE_PICTURE_MAX_UPLOAD_BYTES).
-    from social_home.domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
+    from socialhome.domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 
     body = _make_multipart(b"A" * (PROFILE_PICTURE_MAX_UPLOAD_BYTES + 1024))
     r = await client.post(

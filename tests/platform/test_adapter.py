@@ -1,11 +1,11 @@
-"""Tests for social_home.platform.adapter — dataclasses, helpers, and factory."""
+"""Tests for socialhome.platform.adapter — dataclasses, helpers, and factory."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.platform import build_platform_adapter
-from social_home.platform.adapter import (
+from socialhome.platform import build_platform_adapter
+from socialhome.platform.adapter import (
     ExternalUser,
     InstanceConfig,
     _extract_bearer,
@@ -145,8 +145,8 @@ def test_extract_bearer_empty_token():
 
 def test_build_platform_adapter_ha(tmp_path):
     """build_platform_adapter('ha', ...) returns a HomeAssistantAdapter."""
-    from social_home.config import Config
-    from social_home.platform.ha.adapter import HomeAssistantAdapter
+    from socialhome.config import Config
+    from socialhome.platform.ha.adapter import HomeAssistantAdapter
 
     cfg = Config(mode="ha")
     adapter = build_platform_adapter("ha", db=None, config=cfg)
@@ -155,9 +155,9 @@ def test_build_platform_adapter_ha(tmp_path):
 
 async def test_build_platform_adapter_standalone(tmp_path):
     """build_platform_adapter('standalone', ...) returns a StandaloneAdapter."""
-    from social_home.config import Config
-    from social_home.db.database import AsyncDatabase
-    from social_home.platform.standalone.adapter import StandaloneAdapter
+    from socialhome.config import Config
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.platform.standalone.adapter import StandaloneAdapter
 
     db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
     await db.startup()
@@ -171,7 +171,7 @@ async def test_build_platform_adapter_standalone(tmp_path):
 
 def test_build_platform_adapter_unknown_mode():
     """build_platform_adapter raises ValueError for unrecognised mode strings."""
-    from social_home.config import Config
+    from socialhome.config import Config
 
     cfg = Config(mode="unknown")
     with pytest.raises(ValueError, match="Unknown platform mode"):

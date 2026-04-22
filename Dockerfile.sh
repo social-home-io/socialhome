@@ -1,6 +1,6 @@
 # Social Home core image — the household instance (§4).
 #
-# Entry point: ``python -m social_home``.
+# Entry point: ``python -m socialhome``.
 # Ports: 8099 (HTTP/WebSocket) + 8124 (aiolibdatachannel signalling).
 # Runtime: Python 3.14-slim + ffmpeg (video transcoding in SpacePosts
 # + BazaarListing thumbnails) + libjpeg / libwebp (Pillow).
@@ -8,7 +8,7 @@
 # Builds the frontend (client/) with pnpm so a stock image boots
 # straight into the full web UI without a second build step.
 #
-# Published as ``ghcr.io/social-home-io/core:{tag}`` by the
+# Published as ``ghcr.io/social-home-io/socialhome:{tag}`` by the
 # ``docker-core`` job in .github/workflows/publish.yml.
 
 FROM python:3.14-slim AS base
@@ -32,7 +32,7 @@ WORKDIR /app
 # Install the Python package. Core image ships without the
 # ``global-server`` extras — that lives in Dockerfile.gfs.
 COPY pyproject.toml LICENSE ./
-COPY social_home/ social_home/
+COPY socialhome/ socialhome/
 RUN pip install --no-cache-dir .
 
 # Build the frontend if present. Kept conditional so a minimal
@@ -56,4 +56,4 @@ EXPOSE 8099 8124
 
 USER appuser
 
-CMD ["python", "-m", "social_home"]
+CMD ["python", "-m", "socialhome"]

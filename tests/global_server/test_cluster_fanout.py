@@ -17,26 +17,26 @@ import time
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.global_server import cluster as cluster_mod
-from social_home.global_server.app_keys import (
+from socialhome.global_server import cluster as cluster_mod
+from socialhome.global_server.app_keys import (
     gfs_cluster_key,
     gfs_cluster_repo_key,
     gfs_fed_repo_key,
 )
-from social_home.global_server.cluster import (
+from socialhome.global_server.cluster import (
     ClusterService,
     _report_to_wire,
     _wire_to_client,
     _wire_to_report,
     _wire_to_space,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.domain import (
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.domain import (
     ClientInstance,
     GfsFraudReport,
     GlobalSpace,
 )
-from social_home.global_server.server import create_gfs_app
+from socialhome.global_server.server import create_gfs_app
 
 
 def _config(tmp, *, instance_id: str, cluster_peers=()):
@@ -139,7 +139,7 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory):
         await cluster_a.sync_report(report)
         await asyncio.sleep(0.05)
         # B has the report — pull via admin_repo.list_fraud_reports.
-        from social_home.global_server.app_keys import gfs_admin_repo_key
+        from socialhome.global_server.app_keys import gfs_admin_repo_key
 
         rows = await b.app[gfs_admin_repo_key].list_fraud_reports()
         assert any(r.id == "rpt-1" for r in rows)
@@ -199,7 +199,7 @@ async def test_post_to_peer_raises_on_non_2xx(tmp_dir, tmp_path_factory):
         cluster_a: ClusterService = a.app[gfs_cluster_key]
         # Manually register an unreachable peer row so `_broadcast`
         # iterates through it.
-        from social_home.global_server.domain import ClusterNode
+        from socialhome.global_server.domain import ClusterNode
 
         await a.app[gfs_cluster_repo_key].upsert_node(
             ClusterNode(
@@ -369,7 +369,7 @@ async def test_apply_sync_report_with_bad_wire_is_silent(started_app):
 async def test_handle_heartbeat_updates_last_seen(started_app):
     """``handle_heartbeat`` refreshes a known peer's ``status`` + last_seen."""
     svc: ClusterService = started_app[gfs_cluster_key]
-    from social_home.global_server.domain import ClusterNode
+    from socialhome.global_server.domain import ClusterNode
 
     await started_app[gfs_cluster_repo_key].upsert_node(
         ClusterNode(

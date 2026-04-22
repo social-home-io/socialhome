@@ -8,12 +8,12 @@ import tarfile
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.services.backup_service import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.services.backup_service import (
     BackupError,
     BackupRestoreNotEmpty,
     BackupService,

@@ -1,4 +1,4 @@
-"""Tests for social_home.routes.presence.
+"""Tests for socialhome.routes.presence.
 
 Wire-contract guards: `POST /api/presence/location` must accept the
 body shape documented in spec §23.8.5 so the forthcoming

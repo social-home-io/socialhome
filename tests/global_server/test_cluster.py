@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.global_server.cluster import ClusterService
-from social_home.global_server.repositories import SqliteClusterRepo
+from socialhome.global_server.cluster import ClusterService
+from socialhome.global_server.repositories import SqliteClusterRepo
 
 
 @pytest.fixture

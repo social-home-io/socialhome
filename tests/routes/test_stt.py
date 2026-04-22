@@ -7,7 +7,7 @@ import json
 from typing import AsyncIterable
 
 
-from social_home.app_keys import stt_service_key
+from socialhome.app_keys import stt_service_key
 
 
 class _FakeSttService:

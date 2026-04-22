@@ -6,18 +6,18 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import GfsConnection
-from social_home.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
-from social_home.repositories.public_space_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import GfsConnection
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
     SqlitePublicSpaceRepo,
 )
-from social_home.services.public_space_discovery_service import (
+from socialhome.services.public_space_discovery_service import (
     PublicSpaceDiscoveryService,
 )
 

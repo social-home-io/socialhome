@@ -1,4 +1,4 @@
-"""Error-path coverage for :mod:`social_home.global_server.server`.
+"""Error-path coverage for :mod:`socialhome.global_server.server`.
 
 Exercises the JSON-decode, missing-field, invalid-signature, and
 unknown-NODE_* branches that the success-path tests skip — plus
@@ -18,15 +18,15 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from social_home.crypto import b64url_encode, sign_ed25519
-from social_home.global_server.admin import hash_password
-from social_home.global_server.app_keys import (
+from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.global_server.admin import hash_password
+from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.domain import ClientInstance
-from social_home.global_server.server import (
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.server import (
     _cli_init,
     _cli_set_password,
     create_gfs_app,
@@ -189,8 +189,8 @@ async def test_cluster_sync_missing_type_is_400(client):
 async def test_cluster_sync_known_node_bad_sig_is_401(client):
     # Register a peer node with a valid public key, then send a body
     # signed with a DIFFERENT key so verification fails.
-    from social_home.global_server.app_keys import gfs_cluster_repo_key
-    from social_home.global_server.domain import ClusterNode
+    from socialhome.global_server.app_keys import gfs_cluster_repo_key
+    from socialhome.global_server.domain import ClusterNode
 
     _real_seed, real_pub = _gen_ed25519()
     await client._app[gfs_cluster_repo_key].upsert_node(
@@ -221,8 +221,8 @@ async def test_cluster_sync_known_node_bad_sig_is_401(client):
 async def test_cluster_sync_unknown_node_type_dispatches_silently(client):
     # Register the peer so sig verification passes, then send a NODE_*
     # type that isn't in the match list — server logs + 200s.
-    from social_home.global_server.app_keys import gfs_cluster_repo_key
-    from social_home.global_server.domain import ClusterNode
+    from socialhome.global_server.app_keys import gfs_cluster_repo_key
+    from socialhome.global_server.domain import ClusterNode
 
     seed, pub = _gen_ed25519()
     await client._app[gfs_cluster_repo_key].upsert_node(
@@ -398,7 +398,7 @@ async def test_admin_ban_client_tolerates_bad_body(client):
 
 async def test_admin_ban_space_tolerates_bad_body(client):
     # Seed a space first.
-    from social_home.global_server.domain import GlobalSpace
+    from socialhome.global_server.domain import GlobalSpace
 
     await client._app[gfs_fed_repo_key].upsert_space(
         GlobalSpace(
@@ -624,7 +624,7 @@ def test_cli_set_password_updates_toml(tmp_path, monkeypatch):
     assert _cli_init(target) == 0
     # Fake getpass — return a matching password twice.
     monkeypatch.setattr(
-        "social_home.global_server.server.getpass.getpass",
+        "socialhome.global_server.server.getpass.getpass",
         lambda _prompt="": "correcthorsebattery",
     )
     rc = _cli_set_password(target)
@@ -639,7 +639,7 @@ def test_cli_set_password_mismatch_errors(tmp_path, monkeypatch):
     # Return two different strings for the two getpass calls.
     seq = iter(["first-pw", "different-pw"])
     monkeypatch.setattr(
-        "social_home.global_server.server.getpass.getpass",
+        "socialhome.global_server.server.getpass.getpass",
         lambda _prompt="": next(seq),
     )
     rc = _cli_set_password(target)
@@ -647,12 +647,12 @@ def test_cli_set_password_mismatch_errors(tmp_path, monkeypatch):
 
 
 def test_main_init_short_circuits_without_starting_server(tmp_path, monkeypatch):
-    """``social-home-global-server --init <path>`` writes config + exits."""
+    """``socialhome-global-server --init <path>`` writes config + exits."""
     target = tmp_path / "from_main.toml"
     monkeypatch.setattr(
         sys,
         "argv",
-        ["social-home-global-server", "--config", str(target), "--init"],
+        ["socialhome-global-server", "--config", str(target), "--init"],
     )
     with pytest.raises(SystemExit) as exc:
         main()
@@ -666,10 +666,10 @@ def test_main_set_password_short_circuits(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["social-home-global-server", "--config", str(target), "--set-password"],
+        ["socialhome-global-server", "--config", str(target), "--set-password"],
     )
     monkeypatch.setattr(
-        "social_home.global_server.server.getpass.getpass",
+        "socialhome.global_server.server.getpass.getpass",
         lambda _prompt="": "apropersecret",
     )
     with pytest.raises(SystemExit) as exc:
@@ -693,7 +693,7 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["social-home-global-server", "--config", str(target)],
+        ["socialhome-global-server", "--config", str(target)],
     )
     # Stub out run_app so we don't actually bind a port.
     called = {}
@@ -703,7 +703,7 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
         called["port"] = port
 
     monkeypatch.setattr(
-        "social_home.global_server.server.web.run_app",
+        "socialhome.global_server.server.web.run_app",
         _fake_run_app,
     )
     main()

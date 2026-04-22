@@ -22,13 +22,15 @@ import { SpaceThemeStudio } from '@/components/SpaceThemeStudio'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
 import type { Space } from '@/types'
+import { SpaceBotsTab } from './SpaceBotsTab'
 
-type SettingsTab = 'general' | 'about' | 'theme'
+type SettingsTab = 'general' | 'about' | 'theme' | 'bots'
 
 interface SpaceDetail extends Space {
   about_markdown: string | null
   cover_url: string | null
   cover_hash: string | null
+  bot_enabled?: boolean
 }
 
 const activeTab = signal<SettingsTab>('general')
@@ -40,6 +42,7 @@ export default function SpaceSettingsPage() {
   const [space, setSpace] = useState<SpaceDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [canAdmin, setCanAdmin] = useState(false)
+  const [isMember, setIsMember] = useState(false)
 
   const reload = async () => {
     try {
@@ -54,9 +57,11 @@ export default function SpaceSettingsPage() {
         m => m.user_id === currentUser.value?.user_id,
       )
       setCanAdmin(mine?.role === 'owner' || mine?.role === 'admin')
+      setIsMember(Boolean(mine))
     } catch {
       setSpace(null)
       setCanAdmin(false)
+      setIsMember(false)
     } finally {
       setLoading(false)
     }
@@ -75,19 +80,40 @@ export default function SpaceSettingsPage() {
     )
   }
 
-  if (!canAdmin) {
+  // Any space member can reach the "Bots" tab to manage their OWN
+  // personal bots. Admin-only guards for the shared space-scope bots
+  // live inside SpaceBotsTab. Non-members still get the 403 screen.
+  if (!isMember) {
     return (
       <div class="sh-empty-state">
         <div style={{ fontSize: '2rem' }}>🔒</div>
-        <h3>Space admins only</h3>
+        <h3>Space members only</h3>
         <p class="sh-muted">
-          Only owners and admins can edit space settings.
+          Only members of this space can open its settings.
         </p>
         <Button onClick={() => route(`/spaces/${spaceId}`)}>
           Back to space
         </Button>
       </div>
     )
+  }
+
+  // Tabs the active user can see. Non-admins get only the Bots tab
+  // (where they manage their own personal automations).
+  const visibleTabs: SettingsTab[] = canAdmin
+    ? ['general', 'about', 'theme', 'bots']
+    : ['bots']
+  if (!visibleTabs.includes(activeTab.value)) {
+    activeTab.value = visibleTabs[0]
+  }
+
+  const tabLabel = (t: SettingsTab): string => {
+    switch (t) {
+      case 'general': return 'General'
+      case 'about':   return 'About'
+      case 'theme':   return 'Theme'
+      case 'bots':    return 'Bots & automations'
+    }
   }
 
   return (
@@ -101,12 +127,12 @@ export default function SpaceSettingsPage() {
       </div>
 
       <nav class="sh-space-tabs" role="tablist">
-        {(['general', 'about', 'theme'] as SettingsTab[]).map(tab => (
+        {visibleTabs.map(tab => (
           <button key={tab} type="button" role="tab"
                   aria-selected={activeTab.value === tab}
                   class={activeTab.value === tab ? 'sh-tab sh-tab--active' : 'sh-tab'}
                   onClick={() => { activeTab.value = tab }}>
-            {tab === 'general' ? 'General' : tab === 'about' ? 'About' : 'Theme'}
+            {tabLabel(tab)}
           </button>
         ))}
       </nav>
@@ -119,6 +145,15 @@ export default function SpaceSettingsPage() {
       )}
       {activeTab.value === 'theme' && (
         <SpaceThemeStudio spaceId={space.id} />
+      )}
+      {activeTab.value === 'bots' && (
+        <SpaceBotsTab
+          spaceId={space.id}
+          canAdmin={canAdmin}
+          currentUserId={currentUser.value?.user_id ?? null}
+          botEnabled={space.bot_enabled === true}
+          onBotEnabledChange={(next) => setSpace({ ...space, bot_enabled: next })}
+        />
       )}
     </div>
   )

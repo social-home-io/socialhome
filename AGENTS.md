@@ -1,4 +1,4 @@
-# AGENTS.md — social-home
+# AGENTS.md — socialhome
 
 AI agent instruction file. Read before editing any code in this repository.
 Canonical spec: spec_work.md — the spec is always right.
@@ -64,9 +64,9 @@ Docs live in `docs/`. Ship the matching doc update in the same commit:
   and from the repo-root `README.md`.
 
 ### File locations
-- Business logic: social_home/services/
-- Data access: social_home/repositories/
-- Domain types: social_home/domain/
-- Route handlers: social_home/routes/ (or app.py for small handlers)
-- Migrations: social_home/migrations/00NN_description.sql
+- Business logic: socialhome/services/
+- Data access: socialhome/repositories/
+- Domain types: socialhome/domain/
+- Route handlers: socialhome/routes/ (or app.py for small handlers)
+- Migrations: socialhome/migrations/00NN_description.sql
 - Documentation: docs/ (protocol pages, API reference, crypto notes)

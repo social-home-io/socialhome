@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 
-from social_home.infrastructure.ws_manager import WebSocketManager
+from socialhome.infrastructure.ws_manager import WebSocketManager
 
 
 class _FakeWS:

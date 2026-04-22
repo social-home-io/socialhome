@@ -5,14 +5,14 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.app import create_app
-from social_home.app_keys import (
+from socialhome.app import create_app
+from socialhome.app_keys import (
     db_key as _db_key,
     federation_repo_key,
 )
-from social_home.auth import sha256_token_hash
-from social_home.config import Config
-from social_home.crypto import derive_user_id
+from socialhome.auth import sha256_token_hash
+from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 
 
 def _auth(token: str) -> dict:
@@ -83,7 +83,7 @@ async def test_sync_trigger_enqueues_for_confirmed_peers(client):
     app = client.server.app
     fed_repo = app[federation_repo_key]
 
-    from social_home.domain.federation import (
+    from socialhome.domain.federation import (
         InstanceSource,
         PairingStatus,
         RemoteInstance,
@@ -122,7 +122,7 @@ async def test_sync_trigger_skips_unconfirmed_peers(client):
     app = client.server.app
     fed_repo = app[federation_repo_key]
 
-    from social_home.domain.federation import (
+    from socialhome.domain.federation import (
         InstanceSource,
         PairingStatus,
         RemoteInstance,

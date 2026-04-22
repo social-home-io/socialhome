@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from social_home.services.call_service import StaleCallCleanupScheduler
+from socialhome.services.call_service import StaleCallCleanupScheduler
 
 from ._call_fakes import make_call_service
 
@@ -122,7 +122,7 @@ async def test_scheduler_handles_gc_exception():
 
 
 def test_turn_credential_has_expiry_and_user():
-    from social_home.routes.calls import _make_turn_credential
+    from socialhome.routes.calls import _make_turn_credential
 
     user, cred = _make_turn_credential("secret", "alice-id", ttl_seconds=600)
     expiry, uid = user.split(":", 1)
@@ -132,7 +132,7 @@ def test_turn_credential_has_expiry_and_user():
 
 
 def test_turn_credential_min_ttl_is_60s():
-    from social_home.routes.calls import _make_turn_credential
+    from socialhome.routes.calls import _make_turn_credential
     import time
 
     now = int(time.time())
@@ -142,7 +142,7 @@ def test_turn_credential_min_ttl_is_60s():
 
 
 def test_turn_credential_deterministic_with_same_inputs():
-    from social_home.routes.calls import _make_turn_credential
+    from socialhome.routes.calls import _make_turn_credential
 
     u1, c1 = _make_turn_credential("secret", "alice-id", ttl_seconds=600)
     u2, c2 = _make_turn_credential("secret", "alice-id", ttl_seconds=600)

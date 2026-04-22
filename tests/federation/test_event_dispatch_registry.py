@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from social_home.domain.federation import FederationEvent, FederationEventType
-from social_home.federation.event_dispatch_registry import EventDispatchRegistry
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 
 
 def _event(

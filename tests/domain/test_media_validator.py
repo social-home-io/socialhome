@@ -1,16 +1,16 @@
-"""Tests for social_home.domain.media_validator."""
+"""Tests for socialhome.domain.media_validator."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.domain.media_constraints import (
+from socialhome.domain.media_constraints import (
     IMAGE_MAX_UPLOAD_BYTES,
     IMAGE_OUTPUT_MIME,
     VIDEO_MAX_UPLOAD_BYTES,
     VIDEO_OUTPUT_MIME,
 )
-from social_home.domain.media_validator import validate_inbound_media_meta
+from socialhome.domain.media_validator import validate_inbound_media_meta
 
 
 def test_valid_image_meta():

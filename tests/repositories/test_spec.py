@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.repositories._spec import Spec, spec_to_sql
+from socialhome.repositories._spec import Spec, spec_to_sql
 
 
 # ─── spec_to_sql purity ──────────────────────────────────────────────────
@@ -128,11 +128,11 @@ def test_disallowed_direction_rejected():
 
 @pytest.fixture
 async def notif_db(tmp_dir):
-    from social_home.crypto import (
+    from socialhome.crypto import (
         derive_instance_id,
         generate_identity_keypair,
     )
-    from social_home.db.database import AsyncDatabase
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
@@ -151,7 +151,7 @@ async def notif_db(tmp_dir):
 
 
 async def test_notification_find_by_type(notif_db):
-    from social_home.repositories.notification_repo import (
+    from socialhome.repositories.notification_repo import (
         SqliteNotificationRepo,
         new_notification,
     )
@@ -185,7 +185,7 @@ async def test_notification_find_by_type(notif_db):
 async def test_notification_list_still_works_via_spec_internally(notif_db):
     """The bespoke list() method now composes a Spec internally — the
     public contract is unchanged."""
-    from social_home.repositories.notification_repo import (
+    from socialhome.repositories.notification_repo import (
         SqliteNotificationRepo,
         new_notification,
     )

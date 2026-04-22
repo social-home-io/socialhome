@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.calendar import (
+from socialhome.domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarRSVP,
     RSVPStatus,
 )
-from social_home.repositories.calendar_repo import (
+from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
@@ -21,8 +21,8 @@ from social_home.repositories.calendar_repo import (
 @pytest.fixture
 async def env(tmp_dir):
     """Env with calendar repos over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

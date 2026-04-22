@@ -1,4 +1,4 @@
-"""Tests for social_home.routes.calendar."""
+"""Tests for socialhome.routes.calendar."""
 
 from datetime import datetime, timezone, timedelta
 from .conftest import _auth
@@ -177,7 +177,7 @@ async def test_space_delete_event(client):
 
 async def _seed_outsider(client):
     """Register a second user with no space membership and return auth."""
-    from social_home.auth import sha256_token_hash
+    from socialhome.auth import sha256_token_hash
 
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, is_admin) "

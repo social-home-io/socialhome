@@ -8,7 +8,7 @@ cryptography.
 > **Status (2026-04-18):** classical crypto is in production shape.
 > The hybrid Ed25519 + ML-DSA-65 signature path is wired end-to-end
 > behind `Config.federation_sig_suite = "ed25519+mldsa65"` and an
-> optional `liboqs-python` extra (`pip install 'social-home[pq]'`).
+> optional `liboqs-python` extra (`pip install 'socialhome[pq]'`).
 > Further PQ work (ML-KEM for pairing, PQ VAPID) is tracked in
 > [§ Post-quantum migration path](#post-quantum-migration-path) below.
 
@@ -45,16 +45,16 @@ addresses. See the last section of this document.
 
 | Primitive | Algorithm | Key size | Purpose | Source |
 |-----------|-----------|----------|---------|--------|
-| Identity signatures | Ed25519 | 256-bit | Federation envelopes, user-identity assertions, space config, SDP | `social_home/crypto.py` |
-| Identity signatures (PQ, optional) | ML-DSA-65 (FIPS 204) | 1952-byte pk / 4032-byte sk | Hybrid signature when suite is `ed25519+mldsa65` | `social_home/federation/pq_signer.py` |
-| Key agreement | X25519 (ECDH) | 256-bit | Pairing-time session key derivation | `social_home/federation/pairing_coordinator.py` |
+| Identity signatures | Ed25519 | 256-bit | Federation envelopes, user-identity assertions, space config, SDP | `socialhome/crypto.py` |
+| Identity signatures (PQ, optional) | ML-DSA-65 (FIPS 204) | 1952-byte pk / 4032-byte sk | Hybrid signature when suite is `ed25519+mldsa65` | `socialhome/federation/pq_signer.py` |
+| Key agreement | X25519 (ECDH) | 256-bit | Pairing-time session key derivation | `socialhome/federation/pairing_coordinator.py` |
 | Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, sealed sender, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing | `hashlib.sha256` |
-| MAC | HMAC-SHA256 | 256-bit | Relay path selection (`keyed_hash`) | `social_home/crypto.py` |
-| MAC | HMAC-SHA1 | 160-bit | TURN credential generation (coturn REST API) | `social_home/routes/calls.py` |
-| Password hash | scrypt | N=2^14, r=8, p=1 | Standalone-mode user passwords | `social_home/platform/standalone/adapter.py` |
-| Web Push | VAPID (P-256 ECDSA) | P-256 | Push-notification JWT signing | `social_home/services/push_service.py` |
+| MAC | HMAC-SHA256 | 256-bit | Relay path selection (`keyed_hash`) | `socialhome/crypto.py` |
+| MAC | HMAC-SHA1 | 160-bit | TURN credential generation (coturn REST API) | `socialhome/routes/calls.py` |
+| Password hash | scrypt | N=2^14, r=8, p=1 | Standalone-mode user passwords | `socialhome/platform/standalone/adapter.py` |
+| Web Push | VAPID (P-256 ECDSA) | P-256 | Push-notification JWT signing | `socialhome/services/push_service.py` |
 
 ### Quantum safety at a glance
 
@@ -163,10 +163,10 @@ passphrase bricks the instance's existing wrapped keys.
 
 ## Derivation chains
 
-- `KEK = HKDF-SHA256(salt, length=32, info=b"social-home/kek/from-data-dir")`
+- `KEK = HKDF-SHA256(salt, length=32, info=b"socialhome/kek/from-data-dir")`
 - Pairing directional keys (post-ECDH):
-  - `key_self_to_remote = HKDF-SHA256(shared_secret, info=b"social-home/session/self-to-remote")`
-  - `key_remote_to_self = HKDF-SHA256(shared_secret, info=b"social-home/session/remote-to-self")`
+  - `key_self_to_remote = HKDF-SHA256(shared_secret, info=b"socialhome/session/self-to-remote")`
+  - `key_remote_to_self = HKDF-SHA256(shared_secret, info=b"socialhome/session/remote-to-self")`
 - ID derivation (public, deterministic, no secret):
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
@@ -191,7 +191,7 @@ risk depends on the primitive:
 
 The wire-format building block is the `sig_suite` field. Its grammar:
 `<algo>` or `<algo>+<algo>+…`, where each `<algo>` appears in
-`social_home/federation/crypto_suite.KNOWN_ALGORITHMS`. Current
+`socialhome/federation/crypto_suite.KNOWN_ALGORITHMS`. Current
 registry:
 
 - `ed25519` — classical.
@@ -256,10 +256,10 @@ still on `sig_suite = "ed25519"` before the flag is flipped.
 
 To enable the hybrid signature suite on a deployment:
 
-1. Install the optional extra: `pip install 'social-home[pq]'` (pulls
+1. Install the optional extra: `pip install 'socialhome[pq]'` (pulls
    in `liboqs-python` from GitHub; requires the native `liboqs` C
    library on the host).
-2. Set `federation_sig_suite = "ed25519+mldsa65"` in `social_home.toml`
+2. Set `federation_sig_suite = "ed25519+mldsa65"` in `socialhome.toml`
    (or `SH_FEDERATION_SIG_SUITE=ed25519+mldsa65` as an env var).
 3. Restart. `identity_bootstrap` detects the suite change and mints
    the ML-DSA keypair on startup.

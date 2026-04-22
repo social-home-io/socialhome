@@ -1,4 +1,4 @@
-"""Tests for social_home.domain.post."""
+"""Tests for socialhome.domain.post."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone, time
 
 import pytest
 
-from social_home.domain.post import (
+from socialhome.domain.post import (
     Availability,
     Comment,
     CommentType,

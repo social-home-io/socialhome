@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from social_home.crypto import generate_identity_keypair
-from social_home.domain.federation import FederationEventType
-from social_home.federation.sdp_signing import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.sdp_signing import (
     sign_rtc_offer,
     signed_sdp_to_dict,
 )
-from social_home.services.call_service import RINGING_TTL_SECONDS
+from socialhome.services.call_service import RINGING_TTL_SECONDS
 
 from ._call_fakes import FakeFederation, make_call_service
 

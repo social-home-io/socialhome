@@ -1,11 +1,11 @@
-"""Tests for social_home.domain.events."""
+"""Tests for socialhome.domain.events."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from social_home.domain.events import DomainEvent, PostCreated
-from social_home.domain.post import Post, PostType
+from socialhome.domain.events import DomainEvent, PostCreated
+from socialhome.domain.post import Post, PostType
 
 
 def test_post_created_is_domain_event():

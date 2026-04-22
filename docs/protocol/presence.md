@@ -68,12 +68,12 @@ new pairing is confirmed.
 
 ## Implementation
 
-- `social_home/services/presence_service.py` — local state +
+- `socialhome/services/presence_service.py` — local state +
   scheduler.
-- `social_home/services/federation_inbound/presence.py` — inbound
+- `socialhome/services/federation_inbound/presence.py` — inbound
   handlers.
-- `social_home/repositories/presence_repo.py`.
-- `social_home/routes/presence_routes.py` — REST endpoints.
+- `socialhome/repositories/presence_repo.py`.
+- `socialhome/routes/presence_routes.py` — REST endpoints.
 
 ## Spec references
 

@@ -1,4 +1,4 @@
-"""Tests for social_home.services.shopping_service and sticky_repo."""
+"""Tests for socialhome.services.shopping_service and sticky_repo."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import uuid
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.repositories.shopping_repo import SqliteShoppingRepo
-from social_home.repositories.sticky_repo import SqliteStickyRepo
-from social_home.services.shopping_service import ShoppingService
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.shopping_repo import SqliteShoppingRepo
+from socialhome.repositories.sticky_repo import SqliteStickyRepo
+from socialhome.services.shopping_service import ShoppingService
 
 
 @pytest.fixture
@@ -80,13 +80,13 @@ async def test_shopping_publishes_bus_events(env):
     """§S1 — every mutation emits a domain event on the bus so
     :class:`RealtimeService` can fan it out over the household WS.
     """
-    from social_home.domain.events import (
+    from socialhome.domain.events import (
         ShoppingItemAdded,
         ShoppingItemRemoved,
         ShoppingItemsCleared,
         ShoppingItemToggled,
     )
-    from social_home.infrastructure.event_bus import EventBus
+    from socialhome.infrastructure.event_bus import EventBus
 
     bus = EventBus()
     svc = ShoppingService(env.shopping_repo, bus)

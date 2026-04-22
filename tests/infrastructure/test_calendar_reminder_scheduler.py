@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.domain.calendar import CalendarEvent
-from social_home.domain.user import User
-from social_home.infrastructure.calendar_reminder_scheduler import (
+from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.user import User
+from socialhome.infrastructure.calendar_reminder_scheduler import (
     CalendarReminderScheduler,
 )
 

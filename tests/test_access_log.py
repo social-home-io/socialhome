@@ -1,8 +1,8 @@
-"""Tests for social_home.access_log — query-string redaction."""
+"""Tests for socialhome.access_log — query-string redaction."""
 
 from __future__ import annotations
 
-from social_home.access_log import redact_query_string
+from socialhome.access_log import redact_query_string
 
 
 def test_redact_strips_token_value():

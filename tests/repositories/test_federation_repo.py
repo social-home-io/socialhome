@@ -1,4 +1,4 @@
-"""Tests for social_home.repositories.federation_repo."""
+"""Tests for socialhome.repositories.federation_repo."""
 
 from __future__ import annotations
 
@@ -6,19 +6,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     PairingSession,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.repositories.federation_repo import SqliteFederationRepo
+from socialhome.repositories.federation_repo import SqliteFederationRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a federation repo over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

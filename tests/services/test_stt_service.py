@@ -6,7 +6,7 @@ from typing import AsyncIterable
 
 import pytest
 
-from social_home.services.stt_service import SttService, SttUnsupportedError
+from socialhome.services.stt_service import SttService, SttUnsupportedError
 
 
 class _FakeAdapter:

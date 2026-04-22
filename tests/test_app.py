@@ -1,4 +1,4 @@
-"""Tests for social_home.app — create_app() factory and startup hook."""
+"""Tests for socialhome.app — create_app() factory and startup hook."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.app import create_app
-from social_home.config import Config
+from socialhome.app import create_app
+from socialhome.config import Config
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ async def test_create_app_has_routes(cfg):
 
 async def test_create_app_stores_config(cfg):
     """create_app() stores the Config in the app dict under config_key."""
-    from social_home.app_keys import config_key
+    from socialhome.app_keys import config_key
 
     app = create_app(cfg)
     assert app[config_key] is cfg
@@ -60,7 +60,7 @@ async def test_startup_hook_runs_without_error(tmp_dir):
         resp = await tc.get("/healthz")
         assert resp.status == 200
         # ensure_instance_identity ran — row exists, instance_id is in app dict.
-        from social_home.app_keys import instance_id_key
+        from socialhome.app_keys import instance_id_key
 
         assert app[instance_id_key] != "unknown"
         assert len(app[instance_id_key]) > 0
@@ -68,7 +68,7 @@ async def test_startup_hook_runs_without_error(tmp_dir):
 
 async def test_shared_http_session_lifecycle(tmp_dir):
     """A single aiohttp.ClientSession is created at startup and closed on cleanup."""
-    from social_home.app_keys import http_session_key
+    from socialhome.app_keys import http_session_key
 
     cfg = Config(
         data_dir=str(tmp_dir),

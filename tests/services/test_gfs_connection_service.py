@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.domain.federation import GfsConnection
-from social_home.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
-from social_home.services.gfs_connection_service import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import GfsConnection
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.services.gfs_connection_service import (
     GfsConnectionError,
     GfsConnectionService,
 )

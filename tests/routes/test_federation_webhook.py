@@ -8,13 +8,13 @@ import os
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from social_home.crypto import (
+from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
     sign_ed25519,
 )
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
@@ -62,7 +62,7 @@ def _build_envelope(
 @pytest.fixture
 async def env(client):
     """Add a paired peer to the route-conftest client + return the keys."""
-    from social_home.app_keys import (
+    from socialhome.app_keys import (
         federation_repo_key,
         federation_service_key,
         key_manager_key,

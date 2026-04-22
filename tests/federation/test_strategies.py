@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from social_home.federation.encoder import FederationEncoder
-from social_home.federation.strategies import (
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.strategies import (
     EncryptionStrategy,
     TransportStrategy,
 )
-from social_home.federation.transport import WebhookTransport
+from socialhome.federation.transport import WebhookTransport
 
 
 # ─── Transport ───────────────────────────────────────────────────────────

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.user_service import UserService, _validate_username
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.user_service import UserService, _validate_username
 
 
 @pytest.fixture
@@ -113,7 +113,7 @@ def test_validate_username_too_long_raises():
 
 
 def test_validate_username_reserved_raises():
-    from social_home.domain.user import RESERVED_USERNAMES
+    from socialhome.domain.user import RESERVED_USERNAMES
 
     sample = next(iter(RESERVED_USERNAMES))
     with pytest.raises(ValueError):

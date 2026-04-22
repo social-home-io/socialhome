@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.space import SpacePermissionError
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.cp_repo import SqliteCpRepo
-from social_home.repositories.space_post_repo import SqliteSpacePostRepo
-from social_home.repositories.space_repo import SqliteSpaceRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.child_protection_service import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.space import SpacePermissionError
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.cp_repo import SqliteCpRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.child_protection_service import (
     ChildProtectionService,
 )
-from social_home.services.space_service import SpaceService
+from socialhome.services.space_service import SpaceService
 
 
 @pytest.fixture

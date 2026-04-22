@@ -1,9 +1,9 @@
 """Backpressure tests for the two DataChannel-send call sites.
 
-* :class:`~social_home.federation.transport._RtcPeer.send` — drops the
+* :class:`~socialhome.federation.transport._RtcPeer.send` — drops the
   frame under backpressure, returns ``False`` so the facade falls back
   to webhook.
-* :class:`~social_home.federation.sync_rtc.SyncRtcSession.send_chunk` —
+* :class:`~socialhome.federation.sync_rtc.SyncRtcSession.send_chunk` —
   raises :class:`ConnectionError` so :class:`SyncSessionManager` falls
   back to relay chunks.
 
@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.federation.sync_rtc import SEND_HWM_BYTES, SyncRtcSession
-from social_home.federation.transport import SEND_HWM_BYTES as FED_HWM, _RtcPeer
+from socialhome.federation.sync_rtc import SEND_HWM_BYTES, SyncRtcSession
+from socialhome.federation.transport import SEND_HWM_BYTES as FED_HWM, _RtcPeer
 
 
 # ── fed-v1 transport ────────────────────────────────────────────────

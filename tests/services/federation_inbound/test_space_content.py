@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.federation import FederationEvent, FederationEventType
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.federation_inbound import SpaceContentInboundHandlers
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 
 
 class _FakeRegistry:

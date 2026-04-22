@@ -67,4 +67,56 @@ describe('PostCard', () => {
     if (btn) fireEvent.click(btn)
     expect(fn).toHaveBeenCalledOnce()
   })
+
+  // ── Bot-bridge posts ────────────────────────────────────────────────────
+
+  const mockBotPost: FeedPost = {
+    ...mockPost,
+    author: 'system-integration',
+    content: '**Ring**\nFront door',
+    bot: {
+      bot_id: 'b1',
+      scope: 'space',
+      name: 'Doorbell',
+      icon: '🔔',
+      created_by_display_name: 'Alice',
+    },
+  }
+
+  it('renders bot name in place of author for bot posts', () => {
+    const { container } = render(<PostCard post={mockBotPost} />)
+    expect(container.textContent).toContain('Doorbell')
+  })
+
+  it('renders bot icon via BotAvatar', () => {
+    const { container } = render(<PostCard post={mockBotPost} />)
+    expect(container.querySelector('.sh-bot-avatar')).toBeTruthy()
+    expect(container.textContent).toContain('🔔')
+  })
+
+  it('renders "via Home Assistant" for scope=space bots', () => {
+    const { container } = render(<PostCard post={mockBotPost} />)
+    expect(container.textContent).toContain('via Home Assistant')
+  })
+
+  it('renders "via {member}" for scope=member bots', () => {
+    const memberBot = {
+      ...mockBotPost,
+      bot: { ...mockBotPost.bot!, scope: 'member' as const },
+    }
+    const { container } = render(<PostCard post={memberBot} />)
+    expect(container.textContent).toContain('via Alice')
+  })
+
+  it('falls back to HA when bot has been deleted (bot=null)', () => {
+    const orphaned = { ...mockBotPost, bot: null }
+    const { container } = render(<PostCard post={orphaned} />)
+    expect(container.textContent).toContain('via Home Assistant')
+  })
+
+  it('hides reactions and comment button on bot posts', () => {
+    const { container } = render(<PostCard post={mockBotPost} />)
+    expect(container.querySelector('.sh-reaction-add')).toBeNull()
+    expect(container.querySelector('.sh-comment-btn')).toBeNull()
+  })
 })

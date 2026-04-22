@@ -7,9 +7,9 @@ from typing import Any
 import orjson
 import pytest
 
-from social_home.crypto import generate_identity_keypair
-from social_home.federation.encoder import FederationEncoder
-from social_home.federation.sync.space.exporter import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.sync.space.exporter import (
     CHUNK_SIZE_BUDGET_BYTES,
     ChunkBuilder,
     SENTINEL_RESOURCE,

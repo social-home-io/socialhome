@@ -20,7 +20,7 @@ const notes = signal('')
 const householdOnly = signal(false)
 const submitting = signal(false)
 
-// Values match ``social_home.domain.report.ReportCategory``.
+// Values match ``socialhome.domain.report.ReportCategory``.
 const CATEGORIES: { value: string; label: string }[] = [
   { value: 'spam',           label: 'Spam' },
   { value: 'harassment',     label: 'Harassment' },

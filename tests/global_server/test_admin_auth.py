@@ -5,14 +5,14 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.global_server.admin import (
+from socialhome.global_server.admin import (
     BRUTE_FORCE_MAX_ATTEMPTS,
     SESSION_COOKIE,
     hash_password,
     verify_password,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.server import create_gfs_app
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.server import create_gfs_app
 
 
 def _test_config(tmp_dir):
@@ -30,8 +30,8 @@ async def client(tmp_dir):
     app = create_gfs_app(_test_config(tmp_dir))
     async with TestClient(TestServer(app)) as tc:
         # Seed the admin password via the already-wired admin repo —
-        # equivalent to `social-home-global-server --set-password`.
-        from social_home.global_server.app_keys import gfs_admin_repo_key
+        # equivalent to `socialhome-global-server --set-password`.
+        from socialhome.global_server.app_keys import gfs_admin_repo_key
 
         await app[gfs_admin_repo_key].set_config(
             "admin_password_hash",

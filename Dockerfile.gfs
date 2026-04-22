@@ -1,7 +1,7 @@
 # Global Federation Server (GFS) image — the public relay (§24).
 #
-# Entry point: ``social-home-global-server`` (console script defined
-# in pyproject.toml, pointing at ``social_home.global_server.server:main``).
+# Entry point: ``socialhome-global-server`` (console script defined
+# in pyproject.toml, pointing at ``socialhome.global_server.server:main``).
 # Port: 8765 (default; overridable via GFS_PORT env var).
 #
 # Runtime differs from the core image:
@@ -29,14 +29,14 @@ RUN groupadd --system --gid 10001 gfsuser && \
 WORKDIR /app
 
 COPY pyproject.toml LICENSE ./
-COPY social_home/ social_home/
+COPY socialhome/ socialhome/
 # Install the package + the global-server extra in one go so the
 # console script + its transitive deps land on the image.
 RUN pip install --no-cache-dir '.[global-server]'
 
 # /var/lib/sh-gfs is the spec's default GFSDATA_DIR (config.py). Use
 # a volume so operators can persist the config + SQLite across
-# container restarts. Bootstrapping: run ``social-home-global-server
+# container restarts. Bootstrapping: run ``socialhome-global-server
 # --init --config /var/lib/sh-gfs/global_server.toml`` once in a
 # throwaway container, set ``base_url`` + the admin password, then
 # mount the resulting file.
@@ -50,4 +50,4 @@ EXPOSE 8765
 
 USER gfsuser
 
-CMD ["social-home-global-server", "--config", "/var/lib/sh-gfs/global_server.toml"]
+CMD ["socialhome-global-server", "--config", "/var/lib/sh-gfs/global_server.toml"]

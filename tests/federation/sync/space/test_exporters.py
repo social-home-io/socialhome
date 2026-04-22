@@ -11,12 +11,12 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 
-from social_home.domain.calendar import CalendarEvent
-from social_home.domain.page import Page
-from social_home.domain.post import Comment, CommentType, Post, PostType
-from social_home.domain.space import SpaceMember
-from social_home.domain.sticky import Sticky
-from social_home.domain.task import RecurrenceRule, Task, TaskStatus
+from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.page import Page
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.space import SpaceMember
+from socialhome.domain.sticky import Sticky
+from socialhome.domain.task import RecurrenceRule, Task, TaskStatus
 
 
 class _FakeSpacePostRepo:
@@ -44,7 +44,7 @@ class _FakeSpaceRepo:
 
 
 async def test_members_exporter():
-    from social_home.federation.sync.space.exporters import MembersExporter
+    from socialhome.federation.sync.space.exporters import MembersExporter
 
     member = SpaceMember(
         space_id="sp-1",
@@ -59,7 +59,7 @@ async def test_members_exporter():
 
 
 async def test_bans_exporter():
-    from social_home.federation.sync.space.exporters import BansExporter
+    from socialhome.federation.sync.space.exporters import BansExporter
 
     ex = BansExporter(
         _FakeSpaceRepo(
@@ -72,7 +72,7 @@ async def test_bans_exporter():
 
 
 async def test_posts_exporter_serialises_enums_and_datetimes():
-    from social_home.federation.sync.space.exporters import PostsExporter
+    from socialhome.federation.sync.space.exporters import PostsExporter
 
     post = Post(
         id="p-1",
@@ -89,7 +89,7 @@ async def test_posts_exporter_serialises_enums_and_datetimes():
 
 
 async def test_comments_exporter_walks_posts():
-    from social_home.federation.sync.space.exporters import CommentsExporter
+    from socialhome.federation.sync.space.exporters import CommentsExporter
 
     post = Post(
         id="p-1",
@@ -114,7 +114,7 @@ async def test_comments_exporter_walks_posts():
 
 
 async def test_tasks_exporter_normalises_status_and_assignees():
-    from social_home.federation.sync.space.exporters import TasksExporter
+    from socialhome.federation.sync.space.exporters import TasksExporter
 
     now = datetime.now(timezone.utc)
     task = Task(
@@ -144,7 +144,7 @@ async def test_tasks_exporter_normalises_status_and_assignees():
 
 
 async def test_tasks_archived_filters_to_done():
-    from social_home.federation.sync.space.exporters import TasksArchivedExporter
+    from socialhome.federation.sync.space.exporters import TasksArchivedExporter
 
     now = datetime.now(timezone.utc)
     active = Task(
@@ -178,7 +178,7 @@ async def test_tasks_archived_filters_to_done():
 
 
 async def test_pages_exporter():
-    from social_home.federation.sync.space.exporters import PagesExporter
+    from socialhome.federation.sync.space.exporters import PagesExporter
 
     page = Page(
         id="pg-1",
@@ -199,7 +199,7 @@ async def test_pages_exporter():
 
 
 async def test_stickies_exporter():
-    from social_home.federation.sync.space.exporters import StickiesExporter
+    from socialhome.federation.sync.space.exporters import StickiesExporter
 
     sticky = Sticky(
         id="s-1",
@@ -222,7 +222,7 @@ async def test_stickies_exporter():
 
 
 async def test_calendar_exporter_serialises_datetimes():
-    from social_home.federation.sync.space.exporters import CalendarExporter
+    from socialhome.federation.sync.space.exporters import CalendarExporter
 
     event = CalendarEvent(
         id="e-1",
@@ -243,8 +243,8 @@ async def test_calendar_exporter_serialises_datetimes():
 
 
 async def test_gallery_exporter_emits_albums_then_items():
-    from social_home.domain.gallery import GalleryAlbum, GalleryItem
-    from social_home.federation.sync.space.exporters import GalleryExporter
+    from socialhome.domain.gallery import GalleryAlbum, GalleryItem
+    from socialhome.federation.sync.space.exporters import GalleryExporter
 
     album = GalleryAlbum(
         id="a-1",
@@ -277,7 +277,7 @@ async def test_gallery_exporter_emits_albums_then_items():
 
 
 async def test_polls_exporter_walks_posts_with_polls():
-    from social_home.federation.sync.space.exporters import PollsExporter
+    from socialhome.federation.sync.space.exporters import PollsExporter
 
     post = SimpleNamespace(id="p-1")
 
@@ -299,7 +299,7 @@ async def test_polls_exporter_walks_posts_with_polls():
 
 
 async def test_polls_exporter_skips_posts_without_polls():
-    from social_home.federation.sync.space.exporters import PollsExporter
+    from socialhome.federation.sync.space.exporters import PollsExporter
 
     post = SimpleNamespace(id="p-2")
 

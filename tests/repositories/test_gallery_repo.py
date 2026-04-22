@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.domain.gallery import GalleryAlbum, GalleryItem
-from social_home.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem
+from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 
 
 @pytest.fixture

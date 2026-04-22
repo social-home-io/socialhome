@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.events import TaskCreated, TaskDeleted, TaskUpdated
-from social_home.domain.federation import FederationEventType
-from social_home.domain.task import Task, TaskStatus
-from social_home.infrastructure.event_bus import EventBus
-from social_home.services.task_federation_outbound import (
+from socialhome.domain.events import TaskCreated, TaskDeleted, TaskUpdated
+from socialhome.domain.federation import FederationEventType
+from socialhome.domain.task import Task, TaskStatus
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.task_federation_outbound import (
     TaskFederationOutbound,
 )
 

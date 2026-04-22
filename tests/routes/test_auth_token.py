@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-from social_home.platform.standalone import StandaloneAdapter
+from socialhome.platform.standalone import StandaloneAdapter
 
 
 async def _seed_platform_user(client, username: str, password: str):
@@ -97,7 +97,7 @@ def test_verify_password_rejects_non_scrypt_stored():
 
 async def test_auth_token_rate_limit_returns_429_after_budget(client):
     """§25.7 — a 6th login attempt from the same IP returns 429."""
-    from social_home.routes.users import AUTH_TOKEN_RATE_LIMIT
+    from socialhome.routes.users import AUTH_TOKEN_RATE_LIMIT
 
     # Burn the budget with bad credentials — all should 401, then 429.
     for _ in range(AUTH_TOKEN_RATE_LIMIT):

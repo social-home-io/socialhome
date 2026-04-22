@@ -6,21 +6,21 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.domain.conversation import (
+from socialhome.domain.conversation import (
     Conversation,
     ConversationMember,
     ConversationMessage,
     ConversationType,
     RemoteConversationMember,
 )
-from social_home.repositories.conversation_repo import SqliteConversationRepo
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a conversation repo and seeded users."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

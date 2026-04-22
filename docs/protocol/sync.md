@@ -87,13 +87,13 @@ completes; only the transport changes.
 
 ## Implementation
 
-- `social_home/federation/sync/space/exporter.py` — provider
+- `socialhome/federation/sync/space/exporter.py` — provider
   streams chunks, resume support.
-- `social_home/federation/sync_rtc.py` — `sync-v1` DataChannel
+- `socialhome/federation/sync_rtc.py` — `sync-v1` DataChannel
   lifecycle (offer/answer/ICE/backpressure).
-- `social_home/services/federation_inbound/space_content.py` —
+- `socialhome/services/federation_inbound/space_content.py` —
   chunk application on the requester side.
-- `social_home/federation/sync/space/provider.py` —
+- `socialhome/federation/sync/space/provider.py` —
   `serialise_chunk()` and per-space authoritative snapshot.
 
 ## Spec references

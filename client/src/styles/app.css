@@ -786,6 +786,198 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-post-time { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
 .sh-post-edited { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); font-style: italic; }
+
+/* Bot-bridge posts — visual distinction from user posts so members can
+   tell "an automation posted this" at a glance without reading the
+   attribution line. Border + soft background + accent-tinted avatar. */
+.sh-post-bot-attribution {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.sh-bot-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--sh-radius-full);
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  color: var(--sh-primary);
+  /* Subtle ring to keep the circle readable on light and dark themes. */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sh-primary) 25%, transparent);
+  user-select: none;
+  flex-shrink: 0;
+}
+/* Member-scope bots get a slightly cooler tint so household members can
+   scan "shared" vs. "someone's personal automation" at a glance. */
+.sh-bot-avatar--member {
+  background: color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 10%, transparent);
+  color: var(--sh-accent, var(--sh-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 25%, transparent);
+}
+.sh-bot-avatar--fallback {
+  background: color-mix(in srgb, var(--sh-text-muted) 12%, transparent);
+  color: var(--sh-text-muted);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sh-text-muted) 25%, transparent);
+}
+
+/* Bots & automations tab (SpaceSettingsPage → SpaceBotsTab). */
+.sh-bots-tab { display: flex; flex-direction: column; gap: var(--sh-space-lg); }
+.sh-bots-tab__intro h2 { margin: 0 0 var(--sh-space-xs); }
+.sh-bots-tab__intro p { margin: 0 0 var(--sh-space-sm); }
+.sh-bots-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-surface-2, color-mix(in srgb, var(--sh-text) 5%, transparent));
+  cursor: pointer;
+  font-weight: 600;
+}
+.sh-bots-toggle input { accent-color: var(--sh-primary); }
+.sh-bots-disabled-banner {
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-warning, #b77d00) 10%, transparent);
+  color: var(--sh-warning, #b77d00);
+  font-size: var(--sh-font-size-sm);
+}
+
+.sh-bots-section {
+  border-top: 1px solid var(--sh-divider, color-mix(in srgb, var(--sh-text) 10%, transparent));
+  padding-top: var(--sh-space-md);
+}
+.sh-bots-section h3 { margin: 0 0 4px; }
+.sh-bots-section > p.sh-muted { margin: 0 0 var(--sh-space-sm); }
+.sh-bots-empty {
+  padding: var(--sh-space-md);
+  border: 1px dashed color-mix(in srgb, var(--sh-text) 20%, transparent);
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted);
+  text-align: center;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-bots-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-bot-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-surface-2, color-mix(in srgb, var(--sh-text) 4%, transparent));
+}
+.sh-bot-row__meta { flex: 1; min-width: 0; }
+.sh-bot-row__name { font-weight: 600; }
+.sh-bot-row__slug {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--sh-font-size-xs);
+  margin-top: 2px;
+}
+.sh-bot-row__slug code {
+  background: color-mix(in srgb, var(--sh-text) 8%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-bot-row__actions { display: flex; gap: var(--sh-space-xs); }
+
+.sh-bots-create-panel {
+  padding-top: var(--sh-space-md);
+  border-top: 1px solid var(--sh-divider, color-mix(in srgb, var(--sh-text) 10%, transparent));
+}
+.sh-bot-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-md);
+  background: var(--sh-surface-2, color-mix(in srgb, var(--sh-text) 4%, transparent));
+  border-radius: var(--sh-radius-md);
+}
+.sh-bot-create h3 { margin: 0 0 var(--sh-space-xs); }
+.sh-bot-create__row { display: flex; flex-direction: column; gap: 4px; }
+.sh-bot-create__row label { font-weight: 600; font-size: var(--sh-font-size-sm); }
+.sh-bot-create__row input[type="text"] {
+  padding: 8px 10px;
+  border-radius: var(--sh-radius-sm);
+  border: 1px solid color-mix(in srgb, var(--sh-text) 20%, transparent);
+  font: inherit;
+  background: var(--sh-surface, transparent);
+  color: var(--sh-text);
+}
+.sh-bot-create__scope {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sh-space-sm);
+}
+.sh-bot-create__scope label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--sh-text) 15%, transparent);
+  border-radius: var(--sh-radius-md);
+  cursor: pointer;
+  font-weight: normal;
+}
+.sh-bot-create__scope label:has(input:checked) {
+  border-color: var(--sh-primary);
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+}
+.sh-bot-create__scope label > span { font-weight: 600; }
+.sh-bot-create__actions { display: flex; gap: var(--sh-space-xs); }
+
+.sh-bot-reveal {
+  padding: var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-bot-reveal__title { font-size: var(--sh-font-size-lg); font-weight: 700; }
+.sh-bot-reveal__token {
+  display: flex;
+  gap: var(--sh-space-sm);
+  align-items: center;
+  background: var(--sh-surface, transparent);
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-sm);
+  border: 1px dashed color-mix(in srgb, var(--sh-primary) 40%, transparent);
+  overflow: hidden;
+}
+.sh-bot-reveal__token code {
+  flex: 1;
+  font-family: var(--sh-font-mono, ui-monospace, monospace);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.sh-bot-reveal__snippet {
+  background: color-mix(in srgb, var(--sh-text) 6%, transparent);
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-sm);
+  overflow-x: auto;
+  font-size: var(--sh-font-size-xs);
+  white-space: pre;
+}
+.sh-bot-reveal__actions { display: flex; justify-content: flex-end; }
+.sh-post-header--bot {
+  /* Subtle tint so bot posts are clearly non-conversational in the feed. */
+  margin: calc(-1 * var(--sh-space-xs)) calc(-1 * var(--sh-space-xs)) var(--sh-space-sm);
+  padding: var(--sh-space-xs);
+  border-radius: var(--sh-radius-sm);
+  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
+}
 .sh-post-space-badge {
   display: inline-flex;
   align-items: center;

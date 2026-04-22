@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 
-from social_home.app_keys import (
+from socialhome.app_keys import (
     page_conflict_service_key,
     page_repo_key,
 )
-from social_home.repositories.page_repo import new_page
+from socialhome.repositories.page_repo import new_page
 
 from .conftest import _auth
 

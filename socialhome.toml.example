@@ -1,0 +1,58 @@
+# Social Home configuration
+#
+# Default location: ~/.config/socialhome/socialhome.toml
+# Override with: SH_CONFIG=/path/to/socialhome.toml
+#
+# Every setting can also be set via SH_* environment variable.
+# Environment variables take precedence over this file.
+
+[server]
+# mode = "standalone"                   # "ha" | "standalone"
+# listen_host = "0.0.0.0"
+# listen_port = 8099
+# log_level = "INFO"
+
+[storage]
+# data_dir = "~/.local/share/socialhome"  # XDG default
+# media_path = "~/.local/share/socialhome/media"
+# max_storage_bytes = 10737418240       # 10 GB (0 = no cap)
+
+[federation]
+# instance_name = "My Home"
+
+[webrtc]
+# stun_url = "stun:stun.l.google.com:19302"
+# turn_url = "turn:turn.example.com:3478"
+# turn_user = ""
+# turn_cred = ""
+# turn_secret = ""                      # HMAC-SHA1 time-limited credentials
+# turn_ttl_seconds = 3600
+
+# ── Platform-adapter options ──────────────────────────────────────────────
+# Each platform adapter reads its own section. Keys are adapter-specific
+# and passed through untouched.
+
+[homeassistant]
+# url = "http://homeassistant.local:8123"
+                                        # Home Assistant Core base URL.
+                                        # Only consulted when running
+                                        # outside the HA add-on — in
+                                        # add-on mode the adapter routes
+                                        # through the Supervisor proxy
+                                        # and this setting is ignored.
+                                        # Env override: SH_HA_URL
+# token = ""                              # Long-lived HA access token.
+                                        # Same add-on caveat as `url`.
+                                        # Env override: SH_HA_TOKEN
+# ai_task_entity_id = "ai_task.openai"  # HA entity that backs /import_image
+                                        # and /import_prompt. When unset HA
+                                        # picks the default ai_task entity.
+# stt_entity_id = "stt.home_assistant_cloud"
+                                        # HA STT entity that backs
+                                        # /api/stt/stream. When unset the
+                                        # WebSocket closes with an error
+                                        # frame and the UI hides the mic
+                                        # button.
+
+[standalone]
+# (reserved for future options)

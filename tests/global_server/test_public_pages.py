@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from social_home.global_server.app_keys import (
+from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
 )
-from social_home.global_server.config import GfsConfig
-from social_home.global_server.domain import ClientInstance, GlobalSpace
-from social_home.global_server.server import create_gfs_app
+from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.server import create_gfs_app
 
 
 def _config(tmp_dir):

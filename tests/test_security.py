@@ -1,8 +1,8 @@
-"""Tests for social_home.security."""
+"""Tests for socialhome.security."""
 
 from __future__ import annotations
 
-from social_home.security import SENSITIVE_FIELDS, error_response, sanitise_for_api
+from socialhome.security import SENSITIVE_FIELDS, error_response, sanitise_for_api
 
 
 def test_strips_sensitive():

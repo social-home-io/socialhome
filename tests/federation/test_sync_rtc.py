@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.federation.sync_rtc import (
+from socialhome.federation.sync_rtc import (
     CHANNEL_LABEL,
     ICE_TIMEOUT_SECONDS,
     MAX_SIGNALING_SESSIONS,

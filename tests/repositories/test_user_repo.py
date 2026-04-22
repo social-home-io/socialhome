@@ -1,4 +1,4 @@
-"""Tests for social_home.repositories.user_repo."""
+"""Tests for socialhome.repositories.user_repo."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import pytest
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a user repo over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
-    from social_home.infrastructure.event_bus import EventBus
-    from social_home.repositories.user_repo import SqliteUserRepo
-    from social_home.services.user_service import UserService
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.infrastructure.event_bus import EventBus
+    from socialhome.repositories.user_repo import SqliteUserRepo
+    from socialhome.services.user_service import UserService
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

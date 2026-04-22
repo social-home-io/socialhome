@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.repositories.theme_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.theme_repo import (
     HouseholdTheme,
     SqliteThemeRepo,
     validate_color,

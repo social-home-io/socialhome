@@ -7,12 +7,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from social_home.crypto import derive_instance_id, generate_identity_keypair
-from social_home.db.database import AsyncDatabase
-from social_home.domain.post import BazaarListing, BazaarMode, BazaarStatus
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.bazaar_repo import SqliteBazaarRepo
-from social_home.services.bazaar_service import (
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
+from socialhome.services.bazaar_service import (
     BazaarService,
     BazaarServiceError,
     BidNotFoundError,

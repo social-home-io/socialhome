@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from social_home.services.realtime_service import _safe
+from socialhome.services.realtime_service import _safe
 
 
 pytestmark = pytest.mark.security
@@ -40,7 +40,7 @@ def test_safe_handles_set_and_frozenset():
 
 def test_push_payload_class_omits_body_field():
     """PushPayload defines no `body` attribute by design."""
-    from social_home.services.push_service import PushPayload
+    from socialhome.services.push_service import PushPayload
 
     p = PushPayload(title="Hello")
     serialized = json.loads(p.to_json())
@@ -49,7 +49,7 @@ def test_push_payload_class_omits_body_field():
 
 
 def test_push_payload_drops_none_fields():
-    from social_home.services.push_service import PushPayload
+    from socialhome.services.push_service import PushPayload
 
     p = PushPayload(title="x", click_url=None)
     serialized = json.loads(p.to_json())
@@ -60,7 +60,7 @@ def test_push_payload_drops_none_fields():
 
 
 async def test_typing_event_carries_only_routing():
-    from social_home.services.typing_service import TypingService
+    from socialhome.services.typing_service import TypingService
 
     class _FakeRepo:
         async def list_members(self, _):

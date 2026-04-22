@@ -1,4 +1,4 @@
-"""Tests for social_home.infrastructure.outbox_processor — OutboxProcessor."""
+"""Tests for socialhome.infrastructure.outbox_processor — OutboxProcessor."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 
-from social_home.infrastructure.outbox_processor import (
+from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     JITTER_RATIO,
     MAX_ATTEMPTS,
     OutboxProcessor,
 )
-from social_home.repositories.outbox_repo import OutboxEntry
-from social_home.domain.federation import FederationEventType
+from socialhome.repositories.outbox_repo import OutboxEntry
+from socialhome.domain.federation import FederationEventType
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

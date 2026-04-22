@@ -1,0 +1,1 @@
+import{a as s}from"./index-gt5FaIDM.js";function i({size:n=24}){return s("div",{class:"sh-spinner",style:{width:n,height:n},role:"status",children:s("span",{class:"sr-only",children:"Loading..."})})}export{i as S};

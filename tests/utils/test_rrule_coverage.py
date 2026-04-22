@@ -1,10 +1,10 @@
-"""Coverage fill for :mod:`social_home.utils.rrule`."""
+"""Coverage fill for :mod:`socialhome.utils.rrule`."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from social_home.utils.rrule import _parse_until, expand_rrule, parse_rrule
+from socialhome.utils.rrule import _parse_until, expand_rrule, parse_rrule
 
 
 def _dt(y, m, d, h=0, mi=0) -> datetime:

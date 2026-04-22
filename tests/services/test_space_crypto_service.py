@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_space_id,
     generate_space_keypair,
 )
-from social_home.db.database import AsyncDatabase
-from social_home.infrastructure.key_manager import KeyManager
-from social_home.repositories.space_key_repo import (
+from socialhome.db.database import AsyncDatabase
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.space_key_repo import (
     SqliteSpaceKeyRepo,
 )
-from social_home.services.space_crypto_service import (
+from socialhome.services.space_crypto_service import (
     SpaceContentEncryption,
     create_space_identity,
     sign_space_config,
@@ -209,7 +209,7 @@ async def test_seal_for_gfs_unknown_space_raises(crypto_env):
 
 
 async def test_unseal_unknown_epoch_raises(crypto_env):
-    from social_home.federation.sealed_sender import SealedEnvelope
+    from socialhome.federation.sealed_sender import SealedEnvelope
 
     crypto, _ = crypto_env
     fake = SealedEnvelope(

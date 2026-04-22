@@ -6,10 +6,10 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from social_home.domain.events import TaskDeadlineDue
-from social_home.domain.task import Task, TaskStatus
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.task_deadline_scheduler import (
+from socialhome.domain.events import TaskDeadlineDue
+from socialhome.domain.task import Task, TaskStatus
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.task_deadline_scheduler import (
     TaskDeadlineScheduler,
 )
 

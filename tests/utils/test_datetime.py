@@ -1,4 +1,4 @@
-"""Tests for social_home.utils.datetime."""
+"""Tests for socialhome.utils.datetime."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from social_home.utils.datetime import (
+from socialhome.utils.datetime import (
     parse_iso8601_lenient,
     parse_iso8601_optional,
     parse_iso8601_strict,

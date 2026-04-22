@@ -14,26 +14,26 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
-from social_home.domain.federation import (
+from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
-from social_home.federation.auto_pair_coordinator import (
+from socialhome.federation.auto_pair_coordinator import (
     AutoPairCoordinator,
     _ack_blob,
     _derive_session_keys,
     _vouch_blob,
 )
-from social_home.infrastructure.event_bus import EventBus
-from social_home.infrastructure.key_manager import KeyManager
-from social_home.services.auto_pair_inbox import AutoPairInbox
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.services.auto_pair_inbox import AutoPairInbox
 
 
 class _InMemoryFederationRepo:
@@ -147,7 +147,7 @@ def test_ack_blob_shape():
 
 
 def test_derive_session_keys_produces_32_bytes():
-    from social_home.crypto import generate_x25519_keypair
+    from socialhome.crypto import generate_x25519_keypair
 
     a = generate_x25519_keypair()
     b = generate_x25519_keypair()
@@ -430,7 +430,7 @@ async def test_full_auto_pair_handshake(
     """Exercise the complete A → B → C → A flow with real crypto."""
     from datetime import datetime, timezone
 
-    from social_home.crypto import (
+    from socialhome.crypto import (
         derive_instance_id as _diid,
         generate_identity_keypair as _gik,
     )
@@ -451,7 +451,7 @@ async def test_full_auto_pair_handshake(
     fed_repo.instances[c_id] = c_inst
 
     # Step: A's intro arrives at B (coord).
-    from social_home.crypto import generate_x25519_keypair
+    from socialhome.crypto import generate_x25519_keypair
 
     a_dh = generate_x25519_keypair()
     ts = datetime.now(timezone.utc).isoformat()

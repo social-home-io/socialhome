@@ -9,8 +9,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from social_home.global_server.federation import GfsFederationService
-from social_home.global_server.repositories import SqliteGfsFederationRepo
+from socialhome.global_server.federation import GfsFederationService
+from socialhome.global_server.repositories import SqliteGfsFederationRepo
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

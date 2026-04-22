@@ -1,7 +1,7 @@
-"""Tests for social_home.media.image_processor."""
+"""Tests for socialhome.media.image_processor."""
 
 import pytest
-from social_home.media.image_processor import ImageProcessor, MAGIC_BYTES
+from socialhome.media.image_processor import ImageProcessor, MAGIC_BYTES
 
 
 def test_image_processor_instantiates():
@@ -80,7 +80,7 @@ async def test_thumbnail_uses_lower_quality_than_main_image():
     from PIL import Image
     import io
 
-    from social_home.domain.media_constraints import (
+    from socialhome.domain.media_constraints import (
         IMAGE_WEBP_QUALITY,
         THUMBNAIL_WEBP_QUALITY,
     )

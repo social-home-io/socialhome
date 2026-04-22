@@ -17,12 +17,12 @@ Reference material for running and understanding Social Home.
 
 - **HFS — Household Federation Server.** The per-household instance.
   Runs either inside Home Assistant (`SOCIAL_HOME_MODE=ha`) or as a
-  standalone service. Source lives under `social_home/` (excluding
-  `social_home/global_server/`).
+  standalone service. Source lives under `socialhome/` (excluding
+  `socialhome/global_server/`).
 - **GFS — Global Federation Server.** A public relay service operated
   per community. Provides the public-space directory, push fan-out, and
   WebRTC signalling bootstrap. Source lives under
-  `social_home/global_server/`.
+  `socialhome/global_server/`.
 - **Space.** A group context shared across households — a private
   family space, a neighbourhood watch, a public community. Spaces are
   the unit of content federation.

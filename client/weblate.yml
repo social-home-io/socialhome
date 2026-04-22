@@ -13,7 +13,7 @@
 #    remote YAML source, or upload it via Settings → Add component.
 # 3. Add the target languages listed in spec §30.9 (de, nl, fr, es).
 # 4. Set the VCS push token: GitHub PAT with ``contents:write`` on
-#    ``social-home-io/core``.
+#    ``social-home-io/socialhome``.
 # 5. Enable "Automatically push on commit" and "Merge style: rebase".
 # 6. Translators register at the public Weblate URL — no invite is
 #    required for OSS projects. Link the registration URL from the
@@ -26,8 +26,8 @@
 
 component:
   name:            Social Home UI
-  slug:            social-home
-  repo:            https://github.com/social-home-io/core
+  slug:            socialhome
+  repo:            https://github.com/social-home-io/socialhome
   branch:          main
   filemask:        client/src/i18n/locales/*.json
   file_format:     json-flat                    # flat dotted keys

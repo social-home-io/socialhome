@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from social_home.domain.federation import FederationEventType
-from social_home.services.typing_service import (
+from socialhome.domain.federation import FederationEventType
+from socialhome.services.typing_service import (
     TYPING_TTL_SECONDS,
     TypingService,
 )

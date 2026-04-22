@@ -1,25 +1,25 @@
-"""Tests for social_home.services.space_service."""
+"""Tests for socialhome.services.space_service."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.crypto import generate_identity_keypair, derive_instance_id
-from social_home.db.database import AsyncDatabase
-from social_home.domain.post import PostType
-from social_home.domain.space import (
+from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.post import PostType
+from socialhome.domain.space import (
     JoinMode,
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
     SpaceType,
 )
-from social_home.infrastructure.event_bus import EventBus
-from social_home.repositories.space_post_repo import SqliteSpacePostRepo
-from social_home.repositories.space_repo import SqliteSpaceRepo
-from social_home.repositories.user_repo import SqliteUserRepo
-from social_home.services.space_service import SpaceService
-from social_home.services.user_service import UserService
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.space_service import SpaceService
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture
@@ -168,7 +168,7 @@ async def test_space_post_with_moderation(stack):
 
 async def test_approve_moderation_item_persists_post(stack):
     """Approving a queued post persists it and marks the queue item APPROVED."""
-    from social_home.domain.space import ModerationStatus
+    from socialhome.domain.space import ModerationStatus
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -216,7 +216,7 @@ async def test_approve_moderation_item_persists_post(stack):
 
 
 async def test_reject_moderation_item_records_reason(stack):
-    from social_home.domain.space import ModerationStatus
+    from socialhome.domain.space import ModerationStatus
 
     _a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -283,7 +283,7 @@ async def test_moderation_requires_admin(stack):
 
 
 async def test_double_decide_raises_already_decided(stack):
-    from social_home.domain.space import ModerationAlreadyDecidedError
+    from socialhome.domain.space import ModerationAlreadyDecidedError
 
     _a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -779,8 +779,8 @@ async def test_public_space_coordinate_truncation(stack):
 
 def test_coerce_space_type_string():
     """String space type is coerced to enum."""
-    from social_home.services.space_service import _coerce_space_type
-    from social_home.domain.space import SpaceType
+    from socialhome.services.space_service import _coerce_space_type
+    from socialhome.domain.space import SpaceType
 
     assert _coerce_space_type("private") is SpaceType.PRIVATE
     assert _coerce_space_type(SpaceType.PUBLIC) is SpaceType.PUBLIC
@@ -788,7 +788,7 @@ def test_coerce_space_type_string():
 
 def test_coerce_space_type_invalid():
     """Invalid space type string raises ValueError."""
-    from social_home.services.space_service import _coerce_space_type
+    from socialhome.services.space_service import _coerce_space_type
 
     with pytest.raises(ValueError, match="invalid space type"):
         _coerce_space_type("bogus")
@@ -796,8 +796,8 @@ def test_coerce_space_type_invalid():
 
 def test_coerce_join_mode_string():
     """String join mode is coerced to enum."""
-    from social_home.services.space_service import _coerce_join_mode
-    from social_home.domain.space import JoinMode
+    from socialhome.services.space_service import _coerce_join_mode
+    from socialhome.domain.space import JoinMode
 
     assert _coerce_join_mode("open") is JoinMode.OPEN
     assert _coerce_join_mode(JoinMode.INVITE_ONLY) is JoinMode.INVITE_ONLY
@@ -805,7 +805,7 @@ def test_coerce_join_mode_string():
 
 def test_coerce_join_mode_invalid():
     """Invalid join mode raises ValueError."""
-    from social_home.services.space_service import _coerce_join_mode
+    from socialhome.services.space_service import _coerce_join_mode
 
     with pytest.raises(ValueError, match="invalid join mode"):
         _coerce_join_mode("bogus")
@@ -813,7 +813,7 @@ def test_coerce_join_mode_invalid():
 
 def test_coerce_post_type():
     """Post type coercion works for strings and enums."""
-    from social_home.services.space_service import _coerce_post_type
+    from socialhome.services.space_service import _coerce_post_type
 
     assert _coerce_post_type("text") is PostType.TEXT
     assert _coerce_post_type(PostType.IMAGE) is PostType.IMAGE
@@ -823,8 +823,8 @@ def test_coerce_post_type():
 
 def test_coerce_comment_type():
     """Comment type coercion works."""
-    from social_home.services.space_service import _coerce_comment_type
-    from social_home.domain.post import CommentType
+    from socialhome.services.space_service import _coerce_comment_type
+    from socialhome.domain.post import CommentType
 
     assert _coerce_comment_type("text") is CommentType.TEXT
     assert _coerce_comment_type(CommentType.IMAGE) is CommentType.IMAGE
@@ -834,7 +834,7 @@ def test_coerce_comment_type():
 
 def test_validate_space_content_file():
     """File post without file_meta raises ValueError."""
-    from social_home.services.space_service import _validate_space_content
+    from socialhome.services.space_service import _validate_space_content
 
     with pytest.raises(ValueError, match="file_meta"):
         _validate_space_content(PostType.FILE, None, None)
@@ -842,7 +842,7 @@ def test_validate_space_content_file():
 
 def test_validate_space_content_text_empty():
     """Text post with empty content raises ValueError."""
-    from social_home.services.space_service import _validate_space_content
+    from socialhome.services.space_service import _validate_space_content
 
     with pytest.raises(ValueError, match="content"):
         _validate_space_content(PostType.TEXT, "   ", None)
@@ -850,7 +850,7 @@ def test_validate_space_content_text_empty():
 
 def test_validate_text_length():
     """Over-length content raises ValueError."""
-    from social_home.services.space_service import _validate_text_length
+    from socialhome.services.space_service import _validate_text_length
 
     with pytest.raises(ValueError, match="maximum length"):
         _validate_text_length("x" * 10001, limit=10000)

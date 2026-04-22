@@ -1,10 +1,10 @@
-"""Tests for social_home.repositories.notification_repo."""
+"""Tests for socialhome.repositories.notification_repo."""
 
 from __future__ import annotations
 
 import pytest
 
-from social_home.repositories.notification_repo import (
+from socialhome.repositories.notification_repo import (
     SqliteNotificationRepo,
     new_notification,
 )
@@ -13,8 +13,8 @@ from social_home.repositories.notification_repo import (
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a notification repo over a real SQLite database."""
-    from social_home.crypto import generate_identity_keypair, derive_instance_id
-    from social_home.db.database import AsyncDatabase
+    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

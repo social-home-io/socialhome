@@ -8,13 +8,13 @@ classical / hybrid peer combination, and that the stored
 
 from __future__ import annotations
 
-from social_home.crypto import (
+from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
     generate_x25519_keypair,
 )
-from social_home.federation.pairing_coordinator import PairingCoordinator
-from social_home.infrastructure.key_manager import KeyManager
+from socialhome.federation.pairing_coordinator import PairingCoordinator
+from socialhome.infrastructure.key_manager import KeyManager
 
 
 class _FakeRepo:

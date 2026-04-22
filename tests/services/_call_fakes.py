@@ -10,15 +10,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from social_home.crypto import generate_identity_keypair
-from social_home.domain.call import CallQualitySample, CallSession
-from social_home.domain.conversation import (
+from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.call import CallQualitySample, CallSession
+from socialhome.domain.conversation import (
     ConversationMember,
     ConversationMessage,
     RemoteConversationMember,
 )
-from social_home.domain.user import RemoteUser, User
-from social_home.services.call_service import CallSignalingService
+from socialhome.domain.user import RemoteUser, User
+from socialhome.services.call_service import CallSignalingService
 
 
 class FakeFedRepo:
@@ -26,7 +26,7 @@ class FakeFedRepo:
         self._peer_pk_hex = peer_pk_hex
 
     async def get_instance(self, iid):
-        from social_home.domain.federation import (
+        from socialhome.domain.federation import (
             InstanceSource,
             PairingStatus,
             RemoteInstance,

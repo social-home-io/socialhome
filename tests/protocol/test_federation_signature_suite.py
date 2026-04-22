@@ -12,7 +12,7 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from social_home.federation.inbound_validator import (
+from socialhome.federation.inbound_validator import (
     InboundContext,
     make_parse_json,
 )
