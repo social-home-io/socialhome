@@ -227,6 +227,32 @@ Same CRUD shape:
 /api/gallery/albums[/{id}]    /{id}/items[/{iid}]
 ```
 
+### Polls & schedule polls
+
+Polls attach to an existing post. Reply polls use `/poll`, schedule
+polls (Doodle-style) use `/schedule-poll`. Household variants are
+unfederated; space variants (below) fan out `SPACE_POLL_*` /
+`SPACE_SCHEDULE_*` federation events to paired peers.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET / POST | `/api/posts/{id}/poll` | Fetch summary / attach a new reply poll. |
+| POST / DELETE | `/api/posts/{id}/poll/vote` | Cast / retract own vote. |
+| POST | `/api/posts/{id}/poll/close` | Close (author only). |
+| POST | `/api/posts/{id}/schedule-poll` | Attach a new schedule poll. |
+| GET | `/api/schedule-polls/{id}/summary` | Slots + responses. |
+| POST | `/api/schedule-polls/{id}/respond` | Respond yes/maybe/no to a slot. |
+| DELETE | `/api/schedule-polls/{id}/slots/{slot_id}/response` | Retract own response. |
+| POST | `/api/schedule-polls/{id}/finalize` | Author picks winning slot. |
+| GET / POST | `/api/spaces/{id}/posts/{pid}/poll` | Space-scoped reply poll. |
+| POST / DELETE | `/api/spaces/{id}/posts/{pid}/poll/vote` | Cast / retract space vote. |
+| POST | `/api/spaces/{id}/posts/{pid}/poll/close` | Close (author only). |
+| POST | `/api/spaces/{id}/posts/{pid}/schedule-poll` | Space-scoped schedule poll. |
+| GET | `/api/spaces/{id}/schedule-polls/{pid}/summary` | Space schedule summary. |
+| POST | `/api/spaces/{id}/schedule-polls/{pid}/respond` | Respond to a space slot. |
+| DELETE | `/api/spaces/{id}/schedule-polls/{pid}/slots/{slot_id}/response` | Retract. |
+| POST | `/api/spaces/{id}/schedule-polls/{pid}/finalize` | Author finalizes. |
+
 ## HFS — Conversations (DMs)
 
 | Method | Path | Purpose |

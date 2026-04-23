@@ -147,9 +147,15 @@ from .polls import (
     SchedulePollRespondView,
     SchedulePollSlotResponseView,
     SchedulePollSummaryView,
+)
+from .space_polls import (
+    SpacePollCloseView,
+    SpacePollSummaryView,
+    SpacePollVoteView,
     SpaceSchedulePollCollectionView,
     SpaceSchedulePollFinalizeView,
     SpaceSchedulePollRespondView,
+    SpaceSchedulePollSlotResponseView,
     SpaceSchedulePollSummaryView,
 )
 from .presence import PresenceCollectionView, PresenceLocationView
@@ -722,6 +728,19 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         SchedulePollSlotResponseView,
     )
     app.router.add_view("/api/schedule-polls/{id}/summary", SchedulePollSummaryView)
+    # ── Space-scoped polls + schedule polls ────────────────────────────
+    app.router.add_view(
+        "/api/spaces/{id}/posts/{pid}/poll",
+        SpacePollSummaryView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/posts/{pid}/poll/vote",
+        SpacePollVoteView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/posts/{pid}/poll/close",
+        SpacePollCloseView,
+    )
     app.router.add_view(
         "/api/spaces/{id}/posts/{pid}/schedule-poll",
         SpaceSchedulePollCollectionView,
@@ -729,6 +748,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view(
         "/api/spaces/{id}/schedule-polls/{pid}/respond",
         SpaceSchedulePollRespondView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/schedule-polls/{pid}/slots/{slot_id}/response",
+        SpaceSchedulePollSlotResponseView,
     )
     app.router.add_view(
         "/api/spaces/{id}/schedule-polls/{pid}/finalize",
