@@ -300,10 +300,17 @@ Same CRUD shape:
 
 ## HFS — Child protection
 
-`/api/cp/*` — see `socialhome/routes/child_protection_routes.py`.
+`/api/cp/*` — see `socialhome/routes/child_protection.py`.
 Guardian-scoped operations: manage guardians, list minor's spaces and
-conversations, set age gates, read guardian audit logs. All require
-the minor or their guardian.
+conversations, set age gates, read audit logs. All require the minor
+or their guardian (household admins have an override).
+
+Two distinct audit surfaces:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/cp/minors/{minor_id}/audit-log` | Guardian-driven actions (enable/disable CP, add/remove guardians, toggle blocks). |
+| GET | `/api/cp/minors/{minor_id}/membership-audit` | System-driven space-membership changes affecting the minor — \`joined\` / \`removed\` / \`blocked\`. Written automatically by `SpaceService.add_member` / `remove_member` / `ban` when the target user has child-protection enabled. |
 
 ## HFS — Reports
 

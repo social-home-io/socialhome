@@ -149,3 +149,95 @@ async def test_add_member_no_cp_attached_works_unchanged(env):
         user_id="lila-id",
     )
     assert member.user_id == "lila-id"
+
+
+# ─── Membership audit (§CP) — add_member / remove_member / ban hooks ──────
+
+
+async def test_add_member_appends_joined_audit_for_minor(env):
+    space_svc, cp_svc = env
+    await cp_svc.enable_protection(
+        minor_username="lila",
+        declared_age=15,
+        actor_user_id="admin-id",
+    )
+    await space_svc.add_member(
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
+    )
+    entries = await cp_svc.get_membership_audit(
+        minor_user_id="lila-id",
+        requester_user_id="admin-id",
+    )
+    actions = [e["action"] for e in entries]
+    assert "joined" in actions
+    joined = next(e for e in entries if e["action"] == "joined")
+    assert joined["space_id"] == "sp-adult"
+    assert joined["actor_id"] == "admin-id"
+
+
+async def test_add_member_skips_audit_for_non_minor(env):
+    space_svc, cp_svc = env
+    await space_svc.add_member(
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
+    )
+    entries = await cp_svc.get_membership_audit(
+        minor_user_id="lila-id",
+        requester_user_id="admin-id",
+    )
+    assert entries == []
+
+
+async def test_remove_member_appends_removed_audit_for_minor(env):
+    space_svc, cp_svc = env
+    await cp_svc.enable_protection(
+        minor_username="lila",
+        declared_age=15,
+        actor_user_id="admin-id",
+    )
+    await space_svc.add_member(
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
+    )
+    await space_svc.remove_member(
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
+    )
+    entries = await cp_svc.get_membership_audit(
+        minor_user_id="lila-id",
+        requester_user_id="admin-id",
+    )
+    actions = [e["action"] for e in entries]
+    assert "joined" in actions
+    assert "removed" in actions
+
+
+async def test_ban_appends_blocked_audit_for_minor(env):
+    space_svc, cp_svc = env
+    await cp_svc.enable_protection(
+        minor_username="lila",
+        declared_age=15,
+        actor_user_id="admin-id",
+    )
+    await space_svc.add_member(
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
+    )
+    await space_svc.ban(
+        "sp-adult",
+        actor_username="admin",
+        user_id="lila-id",
+        reason="repeated violations",
+    )
+    entries = await cp_svc.get_membership_audit(
+        minor_user_id="lila-id",
+        requester_user_id="admin-id",
+    )
+    actions = [e["action"] for e in entries]
+    assert "blocked" in actions

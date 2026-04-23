@@ -480,6 +480,62 @@ class ChildProtectionService:
                 ) from exc
         return await self.list_audit_log(minor_user_id, limit=limit)
 
+    # ── Membership audit ──────────────────────────────────────────────
+
+    async def record_membership_change(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+        action: str,
+        actor_id: str,
+    ) -> None:
+        """Append to ``minor_space_memberships_audit`` iff ``user_id``
+        is a minor.
+
+        No-op when the user doesn't have child-protection enabled —
+        the audit trail only needs to track CP-covered users. Silent
+        return keeps the call site in :class:`SpaceService` simple
+        (fire-and-forget).
+
+        ``action`` must be one of ``"joined"``, ``"removed"``, or
+        ``"blocked"`` — enforced by the table's CHECK constraint.
+        """
+        if action not in ("joined", "removed", "blocked"):
+            raise ValueError(f"invalid membership action: {action!r}")
+        if not await self._repo.is_minor(user_id):
+            return
+        await self._repo.append_membership_audit(
+            minor_user_id=user_id,
+            space_id=space_id,
+            action=action,
+            actor_id=actor_id,
+        )
+
+    async def get_membership_audit(
+        self,
+        minor_user_id: str,
+        requester_user_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Guardian-or-admin-gated read of the membership audit trail.
+
+        Raises :class:`GuardianRequiredError` for any other caller.
+        """
+        is_guardian = await self.is_guardian_of(
+            requester_user_id,
+            minor_user_id,
+        )
+        if not is_guardian:
+            try:
+                await self._require_admin(requester_user_id)
+            except SpacePermissionError as exc:
+                raise GuardianRequiredError(
+                    "Only a guardian or household admin may view the membership audit",
+                ) from exc
+        return await self._repo.list_membership_audit(minor_user_id, limit=limit)
+
     async def is_blocked_for_minor(
         self,
         minor_user_id: str,

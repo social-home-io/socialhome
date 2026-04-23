@@ -112,6 +112,28 @@ class AbstractCpRepo(Protocol):
         limit: int,
     ) -> list[dict]: ...
 
+    # Membership audit — append-only trail of space-membership changes
+    # that affected a minor. Distinct from ``guardian_audit_log``: this
+    # table records *system-driven* actions (admin adds/removes, auto-
+    # removal from banned-user spaces) whereas ``guardian_audit_log``
+    # records *guardian-driven* actions. Both surface in the parent
+    # dashboard.
+    async def append_membership_audit(
+        self,
+        *,
+        minor_user_id: str,
+        space_id: str,
+        action: str,  # "joined" | "removed" | "blocked"
+        actor_id: str,
+    ) -> None: ...
+    async def list_membership_audit(
+        self,
+        minor_user_id: str,
+        *,
+        limit: int,
+    ) -> list[dict]: ...
+    async def is_minor(self, user_id: str) -> bool: ...
+
     # Age gate (§CP.F1)
     async def space_exists(self, space_id: str) -> bool: ...
     async def update_space_age_gate(
@@ -326,6 +348,54 @@ class SqliteCpRepo:
             (minor_user_id, int(limit)),
         )
         return [dict(r) for r in rows]
+
+    # ── membership audit ──────────────────────────────────────────────
+
+    async def append_membership_audit(
+        self,
+        *,
+        minor_user_id: str,
+        space_id: str,
+        action: str,
+        actor_id: str,
+    ) -> None:
+        await self._db.enqueue(
+            "INSERT INTO minor_space_memberships_audit("
+            "id, minor_user_id, space_id, action, actor_id)"
+            " VALUES(?,?,?,?,?)",
+            (uuid.uuid4().hex, minor_user_id, space_id, action, actor_id),
+        )
+
+    async def list_membership_audit(
+        self,
+        minor_user_id: str,
+        *,
+        limit: int,
+    ) -> list[dict]:
+        rows = await self._db.fetchall(
+            "SELECT id, minor_user_id, space_id, action, actor_id, occurred_at"
+            " FROM minor_space_memberships_audit WHERE minor_user_id=?"
+            " ORDER BY occurred_at DESC LIMIT ?",
+            (minor_user_id, int(limit)),
+        )
+        return [dict(r) for r in rows]
+
+    async def is_minor(self, user_id: str) -> bool:
+        """Return True iff the user has child-protection enabled.
+
+        Used by :class:`SpaceService` to decide whether a membership
+        mutation needs an audit entry. Absent user → False (caller is
+        responsible for catching any real lookup error).
+        """
+        row = await self._db.fetchone(
+            "SELECT is_minor, child_protection_enabled FROM users WHERE user_id=?",
+            (user_id,),
+        )
+        if row is None:
+            return False
+        return bool(int(row["is_minor"] or 0)) or bool(
+            int(row["child_protection_enabled"] or 0)
+        )
 
     # ── age gate ───────────────────────────────────────────────────────
 

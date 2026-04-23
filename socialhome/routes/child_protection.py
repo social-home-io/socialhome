@@ -250,3 +250,32 @@ class CPAuditLogView(BaseView):
             limit=max(1, min(limit, 200)),
         )
         return self._json({"entries": entries})
+
+
+class CPMembershipAuditView(BaseView):
+    """``GET /api/cp/minors/{minor_id}/membership-audit`` — append-only
+    trail of space-membership changes that affected a minor
+    (``joined`` / ``removed`` / ``blocked``).
+
+    Guardian-or-admin gated via
+    :meth:`ChildProtectionService.get_membership_audit`. Distinct from
+    ``/audit-log`` (which tracks *guardian-driven* actions like
+    enabling CP or toggling blocks); this surface tracks *system-
+    driven* mutations like admin removing a minor from a space.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        minor_id = self.match("minor_id")
+        try:
+            limit = int(self.request.query.get("limit", 50))
+        except ValueError:
+            limit = 50
+        entries = await self.svc(
+            K.child_protection_service_key,
+        ).get_membership_audit(
+            minor_user_id=minor_id,
+            requester_user_id=ctx.user_id,
+            limit=max(1, min(limit, 200)),
+        )
+        return self._json({"entries": entries})

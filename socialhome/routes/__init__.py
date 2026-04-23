@@ -58,6 +58,7 @@ from .child_protection import (
     CPConversationCollectionView,
     CPDmContactCollectionView,
     CPKickView,
+    CPMembershipAuditView,
     CPMinorsForGuardianView,
     CPSpaceCollectionView,
     CPGuardiansView,
@@ -692,6 +693,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/cp/minors", CPMinorsForGuardianView)
     app.router.add_view("/api/cp/spaces/{space_id}/age-gate", CPAgeGateView)
     app.router.add_view("/api/cp/minors/{minor_id}/audit-log", CPAuditLogView)
+    app.router.add_view(
+        "/api/cp/minors/{minor_id}/membership-audit",
+        CPMembershipAuditView,
+    )
 
     # ── Polls ───────────────────────────────────────────────────────────
     app.router.add_view("/api/posts/{id}/poll", PollSummaryView)

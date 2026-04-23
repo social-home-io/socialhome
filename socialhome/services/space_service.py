@@ -518,6 +518,17 @@ class SpaceService:
                 role=role,
             )
         )
+        # §CP audit — record joined action for minors. No-op when the
+        # user isn't CP-covered or when CP isn't wired.
+        if self._child_protection is not None:
+            actor = await self._users.get(actor_username)
+            actor_uid = actor.user_id if actor is not None else actor_username
+            await self._child_protection.record_membership_change(
+                user_id=user_id,
+                space_id=space_id,
+                action="joined",
+                actor_id=actor_uid,
+            )
         return member
 
     async def remove_member(
@@ -551,6 +562,13 @@ class SpaceService:
                 user_id=user_id,
             )
         )
+        if self._child_protection is not None:
+            await self._child_protection.record_membership_change(
+                user_id=user_id,
+                space_id=space_id,
+                action="removed",
+                actor_id=actor.user_id,
+            )
 
     async def set_role(
         self,
@@ -793,6 +811,13 @@ class SpaceService:
                 sequence=sequence,
             )
         )
+        if self._child_protection is not None:
+            await self._child_protection.record_membership_change(
+                user_id=user_id,
+                space_id=space_id,
+                action="blocked",
+                actor_id=actor.user_id,
+            )
 
     async def unban(
         self,

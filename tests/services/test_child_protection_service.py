@@ -661,3 +661,119 @@ async def test_list_dm_contacts_admin_allowed(env):
         actor_user_id="admin-id",
     )
     assert len(contacts) == 1
+
+
+# ─── Membership audit ────────────────────────────────────────────────────
+
+
+async def test_record_membership_change_noop_for_non_minor(env):
+    """A user without child-protection enabled triggers no audit rows."""
+    svc, db = env
+    # 'mom' is not CP-covered.
+    await svc.record_membership_change(
+        user_id="mom-id",
+        space_id="sp-adult",
+        action="joined",
+        actor_id="admin-id",
+    )
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS n FROM minor_space_memberships_audit",
+    )
+    assert row["n"] == 0
+
+
+async def test_record_membership_change_writes_row_for_minor(env):
+    svc, db = env
+    await svc.enable_protection(
+        minor_username="lila",
+        declared_age=12,
+        actor_user_id="admin-id",
+    )
+    await svc.record_membership_change(
+        user_id="lila-id",
+        space_id="sp-adult",
+        action="joined",
+        actor_id="admin-id",
+    )
+    rows = await db.fetchall(
+        "SELECT * FROM minor_space_memberships_audit WHERE minor_user_id=?",
+        ("lila-id",),
+    )
+    assert len(rows) == 1
+    assert rows[0]["action"] == "joined"
+    assert rows[0]["space_id"] == "sp-adult"
+    assert rows[0]["actor_id"] == "admin-id"
+
+
+async def test_record_membership_change_rejects_bad_action(env):
+    svc, _ = env
+    with pytest.raises(ValueError, match="invalid membership action"):
+        await svc.record_membership_change(
+            user_id="lila-id",
+            space_id="sp",
+            action="exiled",  # not in the table's CHECK set
+            actor_id="admin-id",
+        )
+
+
+async def test_get_membership_audit_guardian_access(env):
+    svc, _ = env
+    await svc.enable_protection(
+        minor_username="lila",
+        declared_age=12,
+        actor_user_id="admin-id",
+    )
+    await svc.add_guardian(
+        minor_user_id="lila-id",
+        guardian_user_id="mom-id",
+        actor_user_id="admin-id",
+    )
+    await svc.record_membership_change(
+        user_id="lila-id",
+        space_id="sp-adult",
+        action="removed",
+        actor_id="admin-id",
+    )
+    entries = await svc.get_membership_audit(
+        minor_user_id="lila-id",
+        requester_user_id="mom-id",
+    )
+    assert len(entries) == 1
+    assert entries[0]["action"] == "removed"
+
+
+async def test_get_membership_audit_admin_access(env):
+    svc, _ = env
+    await svc.enable_protection(
+        minor_username="lila",
+        declared_age=12,
+        actor_user_id="admin-id",
+    )
+    await svc.record_membership_change(
+        user_id="lila-id",
+        space_id="sp-adult",
+        action="joined",
+        actor_id="admin-id",
+    )
+    # 'admin' is a household admin — must be allowed even though not a
+    # guardian.
+    entries = await svc.get_membership_audit(
+        minor_user_id="lila-id",
+        requester_user_id="admin-id",
+    )
+    assert len(entries) == 1
+
+
+async def test_get_membership_audit_blocks_strangers(env):
+    svc, _ = env
+    await svc.enable_protection(
+        minor_username="lila",
+        declared_age=12,
+        actor_user_id="admin-id",
+    )
+    # 'mom' is neither guardian nor admin yet.
+    with pytest.raises(GuardianRequiredError):
+        await svc.get_membership_audit(
+            minor_user_id="lila-id",
+            requester_user_id="mom-id",
+        )

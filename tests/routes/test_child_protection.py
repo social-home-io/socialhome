@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+from socialhome import app_keys as K
 from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
@@ -429,3 +430,84 @@ async def test_list_dm_contacts_as_guardian_200(client):
     assert r.status == 200
     body = await r.json()
     assert isinstance(body["contacts"], list)
+
+
+# ─── Membership audit (§CP) ────────────────────────────────────────────────
+
+
+async def test_membership_audit_admin_can_read(client):
+    """The seeded admin may always read the membership-audit trail."""
+    r = await client.get(
+        "/api/cp/minors/anyone-uid/membership-audit",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body == {"entries": []}
+
+
+async def test_membership_audit_forbidden_for_stranger(client):
+    """Non-admin, non-guardian → 403."""
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        ("stranger", "stranger-uid", "Stranger"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("t-mem", "stranger-uid", "t", sha256_token_hash("stranger-tok")),
+    )
+    r = await client.get(
+        "/api/cp/minors/lila-id/membership-audit",
+        headers={"Authorization": "Bearer stranger-tok"},
+    )
+    assert r.status == 403
+
+
+async def test_membership_audit_returns_recorded_rows(client):
+    """After the service records a join, the endpoint surfaces it."""
+    db = client._db
+    # Seed a minor with CP enabled.
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin,"
+        " is_minor, child_protection_enabled) VALUES(?,?,?,0,1,1)",
+        ("lila", "lila-id", "Lila"),
+    )
+    # Append a row directly via the CP service (exposed on the app).
+    svc = client.app[K.child_protection_service_key]
+    await svc.record_membership_change(
+        user_id="lila-id",
+        space_id="sp-audit",
+        action="removed",
+        actor_id=client._uid,
+    )
+    r = await client.get(
+        "/api/cp/minors/lila-id/membership-audit",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert len(body["entries"]) == 1
+    assert body["entries"][0]["action"] == "removed"
+    assert body["entries"][0]["space_id"] == "sp-audit"
+
+
+async def test_membership_audit_limit_clamped(client):
+    """``limit`` query param is clamped to 1..200."""
+    r = await client.get(
+        "/api/cp/minors/x/membership-audit?limit=100000",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    # No crash — the service accepted the clamped value.
+
+    r2 = await client.get(
+        "/api/cp/minors/x/membership-audit?limit=garbage",
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+
+
+async def test_membership_audit_requires_auth(client):
+    r = await client.get("/api/cp/minors/anyone/membership-audit")
+    assert r.status == 401
