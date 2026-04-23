@@ -92,6 +92,74 @@ sequenceDiagram
     P->>R: DM_HISTORY_COMPLETE
 ```
 
+## Reliability — read receipts + delivery state (§12.5)
+
+Each DM_MESSAGE envelope stamps a monotonic `sender_seq` per
+`(conversation_id, sender_user_id)`. Recipients record one row per
+seen message in `conversation_delivery_state`: first `delivered`
+(acked from the browser once the frame lands), then `read` when the
+user opens the conversation. `read` supersedes `delivered` — the
+upsert never downgrades.
+
+Read receipts are end-to-end, not routing-layer. The browser sends a
+`POST /api/conversations/{id}/read` on "mark all read" which
+bulk-upserts `read` state for every visible message from other
+participants. A `POST /api/conversations/{id}/messages/{mid}/delivered`
+covers the single-message ack path.
+
+```mermaid
+sequenceDiagram
+    participant A as A's client
+    participant SH_A as HFS-A (sender)
+    participant SH_B as HFS-B (recipient)
+    participant B as B's client
+    A->>SH_A: POST /api/conversations/{id}/messages
+    SH_A->>SH_A: next_sender_seq(conv, A) → N
+    SH_A->>SH_B: DM_MESSAGE { sender_seq: N, ... }
+    SH_B->>B: realtime: DM_MESSAGE
+    B->>SH_B: POST .../messages/{mid}/delivered
+    B->>SH_B: POST .../read (when opened)
+    SH_B->>SH_A: DM_DELIVERY_STATE (future: propagate to sender)
+```
+
+## Reliability — sequence-gap detection
+
+When HFS-B's inbound handler sees `sender_seq = N` but `last_seq < N-1`
+for `(conv, A)`, every missing value between them is persisted to
+`conversation_message_gaps`. The client polls
+`GET /api/conversations/{id}/gaps` and shows a "some messages may be
+missing" banner above the oldest gap. Out-of-order arrivals that fill
+a gap call `resolve_gap` automatically so the banner clears.
+
+```mermaid
+sequenceDiagram
+    participant SH_A as HFS-A (sender)
+    participant SH_B as HFS-B (recipient)
+    Note over SH_A,SH_B: Normal: seq 1, 2, 3, 4 arrive in order
+    SH_A->>SH_B: DM_MESSAGE seq=5
+    SH_B->>SH_B: last_seen=4 → no gap, save
+    Note over SH_A,SH_B: Transport drops seq=7 (routing failure)
+    SH_A->>SH_B: DM_MESSAGE seq=8
+    SH_B->>SH_B: last_seen=5, incoming=8 → gap [6,7]
+    SH_B->>SH_B: insert_gaps([6,7])
+    SH_A->>SH_B: DM_MESSAGE seq=6 (delayed relay)
+    SH_B->>SH_B: incoming=6 <= last_seen=8 → resolve_gap(6)
+    Note over SH_A,SH_B: seq=7 still missing; UI banner persists
+```
+
+Gap-fill back-pressure (asking the sender to resend a specific seq
+range) lands in a follow-up — the current revision persists the gaps
+and surfaces them to the UI, which is enough for users to notice
+and ask the sender to repost.
+
+## Relay-path diagnostics
+
+`conversation_relay_paths` records the sticky primary route chosen by
+`DmRoutingService.select_conversation_path` for each `(conversation,
+target_instance)`. `GET /api/me/relay-paths?conversation_id=…` (future)
+and `dm_routing_repo.list_relay_paths` expose it for a future
+diagnostics UI.
+
 ## Contact requests
 
 `DM_CONTACT_REQUEST` lets a user on HFS A ask a user on HFS B for

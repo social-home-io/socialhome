@@ -1443,6 +1443,22 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   z-index: 1;
 }
 .sh-thread-call-buttons { display: flex; gap: var(--sh-space-xs); }
+
+/* §12.5 missing-message banner in the DM thread. */
+.sh-dm-gap-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  padding: 10px var(--sh-space-md);
+  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
+  color: var(--sh-warning);
+  border-bottom: 1px solid color-mix(
+    in srgb,
+    var(--sh-warning) 35%,
+    var(--sh-border)
+  );
+  font-size: var(--sh-font-size-sm);
+}
 .sh-messages {
   flex: 1;
   overflow-y: auto;

@@ -14,7 +14,23 @@ import { currentUser } from '@/store/auth'
 const messages = signal<Message[]>([])
 const loading = signal(true)
 const readMessageIds = signal<Set<string>>(new Set())
+const deliveredMessageIds = signal<Set<string>>(new Set())
 const memberCount = signal<number>(0)
+
+interface DeliveryState {
+  message_id: string
+  user_id: string
+  state: 'delivered' | 'read'
+  state_at: string
+}
+
+interface MessageGap {
+  sender_user_id: string
+  expected_seq: number
+  detected_at: string
+}
+
+const gaps = signal<MessageGap[]>([])
 
 /**
  * Render a ``type="call_event"`` system message as a compact centred row
@@ -83,6 +99,26 @@ export default function DmThreadPage() {
       if (readReceiptsEnabled.value) {
         api.post(`/api/conversations/${convId}/read`).catch(() => {})
       }
+      // Hydrate delivery/read state for every message so ticks render
+      // immediately — not just on messages we've seen WS frames for.
+      api.get(`/api/conversations/${convId}/delivery-states`).then(
+        (body: { states: DeliveryState[] }) => {
+          const delivered = new Set<string>()
+          const read = new Set<string>()
+          for (const s of body.states || []) {
+            if (s.state === 'read') read.add(s.message_id)
+            else if (s.state === 'delivered') delivered.add(s.message_id)
+          }
+          deliveredMessageIds.value = delivered
+          readMessageIds.value = new Set([...readMessageIds.value, ...read])
+        },
+      ).catch(() => {})
+      // Poll for open sequence gaps — tiny endpoint, once per thread load.
+      api.get(`/api/conversations/${convId}/gaps`).then(
+        (body: { gaps: MessageGap[] }) => {
+          gaps.value = body.gaps || []
+        },
+      ).catch(() => { gaps.value = [] })
     })
     // Member count drives the call-button visibility.
     api.get(`/api/conversations/${convId}`).then((c: { member_count?: number }) => {
@@ -104,8 +140,17 @@ export default function DmThreadPage() {
     const offNewMsg = ws.on('dm.message', (evt) => {
       const data = evt.data as { conversation_id?: string; message?: Message }
       if (data.conversation_id === convId && data.message) {
-        if (!messages.value.some(m => m.id === data.message!.id)) {
-          messages.value = [...messages.value, data.message]
+        const msg = data.message
+        if (!messages.value.some(m => m.id === msg.id)) {
+          messages.value = [...messages.value, msg]
+          // Ack delivery as soon as the frame lands. The server upsert
+          // is idempotent; a later ``read`` supersedes.
+          const mine = msg.sender_user_id === currentUser.value?.user_id
+          if (!mine && readReceiptsEnabled.value) {
+            api.post(
+              `/api/conversations/${convId}/messages/${msg.id}/delivered`,
+            ).catch(() => {})
+          }
         }
         if (readReceiptsEnabled.value) {
           api.post(`/api/conversations/${convId}/read`).catch(() => {})
@@ -161,6 +206,17 @@ export default function DmThreadPage() {
         <CallButtons convId={convId} onStart={startCall} />
         <a class="sh-link" href={`/dms/${convId}/calls`}>History</a>
       </div>
+      {gaps.value.length > 0 && (
+        <div class="sh-dm-gap-banner" role="status" aria-live="polite">
+          <span aria-hidden="true">⚠️</span>
+          <span>
+            {gaps.value.length === 1
+              ? 'A message may be missing from this conversation.'
+              : `${gaps.value.length} messages may be missing from this conversation.`}
+            {' '}Ask the sender to repost if it looks wrong.
+          </span>
+        </div>
+      )}
       <div class="sh-messages">
         {messages.value.map(m => {
           if (m.type === 'call_event') {
@@ -182,7 +238,10 @@ export default function DmThreadPage() {
                 {mine && (
                   <ReadReceipt
                     sent={true}
-                    delivered={true}
+                    delivered={
+                      deliveredMessageIds.value.has(m.id) ||
+                      readMessageIds.value.has(m.id)
+                    }
                     read={readMessageIds.value.has(m.id)}
                   />
                 )}

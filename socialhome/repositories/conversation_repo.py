@@ -108,6 +108,29 @@ class AbstractConversationRepo(Protocol):
     ) -> None: ...
     async def list_reactions(self, message_id: str) -> list[MessageReaction]: ...
 
+    # Delivery state (§12.5 — read receipts + delivery tracking) ---------
+    async def upsert_delivery_state(
+        self,
+        *,
+        conversation_id: str,
+        message_id: str,
+        user_id: str,
+        state: str,
+    ) -> None: ...
+    async def list_delivery_states(
+        self,
+        conversation_id: str,
+        *,
+        message_ids: list[str] | None = None,
+    ) -> list[dict]: ...
+    async def mark_conversation_read(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        up_to_at: str,
+    ) -> int: ...
+
 
 class SqliteConversationRepo:
     """SQLite-backed :class:`AbstractConversationRepo`."""
@@ -519,6 +542,112 @@ class SqliteConversationRepo:
             )
             for r in rows
         ]
+
+    # ── Delivery state (§12.5) ─────────────────────────────────────────
+
+    async def upsert_delivery_state(
+        self,
+        *,
+        conversation_id: str,
+        message_id: str,
+        user_id: str,
+        state: str,
+    ) -> None:
+        """Record that ``user_id`` has ``delivered`` or ``read`` the message.
+
+        ``read`` supersedes ``delivered`` — once a message is marked
+        read, subsequent ``delivered`` calls are no-ops so the UI
+        doesn't "downgrade" to the single tick.
+        """
+        if state not in ("delivered", "read"):
+            raise ValueError(f"invalid delivery state: {state!r}")
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.enqueue(
+            """
+            INSERT INTO conversation_delivery_state(
+                conversation_id, message_id, user_id, state, state_at
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id, message_id, user_id) DO UPDATE SET
+                state = CASE
+                    WHEN conversation_delivery_state.state = 'read' THEN 'read'
+                    ELSE excluded.state
+                END,
+                state_at = CASE
+                    WHEN conversation_delivery_state.state = 'read' THEN
+                        conversation_delivery_state.state_at
+                    ELSE excluded.state_at
+                END
+            """,
+            (conversation_id, message_id, user_id, state, now),
+        )
+
+    async def list_delivery_states(
+        self,
+        conversation_id: str,
+        *,
+        message_ids: list[str] | None = None,
+    ) -> list[dict]:
+        if message_ids is not None and not message_ids:
+            return []
+        if message_ids is None:
+            rows = await self._db.fetchall(
+                "SELECT message_id, user_id, state, state_at "
+                "FROM conversation_delivery_state WHERE conversation_id=?",
+                (conversation_id,),
+            )
+        else:
+            placeholders = ",".join("?" for _ in message_ids)
+            rows = await self._db.fetchall(
+                f"SELECT message_id, user_id, state, state_at "
+                f"FROM conversation_delivery_state "
+                f"WHERE conversation_id=? AND message_id IN ({placeholders})",
+                (conversation_id, *message_ids),
+            )
+        return [
+            {
+                "message_id": r["message_id"],
+                "user_id": r["user_id"],
+                "state": r["state"],
+                "state_at": r["state_at"],
+            }
+            for r in rows
+        ]
+
+    async def mark_conversation_read(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        up_to_at: str,
+    ) -> int:
+        """Bulk-upsert 'read' state for every non-own message created at
+        or before ``up_to_at``. Returns the number of rows touched.
+
+        Called when a client opens a conversation + the user scrolls
+        through it; saves a round-trip per message.
+        """
+        rows = await self._db.fetchall(
+            "SELECT id FROM conversation_messages "
+            "WHERE conversation_id=? AND sender_user_id<>? "
+            "AND created_at<=? AND COALESCE(deleted,0)=0",
+            (conversation_id, user_id, up_to_at),
+        )
+        count = 0
+        now = datetime.now(timezone.utc).isoformat()
+        for row in rows:
+            await self._db.enqueue(
+                """
+                INSERT INTO conversation_delivery_state(
+                    conversation_id, message_id, user_id, state, state_at
+                ) VALUES(?, ?, ?, 'read', ?)
+                ON CONFLICT(conversation_id, message_id, user_id) DO UPDATE SET
+                    state='read',
+                    state_at=excluded.state_at
+                """,
+                (conversation_id, row["id"], user_id, now),
+            )
+            count += 1
+        return count
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────

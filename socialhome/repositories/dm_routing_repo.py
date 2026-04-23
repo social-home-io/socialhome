@@ -59,6 +59,39 @@ class AbstractDmRoutingRepo(Protocol):
         sender_user_id: str,
     ) -> int: ...
 
+    async def peek_sender_seq(
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
+    ) -> int: ...
+
+    # Gap detection -------------------------------------------------------
+    async def insert_gaps(
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
+        expected_seqs: list[int],
+    ) -> None: ...
+    async def list_open_gaps(
+        self,
+        conversation_id: str,
+    ) -> list[dict]: ...
+    async def resolve_gap(
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
+        expected_seq: int,
+    ) -> None: ...
+
+    # Relay-path diagnostics (service-layer path selection read) ----------
+    async def list_relay_paths(
+        self,
+        conversation_id: str,
+    ) -> list[dict]: ...
+
 
 class SqliteDmRoutingRepo:
     """SQLite-backed :class:`AbstractDmRoutingRepo`."""
@@ -186,6 +219,99 @@ class SqliteDmRoutingRepo:
             return int(row[0]) if row else 1
 
         return await self._db.transact(_run)
+
+    async def peek_sender_seq(
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
+    ) -> int:
+        """Return the last-seen seq for (conv, sender) without incrementing."""
+        row = await self._db.fetchone(
+            "SELECT last_seq FROM conversation_sender_sequences "
+            "WHERE conversation_id=? AND sender_user_id=?",
+            (conversation_id, sender_user_id),
+        )
+        return int(row["last_seq"]) if row else 0
+
+    # ── Gap detection ──────────────────────────────────────────────────
+
+    async def insert_gaps(
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
+        expected_seqs: list[int],
+    ) -> None:
+        """Record one row per missing sequence number.
+
+        ``conversation_message_gaps`` PK is
+        (conv, sender, expected_seq) so re-detecting the same hole
+        twice is idempotent.
+        """
+        for seq in expected_seqs:
+            await self._db.enqueue(
+                """
+                INSERT OR IGNORE INTO conversation_message_gaps(
+                    conversation_id, sender_user_id, expected_seq
+                ) VALUES(?, ?, ?)
+                """,
+                (conversation_id, sender_user_id, int(seq)),
+            )
+
+    async def list_open_gaps(
+        self,
+        conversation_id: str,
+    ) -> list[dict]:
+        rows = await self._db.fetchall(
+            "SELECT sender_user_id, expected_seq, detected_at "
+            "FROM conversation_message_gaps WHERE conversation_id=? "
+            "ORDER BY detected_at, expected_seq",
+            (conversation_id,),
+        )
+        return [
+            {
+                "sender_user_id": r["sender_user_id"],
+                "expected_seq": int(r["expected_seq"]),
+                "detected_at": r["detected_at"],
+            }
+            for r in rows
+        ]
+
+    async def resolve_gap(
+        self,
+        *,
+        conversation_id: str,
+        sender_user_id: str,
+        expected_seq: int,
+    ) -> None:
+        await self._db.enqueue(
+            "DELETE FROM conversation_message_gaps "
+            "WHERE conversation_id=? AND sender_user_id=? AND expected_seq=?",
+            (conversation_id, sender_user_id, int(expected_seq)),
+        )
+
+    # ── Relay-path diagnostics ─────────────────────────────────────────
+
+    async def list_relay_paths(
+        self,
+        conversation_id: str,
+    ) -> list[dict]:
+        rows = await self._db.fetchall(
+            "SELECT target_instance, relay_via, hop_count, last_used_at "
+            "FROM conversation_relay_paths WHERE conversation_id=? "
+            "ORDER BY hop_count, last_used_at DESC",
+            (conversation_id,),
+        )
+        return [
+            {
+                "target_instance": r["target_instance"],
+                "relay_via": r["relay_via"],
+                "hop_count": int(r["hop_count"]),
+                "last_used_at": r["last_used_at"],
+            }
+            for r in rows
+        ]
 
 
 def utcnow_iso() -> str:

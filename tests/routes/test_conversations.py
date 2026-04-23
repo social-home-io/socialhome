@@ -232,3 +232,137 @@ async def test_send_empty_message_422(client):
         headers=_auth(client._admin_token),
     )
     assert resp.status == 422
+
+
+# ── DM reliability (§12.5) ─────────────────────────────────────────────────
+
+
+async def test_mark_read_returns_marked_count(client):
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    # Bob sends two messages so admin can mark them read.
+    for body in ("hello", "hi again"):
+        await client.post(
+            f"/api/conversations/{conv_id}/messages",
+            json={"content": body},
+            headers=_auth(client._bob_token),
+        )
+    resp = await client.post(
+        f"/api/conversations/{conv_id}/read",
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["marked"] == 2
+
+
+async def test_mark_delivered_upserts_state(client):
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    r2 = await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"content": "hello"},
+        headers=_auth(client._bob_token),
+    )
+    msg_id = (await r2.json())["id"]
+    resp = await client.post(
+        f"/api/conversations/{conv_id}/messages/{msg_id}/delivered",
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200
+    # Read-back shows the row with state='delivered'.
+    r3 = await client.get(
+        f"/api/conversations/{conv_id}/delivery-states",
+        headers=_auth(client._admin_token),
+    )
+    states = (await r3.json())["states"]
+    assert len(states) == 1
+    assert states[0]["state"] == "delivered"
+    assert states[0]["message_id"] == msg_id
+
+
+async def test_delivery_states_respects_message_ids_filter(client):
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    msg_ids = []
+    for body in ("one", "two", "three"):
+        rx = await client.post(
+            f"/api/conversations/{conv_id}/messages",
+            json={"content": body},
+            headers=_auth(client._bob_token),
+        )
+        msg_ids.append((await rx.json())["id"])
+    # Mark the whole conversation read so each message has a row.
+    await client.post(
+        f"/api/conversations/{conv_id}/read",
+        headers=_auth(client._admin_token),
+    )
+    keep = msg_ids[0]
+    r2 = await client.get(
+        f"/api/conversations/{conv_id}/delivery-states?message_ids={keep}",
+        headers=_auth(client._admin_token),
+    )
+    body = await r2.json()
+    assert len(body["states"]) == 1
+    assert body["states"][0]["message_id"] == keep
+
+
+async def test_gaps_endpoint_starts_empty(client):
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    resp = await client.get(
+        f"/api/conversations/{conv_id}/gaps",
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["gaps"] == []
+
+
+async def test_gaps_endpoint_non_member_forbidden(client):
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    # Seed a third user who isn't a member.
+    from socialhome.crypto import derive_user_id
+    from socialhome.auth import sha256_token_hash
+
+    db = client.server.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    pk = bytes.fromhex(row["identity_public_key"])
+    uid = derive_user_id(pk, "carl")
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("carl", uid, "Carl"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("tid-3", uid, "carl", sha256_token_hash("carl-tok")),
+    )
+    resp = await client.get(
+        f"/api/conversations/{conv_id}/gaps",
+        headers={"Authorization": "Bearer carl-tok"},
+    )
+    # PermissionError → base _iter maps to 403.
+    assert resp.status == 403

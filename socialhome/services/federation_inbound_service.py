@@ -73,6 +73,7 @@ class FederationInboundService:
         "_user_repo",
         "_profile_picture_repo",
         "_report_service",
+        "_dm_routing_repo",
     )
 
     def __init__(
@@ -85,6 +86,7 @@ class FederationInboundService:
         user_repo: "AbstractUserRepo",
         profile_picture_repo=None,
         report_service=None,
+        dm_routing_repo=None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -93,6 +95,7 @@ class FederationInboundService:
         self._user_repo = user_repo
         self._profile_picture_repo = profile_picture_repo
         self._report_service = report_service
+        self._dm_routing_repo = dm_routing_repo
 
     def attach_to(self, federation_service) -> None:
         """Register inbound handlers on the federation event registry."""
@@ -138,6 +141,45 @@ class FederationInboundService:
             return
         if msg_type not in MESSAGE_TYPES:
             msg_type = "text"
+
+        # §12.5 gap detection — when the sender stamps a monotonic
+        # ``sender_seq`` on the envelope, compare against our last-seen
+        # value and persist one ``conversation_message_gaps`` row per
+        # missing sequence. Skipped when the routing repo isn't wired
+        # or the payload doesn't carry a seq (backwards-compat path).
+        sender_seq = p.get("sender_seq")
+        if self._dm_routing_repo is not None and sender_seq is not None:
+            try:
+                incoming = int(sender_seq)
+            except TypeError, ValueError:
+                incoming = 0
+            if incoming > 0:
+                last = await self._dm_routing_repo.peek_sender_seq(
+                    conversation_id=conv_id,
+                    sender_user_id=sender_user_id,
+                )
+                if incoming > last + 1:
+                    missing = list(range(last + 1, incoming))
+                    log.warning(
+                        "DM gap detected conv=%s sender=%s missing=%d..%d",
+                        conv_id,
+                        sender_user_id,
+                        missing[0],
+                        missing[-1],
+                    )
+                    await self._dm_routing_repo.insert_gaps(
+                        conversation_id=conv_id,
+                        sender_user_id=sender_user_id,
+                        expected_seqs=missing,
+                    )
+                elif incoming <= last:
+                    # Out-of-order delivery resolving a previously-
+                    # recorded gap; clear it so the UI banner disappears.
+                    await self._dm_routing_repo.resolve_gap(
+                        conversation_id=conv_id,
+                        sender_user_id=sender_user_id,
+                        expected_seq=incoming,
+                    )
 
         msg = ConversationMessage(
             id=message_id,

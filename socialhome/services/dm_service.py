@@ -38,6 +38,7 @@ from ..repositories.user_repo import AbstractUserRepo
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..repositories.dm_routing_repo import AbstractDmRoutingRepo
     from ..repositories.federation_repo import AbstractFederationRepo
 
 
@@ -59,6 +60,7 @@ class DmService:
         "_bus",
         "_federation",
         "_federation_repo",
+        "_dm_routing_repo",
         "_own_instance_id",
     )
 
@@ -70,6 +72,7 @@ class DmService:
         *,
         federation_service: "FederationService | None" = None,
         federation_repo: "AbstractFederationRepo | None" = None,
+        dm_routing_repo: "AbstractDmRoutingRepo | None" = None,
         own_instance_id: str = "",
     ) -> None:
         self._convos = conversation_repo
@@ -77,6 +80,7 @@ class DmService:
         self._bus = bus
         self._federation = federation_service
         self._federation_repo = federation_repo
+        self._dm_routing_repo = dm_routing_repo
         self._own_instance_id = own_instance_id
 
     def attach_federation(
@@ -252,21 +256,33 @@ class DmService:
                 content=content,
             )
         )
+        # Stamp a monotonic sender_seq on the envelope when the
+        # routing repo is wired, so recipients can run §12.5 gap
+        # detection. Absent repo → legacy behaviour (no seq field).
+        seq: int | None = None
+        if self._dm_routing_repo is not None:
+            seq = await self._dm_routing_repo.next_sender_seq(
+                conversation_id=conversation_id,
+                sender_user_id=sender.user_id,
+            )
+        payload: dict = {
+            "conversation_id": conversation_id,
+            "message_id": msg.id,
+            "sender_user_id": sender.user_id,
+            "sender_display_name": sender.display_name,
+            "type": type,
+            "content": content,
+            "media_url": media_url,
+            "reply_to_id": reply_to_id,
+            "occurred_at": msg.created_at.isoformat(),
+            "recipient_user_ids": recipients,
+        }
+        if seq is not None:
+            payload["sender_seq"] = seq
         await self._fan_to_remote(
             conversation_id=conversation_id,
             event_type=FederationEventType.DM_MESSAGE,
-            payload={
-                "conversation_id": conversation_id,
-                "message_id": msg.id,
-                "sender_user_id": sender.user_id,
-                "sender_display_name": sender.display_name,
-                "type": type,
-                "content": content,
-                "media_url": media_url,
-                "reply_to_id": reply_to_id,
-                "occurred_at": msg.created_at.isoformat(),
-                "recipient_user_ids": recipients,
-            },
+            payload=payload,
         )
         return msg
 
@@ -349,7 +365,14 @@ class DmService:
         conversation_id: str,
         *,
         username: str,
-    ) -> None:
+    ) -> int:
+        """Mark every message in the conversation read for ``username``.
+
+        Updates the watermark (`set_last_read`) for unread counts AND
+        bulk-upserts ``conversation_delivery_state`` rows so other
+        participants see read-receipt ticks. Returns the number of
+        messages that flipped to ``read``.
+        """
         await self._require_membership(conversation_id, username)
         # Pass Python-format ISO timestamp so it compares correctly with
         # message created_at (also Python ISO). SQLite's datetime('now')
@@ -357,6 +380,64 @@ class DmService:
         # mismatches against Python isoformat() values.
         now = datetime.now(timezone.utc).isoformat()
         await self._convos.set_last_read(conversation_id, username, at=now)
+        user = await self._require_user(username)
+        return await self._convos.mark_conversation_read(
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            up_to_at=now,
+        )
+
+    async def mark_delivered(
+        self,
+        conversation_id: str,
+        *,
+        message_id: str,
+        username: str,
+    ) -> None:
+        """Mark ``message_id`` as delivered to ``username``.
+
+        Called when the client receives a message via WebSocket or the
+        GET /messages endpoint. ``read`` already supersedes
+        ``delivered`` (handled in the repo), so calling after mark_read
+        is a no-op.
+        """
+        await self._require_membership(conversation_id, username)
+        user = await self._require_user(username)
+        await self._convos.upsert_delivery_state(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            user_id=user.user_id,
+            state="delivered",
+        )
+
+    async def list_delivery_states(
+        self,
+        conversation_id: str,
+        *,
+        username: str,
+        message_ids: list[str] | None = None,
+    ) -> list[dict]:
+        await self._require_membership(conversation_id, username)
+        return await self._convos.list_delivery_states(
+            conversation_id,
+            message_ids=message_ids,
+        )
+
+    async def list_open_gaps(
+        self,
+        conversation_id: str,
+        *,
+        username: str,
+    ) -> list[dict]:
+        """§12.5 — sequence holes detected for this conversation.
+
+        Members-only. Returns ``[]`` when the routing repo wasn't wired
+        or nothing is flagged.
+        """
+        await self._require_membership(conversation_id, username)
+        if self._dm_routing_repo is None:
+            return []
+        return await self._dm_routing_repo.list_open_gaps(conversation_id)
 
     async def count_unread(
         self,

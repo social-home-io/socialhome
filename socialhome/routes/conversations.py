@@ -113,14 +113,20 @@ class ConversationMessageView(BaseView):
 
 
 class ConversationReadView(BaseView):
-    """POST /api/conversations/{id}/read — mark conversation as read."""
+    """POST /api/conversations/{id}/read — mark conversation as read.
+
+    Updates the caller's watermark AND bulk-upserts
+    ``conversation_delivery_state`` rows so other participants see the
+    read-receipt tick. Returns ``{marked}`` — count of messages whose
+    state flipped to ``read``.
+    """
 
     async def post(self) -> web.Response:
         ctx = self.user
         svc = self.svc(dm_service_key)
         conv_id = self.match("id")
-        await svc.mark_read(conv_id, username=ctx.username)
-        return web.json_response({"ok": True})
+        marked = await svc.mark_read(conv_id, username=ctx.username)
+        return web.json_response({"ok": True, "marked": int(marked or 0)})
 
 
 class ConversationUnreadView(BaseView):
@@ -132,3 +138,62 @@ class ConversationUnreadView(BaseView):
         conv_id = self.match("id")
         count = await svc.count_unread(conv_id, username=ctx.username)
         return web.json_response({"unread": count})
+
+
+class ConversationMessageDeliveryView(BaseView):
+    """``POST /api/conversations/{id}/messages/{mid}/delivered`` — stamp
+    the caller's delivery state for one message.
+
+    Called by the client when a DM_MESSAGE WebSocket frame lands or the
+    message first appears in a list response. Idempotent; a later
+    ``mark_read`` of the whole conversation supersedes.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        conv_id = self.match("id")
+        message_id = self.match("mid")
+        await svc.mark_delivered(
+            conv_id,
+            message_id=message_id,
+            username=ctx.username,
+        )
+        return web.json_response({"ok": True})
+
+
+class ConversationDeliveryStatesView(BaseView):
+    """``GET /api/conversations/{id}/delivery-states`` — bulk read.
+
+    Returns one row per (message, user) so the client can render
+    checkmarks. Optional ``?message_ids=a,b,c`` narrows the query.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        conv_id = self.match("id")
+        raw_ids = self.request.query.get("message_ids") or ""
+        ids = [x for x in raw_ids.split(",") if x] or None
+        states = await svc.list_delivery_states(
+            conv_id,
+            username=ctx.username,
+            message_ids=ids,
+        )
+        return web.json_response({"states": states})
+
+
+class ConversationGapsView(BaseView):
+    """``GET /api/conversations/{id}/gaps`` — open sequence holes.
+
+    Returns one row per (sender, expected_seq) pair the inbound
+    validator flagged as missing. Used by the client to surface a
+    "messages may be missing" banner.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        conv_id = self.match("id")
+        gaps = await svc.list_open_gaps(conv_id, username=ctx.username)
+        return web.json_response({"gaps": gaps})

@@ -323,3 +323,123 @@ async def test_list_conversations_with_remote_member(env):
     )
     result = await env.repo.list_conversations_with_remote_member("peer-x")
     assert result == ["conv-a"]
+
+
+# ── Delivery state (§12.5) ────────────────────────────────────────────────
+
+
+async def _seed_conv_with_msg(env, *, conv_id="c1", msg_id="m1"):
+    await env.repo.create(_conv(conv_id))
+    msg = ConversationMessage(
+        id=msg_id,
+        conversation_id=conv_id,
+        sender_user_id="uid-alice",
+        content="hi",
+        created_at=datetime.now(timezone.utc),
+    )
+    await env.repo.save_message(msg)
+
+
+async def test_upsert_delivery_state_delivered_then_read(env):
+    await _seed_conv_with_msg(env)
+    await env.repo.upsert_delivery_state(
+        conversation_id="c1",
+        message_id="m1",
+        user_id="uid-bob",
+        state="delivered",
+    )
+    rows = await env.repo.list_delivery_states("c1")
+    assert len(rows) == 1
+    assert rows[0]["state"] == "delivered"
+
+    await env.repo.upsert_delivery_state(
+        conversation_id="c1",
+        message_id="m1",
+        user_id="uid-bob",
+        state="read",
+    )
+    rows = await env.repo.list_delivery_states("c1")
+    assert rows[0]["state"] == "read"
+
+
+async def test_read_does_not_downgrade_to_delivered(env):
+    await _seed_conv_with_msg(env)
+    await env.repo.upsert_delivery_state(
+        conversation_id="c1",
+        message_id="m1",
+        user_id="uid-bob",
+        state="read",
+    )
+    # Delayed ``delivered`` ack arriving after the user already opened
+    # the conversation must not flip the state back.
+    await env.repo.upsert_delivery_state(
+        conversation_id="c1",
+        message_id="m1",
+        user_id="uid-bob",
+        state="delivered",
+    )
+    rows = await env.repo.list_delivery_states("c1")
+    assert rows[0]["state"] == "read"
+
+
+async def test_list_delivery_states_filters_by_message_ids(env):
+    await _seed_conv_with_msg(env, msg_id="m1")
+    await env.repo.save_message(
+        ConversationMessage(
+            id="m2",
+            conversation_id="c1",
+            sender_user_id="uid-alice",
+            content="hi2",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    await env.repo.upsert_delivery_state(
+        conversation_id="c1", message_id="m1", user_id="uid-bob", state="read"
+    )
+    await env.repo.upsert_delivery_state(
+        conversation_id="c1", message_id="m2", user_id="uid-bob", state="delivered"
+    )
+    rows = await env.repo.list_delivery_states("c1", message_ids=["m2"])
+    assert len(rows) == 1
+    assert rows[0]["message_id"] == "m2"
+    # Empty list short-circuits to [].
+    assert await env.repo.list_delivery_states("c1", message_ids=[]) == []
+
+
+async def test_mark_conversation_read_skips_own_messages(env):
+    await env.repo.create(_conv("c1"))
+    # Alice (self) sends one, bob sends two.
+    for msg_id, sender in (
+        ("m-own", "uid-alice"),
+        ("m-b1", "uid-bob"),
+        ("m-b2", "uid-bob"),
+    ):
+        await env.repo.save_message(
+            ConversationMessage(
+                id=msg_id,
+                conversation_id="c1",
+                sender_user_id=sender,
+                content="x",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    up_to = datetime.now(timezone.utc).isoformat()
+    marked = await env.repo.mark_conversation_read(
+        conversation_id="c1", user_id="uid-alice", up_to_at=up_to
+    )
+    # Only bob's two messages get flipped — not alice's own.
+    assert marked == 2
+    rows = await env.repo.list_delivery_states("c1")
+    assert all(r["state"] == "read" for r in rows)
+    assert {r["message_id"] for r in rows} == {"m-b1", "m-b2"}
+
+
+async def test_upsert_delivery_state_rejects_invalid_state(env):
+    await _seed_conv_with_msg(env)
+    with pytest.raises(ValueError):
+        await env.repo.upsert_delivery_state(
+            conversation_id="c1",
+            message_id="m1",
+            user_id="uid-bob",
+            state="seen",
+        )

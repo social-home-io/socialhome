@@ -66,8 +66,11 @@ from .child_protection import (
 )
 from .conversations import (
     ConversationCollectionView,
+    ConversationDeliveryStatesView,
     ConversationDmView,
+    ConversationGapsView,
     ConversationGroupView,
+    ConversationMessageDeliveryView,
     ConversationMessageView,
     ConversationReadView,
     ConversationUnreadView,
@@ -424,6 +427,18 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/conversations/dm", ConversationDmView)
     app.router.add_view("/api/conversations/group", ConversationGroupView)
     app.router.add_view("/api/conversations/{id}/messages", ConversationMessageView)
+    app.router.add_view(
+        "/api/conversations/{id}/messages/{mid}/delivered",
+        ConversationMessageDeliveryView,
+    )
+    app.router.add_view(
+        "/api/conversations/{id}/delivery-states",
+        ConversationDeliveryStatesView,
+    )
+    app.router.add_view(
+        "/api/conversations/{id}/gaps",
+        ConversationGapsView,
+    )
     app.router.add_view("/api/conversations/{id}/read", ConversationReadView)
     app.router.add_view("/api/conversations/{id}/unread", ConversationUnreadView)
 

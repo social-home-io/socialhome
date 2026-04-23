@@ -333,6 +333,7 @@ def _wire_federation_stack(
     typing_service,
     dm_service,
     dm_routing_service,
+    dm_routing_repo,
     presence_service,
     report_service,
 ):
@@ -413,6 +414,7 @@ def _wire_federation_stack(
         user_repo=user_repo,
         profile_picture_repo=profile_picture_repo,
         report_service=report_service,
+        dm_routing_repo=dm_routing_repo,
     )
     inbound_service.attach_to(federation_service)
 
@@ -795,7 +797,12 @@ def create_app(config: Config | None = None) -> web.Application:
         bus,
         i18n=i18n,
     )
-    dm_service = DmService(conversation_repo, user_repo, bus)
+    dm_service = DmService(
+        conversation_repo,
+        user_repo,
+        bus,
+        dm_routing_repo=repos.dm_routing,
+    )
     report_repo = SqliteReportRepo(db)
     report_service = ReportService(
         report_repo=report_repo,
@@ -1209,6 +1216,7 @@ def create_app(config: Config | None = None) -> web.Application:
             typing_service=typing_service,
             dm_service=dm_service,
             dm_routing_service=dm_routing_service,
+            dm_routing_repo=repos.dm_routing,
             presence_service=presence_service,
             report_service=report_service,
         )

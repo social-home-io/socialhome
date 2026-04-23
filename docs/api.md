@@ -270,7 +270,10 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | POST | `/api/conversations/group` | Create group conversation. |
 | GET / POST | `/api/conversations/{id}/messages` | List / send. |
 | PATCH / DELETE | `/api/conversations/{id}/messages/{mid}` | Edit / delete own. |
-| POST | `/api/conversations/{id}/{read\|unread}` | Unread state. |
+| POST | `/api/conversations/{id}/{read\|unread}` | Unread state. `read` bulk-upserts `conversation_delivery_state` rows to `read` for every non-own message and returns `{ok, marked}`. |
+| POST | `/api/conversations/{id}/messages/{mid}/delivered` | Stamp the caller's delivery state for one message — idempotent; `read` supersedes. See [DM reliability](./protocol/dm.md#reliability--read-receipts--delivery-state-125). |
+| GET | `/api/conversations/{id}/delivery-states` | Per-message delivery/read rows for the whole conversation. Optional `?message_ids=a,b,c`. |
+| GET | `/api/conversations/{id}/gaps` | §12.5 sequence holes detected for this conversation — `{gaps: [{sender_user_id, expected_seq, detected_at}]}`. Members only. |
 | GET | `/api/conversations/{id}/calls` | Call history in this conversation. |
 
 ## HFS — Presence, notifications, search
