@@ -1026,14 +1026,6 @@ CREATE TABLE IF NOT EXISTS space_calendar_rsvps (
     PRIMARY KEY (event_id, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS calendar_visibility_prefs (
-    username       TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-    calendar_ref   TEXT NOT NULL,
-    calendar_type  TEXT NOT NULL CHECK(calendar_type IN ('personal','space')),
-    visible        INTEGER NOT NULL DEFAULT 1,
-    position       INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (username, calendar_ref, calendar_type)
-);
 
 -- ── Pages ──────────────────────────────────────────────────────────────────
 
