@@ -2,7 +2,9 @@
  * PollUI — reply-poll voting surface (§9 / §23.52).
  *
  * Rendered by :mod:`PostCard` when ``post.type === 'poll'``. Lazily
- * fetches the summary from ``/api/posts/{id}/poll``, subscribes to
+ * fetches the summary from ``/api/posts/{id}/poll`` (household) or
+ * ``/api/spaces/{space_id}/posts/{id}/poll`` (space-scoped — selected
+ * when ``spaceId`` is set), subscribes to
  * ``poll.*`` WS frames so live vote tallies update as co-members
  * vote, and gives the author a "Close poll" affordance once the
  * poll is open.
@@ -44,8 +46,10 @@ interface Props {
   spaceId?: string | null
 }
 
-function baseUrl(postId: string, _spaceId?: string | null): string {
-  return `/api/posts/${postId}/poll`
+function baseUrl(postId: string, spaceId?: string | null): string {
+  return spaceId
+    ? `/api/spaces/${spaceId}/posts/${postId}/poll`
+    : `/api/posts/${postId}/poll`
 }
 
 export function PollUI({

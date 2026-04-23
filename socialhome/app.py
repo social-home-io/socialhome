@@ -89,6 +89,7 @@ from .repositories.dm_routing_repo import SqliteDmRoutingRepo
 from .repositories.gallery_repo import SqliteGalleryRepo
 from .repositories.household_features_repo import SqliteHouseholdFeaturesRepo
 from .repositories.poll_repo import SqlitePollRepo
+from .repositories.space_poll_repo import SqliteSpacePollRepo
 from .repositories.profile_picture_repo import SqliteProfilePictureRepo
 from .repositories.space_bot_repo import SqliteSpaceBotRepo
 from .repositories.space_cover_repo import SqliteSpaceCoverRepo
@@ -292,6 +293,7 @@ def _build_repos(db: AsyncDatabase):
         space_remote_member=SqliteSpaceRemoteMemberRepo(db),
         storage_stats=SqliteStorageStatsRepo(db),
         poll=SqlitePollRepo(db),
+        space_poll=SqliteSpacePollRepo(db),
         gfs_connection=SqliteGfsConnectionRepo(db),
         call=SqliteCallRepo(db),
         profile_picture=SqliteProfilePictureRepo(db),
@@ -323,7 +325,7 @@ def _wire_federation_stack(
     space_task_repo,
     space_calendar_repo,
     dm_contact_repo,
-    poll_repo,
+    space_poll_repo,
     gallery_repo,
     space_crypto,
     reconnect_queue,
@@ -466,7 +468,7 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         task_repo=space_task_repo,
         calendar_repo=space_calendar_repo,
-        poll_repo=poll_repo,
+        poll_repo=space_poll_repo,
     ).attach_to(federation_service)
 
     # §25.6 Direct Space Sync — content transfer over DataChannel.
@@ -481,7 +483,7 @@ def _wire_federation_stack(
         "stickies": StickiesExporter(sticky_repo),
         "calendar": CalendarExporter(space_calendar_repo),
         "gallery": GalleryExporter(gallery_repo),
-        "polls": PollsExporter(poll_repo, space_post_repo),
+        "polls": PollsExporter(space_poll_repo, space_post_repo),
     }
     chunk_builder = ChunkBuilder(
         encoder=federation_service._encoder,
@@ -924,6 +926,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Poll + schedule-poll service (§9) ──────────────────────────────
     poll_service = PollService(repos.poll, bus)
+    space_poll_service = PollService(repos.space_poll, bus)
 
     # ── Bazaar service + expiry scheduler (§9, §23.15) ─────────────────
     bazaar_service = BazaarService(bazaar_repo, bus)
@@ -1087,6 +1090,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.page_conflict_service_key] = page_conflict_service
     app[K.presence_service_key] = presence_service
     app[K.poll_service_key] = poll_service
+    app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service
     app[K.corner_service_key] = corner_service
     app[K.sticky_repo_key] = sticky_repo
@@ -1197,7 +1201,7 @@ def create_app(config: Config | None = None) -> web.Application:
             space_task_repo=space_task_repo,
             space_calendar_repo=space_cal_repo,
             dm_contact_repo=dm_contact_repo,
-            poll_repo=repos.poll,
+            space_poll_repo=repos.space_poll,
             gallery_repo=repos.gallery,
             space_crypto=space_crypto,
             reconnect_queue=reconnect_queue,

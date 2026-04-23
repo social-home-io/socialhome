@@ -147,8 +147,11 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
         }
       }
       if (postType.value === 'poll' && pendingPoll && newPostId) {
+        const pollUrl = spaceId
+          ? `/api/spaces/${spaceId}/posts/${newPostId}/poll`
+          : `/api/posts/${newPostId}/poll`
         try {
-          await api.post(`/api/posts/${newPostId}/poll`, {
+          await api.post(pollUrl, {
             question:       pendingPoll.question,
             options:        pendingPoll.options,
             allow_multiple: pendingPoll.allow_multiple,
