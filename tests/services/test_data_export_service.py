@@ -142,6 +142,5 @@ def test_exportable_queries_cover_user_facing_surfaces():
         "gallery_items",
         "notifications",
         "push_subscriptions",
-        "dashboard_widgets",
     ):
         assert required in names

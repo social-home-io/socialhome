@@ -76,12 +76,10 @@ EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
     ("gallery_items", "WHERE uploaded_by = ?"),
     ("push_subscriptions", "WHERE user_id = ?"),
     ("hidden_public_spaces", "WHERE user_id = ?"),
-    ("dashboard_widgets", "WHERE user_id = ?"),
     ("space_notif_prefs", "WHERE user_id = ?"),
     ("dm_contact_requests", "WHERE from_user_id = ? OR to_user_id = ?"),
     ("call_sessions", "WHERE initiator_user_id = ? OR callee_user_id = ?"),
     ("following_spaces", "WHERE user_id = ?"),
-    ("drafts", "WHERE user_id = ?"),
 )
 
 

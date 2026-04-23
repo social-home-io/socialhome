@@ -83,10 +83,8 @@ NEVER_EXPORT: frozenset[str] = frozenset(
         "instance_identity",
         "space_keys",
         "pending_pairings",
-        "pending_space_key_exchanges",
         "remote_instances",  # contains KEK-wrapped session keys
         "api_tokens",  # token hashes — useless out of context but still secret
-        "user_sessions",
         "platform_tokens",
         "push_subscriptions",
     }

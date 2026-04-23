@@ -32,7 +32,11 @@ dev = [
     "aiohttp[speedups]",
     "freezegun",
     "mypy>=1.10",
-    "ruff>=0.8",
+    # Keep the floor aligned with ``.pre-commit-config.yaml``'s
+    # ``ruff-pre-commit`` rev — ruff format rules change between
+    # minors, so a dev env on an older ruff prints "would reformat"
+    # for files the pre-commit hook just accepted, and vice-versa.
+    "ruff>=0.15",
     "pre-commit>=3.8",
     # Pulled in so ``tests/global_server/*`` can import the GFS admin
     # modules without a separate ``pip install .[global-server]`` step.

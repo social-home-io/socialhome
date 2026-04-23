@@ -30,8 +30,14 @@ repos:
   # ── Python lint + format via ruff ──────────────────────────────────────
   # Run repo-wide (always_run + pass_filenames: false) so pre-commit
   # matches CI's `ruff check .` / `ruff format --check .` scope.
+  #
+  # Keep ``rev`` in sync with the ruff version CI's `pip install -e .[dev]`
+  # resolves — ruff's format rules change between minors, so a stale
+  # pin silently diverges from CI and lets format violations slip
+  # through until they fail on the push. Bump via
+  # ``pre-commit autoupdate --repo https://github.com/astral-sh/ruff-pre-commit``.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.0
+    rev: v0.15.11
     hooks:
       - id: ruff
         name: ruff (lint, repo-wide)
@@ -45,18 +51,18 @@ repos:
         pass_filenames: false
 
   # ── Python type-check via mypy ─────────────────────────────────────────
-  # Uses the project's own mypy config from pyproject.toml. Run repo-wide
-  # so the scope matches CI's `mypy socialhome/`.
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+  # Run mypy from the developer's own venv (``language: system``) so it
+  # sees the real runtime deps installed by ``pip install -e .[dev]`` —
+  # no need to mirror the project's dependency list into an isolated
+  # pre-commit env. Scope matches CI's ``mypy socialhome/``.
+  - repo: local
     hooks:
       - id: mypy
         name: mypy (socialhome, repo-wide)
-        additional_dependencies:
-          - types-aiofiles
-        args: ["--config-file=pyproject.toml", "socialhome/"]
-        always_run: true
+        entry: mypy --config-file=pyproject.toml socialhome/
+        language: system
         pass_filenames: false
+        always_run: true
 
   # ── Frontend: lint + typecheck + build ─────────────────────────────────
   # A local hook so pre-commit reuses the repo's pnpm install; CI still

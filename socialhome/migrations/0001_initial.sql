@@ -131,38 +131,7 @@ CREATE TABLE IF NOT EXISTS remote_users (
 );
 CREATE INDEX IF NOT EXISTS idx_remote_users_instance ON remote_users(instance_id);
 
-CREATE TABLE IF NOT EXISTS local_user_aliases (
-    target_username  TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-    local_username   TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-    alias            TEXT NOT NULL,
-    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (target_username, local_username),
-    CHECK (target_username != local_username)
-);
-
-CREATE TABLE IF NOT EXISTS remote_user_aliases (
-    target_user_id  TEXT NOT NULL,
-    local_username  TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-    alias           TEXT NOT NULL,
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (target_user_id, local_username)
-);
-
--- ── Auth: sessions + API tokens ─────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS user_sessions (
-    session_id    TEXT PRIMARY KEY,
-    user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    token_hash    TEXT NOT NULL,
-    device_hint   TEXT,
-    browser_hint  TEXT,
-    os_hint       TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    last_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    revoked_at    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_hash ON user_sessions(token_hash);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+-- ── Auth: API tokens ────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS api_tokens (
     token_id      TEXT PRIMARY KEY,
@@ -279,7 +248,7 @@ CREATE TABLE IF NOT EXISTS federation_replay_cache (
 CREATE INDEX IF NOT EXISTS idx_federation_replay_received
     ON federation_replay_cache(received_at);
 
--- ── Household features + presence + drafts ─────────────────────────────────
+-- ── Household features + presence + post drafts ────────────────────────────
 
 CREATE TABLE IF NOT EXISTS household_features (
     id                TEXT PRIMARY KEY DEFAULT 'default' CHECK(id = 'default'),
@@ -541,15 +510,6 @@ CREATE TABLE IF NOT EXISTS space_keys (
     content_key_hex TEXT NOT NULL,                -- KEK-encrypted AES-256 key
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (space_id, epoch)
-);
-
-CREATE TABLE IF NOT EXISTS pending_space_key_exchanges (
-    space_id     TEXT NOT NULL,
-    instance_id  TEXT NOT NULL,
-    own_dh_sk    TEXT NOT NULL,                   -- ephemeral X25519 private key (KEK-encrypted)
-    own_dh_pk    TEXT NOT NULL,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (space_id, instance_id)
 );
 
 CREATE TABLE IF NOT EXISTS space_bans (
@@ -1402,23 +1362,6 @@ CREATE TABLE IF NOT EXISTS content_reports (
 CREATE INDEX IF NOT EXISTS idx_content_reports_status
     ON content_reports(status, created_at DESC);
 
--- ── Dashboard widgets (per-user customisable home) ────────────────────────
-
-CREATE TABLE IF NOT EXISTS dashboard_widgets (
-    id          TEXT PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    widget_type TEXT NOT NULL,
-    config_json TEXT NOT NULL DEFAULT '{}',
-    grid_col    INTEGER NOT NULL DEFAULT 0,
-    grid_row    INTEGER NOT NULL DEFAULT 0,
-    grid_w      INTEGER NOT NULL DEFAULT 4,
-    grid_h      INTEGER NOT NULL DEFAULT 3,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_dashboard_user
-    ON dashboard_widgets(user_id, grid_row, grid_col);
-
 -- ── §28/§29 supplemental tables ───────────────────────────────────────────
 
 -- Bazaar offers (separate from auction bids)
@@ -1505,24 +1448,6 @@ CREATE TABLE IF NOT EXISTS conversation_delivery_state (
     PRIMARY KEY (conversation_id, message_id, user_id)
 );
 
--- Cross-instance shared user mapping (§29)
-CREATE TABLE IF NOT EXISTS instance_shared_users (
-    instance_id   TEXT NOT NULL,
-    user_id       TEXT NOT NULL,
-    shared_via    TEXT NOT NULL,
-    shared_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (instance_id, user_id)
-);
-
--- Pending owner-key approvals (admin-key share rotation flow)
-CREATE TABLE IF NOT EXISTS pending_approval_owner_pks (
-    space_id        TEXT NOT NULL,
-    candidate_pk    TEXT NOT NULL,
-    proposed_by     TEXT NOT NULL,
-    proposed_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (space_id, candidate_pk)
-);
-
 -- GFS connections (§24) — paired Global Federation Servers.
 CREATE TABLE IF NOT EXISTS gfs_connections (
     id TEXT PRIMARY KEY,
@@ -1559,51 +1484,6 @@ CREATE TABLE IF NOT EXISTS space_page_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_space_page_snapshots_conflict
     ON space_page_snapshots(page_id, conflict);
-
--- Per-member space location overrides
-CREATE TABLE IF NOT EXISTS space_member_locations (
-    space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-    user_id     TEXT NOT NULL,
-    state       TEXT NOT NULL CHECK(state IN ('home','away','zone')),
-    zone_name   TEXT,
-    lat         REAL,
-    lon         REAL,
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (space_id, user_id)
-);
-
--- Cached aggregate space-report counts for the moderation dashboard
-CREATE TABLE IF NOT EXISTS space_report_cache (
-    space_id    TEXT PRIMARY KEY,
-    pending     INTEGER NOT NULL DEFAULT 0,
-    approved    INTEGER NOT NULL DEFAULT 0,
-    rejected    INTEGER NOT NULL DEFAULT 0,
-    cached_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Sync session bookkeeping (§4.2.1 sync_depth tracking)
-CREATE TABLE IF NOT EXISTS sync_sessions (
-    sync_id        TEXT PRIMARY KEY,
-    space_id       TEXT NOT NULL,
-    requester_iid  TEXT NOT NULL,
-    sync_mode      TEXT NOT NULL CHECK(sync_mode IN ('initial','incremental','full')),
-    started_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at   TEXT,
-    last_seq       INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_sync_sessions_space ON sync_sessions(space_id);
-
--- Generic per-surface drafts (broader than post_drafts)
-CREATE TABLE IF NOT EXISTS drafts (
-    id           TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    surface      TEXT NOT NULL,        -- "feed_post" | "space_post" | "dm" | "page" | etc.
-    surface_id   TEXT,                 -- e.g. space_id or conversation_id
-    body_json    TEXT NOT NULL DEFAULT '{}',
-    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_drafts_user_surface
-    ON drafts(user_id, surface);
 
 -- Comments on tasks
 CREATE TABLE IF NOT EXISTS task_comments (
