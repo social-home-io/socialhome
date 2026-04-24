@@ -42,7 +42,7 @@ class AbstractFederationRepo(Protocol):
     async def delete_instance(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
-    async def update_webhook(self, instance_id: str, new_url: str) -> None: ...
+    async def update_inbox(self, instance_id: str, new_url: str) -> None: ...
 
     # Replay cache --------------------------------------------------------
     async def load_replay_cache(
@@ -93,7 +93,7 @@ class SqliteFederationRepo:
             INSERT INTO remote_instances(
                 id, display_name, remote_identity_pk,
                 key_self_to_remote, key_remote_to_self,
-                remote_webhook_url, local_webhook_id,
+                remote_inbox_url, local_inbox_id,
                 status, source, proto_version,
                 remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
                 intro_relay_enabled, relay_via,
@@ -105,7 +105,7 @@ class SqliteFederationRepo:
                 remote_identity_pk=excluded.remote_identity_pk,
                 key_self_to_remote=excluded.key_self_to_remote,
                 key_remote_to_self=excluded.key_remote_to_self,
-                remote_webhook_url=excluded.remote_webhook_url,
+                remote_inbox_url=excluded.remote_inbox_url,
                 status=excluded.status,
                 source=excluded.source,
                 proto_version=excluded.proto_version,
@@ -126,8 +126,8 @@ class SqliteFederationRepo:
                 inst.remote_identity_pk,
                 inst.key_self_to_remote,
                 inst.key_remote_to_self,
-                inst.remote_webhook_url,
-                inst.local_webhook_id,
+                inst.remote_inbox_url,
+                inst.local_inbox_id,
                 inst.status.value,
                 inst.source.value,
                 inst.proto_version,
@@ -188,9 +188,9 @@ class SqliteFederationRepo:
             (instance_id,),
         )
 
-    async def update_webhook(self, instance_id: str, new_url: str) -> None:
+    async def update_inbox(self, instance_id: str, new_url: str) -> None:
         await self._db.enqueue(
-            "UPDATE remote_instances SET remote_webhook_url=? WHERE id=?",
+            "UPDATE remote_instances SET remote_inbox_url=? WHERE id=?",
             (new_url, instance_id),
         )
 
@@ -237,7 +237,7 @@ class SqliteFederationRepo:
             """
             INSERT INTO pending_pairings(
                 token, own_identity_pk, own_dh_pk, own_dh_sk,
-                peer_identity_pk, peer_dh_pk, peer_webhook_url, webhook_url,
+                peer_identity_pk, peer_dh_pk, peer_inbox_url, inbox_url,
                 verification_code, intro_note, relay_via,
                 status, issued_at, expires_at
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -249,8 +249,8 @@ class SqliteFederationRepo:
                 session.own_dh_sk,
                 session.peer_identity_pk,
                 session.peer_dh_pk,
-                session.peer_webhook_url,
-                session.webhook_url,
+                session.peer_inbox_url,
+                session.inbox_url,
                 session.verification_code,
                 session.intro_note,
                 session.relay_via,
@@ -275,8 +275,8 @@ class SqliteFederationRepo:
             own_dh_sk=d["own_dh_sk"],
             peer_identity_pk=d.get("peer_identity_pk"),
             peer_dh_pk=d.get("peer_dh_pk"),
-            peer_webhook_url=d.get("peer_webhook_url"),
-            webhook_url=d["webhook_url"],
+            peer_inbox_url=d.get("peer_inbox_url"),
+            inbox_url=d["inbox_url"],
             verification_code=d.get("verification_code"),
             intro_note=d.get("intro_note"),
             relay_via=d.get("relay_via"),
@@ -291,7 +291,7 @@ class SqliteFederationRepo:
             UPDATE pending_pairings SET
                 peer_identity_pk=?,
                 peer_dh_pk=?,
-                peer_webhook_url=?,
+                peer_inbox_url=?,
                 verification_code=?,
                 intro_note=?,
                 relay_via=?,
@@ -301,7 +301,7 @@ class SqliteFederationRepo:
             (
                 session.peer_identity_pk,
                 session.peer_dh_pk,
-                session.peer_webhook_url,
+                session.peer_inbox_url,
                 session.verification_code,
                 session.intro_note,
                 session.relay_via,
@@ -359,8 +359,8 @@ def _row_to_instance(row: dict | None) -> RemoteInstance | None:
         remote_identity_pk=row["remote_identity_pk"],
         key_self_to_remote=row["key_self_to_remote"],
         key_remote_to_self=row["key_remote_to_self"],
-        remote_webhook_url=row["remote_webhook_url"],
-        local_webhook_id=row["local_webhook_id"],
+        remote_inbox_url=row["remote_inbox_url"],
+        local_inbox_id=row["local_inbox_id"],
         status=PairingStatus(row.get("status", "confirmed")),
         source=InstanceSource(row.get("source", "manual")),
         proto_version=int(row.get("proto_version") or 1),

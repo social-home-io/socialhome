@@ -39,8 +39,8 @@ def _make_remote(
         remote_identity_pk="aa" * 32,
         key_self_to_remote="enc",
         key_remote_to_self="enc",
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh",
         status=status,
         source=InstanceSource.MANUAL,
     )

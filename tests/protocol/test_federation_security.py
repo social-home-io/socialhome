@@ -95,13 +95,13 @@ async def fed(tmp_dir):
 
 async def test_inbound_rejects_unparseable_json(fed):
     with pytest.raises(ValueError):
-        await fed["svc"].handle_inbound_webhook("wh-1", b"not json")
+        await fed["svc"].handle_inbound_envelope("wh-1", b"not json")
 
 
 async def test_inbound_rejects_missing_required_fields(fed):
     body = b'{"msg_id":"x"}'
     with pytest.raises(ValueError, match="Missing required fields"):
-        await fed["svc"].handle_inbound_webhook("wh-1", body)
+        await fed["svc"].handle_inbound_envelope("wh-1", body)
 
 
 async def test_inbound_rejects_unknown_event_type(fed):
@@ -112,10 +112,10 @@ async def test_inbound_rejects_unknown_event_type(fed):
         b'"signatures":{"ed25519":"z"}}'
     )
     with pytest.raises(ValueError, match="Unknown event_type"):
-        await fed["svc"].handle_inbound_webhook("wh-1", body)
+        await fed["svc"].handle_inbound_envelope("wh-1", body)
 
 
-async def test_inbound_rejects_unknown_webhook_id(fed):
+async def test_inbound_rejects_unknown_inbox_id(fed):
     body = (
         b'{"msg_id":"x","event_type":"presence_updated",'
         b'"from_instance":"a","to_instance":"b","timestamp":"2026-01-01T00:00:00+00:00",'
@@ -123,7 +123,7 @@ async def test_inbound_rejects_unknown_webhook_id(fed):
         b'"signatures":{"ed25519":"z"}}'
     )
     with pytest.raises(ValueError, match="No instance found"):
-        await fed["svc"].handle_inbound_webhook("nonexistent-wh", body)
+        await fed["svc"].handle_inbound_envelope("nonexistent-wh", body)
 
 
 # ─── §25.6.2 audit fixes ─────────────────────────────────────────────────
@@ -258,8 +258,8 @@ async def test_s17_instance_sync_status_caps_payload_size():
                 remote_identity_pk="aa" * 32,
                 key_self_to_remote="x",
                 key_remote_to_self="x",
-                remote_webhook_url="https://x",
-                local_webhook_id="wh",
+                remote_inbox_url="https://x",
+                local_inbox_id="wh",
                 status=PairingStatus.CONFIRMED,
                 source=InstanceSource.MANUAL,
             )
@@ -293,8 +293,8 @@ async def test_outbound_envelope_has_no_plaintext_payload(fed):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://nonexistent.invalid/wh",
-        local_webhook_id="wh-peer",
+        remote_inbox_url="https://nonexistent.invalid/wh",
+        local_inbox_id="wh-peer",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )

@@ -20,8 +20,8 @@ def _fake_instance(iid: str = "peer-1") -> RemoteInstance:
         remote_identity_pk="aa" * 32,
         key_self_to_remote="enc",
         key_remote_to_self="enc",
-        remote_webhook_url="https://peer/wh",
-        local_webhook_id=f"wh-{iid}",
+        remote_inbox_url="https://peer/wh",
+        local_inbox_id=f"wh-{iid}",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
@@ -30,7 +30,7 @@ def _fake_instance(iid: str = "peer-1") -> RemoteInstance:
 async def test_initiate_pairing_returns_qr_payload(client):
     r = await client.post(
         "/api/pairing/initiate",
-        json={"webhook_url": "https://example/wh"},
+        json={"inbox_url": "https://example/wh"},
         headers=_auth(client._tok),
     )
     assert r.status == 201
@@ -38,7 +38,7 @@ async def test_initiate_pairing_returns_qr_payload(client):
     assert "token" in data and "identity_pk" in data and "dh_pk" in data
 
 
-async def test_initiate_pairing_requires_webhook(client):
+async def test_initiate_pairing_requires_inbox(client):
     r = await client.post(
         "/api/pairing/initiate",
         json={},

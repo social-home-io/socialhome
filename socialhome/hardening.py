@@ -41,7 +41,7 @@ def build_body_size_middleware(
 
     The check is on ``Content-Length`` only — chunked uploads bypass
     it (aiohttp's own ``client_max_size`` covers those).  The
-    federation webhook has its own per-route limit on top.
+    federation inbox has its own per-route limit on top.
     """
 
     @web.middleware

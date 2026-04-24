@@ -152,7 +152,7 @@ class NotificationService:
                 )
             except Exception as exc:
                 log.debug("web push fan-out failed: %s", exc)
-        # Platform adapter (HA mobile app / standalone webhook).
+        # Platform adapter (HA mobile app / standalone inbox).
         if self._adapter is not None:
             try:
                 user = await self._users.get_by_user_id(saved.user_id)

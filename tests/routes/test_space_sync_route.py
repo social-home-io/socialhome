@@ -96,8 +96,8 @@ async def test_sync_trigger_enqueues_for_confirmed_peers(client):
             remote_identity_pk="aa" * 32,
             key_self_to_remote="enc",
             key_remote_to_self="enc",
-            remote_webhook_url="https://peer/wh",
-            local_webhook_id="wh-peer-a",
+            remote_inbox_url="https://peer/wh",
+            local_inbox_id="wh-peer-a",
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
         )
@@ -135,8 +135,8 @@ async def test_sync_trigger_skips_unconfirmed_peers(client):
             remote_identity_pk="bb" * 32,
             key_self_to_remote="enc",
             key_remote_to_self="enc",
-            remote_webhook_url="https://peer/wh",
-            local_webhook_id="wh-peer-new",
+            remote_inbox_url="https://peer/wh",
+            local_inbox_id="wh-peer-new",
             status=PairingStatus.PENDING_SENT,
             source=InstanceSource.MANUAL,
         )

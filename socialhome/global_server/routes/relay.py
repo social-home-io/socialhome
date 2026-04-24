@@ -24,7 +24,7 @@ class RegisterView(GfsBaseView):
         try:
             instance_id = body["instance_id"]
             public_key = body["public_key"]
-            webhook_url = body["webhook_url"]
+            inbox_url = body["inbox_url"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
         display_name = str(body.get("display_name") or "")
@@ -32,7 +32,7 @@ class RegisterView(GfsBaseView):
         await svc.register_instance(
             instance_id,
             public_key,
-            webhook_url,
+            inbox_url,
             display_name=display_name,
             auto_accept=auto_accept,
         )

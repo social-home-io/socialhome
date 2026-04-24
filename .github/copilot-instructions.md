@@ -32,7 +32,7 @@ Architecture: platform adapter pattern, service layer, repository pattern.
   crypto satisfies `EncryptionStrategy` (`federation/strategies.py`)
 - New inbound federation validation steps go into the `InboundPipeline`
   chain (`federation/inbound_validator.py`) — never edit
-  `handle_inbound_webhook` directly
+  `handle_inbound_envelope` directly
 
 ### What not to generate
 - Imports inside functions or methods — all imports at the top of the file

@@ -253,7 +253,7 @@ const loaders = {
       <tr>
         <td>${c.display_name || "—"}</td>
         <td style="font-family:monospace">${c.instance_id}</td>
-        <td><a href="${c.endpoint_url}" rel="noopener">${c.endpoint_url}</a></td>
+        <td><a href="${c.inbox_url}" rel="noopener">${c.inbox_url}</a></td>
         <td>${pill(c.status)}</td>
         <td class="row-actions">
           ${c.status === 'pending' ? `<button class="primary" onclick="loaders.client_action('${c.instance_id}','accept')">Accept</button>` : ''}

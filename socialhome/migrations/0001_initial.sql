@@ -174,8 +174,8 @@ CREATE TABLE IF NOT EXISTS remote_instances (
     remote_identity_pk    TEXT NOT NULL,
     key_self_to_remote    TEXT NOT NULL,           -- KEK-encrypted AES-GCM session key
     key_remote_to_self    TEXT NOT NULL,
-    remote_webhook_url    TEXT NOT NULL,
-    local_webhook_id      TEXT NOT NULL UNIQUE,
+    remote_inbox_url      TEXT NOT NULL,
+    local_inbox_id        TEXT NOT NULL UNIQUE,
     status                TEXT NOT NULL DEFAULT 'confirmed'
                           CHECK(status IN ('pending_sent','pending_received',
                                            'confirmed','unpairing')),
@@ -208,8 +208,8 @@ CREATE TABLE IF NOT EXISTS pending_pairings (
     own_dh_sk           TEXT NOT NULL,             -- KEK-encrypted until confirmed
     peer_identity_pk    TEXT,
     peer_dh_pk          TEXT,
-    peer_webhook_url    TEXT,
-    webhook_url         TEXT NOT NULL,
+    peer_inbox_url      TEXT,
+    inbox_url           TEXT NOT NULL,
     verification_code   TEXT,
     intro_note          TEXT,
     relay_via           TEXT,
@@ -1438,7 +1438,7 @@ CREATE TABLE IF NOT EXISTS gfs_connections (
     gfs_instance_id TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL,
     public_key TEXT NOT NULL,
-    endpoint_url TEXT NOT NULL,
+    inbox_url TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending', 'active', 'suspended')),
     paired_at TEXT NOT NULL,

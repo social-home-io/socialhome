@@ -2,7 +2,7 @@
 
 * :class:`~socialhome.federation.transport._RtcPeer.send` — drops the
   frame under backpressure, returns ``False`` so the facade falls back
-  to webhook.
+  to HTTPS inbox.
 * :class:`~socialhome.federation.sync_rtc.SyncRtcSession.send_chunk` —
   raises :class:`ConnectionError` so :class:`SyncSessionManager` falls
   back to relay chunks.

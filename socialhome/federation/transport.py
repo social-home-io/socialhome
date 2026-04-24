@@ -7,13 +7,13 @@ peer and switches between two transports at send time:
 * **WebRTC DataChannel** — primary transport. Once the DTLS + SRTP
   negotiation completes the channel stays open for the lifetime of the
   peering; routine envelopes go over it with zero HTTP overhead.
-* **HTTPS webhook** — fallback transport and bootstrap path. Used (a)
+* **HTTPS inbox** — fallback transport and bootstrap path. Used (a)
   before the DataChannel is established (the signed SDP offer/answer
   and ICE candidates ride on top of it), (b) whenever the channel is
   closed / failing, and (c) to reach peers behind a strictly-blocked
   UDP path.
 
-The channel payload is identical to the webhook payload: the caller
+The channel payload is identical to the HTTPS inbox payload: the caller
 still builds the AES-256-GCM-encrypted + Ed25519-signed
 :class:`FederationEnvelope` the same way. Only delivery differs.
 
@@ -24,7 +24,7 @@ Security invariants:
   to. :class:`_RtcPeer` tracks the expected responder and rejects
   mismatched answers with a warning log.
 * **Sender signature** — RTC frames are plain UTF-8 JSON of the same
-  envelope dict the webhook transport would have POSTed. The Ed25519
+  envelope dict the HTTPS inbox transport would have POSTed. The Ed25519
   signature inside the envelope proves origin; DTLS protects the
   DataChannel against an on-path MITM but the envelope signature is
   what the receiving :class:`FederationService` actually checks.
@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 CHANNEL_LABEL: str = "fed-v1"
 
 #: Maximum time we will wait for the DataChannel to finish negotiating
-#: before giving up and falling back to webhook.
+#: before giving up and falling back to HTTPS inbox.
 RTC_READY_TIMEOUT_S: float = 10.0
 
 #: Keep-alive interval once the channel is open. Matches the TS
@@ -62,16 +62,16 @@ PING_INTERVAL_S: float = 30.0
 
 #: High-water mark for a DataChannel's send buffer. When
 #: ``dc.buffered_amount`` exceeds this, we drop the frame and let the
-#: caller fall back to webhook instead of unbounded SCTP queuing.
+#: caller fall back to HTTPS inbox instead of unbounded SCTP queuing.
 #: 1 MiB is well above a single envelope (~10 KB) but far under the
 #: default libdatachannel message size ceiling.
 SEND_HWM_BYTES: int = 1 << 20
 
 
-# ─── Webhook transport ─────────────────────────────────────────────────────
+# ─── HTTPS inbox transport ─────────────────────────────────────────────────────
 
 
-class WebhookTransport:
+class HttpsInboxTransport:
     """HTTPS POST transport — always available, used as fallback.
 
     Thin wrapper around an aiohttp client session. Keeping it a class
@@ -102,7 +102,7 @@ class WebhookTransport:
         instance: RemoteInstance,
         envelope_dict: dict,
     ) -> tuple[bool, int | None]:
-        """POST the envelope to the remote webhook URL.
+        """POST the envelope to the remote inbox URL.
 
         Returns ``(ok, status_code)``. ``ok`` is true iff the peer
         returned 2xx. Any network-level error returns
@@ -112,7 +112,7 @@ class WebhookTransport:
         try:
             client = await self._client_once()
             async with client.post(
-                instance.remote_webhook_url,
+                instance.remote_inbox_url,
                 json=envelope_dict,
                 timeout=ClientTimeout(total=self._timeout_s),
             ) as resp:
@@ -120,7 +120,7 @@ class WebhookTransport:
                 return 200 <= status < 300, status
         except Exception as exc:
             log.warning(
-                "webhook send to %s failed: %s",
+                "HTTPS-inbox send to %s failed: %s",
                 instance.id,
                 exc,
             )
@@ -130,8 +130,8 @@ class WebhookTransport:
 # ─── RTC peer ──────────────────────────────────────────────────────────────
 
 # The frame format on the DataChannel is the same envelope dict the
-# webhook transport would have POSTed — serialised as UTF-8 JSON with
-# orjson for consistency with the webhook path.
+# HTTPS inbox transport would have POSTed — serialised as UTF-8 JSON with
+# orjson for consistency with the HTTPS-inbox path.
 _InboundCallback = Callable[[dict], Awaitable[None]]
 
 
@@ -347,7 +347,7 @@ class _RtcPeer:
 
         Returns ``True`` on success, ``False`` if the channel isn't
         currently open or the send buffer is over the HWM (caller
-        should fall back to webhook). Dropping under backpressure is
+        should fall back to HTTPS inbox). Dropping under backpressure is
         preferable to unbounded SCTP queueing.
         """
         if not self.is_ready or self._channel is None:
@@ -394,7 +394,7 @@ class _TransportSendResult:
     """What :meth:`FederationTransport.send` returns to the caller."""
 
     ok: bool
-    via: str  # "rtc" | "webhook"
+    via: str  # "rtc" | "https"
     status_code: int | None = None
     error: str | None = None
 
@@ -402,15 +402,15 @@ class _TransportSendResult:
 class FederationTransport:
     """Route outbound federation envelopes over RTC when possible.
 
-    Wiring: construct with the instance's own id, a webhook transport,
+    Wiring: construct with the instance's own id, a HTTPS inbox transport,
     and a callback used to dispatch the three ``FEDERATION_RTC_*``
     signalling events through :class:`FederationService.send_event`
-    (which is the same signed-webhook path used for everything else).
+    (which is the same signed HTTPS-inbox path used for everything else).
     """
 
     __slots__ = (
         "_own_instance_id",
-        "_webhook",
+        "_https_inbox",
         "_signaling_send",
         "_ice_servers",
         "_peers",
@@ -422,7 +422,7 @@ class FederationTransport:
         self,
         *,
         own_instance_id: str,
-        webhook: WebhookTransport,
+        https_inbox: HttpsInboxTransport,
         signaling_send: Callable[
             [str, FederationEventType, dict], Awaitable[DeliveryResult]
         ],
@@ -430,7 +430,7 @@ class FederationTransport:
         inbound_handler: Callable[[str, bytes], Awaitable[dict]] | None = None,
     ) -> None:
         self._own_instance_id = own_instance_id
-        self._webhook = webhook
+        self._https_inbox = https_inbox
         self._signaling_send = signaling_send
         self._ice_servers = ice_servers or []
         self._peers: dict[str, _RtcPeer] = {}
@@ -448,7 +448,7 @@ class FederationTransport:
         instance: RemoteInstance,
         envelope_dict: dict,
     ) -> _TransportSendResult:
-        """Deliver ``envelope_dict`` to *instance*, RTC first, webhook on fallback.
+        """Deliver ``envelope_dict`` to *instance*, RTC first, inbox on fallback.
 
         The envelope is unchanged across transports — the signature and
         AES-256-GCM payload are already baked in.
@@ -459,7 +459,7 @@ class FederationTransport:
                 sent = await peer.send(envelope_dict)
             except Exception as exc:
                 log.warning(
-                    "fed RTC send to %s raised (%s) — falling back to webhook",
+                    "fed RTC send to %s raised (%s) — falling back to HTTPS inbox",
                     instance.id,
                     exc,
                 )
@@ -467,7 +467,7 @@ class FederationTransport:
             if sent:
                 return _TransportSendResult(ok=True, via="rtc")
             log.debug(
-                "fed RTC send to %s not ready — falling back to webhook",
+                "fed RTC send to %s not ready — falling back to HTTPS inbox",
                 instance.id,
             )
 
@@ -475,15 +475,15 @@ class FederationTransport:
         if peer is None:
             await self._ensure_handshake(instance)
 
-        ok, status = await self._webhook.send(
+        ok, status = await self._https_inbox.send(
             instance=instance,
             envelope_dict=envelope_dict,
         )
         return _TransportSendResult(
             ok=ok,
-            via="webhook",
+            via="https",
             status_code=status,
-            error=None if ok else "webhook_failed",
+            error=None if ok else "https_inbox_failed",
         )
 
     async def _ensure_handshake(self, instance: RemoteInstance) -> None:
@@ -526,9 +526,9 @@ class FederationTransport:
                 envelope.get("event_type"),
             )
             # Feed inbound DataChannel frames through the same §24.11
-            # validation pipeline the webhook path uses — but with the
+            # validation pipeline the HTTPS-inbox path uses — but with the
             # instance resolved by instance_id (already known from the
-            # peer connection) instead of webhook_id.
+            # peer connection) instead of inbox_id.
             if self._inbound_handler is not None:
                 raw = orjson.dumps(envelope)
                 try:

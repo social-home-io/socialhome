@@ -10,20 +10,20 @@ one B trusts."
 Wire protocol (3 parties: A=originator, B=vouching peer, C=target):
 
     A → B    PAIRING_INTRO_AUTO
-               {target_id, a_dh_pk, a_webhook, ts, nonce, token}
+               {target_id, a_dh_pk, a_inbox_url, ts, nonce, token}
 
     B → C    PAIRING_INTRO_AUTO
-               {from_a_id, from_a_pk, from_a_webhook, from_a_dh_pk,
+               {from_a_id, from_a_pk, from_a_inbox_url, from_a_dh_pk,
                 via_b_id, vouch_sig, ts, nonce, token}
              where vouch_sig = sign(B_seed,
-                 a_id || a_pk || a_webhook || a_dh_pk || c_id || ts || nonce)
+                 a_id || a_pk || a_inbox_url || a_dh_pk || c_id || ts || nonce)
 
     C: queues the request in :class:`AutoPairInbox` + notifies admin.
        Admin clicks approve → coordinator.finalize_pending(request_id)
        builds the ack and sends it back to A:
 
     C → A    PAIRING_INTRO_AUTO_ACK
-               {a_id, c_id, c_pk, c_webhook, c_dh_pk,
+               {a_id, c_id, c_pk, c_inbox_url, c_dh_pk,
                 via_b_id, vouch_sig, ack_sig, ts, nonce, token}
              where ack_sig = sign(C_seed,
                  a_id || a_dh_pk || c_id || c_dh_pk || ts || nonce)
@@ -94,7 +94,7 @@ def _vouch_blob(
     *,
     a_id: str,
     a_pk_hex: str,
-    a_webhook: str,
+    a_inbox_url: str,
     a_dh_pk_hex: str,
     c_id: str,
     ts: str,
@@ -105,7 +105,7 @@ def _vouch_blob(
             "vouch/v1",
             a_id,
             a_pk_hex,
-            a_webhook,
+            a_inbox_url,
             a_dh_pk_hex,
             c_id,
             ts,
@@ -217,9 +217,9 @@ class AutoPairCoordinator:
         nonce = secrets.token_hex(16)
         ts = datetime.now(timezone.utc).isoformat()
 
-        a_webhook = (
-            self._federation.own_webhook_url
-            if hasattr(self._federation, "own_webhook_url")
+        a_inbox_url = (
+            self._federation.own_inbox_url
+            if hasattr(self._federation, "own_inbox_url")
             else ""
         )
         self._pending[token] = _PendingAutoSession(
@@ -238,8 +238,8 @@ class AutoPairCoordinator:
             remote_identity_pk="",
             key_self_to_remote="",
             key_remote_to_self="",
-            remote_webhook_url="",
-            local_webhook_id=secrets.token_urlsafe(24),
+            remote_inbox_url="",
+            local_inbox_id=secrets.token_urlsafe(24),
             status=PairingStatus.PENDING_SENT,
             source=InstanceSource.MANUAL,
             relay_via=via_instance_id,
@@ -250,7 +250,7 @@ class AutoPairCoordinator:
         payload = {
             "target_id": target_instance_id,
             "a_dh_pk": dh_kp.public_key.hex(),
-            "a_webhook": a_webhook,
+            "a_inbox_url": a_inbox_url,
             "ts": ts,
             "nonce": nonce,
             "token": token,
@@ -268,7 +268,7 @@ class AutoPairCoordinator:
         """B side: auto-forwards the signed envelope without admin approval."""
         p = event.payload
         target_id = str(p.get("target_id") or "")
-        a_webhook = str(p.get("a_webhook") or "")
+        a_inbox_url = str(p.get("a_inbox_url") or "")
         a_dh_pk_hex = str(p.get("a_dh_pk") or "")
         ts = str(p.get("ts") or "")
         nonce = str(p.get("nonce") or "")
@@ -303,7 +303,7 @@ class AutoPairCoordinator:
             _vouch_blob(
                 a_id=a.id,
                 a_pk_hex=a.remote_identity_pk,
-                a_webhook=a_webhook,
+                a_inbox_url=a_inbox_url,
                 a_dh_pk_hex=a_dh_pk_hex,
                 c_id=c.id,
                 ts=ts,
@@ -314,7 +314,7 @@ class AutoPairCoordinator:
         forward_payload = {
             "from_a_id": a.id,
             "from_a_pk": a.remote_identity_pk,
-            "from_a_webhook": a_webhook,
+            "from_a_inbox_url": a_inbox_url,
             "from_a_dh_pk": a_dh_pk_hex,
             "from_a_display": a.display_name,
             "via_b_id": via_b_id,
@@ -341,7 +341,7 @@ class AutoPairCoordinator:
 
         a_id = str(p.get("from_a_id") or "")
         a_pk_hex = str(p.get("from_a_pk") or "")
-        a_webhook = str(p.get("from_a_webhook") or "")
+        a_inbox_url = str(p.get("from_a_inbox_url") or "")
         a_dh_pk_hex = str(p.get("from_a_dh_pk") or "")
         a_display = str(p.get("from_a_display") or "")
         via_b_id = str(p.get("via_b_id") or "")
@@ -354,7 +354,7 @@ class AutoPairCoordinator:
             [
                 a_id,
                 a_pk_hex,
-                a_webhook,
+                a_inbox_url,
                 a_dh_pk_hex,
                 via_b_id,
                 vouch_sig_hex,
@@ -382,7 +382,7 @@ class AutoPairCoordinator:
                 _vouch_blob(
                     a_id=a_id,
                     a_pk_hex=a_pk_hex,
-                    a_webhook=a_webhook,
+                    a_inbox_url=a_inbox_url,
                     a_dh_pk_hex=a_dh_pk_hex,
                     c_id=c_id,
                     ts=ts,
@@ -408,7 +408,7 @@ class AutoPairCoordinator:
         req = self._inbox.enqueue(
             from_a_id=a_id,
             from_a_pk=a_pk_hex,
-            from_a_webhook=a_webhook,
+            from_a_inbox_url=a_inbox_url,
             from_a_dh_pk=a_dh_pk_hex,
             via_b_id=via_b_id,
             vouch_sig=vouch_sig_hex,
@@ -441,17 +441,15 @@ class AutoPairCoordinator:
         )
         now = datetime.now(timezone.utc).isoformat()
         existing = await self._repo.get_instance(req.from_a_id)
-        webhook_id = (
-            existing.local_webhook_id if existing else secrets.token_urlsafe(24)
-        )
+        inbox_id = existing.local_inbox_id if existing else secrets.token_urlsafe(24)
         confirmed = RemoteInstance(
             id=req.from_a_id,
             display_name=req.from_a_display or req.from_a_id[:8],
             remote_identity_pk=req.from_a_pk,
             key_self_to_remote=self._key_manager.encrypt(k_self_to_remote),
             key_remote_to_self=self._key_manager.encrypt(k_remote_to_self),
-            remote_webhook_url=req.from_a_webhook,
-            local_webhook_id=webhook_id,
+            remote_inbox_url=req.from_a_inbox_url,
+            local_inbox_id=inbox_id,
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
             relay_via=req.via_b_id,
@@ -473,16 +471,16 @@ class AutoPairCoordinator:
                 nonce=req.nonce,
             ),
         )
-        c_webhook = (
-            self._federation.own_webhook_url
-            if hasattr(self._federation, "own_webhook_url")
+        c_inbox_url = (
+            self._federation.own_inbox_url
+            if hasattr(self._federation, "own_inbox_url")
             else ""
         )
         ack_payload = {
             "a_id": req.from_a_id,
             "c_id": c_id,
             "c_pk": self._own_identity_pk.hex(),
-            "c_webhook": c_webhook,
+            "c_inbox_url": c_inbox_url,
             "c_dh_pk": dh_kp.public_key.hex(),
             "via_b_id": req.via_b_id,
             "vouch_sig": req.vouch_sig,
@@ -528,7 +526,7 @@ class AutoPairCoordinator:
             return
         c_id = str(p.get("c_id") or "")
         c_pk_hex = str(p.get("c_pk") or "")
-        c_webhook = str(p.get("c_webhook") or "")
+        c_inbox_url = str(p.get("c_inbox_url") or "")
         c_dh_pk_hex = str(p.get("c_dh_pk") or "")
         via_b_id = str(p.get("via_b_id") or "")
         vouch_sig_hex = str(p.get("vouch_sig") or "")
@@ -547,9 +545,9 @@ class AutoPairCoordinator:
             log.warning("auto-pair ack: via mismatch")
             return
         a_id = derive_instance_id(self._own_identity_pk)
-        a_webhook = (
-            self._federation.own_webhook_url
-            if hasattr(self._federation, "own_webhook_url")
+        a_inbox_url = (
+            self._federation.own_inbox_url
+            if hasattr(self._federation, "own_inbox_url")
             else ""
         )
         b = await self._repo.get_instance(via_b_id)
@@ -562,7 +560,7 @@ class AutoPairCoordinator:
                 _vouch_blob(
                     a_id=a_id,
                     a_pk_hex=self._own_identity_pk.hex(),
-                    a_webhook=a_webhook,
+                    a_inbox_url=a_inbox_url,
                     a_dh_pk_hex=session.dh_pk_hex,
                     c_id=c_id,
                     ts=ts,
@@ -606,9 +604,9 @@ class AutoPairCoordinator:
             remote_identity_pk=c_pk_hex,
             key_self_to_remote=self._key_manager.encrypt(k_self_to_remote),
             key_remote_to_self=self._key_manager.encrypt(k_remote_to_self),
-            remote_webhook_url=c_webhook,
-            local_webhook_id=(
-                existing.local_webhook_id if existing else secrets.token_urlsafe(24)
+            remote_inbox_url=c_inbox_url,
+            local_inbox_id=(
+                existing.local_inbox_id if existing else secrets.token_urlsafe(24)
             ),
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,

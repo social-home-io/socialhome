@@ -60,14 +60,14 @@ class PairingInitiateView(BaseView):
     async def post(self) -> web.Response:
         self.user  # auth check
         body = await self.body()
-        webhook_url = str(body.get("webhook_url") or "").strip()
-        if not webhook_url:
+        inbox_url = str(body.get("inbox_url") or "").strip()
+        if not inbox_url:
             return error_response(
                 422,
                 "UNPROCESSABLE",
-                "webhook_url is required.",
+                "inbox_url is required.",
             )
-        qr = await self.svc(federation_service_key).initiate_pairing(webhook_url)
+        qr = await self.svc(federation_service_key).initiate_pairing(inbox_url)
         return web.json_response(qr, status=201)
 
 

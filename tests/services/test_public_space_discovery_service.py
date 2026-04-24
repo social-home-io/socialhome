@@ -58,14 +58,14 @@ def _listing(space_id: str, *, instance_id: str = "remote-1", member_count: int 
 
 
 def _gfs_conn(
-    gfs_id: str = "gfs-1", *, endpoint_url: str = "https://gfs.example.com"
+    gfs_id: str = "gfs-1", *, inbox_url: str = "https://gfs.example.com"
 ) -> GfsConnection:
     return GfsConnection(
         id=gfs_id,
         gfs_instance_id=f"inst-{gfs_id}",
         display_name=f"GFS {gfs_id}",
         public_key="pk-hex",
-        endpoint_url=endpoint_url,
+        inbox_url=inbox_url,
         status="active",
         paired_at="2025-01-01T00:00:00+00:00",
     )
@@ -308,8 +308,8 @@ async def test_poll_once_no_active_connections_returns_zero(env):
 
 async def test_poll_once_multiple_gfs(env):
     _, repo, gfs_repo = env
-    await gfs_repo.save(_gfs_conn("gfs-1", endpoint_url="https://gfs1.example.com"))
-    await gfs_repo.save(_gfs_conn("gfs-2", endpoint_url="https://gfs2.example.com"))
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs1.example.com"))
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://gfs2.example.com"))
     body = {
         "spaces": [
             {"space_id": "sp-A", "instance_id": "inst-A", "name": "A"},

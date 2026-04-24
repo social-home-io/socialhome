@@ -29,7 +29,7 @@ flowchart LR
     end
 
     A_pc -- "WebRTC DataChannel<br/>(fed-v1 / sync-v1)" --> B_pc
-    A_app -- "HTTPS webhook<br/>(fallback + signalling)" --> B_app
+    A_app -- "HTTPS inbox<br/>(fallback + signalling)" --> B_app
 
     A_app -. "publish space" .-> G_dir
     B_app -. "subscribe" .-> G_dir
@@ -42,7 +42,7 @@ flowchart LR
 
 Every federation event is an **envelope** — a signed, AES-256-GCM-
 encrypted JSON payload. All inbound envelopes, whether they arrive over
-HTTPS webhook or over a WebRTC DataChannel, flow through the same
+HTTPS inbox or over a WebRTC DataChannel, flow through the same
 validation pipeline (§24.11):
 
 ```mermaid
@@ -61,7 +61,7 @@ flowchart LR
 
 Each step is an independently-testable async callable composed via
 `InboundPipeline` (`federation/inbound_validator.py`). New validation
-steps are appended to the chain — `handle_inbound_webhook` is not
+steps are appended to the chain — `handle_inbound_envelope` is not
 edited. The same chain runs for RTC-delivered envelopes.
 
 ## Transports
@@ -70,7 +70,7 @@ edited. The same chain runs for RTC-delivered envelopes.
 |---|---|
 | **WebRTC DataChannel** (`fed-v1`) | Primary: routine envelopes once the peer-to-peer channel is up. |
 | **WebRTC DataChannel** (`sync-v1`) | Bulk content sync chunks. Distinct label from `fed-v1` so routine + sync traffic don't interfere. |
-| **HTTPS webhook** | Fallback: before the DataChannel is negotiated, when it's closed or failing, and for peers behind a blocked UDP path. |
+| **HTTPS inbox** | Fallback: before the DataChannel is negotiated, when it's closed or failing, and for peers behind a blocked UDP path. |
 
 ## Encryption-first rule (§25.8.21)
 

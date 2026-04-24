@@ -1,6 +1,6 @@
 """Inbound federation validation pipeline (§24.11) — middleware chain.
 
-The §24.11 pipeline validates every inbound federation webhook before the
+The §24.11 pipeline validates every inbound federation inbox before the
 payload reaches business logic. Each step is a standalone async callable
 (a *middleware*) that receives the validation context and either passes
 or raises ``ValueError`` to reject.
@@ -8,7 +8,7 @@ or raises ``ValueError`` to reject.
 Steps (in order):
 
 1. **JSON parse** — ``raw_body`` → envelope dict.
-2. **Instance lookup** — ``local_webhook_id`` → ``RemoteInstance``.
+2. **Instance lookup** — ``local_inbox_id`` → ``RemoteInstance``.
 3. **Timestamp skew** — ``abs(now - envelope.timestamp) ≤ 300s``.
 4. **Signature verify** — Ed25519 with the remote's identity_pk.
 5. **Replay check** — ``msg_id`` already seen → reject.
@@ -30,7 +30,7 @@ Benefits of the decomposition:
 * **Extension** — new steps (e.g. quota enforcement, sealed-sender
   unseal) are added by appending to the chain, not by editing a
   200-line monolith.
-* **Reuse** — the same chain validates both HTTPS-webhook and
+* **Reuse** — the same chain validates both HTTPS-inbox and
   DataChannel-delivered envelopes.
 """
 
@@ -67,12 +67,12 @@ class InboundContext:
     #: Raw bytes received from the transport.
     raw_body: bytes = b""
 
-    #: Webhook identifier from the URL path (HTTPS webhook transport).
-    webhook_id: str = ""
+    #: Inbox identifier from the URL path (HTTPS inbox transport).
+    inbox_id: str = ""
 
     #: Instance identifier (WebRTC transport — already known from the
     #: DataChannel connection). When set, the lookup step uses this
-    #: instead of ``webhook_id``.
+    #: instead of ``inbox_id``.
     instance_id: str = ""
 
     #: Parsed envelope dict (populated by ``parse_json``).
@@ -93,7 +93,7 @@ class InboundContext:
 InboundStep = Callable[[InboundContext], Awaitable[None]]
 
 
-class _WebhookInstance:
+class _InboxInstance:
     """Thin wrapper that exposes ``RemoteInstance`` fields needed by the
     inbound pipeline while also providing a ``from_instance`` attribute
     for cross-checking the ``from_instance`` field in the envelope."""
@@ -165,12 +165,12 @@ def make_parse_json(*, loads) -> InboundStep:
 
 
 def make_lookup_instance(*, repo, lookup_fn) -> InboundStep:
-    """Step 2 (webhook): resolve RemoteInstance by webhook_id."""
+    """Step 2 (inbox): resolve RemoteInstance by inbox_id."""
 
     async def lookup_instance(ctx: InboundContext) -> None:
-        instance = await lookup_fn(repo, ctx.webhook_id)
+        instance = await lookup_fn(repo, ctx.inbox_id)
         if instance is None:
-            raise ValueError(f"No instance found for webhook_id={ctx.webhook_id!r}")
+            raise ValueError(f"No instance found for inbox_id={ctx.inbox_id!r}")
         ctx.instance = instance
 
     return lookup_instance
@@ -189,9 +189,9 @@ def make_lookup_instance_by_id(*, repo) -> InboundStep:
         instance = await repo.get_instance(ctx.instance_id)
         if instance is None:
             raise ValueError(f"No instance found for instance_id={ctx.instance_id!r}")
-        # Wrap in the same shape the webhook lookup returns so the
+        # Wrap in the same shape the HTTPS inbox lookup returns so the
         # remaining pipeline steps (sig verify, decrypt) work unchanged.
-        ctx.instance = _WebhookInstance(instance)
+        ctx.instance = _InboxInstance(instance)
 
     return lookup_instance_by_id
 

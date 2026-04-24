@@ -40,8 +40,8 @@ class FakeFedRepo:
             remote_identity_pk=self._peer_pk_hex,
             key_self_to_remote="x",
             key_remote_to_self="x",
-            remote_webhook_url="https://x",
-            local_webhook_id="wh",
+            remote_inbox_url="https://x",
+            local_inbox_id="wh",
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
         )

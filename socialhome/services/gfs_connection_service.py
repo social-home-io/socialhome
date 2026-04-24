@@ -5,7 +5,7 @@ publishing / unpublishing spaces to paired GFS instances.
 
 The pairing flow (simpler than HFS):
 1. Admin scans GFS QR code -> extracts ``{gfs_url, token, public_key}``
-2. Instance POSTs to ``{gfs_url}/gfs/register`` with own identity + webhook
+2. Instance POSTs to ``{gfs_url}/gfs/register`` with own identity + inbox
 3. GFS responds with ``gfs_instance_id``
 4. Connection saved as ``status=active``
 """
@@ -115,7 +115,7 @@ class GfsConnectionService:
             gfs_instance_id=gfs_instance_id,
             display_name=display_name,
             public_key=public_key,
-            endpoint_url=gfs_url,
+            inbox_url=gfs_url,
             status="active",
             paired_at=now,
         )
@@ -143,7 +143,7 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         client = self._client()
-        publish_url = f"{conn.endpoint_url}/gfs/spaces/{space_id}/publish"
+        publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
         try:
             async with client.post(
                 publish_url,
@@ -169,7 +169,7 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         client = self._client()
-        unpublish_url = f"{conn.endpoint_url}/gfs/spaces/{space_id}/unpublish"
+        unpublish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/unpublish"
         try:
             async with client.delete(
                 unpublish_url,
@@ -269,7 +269,7 @@ class GfsConnectionService:
         except RuntimeError:
             # No HTTP session attached (test harness without network). Skip.
             return False
-        url = f"{conn.endpoint_url}/gfs/report"
+        url = f"{conn.inbox_url}/gfs/report"
         try:
             async with client.post(
                 url,
@@ -329,7 +329,7 @@ class GfsConnectionService:
             return False
         try:
             async with client.post(
-                f"{conn.endpoint_url}/gfs/appeal",
+                f"{conn.inbox_url}/gfs/appeal",
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:

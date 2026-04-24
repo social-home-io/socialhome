@@ -63,7 +63,7 @@ async def test_landing_lists_active_spaces_only(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -99,7 +99,7 @@ async def test_landing_search_filters(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -133,7 +133,7 @@ async def test_landing_audience_filter(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -186,7 +186,7 @@ async def test_space_page_renders_deep_link(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -215,7 +215,7 @@ async def test_space_page_404_for_pending_or_banned(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -243,7 +243,7 @@ async def test_invite_page_known_token(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )

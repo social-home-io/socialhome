@@ -103,8 +103,8 @@ def _make_peer() -> tuple[RemoteInstance, object]:
         remote_identity_pk=kp.public_key.hex(),
         key_self_to_remote="enc",
         key_remote_to_self="enc",
-        remote_webhook_url="https://peer/wh",
-        local_webhook_id="wh-peer-a",
+        remote_inbox_url="https://peer/wh",
+        local_inbox_id="wh-peer-a",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )

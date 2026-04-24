@@ -93,7 +93,7 @@ calendar_service_key: AppKey = AppKey("calendar_service")
 space_cal_service_key: AppKey = AppKey("space_cal_service")
 shopping_service_key: AppKey = AppKey("shopping_service")
 
-# ── Repos (exposed for routes / federation / webhooks) ───────────────────
+# ── Repos (exposed for routes / federation / inboxs) ───────────────────
 user_repo_key: AppKey = AppKey("user_repo")
 profile_picture_repo_key: AppKey = AppKey("profile_picture_repo")
 post_repo_key: AppKey = AppKey("post_repo")

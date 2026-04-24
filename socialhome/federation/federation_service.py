@@ -5,7 +5,7 @@ This module owns two responsibilities:
 A) **Outbound**: encrypt, sign, and POST federation events to paired peer
    instances using the per-pair directional session keys.
 
-B) **Inbound**: run the §24.11 validation pipeline on received webhook
+B) **Inbound**: run the §24.11 validation pipeline on received inbox
    bodies, then dispatch validated events to the in-process EventBus.
 
 Pairing helpers (``initiate_pairing``, ``accept_pairing``,
@@ -50,7 +50,7 @@ from .pq_signer import PqSigner
 from .inbound_validator import (
     InboundContext,
     InboundPipeline,
-    _WebhookInstance,
+    _InboxInstance,
     make_ban_check,
     make_check_replay,
     make_check_timestamp,
@@ -91,7 +91,7 @@ class FederationService:
     """Core federation handler — outbound delivery and inbound dispatch.
 
     All constructor parameters are injected; the service has no I/O of its
-    own beyond the HTTP client it uses to POST to peer webhook URLs.
+    own beyond the HTTP client it uses to POST to peer inbox URLs.
 
     Parameters
     ----------
@@ -218,14 +218,14 @@ class FederationService:
         """Lazily construct the §24.11 validation middleware chain.
 
         Must be called after ``attach_idempotency_cache`` since the
-        pipeline references it. Built on first inbound webhook rather
+        pipeline references it. Built on first inbound envelope rather
         than in ``__init__`` so all optional wiring is in place.
         """
         return InboundPipeline(
             self._common_pipeline_steps(
                 lookup_step=make_lookup_instance(
                     repo=self._federation_repo,
-                    lookup_fn=_lookup_by_webhook_id,
+                    lookup_fn=_lookup_by_inbox_id,
                 ),
             )
         )
@@ -233,9 +233,9 @@ class FederationService:
     def _build_rtc_inbound_pipeline(self):
         """Build the §24.11 pipeline variant for WebRTC DataChannel frames.
 
-        Identical to the webhook variant except the instance lookup uses
+        Identical to the HTTPS inbox variant except the instance lookup uses
         ``instance_id`` (already known from the peer connection) instead
-        of ``webhook_id``.
+        of ``inbox_id``.
         """
         return InboundPipeline(
             self._common_pipeline_steps(
@@ -246,7 +246,7 @@ class FederationService:
         )
 
     def _common_pipeline_steps(self, *, lookup_step):
-        """Return the shared step list for both webhook and RTC pipelines."""
+        """Return the shared step list for both inbox and RTC pipelines."""
         return [
             make_parse_json(loads=_loads),
             lookup_step,
@@ -295,7 +295,7 @@ class FederationService:
         """Attach a :class:`FederationTransport` facade.
 
         Once attached, :meth:`send_event` prefers its WebRTC
-        DataChannel and falls back to webhook only if the channel is
+        DataChannel and falls back to HTTPS inbox only if the channel is
         unavailable.
         """
         self._transport = transport
@@ -374,7 +374,7 @@ class FederationService:
     async def _get_http_client(self):
         """Return the wired aiohttp session.
 
-        Retained as a callable so the ``FederationTransport`` webhook
+        Retained as a callable so the ``FederationTransport`` inbox
         strategy can defer client resolution to delivery time.
         """
         if self._http_client is None:
@@ -403,7 +403,7 @@ class FederationService:
         3. Encrypt the payload JSON with AES-256-GCM.
         4. Build ``FederationEnvelope``.
         5. Sign the serialised envelope with ``own_identity_seed``.
-        6. POST to ``remote_webhook_url``.
+        6. POST to ``remote_inbox_url``.
         7. On success: ``mark_reachable``, return ``DeliveryResult(ok=True)``.
         8. On failure: ``mark_unreachable``, enqueue to outbox, return
            ``DeliveryResult(ok=False)``.
@@ -461,8 +461,8 @@ class FederationService:
 
         # Dispatch the envelope. When a FederationTransport facade is
         # attached, it decides between WebRTC DataChannel (§24.12.5
-        # primary) and HTTPS webhook (fallback). Without the facade we
-        # run the legacy inline webhook path — still used by federation-
+        # primary) and HTTPS inbox (fallback). Without the facade we
+        # run the legacy inline HTTPS-inbox path — still used by federation-
         # level tests that don't construct the facade.
         # Previous reachability state — used to fire ConnectionReachable
         # on the unreachable → reachable transition only (no noise on every
@@ -491,7 +491,7 @@ class FederationService:
             try:
                 client = await self._get_http_client()
                 async with client.post(
-                    instance.remote_webhook_url,
+                    instance.remote_inbox_url,
                     json=envelope_dict,
                     timeout=_aiohttp_timeout(10),
                 ) as resp:
@@ -604,12 +604,12 @@ class FederationService:
 
     # ─── Inbound ──────────────────────────────────────────────────────────
 
-    async def handle_inbound_webhook(
+    async def handle_inbound_envelope(
         self,
-        webhook_id: str,
+        inbox_id: str,
         raw_body: bytes,
     ) -> dict:
-        """§24.11 validation pipeline for an inbound federation webhook.
+        """§24.11 validation pipeline for an inbound federation inbox.
 
         Delegates to :class:`InboundPipeline` — a composable middleware
         chain where each step (JSON parse → instance lookup → timestamp
@@ -624,7 +624,7 @@ class FederationService:
             self._inbound_pipeline = self._build_inbound_pipeline()
 
         pipeline: InboundPipeline = self._inbound_pipeline  # type: ignore[assignment]
-        ctx = InboundContext(raw_body=raw_body, webhook_id=webhook_id)
+        ctx = InboundContext(raw_body=raw_body, inbox_id=inbox_id)
         result = await pipeline.run(ctx)
 
         # Early-response means a step (e.g. idempotency) short-circuited.
@@ -644,9 +644,9 @@ class FederationService:
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
-        Same pipeline as :meth:`handle_inbound_webhook` but resolves
+        Same pipeline as :meth:`handle_inbound_envelope` but resolves
         the sender by ``instance_id`` (already known from the peer
-        connection) instead of ``webhook_id``.
+        connection) instead of ``inbox_id``.
         """
         if self._rtc_inbound_pipeline is None:
             self._rtc_inbound_pipeline = self._build_rtc_inbound_pipeline()
@@ -1032,9 +1032,9 @@ class FederationService:
     # :class:`PairingCoordinator`. The three methods below are thin
     # delegations so the public surface of FederationService is unchanged.
 
-    async def initiate_pairing(self, webhook_url: str) -> dict:
+    async def initiate_pairing(self, inbox_url: str) -> dict:
         """Delegates to :class:`PairingCoordinator`."""
-        return await self._pairing.initiate(webhook_url)
+        return await self._pairing.initiate(inbox_url)
 
     async def accept_pairing(self, qr_payload: dict) -> dict:
         """Delegates to :class:`PairingCoordinator`."""
@@ -1086,20 +1086,20 @@ def _require_fields(data: dict, *fields: str) -> None:
         raise ValueError(f"Missing required fields: {missing}")
 
 
-async def _lookup_by_webhook_id(
+async def _lookup_by_inbox_id(
     repo: AbstractFederationRepo,
-    webhook_id: str,
-) -> "_WebhookInstance | None":
-    """Find a ``RemoteInstance`` by its ``local_webhook_id``.
+    inbox_id: str,
+) -> "_InboxInstance | None":
+    """Find a ``RemoteInstance`` by its ``local_inbox_id``.
 
     The repository protocol exposes ``get_instance(instance_id)`` only, so
-    we list all instances and scan for the matching webhook ID.  For v1
+    we list all instances and scan for the matching inbox ID.  For v1
     instance counts are small; a dedicated index can be added later.
     """
     instances = await repo.list_instances()
     for inst in instances:
-        if inst.local_webhook_id == webhook_id:
-            return _WebhookInstance(inst)
+        if inst.local_inbox_id == inbox_id:
+            return _InboxInstance(inst)
     return None
 
 

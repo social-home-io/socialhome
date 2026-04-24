@@ -39,13 +39,13 @@ class SqliteGfsConnectionRepo:
             """
             INSERT INTO gfs_connections(
                 id, gfs_instance_id, display_name, public_key,
-                endpoint_url, status, paired_at
+                inbox_url, status, paired_at
             ) VALUES(?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 gfs_instance_id=excluded.gfs_instance_id,
                 display_name=excluded.display_name,
                 public_key=excluded.public_key,
-                endpoint_url=excluded.endpoint_url,
+                inbox_url=excluded.inbox_url,
                 status=excluded.status,
                 paired_at=excluded.paired_at
             """,
@@ -54,7 +54,7 @@ class SqliteGfsConnectionRepo:
                 conn.gfs_instance_id,
                 conn.display_name,
                 conn.public_key,
-                conn.endpoint_url,
+                conn.inbox_url,
                 conn.status,
                 conn.paired_at,
             ),
@@ -151,7 +151,7 @@ class SqliteGfsConnectionRepo:
                    gsp.gfs_connection_id   AS gfs_id,
                    gsp.published_at        AS published_at,
                    gc.display_name         AS gfs_display_name,
-                   gc.endpoint_url         AS gfs_endpoint_url,
+                   gc.inbox_url         AS gfs_inbox_url,
                    s.name                  AS space_name,
                    s.emoji                 AS space_emoji
               FROM gfs_space_publications AS gsp
@@ -169,7 +169,7 @@ def _row_to_conn(r: dict) -> GfsConnection:
         gfs_instance_id=r["gfs_instance_id"],
         display_name=r["display_name"],
         public_key=r["public_key"],
-        endpoint_url=r["endpoint_url"],
+        inbox_url=r["inbox_url"],
         status=r["status"],
         paired_at=r["paired_at"],
         created_at=r.get("created_at"),

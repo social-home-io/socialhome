@@ -246,7 +246,7 @@ interface GfsPublication {
   gfs_id:            string
   published_at:      string
   gfs_display_name:  string
-  gfs_endpoint_url:  string
+  gfs_inbox_url:  string
   space_name:        string | null
   space_emoji:       string | null
 }
@@ -372,7 +372,7 @@ function SpacesTab() {
                 </td>
                 <td>
                   {p.gfs_display_name}
-                  <span class="sh-muted"> · {p.gfs_endpoint_url}</span>
+                  <span class="sh-muted"> · {p.gfs_inbox_url}</span>
                 </td>
                 <td>
                   {p.published_at

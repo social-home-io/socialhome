@@ -32,7 +32,7 @@ Canonical spec: spec_work.md — the spec is always right.
   crypto satisfies `EncryptionStrategy` (`federation/strategies.py`).
 - New inbound validation steps are added by appending to the
   `InboundPipeline` chain (`federation/inbound_validator.py`). Never edit
-  the monolithic `handle_inbound_webhook` directly — each step is its own
+  the monolithic `handle_inbound_envelope` directly — each step is its own
   async callable with isolated tests.
 
 ### Patterns to avoid

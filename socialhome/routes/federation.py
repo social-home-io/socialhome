@@ -1,9 +1,9 @@
-"""Federation inbound webhook routes — /webhook/{webhook_id} (section 24.11).
+"""Federation inbound envelope routes — /federation/inbox/{inbox_id} (section 24.11).
 
 This is the single inbound entry point for federation. The full
 validation pipeline (JSON parse -> timestamp skew -> instance lookup ->
 signature verify -> replay cache -> decrypt -> dispatch) lives in
-:class:`FederationService.handle_inbound_webhook` — this route is a
+:class:`FederationService.handle_inbound_envelope` — this route is a
 thin shim that forwards the raw body and converts the service's
 canonical ``ValueError`` rejections into HTTP 400 / 403 / 410.
 
@@ -50,8 +50,8 @@ def _classify(msg: str) -> int:
     return 400
 
 
-class FederationWebhookView(BaseView):
-    """POST /webhook/{webhook_id} — federation envelope arrives here.
+class FederationInboxView(BaseView):
+    """POST /federation/inbox/{inbox_id} — federation envelope arrives here.
 
     Returns ``{"status":"ok"}`` on successful dispatch (200), or
     an error code on validation failure. All errors are silent
@@ -60,11 +60,11 @@ class FederationWebhookView(BaseView):
     """
 
     async def post(self) -> web.Response:
-        webhook_id = self.match("webhook_id")
+        inbox_id = self.match("inbox_id")
         try:
             raw_body = await self.request.read()
         except Exception as exc:
-            log.debug("federation webhook: body read error: %s", exc)
+            log.debug("federation inbox: body read error: %s", exc)
             return web.json_response({"error": "bad_body"}, status=400)
 
         if len(raw_body) > 1 * 1024 * 1024:  # 1 MiB cap
@@ -76,8 +76,8 @@ class FederationWebhookView(BaseView):
         federation_service = self.request.app.get(K.federation_service_key)
         if federation_service is None:
             log.warning(
-                "federation webhook: service not yet wired (webhook_id=%s)",
-                webhook_id,
+                "federation inbox: service not yet wired (inbox_id=%s)",
+                inbox_id,
             )
             return web.json_response(
                 {"error": "service_unavailable"},
@@ -85,23 +85,23 @@ class FederationWebhookView(BaseView):
             )
 
         try:
-            result = await federation_service.handle_inbound_webhook(
-                webhook_id,
+            result = await federation_service.handle_inbound_envelope(
+                inbox_id,
                 raw_body,
             )
         except ValueError as exc:
             status = _classify(str(exc))
             log.debug(
-                "federation webhook: rejected webhook_id=%s status=%d reason=%s",
-                webhook_id,
+                "federation inbox: rejected inbox_id=%s status=%d reason=%s",
+                inbox_id,
                 status,
                 exc,
             )
             return web.json_response({"error": str(exc)}, status=status)
         except Exception:
             log.exception(
-                "federation webhook: unexpected error (webhook_id=%s)",
-                webhook_id,
+                "federation inbox: unexpected error (inbox_id=%s)",
+                inbox_id,
             )
             return web.json_response(
                 {"error": "internal"},

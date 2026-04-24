@@ -12,7 +12,7 @@ protocol**. Ongoing live updates afterwards are covered by
   + streams chunks; requester acks and commits.
 - **GFS**: uninvolved. Sync is strictly peer-to-peer. Preferred
   transport is the `sync-v1` WebRTC DataChannel; falls back to
-  chunked webhook.
+  chunked inbox.
 
 ## Event types
 
@@ -24,9 +24,9 @@ protocol**. Ongoing live updates afterwards are covered by
 
 ## Tiered transport
 
-- **Tier 2 — webhook.** The bootstrap path. Always available; used
+- **Tier 2 — HTTPS inbox.** The bootstrap path. Always available; used
   until the dedicated sync DataChannel is up. Chunks are POSTed one by
-  one to the provider's webhook.
+  one to the provider's inbox.
 - **Tier 3 — DataChannel (`sync-v1`).** Separate from the `fed-v1`
   routine channel so a large sync doesn't block live events. Once the
   DataChannel is negotiated the requester sends
@@ -82,7 +82,7 @@ devices.
 ## DataChannel failure
 
 If the DataChannel negotiation fails, the provider emits
-`SPACE_SYNC_DIRECT_FAILED` and continues over webhook. The sync
+`SPACE_SYNC_DIRECT_FAILED` and continues over HTTPS inbox. The sync
 completes; only the transport changes.
 
 ## Implementation

@@ -6,7 +6,7 @@ Reference material for running and understanding Social Home.
 
 - **[api.md](./api.md)** — REST API reference for the Household Federation
   Server (HFS) and Global Federation Server (GFS), plus WebSocket channels
-  and the inbound federation webhook.
+  and the inbound federation inbox.
 - **[crypto.md](./crypto.md)** — Cryptographic design: identity keys,
   pairing DH, per-space session keys, post-quantum migration (§25.8).
 - **[protocol/](./protocol/)** — The federation protocol, feature by
@@ -30,7 +30,7 @@ Reference material for running and understanding Social Home.
   encrypted trust relationship between two HFS instances.
 - **Envelope.** A signed, AES-256-GCM-encrypted JSON payload — the
   unit of federation traffic. Delivered over WebRTC DataChannel when
-  possible, falling back to HTTPS webhook.
+  possible, falling back to HTTPS inbox.
 
 ## Where the spec lives
 

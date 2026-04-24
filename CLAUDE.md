@@ -57,11 +57,11 @@ The spec is the source of truth — if code and spec disagree, fix the code.
   verify, replay check, decrypt, idempotency, ban check, persist replay) is an
   independently-testable async callable composed via `InboundPipeline`. New
   steps (quota enforcement, sealed-sender unseal) are added by appending to
-  the chain — never by editing the monolithic `handle_inbound_webhook`. The
-  same chain validates both HTTPS-webhook and DataChannel-delivered envelopes.
+  the chain — never by editing the monolithic `handle_inbound_envelope`. The
+  same chain validates both HTTPS-inbox and DataChannel-delivered envelopes.
   Reference: `federation/inbound_validator.py`.
 - **Strategy** for transport + envelope crypto. Concrete classes
-  (`WebhookTransport`, `_RtcPeer`, `FederationEncoder`) satisfy the
+  (`HttpsInboxTransport`, `_RtcPeer`, `FederationEncoder`) satisfy the
   `TransportStrategy` / `EncryptionStrategy` Protocols in
   `federation/strategies.py`. New transports / crypto schemes plug in by
   satisfying the protocol — no `FederationService` edits required.

@@ -37,7 +37,7 @@ async def test_list_instances_filtered_by_status(fed):
             instance_id="a",
             display_name="A",
             public_key="aa" * 32,
-            endpoint_url="http://a",
+            inbox_url="http://a",
             status="pending",
         )
     )
@@ -46,7 +46,7 @@ async def test_list_instances_filtered_by_status(fed):
             instance_id="b",
             display_name="B",
             public_key="bb" * 32,
-            endpoint_url="http://b",
+            inbox_url="http://b",
             status="active",
         )
     )
@@ -62,7 +62,7 @@ async def test_list_spaces_for_instance(fed):
             instance_id="owner",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o",
+            inbox_url="http://o",
             status="active",
         )
     )
@@ -90,7 +90,7 @@ async def test_remove_subscriber_updates_count(fed):
             instance_id="o",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o",
+            inbox_url="http://o",
             status="active",
         )
     )
@@ -99,7 +99,7 @@ async def test_remove_subscriber_updates_count(fed):
             instance_id="sub",
             display_name="S",
             public_key="bb" * 32,
-            endpoint_url="http://s",
+            inbox_url="http://s",
             status="active",
         )
     )

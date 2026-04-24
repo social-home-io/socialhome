@@ -31,7 +31,7 @@ MUST ALWAYS:
 - For multi-write handlers needing atomic event publish: async with UnitOfWork(db, bus=bus)
 - For composable list/search reads: build a Spec and call repo.find(spec)
 - New inbound federation validation steps: append to InboundPipeline chain
-  (federation/inbound_validator.py) — never edit handle_inbound_webhook directly
+  (federation/inbound_validator.py) — never edit handle_inbound_envelope directly
 
 MUST NEVER:
 - Import inside a function or method — all imports at the top of the file

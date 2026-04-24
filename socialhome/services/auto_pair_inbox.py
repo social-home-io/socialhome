@@ -31,7 +31,7 @@ class PendingAutoPairRequest:
     request_id: str
     from_a_id: str
     from_a_pk: str
-    from_a_webhook: str
+    from_a_inbox_url: str
     from_a_dh_pk: str
     via_b_id: str
     vouch_sig: str
@@ -72,7 +72,7 @@ class AutoPairInbox:
         *,
         from_a_id: str,
         from_a_pk: str,
-        from_a_webhook: str,
+        from_a_inbox_url: str,
         from_a_dh_pk: str,
         via_b_id: str,
         vouch_sig: str,
@@ -87,7 +87,7 @@ class AutoPairInbox:
             request_id=request_id,
             from_a_id=from_a_id,
             from_a_pk=from_a_pk,
-            from_a_webhook=from_a_webhook,
+            from_a_inbox_url=from_a_inbox_url,
             from_a_dh_pk=from_a_dh_pk,
             via_b_id=via_b_id,
             vouch_sig=vouch_sig,

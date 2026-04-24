@@ -15,7 +15,7 @@ here.
 
 `PAIRING_INTRO`, `PAIRING_INTRO_RELAY`, `PAIRING_INTRO_AUTO`,
 `PAIRING_INTRO_AUTO_ACK`, `PAIRING_ACCEPT`, `PAIRING_CONFIRM`,
-`PAIRING_ABORT`, `UNPAIR`, `WEBHOOK_UPDATED`.
+`PAIRING_ABORT`, `UNPAIR`, `URL_UPDATED`.
 
 ## Flow — direct QR handshake
 
@@ -24,7 +24,7 @@ sequenceDiagram
     autonumber
     participant A as HFS A<br/>(inviter)
     participant B as HFS B<br/>(scanner)
-    A->>A: generate QR<br/>(identity_pk, dh_pk,<br/>webhook_url, token, expiry)
+    A->>A: generate QR<br/>(identity_pk, dh_pk,<br/>inbox_url, token, expiry)
     Note over A,B: user shows QR to B
     B->>B: scan QR, compute<br/>shared DH secret
     B->>A: PAIRING_INTRO<br/>(B.identity_pk, B.dh_pk)
@@ -33,7 +33,7 @@ sequenceDiagram
     Note over A,B: users compare SAS<br/>out-of-band
     B->>A: PAIRING_CONFIRM
     Note over A,B: both sides persist<br/>directional session keys
-    A-->>B: WEBHOOK_UPDATED<br/>(if URL changes later)
+    A-->>B: URL_UPDATED<br/>(if URL changes later)
 ```
 
 ## Flow — auto-pair via relay
@@ -87,6 +87,6 @@ the receiver still decrypts with a key it's about to delete.
 
 ## Spec references
 
-§11 (Instance Pairing & Encrypted Webhooks),
+§11 (Instance Pairing & Encrypted Inboxs),
 §25.8.20 (session key derivation),
 §S-13/S-14 (SAS verification and answer-origin audits).

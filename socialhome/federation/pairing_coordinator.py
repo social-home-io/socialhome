@@ -6,7 +6,7 @@ exercised independently of outbound delivery + inbound validation.
 The flow is three steps:
 
 1. :meth:`initiate` — local admin generates a QR payload (token,
-   identity_pk, dh_pk, webhook_url, expires_at) for the peer to scan.
+   identity_pk, dh_pk, inbox_url, expires_at) for the peer to scan.
 2. :meth:`accept` — peer scans the QR, derives a shared X25519 secret,
    stores a provisional ``RemoteInstance`` in ``PENDING_RECEIVED`` and
    returns a 6-digit SAS code that the two admins compare out-of-band.
@@ -85,7 +85,7 @@ class PairingCoordinator:
         self._own_pq_pk = own_pq_pk
         self._own_sig_suite = own_sig_suite
 
-    async def initiate(self, webhook_url: str) -> dict:
+    async def initiate(self, inbox_url: str) -> dict:
         """Generate a QR payload for the §11 pairing handshake.
 
         The payload advertises this instance's supported ``sig_suite`` and
@@ -103,7 +103,7 @@ class PairingCoordinator:
             own_identity_pk=self._own_identity_pk.hex(),
             own_dh_pk=dh_kp.public_key.hex(),
             own_dh_sk=dh_kp.private_key.hex(),
-            webhook_url=webhook_url,
+            inbox_url=inbox_url,
             issued_at=now.isoformat(),
             expires_at=expires_at,
             status=PairingStatus.PENDING_SENT,
@@ -122,7 +122,7 @@ class PairingCoordinator:
             "instance_id": own_instance_id,
             "identity_pk": self._own_identity_pk.hex(),
             "dh_pk": dh_kp.public_key.hex(),
-            "webhook_url": webhook_url,
+            "inbox_url": inbox_url,
             "expires_at": expires_at,
             "sig_suite": self._own_sig_suite,
         }
@@ -138,13 +138,13 @@ class PairingCoordinator:
             "token",
             "identity_pk",
             "dh_pk",
-            "webhook_url",
+            "inbox_url",
         )
 
         token: str = qr_payload["token"]
         peer_identity_pk_hex: str = qr_payload["identity_pk"]
         peer_dh_pk_hex: str = qr_payload["dh_pk"]
-        peer_webhook_url: str = qr_payload["webhook_url"]
+        peer_inbox_url: str = qr_payload["inbox_url"]
 
         # Generate our ephemeral DH keypair.
         own_dh_kp = generate_x25519_keypair()
@@ -186,8 +186,8 @@ class PairingCoordinator:
                 "refuse to complete handshake",
             )
 
-        # Generate a webhook ID for the peer to POST to.
-        local_webhook_id = secrets.token_urlsafe(24)
+        # Generate a inbox ID for the peer to POST to.
+        local_inbox_id = secrets.token_urlsafe(24)
 
         # 6-digit SAS verification code.
         verification_code = str(secrets.randbelow(10**SAS_DIGITS)).zfill(SAS_DIGITS)
@@ -203,8 +203,8 @@ class PairingCoordinator:
             own_dh_sk=own_dh_kp.private_key.hex(),
             peer_identity_pk=peer_identity_pk_hex,
             peer_dh_pk=peer_dh_pk_hex,
-            peer_webhook_url=peer_webhook_url,
-            webhook_url=qr_payload.get("webhook_url", ""),
+            peer_inbox_url=peer_inbox_url,
+            inbox_url=qr_payload.get("inbox_url", ""),
             verification_code=verification_code,
             issued_at=now.isoformat(),
             expires_at=expires_at,
@@ -226,8 +226,8 @@ class PairingCoordinator:
             remote_identity_pk=peer_identity_pk_hex,
             key_self_to_remote=key_self_enc,
             key_remote_to_self=key_remote_enc,
-            remote_webhook_url=peer_webhook_url,
-            local_webhook_id=local_webhook_id,
+            remote_inbox_url=peer_inbox_url,
+            local_inbox_id=local_inbox_id,
             status=PairingStatus.PENDING_RECEIVED,
             source=InstanceSource.MANUAL,
             remote_pq_algorithm=str(peer_pq_alg) if peer_pq_alg else None,
@@ -240,7 +240,7 @@ class PairingCoordinator:
         return {
             "verification_code": verification_code,
             "token": token,
-            "local_webhook_id": local_webhook_id,
+            "local_inbox_id": local_inbox_id,
             "own_dh_pk": own_dh_kp.public_key.hex(),
         }
 
@@ -286,8 +286,8 @@ class PairingCoordinator:
             remote_identity_pk=instance.remote_identity_pk,
             key_self_to_remote=instance.key_self_to_remote,
             key_remote_to_self=instance.key_remote_to_self,
-            remote_webhook_url=instance.remote_webhook_url,
-            local_webhook_id=instance.local_webhook_id,
+            remote_inbox_url=instance.remote_inbox_url,
+            local_inbox_id=instance.local_inbox_id,
             status=PairingStatus.CONFIRMED,
             source=instance.source,
             remote_pq_algorithm=instance.remote_pq_algorithm,

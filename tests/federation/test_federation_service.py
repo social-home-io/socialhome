@@ -80,8 +80,8 @@ def _make_remote_instance(
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=key_self_enc,
         key_remote_to_self=key_remote_enc,
-        remote_webhook_url="http://peer.example.com/fed/webhook",
-        local_webhook_id="local-wh-id-abc",
+        remote_inbox_url="http://peer.example.com/fed/inbox",
+        local_inbox_id="local-wh-id-abc",
         status=PairingStatus.CONFIRMED,
     )
     return inst, session_key
@@ -125,7 +125,7 @@ class InMemoryFederationRepo:
     async def mark_unreachable(self, instance_id: str) -> None:
         self.unreachable_calls.append(instance_id)
 
-    async def update_webhook(self, instance_id: str, new_url: str) -> None:
+    async def update_inbox(self, instance_id: str, new_url: str) -> None:
         pass
 
     async def load_replay_cache(self, within_hours: int = 1) -> list[tuple[str, str]]:
@@ -385,7 +385,7 @@ async def test_send_event_failure_enqueues_outbox():
 async def test_send_event_prefers_attached_transport():
     """When a FederationTransport facade is attached, send_event delegates to it.
 
-    The webhook HTTP client is wired to raise — if send_event is
+    The inbox HTTP client is wired to raise — if send_event is
     routing through the legacy inline path it would surface an
     exception or enqueue to outbox. Instead, the facade's fake
     returns ok=True and ok bubbles up.
@@ -434,7 +434,7 @@ async def test_send_event_prefers_attached_transport():
     failing_http.post.assert_not_called()
 
 
-# ─── Inbound webhook ──────────────────────────────────────────────────────
+# ─── Inbound inbox ──────────────────────────────────────────────────────
 
 
 def _make_valid_envelope(
@@ -493,7 +493,7 @@ def _make_valid_envelope(
 
 
 @pytest.mark.asyncio
-async def test_inbound_webhook_validation():
+async def test_inbound_inbox_validation():
     """A well-formed signed envelope is validated successfully."""
     km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
@@ -515,8 +515,8 @@ async def test_inbound_webhook_validation():
         peer_inst=inst,
     )
 
-    result = await svc.handle_inbound_webhook(
-        webhook_id=inst.local_webhook_id,
+    result = await svc.handle_inbound_envelope(
+        inbox_id=inst.local_inbox_id,
         raw_body=raw_body,
     )
     assert result == {"status": "ok"}
@@ -548,16 +548,16 @@ async def test_inbound_replay_rejected():
     )
 
     # First delivery.
-    result = await svc.handle_inbound_webhook(
-        webhook_id=inst.local_webhook_id,
+    result = await svc.handle_inbound_envelope(
+        inbox_id=inst.local_inbox_id,
         raw_body=raw_body,
     )
     assert result == {"status": "ok"}
 
     # Second delivery — same msg_id.
     with pytest.raises(ValueError, match="Replay detected"):
-        await svc.handle_inbound_webhook(
-            webhook_id=inst.local_webhook_id,
+        await svc.handle_inbound_envelope(
+            inbox_id=inst.local_inbox_id,
             raw_body=raw_body,
         )
 
@@ -589,8 +589,8 @@ async def test_inbound_timestamp_skew_rejected():
     )
 
     with pytest.raises(ValueError, match="Timestamp skew"):
-        await svc.handle_inbound_webhook(
-            webhook_id=inst.local_webhook_id,
+        await svc.handle_inbound_envelope(
+            inbox_id=inst.local_inbox_id,
             raw_body=raw_body,
         )
 
@@ -626,15 +626,15 @@ async def test_inbound_bad_signature_rejected():
     data["signatures"]["ed25519"] = b64url_encode(bytes(bad_sig))
 
     with pytest.raises(ValueError, match="Invalid envelope signature"):
-        await svc.handle_inbound_webhook(
-            webhook_id=inst.local_webhook_id,
+        await svc.handle_inbound_envelope(
+            inbox_id=inst.local_inbox_id,
             raw_body=_dumps(data).encode("utf-8"),
         )
 
 
 @pytest.mark.asyncio
-async def test_inbound_unknown_webhook_rejected():
-    """Inbound webhook with unknown webhook_id raises ValueError."""
+async def test_inbound_unknown_inbox_rejected():
+    """Inbound inbox with unknown inbox_id raises ValueError."""
     km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
     svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
@@ -653,8 +653,8 @@ async def test_inbound_unknown_webhook_rejected():
     ).encode("utf-8")
 
     with pytest.raises(ValueError, match="No instance found"):
-        await svc.handle_inbound_webhook(
-            webhook_id="nonexistent-webhook",
+        await svc.handle_inbound_envelope(
+            inbox_id="nonexistent-inbox",
             raw_body=raw_body,
         )
 
@@ -669,16 +669,16 @@ async def test_initiate_pairing():
     fed_repo = InMemoryFederationRepo()
     svc, own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
 
-    result = await svc.initiate_pairing("http://my-instance.local/fed/webhook")
+    result = await svc.initiate_pairing("http://my-instance.local/fed/inbox")
 
     assert "token" in result
     assert "identity_pk" in result
     assert "dh_pk" in result
-    assert "webhook_url" in result
+    assert "inbox_url" in result
     assert "expires_at" in result
 
     assert result["identity_pk"] == own_kp.public_key.hex()
-    assert result["webhook_url"] == "http://my-instance.local/fed/webhook"
+    assert result["inbox_url"] == "http://my-instance.local/fed/inbox"
 
     # The pairing session should be persisted.
     assert len(fed_repo._pairings) == 1
@@ -701,7 +701,7 @@ async def test_accept_pairing():
         "token": "test-token-123",
         "identity_pk": peer_kp.public_key.hex(),
         "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "http://peer.local/fed/webhook",
+        "inbox_url": "http://peer.local/fed/inbox",
     }
 
     result = await svc.accept_pairing(qr_payload)
@@ -709,7 +709,7 @@ async def test_accept_pairing():
     assert "verification_code" in result
     assert len(result["verification_code"]) == 6
     assert result["verification_code"].isdigit()
-    assert "local_webhook_id" in result
+    assert "local_inbox_id" in result
 
     # A RemoteInstance should be saved in PENDING_RECEIVED state.
     peer_id = derive_instance_id(peer_kp.public_key)
@@ -731,7 +731,7 @@ async def test_confirm_pairing():
         "token": "tok-abc",
         "identity_pk": peer_kp.public_key.hex(),
         "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "http://peer.local/fed/webhook",
+        "inbox_url": "http://peer.local/fed/inbox",
     }
 
     accept_result = await svc.accept_pairing(qr_payload)
@@ -757,7 +757,7 @@ async def test_confirm_pairing_wrong_code():
         "token": "tok-xyz",
         "identity_pk": peer_kp.public_key.hex(),
         "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "http://peer.local/fed/webhook",
+        "inbox_url": "http://peer.local/fed/inbox",
     }
 
     await svc.accept_pairing(qr_payload)

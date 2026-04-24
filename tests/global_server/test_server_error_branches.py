@@ -2,7 +2,7 @@
 
 Exercises the JSON-decode, missing-field, invalid-signature, and
 unknown-NODE_* branches that the success-path tests skip — plus
-``_fan_out`` via a real subscriber webhook and the CLI entry point
+``_fan_out`` via a real subscriber HTTPS inbox and the CLI entry point
 (``main``, ``_cli_init``, ``_cli_set_password``).
 """
 
@@ -92,7 +92,7 @@ async def client(tmp_dir):
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                endpoint_url="http://peer.home/wh",
+                inbox_url="http://peer.home/wh",
                 status="active",
             )
         )
@@ -525,18 +525,18 @@ async def test_header_image_upload_rejects_non_image(client):
     assert resp.status == 415
 
 
-# ─── Federation _fan_out via a real subscriber webhook ──────────────
+# ─── Federation _fan_out via a real subscriber HTTPS inbox ──────────────
 
 
-async def test_fan_out_delivers_to_real_subscriber_webhook(
+async def test_fan_out_delivers_to_real_subscriber_inbox(
     tmp_dir,
     tmp_path_factory,
 ):
-    """A real subscriber webhook receives the published event over HTTP.
+    """A real subscriber HTTPS inbox receives the published event over HTTP.
 
     Spins up a mini aiohttp app that records every POST to ``/wh``,
     registers it as a GFS subscriber, then publishes an event — the
-    federation service's ``_fan_out`` -> webhook path must deliver.
+    federation service's ``_fan_out`` -> HTTPS-inbox path must deliver.
     """
     received = []
 
@@ -558,7 +558,7 @@ async def test_fan_out_delivers_to_real_subscriber_webhook(
                     instance_id="sub.home",
                     display_name="Sub",
                     public_key="aa" * 32,
-                    endpoint_url=sub_url,
+                    inbox_url=sub_url,
                     status="active",
                 )
             )
@@ -567,7 +567,7 @@ async def test_fan_out_delivers_to_real_subscriber_webhook(
                     instance_id="pub.home",
                     display_name="Pub",
                     public_key="bb" * 32,
-                    endpoint_url="http://pub",
+                    inbox_url="http://pub",
                     status="active",
                 )
             )
@@ -591,7 +591,7 @@ async def test_fan_out_delivers_to_real_subscriber_webhook(
             )
             assert resp.status == 200
             assert (await resp.json())["delivered_to"] == ["sub.home"]
-        # Wait for the webhook to capture the event.
+        # Wait for the HTTPS inbox to capture the event.
         await asyncio.sleep(0.05)
         assert received
         assert received[0]["event_type"] == "POST_PUBLISH"

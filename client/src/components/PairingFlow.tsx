@@ -215,7 +215,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     sasAutofilledRef.current = false
     try {
       const result = await api.post('/api/pairing/initiate', {
-        webhook_url: `${location.origin}/webhook/self`,
+        inbox_url: `${location.origin}/federation/inbox/self`,
       }) as { token: string; [key: string]: unknown }
       qrPayload.value = JSON.stringify(result)
       pairingToken.value = result.token
@@ -254,7 +254,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const connectGfs = async () => {
     step.value = 'generating'
     try {
-      await api.post('/api/gfs/connections', { endpoint_url: gfsUrl.value.trim() })
+      await api.post('/api/gfs/connections', { inbox_url: gfsUrl.value.trim() })
       step.value = 'success'
       showToast(t('gfs.pair_success'), 'success')
       if (onGfsConnectedCb.value) onGfsConnectedCb.value()

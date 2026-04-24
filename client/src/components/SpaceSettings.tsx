@@ -172,7 +172,7 @@ export function SpaceSettings({ space, onUpdate }: { space: Space; onUpdate: () 
                 <div class="sh-connection-info">
                   <span class={`sh-status-dot sh-status-dot--${gfs.status === 'active' ? 'active' : gfs.status === 'suspended' ? 'unreachable' : 'pending'}`} />
                   <strong>{gfs.display_name}</strong>
-                  <span class="sh-muted">{gfs.endpoint_url}</span>
+                  <span class="sh-muted">{gfs.inbox_url}</span>
                 </div>
                 <div class="sh-federation-actions">
                   <span class={published ? 'sh-text-success' : 'sh-muted'}>

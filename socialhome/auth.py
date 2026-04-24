@@ -44,7 +44,7 @@ _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
     "/healthz",
     "/api/pairing/accept",  # pairing handshake — uses its own auth
     "/api/auth/token",  # standalone login — issues the token
-    "/webhook/",  # federation inbound — envelope-signed
+    "/federation/inbox/",  # federation inbound — envelope-signed
     "/.well-known/",
     # Bot-bridge space posts authenticate via a per-bot Bearer token that
     # is NOT an api_tokens row. The handler does its own lookup via
@@ -120,7 +120,7 @@ def require_auth(
     * ``strategy`` — the :class:`AuthStrategy` that resolves the request
       to an :class:`AuthContext` (or ``None``).
     * ``public_paths`` — prefixes that bypass the middleware (default:
-      healthcheck, pairing accept, federation webhooks, .well-known).
+      healthcheck, pairing accept, federation inboxs, .well-known).
     * ``public_path_patterns`` — regex patterns; anything matching is
       also public. Use sparingly.
 

@@ -4,7 +4,7 @@ Social Home exposes HTTP APIs on two distinct surfaces:
 
 - **HFS** (per-household server) — serves the web UI, mobile apps,
   and any third-party integrations the household admin enables.
-  Everything under `/api/*` plus `/webhook/{id}` (federation inbound).
+  Everything under `/api/*` plus `/federation/inbox/{id}` (federation inbound).
 - **GFS** (global federation server) — serves the public
   space-directory, RTC signalling relay, and operator admin portal.
   Everything under `/gfs/*`, `/cluster/*`, and `/admin*`.
@@ -18,7 +18,7 @@ protocol events these routes trigger, see
 | Model | Where | How |
 |---|---|---|
 | **Bearer token** | HFS `/api/*` | `Authorization: Bearer <token>` or, for WebSocket only, `?token=<token>`. Tokens are minted via `/api/auth/token` (standalone) or via the HA adapter. |
-| **Signed envelope** | HFS `/webhook/{id}`, GFS `/gfs/*` | Ed25519 signature inside the posted envelope. No separate auth header — the signature *is* the auth. |
+| **Signed envelope** | HFS `/federation/inbox/{id}`, GFS `/gfs/*` | Ed25519 signature inside the posted envelope. No separate auth header — the signature *is* the auth. |
 | **Cookie session** | GFS `/admin*` | `admin_auth` middleware. Logged in via `POST /admin/login` with a bcrypt-verified password. |
 | **None** | Health, VAPID key, public SSR pages, directory listings | Explicitly public. |
 
@@ -414,11 +414,11 @@ UI-authenticated user cannot impersonate the integration.
 | `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; JSON `{"type":"typing","conversation_id":"..."}`. |
 | `GET /api/stt/stream` | Streaming speech-to-text (binary audio frames → `{"type":"final","text":"..."}`). |
 
-## HFS — Federation webhook
+## HFS — federation inbox
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/webhook/{webhook_id}` | Inbound federation envelope. Runs the §24.11 validation pipeline before dispatch. See [protocol/README.md](./protocol/README.md). |
+| POST | `/federation/inbox/{inbox_id}` | Inbound federation envelope. Runs the §24.11 validation pipeline before dispatch. See [protocol/README.md](./protocol/README.md). |
 
 ## GFS — Public relay
 

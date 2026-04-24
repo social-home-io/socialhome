@@ -91,7 +91,7 @@ def _conn(gfs_id: str = "gfs-1", status: str = "active") -> GfsConnection:
         gfs_instance_id=f"inst-{gfs_id}",
         display_name=gfs_id,
         public_key="pk",
-        endpoint_url="https://gfs.example",
+        inbox_url="https://gfs.example",
         status=status,
         paired_at="2025-01-01T00:00:00+00:00",
     )
@@ -144,7 +144,7 @@ async def test_pair_registers_and_saves(env):
     )
     assert conn.gfs_instance_id == "inst-1"
     assert conn.display_name == "Demo"
-    assert conn.endpoint_url == "https://gfs.example"
+    assert conn.inbox_url == "https://gfs.example"
 
 
 async def test_pair_non_200_raises(env):

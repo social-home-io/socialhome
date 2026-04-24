@@ -92,7 +92,7 @@ async def test_register_instance_returns_registered(gfs_client):
         json={
             "instance_id": "inst-abc",
             "public_key": "aa" * 32,
-            "webhook_url": "http://example.com/webhook",
+            "inbox_url": "http://example.com/inbox",
         },
     )
     assert resp.status == 200
@@ -121,7 +121,7 @@ async def test_register_returns_pending_when_auto_accept_off(gfs_client):
         json={
             "instance_id": "new-pending.home",
             "public_key": "aa" * 32,
-            "webhook_url": "http://p/wh",
+            "inbox_url": "http://p/wh",
         },
     )
     assert resp.status == 200
@@ -152,7 +152,7 @@ async def test_subscribe_returns_subscribed(gfs_client):
         json={
             "instance_id": "inst-sub",
             "public_key": "bb" * 32,
-            "webhook_url": "http://example.com/wh",
+            "inbox_url": "http://example.com/wh",
         },
     )
     resp = await gfs_client.post(
@@ -171,7 +171,7 @@ async def test_subscribe_unsubscribe_roundtrip(gfs_client):
         json={
             "instance_id": "inst-unsub",
             "public_key": "cc" * 32,
-            "webhook_url": "http://example.com/wh2",
+            "inbox_url": "http://example.com/wh2",
         },
     )
     await gfs_client.post(

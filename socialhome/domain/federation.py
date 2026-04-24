@@ -32,7 +32,7 @@ class FederationEventType(str, enum.Enum):
     PAIRING_CONFIRM = "pairing_confirm"
     PAIRING_ABORT = "pairing_abort"
     UNPAIR = "unpair"
-    WEBHOOK_UPDATED = "webhook_updated"
+    URL_UPDATED = "url_updated"
 
     # ── User sync ──
     USERS_SYNC = "users_sync"
@@ -173,9 +173,9 @@ class FederationEventType(str, enum.Enum):
 
     # ── P2P federation-level WebRTC signalling (§24.12.5) ──
     # Used to bootstrap a persistent DataChannel between paired
-    # Social Home instances over the existing signed webhook. Once the
-    # channel is open, routine federation envelopes are delivered over
-    # it and the webhook acts as fallback only.
+    # Social Home instances over the existing signed HTTPS inbox. Once
+    # the channel is open, routine federation envelopes are delivered
+    # over it and HTTPS acts as fallback only.
     FEDERATION_RTC_OFFER = "federation_rtc_offer"
     FEDERATION_RTC_ANSWER = "federation_rtc_answer"
     FEDERATION_RTC_ICE = "federation_rtc_ice"
@@ -254,8 +254,8 @@ class RemoteInstance:
     remote_identity_pk: str  # 64 hex chars — Ed25519 public key
     key_self_to_remote: str  # AES-256-GCM session key (ciphertext)
     key_remote_to_self: str  # AES-256-GCM session key (ciphertext)
-    remote_webhook_url: str
-    local_webhook_id: str
+    remote_inbox_url: str
+    local_inbox_id: str
     status: PairingStatus = PairingStatus.CONFIRMED
     intro_relay_enabled: bool = True
     source: InstanceSource = InstanceSource.MANUAL
@@ -329,10 +329,10 @@ class PairingSession:
     own_identity_pk: str  # 64 hex
     own_dh_pk: str  # 64 hex (X25519)
     own_dh_sk: str  # 64 hex (X25519) — kept until confirm
-    webhook_url: str
+    inbox_url: str
     peer_identity_pk: str | None = None
     peer_dh_pk: str | None = None
-    peer_webhook_url: str | None = None
+    peer_inbox_url: str | None = None
     intro_note: str | None = None
     relay_via: str | None = None
     verification_code: str | None = None  # 6-digit SAS
@@ -402,7 +402,7 @@ class GfsConnection:
     gfs_instance_id: str
     display_name: str
     public_key: str
-    endpoint_url: str
+    inbox_url: str
     status: str  # pending | active | suspended
     paired_at: str
     created_at: str | None = None

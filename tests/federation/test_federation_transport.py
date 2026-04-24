@@ -20,7 +20,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.transport import (
     FederationTransport,
-    WebhookTransport,
+    HttpsInboxTransport,
     _RtcPeer,
 )
 
@@ -35,15 +35,15 @@ def _fake_instance(iid: str = "peer-1") -> RemoteInstance:
         remote_identity_pk="aa" * 32,
         key_self_to_remote="enc",
         key_remote_to_self="enc",
-        remote_webhook_url="https://peer/wh",
-        local_webhook_id=f"wh-{iid}",
+        remote_inbox_url="https://peer/wh",
+        local_inbox_id=f"wh-{iid}",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
 
 
-class _RecordingWebhook:
-    """Drop-in replacement for :class:`WebhookTransport` used by facade tests."""
+class _RecordingHttpsInbox:
+    """Drop-in replacement for :class:`HttpsInboxTransport` used by facade tests."""
 
     def __init__(self, *, ok: bool = True, status: int | None = 200) -> None:
         self.ok = ok
@@ -75,11 +75,11 @@ class _FakeSignaler:
 
 async def test_send_uses_rtc_when_peer_is_ready():
     """A peer whose DataChannel is already open takes the RTC path."""
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     inst = _fake_instance("peer-1")
@@ -112,16 +112,16 @@ async def test_send_uses_rtc_when_peer_is_ready():
     assert result.ok is True
     assert result.via == "rtc"
     assert fake_ch.sent  # DataChannel received the frame
-    assert webhook.calls == []  # no webhook fallback
+    assert https_inbox.calls == []  # no HTTPS https_inbox fallback
 
 
-async def test_send_falls_back_to_webhook_when_peer_not_ready():
-    """No RTC channel yet → facade starts a handshake AND uses webhook."""
-    webhook = _RecordingWebhook()
+async def test_send_falls_back_to_inbox_when_peer_not_ready():
+    """No RTC channel yet → facade starts a handshake AND uses HTTPS https_inbox."""
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     inst = _fake_instance("peer-2")
@@ -129,8 +129,8 @@ async def test_send_falls_back_to_webhook_when_peer_not_ready():
     result = await t.send(instance=inst, envelope_dict={"msg_id": "x"})
 
     assert result.ok is True
-    assert result.via == "webhook"
-    assert len(webhook.calls) == 1
+    assert result.via == "https"
+    assert len(https_inbox.calls) == 1
     # Handshake was kicked — one OFFER was sent through the signaler.
     assert (
         signal.events
@@ -138,13 +138,13 @@ async def test_send_falls_back_to_webhook_when_peer_not_ready():
     )
 
 
-async def test_send_falls_back_when_webhook_fails():
-    """Webhook returning non-2xx bubbles up as ``ok=False``."""
-    webhook = _RecordingWebhook(ok=False, status=502)
+async def test_send_falls_back_when_inbox_fails():
+    """HTTPS https_inbox returning non-2xx bubbles up as ``ok=False``."""
+    https_inbox = _RecordingHttpsInbox(ok=False, status=502)
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     result = await t.send(
@@ -152,17 +152,17 @@ async def test_send_falls_back_when_webhook_fails():
         envelope_dict={"msg_id": "x"},
     )
     assert result.ok is False
-    assert result.via == "webhook"
+    assert result.via == "https"
     assert result.status_code == 502
 
 
-async def test_send_falls_back_to_webhook_when_rtc_send_raises():
-    """An RTC send that errors is swallowed; webhook delivers instead."""
-    webhook = _RecordingWebhook()
+async def test_send_falls_back_to_inbox_when_rtc_send_raises():
+    """An RTC send that errors is swallowed; https_inbox delivers instead."""
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     inst = _fake_instance("peer-4")
@@ -189,19 +189,19 @@ async def test_send_falls_back_to_webhook_when_rtc_send_raises():
 
     result = await t.send(instance=inst, envelope_dict={"msg_id": "x"})
     assert result.ok is True
-    assert result.via == "webhook"
-    assert webhook.calls
+    assert result.via == "https"
+    assert https_inbox.calls
 
 
 # ─── Inbound signalling ────────────────────────────────────────────────────
 
 
 async def test_on_rtc_offer_creates_peer_and_sends_answer():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     await t.on_rtc_offer(
@@ -216,11 +216,11 @@ async def test_on_rtc_offer_creates_peer_and_sends_answer():
 
 
 async def test_on_rtc_offer_ignores_empty_sdp():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     await t.on_rtc_offer(from_instance="peer-6", payload={"sdp": ""})
@@ -232,11 +232,11 @@ async def test_on_rtc_offer_ignores_empty_sdp():
 
 async def test_on_rtc_answer_with_matching_from_applies():
     """S-14: the answer origin must match the pending-offer target."""
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     inst = _fake_instance("peer-7")
@@ -253,11 +253,11 @@ async def test_on_rtc_answer_with_matching_from_applies():
 
 async def test_on_rtc_answer_with_mismatched_from_is_rejected():
     """S-14: an answer from the wrong peer must NOT be applied."""
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     inst = _fake_instance("peer-8")
@@ -274,11 +274,11 @@ async def test_on_rtc_answer_with_mismatched_from_is_rejected():
 
 async def test_on_rtc_answer_unknown_peer_is_noop():
     """Answer for a peer we never offered to is dropped silently."""
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     await t.on_rtc_answer(
@@ -289,11 +289,11 @@ async def test_on_rtc_answer_unknown_peer_is_noop():
 
 
 async def test_on_rtc_ice_unknown_peer_is_noop():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     # Should not raise.
@@ -304,11 +304,11 @@ async def test_on_rtc_ice_unknown_peer_is_noop():
 
 
 async def test_on_rtc_ice_accepts_trickled_candidate():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     inst = _fake_instance("peer-9")
@@ -327,11 +327,11 @@ async def test_on_rtc_ice_accepts_trickled_candidate():
 
 
 async def test_close_peer_removes_entry():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     await t._ensure_handshake(_fake_instance("peer-10"))
@@ -341,11 +341,11 @@ async def test_close_peer_removes_entry():
 
 
 async def test_close_all_drops_every_peer():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     await t._ensure_handshake(_fake_instance("a"))
@@ -355,21 +355,21 @@ async def test_close_all_drops_every_peer():
 
 
 async def test_is_ready_reports_false_for_unknown_peer():
-    webhook = _RecordingWebhook()
+    https_inbox = _RecordingHttpsInbox()
     signal = _FakeSignaler()
     t = FederationTransport(
         own_instance_id="self-iid",
-        webhook=webhook,
+        https_inbox=https_inbox,
         signaling_send=signal,
     )
     assert t.is_ready("never-seen") is False
 
 
-# ─── WebhookTransport ──────────────────────────────────────────────────────
+# ─── HttpsInboxTransport ──────────────────────────────────────────────────────
 
 
-async def test_webhook_transport_2xx_is_ok():
-    """WebhookTransport.send returns (True, status) for 2xx."""
+async def test_https_inbox_transport_2xx_is_ok():
+    """HttpsInboxTransport.send returns (True, status) for 2xx."""
 
     class _FakeResp:
         def __init__(self, status):
@@ -388,7 +388,7 @@ async def test_webhook_transport_2xx_is_ok():
     async def _factory():
         return _FakeClient()
 
-    wt = WebhookTransport(client_factory=_factory)
+    wt = HttpsInboxTransport(client_factory=_factory)
     ok, status = await wt.send(
         instance=_fake_instance("peer"),
         envelope_dict={"msg_id": "x"},
@@ -396,7 +396,7 @@ async def test_webhook_transport_2xx_is_ok():
     assert ok is True and status == 204
 
 
-async def test_webhook_transport_non_2xx_is_failure():
+async def test_https_inbox_transport_non_2xx_is_failure():
     class _FakeResp:
         def __init__(self, status):
             self.status = status
@@ -414,7 +414,7 @@ async def test_webhook_transport_non_2xx_is_failure():
     async def _factory():
         return _FakeClient()
 
-    wt = WebhookTransport(client_factory=_factory)
+    wt = HttpsInboxTransport(client_factory=_factory)
     ok, status = await wt.send(
         instance=_fake_instance("peer"),
         envelope_dict={"x": 1},
@@ -422,7 +422,7 @@ async def test_webhook_transport_non_2xx_is_failure():
     assert ok is False and status == 503
 
 
-async def test_webhook_transport_network_error_is_failure():
+async def test_https_inbox_transport_network_error_is_failure():
     class _RaisingClient:
         def post(self, *a, **kw):
             raise RuntimeError("boom")
@@ -430,7 +430,7 @@ async def test_webhook_transport_network_error_is_failure():
     async def _factory():
         return _RaisingClient()
 
-    wt = WebhookTransport(client_factory=_factory)
+    wt = HttpsInboxTransport(client_factory=_factory)
     ok, status = await wt.send(
         instance=_fake_instance("peer"),
         envelope_dict={"x": 1},

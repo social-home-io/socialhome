@@ -96,8 +96,8 @@ async def env(tmp_dir):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh-peer",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh-peer",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
@@ -141,7 +141,7 @@ async def test_inbound_idempotency_drops_duplicates(env):
         payload={"idempotency_key": "ik-1", "user_id": "alice"},
         msg_id="msg-1",
     )
-    out = await env["svc"].handle_inbound_webhook(env["peer"].local_webhook_id, body)
+    out = await env["svc"].handle_inbound_envelope(env["peer"].local_inbox_id, body)
     assert out["status"] == "ok"
 
     body2 = _build_inbound(
@@ -152,7 +152,7 @@ async def test_inbound_idempotency_drops_duplicates(env):
         payload={"idempotency_key": "ik-1", "user_id": "alice"},
         msg_id="msg-2",  # distinct msg_id so replay cache doesn't trip
     )
-    out2 = await env["svc"].handle_inbound_webhook(env["peer"].local_webhook_id, body2)
+    out2 = await env["svc"].handle_inbound_envelope(env["peer"].local_inbox_id, body2)
     assert out2.get("deduped") is True
 
 
@@ -165,7 +165,7 @@ async def test_inbound_no_idempotency_key_processes_normally(env):
         payload={"user_id": "alice"},
         msg_id="msg-3",
     )
-    out = await env["svc"].handle_inbound_webhook(env["peer"].local_webhook_id, body)
+    out = await env["svc"].handle_inbound_envelope(env["peer"].local_inbox_id, body)
     assert out["status"] == "ok"
     assert "deduped" not in out
 
@@ -180,8 +180,6 @@ async def test_inbound_distinct_idempotency_keys_both_processed(env):
             payload={"idempotency_key": ik, "user_id": "alice"},
             msg_id=mid,
         )
-        out = await env["svc"].handle_inbound_webhook(
-            env["peer"].local_webhook_id, body
-        )
+        out = await env["svc"].handle_inbound_envelope(env["peer"].local_inbox_id, body)
         assert out["status"] == "ok"
         assert "deduped" not in out

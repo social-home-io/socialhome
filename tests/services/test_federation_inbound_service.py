@@ -564,7 +564,7 @@ async def test_users_sync_upserts_remote_users(db, inbound):
         """INSERT INTO remote_instances(
                id, display_name, remote_identity_pk,
                key_self_to_remote, key_remote_to_self,
-               remote_webhook_url, local_webhook_id,
+               remote_inbox_url, local_inbox_id,
                status, source, created_at)
            VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (

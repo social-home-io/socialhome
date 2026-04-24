@@ -100,8 +100,8 @@ async def test_send_event_failed_session_decrypt(env):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote="garbage:bytes",
         key_remote_to_self="garbage:bytes",
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
@@ -127,8 +127,8 @@ async def test_send_event_transport_error(env):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://nonexistent.invalid/wh",
-        local_webhook_id="wh",
+        remote_inbox_url="https://nonexistent.invalid/wh",
+        local_inbox_id="wh",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )

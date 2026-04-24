@@ -56,7 +56,7 @@ async def test_initiate_hybrid_carries_pq_pk_in_qr_payload():
         own_pq_pk=b"FAKE-PQ-PK",
         own_sig_suite="ed25519+mldsa65",
     )
-    payload = await coord.initiate(webhook_url="https://x/wh")
+    payload = await coord.initiate(inbox_url="https://x/wh")
     assert payload["sig_suite"] == "ed25519+mldsa65"
     assert payload["pq_algorithm"] == "mldsa65"
     assert payload["pq_identity_pk"] == b"FAKE-PQ-PK".hex()
@@ -66,7 +66,7 @@ async def test_initiate_classical_omits_pq_fields():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(repo, _kek(), kp.public_key)
-    payload = await coord.initiate(webhook_url="https://x/wh")
+    payload = await coord.initiate(inbox_url="https://x/wh")
     assert payload["sig_suite"] == "ed25519"
     assert "pq_algorithm" not in payload
     assert "pq_identity_pk" not in payload
@@ -89,7 +89,7 @@ async def test_accept_negotiates_hybrid_when_both_sides_support_it():
         "token": "tok-1",
         "identity_pk": peer_kp.public_key.hex(),
         "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "https://peer/wh",
+        "inbox_url": "https://peer/wh",
         "sig_suite": "ed25519+mldsa65",
         "pq_algorithm": "mldsa65",
         "pq_identity_pk": "aa" * 32,
@@ -119,7 +119,7 @@ async def test_accept_falls_back_to_classical_when_peer_is_classical():
         "token": "tok-2",
         "identity_pk": peer_kp.public_key.hex(),
         "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "https://peer/wh",
+        "inbox_url": "https://peer/wh",
         "sig_suite": "ed25519",
     }
     await coord.accept(qr)
@@ -146,7 +146,7 @@ async def test_accept_falls_back_when_local_is_classical_peer_hybrid():
         "token": "tok-3",
         "identity_pk": peer_kp.public_key.hex(),
         "dh_pk": peer_dh.public_key.hex(),
-        "webhook_url": "https://peer/wh",
+        "inbox_url": "https://peer/wh",
         "sig_suite": "ed25519+mldsa65",
         "pq_algorithm": "mldsa65",
         "pq_identity_pk": "bb" * 32,
@@ -178,7 +178,7 @@ async def test_confirm_preserves_pq_material():
             "token": "tok-4",
             "identity_pk": peer_kp.public_key.hex(),
             "dh_pk": peer_dh.public_key.hex(),
-            "webhook_url": "https://peer/wh",
+            "inbox_url": "https://peer/wh",
             "sig_suite": "ed25519+mldsa65",
             "pq_algorithm": "mldsa65",
             "pq_identity_pk": "cc" * 32,

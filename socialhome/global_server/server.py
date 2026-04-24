@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from ..db import AsyncDatabase
-from ..federation.transport import FederationTransport, WebhookTransport
+from ..federation.transport import FederationTransport, HttpsInboxTransport
 from . import app_keys as K
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
@@ -242,7 +242,7 @@ class GfsApp:
 
         transport = FederationTransport(
             own_instance_id=self.config.instance_id,
-            webhook=WebhookTransport(client_factory=_http_factory),
+            https_inbox=HttpsInboxTransport(client_factory=_http_factory),
             signaling_send=_signaling_send,
             ice_servers=[],
         )

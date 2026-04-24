@@ -66,8 +66,8 @@ def _remote(iid: str, *, status=PairingStatus.CONFIRMED) -> RemoteInstance:
         remote_identity_pk="aa" * 32,
         key_self_to_remote="enc",
         key_remote_to_self="enc",
-        remote_webhook_url="https://x/wh",
-        local_webhook_id=f"wh-{iid}",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id=f"wh-{iid}",
         status=status,
         source=InstanceSource.MANUAL,
     )

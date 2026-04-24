@@ -143,7 +143,7 @@ class PublicSpaceDiscoveryService:
 
         total = 0
         for conn in active_connections:
-            listings = await self._fetch_directory(conn.endpoint_url)
+            listings = await self._fetch_directory(conn.inbox_url)
             for listing in listings:
                 if await self._repo.is_instance_blocked(listing.instance_id):
                     continue

@@ -13,7 +13,7 @@ implicitly inside :mod:`socialhome.federation.transport` and
 
 Concrete implementations:
 
-* :class:`socialhome.federation.transport.WebhookTransport` →
+* :class:`socialhome.federation.transport.HttpsInboxTransport` →
   :class:`TransportStrategy`
 * :class:`socialhome.federation.transport._RtcPeer` (channel-level) →
   :class:`TransportStrategy` via :class:`FederationTransport` facade.
@@ -43,7 +43,7 @@ class TransportStrategy(Protocol):
     rewrite the body. Returns ``(ok, status_code)`` where:
 
     * ``ok=True`` iff the peer accepted the envelope (HTTP 2xx for
-      webhooks, channel write success for WebRTC).
+      inboxes, channel write success for WebRTC).
     * ``status_code`` is the HTTP status when meaningful, or ``None``
       for non-HTTP transports.
 

@@ -89,8 +89,8 @@ async def space_stack(tmp_dir):
             remote_identity_pk=os.urandom(32).hex(),
             key_self_to_remote="enc",
             key_remote_to_self="enc",
-            remote_webhook_url="https://peer.example",
-            local_webhook_id="loc",
+            remote_inbox_url="https://peer.example",
+            local_inbox_id="loc",
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
         )

@@ -86,8 +86,8 @@ async def env(tmp_dir):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )

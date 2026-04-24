@@ -81,7 +81,7 @@ from .conversations import (
     ConversationReadView,
     ConversationUnreadView,
 )
-from .federation import FederationWebhookView
+from .federation import FederationInboxView
 from .feed import (
     FeedCollectionView,
     FeedReadWatermarkView,
@@ -612,7 +612,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
 
     # ── Federation ──────────────────────────────────────────────────────
-    app.router.add_view("/webhook/{webhook_id}", FederationWebhookView)
+    app.router.add_view("/federation/inbox/{inbox_id}", FederationInboxView)
 
     # ── Pairing / connections ───────────────────────────────────────────
     app.router.add_view("/api/pairing/initiate", PairingInitiateView)

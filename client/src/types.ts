@@ -232,7 +232,7 @@ export interface GfsConnection {
   id: string
   gfs_instance_id: string
   display_name: string
-  endpoint_url: string
+  inbox_url: string
   status: 'pending' | 'active' | 'suspended'
   paired_at: string
   published_space_count: number

@@ -49,7 +49,7 @@ async def test_federation_pairing_lifecycle(env):
         own_identity_pk="aa" * 32,
         own_dh_pk="bb" * 32,
         own_dh_sk="cc" * 32,
-        webhook_url="https://local/webhook",
+        inbox_url="https://local/inbox",
         issued_at=now,
         expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         status=PairingStatus.PENDING_SENT,
@@ -66,10 +66,10 @@ async def test_federation_pairing_lifecycle(env):
         own_identity_pk=session.own_identity_pk,
         own_dh_pk=session.own_dh_pk,
         own_dh_sk=session.own_dh_sk,
-        webhook_url=session.webhook_url,
+        inbox_url=session.inbox_url,
         peer_identity_pk="dd" * 32,
         peer_dh_pk="ee" * 32,
-        peer_webhook_url="https://peer/webhook",
+        peer_inbox_url="https://peer/inbox",
         issued_at=now,
         expires_at=session.expires_at,
         status=PairingStatus.PENDING_RECEIVED,
@@ -77,7 +77,7 @@ async def test_federation_pairing_lifecycle(env):
     await env.fed_repo.update_pairing(updated_session)
     refreshed = await env.fed_repo.get_pairing("tok-abc")
     assert refreshed.status == PairingStatus.PENDING_RECEIVED
-    assert refreshed.peer_webhook_url == "https://peer/webhook"
+    assert refreshed.peer_inbox_url == "https://peer/inbox"
 
     await env.fed_repo.delete_pairing("tok-abc")
     assert await env.fed_repo.get_pairing("tok-abc") is None
@@ -112,8 +112,8 @@ async def test_federation_instance_filtering(env):
         remote_identity_pk="11" * 32,
         key_self_to_remote="k1",
         key_remote_to_self="k2",
-        remote_webhook_url="https://alpha/wh",
-        local_webhook_id="wh-1",
+        remote_inbox_url="https://alpha/wh",
+        local_inbox_id="wh-1",
         status=PairingStatus.CONFIRMED,
     )
     inst2 = RemoteInstance(
@@ -122,8 +122,8 @@ async def test_federation_instance_filtering(env):
         remote_identity_pk="22" * 32,
         key_self_to_remote="k3",
         key_remote_to_self="k4",
-        remote_webhook_url="https://beta/wh",
-        local_webhook_id="wh-2",
+        remote_inbox_url="https://beta/wh",
+        local_inbox_id="wh-2",
         status=PairingStatus.UNPAIRING,
     )
     await env.fed_repo.save_instance(inst1)

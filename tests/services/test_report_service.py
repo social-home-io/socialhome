@@ -295,9 +295,7 @@ async def test_create_report_auto_forwards_to_paired_gfs(stack):
 
     class _FakeGfs:
         async def list_connections(self):
-            return [
-                SimpleNamespace(id="gfs-1", endpoint_url="http://g", status="active")
-            ]
+            return [SimpleNamespace(id="gfs-1", inbox_url="http://g", status="active")]
 
         async def report_fraud(self, gfs_id, **kwargs):
             forwarded.append({"gfs_id": gfs_id, **kwargs})
@@ -331,7 +329,7 @@ async def test_auto_forward_resolves_space_target_unchanged(stack):
 
     class _FakeGfs:
         async def list_connections(self):
-            return [SimpleNamespace(id="g", endpoint_url="", status="active")]
+            return [SimpleNamespace(id="g", inbox_url="", status="active")]
 
         async def report_fraud(self, gfs_id, **kwargs):
             forwarded.append(kwargs)
@@ -366,7 +364,7 @@ async def test_auto_forward_resolves_post_target_to_space(stack):
 
     class _FakeGfs:
         async def list_connections(self):
-            return [SimpleNamespace(id="g", endpoint_url="", status="active")]
+            return [SimpleNamespace(id="g", inbox_url="", status="active")]
 
         async def report_fraud(self, gfs_id, **kwargs):
             forwarded.append(kwargs)
@@ -398,9 +396,7 @@ async def test_create_report_forward_gfs_false_skips_background(stack):
 
     class _FakeGfs:
         async def list_connections(self):
-            return [
-                SimpleNamespace(id="gfs-1", endpoint_url="http://g", status="active")
-            ]
+            return [SimpleNamespace(id="gfs-1", inbox_url="http://g", status="active")]
 
         async def report_fraud(self, gfs_id, **kwargs):
             forwarded.append(kwargs)

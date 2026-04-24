@@ -161,7 +161,7 @@ async def rtc_client(tmp_dir):
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                endpoint_url="http://peer.home/wh",
+                inbox_url="http://peer.home/wh",
                 status="active",
             )
         )
@@ -276,13 +276,13 @@ async def test_rtc_session_poll_404_on_unknown(rtc_client):
 
 async def test_rtc_ping_updates_transport(rtc_client):
     body = _sign(
-        {"instance_id": "peer.home", "transport": "webhook"},
+        {"instance_id": "peer.home", "transport": "https"},
         rtc_client._seed,
     )
     resp = await rtc_client.post("/gfs/rtc/ping", json=body)
     assert resp.status == 200
     row = await rtc_client._app[gfs_fed_repo_key].get_rtc_connection("peer.home")
-    assert row.transport == "webhook"
+    assert row.transport == "https"
 
 
 async def test_rtc_ping_rejects_invalid_transport(rtc_client):

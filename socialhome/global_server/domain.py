@@ -16,7 +16,7 @@ class ClientInstance:
     instance_id: str
     display_name: str
     public_key: str  # Ed25519 verify key (hex)
-    endpoint_url: str
+    inbox_url: str
     status: str = "pending"  # 'pending' | 'active' | 'banned'
     auto_accept: bool = False
     connected_at: str = ""  # ISO 8601
@@ -43,10 +43,10 @@ class GlobalSpace:
 
 @dataclass(slots=True, frozen=True)
 class GfsSubscriber:
-    """A subscriber row: instance + webhook for fan-out delivery."""
+    """A subscriber row: instance + inbox URL for fan-out delivery."""
 
     instance_id: str
-    endpoint_url: str
+    inbox_url: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -110,13 +110,13 @@ class RtcConnection:
     """Transport mode per client instance (spec §24.12).
 
     ``transport`` is ``'webrtc'`` when the household's DataChannel is up,
-    ``'webhook'`` when falling back to HTTPS push. ``last_ping_at`` is
-    bumped by each RTC-ping or webhook fallback write so the admin UI
+    ``'inbox'`` when falling back to HTTPS push. ``last_ping_at`` is
+    bumped by each RTC-ping or HTTPS inbox fallback write so the admin UI
     can show online/offline per peer.
     """
 
     instance_id: str
-    transport: str = "webhook"
+    transport: str = "https"
     connected_at: str = ""
     last_ping_at: str = ""
 

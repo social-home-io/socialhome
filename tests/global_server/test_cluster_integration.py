@@ -155,7 +155,7 @@ async def test_apply_sync_client_upserts(client):
             "instance_id": "peer.home",
             "display_name": "Peer",
             "public_key": "aa" * 32,
-            "endpoint_url": "http://peer/wh",
+            "inbox_url": "http://peer/wh",
             "status": "active",
         },
     )
@@ -176,7 +176,7 @@ async def test_apply_sync_space_banned_wins_lww(client):
             "instance_id": "owner.home",
             "display_name": "O",
             "public_key": "bb" * 32,
-            "endpoint_url": "http://o/wh",
+            "inbox_url": "http://o/wh",
             "status": "active",
         },
     )

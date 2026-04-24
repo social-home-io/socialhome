@@ -3,10 +3,10 @@
 Business logic only — all SQL lives in :mod:`.repositories`. Crypto
 helpers are reused from :mod:`socialhome.crypto` (no duplication).
 
-Fan-out delivery uses the same WebRTC-primary + webhook-fallback pattern
+Fan-out delivery uses the same WebRTC-primary + HTTPS-fallback pattern
 as the main federation transport: if a DataChannel is open to a
 subscriber, the event is sent over it; otherwise it falls back to an
-HTTPS POST to the subscriber's webhook URL.
+HTTPS POST to the subscriber's inbox URL.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class GfsFederationService:
         self,
         instance_id: str,
         public_key: str,
-        webhook_url: str,
+        inbox_url: str,
         *,
         display_name: str = "",
         auto_accept: bool = False,
@@ -61,12 +61,12 @@ class GfsFederationService:
                 instance_id=instance_id,
                 display_name=display_name,
                 public_key=public_key,
-                endpoint_url=webhook_url,
+                inbox_url=inbox_url,
                 status="active" if auto_accept else "pending",
                 auto_accept=auto_accept,
             )
         )
-        log.debug("GFS: registered instance %s webhook=%s", instance_id, webhook_url)
+        log.debug("GFS: registered instance %s inbox=%s", instance_id, inbox_url)
 
     async def publish_event(
         self,
@@ -183,7 +183,7 @@ class GfsFederationService:
 
         Tries the WebRTC DataChannel first (if a transport is attached
         and the channel to that subscriber is open); falls back to an
-        HTTPS POST to the subscriber's webhook URL.
+        HTTPS POST to the subscriber's inbox URL.
         """
         own_session = session is None
         active: aiohttp.ClientSession = (
@@ -204,8 +204,8 @@ class GfsFederationService:
                             remote_identity_pk="",
                             key_self_to_remote="",
                             key_remote_to_self="",
-                            remote_webhook_url=sub.endpoint_url,
-                            local_webhook_id="",
+                            remote_inbox_url=sub.inbox_url,
+                            local_inbox_id="",
                             status=PairingStatus.CONFIRMED,
                             source=InstanceSource.MANUAL,
                         )
@@ -218,15 +218,15 @@ class GfsFederationService:
                             continue
                     except Exception as exc:
                         log.debug(
-                            "GFS RTC fan-out failed for %s, falling back to webhook: %s",
+                            "GFS RTC fan-out failed for %s, falling back to HTTPS inbox: %s",
                             sub.instance_id,
                             exc,
                         )
 
-                # Webhook fallback.
+                # HTTPS fallback.
                 try:
                     async with active.post(
-                        sub.endpoint_url,
+                        sub.inbox_url,
                         json=event_body,
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
@@ -235,13 +235,13 @@ class GfsFederationService:
                         else:
                             log.warning(
                                 "GFS fan-out: %s returned HTTP %s",
-                                sub.endpoint_url,
+                                sub.inbox_url,
                                 resp.status,
                             )
                 except Exception as exc:
                     log.warning(
                         "GFS fan-out: failed to deliver to %s: %s",
-                        sub.endpoint_url,
+                        sub.inbox_url,
                         exc,
                     )
             return delivered

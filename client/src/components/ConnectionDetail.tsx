@@ -10,7 +10,7 @@ import { showToast } from './Toast'
 
 interface Connection {
   instance_id: string; display_name: string; status: string
-  webhook_url: string; intro_relay_enabled: boolean
+  inbox_url: string; intro_relay_enabled: boolean
   unreachable_since: string | null; paired_at: string | null
 }
 
@@ -43,7 +43,7 @@ export function ConnectionDetail({ conn, onClose, onRevoke }: {
         <dl>
           <dt>Instance ID</dt><dd class="sh-mono">{conn.instance_id}</dd>
           <dt>Status</dt><dd class={`sh-status sh-status--${conn.status}`}>{conn.status}</dd>
-          <dt>Webhook</dt><dd class="sh-mono sh-muted">{conn.webhook_url}</dd>
+          <dt>Inbox</dt><dd class="sh-mono sh-muted">{conn.inbox_url}</dd>
           {conn.paired_at && <><dt>Paired</dt><dd>{new Date(conn.paired_at).toLocaleString()}</dd></>}
           {conn.unreachable_since && (
             <><dt>Unreachable since</dt><dd class="sh-text-warning">{new Date(conn.unreachable_since).toLocaleString()}</dd></>

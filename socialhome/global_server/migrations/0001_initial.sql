@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS client_instances (
     instance_id  TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
     public_key   TEXT NOT NULL,
-    endpoint_url TEXT NOT NULL,
+    inbox_url    TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'pending'
                  CHECK(status IN ('pending','active','banned')),
     auto_accept  INTEGER NOT NULL DEFAULT 0,
@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_instance_spaces   ON space_subscribers(instance_i
 
 CREATE TABLE IF NOT EXISTS rtc_connections (
     instance_id   TEXT PRIMARY KEY REFERENCES client_instances(instance_id) ON DELETE CASCADE,
-    transport     TEXT NOT NULL CHECK(transport IN ('webrtc','webhook')),
+    transport     TEXT NOT NULL CHECK(transport IN ('webrtc','https')),
     connected_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_ping_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

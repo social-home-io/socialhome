@@ -7,7 +7,7 @@ from socialhome.federation.strategies import (
     EncryptionStrategy,
     TransportStrategy,
 )
-from socialhome.federation.transport import WebhookTransport
+from socialhome.federation.transport import HttpsInboxTransport
 
 
 # ─── Transport ───────────────────────────────────────────────────────────
@@ -20,8 +20,8 @@ async def _dummy_client_factory():
     return object()
 
 
-def test_webhook_transport_satisfies_protocol():
-    wh = WebhookTransport(client_factory=_dummy_client_factory)
+def test_https_inbox_transport_satisfies_protocol():
+    wh = HttpsInboxTransport(client_factory=_dummy_client_factory)
     assert isinstance(wh, TransportStrategy)
 
 

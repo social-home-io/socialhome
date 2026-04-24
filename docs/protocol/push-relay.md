@@ -51,7 +51,7 @@ sequenceDiagram
 ## Flow — RTC DataChannel bootstrap
 
 Before two paired instances have a live DataChannel, the offerer
-sends the SDP offer over webhook (Tier 2). If that fails — peer
+sends the SDP offer over HTTPS inbox (Tier 2). If that fails — peer
 unreachable, NAT blocking UDP — the offer goes through GFS as a
 signalling relay.
 
@@ -102,7 +102,7 @@ which triggers an authenticated request to the user's own HFS.
 - `socialhome/global_server/rtc_transport.py` — in-memory RTC
   session store + relay routing.
 - `socialhome/federation/strategies.py` — `TransportStrategy`
-  protocol that selects webhook / DataChannel / relay.
+  protocol that selects inbox / DataChannel / relay.
 - `socialhome/global_server/routes/rtc.py` — RTC signalling
   endpoints (`POST /gfs/rtc/offer`, `…/answer`, `…/ice`).
 - `socialhome/global_server/federation.py` — inbound relay

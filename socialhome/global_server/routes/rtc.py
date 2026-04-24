@@ -128,7 +128,7 @@ class RtcPingView(GfsBaseView):
             return result
         body, instance_id = result
         transport = str(body.get("transport") or "webrtc")
-        if transport not in ("webrtc", "webhook"):
+        if transport not in ("webrtc", "https"):
             return web.json_response(
                 {"error": "invalid_transport"},
                 status=422,

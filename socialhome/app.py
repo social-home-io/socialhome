@@ -35,7 +35,7 @@ from .domain.federation import FederationEventType
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.sync_manager import SyncSessionManager
-from .federation.transport import FederationTransport, WebhookTransport
+from .federation.transport import FederationTransport, HttpsInboxTransport
 from .hardening import (
     build_body_size_middleware,
     build_cors_deny_middleware,
@@ -196,7 +196,7 @@ async def _redeliver_envelope(
 
     The envelope JSON stored in ``payload_json`` is already signed and
     encrypted from the original :meth:`FederationService.send_event`
-    call — we just need to look up the peer webhook and POST again.
+    call — we just need to look up the peer inbox and POST again.
     Returns ``True`` on 2xx, ``False`` otherwise.
     """
     instance = await federation_repo.get_instance(entry.instance_id)
@@ -207,7 +207,7 @@ async def _redeliver_envelope(
     try:
         client = await federation_service._get_http_client()
         async with client.post(
-            instance.remote_webhook_url,
+            instance.remote_inbox_url,
             data=entry.payload_json,
             headers={"Content-Type": "application/json"},
             timeout=_aiohttp_timeout(10),
@@ -1225,7 +1225,7 @@ def create_app(config: Config | None = None) -> web.Application:
         await federation_service.warm_replay_cache()
 
         # Federation transport facade (§24.12.5): WebRTC DataChannel
-        # primary, HTTPS webhook fallback. The signalling callback is
+        # primary, HTTPS HTTPS inbox fallback. The signalling callback is
         # send_event itself — SDP offers/answers/ICE ride on top of the
         # existing signed envelope path.
         async def _signaling_send(
@@ -1241,7 +1241,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
         fed_transport = FederationTransport(
             own_instance_id=real_instance_id,
-            webhook=WebhookTransport(
+            https_inbox=HttpsInboxTransport(
                 client_factory=federation_service._get_http_client,
             ),
             signaling_send=_signaling_send,

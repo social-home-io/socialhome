@@ -86,7 +86,7 @@ async def test_lookup_instance_resolves():
         return _FakeInstance() if wh_id == "wh-1" else None
 
     step = make_lookup_instance(repo=None, lookup_fn=_lookup)
-    ctx = InboundContext(webhook_id="wh-1")
+    ctx = InboundContext(inbox_id="wh-1")
     await step(ctx)
     assert ctx.instance is not None
 
@@ -96,7 +96,7 @@ async def test_lookup_instance_rejects_unknown():
         return None
 
     step = make_lookup_instance(repo=None, lookup_fn=_lookup)
-    ctx = InboundContext(webhook_id="unknown")
+    ctx = InboundContext(inbox_id="unknown")
     with pytest.raises(ValueError, match="No instance found"):
         await step(ctx)
 

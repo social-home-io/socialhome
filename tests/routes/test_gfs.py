@@ -13,14 +13,14 @@ def _make_conn(
     gfs_id: str = "gfs-1",
     *,
     status: str = "active",
-    endpoint_url: str = "https://gfs.example.com",
+    inbox_url: str = "https://gfs.example.com",
 ) -> GfsConnection:
     return GfsConnection(
         id=gfs_id,
         gfs_instance_id=f"inst-{gfs_id}",
         display_name=f"GFS {gfs_id}",
         public_key="pubkey-hex",
-        endpoint_url=endpoint_url,
+        inbox_url=inbox_url,
         status=status,
         paired_at="2025-01-01T00:00:00+00:00",
     )

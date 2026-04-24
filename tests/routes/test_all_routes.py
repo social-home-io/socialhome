@@ -372,17 +372,17 @@ async def test_presence_routes(client):
     assert r.status == 204
 
 
-# ── Federation webhook ───────────────────────────────────────────────────
+# ── federation inbox ───────────────────────────────────────────────────
 
 
-async def test_federation_webhook(client):
-    """POST /webhook/{id} runs the §24.11 pipeline (now wired).
+async def test_federation_inbox(client):
+    """POST /federation/inbox/{id} runs the §24.11 pipeline (now wired).
 
     A malformed body lands at the JSON/missing-fields rejection
     branches — never the 200 placeholder. Full pipeline coverage
-    lives in ``test_federation_webhook.py``.
+    lives in ``test_federation_inbox.py``.
     """
-    r = await client.post("/webhook/test-id", json={"event_type": "test"})
+    r = await client.post("/federation/inbox/test-id", json={"event_type": "test"})
     assert r.status in (400, 404, 410)
 
 

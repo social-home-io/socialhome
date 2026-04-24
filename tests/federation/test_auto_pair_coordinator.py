@@ -63,8 +63,8 @@ def _make_peer_remote_instance(pk_hex: str, status=PairingStatus.CONFIRMED):
         remote_identity_pk=pk_hex,
         key_self_to_remote="enc",
         key_remote_to_self="enc",
-        remote_webhook_url="https://peer.example/webhook",
-        local_webhook_id="loc-" + os.urandom(4).hex(),
+        remote_inbox_url="https://peer.example/inbox",
+        local_inbox_id="loc-" + os.urandom(4).hex(),
         status=status,
         source=InstanceSource.MANUAL,
     )
@@ -94,7 +94,7 @@ def inbox(bus):
 def fed_service():
     svc = AsyncMock()
     svc.send_event = AsyncMock()
-    svc.own_webhook_url = "https://self.example/webhook"
+    svc.own_inbox_url = "https://self.example/inbox"
     return svc
 
 
@@ -123,7 +123,7 @@ def test_vouch_blob_shape():
     b = _vouch_blob(
         a_id="a",
         a_pk_hex="aa",
-        a_webhook="http://x",
+        a_inbox_url="http://x",
         a_dh_pk_hex="bb",
         c_id="c",
         ts="2026-04-20T00:00:00Z",
@@ -284,7 +284,7 @@ async def test_on_intro_from_peer_unknown_sender(coord, fed_service):
                 "ts": ts,
                 "nonce": "n",
                 "token": "tk",
-                "a_webhook": "",
+                "a_inbox_url": "",
             },
         )
     )
@@ -307,7 +307,7 @@ async def test_on_intro_from_peer_unknown_target(coord, fed_repo, fed_service):
                 "ts": ts,
                 "nonce": "n",
                 "token": "tk",
-                "a_webhook": "",
+                "a_inbox_url": "",
             },
         )
     )
@@ -333,7 +333,7 @@ async def test_on_intro_from_peer_forwards_to_c(coord, fed_repo, fed_service):
                 "ts": ts,
                 "nonce": "n" * 16,
                 "token": "tk",
-                "a_webhook": "http://a",
+                "a_inbox_url": "http://a",
             },
         )
     )
@@ -371,7 +371,7 @@ async def test_on_intro_at_target_unknown_via(coord, inbox):
                 "via_b_id": "no-such-b",
                 "from_a_id": "a",
                 "from_a_pk": "aa",
-                "from_a_webhook": "w",
+                "from_a_inbox_url": "w",
                 "from_a_dh_pk": "dd",
                 "vouch_sig": "ab",
                 "ts": "2026-04-20T00:00:00+00:00",
@@ -396,7 +396,7 @@ async def test_on_intro_at_target_bad_vouch_sig(coord, fed_repo, inbox):
                 "via_b_id": b.id,
                 "from_a_id": "a",
                 "from_a_pk": "aa" * 16,
-                "from_a_webhook": "w",
+                "from_a_inbox_url": "w",
                 "from_a_dh_pk": "dd" * 16,
                 "vouch_sig": "ab" * 32,
                 "ts": "2026-04-20T00:00:00+00:00",
@@ -461,7 +461,7 @@ async def test_full_auto_pair_handshake(
             {
                 "target_id": c_id,
                 "a_dh_pk": a_dh.public_key.hex(),
-                "a_webhook": "https://a.example/webhook",
+                "a_inbox_url": "https://a.example/inbox",
                 "ts": ts,
                 "nonce": "n" * 16,
                 "token": "tk",
@@ -524,7 +524,7 @@ async def test_decline_pending_sends_abort(coord, inbox, fed_service):
     req = inbox.enqueue(
         from_a_id="a1",
         from_a_pk="aa",
-        from_a_webhook="w",
+        from_a_inbox_url="w",
         from_a_dh_pk="dd",
         via_b_id="b1",
         vouch_sig="vv",

@@ -65,7 +65,7 @@ async def test_clients_list_accept_ban_unban(client):
             instance_id="pascal.home",
             display_name="Pascal",
             public_key="aa" * 32,
-            endpoint_url="http://p.example/wh",
+            inbox_url="http://p.example/wh",
             status="pending",
         )
     )
@@ -114,7 +114,7 @@ async def test_spaces_accept_reject_ban(client):
             instance_id="owner.home",
             display_name="Owner",
             public_key="bb" * 32,
-            endpoint_url="http://o.example/wh",
+            inbox_url="http://o.example/wh",
             status="active",
         )
     )
@@ -216,7 +216,7 @@ async def test_fraud_report_happy_path_records_row(client):
             instance_id="reporter.home",
             display_name="Reporter",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://r.example/wh",
+            inbox_url="http://r.example/wh",
             status="active",
         )
     )
@@ -244,7 +244,7 @@ async def test_fraud_report_bad_signature_is_401(client):
             instance_id="reporter.home",
             display_name="Reporter",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://r.example/wh",
+            inbox_url="http://r.example/wh",
             status="active",
         )
     )
@@ -275,7 +275,7 @@ async def test_threshold_crossing_auto_bans_space(client):
                 instance_id=name,
                 display_name=name,
                 public_key=kp.public_key.hex(),
-                endpoint_url=f"http://{name}.example/wh",
+                inbox_url=f"http://{name}.example/wh",
                 status="active",
             )
         )
@@ -316,7 +316,7 @@ async def test_report_review_dismiss(client):
             instance_id="reporter.home",
             display_name="R",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://r/wh",
+            inbox_url="http://r/wh",
             status="active",
         )
     )
@@ -344,7 +344,7 @@ async def test_audit_log_records_accept_and_ban(client):
             instance_id="pascal.home",
             display_name="Pascal",
             public_key="aa" * 32,
-            endpoint_url="http://p/wh",
+            inbox_url="http://p/wh",
             status="pending",
         )
     )
@@ -373,7 +373,7 @@ async def test_appeal_roundtrip(client):
             instance_id="banned.home",
             display_name="Banned",
             public_key="cc" * 32,
-            endpoint_url="http://b/wh",
+            inbox_url="http://b/wh",
             status="banned",
         )
     )
@@ -444,7 +444,7 @@ async def test_double_review_returns_409(client):
             instance_id="reporter.home",
             display_name="R",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://r/wh",
+            inbox_url="http://r/wh",
             status="active",
         )
     )
@@ -479,7 +479,7 @@ async def test_review_bad_action_is_422(client):
             instance_id="reporter.home",
             display_name="R",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://r/wh",
+            inbox_url="http://r/wh",
             status="active",
         )
     )
@@ -510,7 +510,7 @@ async def test_report_ban_instance_action(client):
             instance_id="owner.home",
             display_name="Owner",
             public_key="dd" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -528,7 +528,7 @@ async def test_report_ban_instance_action(client):
             instance_id="reporter.home",
             display_name="R",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://r/wh",
+            inbox_url="http://r/wh",
             status="active",
         )
     )
@@ -562,7 +562,7 @@ async def test_client_reject_removes_row(client):
             instance_id="rej.home",
             display_name="Rej",
             public_key="ff" * 32,
-            endpoint_url="http://rej/wh",
+            inbox_url="http://rej/wh",
             status="pending",
         )
     )
@@ -579,7 +579,7 @@ async def test_space_reject_deletes_row(client):
             instance_id="o2.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o2/wh",
+            inbox_url="http://o2/wh",
             status="active",
         )
     )
@@ -604,7 +604,7 @@ async def test_space_unban_sets_pending(client):
             instance_id="o3.home",
             display_name="O",
             public_key="aa" * 32,
-            endpoint_url="http://o3/wh",
+            inbox_url="http://o3/wh",
             status="active",
         )
     )
@@ -632,7 +632,7 @@ async def test_duplicate_fraud_report_is_duplicate_status(client):
             instance_id="dup.home",
             display_name="D",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://d/wh",
+            inbox_url="http://d/wh",
             status="active",
         )
     )
@@ -657,7 +657,7 @@ async def test_fraud_report_reporter_cap_rate_limits(client, monkeypatch):
             instance_id="cap.home",
             display_name="C",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://c/wh",
+            inbox_url="http://c/wh",
             status="active",
         )
     )
@@ -707,7 +707,7 @@ async def test_appeal_ingress_records_pending_row(client):
             instance_id="banned.home",
             display_name="B",
             public_key=kp.public_key.hex(),
-            endpoint_url="http://b/wh",
+            inbox_url="http://b/wh",
             status="banned",
         )
     )
@@ -819,7 +819,7 @@ async def test_public_spaces_excludes_pending_and_banned(client):
             instance_id="o.home",
             display_name="O",
             public_key="ee" * 32,
-            endpoint_url="http://o/wh",
+            inbox_url="http://o/wh",
             status="active",
         )
     )

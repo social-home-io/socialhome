@@ -92,8 +92,8 @@ async def test_redeliver_2xx_returns_true(env):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
@@ -129,8 +129,8 @@ async def test_redeliver_non_2xx_returns_false(env):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh2",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh2",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
@@ -166,8 +166,8 @@ async def test_redeliver_transport_error_returns_false(env):
         remote_identity_pk=peer_kp.public_key.hex(),
         key_self_to_remote=wrapped,
         key_remote_to_self=wrapped,
-        remote_webhook_url="https://x/wh",
-        local_webhook_id="wh3",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh3",
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
