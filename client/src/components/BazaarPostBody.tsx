@@ -10,7 +10,9 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
+import { BazaarOffersPanel } from './BazaarOffersPanel'
 import { ImageRenderer } from './FileRenderer'
+import { SaveListingButton } from './SaveListingButton'
 import { showToast } from './Toast'
 import { currentUser } from '@/store/auth'
 import type { BazaarBid, BazaarListing } from '@/types'
@@ -221,6 +223,27 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
     return base
   })()
 
+  const placeOffer = async (amountCents: number, message?: string) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await api.post(`/api/bazaar/${postId}/offers`, {
+        amount: amountCents,
+        ...(message ? { message } : {}),
+      })
+      setBidAmount('')
+      setOfferMessage('')
+      showToast('Offer sent — the seller has been notified.', 'success')
+      onUpdated?.()
+    } catch (err: unknown) {
+      showToast(
+        `Could not send offer: ${(err as Error).message ?? err}`, 'error',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const submitBid = (e: Event) => {
     e.preventDefault()
     const n = Number(bidAmount)
@@ -230,16 +253,27 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
     }
     const digits = CURRENCY_FRACTION_DIGITS[listing.currency] ?? 2
     const cents = digits === 0 ? Math.round(n) : Math.round(n * 100)
-    void placeBid(cents, offerMessage.trim() || undefined)
+    // offer / negotiable modes write to the dedicated bazaar_offers
+    // table; auction / bid_from stay on the bids path.
+    if (listing.mode === 'offer' || listing.mode === 'negotiable') {
+      void placeOffer(cents, offerMessage.trim() || undefined)
+    } else {
+      void placeBid(cents, offerMessage.trim() || undefined)
+    }
   }
 
   return (
     <div class={`sh-bazaar-card sh-bazaar-card--${listing.mode} sh-bazaar-card--${listing.status}`}>
       <div class="sh-bazaar-card-head">
         <h3 class="sh-bazaar-title">{listing.title}</h3>
-        <span class={`sh-bazaar-mode-chip sh-bazaar-mode-chip--${listing.mode}`}>
-          {modeLabel(listing.mode)}
-        </span>
+        <div class="sh-bazaar-card-head-right">
+          <span class={`sh-bazaar-mode-chip sh-bazaar-mode-chip--${listing.mode}`}>
+            {modeLabel(listing.mode)}
+          </span>
+          {me && !isSeller && (
+            <SaveListingButton postId={postId} />
+          )}
+        </div>
       </div>
       {listing.image_urls.length > 0 && (
         <div class={`sh-bazaar-gallery ${listing.image_urls.length === 1 ? 'sh-bazaar-gallery--single' : ''}`}>
@@ -335,6 +369,15 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
         </div>
       )}
 
+      {/* Offer/negotiable modes use the dedicated bazaar_offers pane;
+          seller sees every pending offer, buyer sees their own. */}
+      {!closed && (listing.mode === 'offer' || listing.mode === 'negotiable') && (
+        <BazaarOffersPanel
+          listing={listing}
+          currentUserId={me ?? null}
+          onListingChanged={onUpdated} />
+      )}
+
       {isSeller && (
         <SellerControls
           listing={listing}
@@ -359,8 +402,10 @@ function SellerControls({
   onCancel: () => Promise<void>
 }) {
   const active = listing.status === 'active'
+  // offer / negotiable now use BazaarOffersPanel; keep the legacy
+  // bid-list only for auction / bid_from.
   const showBids = bids.length > 0 && active &&
-    (listing.mode === 'offer' || listing.mode === 'negotiable')
+    (listing.mode === 'auction' || listing.mode === 'bid_from')
   return (
     <div class="sh-bazaar-seller">
       <strong class="sh-muted">You own this listing</strong>

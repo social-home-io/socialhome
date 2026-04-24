@@ -262,3 +262,273 @@ async def test_cancel_own_listing_succeeds(client):
         headers=_auth(client._tok),
     )
     assert (await got.json())["status"] == "cancelled"
+
+
+# ─── Fixed-price offers (§23.23) ──────────────────────────────────────────
+
+
+async def test_make_offer_returns_pending(client):
+    await _seed_listing(client, listing_id="lst-off-1", seller="other-user")
+    r = await client.post(
+        "/api/bazaar/lst-off-1/offers",
+        json={"amount": 4500, "message": "Trade for my bike?"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["status"] == "pending"
+    assert body["amount"] == 4500
+
+
+async def test_make_offer_on_own_listing_rejected(client):
+    await _seed_listing(client, listing_id="lst-off-self")
+    r = await client.post(
+        "/api/bazaar/lst-off-self/offers",
+        json={"amount": 4500},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+
+
+async def test_make_offer_requires_positive_amount(client):
+    await _seed_listing(client, listing_id="lst-off-neg", seller="other-user")
+    r = await client.post(
+        "/api/bazaar/lst-off-neg/offers",
+        json={"amount": 0},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_make_offer_amount_required(client):
+    await _seed_listing(client, listing_id="lst-off-noamt", seller="other-user")
+    r = await client.post(
+        "/api/bazaar/lst-off-noamt/offers",
+        json={},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_offerer_sees_only_own_offer(client):
+    await _seed_listing(client, listing_id="lst-off-2", seller="other-user")
+    # Seed a foreign offer directly at the DB level.
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES(?,?,?,?,?)",
+        ("foreign-offer", "lst-off-2", "someone-else", 100, "pending"),
+    )
+    # Now the test user offers.
+    await client.post(
+        "/api/bazaar/lst-off-2/offers",
+        json={"amount": 200},
+        headers=_auth(client._tok),
+    )
+    r = await client.get(
+        "/api/bazaar/lst-off-2/offers",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    offers = await r.json()
+    assert all(o["offerer_user_id"] == client._uid for o in offers)
+    assert len(offers) == 1
+
+
+async def test_seller_sees_every_offer(client):
+    await _seed_listing(client, listing_id="lst-off-3")  # self is seller
+    db = client._db
+    for i, uid in enumerate(("u-a", "u-b", "u-c")):
+        await db.enqueue(
+            "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+            " amount, status) VALUES(?,?,?,?,?)",
+            (f"o-{i}", "lst-off-3", uid, 100 * (i + 1), "pending"),
+        )
+    r = await client.get(
+        "/api/bazaar/lst-off-3/offers",
+        headers=_auth(client._tok),
+    )
+    offers = await r.json()
+    assert len(offers) == 3
+
+
+async def test_accept_offer_sells_listing_and_rejects_siblings(client):
+    await _seed_listing(client, listing_id="lst-acc-1")  # self is seller
+    db = client._db
+    for i, (uid, amt) in enumerate((("u-a", 100), ("u-b", 200), ("u-c", 150))):
+        await db.enqueue(
+            "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+            " amount, status) VALUES(?,?,?,?,?)",
+            (f"acc-{i}", "lst-acc-1", uid, amt, "pending"),
+        )
+    r = await client.post(
+        "/api/bazaar/lst-acc-1/offers/acc-1/accept",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["status"] == "accepted"
+
+    offers = await (
+        await client.get(
+            "/api/bazaar/lst-acc-1/offers",
+            headers=_auth(client._tok),
+        )
+    ).json()
+    statuses = {o["id"]: o["status"] for o in offers}
+    assert statuses == {
+        "acc-0": "rejected",
+        "acc-1": "accepted",
+        "acc-2": "rejected",
+    }
+    # Listing flips to sold with the accepted offer's amount.
+    r2 = await client.get(
+        "/api/bazaar/lst-acc-1",
+        headers=_auth(client._tok),
+    )
+    listing = await r2.json()
+    assert listing["status"] == "sold"
+    assert listing["winning_price"] == 200
+
+
+async def test_accept_offer_non_seller_forbidden(client):
+    await _seed_listing(client, listing_id="lst-acc-2", seller="other-user")
+    await client._db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES('acc-x','lst-acc-2','u-z',100,'pending')",
+    )
+    r = await client.post(
+        "/api/bazaar/lst-acc-2/offers/acc-x/accept",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+
+
+async def test_reject_offer_leaves_listing_active(client):
+    await _seed_listing(client, listing_id="lst-rej-1")  # self is seller
+    await client._db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES('rej-1','lst-rej-1','u-z',100,'pending')",
+    )
+    r = await client.post(
+        "/api/bazaar/lst-rej-1/offers/rej-1/reject",
+        json={"reason": "too low"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["status"] == "rejected"
+    # Listing still active.
+    r2 = await client.get(
+        "/api/bazaar/lst-rej-1",
+        headers=_auth(client._tok),
+    )
+    assert (await r2.json())["status"] == "active"
+
+
+async def test_withdraw_own_offer(client):
+    await _seed_listing(client, listing_id="lst-wd-1", seller="other-user")
+    r1 = await client.post(
+        "/api/bazaar/lst-wd-1/offers",
+        json={"amount": 100},
+        headers=_auth(client._tok),
+    )
+    offer_id = (await r1.json())["id"]
+    r = await client.delete(
+        f"/api/bazaar/lst-wd-1/offers/{offer_id}",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["status"] == "withdrawn"
+
+
+async def test_withdraw_by_non_offerer_forbidden(client):
+    await _seed_listing(client, listing_id="lst-wd-2", seller="other-user")
+    await client._db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES('wd-foreign','lst-wd-2','u-other',100,'pending')",
+    )
+    r = await client.delete(
+        "/api/bazaar/lst-wd-2/offers/wd-foreign",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+
+
+async def test_double_accept_fails_with_state_error(client):
+    await _seed_listing(client, listing_id="lst-dbl")  # self is seller
+    await client._db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES('dbl-1','lst-dbl','u-z',100,'pending')",
+    )
+    await client.post(
+        "/api/bazaar/lst-dbl/offers/dbl-1/accept",
+        headers=_auth(client._tok),
+    )
+    r = await client.post(
+        "/api/bazaar/lst-dbl/offers/dbl-1/accept",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+
+
+# ─── Saved listings ───────────────────────────────────────────────────────
+
+
+async def test_save_unsave_listing(client):
+    await _seed_listing(client, listing_id="lst-save-1", seller="other-user")
+    r = await client.post(
+        "/api/bazaar/lst-save-1/save",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    assert (await r.json())["saved"] is True
+    # Probe.
+    r2 = await client.get(
+        "/api/bazaar/lst-save-1/save",
+        headers=_auth(client._tok),
+    )
+    assert (await r2.json())["saved"] is True
+    # Unsave.
+    r3 = await client.delete(
+        "/api/bazaar/lst-save-1/save",
+        headers=_auth(client._tok),
+    )
+    assert r3.status == 200
+    assert (await r3.json())["saved"] is False
+
+
+async def test_save_listing_is_idempotent(client):
+    await _seed_listing(client, listing_id="lst-save-id", seller="other-user")
+    for _ in range(3):
+        await client.post(
+            "/api/bazaar/lst-save-id/save",
+            headers=_auth(client._tok),
+        )
+    r = await client.get(
+        "/api/me/bazaar/saved",
+        headers=_auth(client._tok),
+    )
+    body = await r.json()
+    assert [s["post_id"] for s in body["saved"]] == ["lst-save-id"]
+
+
+async def test_save_listing_404_when_missing(client):
+    r = await client.post(
+        "/api/bazaar/no-such-listing/save",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 404
+
+
+async def test_list_my_saved_returns_both(client):
+    await _seed_listing(client, listing_id="lst-s1", seller="u2")
+    await _seed_listing(client, listing_id="lst-s2", seller="u2")
+    await client.post("/api/bazaar/lst-s1/save", headers=_auth(client._tok))
+    await client.post("/api/bazaar/lst-s2/save", headers=_auth(client._tok))
+    r = await client.get(
+        "/api/me/bazaar/saved",
+        headers=_auth(client._tok),
+    )
+    body = await r.json()
+    # Per-row saved_at has 1-second SQLite resolution — don't assert
+    # relative ordering within a single test second.
+    assert {s["post_id"] for s in body["saved"]} == {"lst-s1", "lst-s2"}

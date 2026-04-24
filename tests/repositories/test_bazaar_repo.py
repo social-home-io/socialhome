@@ -309,3 +309,151 @@ async def test_non_auction_modes_do_not_extend(env):
     )
     listing = await env.bazaar_repo.get_listing(pid)
     assert listing.end_time == close_soon
+
+
+# ── Fixed-price offers (§23.23) ────────────────────────────────────────────
+
+
+async def _seed_listing(env, pid: str, *, seller: str = "u1"):
+    await _seed_post(env.db, pid)
+    await env.bazaar_repo.save_listing(
+        BazaarListing(
+            post_id=pid,
+            seller_user_id=seller,
+            mode=BazaarMode.FIXED,
+            title="Thing",
+            end_time="2099-01-01T00:00:00",
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=None,
+            price=5000,
+        )
+    )
+
+
+async def test_create_and_get_offer(env):
+    from socialhome.repositories.bazaar_repo import new_offer
+
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    offer = new_offer(
+        listing_post_id=pid,
+        offerer_user_id="u2",
+        amount=4500,
+        message="Trade?",
+    )
+    await env.bazaar_repo.create_offer(offer)
+    fetched = await env.bazaar_repo.get_offer(offer.id)
+    assert fetched is not None
+    assert fetched.amount == 4500
+    assert fetched.status == "pending"
+    assert fetched.message == "Trade?"
+
+
+async def test_list_offers_for_listing_and_offerer(env):
+    from socialhome.repositories.bazaar_repo import new_offer
+
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    for uid, amt in (("u2", 4500), ("u3", 4800), ("u2", 4600)):
+        await env.bazaar_repo.create_offer(
+            new_offer(
+                listing_post_id=pid,
+                offerer_user_id=uid,
+                amount=amt,
+            )
+        )
+    all_offers = await env.bazaar_repo.list_offers_for_listing(pid)
+    assert len(all_offers) == 3
+    u2_offers = await env.bazaar_repo.list_offers_for_offerer("u2")
+    assert len(u2_offers) == 2
+    assert all(o.offerer_user_id == "u2" for o in u2_offers)
+
+
+async def test_update_offer_status_accepts(env):
+    from socialhome.repositories.bazaar_repo import new_offer
+
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    offer = new_offer(listing_post_id=pid, offerer_user_id="u2", amount=100)
+    await env.bazaar_repo.create_offer(offer)
+    updated = await env.bazaar_repo.update_offer_status(offer.id, "accepted")
+    assert updated.status == "accepted"
+    assert updated.responded_at is not None
+
+
+async def test_update_offer_status_rejects_illegal_transition(env):
+    from socialhome.repositories.bazaar_repo import OfferStateError, new_offer
+
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    offer = new_offer(listing_post_id=pid, offerer_user_id="u2", amount=100)
+    await env.bazaar_repo.create_offer(offer)
+    await env.bazaar_repo.update_offer_status(offer.id, "rejected")
+    # rejected → accepted is illegal
+    with pytest.raises(OfferStateError):
+        await env.bazaar_repo.update_offer_status(offer.id, "accepted")
+
+
+async def test_reject_other_pending_offers(env):
+    from socialhome.repositories.bazaar_repo import new_offer
+
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    winner = new_offer(listing_post_id=pid, offerer_user_id="u2", amount=100)
+    other1 = new_offer(listing_post_id=pid, offerer_user_id="u3", amount=80)
+    other2 = new_offer(listing_post_id=pid, offerer_user_id="u4", amount=90)
+    for o in (winner, other1, other2):
+        await env.bazaar_repo.create_offer(o)
+    n = await env.bazaar_repo.reject_other_pending_offers(
+        pid, except_offer_id=winner.id
+    )
+    assert n == 2
+    assert (await env.bazaar_repo.get_offer(winner.id)).status == "pending"
+    assert (await env.bazaar_repo.get_offer(other1.id)).status == "rejected"
+    assert (await env.bazaar_repo.get_offer(other2.id)).status == "rejected"
+
+
+async def test_update_offer_status_unknown_raises(env):
+    with pytest.raises(KeyError):
+        await env.bazaar_repo.update_offer_status("no-such", "accepted")
+
+
+# ── Saved-listing bookmarks ─────────────────────────────────────────────────
+
+
+async def _seed_user(env, *, username: str, user_id: str):
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (username, user_id, username),
+    )
+
+
+async def test_save_and_list_bookmarks(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    await _seed_user(env, username="alice", user_id="u-alice")
+    await env.bazaar_repo.save_listing_bookmark(user_id="u-alice", post_id=pid)
+    assert await env.bazaar_repo.is_listing_saved(user_id="u-alice", post_id=pid)
+    saved = await env.bazaar_repo.list_saved_listings("u-alice")
+    assert [s["post_id"] for s in saved] == [pid]
+
+
+async def test_save_is_idempotent(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    await _seed_user(env, username="alice", user_id="u-alice")
+    await env.bazaar_repo.save_listing_bookmark(user_id="u-alice", post_id=pid)
+    await env.bazaar_repo.save_listing_bookmark(user_id="u-alice", post_id=pid)
+    saved = await env.bazaar_repo.list_saved_listings("u-alice")
+    assert len(saved) == 1
+
+
+async def test_unsave_removes_bookmark(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    await _seed_user(env, username="alice", user_id="u-alice")
+    await env.bazaar_repo.save_listing_bookmark(user_id="u-alice", post_id=pid)
+    await env.bazaar_repo.unsave_listing_bookmark(user_id="u-alice", post_id=pid)
+    assert not await env.bazaar_repo.is_listing_saved(user_id="u-alice", post_id=pid)
+    assert await env.bazaar_repo.list_saved_listings("u-alice") == []

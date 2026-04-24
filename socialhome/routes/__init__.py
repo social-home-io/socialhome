@@ -25,6 +25,12 @@ from .bazaar import (
     BazaarBidRejectView,
     BazaarCollectionView,
     BazaarDetailView,
+    BazaarOfferAcceptView,
+    BazaarOfferCollectionView,
+    BazaarOfferDetailView,
+    BazaarOfferRejectView,
+    BazaarSaveView,
+    MySavedBazaarView,
 )
 from .calendar import (
     CalendarCollectionView,
@@ -570,6 +576,25 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/bazaar/{id}/bids/{bid_id}/reject",
         BazaarBidRejectView,
     )
+    # Fixed-price offers + saved-listing bookmarks (§23.23).
+    app.router.add_view(
+        "/api/bazaar/{id}/offers",
+        BazaarOfferCollectionView,
+    )
+    app.router.add_view(
+        "/api/bazaar/{id}/offers/{offer_id}",
+        BazaarOfferDetailView,
+    )
+    app.router.add_view(
+        "/api/bazaar/{id}/offers/{offer_id}/accept",
+        BazaarOfferAcceptView,
+    )
+    app.router.add_view(
+        "/api/bazaar/{id}/offers/{offer_id}/reject",
+        BazaarOfferRejectView,
+    )
+    app.router.add_view("/api/bazaar/{id}/save", BazaarSaveView)
+    app.router.add_view("/api/me/bazaar/saved", MySavedBazaarView)
 
     # ── Media ───────────────────────────────────────────────────────────
     app.router.add_view("/api/media/upload", MediaUploadView)

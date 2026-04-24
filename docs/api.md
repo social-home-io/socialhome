@@ -235,6 +235,22 @@ Same CRUD shape:
 /api/gallery/albums[/{id}]    /{id}/items[/{iid}]
 ```
 
+### Bazaar offers & saved listings (§23.23)
+
+Offers write to a dedicated `bazaar_offers` table — distinct from
+auction/bid_from `bazaar_bids`. State machine:
+`pending → accepted | rejected | withdrawn` (terminal).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/bazaar/{id}/offers` | List offers. Seller sees all; others see only their own. |
+| POST | `/api/bazaar/{id}/offers` | Make an offer on a fixed / negotiable listing. Body: `{amount, message?}`. Returns the new offer row. |
+| DELETE | `/api/bazaar/{id}/offers/{offer_id}` | Offerer withdraws a pending offer. |
+| POST | `/api/bazaar/{id}/offers/{offer_id}/accept` | Seller accepts → listing flips to `sold` and every other pending offer on the listing is auto-rejected. |
+| POST | `/api/bazaar/{id}/offers/{offer_id}/reject` | Seller rejects. Body: `{reason?}`. Listing stays active. |
+| GET / POST / DELETE | `/api/bazaar/{id}/save` | Probe / bookmark / un-bookmark. POST returns `{saved: true}` (201). |
+| GET | `/api/me/bazaar/saved` | Caller's bookmarked listings — `{saved: [{post_id, saved_at}]}`. Client hydrates each via `/api/bazaar/{post_id}`. |
+
 ### Polls & schedule polls
 
 Polls attach to an existing post. Reply polls use `/poll`, schedule
