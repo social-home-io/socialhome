@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS pending_pairings (
     peer_dh_pk          TEXT,
     peer_inbox_url      TEXT,
     inbox_url           TEXT NOT NULL,
+    own_local_inbox_id  TEXT NOT NULL,
     verification_code   TEXT,
     intro_note          TEXT,
     relay_via           TEXT,

@@ -678,13 +678,19 @@ async def test_initiate_pairing():
     assert "expires_at" in result
 
     assert result["identity_pk"] == own_kp.public_key.hex()
-    assert result["inbox_url"] == "http://my-instance.local/fed/inbox"
+    # The advertised URL = base + "/" + own_local_inbox_id (generated
+    # server-side). Any POST that peer later makes will hit the addon's
+    # /federation/inbox/{inbox_id} route and resolve via that id.
+    assert result["inbox_url"].startswith("http://my-instance.local/fed/inbox/")
+    advertised_id = result["inbox_url"].rsplit("/", 1)[1]
+    assert advertised_id  # non-empty
 
-    # The pairing session should be persisted.
+    # The pairing session should be persisted with that id.
     assert len(fed_repo._pairings) == 1
     session = fed_repo._pairings[result["token"]]
     assert session.token == result["token"]
     assert session.status == PairingStatus.PENDING_SENT
+    assert session.own_local_inbox_id == advertised_id
 
 
 @pytest.mark.asyncio

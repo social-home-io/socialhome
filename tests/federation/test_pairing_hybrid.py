@@ -56,7 +56,7 @@ async def test_initiate_hybrid_carries_pq_pk_in_qr_payload():
         own_pq_pk=b"FAKE-PQ-PK",
         own_sig_suite="ed25519+mldsa65",
     )
-    payload = await coord.initiate(inbox_url="https://x/wh")
+    payload = await coord.initiate(inbox_base_url="https://x/wh")
     assert payload["sig_suite"] == "ed25519+mldsa65"
     assert payload["pq_algorithm"] == "mldsa65"
     assert payload["pq_identity_pk"] == b"FAKE-PQ-PK".hex()
@@ -66,7 +66,7 @@ async def test_initiate_classical_omits_pq_fields():
     kp = generate_identity_keypair()
     repo = _FakeRepo()
     coord = PairingCoordinator(repo, _kek(), kp.public_key)
-    payload = await coord.initiate(inbox_url="https://x/wh")
+    payload = await coord.initiate(inbox_base_url="https://x/wh")
     assert payload["sig_suite"] == "ed25519"
     assert "pq_algorithm" not in payload
     assert "pq_identity_pk" not in payload

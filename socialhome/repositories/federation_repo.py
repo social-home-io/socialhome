@@ -238,9 +238,10 @@ class SqliteFederationRepo:
             INSERT INTO pending_pairings(
                 token, own_identity_pk, own_dh_pk, own_dh_sk,
                 peer_identity_pk, peer_dh_pk, peer_inbox_url, inbox_url,
+                own_local_inbox_id,
                 verification_code, intro_note, relay_via,
                 status, issued_at, expires_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 session.token,
@@ -251,6 +252,7 @@ class SqliteFederationRepo:
                 session.peer_dh_pk,
                 session.peer_inbox_url,
                 session.inbox_url,
+                session.own_local_inbox_id,
                 session.verification_code,
                 session.intro_note,
                 session.relay_via,
@@ -277,6 +279,7 @@ class SqliteFederationRepo:
             peer_dh_pk=d.get("peer_dh_pk"),
             peer_inbox_url=d.get("peer_inbox_url"),
             inbox_url=d["inbox_url"],
+            own_local_inbox_id=d["own_local_inbox_id"],
             verification_code=d.get("verification_code"),
             intro_note=d.get("intro_note"),
             relay_via=d.get("relay_via"),

@@ -215,7 +215,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     sasAutofilledRef.current = false
     try {
       const result = await api.post('/api/pairing/initiate', {
-        inbox_url: `${location.origin}/federation/inbox/self`,
+        inbox_url: `${location.origin}/federation/inbox`,
       }) as { token: string; [key: string]: unknown }
       qrPayload.value = JSON.stringify(result)
       pairingToken.value = result.token

@@ -330,6 +330,10 @@ class PairingSession:
     own_dh_pk: str  # 64 hex (X25519)
     own_dh_sk: str  # 64 hex (X25519) — kept until confirm
     inbox_url: str
+    # Our own per-peer inbox secret, generated at initiate/accept time.
+    # Baked into the URL the peer POSTs to (`inbox_url` ends in this id).
+    # Moves onto ``RemoteInstance.local_inbox_id`` when the pair confirms.
+    own_local_inbox_id: str
     peer_identity_pk: str | None = None
     peer_dh_pk: str | None = None
     peer_inbox_url: str | None = None

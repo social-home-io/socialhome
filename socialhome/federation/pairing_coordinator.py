@@ -85,16 +85,21 @@ class PairingCoordinator:
         self._own_pq_pk = own_pq_pk
         self._own_sig_suite = own_sig_suite
 
-    async def initiate(self, inbox_url: str) -> dict:
+    async def initiate(self, inbox_base_url: str) -> dict:
         """Generate a QR payload for the §11 pairing handshake.
 
-        The payload advertises this instance's supported ``sig_suite`` and
-        — if configured for hybrid — its post-quantum public key. The
-        peer picks the intersection via :func:`crypto_suite.negotiate`
-        during :meth:`accept`.
+        ``inbox_base_url`` is the scheme+host+path prefix peers will
+        POST to (e.g. ``https://my-instance.example/federation/inbox``).
+        We append a freshly-generated secret id to produce the full
+        per-peer URL baked into the QR; that same id lands on
+        :attr:`PairingSession.own_local_inbox_id` and later becomes
+        :attr:`RemoteInstance.local_inbox_id` when the pair confirms,
+        which is how the inbound pipeline resolves the sender.
         """
         token = random_token(24)
         dh_kp = generate_x25519_keypair()
+        own_local_inbox_id = secrets.token_urlsafe(24)
+        inbox_url = f"{inbox_base_url.rstrip('/')}/{own_local_inbox_id}"
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=PAIRING_TTL_SECONDS)).isoformat()
 
@@ -104,6 +109,7 @@ class PairingCoordinator:
             own_dh_pk=dh_kp.public_key.hex(),
             own_dh_sk=dh_kp.private_key.hex(),
             inbox_url=inbox_url,
+            own_local_inbox_id=own_local_inbox_id,
             issued_at=now.isoformat(),
             expires_at=expires_at,
             status=PairingStatus.PENDING_SENT,
@@ -186,8 +192,8 @@ class PairingCoordinator:
                 "refuse to complete handshake",
             )
 
-        # Generate a inbox ID for the peer to POST to.
-        local_inbox_id = secrets.token_urlsafe(24)
+        # Generate an inbox id for the peer to POST to.
+        own_local_inbox_id = secrets.token_urlsafe(24)
 
         # 6-digit SAS verification code.
         verification_code = str(secrets.randbelow(10**SAS_DIGITS)).zfill(SAS_DIGITS)
@@ -205,6 +211,7 @@ class PairingCoordinator:
             peer_dh_pk=peer_dh_pk_hex,
             peer_inbox_url=peer_inbox_url,
             inbox_url=qr_payload.get("inbox_url", ""),
+            own_local_inbox_id=own_local_inbox_id,
             verification_code=verification_code,
             issued_at=now.isoformat(),
             expires_at=expires_at,
@@ -227,7 +234,7 @@ class PairingCoordinator:
             key_self_to_remote=key_self_enc,
             key_remote_to_self=key_remote_enc,
             remote_inbox_url=peer_inbox_url,
-            local_inbox_id=local_inbox_id,
+            local_inbox_id=own_local_inbox_id,
             status=PairingStatus.PENDING_RECEIVED,
             source=InstanceSource.MANUAL,
             remote_pq_algorithm=str(peer_pq_alg) if peer_pq_alg else None,
@@ -240,7 +247,7 @@ class PairingCoordinator:
         return {
             "verification_code": verification_code,
             "token": token,
-            "local_inbox_id": local_inbox_id,
+            "local_inbox_id": own_local_inbox_id,
             "own_dh_pk": own_dh_kp.public_key.hex(),
         }
 
