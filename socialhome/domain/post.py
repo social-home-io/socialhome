@@ -197,6 +197,35 @@ class BazaarBid:
     withdrawn: bool = False
 
 
+#: Legal transitions for :class:`BazaarOffer.status`.
+BAZAAR_OFFER_TRANSITIONS: dict[str, frozenset[str]] = {
+    "pending": frozenset({"accepted", "rejected", "withdrawn"}),
+    "accepted": frozenset(),
+    "rejected": frozenset(),
+    "withdrawn": frozenset(),
+}
+
+
+@dataclass(slots=True, frozen=True)
+class BazaarOffer:
+    """Buyer's offer on a fixed / negotiable bazaar listing (§23.23).
+
+    Distinct from :class:`BazaarBid` (auction). Offers are single-status
+    rows — a new offer starts ``pending``; the seller flips it to
+    ``accepted`` or ``rejected``; the offerer can flip it to
+    ``withdrawn`` while still pending.
+    """
+
+    id: str
+    listing_post_id: str
+    offerer_user_id: str
+    amount: int
+    created_at: str
+    status: str = "pending"
+    message: str | None = None
+    responded_at: str | None = None
+
+
 # ─── Polls ────────────────────────────────────────────────────────────────
 
 

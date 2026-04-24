@@ -38,10 +38,12 @@ from ..domain.post import (
     BazaarStatus,
 )
 from ..infrastructure.event_bus import EventBus
+from ..domain.post import BazaarOffer
 from ..repositories.bazaar_repo import (
     AbstractBazaarRepo,
     BidStateError,
     new_bid,
+    new_offer,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +62,10 @@ class ListingNotFoundError(BazaarServiceError):
 
 class BidNotFoundError(BazaarServiceError):
     """Raised when a bid reference is unknown."""
+
+
+class OfferNotFoundError(BazaarServiceError):
+    """Raised when a fixed-price offer reference is unknown."""
 
 
 class _Unset:
@@ -394,6 +400,206 @@ class BazaarService:
 
     async def list_bids(self, post_id: str) -> list[BazaarBid]:
         return await self._repo.list_bids(post_id)
+
+    # ─── Fixed-price offers (§23.23) ────────────────────────────────────
+
+    async def make_offer(
+        self,
+        *,
+        listing_post_id: str,
+        offerer_user_id: str,
+        amount: int,
+        message: str | None = None,
+    ) -> BazaarOffer:
+        """Place a new offer on a fixed-price / negotiable listing.
+
+        Auction listings reject offer creation — auction uses
+        :meth:`place_bid` instead. A seller can't offer on their own
+        listing; already-sold / expired / cancelled listings reject.
+        """
+        listing = await self.get_listing(listing_post_id)
+        if listing.status != BazaarStatus.ACTIVE:
+            raise BazaarServiceError(
+                f"listing {listing_post_id!r} is {listing.status.value}, "
+                "no new offers accepted",
+            )
+        if listing.mode == BazaarMode.AUCTION:
+            raise BazaarServiceError(
+                "auction listings accept bids, not offers — use POST /bids",
+            )
+        if offerer_user_id == listing.seller_user_id:
+            raise PermissionError("cannot offer on your own listing")
+        if int(amount) <= 0:
+            raise ValueError("amount must be positive")
+
+        offer = new_offer(
+            listing_post_id=listing_post_id,
+            offerer_user_id=offerer_user_id,
+            amount=int(amount),
+            message=message,
+        )
+        await self._repo.create_offer(offer)
+        # Reuse BazaarBidPlaced so the seller notification path handles
+        # both bid + offer uniformly. ``new_end_time`` is the listing's
+        # own end_time — fixed-price offers don't anti-snipe.
+        await self._bus.publish(
+            BazaarBidPlaced(
+                listing_post_id=listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=offerer_user_id,
+                amount=int(amount),
+                new_end_time=listing.end_time,
+            )
+        )
+        return offer
+
+    async def accept_fixed_offer(
+        self,
+        *,
+        offer_id: str,
+        actor_user_id: str,
+    ) -> BazaarOffer:
+        """Seller accepts one offer → listing flips to sold and every
+        other pending offer is auto-rejected.
+
+        Raises :class:`PermissionError` if the actor isn't the seller,
+        :class:`OfferStateError` if the offer isn't pending.
+        """
+        offer = await self._repo.get_offer(offer_id)
+        if offer is None:
+            raise OfferNotFoundError(offer_id)
+        listing = await self.get_listing(offer.listing_post_id)
+        if actor_user_id != listing.seller_user_id:
+            raise PermissionError("only the seller may accept offers")
+        if listing.status != BazaarStatus.ACTIVE:
+            raise BazaarServiceError(
+                "listing is no longer active — cannot accept offers",
+            )
+
+        updated = await self._repo.update_offer_status(offer_id, "accepted")
+        await self._repo.reject_other_pending_offers(
+            offer.listing_post_id,
+            except_offer_id=offer_id,
+        )
+        await self._repo.mark_sold(
+            offer.listing_post_id,
+            winner_user_id=offer.offerer_user_id,
+            winning_price=offer.amount,
+        )
+        await self._bus.publish(
+            BazaarOfferAccepted(
+                listing_post_id=offer.listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                buyer_user_id=offer.offerer_user_id,
+                price=offer.amount,
+            )
+        )
+        return updated
+
+    async def reject_fixed_offer(
+        self,
+        *,
+        offer_id: str,
+        actor_user_id: str,
+        reason: str | None = None,
+    ) -> BazaarOffer:
+        """Seller rejects a single pending offer. Listing stays active
+        so other buyers can still make offers."""
+        offer = await self._repo.get_offer(offer_id)
+        if offer is None:
+            raise OfferNotFoundError(offer_id)
+        listing = await self.get_listing(offer.listing_post_id)
+        if actor_user_id != listing.seller_user_id:
+            raise PermissionError("only the seller may reject offers")
+        updated = await self._repo.update_offer_status(offer_id, "rejected")
+        await self._bus.publish(
+            BazaarOfferRejected(
+                listing_post_id=offer.listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=offer.offerer_user_id,
+                bid_id=offer_id,
+                reason=reason,
+            )
+        )
+        return updated
+
+    async def withdraw_fixed_offer(
+        self,
+        *,
+        offer_id: str,
+        actor_user_id: str,
+    ) -> BazaarOffer:
+        """Offerer withdraws a pending offer (before the seller acts).
+
+        Raises :class:`PermissionError` if the actor isn't the offerer,
+        :class:`OfferStateError` if the offer isn't pending.
+        """
+        offer = await self._repo.get_offer(offer_id)
+        if offer is None:
+            raise OfferNotFoundError(offer_id)
+        if actor_user_id != offer.offerer_user_id:
+            raise PermissionError("only the offerer may withdraw")
+        return await self._repo.update_offer_status(offer_id, "withdrawn")
+
+    async def list_offers(
+        self,
+        listing_post_id: str,
+        *,
+        actor_user_id: str,
+    ) -> list[BazaarOffer]:
+        """Return offers on a listing.
+
+        The seller sees every offer; other callers see only their own.
+        Sellers routing-need the full list to pick which to accept;
+        other participants get their row back so they can poll the
+        status of their own offer.
+        """
+        listing = await self.get_listing(listing_post_id)
+        if actor_user_id == listing.seller_user_id:
+            return await self._repo.list_offers_for_listing(listing_post_id)
+        # Filter by offerer — the caller's own offer (or none).
+        all_offers = await self._repo.list_offers_for_offerer(actor_user_id)
+        return [o for o in all_offers if o.listing_post_id == listing_post_id]
+
+    # ─── Saved listings (§23.23 — buyer bookmarks) ──────────────────────
+
+    async def save_listing(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> None:
+        """Bookmark a listing for the caller. Idempotent."""
+        await self.get_listing(post_id)  # existence check
+        await self._repo.save_listing_bookmark(user_id=user_id, post_id=post_id)
+
+    async def unsave_listing(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> None:
+        await self._repo.unsave_listing_bookmark(
+            user_id=user_id,
+            post_id=post_id,
+        )
+
+    async def is_listing_saved(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> bool:
+        return await self._repo.is_listing_saved(
+            user_id=user_id,
+            post_id=post_id,
+        )
+
+    async def list_saved_listings(
+        self,
+        user_id: str,
+    ) -> list[dict]:
+        return await self._repo.list_saved_listings(user_id)
 
     # ─── Expiry ──────────────────────────────────────────────────────────
 

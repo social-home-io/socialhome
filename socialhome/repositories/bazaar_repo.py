@@ -22,9 +22,11 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..domain.post import (
     BAZAAR_CURRENCIES,
+    BAZAAR_OFFER_TRANSITIONS,
     BazaarBid,
     BazaarListing,
     BazaarMode,
+    BazaarOffer,
     BazaarStatus,
 )
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
@@ -41,6 +43,11 @@ SNIPE_EXTEND_SECONDS: int = 5 * 60
 
 class BidStateError(Exception):
     """Raised when a bid transition would violate the OFFER state machine."""
+
+
+class OfferStateError(Exception):
+    """Raised when a :table:`bazaar_offers` transition is illegal
+    (e.g. trying to accept an already-rejected offer)."""
 
 
 @runtime_checkable
@@ -76,6 +83,55 @@ class AbstractBazaarRepo(Protocol):
         reason: str | None = None,
     ) -> None: ...
     async def withdraw_bid(self, bid_id: str) -> None: ...
+
+    # ── Fixed-price offers (``bazaar_offers``) ──────────────────────────
+    async def create_offer(self, offer: BazaarOffer) -> BazaarOffer: ...
+    async def get_offer(self, offer_id: str) -> BazaarOffer | None: ...
+    async def list_offers_for_listing(
+        self,
+        listing_post_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[BazaarOffer]: ...
+    async def list_offers_for_offerer(
+        self,
+        offerer_user_id: str,
+    ) -> list[BazaarOffer]: ...
+    async def update_offer_status(
+        self,
+        offer_id: str,
+        new_status: str,
+    ) -> BazaarOffer: ...
+    async def reject_other_pending_offers(
+        self,
+        listing_post_id: str,
+        *,
+        except_offer_id: str,
+    ) -> int: ...
+
+    # ── Saved-listing bookmarks (``saved_bazaar_listings``) ─────────────
+    async def save_listing_bookmark(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> None: ...
+    async def unsave_listing_bookmark(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> None: ...
+    async def is_listing_saved(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> bool: ...
+    async def list_saved_listings(
+        self,
+        user_id: str,
+    ) -> list[dict]: ...
 
 
 class SqliteBazaarRepo:
@@ -397,6 +453,185 @@ class SqliteBazaarRepo:
 
         await self._db.transact(_run)
 
+    # ── Fixed-price offers (``bazaar_offers``) ──────────────────────────
+
+    async def create_offer(self, offer: BazaarOffer) -> BazaarOffer:
+        await self._db.enqueue(
+            """
+            INSERT INTO bazaar_offers(
+                id, listing_post_id, offerer_user_id, amount, message,
+                status, created_at, responded_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                offer.id,
+                offer.listing_post_id,
+                offer.offerer_user_id,
+                int(offer.amount),
+                offer.message,
+                offer.status,
+                offer.created_at,
+                offer.responded_at,
+            ),
+        )
+        return offer
+
+    async def get_offer(self, offer_id: str) -> BazaarOffer | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM bazaar_offers WHERE id=?",
+            (offer_id,),
+        )
+        return _row_to_offer(row_to_dict(row))
+
+    async def list_offers_for_listing(
+        self,
+        listing_post_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[BazaarOffer]:
+        if status is not None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM bazaar_offers "
+                "WHERE listing_post_id=? AND status=? "
+                "ORDER BY created_at DESC",
+                (listing_post_id, status),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT * FROM bazaar_offers "
+                "WHERE listing_post_id=? ORDER BY created_at DESC",
+                (listing_post_id,),
+            )
+        return [o for o in (_row_to_offer(d) for d in rows_to_dicts(rows)) if o]
+
+    async def list_offers_for_offerer(
+        self,
+        offerer_user_id: str,
+    ) -> list[BazaarOffer]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM bazaar_offers "
+            "WHERE offerer_user_id=? ORDER BY created_at DESC",
+            (offerer_user_id,),
+        )
+        return [o for o in (_row_to_offer(d) for d in rows_to_dicts(rows)) if o]
+
+    async def update_offer_status(
+        self,
+        offer_id: str,
+        new_status: str,
+    ) -> BazaarOffer:
+        """State-machine-guarded status flip.
+
+        Raises :class:`OfferStateError` if ``new_status`` isn't a legal
+        transition from the row's current status (e.g. accept after
+        reject).
+        """
+
+        def _run(conn):
+            row = conn.execute(
+                "SELECT status FROM bazaar_offers WHERE id=?",
+                (offer_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"offer {offer_id!r} not found")
+            current = row[0]
+            legal = BAZAAR_OFFER_TRANSITIONS.get(current, frozenset())
+            if new_status not in legal:
+                raise OfferStateError(
+                    f"cannot transition offer {offer_id!r} "
+                    f"from {current!r} to {new_status!r}"
+                )
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE bazaar_offers SET status=?, responded_at=? WHERE id=?",
+                (new_status, now, offer_id),
+            )
+
+        await self._db.transact(_run)
+        fetched = await self.get_offer(offer_id)
+        assert fetched is not None
+        return fetched
+
+    async def reject_other_pending_offers(
+        self,
+        listing_post_id: str,
+        *,
+        except_offer_id: str,
+    ) -> int:
+        """Bulk-reject every pending offer on ``listing_post_id`` EXCEPT
+        ``except_offer_id``. Used when the seller accepts one offer —
+        the others fall out as rejected automatically.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM bazaar_offers "
+            "WHERE listing_post_id=? AND status='pending' AND id<>?",
+            (listing_post_id, except_offer_id),
+        )
+        n = int(row["n"]) if row else 0
+        if n:
+            await self._db.enqueue(
+                "UPDATE bazaar_offers SET status='rejected', responded_at=? "
+                "WHERE listing_post_id=? AND status='pending' AND id<>?",
+                (now, listing_post_id, except_offer_id),
+            )
+        return n
+
+    # ── Saved-listing bookmarks ─────────────────────────────────────────
+
+    async def save_listing_bookmark(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> None:
+        await self._db.enqueue(
+            "INSERT OR IGNORE INTO saved_bazaar_listings(user_id, post_id) "
+            "VALUES(?, ?)",
+            (user_id, post_id),
+        )
+
+    async def unsave_listing_bookmark(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> None:
+        await self._db.enqueue(
+            "DELETE FROM saved_bazaar_listings WHERE user_id=? AND post_id=?",
+            (user_id, post_id),
+        )
+
+    async def is_listing_saved(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+    ) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM saved_bazaar_listings WHERE user_id=? AND post_id=?",
+            (user_id, post_id),
+        )
+        return row is not None
+
+    async def list_saved_listings(
+        self,
+        user_id: str,
+    ) -> list[dict]:
+        """Return ``[{post_id, saved_at}]`` newest first.
+
+        Intentionally cross-reference only by ``post_id`` — the client
+        hydrates full listing metadata via
+        ``GET /api/bazaar/{post_id}`` so deleted listings just disappear
+        from the UI instead of dangling as broken entries.
+        """
+        rows = await self._db.fetchall(
+            "SELECT post_id, saved_at FROM saved_bazaar_listings "
+            "WHERE user_id=? ORDER BY saved_at DESC",
+            (user_id,),
+        )
+        return [{"post_id": r["post_id"], "saved_at": r["saved_at"]} for r in rows]
+
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
 
@@ -453,6 +688,38 @@ def new_bid(
         id=uuid.uuid4().hex,
         listing_post_id=listing_post_id,
         bidder_user_id=bidder_user_id,
+        amount=int(amount),
+        created_at=datetime.now(timezone.utc).isoformat(),
+        message=message,
+    )
+
+
+def _row_to_offer(row: dict | None) -> BazaarOffer | None:
+    if row is None:
+        return None
+    return BazaarOffer(
+        id=row["id"],
+        listing_post_id=row["listing_post_id"],
+        offerer_user_id=row["offerer_user_id"],
+        amount=int(row["amount"]),
+        message=row.get("message"),
+        status=row.get("status", "pending"),
+        created_at=row["created_at"],
+        responded_at=row.get("responded_at"),
+    )
+
+
+def new_offer(
+    *,
+    listing_post_id: str,
+    offerer_user_id: str,
+    amount: int,
+    message: str | None = None,
+) -> BazaarOffer:
+    return BazaarOffer(
+        id=uuid.uuid4().hex,
+        listing_post_id=listing_post_id,
+        offerer_user_id=offerer_user_id,
         amount=int(amount),
         created_at=datetime.now(timezone.utc).isoformat(),
         message=message,

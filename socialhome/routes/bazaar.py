@@ -5,13 +5,14 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import bazaar_repo_key, bazaar_service_key
-from ..repositories.bazaar_repo import BidStateError
+from ..repositories.bazaar_repo import BidStateError, OfferStateError
 from ..security import error_response
 from ..services.bazaar_service import (
     _UNSET,
     BazaarServiceError,
     BidNotFoundError,
     ListingNotFoundError,
+    OfferNotFoundError,
 )
 from .base import BaseView
 
@@ -49,6 +50,19 @@ def _bid_dict(bid) -> dict:
         "rejection_reason": bid.rejection_reason,
         "withdrawn": bid.withdrawn,
         "created_at": bid.created_at,
+    }
+
+
+def _offer_dict(offer) -> dict:
+    return {
+        "id": offer.id,
+        "listing_post_id": offer.listing_post_id,
+        "offerer_user_id": offer.offerer_user_id,
+        "amount": offer.amount,
+        "message": offer.message,
+        "status": offer.status,
+        "created_at": offer.created_at,
+        "responded_at": offer.responded_at,
     }
 
 
@@ -286,3 +300,190 @@ class BazaarBidRejectView(BaseView):
         except BazaarServiceError as exc:
             return error_response(409, "BID_STATE_ERROR", str(exc))
         return web.json_response({"ok": True})
+
+
+# ─── Fixed-price offers (§23.23) ────────────────────────────────────────
+
+
+class BazaarOfferCollectionView(BaseView):
+    """``GET/POST /api/bazaar/{id}/offers``.
+
+    ``GET`` — seller sees every offer; other members see only their own.
+    ``POST`` — create a new offer on a fixed/negotiable listing.
+    Body: ``{amount, message?}``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            offers = await svc.list_offers(
+                self.match("id"),
+                actor_user_id=ctx.user_id,
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        return web.json_response([_offer_dict(o) for o in offers])
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.require_household_feature("bazaar")
+        svc = self.svc(bazaar_service_key)
+        body = await self.body()
+        amount = body.get("amount")
+        if amount is None:
+            return error_response(422, "UNPROCESSABLE", "amount is required.")
+        try:
+            amount_i = int(amount)
+        except TypeError, ValueError:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "amount must be an integer.",
+            )
+        try:
+            offer = await svc.make_offer(
+                listing_post_id=self.match("id"),
+                offerer_user_id=ctx.user_id,
+                amount=amount_i,
+                message=body.get("message"),
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "CONFLICT", str(exc))
+        return web.json_response(_offer_dict(offer), status=201)
+
+
+class BazaarOfferDetailView(BaseView):
+    """``DELETE /api/bazaar/{id}/offers/{offer_id}`` — offerer withdraws."""
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            updated = await svc.withdraw_fixed_offer(
+                offer_id=self.match("offer_id"),
+                actor_user_id=ctx.user_id,
+            )
+        except OfferNotFoundError:
+            return error_response(404, "NOT_FOUND", "Offer not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except OfferStateError as exc:
+            return error_response(409, "OFFER_STATE_ERROR", str(exc))
+        return web.json_response(_offer_dict(updated))
+
+
+class BazaarOfferAcceptView(BaseView):
+    """``POST /api/bazaar/{id}/offers/{offer_id}/accept`` — seller accepts.
+
+    Flips the listing to ``sold`` and auto-rejects every other pending
+    offer on the same listing in one atomic flow.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            updated = await svc.accept_fixed_offer(
+                offer_id=self.match("offer_id"),
+                actor_user_id=ctx.user_id,
+            )
+        except OfferNotFoundError:
+            return error_response(404, "NOT_FOUND", "Offer not found.")
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except OfferStateError as exc:
+            return error_response(409, "OFFER_STATE_ERROR", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "CONFLICT", str(exc))
+        return web.json_response(_offer_dict(updated))
+
+
+class BazaarOfferRejectView(BaseView):
+    """``POST /api/bazaar/{id}/offers/{offer_id}/reject`` — seller rejects.
+
+    Body: ``{reason?}``. Listing stays active.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        body = await self.body()
+        try:
+            updated = await svc.reject_fixed_offer(
+                offer_id=self.match("offer_id"),
+                actor_user_id=ctx.user_id,
+                reason=(body.get("reason") or None),
+            )
+        except OfferNotFoundError:
+            return error_response(404, "NOT_FOUND", "Offer not found.")
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except OfferStateError as exc:
+            return error_response(409, "OFFER_STATE_ERROR", str(exc))
+        return web.json_response(_offer_dict(updated))
+
+
+# ─── Saved listings (§23.23 — buyer bookmarks) ─────────────────────────
+
+
+class BazaarSaveView(BaseView):
+    """``POST /api/bazaar/{id}/save`` — bookmark.
+
+    ``DELETE /api/bazaar/{id}/save`` — unbookmark.
+    ``GET /api/bazaar/{id}/save`` — is-saved probe (returns ``{saved}``).
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        saved = await svc.is_listing_saved(
+            user_id=ctx.user_id,
+            post_id=self.match("id"),
+        )
+        return web.json_response({"saved": bool(saved)})
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            await svc.save_listing(
+                user_id=ctx.user_id,
+                post_id=self.match("id"),
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        return web.json_response({"saved": True}, status=201)
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        await svc.unsave_listing(
+            user_id=ctx.user_id,
+            post_id=self.match("id"),
+        )
+        return web.json_response({"saved": False})
+
+
+class MySavedBazaarView(BaseView):
+    """``GET /api/me/bazaar/saved`` — the caller's bookmarked listings.
+
+    Returns ``{saved: [{post_id, saved_at}]}`` newest first. The client
+    hydrates each listing via ``GET /api/bazaar/{post_id}``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        saved = await svc.list_saved_listings(ctx.user_id)
+        return web.json_response({"saved": saved})

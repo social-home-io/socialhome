@@ -313,3 +313,16 @@ export interface BazaarBid {
   withdrawn: boolean
   created_at: string
 }
+
+export type BazaarOfferStatus = 'pending' | 'accepted' | 'rejected' | 'withdrawn'
+
+export interface BazaarOffer {
+  id: string
+  listing_post_id: string
+  offerer_user_id: string
+  amount: number
+  message: string | null
+  status: BazaarOfferStatus
+  created_at: string
+  responded_at: string | null
+}
