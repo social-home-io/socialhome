@@ -130,6 +130,7 @@ from .federation.peer_directory_handler import PeerDirectoryHandler
 from .federation.private_invite_handler import PrivateSpaceInviteHandler
 from .services.peer_directory_service import PeerDirectoryService
 from .services.profile_federation_outbound import ProfileFederationOutbound
+from .services.url_update_outbound import UrlUpdateOutbound
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
@@ -572,6 +573,15 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
     )
     profile_federation_outbound.wire()
+
+    # §11 URL rotation fan-out. Triggered by
+    # PATCH /api/ha/integration/federation-base when the HA integration
+    # reports a new externally-reachable base URL.
+    url_update_outbound = UrlUpdateOutbound(
+        federation_service=federation_service,
+        federation_repo=federation_repo,
+    )
+    app[K.url_update_outbound_key] = url_update_outbound
 
     peer_directory_service = PeerDirectoryService(
         bus=bus,

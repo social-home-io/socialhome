@@ -392,6 +392,19 @@ CRUD surface for the bot personas themselves is under
 Both endpoints reject requests carrying `X-Ingress-User` (403) so a
 UI-authenticated user cannot impersonate the integration.
 
+## HFS — HA integration bridge
+
+Pushed to by the separate `ha-integration` HACS package. The integration
+resolves the externally-reachable URL inside HA (`external_url` or
+Nabu Casa Remote UI) and mirrors it here so the addon can stamp it into
+new pairing QRs + fan out `URL_UPDATED` to already-paired peers. Admin
+Bearer auth (the integration holds the auto-provisioned token).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/ha/integration/federation-base` | Current base the addon advertises. Returns `{"base": string \| null}`. |
+| PUT | `/api/ha/integration/federation-base` | Upsert `{"base": "https://..."}`. Validates scheme (http/https) and strips trailing slash. On value change, fans out `URL_UPDATED` to every confirmed peer. Returns `{ok, base, changed, peers_notified}`. |
+
 ## HFS — Storage, backup, misc
 
 | Method | Path | Purpose |
