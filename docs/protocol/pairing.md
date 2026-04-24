@@ -19,20 +19,38 @@ here.
 
 ## Flow — direct QR handshake
 
+The handshake runs on a **dedicated plaintext bootstrap transport**
+(`POST /api/pairing/peer-accept` and `POST /api/pairing/peer-confirm`)
+rather than the §24.11 federation inbox. The §24.11 pipeline starts
+with a `RemoteInstance` lookup that doesn't exist until pairing
+completes — classic bootstrap chicken-and-egg. Both bootstrap
+endpoints are public; the body's Ed25519 signature is the auth
+(TOFU on first contact, plus the SAS round-trip closes the MITM
+window).
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant A as HFS A<br/>(inviter)
     participant B as HFS B<br/>(scanner)
-    A->>A: generate QR<br/>(identity_pk, dh_pk,<br/>inbox_url, token, expiry)
+
+    A->>A: generate QR<br/>(own_inbox_id, identity_pk,<br/>dh_pk, inbox_url, token, expiry)
     Note over A,B: user shows QR to B
-    B->>B: scan QR, compute<br/>shared DH secret
-    B->>A: PAIRING_INTRO<br/>(B.identity_pk, B.dh_pk)
-    A->>A: verify token, derive<br/>shared DH secret
-    A->>B: PAIRING_ACCEPT<br/>(+ 6-digit SAS)
-    Note over A,B: users compare SAS<br/>out-of-band
-    B->>A: PAIRING_CONFIRM
-    Note over A,B: both sides persist<br/>directional session keys
+
+    B->>B: scan QR → accept_pairing()<br/>derives shared DH secret,<br/>stores local RemoteInstance for A
+    B->>A: POST /api/pairing/peer-accept<br/>(B.identity_pk, B.dh_pk,<br/>B.inbox_url, B.display_name,<br/>token, SAS, Ed25519 signature)
+
+    A->>A: handle_peer_accept: TOFU verify sig,<br/>derive shared secret, KEK-encrypt keys,<br/>save RemoteInstance for B,<br/>publish PairingAcceptReceived
+    A-->>A: WS pairing.accept_received →<br/>admin UI auto-fills SAS digits
+
+    Note over A,B: admins compare SAS<br/>out-of-band
+
+    A->>A: admin enters SAS → confirm_pairing()<br/>flips local RemoteInstance → CONFIRMED
+    A->>B: POST /api/pairing/peer-confirm<br/>(token, A.instance_id, Ed25519 signature)
+
+    B->>B: handle_peer_confirm: verify sig<br/>with stored A.identity_pk,<br/>flip local RemoteInstance → CONFIRMED,<br/>publish PairingConfirmed
+
+    Note over A,B: both sides hold CONFIRMED pair;<br/>normal §24.11 federation starts here.
     A-->>B: URL_UPDATED<br/>(if URL changes later)
 ```
 
@@ -109,14 +127,20 @@ the receiver still decrypts with a key it's about to delete.
 ## Implementation
 
 - `socialhome/federation/pairing_coordinator.py` — state machine for
-  direct + auto-pair flows.
-- `socialhome/services/federation_inbound/pairing.py` — inbound
-  handlers (one per event type, registered with the dispatch registry).
-  Includes the `URL_UPDATED` handler.
+  direct + auto-pair flows, plus `handle_peer_accept` /
+  `handle_peer_confirm` for the bootstrap transport.
+- `socialhome/federation/peer_pairing_client.py` — outbound HTTP
+  client for `/api/pairing/peer-{accept,confirm}`. Signs bodies with
+  Ed25519 using this instance's identity seed.
+- `socialhome/routes/pairing_peer.py` — the two public bootstrap
+  endpoints.
+- `socialhome/routes/pairing.py` — local-only admin routes used by
+  the UI (`/api/pairing/initiate`, `/accept`, `/confirm`).
+- `socialhome/services/federation_inbound/pairing.py` — §24.11
+  inbound handlers for already-paired peers (covers
+  `PAIRING_INTRO_RELAY`, `URL_UPDATED`, `UNPAIR`).
 - `socialhome/services/url_update_outbound.py` — outbound fan-out of
   `URL_UPDATED` when this instance's base URL changes.
-- `socialhome/routes/pairing.py` — REST endpoints used by the UI
-  (`/api/pairing/*`).
 - `socialhome/crypto.py` — key derivation primitives.
 
 ## Spec references

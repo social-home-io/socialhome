@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
     "/healthz",
     "/api/pairing/accept",  # pairing handshake — uses its own auth
+    "/api/pairing/peer-accept",  # §11 bootstrap — Ed25519 body sig
+    "/api/pairing/peer-confirm",  # §11 bootstrap — Ed25519 body sig
     "/api/auth/token",  # standalone login — issues the token
     "/federation/inbox/",  # federation inbound — envelope-signed
     "/.well-known/",

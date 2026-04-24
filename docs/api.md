@@ -312,6 +312,8 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | POST | `/api/pairing/initiate` | Generate a QR payload. Empty body; base URL comes from the platform adapter (`[standalone].external_url` or the HA integration's pushed base). Returns 422 `NOT_CONFIGURED` if unset. |
 | POST | `/api/pairing/accept` | Scanner posts its side of the DH. |
 | POST | `/api/pairing/confirm` | Confirm SAS-verified pair. |
+| POST | `/api/pairing/peer-accept` | **Peer-to-peer bootstrap** (§11). Public (Ed25519 body signature is the auth). B → A: delivers B's identity + DH keys so A can materialise its RemoteInstance and surface the SAS. Body: `{token, verification_code, identity_pk, dh_pk, inbox_url, display_name?, sig_suite?, pq_identity_pk?, pq_algorithm?, signature}`. Returns `{ok, instance_id, replay}`. |
+| POST | `/api/pairing/peer-confirm` | **Peer-to-peer bootstrap** (§11). Public. A → B after A's admin enters the matching SAS: flips B's local status to CONFIRMED. Body: `{token, instance_id, signature}`. Returns `{ok, instance_id, replay}`. |
 | POST | `/api/pairing/introduce` | Introduce self to an intermediary. |
 | POST | `/api/pairing/auto-pair-via` | Ask a mutual peer to relay. |
 | GET / POST | `/api/pairing/auto-pair-requests[/{id}/{approve\|decline}]` | Auto-pair queue. |

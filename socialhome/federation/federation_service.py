@@ -63,6 +63,7 @@ from .inbound_validator import (
     make_verify_signature,
 )
 from .pairing_coordinator import PairingCoordinator
+from .peer_pairing_client import PeerPairingClient
 from .event_dispatch_registry import EventDispatchRegistry
 
 
@@ -198,13 +199,22 @@ class FederationService:
             pq_signer=pq_signer,
             sig_suite=sig_suite,
         )
-        # §11 QR-code pairing handshake delegate.
+        # §11 QR-code pairing handshake delegate. The peer-pairing
+        # client (plaintext Ed25519-signed bootstrap transport) is
+        # attached right after construction — circular-free.
         self._pairing = PairingCoordinator(
             federation_repo,
             key_manager,
             own_identity_pk,
             own_pq_pk=own_pq_pk,
             own_sig_suite=sig_suite,
+            bus=bus,
+        )
+        self._pairing.attach_peer_pairing_client(
+            PeerPairingClient(
+                own_identity_seed=own_identity_seed,
+                client_factory=self._get_http_client,
+            ),
         )
         # §24.11 inbound validation pipeline (middleware chain).
         self._inbound_pipeline = None  # lazy-built on first use
@@ -1052,6 +1062,14 @@ class FederationService:
     ) -> RemoteInstance:
         """Delegates to :class:`PairingCoordinator`."""
         return await self._pairing.confirm(token, verification_code)
+
+    async def handle_peer_accept(self, body: dict) -> dict:
+        """Delegates to :class:`PairingCoordinator.handle_peer_accept`."""
+        return await self._pairing.handle_peer_accept(body)
+
+    async def handle_peer_confirm(self, body: dict) -> dict:
+        """Delegates to :class:`PairingCoordinator.handle_peer_confirm`."""
+        return await self._pairing.handle_peer_confirm(body)
 
     # ─── Encryption helpers ───────────────────────────────────────────────
 

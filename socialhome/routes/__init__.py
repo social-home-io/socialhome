@@ -148,6 +148,10 @@ from .pairing import (
     PairingRelayDeclineView,
     PairingRelayRequestCollectionView,
 )
+from .pairing_peer import (
+    PairingPeerAcceptView,
+    PairingPeerConfirmView,
+)
 from .polls import (
     PollCloseView,
     PollSummaryView,
@@ -625,6 +629,9 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/pairing/initiate", PairingInitiateView)
     app.router.add_view("/api/pairing/accept", PairingAcceptView)
     app.router.add_view("/api/pairing/confirm", PairingConfirmView)
+    # §11 peer-to-peer bootstrap transport (plaintext, Ed25519-signed).
+    app.router.add_view("/api/pairing/peer-accept", PairingPeerAcceptView)
+    app.router.add_view("/api/pairing/peer-confirm", PairingPeerConfirmView)
     app.router.add_view("/api/pairing/introduce", PairingIntroduceView)
     app.router.add_view("/api/pairing/auto-pair-via", AutoPairViaView)
     app.router.add_view(
