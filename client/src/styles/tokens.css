@@ -1,50 +1,66 @@
 /**
  * Design Tokens (§23.111) — CSS custom properties.
  *
- * Modern 2026 palette: indigo-500 primary, emerald success, amber
- * warning, red danger. Dark mode uses warm slate tones (Tailwind
- * slate-950/800/100) rather than saturated navy. Shadows are
- * two-layer so hover lifts read cleanly on every surface.
+ * 2026 palette: hearth-terracotta primary, warm parchment
+ * surfaces, ink (warm-tinted brown) text. Same brand DNA as the
+ * marketing site at social-home.io — Social Home looks like a
+ * household, not like every other SaaS app.
+ *
+ * Brand alignment (2026.4):
+ *   * Primary    indigo → hearth (#D2542A)
+ *   * Surfaces   white / slate → cream paper / parchment
+ *   * Ink        slate-900 → #1A1814 (warm-tinted)
+ *   * Shadows    cool slate-blue → warm earth (rgba(26,24,20,…))
+ *   * Type       Inter / system → Manrope (geometric, free, warm)
+ *   * Motion     unchanged — spring easing is app-appropriate.
+ *
+ * Cream-on-white-with-slate is the most-tested SaaS combination;
+ * we leave it deliberately. The household OS that lives in the
+ * background of someone's home has earned the right to look
+ * like one.
  */
 :root {
   /* ── Brand colors ─────────────────────────────────────────────── */
-  --sh-primary:         #6366F1;     /* indigo-500 */
-  --sh-primary-hover:   #4F46E5;     /* indigo-600 */
-  --sh-primary-soft:    #EEF2FF;     /* indigo-50  — tinted surfaces */
+  --sh-primary:         #D2542A;     /* hearth — terracotta */
+  --sh-primary-hover:   #A33F1A;     /* hearth-deep */
+  --sh-primary-soft:    #F1D9CA;     /* hearth-tint — for tinted surfaces */
   --sh-danger:          #EF4444;     /* red-500 */
   --sh-danger-hover:    #DC2626;     /* red-600 */
-  --sh-success:         #10B981;     /* emerald-500 */
-  --sh-warning:         #F59E0B;     /* amber-500 */
+  --sh-success:         #1F4438;     /* moss — hearth-green secondary */
+  --sh-warning:         #C8902F;     /* honey — replaces amber-500 */
 
-  /* ── Surface ladder ───────────────────────────────────────────── */
-  --sh-bg:              #FFFFFF;
-  --sh-bg-secondary:    #F8FAFC;     /* slate-50 — app chrome */
-  --sh-bg-tertiary:     #F1F5F9;     /* slate-100 — nested cards */
-  --sh-text:            #0F172A;     /* slate-900 — crisper than #1A1A1A */
-  --sh-text-muted:      #64748B;     /* slate-500 — 7.1:1 on bg */
-  --sh-border:          #E2E8F0;     /* slate-200 — softer than DEE2E6 */
-  --sh-border-strong:   #CBD5E1;     /* slate-300 — divider on hover */
+  /* ── Surface ladder — cream parchment, never pure white ───────── */
+  --sh-bg:              #F4ECE0;     /* paper — primary surface */
+  --sh-bg-secondary:    #ECE0CE;     /* paper-deep — chrome / sidebar */
+  --sh-bg-tertiary:     #EFE3D2;     /* paper-tinted — nested cards */
+  --sh-text:            #1A1814;     /* ink — warm brown-tinted */
+  --sh-text-muted:      #807766;     /* ink-quiet — 5.4:1 on paper */
+  --sh-border:          #D8CFC0;     /* warm-tinted hairline */
+  --sh-border-strong:   #B5AC9C;     /* ink-faint — divider on hover */
 
-  /* ── Elevation ladder ─────────────────────────────────────────── */
-  --sh-shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --sh-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05),
-                  0 1px 3px rgba(15, 23, 42, 0.08);
-  --sh-shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.08),
-                  0 2px 4px -2px rgba(15, 23, 42, 0.06);
-  --sh-shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.10),
-                  0 4px 6px -4px rgba(15, 23, 42, 0.08);
-  --sh-shadow-xl: 0 20px 25px -5px rgba(15, 23, 42, 0.12),
-                  0 8px 10px -6px rgba(15, 23, 42, 0.08);
+  /* ── Elevation ladder — warm earth shadow, not cool slate ────── */
+  --sh-shadow-xs: 0 1px 2px rgba(26, 24, 20, 0.05);
+  --sh-shadow-sm: 0 1px 2px rgba(26, 24, 20, 0.06),
+                  0 1px 3px rgba(26, 24, 20, 0.10);
+  --sh-shadow-md: 0 4px 6px -1px rgba(26, 24, 20, 0.10),
+                  0 2px 4px -2px rgba(26, 24, 20, 0.08);
+  --sh-shadow-lg: 0 10px 15px -3px rgba(26, 24, 20, 0.12),
+                  0 4px 6px -4px rgba(26, 24, 20, 0.10);
+  --sh-shadow-xl: 0 20px 25px -5px rgba(26, 24, 20, 0.15),
+                  0 8px 10px -6px rgba(26, 24, 20, 0.10);
   /* Legacy alias — pre-existing rules use a flat --sh-shadow. */
   --sh-shadow:    var(--sh-shadow-sm);
 
-  /* ── Typography ───────────────────────────────────────────────── */
-  --sh-font-family:         -apple-system, BlinkMacSystemFont, 'Inter',
+  /* ── Typography — Manrope (geometric, free, warm-leaning) ─────
+     Loaded from fonts.googleapis.com via the @import in app.css.
+     Keep the system fallback chain so the first paint isn't
+     held back if the network is slow. */
+  --sh-font-family:         'Manrope', -apple-system, BlinkMacSystemFont,
                             'Segoe UI', Roboto, sans-serif;
-  --sh-font-family-display: 'Inter', -apple-system, BlinkMacSystemFont,
+  --sh-font-family-display: 'Manrope', -apple-system, BlinkMacSystemFont,
                             'Segoe UI', system-ui, sans-serif;
-  --sh-font-family-mono:    ui-monospace, 'SF Mono', 'Menlo',
-                            'Cascadia Code', 'Source Code Pro', monospace;
+  --sh-font-family-mono:    'JetBrains Mono', ui-monospace, 'SF Mono',
+                            'Menlo', 'Cascadia Code', monospace;
   --sh-font-size-xs:    0.75rem;
   --sh-font-size-sm:    0.875rem;
   --sh-font-size-base:  1rem;
@@ -92,44 +108,46 @@
    * above so untouched households look identical. */
   --hh-accent:        var(--sh-primary);
   --hh-surface:       var(--sh-bg);
-  --hh-surface-dark:  #0F172A;
+  --hh-surface-dark:  #161821;
   --hh-font:          var(--sh-font-family);
   --hh-radius-card:   var(--sh-radius-md);
   --hh-radius-btn:    var(--sh-radius-md);
   --hh-density-gap:   var(--sh-space-md);   /* "comfortable" */
 }
 
-/* Dark mode (§23.35) — warm slate, modern tone. */
+/* Dark mode (§23.35) — warm slate with brand-coherent ink. */
 .sh-theme-dark {
-  --sh-primary:        #818CF8;  /* indigo-400 — more readable on dark */
-  --sh-primary-hover:  #6366F1;  /* indigo-500 */
-  --sh-primary-soft:   #1E1B4B;  /* indigo-950 — tinted dark surface */
-  --sh-success:        #34D399;  /* emerald-400 */
-  --sh-warning:        #FBBF24;  /* amber-400 */
+  --sh-primary:        #E96A3F;  /* hearth lifted for dark surfaces */
+  --sh-primary-hover:  #C04E22;  /* hearth-deep dark variant */
+  --sh-primary-soft:   #3A211A;  /* hearth tinted onto a dark surface */
+  --sh-success:        #6FA38B;  /* moss-light — readable on dark */
+  --sh-warning:        #E8B865;  /* honey-light */
   --sh-danger:         #F87171;  /* red-400 */
   --sh-danger-hover:   #EF4444;
 
-  --sh-bg:             #0F172A;  /* slate-950 */
-  --sh-bg-secondary:   #1E293B;  /* slate-800 */
-  --sh-bg-tertiary:    #334155;  /* slate-700 */
-  --sh-text:           #F1F5F9;  /* slate-100 */
-  --sh-text-muted:     #94A3B8;  /* slate-400 */
-  --sh-border:         #334155;  /* slate-700 */
-  --sh-border-strong:  #475569;  /* slate-600 */
+  --sh-bg:             #161821;  /* paper-deep dark */
+  --sh-bg-secondary:   #1F222C;  /* one notch up for chrome */
+  --sh-bg-tertiary:    #252834;  /* two notches up for nested cards */
+  --sh-text:           #F1E9DA;  /* ink-light — warm cream */
+  --sh-text-muted:     #8A8270;  /* ink-quiet dark */
+  --sh-border:         #3A3A36;  /* warm-tinted hairline */
+  --sh-border-strong:  #4F4A40;  /* ink-faint dark */
 
-  --sh-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --sh-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5),
-                  0 1px 3px rgba(0, 0, 0, 0.4);
-  --sh-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5),
-                  0 2px 4px -2px rgba(0, 0, 0, 0.4);
-  --sh-shadow-lg: 0 10px 20px -3px rgba(0, 0, 0, 0.6),
-                  0 4px 8px -4px rgba(0, 0, 0, 0.4);
-  --sh-shadow-xl: 0 20px 30px -5px rgba(0, 0, 0, 0.7),
-                  0 8px 12px -6px rgba(0, 0, 0, 0.5);
+  /* Shadows can stay near-black on dark surfaces; the warm tint
+     above is what carries the brand. */
+  --sh-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --sh-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55),
+                  0 1px 3px rgba(0, 0, 0, 0.45);
+  --sh-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.55),
+                  0 2px 4px -2px rgba(0, 0, 0, 0.45);
+  --sh-shadow-lg: 0 10px 20px -3px rgba(0, 0, 0, 0.65),
+                  0 4px 8px -4px rgba(0, 0, 0, 0.45);
+  --sh-shadow-xl: 0 20px 30px -5px rgba(0, 0, 0, 0.75),
+                  0 8px 12px -6px rgba(0, 0, 0, 0.55);
   --sh-shadow:    var(--sh-shadow-sm);
 }
 .sh-theme-dark :focus-visible {
-  outline-color: #A5B4FC;    /* indigo-300 — higher luminance on slate */
+  outline-color: #F1D9CA;    /* hearth-tint — high luminance on dark paper */
 }
 
 /* Responsive breakpoints (§23.113) */

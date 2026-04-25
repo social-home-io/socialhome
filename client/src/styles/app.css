@@ -17,6 +17,12 @@
  *     connections, widgets, shopping, pages, search, sessions)
  */
 
+/* Brand fonts — Manrope (body + display) + JetBrains Mono
+   (technical accents). Loaded with display=swap so the system
+   fallback in ``--sh-font-family`` keeps the first paint
+   responsive while the WOFF2 streams in. */
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap");
+
 /* ───── 1. Reset + base ──────────────────────────────────────────────── */
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -505,7 +511,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-modal-overlay, .sh-dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.55);
+  background: rgba(26, 24, 20, 0.55);     /* warm ink scrim instead of slate-blue */
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   display: flex;
@@ -1535,7 +1541,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-receipt--sent      { color: var(--sh-text-muted); }
 .sh-receipt--delivered { color: var(--sh-text-muted); }
 .sh-receipt--read      { color: var(--sh-primary); font-weight: 700; }
-.sh-message--mine .sh-receipt--read      { color: #A5B4FC; }
+.sh-message--mine .sh-receipt--read      { color: #F1D9CA; }   /* hearth-tint on hearth gradient */
 .sh-message--mine .sh-receipt--delivered { color: rgba(255,255,255,0.7); }
 .sh-message--mine .sh-receipt--sent      { color: rgba(255,255,255,0.5); }
 
@@ -5576,7 +5582,7 @@ hr {
 .sh-switcher-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.55);
+  background: rgba(26, 24, 20, 0.55);     /* warm ink scrim instead of slate-blue */
   backdrop-filter: blur(8px);
   z-index: calc(var(--sh-z-modal) + 10);
   display: flex;
