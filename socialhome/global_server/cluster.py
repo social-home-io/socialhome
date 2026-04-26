@@ -39,6 +39,12 @@ HEARTBEAT_FAIL_THRESHOLD: int = 3
 SYNC_RETRY_DELAY_S: int = 5
 CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 
+#: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
+#: sessions. ``pick_signaling_node`` filters out any node already at this
+#: count, and the GFS replies ``SPACE_SYNC_DIRECT_FAILED`` when nothing
+#: remains.
+MAX_SIGNALING_SESSIONS: int = 200
+
 
 # ─── NODE_* message types ───────────────────────────────────────────────
 
@@ -72,6 +78,7 @@ class ClusterService:
         "_heartbeat_task",
         "_fail_counts",
         "_seen_relays",
+        "_active_sync_count",
     )
 
     def __init__(
@@ -100,6 +107,11 @@ class ClusterService:
         self._fail_counts: dict[str, int] = {}
         #: 10-minute TTL dedup for relayed message ids.
         self._seen_relays: dict[str, float] = {}
+        #: Spec §24.10.7 — local view of each node's active sync-signaling
+        #: load. The own count is authoritative; peer counts are refreshed
+        #: from incoming ``NODE_HEARTBEAT`` payloads. Local-per-node, no
+        #: cluster-wide consensus required.
+        self._active_sync_count: dict[str, int] = {}
 
     # ─── Back-compat single-node stub API ─────────────────────────────
 
@@ -156,6 +168,94 @@ class ClusterService:
                 for r in rows
             ],
         }
+
+    # ─── Sync-signaling round-robin (spec §24.10.7) ───────────────────
+
+    async def pick_signaling_node(self) -> str | None:
+        """Return the URL of the least-loaded cluster node, or ``None``.
+
+        Implements the weighted least-connections selector from spec
+        §24.10.7. Candidates are non-offline peers plus self; each
+        candidate is filtered out when its ``_active_sync_count`` has
+        reached :data:`MAX_SIGNALING_SESSIONS` (S-8). Sorting by
+        ``(count, node_id)`` gives a deterministic tie-break.
+
+        Returns ``None`` in three cases the caller must distinguish:
+
+        * Single-node mode (``cluster_enabled = false``) — no peer to
+          load-balance with; the SH provider should omit ``signaling_node``
+          from ``SPACE_SYNC_OFFER`` (spec §24.10.7 "Non-cluster GFS").
+        * No peer is currently online and ``self`` is also at cap — the
+          GFS replies ``SPACE_SYNC_DIRECT_FAILED {reason: "node_capacity"}``.
+        * Misconfiguration (own ``node_id``/``url`` blank) — fail safe.
+        """
+        if not self._enabled:
+            return None
+        if not self._node_id or not self._self_url:
+            return None
+        rows = await self._repo.list_nodes()
+        candidates: list[tuple[int, str, str]] = []
+        for r in rows:
+            if r.status == "offline":
+                continue
+            if r.node_id == self._node_id:
+                # Own row — prefer the in-memory authoritative count.
+                continue
+            count = self._active_sync_count.get(
+                r.node_id,
+                int(r.active_sync_sessions or 0),
+            )
+            if count >= MAX_SIGNALING_SESSIONS:
+                continue
+            candidates.append((count, r.node_id, r.url))
+        own_count = self._active_sync_count.get(self._node_id, 0)
+        if own_count < MAX_SIGNALING_SESSIONS:
+            candidates.append((own_count, self._node_id, self._self_url))
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[0][2]
+
+    async def note_signaling_started(self, node_id: str) -> None:
+        """Increment the active sync-signaling count for *node_id*.
+
+        Called by the GFS REST handler the moment ``pick_signaling_node``
+        commits to a node, so the next picker sees the updated load.
+        For self the count is also persisted to ``cluster_nodes`` so the
+        column in ``GET /cluster/health`` and admin UIs stays current.
+        """
+        if not node_id:
+            return
+        new_count = self._active_sync_count.get(node_id, 0) + 1
+        self._active_sync_count[node_id] = new_count
+        if node_id == self._node_id:
+            await self._persist_own_count(new_count)
+
+    async def note_signaling_ended(self, node_id: str) -> None:
+        """Decrement the active sync-signaling count for *node_id*.
+
+        Floor at zero — duplicate releases (e.g. both
+        ``SPACE_SYNC_DIRECT_READY`` and ``SPACE_SYNC_DIRECT_FAILED``) are
+        idempotent rather than producing negative counts. Persists to
+        ``cluster_nodes`` for self only.
+        """
+        if not node_id:
+            return
+        new_count = max(0, self._active_sync_count.get(node_id, 0) - 1)
+        self._active_sync_count[node_id] = new_count
+        if node_id == self._node_id:
+            await self._persist_own_count(new_count)
+
+    async def _persist_own_count(self, count: int) -> None:
+        if not self._enabled or not self._node_id:
+            return
+        try:
+            await self._repo.update_active_sync_sessions(self._node_id, count)
+        except Exception as exc:
+            log.debug(
+                "cluster: failed to persist active_sync_sessions for self: %s",
+                exc,
+            )
 
     # ─── Outbound NODE_* broadcasts ──────────────────────────────────
 
@@ -275,7 +375,25 @@ class ClusterService:
             )
         )
 
-    async def handle_heartbeat(self, from_node_id: str) -> None:
+    async def handle_heartbeat(
+        self,
+        from_node_id: str,
+        payload: dict | None = None,
+    ) -> None:
+        """Refresh ``last_seen`` for *from_node_id* and capture its load.
+
+        ``payload['active_sync_sessions']`` is the peer's
+        authoritative sync-signaling count (spec §24.10.7). It is mirrored
+        into our in-memory ``_active_sync_count`` so the next
+        ``pick_signaling_node`` reflects fresh load, and persisted to the
+        ``cluster_nodes`` row so admin UIs stay accurate.
+        """
+        peer_count: int | None = None
+        if isinstance(payload, dict) and "active_sync_sessions" in payload:
+            try:
+                peer_count = max(0, int(payload["active_sync_sessions"]))
+            except TypeError, ValueError:
+                peer_count = None
         rows = await self._repo.list_nodes()
         for r in rows:
             if r.node_id == from_node_id:
@@ -290,6 +408,12 @@ class ClusterService:
                         active_sync_sessions=r.active_sync_sessions,
                     )
                 )
+                if peer_count is not None:
+                    self._active_sync_count[from_node_id] = peer_count
+                    await self._repo.update_active_sync_sessions(
+                        from_node_id,
+                        peer_count,
+                    )
                 return
 
     async def apply_sync_client(
@@ -384,6 +508,27 @@ class ClusterService:
                                 active_sync_sessions=r.active_sync_sessions,
                             )
                         )
+                        # Spec §24.10.7 — propagate own sync-signaling load
+                        # via NODE_HEARTBEAT so peers' selectors see fresh
+                        # counts on the next ``pick_signaling_node``.
+                        try:
+                            await self._post_to_peer(
+                                r.url,
+                                NODE_HEARTBEAT,
+                                {
+                                    "active_sync_sessions": self._active_sync_count.get(
+                                        self._node_id,
+                                        0,
+                                    ),
+                                },
+                                session=None,
+                            )
+                        except Exception as exc:
+                            log.debug(
+                                "cluster: NODE_HEARTBEAT to %s failed: %s",
+                                r.url,
+                                exc,
+                            )
                     else:
                         self._fail_counts[r.url] = fails + 1
                         if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:

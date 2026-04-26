@@ -45,7 +45,12 @@ from .admin import (
     AdminSpaceCollectionView,
     AdminUiIndexView,
 )
-from .cluster import ClusterHealthView, ClusterSyncView
+from .cluster import (
+    ClusterHealthView,
+    ClusterSignalingBeginView,
+    ClusterSignalingEndView,
+    ClusterSyncView,
+)
 from .relay import (
     AppealView,
     HealthzView,
@@ -99,6 +104,15 @@ def register_routes(
     # Cluster (spec §24.10).
     app.router.add_view("/cluster/sync", ClusterSyncView)
     app.router.add_view("/cluster/health", ClusterHealthView)
+    # Spec §24.10.7 — round-robin sync-signaling node selection.
+    app.router.add_view(
+        "/cluster/signaling-session",
+        ClusterSignalingBeginView,
+    )
+    app.router.add_view(
+        "/cluster/signaling-session/release",
+        ClusterSignalingEndView,
+    )
 
     # SH↔SH WebRTC signalling rendezvous for §4.2.3 direct DataChannel
     # sync. The GFS is a public bulletin board for SDP offers / answers /

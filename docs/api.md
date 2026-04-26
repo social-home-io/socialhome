@@ -474,6 +474,8 @@ sync. The GFS holds no PeerConnection.
 |---|---|---|
 | POST | `/cluster/sync` | Cluster-node state sync. |
 | GET | `/cluster/health` | Node health. |
+| POST | `/cluster/signaling-session` | Pick a least-loaded signaling node for a sync session (spec §24.10.7). |
+| POST | `/cluster/signaling-session/release` | Release a signaling session on `SPACE_SYNC_DIRECT_READY` / `DIRECT_FAILED`. |
 
 ## GFS — Admin portal
 
@@ -525,6 +527,7 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/calls` | 10 / min / user |
 | `POST /api/calls/{id}/decline` | 10 / min / user |
 | `POST /api/calls/{id}/hangup` | 30 / min / user |
+| `POST /cluster/signaling-session{,/release}` | 60 / min / paired instance |
 | Federation inbound (per signing instance) | Rolling window; see §24.11. |
 
 Rate-limit responses return HTTP 429 with a `Retry-After` header.

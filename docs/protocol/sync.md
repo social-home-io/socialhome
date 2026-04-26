@@ -85,6 +85,33 @@ If the DataChannel negotiation fails, the provider emits
 `SPACE_SYNC_DIRECT_FAILED` and continues over HTTPS inbox. The sync
 completes; only the transport changes.
 
+## Round-robin signaling-node selection (cluster GFS)
+
+When a Social Home instance is connected to a multi-node GFS cluster,
+the load of relaying ICE candidates between requester and provider
+must be spread across nodes rather than always landing on the
+caller's preferred GFS. Spec §24.10.7.
+
+- The provider, before generating `SPACE_SYNC_OFFER`, calls
+  `POST /cluster/signaling-session` on its connected GFS node. The
+  GFS picks the least-loaded online cluster node by weighted
+  least-connections (min-heap on `(active_sync_sessions, node_id)`)
+  and increments its counter, returning the chosen URL.
+- The provider includes that URL in the OFFER as `signaling_node`.
+  Single-node deployments return `null` and the field is omitted.
+- The requester sends `SPACE_SYNC_ANSWER` and trickles `SPACE_SYNC_ICE`
+  directly to `signaling_node`.
+- On `SPACE_SYNC_DIRECT_READY` or `SPACE_SYNC_DIRECT_FAILED` the
+  provider calls `POST /cluster/signaling-session/release` to
+  decrement the counter.
+
+Counters are local-per-node (no consensus). They propagate via
+`NODE_HEARTBEAT` so peers' selectors see fresh load on the next pick.
+A node at `MAX_SIGNALING_SESSIONS = 200` is filtered out of the
+candidate set; if every node is at the cap the GFS replies with
+`503 {reason: "node_capacity"}` and the SH provider falls back to
+relay sync.
+
 ## Implementation
 
 - `socialhome/federation/sync/space/exporter.py` — provider

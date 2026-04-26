@@ -826,6 +826,11 @@ class AbstractClusterRepo(Protocol):
     async def list_nodes(self) -> list[ClusterNode]: ...
     async def remove_node(self, node_id: str) -> None: ...
     async def get_leader_id(self) -> str | None: ...
+    async def update_active_sync_sessions(
+        self,
+        node_id: str,
+        count: int,
+    ) -> None: ...
 
 
 class SqliteClusterRepo:
@@ -880,6 +885,22 @@ class SqliteClusterRepo:
             "SELECT node_id FROM cluster_nodes ORDER BY added_at LIMIT 1",
         )
         return row["node_id"] if row else None
+
+    async def update_active_sync_sessions(
+        self,
+        node_id: str,
+        count: int,
+    ) -> None:
+        """Persist the per-node sync-signaling load (spec §24.10.7).
+
+        Touches only ``active_sync_sessions`` — keeps the heartbeat /
+        round-robin update path from clobbering ``status`` or
+        ``last_seen``.
+        """
+        await self._db.enqueue(
+            "UPDATE cluster_nodes SET active_sync_sessions=? WHERE node_id=?",
+            (max(0, int(count)), node_id),
+        )
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
