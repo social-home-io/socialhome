@@ -428,3 +428,152 @@ async def test_poll_handlers_not_registered_without_poll_repo(bus, repos):
     assert FederationEventType.SPACE_POLL_CREATED not in types
     assert FederationEventType.SPACE_POLL_VOTE_CAST not in types
     assert FederationEventType.SPACE_POLL_CLOSED not in types
+
+
+# ─── Gallery items (§23.119) ────────────────────────────────────────
+
+
+class _FakeGalleryRepo:
+    """Stub matching the slice of ``AbstractGalleryRepo`` the handler uses."""
+
+    def __init__(self) -> None:
+        self.created = []
+        self.deleted = []
+        self.counts: dict[str, int] = {}
+        self.items_by_id: dict[str, object] = {}
+        self.fail_create = False
+
+    async def create_item(self, item):
+        if self.fail_create:
+            raise RuntimeError("fk-violation simulated")
+        self.created.append(item)
+        self.items_by_id[item.id] = item
+        return item
+
+    async def increment_item_count(self, album_id, delta):
+        self.counts[album_id] = self.counts.get(album_id, 0) + int(delta)
+
+    async def get_item(self, item_id):
+        return self.items_by_id.get(item_id)
+
+    async def delete_item(self, item_id):
+        self.deleted.append(item_id)
+        self.items_by_id.pop(item_id, None)
+
+
+@pytest.fixture
+def gallery_handlers(bus, repos):
+    gallery = _FakeGalleryRepo()
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        gallery_repo=gallery,
+    )
+    h.attach_to(_FakeFederationService())
+    return h, gallery
+
+
+async def test_gallery_item_saved_happy_path(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": "gi-1",
+                "album_id": "alb-1",
+                "uploaded_by": "alice",
+                "item_type": "photo",
+                "thumbnail_url": "/api/media/t.jpg",
+                "width": 800,
+                "height": 600,
+                "occurred_at": "2026-04-10T12:00:00+00:00",
+            },
+            space_id="sp-1",
+        ),
+    )
+    assert len(gallery.created) == 1
+    assert gallery.created[0].id == "gi-1"
+    # Album item count bumped.
+    assert gallery.counts == {"alb-1": 1}
+
+
+async def test_gallery_item_saved_drops_on_repo_error(gallery_handlers):
+    """Unknown album / FK failure → log + drop, no count bump."""
+    handlers, gallery = gallery_handlers
+    gallery.fail_create = True
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": "gi-fk",
+                "album_id": "missing",
+                "uploaded_by": "alice",
+                "item_type": "photo",
+                "thumbnail_url": "/api/media/t.jpg",
+                "width": 1,
+                "height": 1,
+            },
+        ),
+    )
+    assert gallery.created == []
+    assert gallery.counts == {}
+
+
+async def test_gallery_item_saved_missing_required_fields(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_item_saved(
+        _event(FederationEventType.SPACE_GALLERY_ITEM_CREATED, {"id": "gi-x"}),
+    )
+    assert gallery.created == []
+
+
+async def test_gallery_item_deleted_decrements_count(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    # Seed an existing item so delete decrements.
+    from socialhome.domain.gallery import GalleryItem
+
+    seeded = GalleryItem(
+        id="gi-del",
+        album_id="alb-1",
+        uploaded_by="alice",
+        item_type="photo",
+        url="/api/media/x",
+        thumbnail_url="/api/media/x-thumb",
+        width=1,
+        height=1,
+    )
+    gallery.items_by_id["gi-del"] = seeded
+    await handlers._on_gallery_item_deleted(
+        _event(FederationEventType.SPACE_GALLERY_ITEM_DELETED, {"id": "gi-del"}),
+    )
+    assert gallery.deleted == ["gi-del"]
+    assert gallery.counts == {"alb-1": -1}
+
+
+async def test_gallery_item_deleted_unknown_is_noop(gallery_handlers):
+    """Delete for an item we never had → silent."""
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_item_deleted(
+        _event(FederationEventType.SPACE_GALLERY_ITEM_DELETED, {"id": "ghost"}),
+    )
+    assert gallery.deleted == []
+    assert gallery.counts == {}
+
+
+async def test_gallery_handlers_not_registered_without_repo(bus, repos):
+    """No gallery_repo → events not registered."""
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+    )
+    fed = _FakeFederationService()
+    h.attach_to(fed)
+    types = {t for t, _ in fed._event_registry.registered}
+    assert FederationEventType.SPACE_GALLERY_ITEM_CREATED not in types
+    assert FederationEventType.SPACE_GALLERY_ITEM_DELETED not in types

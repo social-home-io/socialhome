@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from ...domain.calendar import CalendarEvent
 from ...domain.federation import FederationEventType
+from ...domain.gallery import GalleryItem
 from ...domain.page import Page
 from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
+    from ...repositories.gallery_repo import AbstractGalleryRepo
     from ...repositories.page_repo import AbstractPageRepo
     from ...repositories.poll_repo import AbstractPollRepo
     from ...repositories.sticky_repo import AbstractStickyRepo
@@ -45,6 +47,7 @@ class SpaceContentInboundHandlers:
         "_task_repo",
         "_calendar_repo",
         "_poll_repo",
+        "_gallery_repo",
     )
 
     def __init__(
@@ -56,6 +59,7 @@ class SpaceContentInboundHandlers:
         task_repo: "AbstractSpaceTaskRepo",
         calendar_repo: "AbstractSpaceCalendarRepo",
         poll_repo: "AbstractPollRepo | None" = None,
+        gallery_repo: "AbstractGalleryRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._page_repo = page_repo
@@ -63,6 +67,7 @@ class SpaceContentInboundHandlers:
         self._task_repo = task_repo
         self._calendar_repo = calendar_repo
         self._poll_repo = poll_repo
+        self._gallery_repo = gallery_repo
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry
@@ -126,6 +131,20 @@ class SpaceContentInboundHandlers:
             registry.register(
                 FederationEventType.SPACE_SCHEDULE_FINALIZED,
                 self._on_schedule_finalized,
+            )
+
+        # Gallery items — only registered when a gallery_repo is wired.
+        # Albums still ride the chunked initial sync (§4.2.3); we only
+        # push individual *items* per-event so SPACE_SYNC_RESUME has
+        # something to replay.
+        if self._gallery_repo is not None:
+            registry.register(
+                FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+                self._on_gallery_item_saved,
+            )
+            registry.register(
+                FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+                self._on_gallery_item_deleted,
             )
 
     # ─── Tasks ───────────────────────────────────────────────────────────
@@ -380,3 +399,71 @@ class SpaceContentInboundHandlers:
             post_id=post_id,
             slot_id=slot_id,
         )
+
+    # ─── Gallery items (§23.119) ─────────────────────────────────────────
+
+    async def _on_gallery_item_saved(self, event: "FederationEvent") -> None:
+        """Mirror a remote upload into the local ``gallery_items`` table.
+
+        Carries the §S-9 thumbnail-only projection — the full file is
+        fetched lazily by the receiver via the existing on-demand
+        media path. The item's ``album_id`` must reference a local
+        album row already (chunked initial sync seeds those); if it
+        doesn't, ``create_item`` raises and we drop the event rather
+        than auto-creating a stub.
+        """
+        if self._gallery_repo is None:
+            return
+        p = event.payload
+        item_id = str(p.get("id") or p.get("item_id") or "")
+        album_id = str(p.get("album_id") or "")
+        uploaded_by = str(p.get("uploaded_by") or p.get("uploader") or "")
+        item_type = str(p.get("item_type") or "photo")
+        thumbnail_url = str(p.get("thumbnail_url") or "")
+        if not item_id or not album_id or not uploaded_by:
+            log.debug("SPACE_GALLERY_ITEM_* missing required field")
+            return
+        item = GalleryItem(
+            id=item_id,
+            album_id=album_id,
+            uploaded_by=uploaded_by,
+            item_type=item_type,
+            url=str(p.get("url") or ""),
+            thumbnail_url=thumbnail_url,
+            width=int(p.get("width") or 0),
+            height=int(p.get("height") or 0),
+            duration_s=p.get("duration_s"),
+            caption=p.get("caption"),
+            taken_at=p.get("taken_at"),
+            sort_order=int(p.get("sort_order") or 0),
+            created_at=p.get("created_at") or p.get("occurred_at"),
+        )
+        try:
+            await self._gallery_repo.create_item(item)
+            await self._gallery_repo.increment_item_count(album_id, +1)
+        except Exception as exc:
+            # Foreign-key failure (unknown album, unknown uploader) or a
+            # duplicate id from a prior chunked-sync delivery — log and
+            # drop. Matches the chunked-sync receiver's tolerance.
+            log.debug(
+                "SPACE_GALLERY_ITEM_CREATED apply failed item=%s: %s",
+                item_id,
+                exc,
+            )
+
+    async def _on_gallery_item_deleted(self, event: "FederationEvent") -> None:
+        if self._gallery_repo is None:
+            return
+        item_id = str(event.payload.get("id") or event.payload.get("item_id") or "")
+        if not item_id:
+            return
+        # Decrement album count if the item exists; ``delete_item``
+        # is idempotent so a duplicate delete from the chunked path
+        # is harmless.
+        existing = await self._gallery_repo.get_item(item_id)
+        if existing is not None:
+            await self._gallery_repo.delete_item(item_id)
+            await self._gallery_repo.increment_item_count(
+                existing.album_id,
+                -1,
+            )

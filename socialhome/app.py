@@ -135,6 +135,7 @@ from .services.url_update_outbound import UrlUpdateOutbound
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
+from .services.gallery_federation_outbound import GalleryFederationOutbound
 from .services.sticky_federation_outbound import StickyFederationOutbound
 from .services.task_federation_outbound import TaskFederationOutbound
 from .services.federation_inbound import (
@@ -474,6 +475,7 @@ def _wire_federation_stack(
         task_repo=space_task_repo,
         calendar_repo=space_calendar_repo,
         poll_repo=space_poll_repo,
+        gallery_repo=gallery_repo,
     ).attach_to(federation_service)
 
     # §25.6 Direct Space Sync — content transfer over DataChannel.
@@ -601,6 +603,18 @@ def _wire_federation_stack(
     )
     space_member_profile_federation_outbound.wire()
 
+    # §23.119 — gallery items federate per-event so SPACE_SYNC_RESUME
+    # has something to replay after long offlines, and so peers see
+    # uploads in near real-time between chunked sync ticks. Albums
+    # still ride the chunked sync only.
+    gallery_federation_outbound = GalleryFederationOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        gallery_repo=gallery_repo,
+        space_repo=space_repo,
+    )
+    gallery_federation_outbound.wire()
+
     # DM history sync: reconcile missed messages when a peer reconnects.
     dm_history_provider = DmHistoryProvider(
         conversation_repo=conversation_repo,
@@ -650,6 +664,7 @@ def _wire_federation_stack(
         page_repo=page_repo,
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
+        gallery_repo=gallery_repo,
     )
 
     async def _space_sync_resume(event) -> None:

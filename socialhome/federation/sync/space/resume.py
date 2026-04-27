@@ -17,9 +17,11 @@ Resource types replayed today:
 * ``SPACE_PAGE_CREATED``         — wiki-style pages.
 * ``SPACE_STICKY_CREATED``       — corkboard notes.
 * ``SPACE_CALENDAR_EVENT_CREATED`` — calendar events (RRULEs included).
-
-Gallery items are intentionally excluded — there's no
-``SPACE_GALLERY_*`` federation event yet. Add them here when one lands.
+* ``SPACE_GALLERY_ITEM_CREATED`` — gallery items, joined via
+  ``gallery_items.album_id`` → ``gallery_albums.space_id``. Albums
+  themselves still ride the chunked initial sync (§4.2.3) — they're
+  structural, rare, and a per-event push would race with the album
+  pre-sync.
 
 The replay payload for every type matches what its corresponding
 ``federation_inbound_*`` handler reads, so the receiver applies a
@@ -37,11 +39,13 @@ from ....domain.federation import FederationEventType
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
     from ....domain.federation import FederationEvent
+    from ....domain.gallery import GalleryItem
     from ....domain.page import Page
     from ....domain.post import Comment, Post
     from ....domain.sticky import Sticky
     from ....domain.task import Task
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
+    from ....repositories.gallery_repo import AbstractGalleryRepo
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
@@ -79,6 +83,7 @@ class SpaceSyncResumeProvider:
         "_page_repo",
         "_sticky_repo",
         "_space_calendar_repo",
+        "_gallery_repo",
     )
 
     def __init__(
@@ -91,6 +96,7 @@ class SpaceSyncResumeProvider:
         page_repo: "AbstractPageRepo | None" = None,
         sticky_repo: "AbstractStickyRepo | None" = None,
         space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
+        gallery_repo: "AbstractGalleryRepo | None" = None,
     ) -> None:
         self._federation = federation_service
         self._space_repo = space_repo
@@ -99,6 +105,7 @@ class SpaceSyncResumeProvider:
         self._page_repo = page_repo
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
+        self._gallery_repo = gallery_repo
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -185,6 +192,11 @@ class SpaceSyncResumeProvider:
             to=event.from_instance,
         )
         sent += await self._replay_calendar(
+            space_id,
+            since,
+            to=event.from_instance,
+        )
+        sent += await self._replay_gallery_items(
             space_id,
             since,
             to=event.from_instance,
@@ -325,6 +337,36 @@ class SpaceSyncResumeProvider:
             to=to,
         )
 
+    async def _replay_gallery_items(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+    ) -> int:
+        """Replay missed ``SPACE_GALLERY_ITEM_CREATED`` events.
+
+        Albums themselves still ride the chunked initial sync path —
+        they're rare and structural — so resume only re-emits items.
+        Receivers FK back to the album row already mirrored on
+        first-pair sync; an item whose album is unknown locally drops
+        cleanly via the inbound handler's broad-except.
+        """
+        if self._gallery_repo is None:
+            return 0
+        items = await self._gallery_repo.list_items_since(
+            space_id,
+            since,
+            limit=MAX_PER_RESOURCE,
+        )
+        return await self._send_each(
+            items,
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            _gallery_item_to_payload,
+            space_id=space_id,
+            to=to,
+        )
+
     async def _send_each(
         self,
         rows: list,
@@ -433,6 +475,16 @@ def _calendar_to_payload(event: "CalendarEvent") -> dict:
         "attendees": list(event.attendees),
         "created_by": event.created_by,
     }
+
+
+def _gallery_item_to_payload(item: "GalleryItem") -> dict:
+    """§S-9 thumbnail-only projection — full file fetched on demand.
+
+    Mirrors ``GalleryItem.to_thumbnail_dict`` so receivers see the
+    same shape on resume replay as on the live per-event push from
+    ``GalleryFederationOutbound``.
+    """
+    return item.to_thumbnail_dict()
 
 
 def _iso(value) -> str:

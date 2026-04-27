@@ -9,6 +9,7 @@ import pytest
 
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.gallery import GalleryItem
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.sticky import Sticky
@@ -88,7 +89,7 @@ class _FakeListSinceRepo:
         self._method = method
 
     def __getattr__(self, name):  # type: ignore[no-redef]
-        if name in ("list_since", "list_events_since"):
+        if name in ("list_since", "list_events_since", "list_items_since"):
 
             async def _impl(space_id, since, *, limit=500):
                 return [r for r in self._rows if _ts_attr(r) > since][:limit]
@@ -178,6 +179,20 @@ def _cal_event(i: int, at: datetime) -> CalendarEvent:
     )
 
 
+def _gallery_item(i: int, iso: str) -> GalleryItem:
+    return GalleryItem(
+        id=f"gi-{i}",
+        album_id="alb-1",
+        uploaded_by="alice",
+        item_type="photo",
+        url=f"/api/media/orig-{i}.jpg",
+        thumbnail_url=f"/api/media/thumb-{i}.jpg",
+        width=800,
+        height=600,
+        created_at=iso,
+    )
+
+
 def _event(from_instance: str, payload: dict, *, space_id: str = "sp-1"):
     return SimpleNamespace(
         event_type=FederationEventType.SPACE_SYNC_RESUME,
@@ -199,6 +214,7 @@ def provider_factory():
         pages=None,
         stickies=None,
         cal_events=None,
+        gallery_items=None,
         members,
     ):
         fed = _FakeFederation()
@@ -214,6 +230,9 @@ def provider_factory():
             ),
             space_calendar_repo=(
                 _FakeListSinceRepo(cal_events) if cal_events is not None else None
+            ),
+            gallery_repo=(
+                _FakeListSinceRepo(gallery_items) if gallery_items is not None else None
             ),
         )
         return provider, fed, post_repo
@@ -434,6 +453,28 @@ async def test_handle_request_replays_calendar_events(provider_factory):
     assert {"id", "calendar_id", "summary", "start", "end"} <= set(payload)
 
 
+async def test_handle_request_replays_gallery_items(provider_factory):
+    """Gallery items newer than ``since`` go out as SPACE_GALLERY_ITEM_CREATED."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    iso = (base + timedelta(minutes=1)).isoformat()
+    items = [_gallery_item(0, iso), _gallery_item(1, iso)]
+    provider, fed, _ = provider_factory(
+        gallery_items=items,
+        members=["peer-a"],
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert sent == 2
+    assert all(
+        s["type"] == FederationEventType.SPACE_GALLERY_ITEM_CREATED for s in fed.sent
+    )
+    payload = fed.sent[0]["payload"]
+    # §S-9 thumbnail-only projection — no full ``url`` field.
+    assert "url" not in payload
+    assert {"id", "album_id", "uploaded_by", "thumbnail_url"} <= set(payload)
+
+
 async def test_handle_request_aggregates_across_resources(provider_factory):
     """The total return value sums every resource type."""
     base = datetime(2026, 4, 1, tzinfo=timezone.utc)
@@ -446,12 +487,13 @@ async def test_handle_request_aggregates_across_resources(provider_factory):
         pages=[_page(0, iso)],
         stickies=[_sticky(0, iso)],
         cal_events=[_cal_event(0, base + timedelta(minutes=1))],
+        gallery_items=[_gallery_item(0, iso)],
         members=["peer-a"],
     )
     sent = await provider.handle_request(
         _event("peer-a", {"space_id": "sp-1", "since": cutoff}),
     )
-    assert sent == 6
+    assert sent == 7
     assert {s["type"] for s in fed.sent} == {
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_COMMENT_CREATED,
@@ -459,6 +501,7 @@ async def test_handle_request_aggregates_across_resources(provider_factory):
         FederationEventType.SPACE_PAGE_CREATED,
         FederationEventType.SPACE_STICKY_CREATED,
         FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        FederationEventType.SPACE_GALLERY_ITEM_CREATED,
     }
 
 

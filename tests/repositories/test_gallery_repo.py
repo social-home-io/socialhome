@@ -193,6 +193,116 @@ async def test_get_first_item_thumbnail_empty_album(env):
     assert await repo.get_first_item_thumbnail("alb-1") is None
 
 
+# ── list_items_since (resume catch-up §4.4) ───────────────────────────
+
+
+async def test_list_items_since_joins_through_album(env):
+    """``list_items_since`` filters by parent album's space_id (JOIN)."""
+    db, repo = env
+    # Two albums: one in our space, one household-level (NULL space_id).
+    await repo.create_album(_album("alb-space", space_id="sp-1"))
+    await repo.create_album(_album("alb-house", space_id=None))
+    # One old item in each — both predate the cutoff.
+    await db.enqueue(
+        "INSERT INTO gallery_items"
+        "(id, album_id, uploaded_by, item_type, filename, thumbnail_filename,"
+        " width, height, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "old-space",
+            "alb-space",
+            "a-id",
+            "photo",
+            "f1",
+            "t1",
+            1,
+            1,
+            "2025-01-01T00:00:00Z",
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items"
+        "(id, album_id, uploaded_by, item_type, filename, thumbnail_filename,"
+        " width, height, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "old-house",
+            "alb-house",
+            "a-id",
+            "photo",
+            "f2",
+            "t2",
+            1,
+            1,
+            "2025-01-01T00:00:00Z",
+        ),
+    )
+    # Two new items — one in each album — after the cutoff.
+    await db.enqueue(
+        "INSERT INTO gallery_items"
+        "(id, album_id, uploaded_by, item_type, filename, thumbnail_filename,"
+        " width, height, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "new-space",
+            "alb-space",
+            "a-id",
+            "photo",
+            "f3",
+            "t3",
+            1,
+            1,
+            "2026-04-10T12:00:00Z",
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items"
+        "(id, album_id, uploaded_by, item_type, filename, thumbnail_filename,"
+        " width, height, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "new-house",
+            "alb-house",
+            "a-id",
+            "photo",
+            "f4",
+            "t4",
+            1,
+            1,
+            "2026-04-10T12:00:00Z",
+        ),
+    )
+    rows = await repo.list_items_since("sp-1", "2026-01-01T00:00:00Z")
+    ids = [r.id for r in rows]
+    # Only items in space-scoped albums after the cutoff are returned.
+    assert ids == ["new-space"]
+
+
+async def test_list_items_since_respects_limit(env):
+    """``limit`` caps the burst size."""
+    db, repo = env
+    await repo.create_album(_album("alb-1", space_id="sp-1"))
+    for i in range(5):
+        await db.enqueue(
+            "INSERT INTO gallery_items"
+            "(id, album_id, uploaded_by, item_type, filename, thumbnail_filename,"
+            " width, height, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                f"it-{i}",
+                "alb-1",
+                "a-id",
+                "photo",
+                "f",
+                "t",
+                1,
+                1,
+                f"2026-04-{10 + i:02d}T12:00:00Z",
+            ),
+        )
+    rows = await repo.list_items_since(
+        "sp-1",
+        "2026-01-01T00:00:00Z",
+        limit=2,
+    )
+    assert len(rows) == 2
+
+
 # ─── Domain helpers ──────────────────────────────────────────────────────
 
 

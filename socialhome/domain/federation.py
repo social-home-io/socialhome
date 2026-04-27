@@ -90,6 +90,12 @@ class FederationEventType(str, enum.Enum):
     SPACE_SCHEDULE_RESPONSE_UPDATED = "space_schedule_response_updated"
     SPACE_SCHEDULE_FINALIZED = "space_schedule_finalized"
     SPACE_LOCATION_UPDATED = "space_location_updated"
+    # ── Gallery (§23.119) — per-event push complementing the chunked
+    # initial sync. Carries the thumbnail-only projection per S-9; the
+    # full file is fetched lazily via ``gallery_item_full``. Albums
+    # ride on the chunked sync only — they're rare and structural.
+    SPACE_GALLERY_ITEM_CREATED = "space_gallery_item_created"
+    SPACE_GALLERY_ITEM_DELETED = "space_gallery_item_deleted"
 
     # ── Space encryption key exchange ──
     SPACE_KEY_EXCHANGE = "space_key_exchange"

@@ -87,11 +87,14 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 - `SPACE_STICKY_CREATED` — stickies (`sticky_repo.list_since`)
 - `SPACE_CALENDAR_EVENT_CREATED` — calendar events
   (`space_calendar_repo.list_events_since`, RRULEs included)
+- `SPACE_GALLERY_ITEM_CREATED` — gallery items, joined via
+  `gallery_items.album_id` → `gallery_albums.space_id`. Albums
+  themselves still ride the chunked initial sync (§4.2.3); only items
+  push per-event. Wire payload is the §S-9 thumbnail-only projection
+  — full files are fetched on demand.
 
 Each resource is capped at `MAX_PER_RESOURCE = 500` events per request
 — receivers paginate by re-issuing with the new high-water mark.
-Gallery items are intentionally excluded until `SPACE_GALLERY_*`
-federation events land.
 
 ## Backpressure
 

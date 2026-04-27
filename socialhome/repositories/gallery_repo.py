@@ -30,6 +30,13 @@ class AbstractGalleryRepo(Protocol):
         limit: int = 50,
         before: str | None = None,
     ) -> list[GalleryItem]: ...
+    async def list_items_since(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        limit: int = 500,
+    ) -> list[GalleryItem]: ...
     async def get_item(self, item_id: str) -> GalleryItem | None: ...
     async def create_item(self, item: GalleryItem) -> GalleryItem: ...
     async def delete_item(self, item_id: str) -> None: ...
@@ -204,6 +211,31 @@ class SqliteGalleryRepo:
             (item_id,),
         )
         return self._row_to_item(dict(row)) if row else None
+
+    async def list_items_since(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        limit: int = 500,
+    ) -> list[GalleryItem]:
+        """Items uploaded after ``since`` for any album in *space_id*.
+
+        Joins ``gallery_items`` with ``gallery_albums`` so resume can
+        scope by space — the item row itself only knows its album.
+        Items in household-level albums (NULL ``space_id``) are
+        intentionally excluded; they don't federate. Oldest-first by
+        ``created_at`` so the receiver applies them in chronological
+        order.
+        """
+        rows = await self._db.fetchall(
+            "SELECT i.* FROM gallery_items i "
+            "JOIN gallery_albums a ON a.id = i.album_id "
+            "WHERE a.space_id=? AND i.created_at > ? "
+            "ORDER BY i.created_at ASC LIMIT ?",
+            (space_id, since, int(limit)),
+        )
+        return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 
     async def create_item(self, item: GalleryItem) -> GalleryItem:
         # Strip the "/api/media/" prefix so the column stores the bare filename.
