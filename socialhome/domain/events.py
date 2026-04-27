@@ -169,6 +169,36 @@ class SpaceConfigChanged(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class SpaceZoneUpserted(DomainEvent):
+    """A per-space display zone was created or modified (§23.8.7).
+
+    Picked up by ``SpaceZoneOutboundService`` (federation fan-out)
+    and ``RealtimeService`` (local WS ``space_zone_changed`` frame).
+    """
+
+    space_id: str
+    zone_id: str
+    name: str
+    latitude: float
+    longitude: float
+    radius_m: int
+    color: str | None
+    created_by: str
+    updated_at: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceZoneDeleted(DomainEvent):
+    """A per-space display zone was deleted (§23.8.7)."""
+
+    space_id: str
+    zone_id: str
+    deleted_by: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Tasks ────────────────────────────────────────────────────────────────
 
 

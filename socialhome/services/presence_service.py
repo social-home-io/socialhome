@@ -58,43 +58,25 @@ class PresenceService:
     async def list_presence_for_members(
         self,
         user_ids: set[str],
-        *,
-        location_mode: str = "gps",
     ) -> list[PersonPresence]:
-        """§23.80 — presence snapshot filtered to a specific member set
-        + per-space privacy mode.
+        """§23.80 — presence snapshot filtered to a specific member set.
 
         ``user_ids`` = the local user_ids allowed to surface in the
-        result (i.e. the space's member list).
+        result (typically the space's member list, intersected with
+        ``location_share_enabled`` opt-ins by the caller).
 
-        ``location_mode`` governs what location detail leaks:
-
-        * ``"off"``       — returns an empty list (caller should hide
-                            the map entirely).
-        * ``"zone_only"`` — keeps ``zone_name`` + ``state`` but nulls
-                            lat/lon/accuracy.
-        * ``"gps"``       — full data (subject to the existing
-                            §25 4-decimal truncation applied at ingest).
+        Each member's GPS comes from the household ``presence`` table.
+        Returned entries are stripped of ``zone_name`` because zones
+        are a household-only concept (§7.3); space callers must not
+        receive HA zone names. The 4dp truncation is already applied
+        at ingest (§25 GPS rule).
         """
-        if location_mode == "off":
-            return []
         all_entries = await self._repo.list_active()
-        out: list[PersonPresence] = []
-        for p in all_entries:
-            if p.user_id not in user_ids:
-                continue
-            if location_mode == "zone_only":
-                out.append(
-                    replace(
-                        p,
-                        latitude=None,
-                        longitude=None,
-                        gps_accuracy_m=None,
-                    )
-                )
-            else:
-                out.append(p)
-        return out
+        return [
+            replace(p, zone_name=None)
+            for p in all_entries
+            if p.user_id in user_ids
+        ]
 
     async def update_location(self, update: LocationUpdate) -> None:
         """Persist a location update from the HA integration or browser.

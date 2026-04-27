@@ -868,11 +868,15 @@ def _bot_view(
 class SpacePresenceView(BaseView):
     """``GET /api/spaces/{id}/presence`` — §23.80 space-scoped presence.
 
-    Only members of the space see this. The response is filtered + GPS
-    redacted according to the space's ``location_mode``
-    (``off`` / ``zone_only`` / ``gps``). When ``feature_location`` is
-    disabled or ``location_mode == "off"``, returns an empty list so
-    the frontend can hide the map without a special 403.
+    Only members of the space see this. When ``feature_location`` is
+    disabled, returns an empty list so the frontend can hide the map
+    without a special 403. When enabled, returns each member's GPS pin
+    (subject to their per-member ``location_share_enabled`` opt-in).
+
+    The response NEVER carries ``zone_name`` — HA-defined zone names
+    are stripped at the household boundary. Per-space display zones
+    live in ``space_zones`` (§23.8.7) and are matched to GPS
+    client-side. See §25.10.3 WS-events table.
     """
 
     async def get(self) -> web.Response:
@@ -899,28 +903,24 @@ class SpacePresenceView(BaseView):
             return web.json_response(
                 {
                     "feature_enabled": False,
-                    "location_mode": "off",
                     "entries": [],
                 }
             )
         members = await repo.list_members(space_id)
-        member_ids = {m.user_id for m in members}
+        opted_in = {
+            m.user_id for m in members if m.location_share_enabled
+        }
         presence_svc = self.svc(presence_service_key)
-        entries = await presence_svc.list_presence_for_members(
-            member_ids,
-            location_mode=space.features.location_mode,
-        )
+        entries = await presence_svc.list_presence_for_members(opted_in)
         return web.json_response(
             {
                 "feature_enabled": True,
-                "location_mode": space.features.location_mode,
                 "entries": [
                     {
                         "user_id": p.user_id,
                         "username": p.username,
                         "display_name": p.display_name,
                         "state": p.state,
-                        "zone_name": p.zone_name,
                         "latitude": p.latitude,
                         "longitude": p.longitude,
                         "gps_accuracy_m": p.gps_accuracy_m,

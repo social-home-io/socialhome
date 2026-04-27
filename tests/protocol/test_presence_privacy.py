@@ -101,7 +101,14 @@ async def test_inaccurate_gps_dropped_with_500m_gate(env):
     assert row["latitude"] is None or row["latitude"] == 0.0
 
 
-async def test_zone_only_state_omits_coords(env):
+async def test_zoned_state_without_coords_stores_zone_name(env):
+    """Household presence row stores ``zone_name`` even when GPS is absent.
+
+    Zone names are household-only data (§7.3) — they hydrate the household
+    dashboard but are stripped from any space-bound payload (§23.8.6). Here
+    we just assert the household persistence path keeps ``zone_name`` when
+    HA reports a zoned state without coordinates.
+    """
     db, svc = env
     await svc.update_location(
         LocationUpdate(
