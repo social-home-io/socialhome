@@ -55,6 +55,13 @@ NODE_SYNC_SPACE = "NODE_SYNC_SPACE"
 NODE_SYNC_REPORT = "NODE_SYNC_REPORT"  # Phase Z — fraud aggregation
 NODE_RELAY = "NODE_RELAY"
 NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
+#: Spec §24.10.3 / §4.4.6 — partition-healing pair. ``CATCHUP`` is sent
+#: by a node that just came back online; the receiver replies with one
+#: ``GAP`` per space where its own ``last_relay_ts`` is newer than the
+#: sender's (fire-and-discard posts can't be replayed; subscribers see
+#: a banner instead).
+NODE_PARTITION_CATCHUP = "NODE_PARTITION_CATCHUP"
+NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
 
 
 class ClusterService:
@@ -79,6 +86,8 @@ class ClusterService:
         "_fail_counts",
         "_seen_relays",
         "_active_sync_count",
+        "_local_last_relay_ts",
+        "_partition_gaps",
     )
 
     def __init__(
@@ -112,6 +121,20 @@ class ClusterService:
         #: from incoming ``NODE_HEARTBEAT`` payloads. Local-per-node, no
         #: cluster-wide consensus required.
         self._active_sync_count: dict[str, int] = {}
+        #: Spec §4.4.6 / §24.10.3 — last unix-ts at which we relayed
+        #: anything for ``space_id``. Updated by ``record_relay_ts`` (the
+        #: federation service calls this on successful relay). Used to
+        #: emit ``NODE_PARTITION_GAP`` when a peer's ``CATCHUP`` payload
+        #: shows it missed posts during a partition. In-memory only —
+        #: a restart loses the timeline, which is acceptable since
+        #: gap-reporting is best-effort.
+        self._local_last_relay_ts: dict[str, float] = {}
+        #: Inbound ``NODE_PARTITION_GAP`` accumulator. Keyed by
+        #: ``space_id``; each value is the most recent gap range we saw
+        #: from any peer. Read by
+        #: :meth:`pending_partition_gaps` so SH-side fan-out can drain
+        #: them after a partition heals.
+        self._partition_gaps: dict[str, dict] = {}
 
     # ─── Back-compat single-node stub API ─────────────────────────────
 
@@ -470,6 +493,141 @@ class ClusterService:
         if msg_id:
             self._seen_relays[msg_id] = time.monotonic()
             self._gc_seen()
+        if space_id:
+            self._local_last_relay_ts[space_id] = time.time()
+
+    def record_relay_ts(self, space_id: str) -> None:
+        """Bump the local high-water mark for ``space_id``.
+
+        Called by the federation service after a successful own-node
+        post-relay. Pairs with :meth:`apply_relay` (which records the
+        timestamp on inbound NODE_RELAY) so partition-catchup math
+        sees both inbound and locally-originated traffic.
+        """
+        if space_id:
+            self._local_last_relay_ts[space_id] = time.time()
+
+    async def apply_partition_catchup(
+        self,
+        from_node_id: str,
+        last_relay_ts: dict,
+        *,
+        session: aiohttp.ClientSession | None = None,
+    ) -> list[dict]:
+        """Inbound ``NODE_PARTITION_CATCHUP`` (spec §4.4.6).
+
+        For every space the peer mentions, compare its ``last_relay_ts``
+        to ours. If we have newer data the peer must have missed posts
+        during the partition (fire-and-discard — they can't be replayed).
+        Reply with one ``NODE_PARTITION_GAP`` per affected space so the
+        peer can surface the banner to its SH subscribers.
+
+        Returns the list of gap descriptors (also useful for tests).
+        """
+        if not isinstance(last_relay_ts, dict):
+            return []
+        gaps: list[dict] = []
+        for space_id, peer_ts_raw in last_relay_ts.items():
+            try:
+                peer_ts = float(peer_ts_raw)
+            except TypeError, ValueError:
+                continue
+            local_ts = self._local_last_relay_ts.get(str(space_id), 0.0)
+            if local_ts > peer_ts:
+                gaps.append(
+                    {
+                        "space_id": str(space_id),
+                        "gap_start": peer_ts,
+                        "gap_end": local_ts,
+                    }
+                )
+        if not gaps or not self._enabled:
+            return gaps
+        peer_url = await self._lookup_node_url(from_node_id)
+        if not peer_url:
+            return gaps
+        for gap in gaps:
+            try:
+                await self._post_to_peer(
+                    peer_url,
+                    NODE_PARTITION_GAP,
+                    gap,
+                    session=session,
+                )
+            except Exception as exc:
+                log.debug(
+                    "cluster: NODE_PARTITION_GAP to %s failed: %s",
+                    peer_url,
+                    exc,
+                )
+        return gaps
+
+    async def apply_partition_gap(self, payload: dict) -> None:
+        """Inbound ``NODE_PARTITION_GAP``.
+
+        Records the gap so the federation service can drain it via
+        :meth:`pending_partition_gaps` and emit ``SPACE_PARTITION_GAP``
+        WS frames to subscribed SH instances.
+        """
+        space_id = str(payload.get("space_id") or "")
+        if not space_id:
+            return
+        try:
+            gap_start = float(payload.get("gap_start") or 0.0)
+            gap_end = float(payload.get("gap_end") or 0.0)
+        except TypeError, ValueError:
+            return
+        if gap_end <= gap_start:
+            return
+        self._partition_gaps[space_id] = {
+            "space_id": space_id,
+            "gap_start": gap_start,
+            "gap_end": gap_end,
+        }
+
+    def pending_partition_gaps(self) -> list[dict]:
+        """Drain + return all ``NODE_PARTITION_GAP`` messages received."""
+        gaps = list(self._partition_gaps.values())
+        self._partition_gaps.clear()
+        return gaps
+
+    async def announce_partition_catchup(
+        self,
+        peer_url: str,
+        *,
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
+        """Send ``NODE_PARTITION_CATCHUP`` to a peer that just came back.
+
+        Triggered by the heartbeat loop on offline → online transition.
+        Broadcasts our current ``_local_last_relay_ts`` per space so the
+        peer can compute gaps and reply with ``NODE_PARTITION_GAP``.
+        """
+        if not self._enabled or not peer_url:
+            return
+        snapshot = {sid: ts for sid, ts in self._local_last_relay_ts.items()}
+        try:
+            await self._post_to_peer(
+                peer_url,
+                NODE_PARTITION_CATCHUP,
+                {"last_relay_ts": snapshot},
+                session=session,
+            )
+        except Exception as exc:
+            log.debug(
+                "cluster: NODE_PARTITION_CATCHUP to %s failed: %s",
+                peer_url,
+                exc,
+            )
+
+    async def _lookup_node_url(self, node_id: str) -> str:
+        if not node_id:
+            return ""
+        nodes = await self._repo.list_nodes()
+        for n in nodes:
+            if n.node_id == node_id:
+                return n.url
+        return ""
 
     # ─── Internals ────────────────────────────────────────────────────
 
@@ -492,6 +650,22 @@ class ClusterService:
                 rows = await self._repo.list_nodes()
                 for r in rows:
                     if r.status == "offline":
+                        # Probe offline peers too — coming back triggers
+                        # a partition-catchup handshake (spec §4.4.6).
+                        if await self._ping_peer(r.url):
+                            self._fail_counts[r.url] = 0
+                            await self._repo.upsert_node(
+                                ClusterNode(
+                                    node_id=r.node_id,
+                                    url=r.url,
+                                    public_key=r.public_key,
+                                    status="online",
+                                    last_seen=_now_iso(),
+                                    added_at=r.added_at,
+                                    active_sync_sessions=r.active_sync_sessions,
+                                ),
+                            )
+                            await self.announce_partition_catchup(r.url)
                         continue
                     ok = await self._ping_peer(r.url)
                     fails = self._fail_counts.get(r.url, 0)

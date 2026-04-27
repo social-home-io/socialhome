@@ -12,12 +12,14 @@ The pairing flow (simpler than HFS):
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 
 import aiohttp
 
+from ..crypto import b64url_encode, sign_ed25519
 from ..domain.federation import GfsConnection
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 
@@ -344,3 +346,120 @@ class GfsConnectionService:
         except aiohttp.ClientError as exc:
             log.warning("GFS send_appeal request failed: %s", exc)
             return False
+
+    # ── Sync-signaling round-robin (spec §24.10.7) ────────────────────────
+
+    async def _first_active_gfs(self) -> GfsConnection | None:
+        """Return the first ``status='active'`` GFS connection, or ``None``.
+
+        v1 picks any active GFS; multi-GFS deployments will route per
+        space in a follow-up.
+        """
+        conns = await self._repo.list_active()
+        return conns[0] if conns else None
+
+    async def request_signaling_node(
+        self,
+        sync_id: str,
+        *,
+        from_instance: str,
+        signing_key: bytes,
+    ) -> str | None:
+        """Ask the paired GFS for a least-loaded signaling node URL.
+
+        Returns the URL the SH provider should embed in
+        ``SPACE_SYNC_OFFER`` as ``signaling_node`` (spec §24.10.7).
+        Returns ``None`` for any of:
+
+        * No active GFS connection (HFS-only deployment, or none paired).
+        * GFS replied ``signaling_node: null`` (single-node mode).
+        * GFS replied ``503 {reason: "node_capacity"}`` (S-8 cap hit) —
+          the caller should still send the OFFER without the field; the
+          requester will fall back to its connected node and ICE may
+          ultimately fail with ``DIRECT_FAILED``, which is the expected
+          back-pressure path.
+        * Any transport error (logged + treated as "no signaling node").
+        """
+        conn = await self._first_active_gfs()
+        if conn is None:
+            return None
+        try:
+            client = self._client()
+        except RuntimeError:
+            return None
+        body = {"from_instance": from_instance, "sync_id": sync_id}
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+        body["signature"] = b64url_encode(sign_ed25519(signing_key, canonical))
+
+        url = f"{conn.inbox_url}/cluster/signaling-session"
+        try:
+            async with client.post(
+                url,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 503:
+                    return None
+                if resp.status != 200:
+                    log.warning(
+                        "GFS signaling-session returned HTTP %d",
+                        resp.status,
+                    )
+                    return None
+                payload = await resp.json()
+                node = payload.get("signaling_node")
+                return str(node) if node else None
+        except aiohttp.ClientError as exc:
+            log.debug("GFS signaling-session request failed: %s", exc)
+            return None
+
+    async def release_signaling_node(
+        self,
+        sync_id: str,
+        signaling_node: str,
+        *,
+        from_instance: str,
+        signing_key: bytes,
+    ) -> None:
+        """Decrement the GFS-side counter for a previously-picked node.
+
+        Called when ``SPACE_SYNC_DIRECT_READY`` or
+        ``SPACE_SYNC_DIRECT_FAILED`` fires. Idempotent on the GFS side —
+        safe to call twice. Errors are logged + swallowed; failing to
+        release leaves a stale counter at most until the GFS restarts.
+        """
+        if not signaling_node:
+            return
+        conn = await self._first_active_gfs()
+        if conn is None:
+            return
+        try:
+            client = self._client()
+        except RuntimeError:
+            return
+        body = {
+            "from_instance": from_instance,
+            "sync_id": sync_id,
+            "signaling_node": signaling_node,
+        }
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+        body["signature"] = b64url_encode(sign_ed25519(signing_key, canonical))
+
+        url = f"{conn.inbox_url}/cluster/signaling-session/release"
+        try:
+            async with client.post(
+                url,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 400:
+                    log.debug(
+                        "GFS signaling-session release HTTP %d",
+                        resp.status,
+                    )
+        except aiohttp.ClientError as exc:
+            log.debug("GFS signaling-session release failed: %s", exc)

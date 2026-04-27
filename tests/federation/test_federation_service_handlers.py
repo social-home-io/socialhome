@@ -9,7 +9,7 @@ fields, etc.) is exercised.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -48,7 +48,9 @@ def svc():
     s._call_signaling = None
     s._sync_manager = None
     s._space_sync_service = None
+    s._gfs_connection_service = None
     s._own_instance_id = "self-iid"
+    s._own_identity_seed = b"\x00" * 32
     s._ice_servers = []
     return s
 
@@ -235,6 +237,118 @@ async def test_handle_space_sync_begin_accepted_no_prefer_direct(svc):
     svc._sync_manager.get_session.assert_not_called()
 
 
+async def test_handle_space_sync_begin_offer_includes_signaling_node(svc):
+    """Provider asks GFS for signaling_node and embeds it in OFFER (§24.10.7)."""
+    record = SimpleNamespace(signaling_node=None)
+    record.rtc = SimpleNamespace(create_offer=AsyncMock(return_value="sdp-x"))
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=True,
+            next_event=None,
+            next_payload=None,
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._gfs_connection_service = MagicMock()
+    svc._gfs_connection_service.request_signaling_node = AsyncMock(
+        return_value="https://b.gfs.test",
+    )
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {
+                    "sync_id": "s1",
+                    "space_id": "sp",
+                    "sync_mode": "initial",
+                    "prefer_direct": True,
+                },
+                space_id="sp",
+            ),
+        )
+        sent_payload = send_mock.await_args.kwargs["payload"]
+    assert sent_payload["signaling_node"] == "https://b.gfs.test"
+    # Record stores it so DIRECT_READY/FAILED can release the slot.
+    assert record.signaling_node == "https://b.gfs.test"
+
+
+async def test_handle_space_sync_begin_offer_omits_signaling_node_when_null(svc):
+    """Single-node GFS returns null → field omitted from OFFER."""
+    record = SimpleNamespace(signaling_node=None)
+    record.rtc = SimpleNamespace(create_offer=AsyncMock(return_value="sdp-x"))
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=True,
+            next_event=None,
+            next_payload=None,
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._gfs_connection_service = MagicMock()
+    svc._gfs_connection_service.request_signaling_node = AsyncMock(return_value=None)
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {
+                    "sync_id": "s2",
+                    "space_id": "sp",
+                    "sync_mode": "initial",
+                    "prefer_direct": True,
+                },
+                space_id="sp",
+            ),
+        )
+        sent_payload = send_mock.await_args.kwargs["payload"]
+    assert "signaling_node" not in sent_payload
+    assert record.signaling_node is None
+
+
+async def test_handle_space_sync_begin_no_gfs_service_no_signaling_node(svc):
+    """No GFS attached (HFS-only) → OFFER stays bare, no crash."""
+    record = SimpleNamespace(signaling_node=None)
+    record.rtc = SimpleNamespace(create_offer=AsyncMock(return_value="sdp-x"))
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=True,
+            next_event=None,
+            next_payload=None,
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    # _gfs_connection_service stays None.
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {
+                    "sync_id": "s3",
+                    "space_id": "sp",
+                    "sync_mode": "initial",
+                    "prefer_direct": True,
+                },
+                space_id="sp",
+            ),
+        )
+        sent_payload = send_mock.await_args.kwargs["payload"]
+    assert "signaling_node" not in sent_payload
+
+
 # ─── _handle_space_sync_offer ──────────────────────────────────────
 
 
@@ -369,6 +483,27 @@ async def test_handle_direct_ready_wrong_origin_skipped(svc):
     svc._space_sync_service.stream_initial.assert_not_awaited()
 
 
+async def test_handle_direct_ready_releases_signaling_node(svc):
+    """DIRECT_READY decrements the GFS counter (§24.10.7)."""
+    session = SimpleNamespace(
+        sync_id="s1",
+        requester_instance_id="peer-1",
+        signaling_node="https://b.gfs.test",
+    )
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    svc._gfs_connection_service = MagicMock()
+    svc._gfs_connection_service.release_signaling_node = AsyncMock()
+    await svc._handle_space_sync_direct_ready(
+        _event("SPACE_SYNC_DIRECT_READY", {"sync_id": "s1"}),
+    )
+    svc._gfs_connection_service.release_signaling_node.assert_awaited_once()
+    # Session's signaling_node is cleared so a duplicate release is a no-op.
+    assert session.signaling_node is None
+
+
 # ─── _handle_space_sync_direct_failed ────────────────────────────
 
 
@@ -390,6 +525,7 @@ async def test_handle_direct_failed_missing_sync_id(svc):
 async def test_handle_direct_failed_no_next_event(svc):
     """trigger_relay_sync returning no next_event short-circuits."""
     svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
     svc._sync_manager.trigger_relay_sync = AsyncMock(
         return_value=SimpleNamespace(next_event=None, next_payload=None),
     )
@@ -397,6 +533,34 @@ async def test_handle_direct_failed_no_next_event(svc):
         _event("SPACE_SYNC_DIRECT_FAILED", {"sync_id": "s1"}),
     )
     svc._sync_manager.trigger_relay_sync.assert_awaited_once()
+
+
+async def test_handle_direct_failed_releases_signaling_node(svc):
+    """DIRECT_FAILED also decrements the GFS counter (§24.10.7)."""
+    session = SimpleNamespace(
+        sync_id="s1",
+        signaling_node="https://b.gfs.test",
+    )
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(next_event=None, next_payload=None),
+    )
+    svc._gfs_connection_service = MagicMock()
+    svc._gfs_connection_service.release_signaling_node = AsyncMock()
+    await svc._handle_space_sync_direct_failed(
+        _event("SPACE_SYNC_DIRECT_FAILED", {"sync_id": "s1"}),
+    )
+    svc._gfs_connection_service.release_signaling_node.assert_awaited_once()
+
+
+async def test_release_signaling_node_idempotent(svc):
+    """Second call after a session.signaling_node clear is a no-op."""
+    session = SimpleNamespace(sync_id="s1", signaling_node=None)
+    svc._gfs_connection_service = MagicMock()
+    svc._gfs_connection_service.release_signaling_node = AsyncMock()
+    await svc._release_signaling_node(session)
+    svc._gfs_connection_service.release_signaling_node.assert_not_awaited()
 
 
 # ─── _handle_space_sync_request_more ──────────────────────────────

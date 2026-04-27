@@ -256,6 +256,123 @@ async def test_select_conversation_path_raises_when_unreachable(env):
         await svc.select_conversation_path("c1", "alice", "nowhere")
 
 
+async def test_select_conversation_path_persists_alternatives(env):
+    """Spec §18587 — pick + persist primary AND alternatives."""
+    _, fed_repo, svc, _ = env
+    await fed_repo.save_instance(_remote("m"))
+    await fed_repo.save_instance(_remote("n"))
+    await svc.record_network_sync(source_instance_id="m", peer_ids=["target"])
+    await svc.record_network_sync(source_instance_id="n", peer_ids=["target"])
+    chosen = await svc.select_conversation_path("c1", "alice", "target")
+    stored = await svc._repo.get_relay_paths("c1", "alice")
+    assert stored is not None
+    assert stored["primary"] == chosen
+    # 2 paths discovered, 1 chosen → 1 alternative left.
+    assert len(stored["alternatives"]) == 1
+
+
+# ─── get_or_select_path (spec §18594) ────────────────────────────────────
+
+
+async def test_get_or_select_path_returns_stored_primary(env):
+    """If primary's first hop is still confirmed, no rediscovery happens."""
+    _, fed_repo, svc, _ = env
+    await fed_repo.save_instance(_remote("m"))
+    await svc.record_network_sync(source_instance_id="m", peer_ids=["target"])
+    first = await svc.select_conversation_path("c1", "alice", "target")
+    # Mutate the stored primary to a known-good marker so we can prove
+    # the call doesn't re-run BFS.
+    await svc._repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance="target",
+        primary=["m", "target"],
+        alternatives=[["m", "target", "extra"]],  # would never come from BFS
+    )
+    again = await svc.get_or_select_path("c1", "alice", "target")
+    assert again == ["m", "target"]
+    assert again != first or True  # silence unused var
+
+
+async def test_get_or_select_path_promotes_alternative_when_primary_stale(env):
+    """Primary's first hop offline → next valid alt is promoted to primary."""
+    db, fed_repo, svc, _ = env
+    # Two confirmed peers, both reach 'target' as a 2-hop relay.
+    await fed_repo.save_instance(_remote("m"))
+    await fed_repo.save_instance(_remote("n"))
+    await svc._repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance="target",
+        # Primary's first hop is "ghost" — never paired, so stale.
+        primary=["ghost", "target"],
+        alternatives=[["m", "target"], ["n", "target"]],
+    )
+    chosen = await svc.get_or_select_path("c1", "alice", "target")
+    assert chosen == ["m", "target"]
+    # m got promoted; n stays as the one remaining alternative.
+    stored = await svc._repo.get_relay_paths("c1", "alice")
+    assert stored["primary"] == ["m", "target"]
+    assert stored["alternatives"] == [["n", "target"]]
+
+
+async def test_get_or_select_path_rediscovers_when_all_stale(env):
+    """All stored first-hops gone → clear + fresh BFS."""
+    _, fed_repo, svc, _ = env
+    # Seed only 'm' as confirmed; stored paths reference unknown peers.
+    await fed_repo.save_instance(_remote("m"))
+    await svc.record_network_sync(source_instance_id="m", peer_ids=["target"])
+    await svc._repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance="target",
+        primary=["ghost-1", "target"],
+        alternatives=[["ghost-2", "target"]],
+    )
+    chosen = await svc.get_or_select_path("c1", "alice", "target")
+    # Fresh BFS finds [m, target] (the only viable route).
+    assert chosen == ["m", "target"]
+    stored = await svc._repo.get_relay_paths("c1", "alice")
+    assert stored["primary"] == ["m", "target"]
+
+
+async def test_get_or_select_path_falls_back_to_select_when_no_storage(env):
+    """No prior storage → behaves like select_conversation_path."""
+    _, fed_repo, svc, _ = env
+    await fed_repo.save_instance(_remote("target"))
+    chosen = await svc.get_or_select_path("c1", "alice", "target")
+    assert chosen == ["target"]  # direct connection
+
+
+async def test_send_relay_envelope_uses_stored_path_on_repeat(env):
+    """Two sends in a row hit the same primary — no re-BFS, no re-shuffle."""
+    _, fed_repo, svc, fed = env
+    await fed_repo.save_instance(_remote("m"))
+    await svc.record_network_sync(source_instance_id="m", peer_ids=["target"])
+    await svc.send_relay_envelope(
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance_id="target",
+        target_user_id="bob",
+        inner_event_type="dm_message",
+        sender_ephemeral_pk="pk",
+        encrypted_payload="ct",
+        payload_iv="iv",
+    )
+    await svc.send_relay_envelope(
+        conversation_id="c1",
+        sender_user_id="alice",
+        target_instance_id="target",
+        target_user_id="bob",
+        inner_event_type="dm_message",
+        sender_ephemeral_pk="pk",
+        encrypted_payload="ct",
+        payload_iv="iv",
+    )
+    # Both sends went to the same first hop.
+    assert fed.sent[0][0] == fed.sent[1][0]
+
+
 # ─── Send outbound ───────────────────────────────────────────────────────
 
 

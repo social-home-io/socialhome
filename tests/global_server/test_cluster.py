@@ -251,3 +251,74 @@ async def test_handle_heartbeat_without_payload_is_compat(
     peer_row = next(n for n in nodes if n.node_id == "node-b")
     assert peer_row.status == "online"
     assert "node-b" not in enabled_cluster._active_sync_count
+
+
+# ─── Spec §4.4.6 — partition catchup ──────────────────────────────────
+
+
+async def test_record_relay_ts_bumps_high_water_mark(enabled_cluster):
+    enabled_cluster.record_relay_ts("space-1")
+    assert "space-1" in enabled_cluster._local_last_relay_ts
+
+
+async def test_apply_relay_records_local_ts(enabled_cluster):
+    """Inbound NODE_RELAY also bumps the per-space timestamp."""
+    await enabled_cluster.apply_relay(
+        "space-1",
+        {"msg_id": "m1", "encrypted_payload": "..."},
+    )
+    assert "space-1" in enabled_cluster._local_last_relay_ts
+
+
+async def test_apply_partition_catchup_returns_gaps_for_newer_local(
+    enabled_cluster,
+):
+    """Peer's last_relay_ts older than ours → emit a gap descriptor."""
+    enabled_cluster._local_last_relay_ts["sp-1"] = 1000.0
+    enabled_cluster._local_last_relay_ts["sp-2"] = 500.0
+    enabled_cluster._enabled = False  # skip outbound POST in this unit test
+    gaps = await enabled_cluster.apply_partition_catchup(
+        "node-b",
+        {"sp-1": 800.0, "sp-2": 600.0},
+    )
+    # sp-1 is newer locally → gap; sp-2 is newer on peer → no gap from us.
+    assert len(gaps) == 1
+    assert gaps[0]["space_id"] == "sp-1"
+    assert gaps[0]["gap_start"] == 800.0
+    assert gaps[0]["gap_end"] == 1000.0
+
+
+async def test_apply_partition_catchup_handles_unknown_spaces(enabled_cluster):
+    """Spaces we never relayed (local_ts=0) → no gap reported."""
+    enabled_cluster._enabled = False
+    gaps = await enabled_cluster.apply_partition_catchup(
+        "node-b",
+        {"never-seen": 1000.0},
+    )
+    assert gaps == []
+
+
+async def test_apply_partition_catchup_ignores_malformed_payload(enabled_cluster):
+    enabled_cluster._enabled = False
+    assert await enabled_cluster.apply_partition_catchup("node-b", "garbage") == []
+    assert await enabled_cluster.apply_partition_catchup("node-b", None) == []
+
+
+async def test_apply_partition_gap_records_for_drain(enabled_cluster):
+    await enabled_cluster.apply_partition_gap(
+        {"space_id": "sp-1", "gap_start": 100.0, "gap_end": 200.0},
+    )
+    pending = enabled_cluster.pending_partition_gaps()
+    assert pending == [
+        {"space_id": "sp-1", "gap_start": 100.0, "gap_end": 200.0},
+    ]
+    # Drain is destructive — second call returns empty.
+    assert enabled_cluster.pending_partition_gaps() == []
+
+
+async def test_apply_partition_gap_drops_invalid_range(enabled_cluster):
+    """gap_end <= gap_start is bogus — silently discarded."""
+    await enabled_cluster.apply_partition_gap(
+        {"space_id": "sp-1", "gap_start": 200.0, "gap_end": 100.0},
+    )
+    assert enabled_cluster.pending_partition_gaps() == []

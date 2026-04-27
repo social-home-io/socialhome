@@ -277,6 +277,10 @@ class DmRoutingService:
         every send uses the same relay while the primary is alive, but
         different senders may take different paths across the same
         conversation (traffic-analysis resistance).
+
+        Spec §18587 — persist the chosen path as the primary plus all
+        remaining paths as alternatives so :meth:`get_or_select_path`
+        can promote one if the primary's first hop goes offline.
         """
         paths = await self.find_relay_paths(target_instance_id)
         if not paths:
@@ -285,19 +289,79 @@ class DmRoutingService:
             )
         idx = _hash_mod(f"{conversation_id}:{sender_user_id}", len(paths))
         chosen = paths[idx]
-
-        # Persist the shortest path (paths[0]) as the sticky primary —
-        # only one row per (conv, target) due to the PK; the caller
-        # re-selects on fallback.
-        primary = paths[0]
-        await self._repo.upsert_conversation_path(
+        alternatives = [p for i, p in enumerate(paths) if i != idx]
+        await self._repo.set_relay_paths(
             conversation_id=conversation_id,
+            sender_user_id=sender_user_id,
             target_instance=target_instance_id,
-            relay_via=primary[0],
-            hop_count=len(primary),
-            last_used_at=utcnow_iso(),
+            primary=chosen,
+            alternatives=alternatives,
         )
         return chosen
+
+    async def get_or_select_path(
+        self,
+        conversation_id: str,
+        sender_user_id: str,
+        target_instance_id: str,
+    ) -> list[str]:
+        """Return a usable relay path, validating storage first (spec §18594).
+
+        On every call:
+
+        1. Read stored paths for (conversation, sender).
+        2. If the primary's first hop is still a confirmed direct peer,
+           return it.
+        3. Otherwise iterate alternatives in order; the first one whose
+           first hop is still confirmed is **promoted** to primary
+           (rest stay as alternatives) and returned.
+        4. If every stored path is stale, clear them and run a fresh
+           BFS via :meth:`select_conversation_path`.
+
+        Raises :class:`NoRouteError` when discovery yields nothing.
+        """
+        stored = await self._repo.get_relay_paths(
+            conversation_id,
+            sender_user_id,
+        )
+        if stored:
+            primary = stored.get("primary") or []
+            alternatives = stored.get("alternatives") or []
+            if primary and await self._first_hop_alive(primary):
+                return primary
+            for i, alt in enumerate(alternatives):
+                if alt and await self._first_hop_alive(alt):
+                    remaining = [p for j, p in enumerate(alternatives) if j != i]
+                    await self._repo.set_relay_paths(
+                        conversation_id=conversation_id,
+                        sender_user_id=sender_user_id,
+                        target_instance=target_instance_id,
+                        primary=alt,
+                        alternatives=remaining,
+                    )
+                    return alt
+            await self._repo.clear_relay_paths(
+                conversation_id,
+                sender_user_id,
+            )
+        return await self.select_conversation_path(
+            conversation_id,
+            sender_user_id,
+            target_instance_id,
+        )
+
+    async def _first_hop_alive(self, path: list[str]) -> bool:
+        """``True`` if ``path[0]`` resolves to a confirmed direct peer.
+
+        Direct (single-hop) paths route to the target instance; we only
+        validate that the target itself is still confirmed — that is
+        the same ``get_instance + status==CONFIRMED`` check used by
+        BFS's fast path.
+        """
+        if not path:
+            return False
+        peer = await self._fed_repo.get_instance(path[0])
+        return peer is not None and peer.status == PairingStatus.CONFIRMED
 
     # ─── Outbound send ────────────────────────────────────────────────────
 
@@ -328,7 +392,7 @@ class DmRoutingService:
                     "DM routing blocked for protected minor (§CP.F3)"
                 )
 
-        path = await self.select_conversation_path(
+        path = await self.get_or_select_path(
             conversation_id,
             sender_user_id,
             target_instance_id,

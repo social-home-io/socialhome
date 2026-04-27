@@ -399,3 +399,101 @@ async def test_unpublish_space_not_found(env):
     svc = GfsConnectionService(repo, http_client=_StubSession())
     with pytest.raises(GfsConnectionError, match="not found"):
         await svc.unpublish_space("sp-1", "nonexistent")
+
+
+# ─── Sync-signaling round-robin (spec §24.10.7) ───────────────────────
+
+
+async def test_request_signaling_node_returns_url(env):
+    _, repo = env
+    await repo.save(_make_conn("gfs-1"))
+    kp = generate_identity_keypair()
+    session = _StubSession(
+        status=200,
+        body={"signaling_node": "https://b.gfs.test", "session_id": "s1"},
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    result = await svc.request_signaling_node(
+        "s1",
+        from_instance="caller.home",
+        signing_key=kp.private_key,
+    )
+    assert result == "https://b.gfs.test"
+    # Posted to the right URL with a signature attached.
+    assert session.calls == [
+        ("POST", "https://gfs.example.com/cluster/signaling-session")
+    ]
+
+
+async def test_request_signaling_node_503_returns_none(env):
+    _, repo = env
+    await repo.save(_make_conn("gfs-1"))
+    kp = generate_identity_keypair()
+    session = _StubSession(status=503, body={"reason": "node_capacity"})
+    svc = GfsConnectionService(repo, http_client=session)
+    result = await svc.request_signaling_node(
+        "s1",
+        from_instance="caller.home",
+        signing_key=kp.private_key,
+    )
+    assert result is None
+
+
+async def test_request_signaling_node_null_returns_none(env):
+    """Single-node GFS: ``signaling_node: null`` → None."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-1"))
+    kp = generate_identity_keypair()
+    session = _StubSession(status=200, body={"signaling_node": None})
+    svc = GfsConnectionService(repo, http_client=session)
+    result = await svc.request_signaling_node(
+        "s1",
+        from_instance="caller.home",
+        signing_key=kp.private_key,
+    )
+    assert result is None
+
+
+async def test_request_signaling_node_no_active_gfs_returns_none(env):
+    """No paired active GFS → None (HFS-only deployment)."""
+    _, repo = env
+    kp = generate_identity_keypair()
+    svc = GfsConnectionService(repo, http_client=_StubSession())
+    result = await svc.request_signaling_node(
+        "s1",
+        from_instance="caller.home",
+        signing_key=kp.private_key,
+    )
+    assert result is None
+
+
+async def test_release_signaling_node_posts(env):
+    _, repo = env
+    await repo.save(_make_conn("gfs-1"))
+    kp = generate_identity_keypair()
+    session = _StubSession(status=200, body={"status": "released"})
+    svc = GfsConnectionService(repo, http_client=session)
+    await svc.release_signaling_node(
+        "s1",
+        "https://b.gfs.test",
+        from_instance="caller.home",
+        signing_key=kp.private_key,
+    )
+    assert session.calls == [
+        ("POST", "https://gfs.example.com/cluster/signaling-session/release"),
+    ]
+
+
+async def test_release_signaling_node_no_url_is_noop(env):
+    _, repo = env
+    await repo.save(_make_conn("gfs-1"))
+    kp = generate_identity_keypair()
+    session = _StubSession(status=200)
+    svc = GfsConnectionService(repo, http_client=session)
+    await svc.release_signaling_node(
+        "s1",
+        "",
+        from_instance="caller.home",
+        signing_key=kp.private_key,
+    )
+    assert session.calls == []

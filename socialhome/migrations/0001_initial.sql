@@ -1381,14 +1381,20 @@ CREATE TABLE IF NOT EXISTS conversation_message_gaps (
     PRIMARY KEY (conversation_id, sender_user_id, expected_seq)
 );
 
--- Multi-hop DM relay paths (§12.5)
+-- Multi-hop DM relay paths (§12.5, §18587).
+-- One row per (conversation, sender, path_index). path_index=0 is the
+-- primary; 1+ are alternatives, promoted on relay-offline fallback.
+-- ``relay_path`` is a JSON array of instance_ids; ``relay_path[0]`` is
+-- the next hop (validated on each send by ``get_or_select_path``).
 CREATE TABLE IF NOT EXISTS conversation_relay_paths (
     conversation_id TEXT NOT NULL,
+    sender_user_id  TEXT NOT NULL,
+    path_index      INTEGER NOT NULL,
     target_instance TEXT NOT NULL,
-    relay_via       TEXT NOT NULL,
+    relay_path      TEXT NOT NULL,
     hop_count       INTEGER NOT NULL DEFAULT 1,
     last_used_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (conversation_id, target_instance)
+    PRIMARY KEY (conversation_id, sender_user_id, path_index)
 );
 
 CREATE TABLE IF NOT EXISTS conversation_sender_sequences (

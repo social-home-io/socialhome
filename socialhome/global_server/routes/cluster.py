@@ -14,6 +14,8 @@ from ..cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
     NODE_HEARTBEAT,
     NODE_HELLO,
+    NODE_PARTITION_CATCHUP,
+    NODE_PARTITION_GAP,
     NODE_POLICY_PUSH,
     NODE_RELAY,
     NODE_SYNC_CLIENT,
@@ -119,6 +121,15 @@ class ClusterSyncView(GfsBaseView):
                 str(payload.get("space_id") or ""),
                 payload.get("envelope") or {},
             )
+        elif msg_type == NODE_PARTITION_CATCHUP:
+            session = self.request.app.get(K.gfs_http_session_key)
+            await svc.apply_partition_catchup(
+                from_node,
+                payload.get("last_relay_ts") or {},
+                session=session,
+            )
+        elif msg_type == NODE_PARTITION_GAP:
+            await svc.apply_partition_gap(payload)
         else:
             log.debug(
                 "cluster: unknown NODE_* type %s from %s",

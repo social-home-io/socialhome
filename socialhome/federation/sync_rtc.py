@@ -349,3 +349,9 @@ class SyncSessionRecord:
     sync_mode: str
     rtc: SyncRtcSession | None = None
     created_at: float = field(default=0.0)
+    #: Spec §24.10.7 — URL of the GFS cluster node assigned to relay
+    #: ICE candidates for this session. Set by the provider on
+    #: ``SPACE_SYNC_OFFER`` build, read on ``DIRECT_READY``/``FAILED``
+    #: to release the GFS counter. ``None`` for single-node GFS or
+    #: HFS-only deployments.
+    signaling_node: str | None = None

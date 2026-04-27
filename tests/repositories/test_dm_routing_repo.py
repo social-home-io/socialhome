@@ -95,24 +95,108 @@ async def test_resolve_gap_removes_one(env):
 
 
 async def test_list_relay_paths(env):
-    await env.repo.upsert_conversation_path(
+    await env.repo.set_relay_paths(
         conversation_id="c1",
+        sender_user_id="u1",
         target_instance="inst-b",
-        relay_via="inst-hub",
-        hop_count=2,
-        last_used_at="2026-01-01T00:00:00Z",
-    )
-    await env.repo.upsert_conversation_path(
-        conversation_id="c1",
-        target_instance="inst-c",
-        relay_via="inst-b",
-        hop_count=3,
-        last_used_at="2026-01-02T00:00:00Z",
+        primary=["inst-hub", "inst-b"],
+        alternatives=[["inst-c", "inst-b"]],
     )
     paths = await env.repo.list_relay_paths("c1")
-    assert [p["target_instance"] for p in paths] == ["inst-b", "inst-c"]
+    # Two rows: primary (path_index=0) + one alternative (path_index=1).
+    assert [p["path_index"] for p in paths] == [0, 1]
+    assert paths[0]["relay_path"] == ["inst-hub", "inst-b"]
+    assert paths[0]["relay_via"] == "inst-hub"
     assert paths[0]["hop_count"] == 2
+    assert paths[1]["relay_path"] == ["inst-c", "inst-b"]
 
 
 async def test_list_relay_paths_empty(env):
     assert await env.repo.list_relay_paths("c1") == []
+
+
+# ── Spec §18587 — multi-path persistence + retrieval ──────────────────
+
+
+async def test_set_and_get_relay_paths_roundtrip(env):
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u1",
+        target_instance="inst-b",
+        primary=["inst-hub", "inst-b"],
+        alternatives=[["inst-x", "inst-b"], ["inst-y", "inst-z", "inst-b"]],
+    )
+    stored = await env.repo.get_relay_paths("c1", "u1")
+    assert stored is not None
+    assert stored["primary"] == ["inst-hub", "inst-b"]
+    assert stored["alternatives"] == [
+        ["inst-x", "inst-b"],
+        ["inst-y", "inst-z", "inst-b"],
+    ]
+    assert stored["target_instance"] == "inst-b"
+
+
+async def test_set_relay_paths_replaces_prior(env):
+    """Repeat ``set_relay_paths`` wipes old rows — never accumulates."""
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u1",
+        target_instance="inst-b",
+        primary=["inst-old", "inst-b"],
+        alternatives=[["inst-also-old", "inst-b"]],
+    )
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u1",
+        target_instance="inst-b",
+        primary=["inst-new", "inst-b"],
+        alternatives=[],
+    )
+    stored = await env.repo.get_relay_paths("c1", "u1")
+    assert stored["primary"] == ["inst-new", "inst-b"]
+    assert stored["alternatives"] == []
+
+
+async def test_get_relay_paths_unknown_returns_none(env):
+    assert await env.repo.get_relay_paths("c1", "u1") is None
+
+
+async def test_clear_relay_paths_for_sender(env):
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u1",
+        target_instance="inst-b",
+        primary=["inst-b"],
+        alternatives=[],
+    )
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u2",
+        target_instance="inst-b",
+        primary=["inst-b"],
+        alternatives=[],
+    )
+    await env.repo.clear_relay_paths("c1", "u1")
+    assert await env.repo.get_relay_paths("c1", "u1") is None
+    # u2 still has its row.
+    assert await env.repo.get_relay_paths("c1", "u2") is not None
+
+
+async def test_clear_relay_paths_whole_conversation(env):
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u1",
+        target_instance="inst-b",
+        primary=["inst-b"],
+        alternatives=[],
+    )
+    await env.repo.set_relay_paths(
+        conversation_id="c1",
+        sender_user_id="u2",
+        target_instance="inst-b",
+        primary=["inst-b"],
+        alternatives=[],
+    )
+    await env.repo.clear_relay_paths("c1")  # sender_user_id=None
+    assert await env.repo.get_relay_paths("c1", "u1") is None
+    assert await env.repo.get_relay_paths("c1", "u2") is None

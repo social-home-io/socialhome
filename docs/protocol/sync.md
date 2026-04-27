@@ -96,14 +96,18 @@ caller's preferred GFS. Spec §24.10.7.
   `POST /cluster/signaling-session` on its connected GFS node. The
   GFS picks the least-loaded online cluster node by weighted
   least-connections (min-heap on `(active_sync_sessions, node_id)`)
-  and increments its counter, returning the chosen URL.
+  and increments its counter, returning the chosen URL. The SH
+  client wrapper that issues this call is
+  `GfsConnectionService.request_signaling_node`.
 - The provider includes that URL in the OFFER as `signaling_node`.
-  Single-node deployments return `null` and the field is omitted.
+  Single-node deployments (or no paired GFS) return `null` and the
+  field is omitted from the offer.
 - The requester sends `SPACE_SYNC_ANSWER` and trickles `SPACE_SYNC_ICE`
   directly to `signaling_node`.
 - On `SPACE_SYNC_DIRECT_READY` or `SPACE_SYNC_DIRECT_FAILED` the
-  provider calls `POST /cluster/signaling-session/release` to
-  decrement the counter.
+  provider calls `POST /cluster/signaling-session/release` (via
+  `GfsConnectionService.release_signaling_node`) to decrement the
+  counter.
 
 Counters are local-per-node (no consensus). They propagate via
 `NODE_HEARTBEAT` so peers' selectors see fresh load on the next pick.

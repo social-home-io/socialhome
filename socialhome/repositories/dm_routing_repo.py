@@ -8,14 +8,15 @@ Tables touched:
 
 * ``network_discovery`` — peer-of-peer announcements from
   ``NETWORK_SYNC`` events.
-* ``conversation_relay_paths`` — sticky per-(conv, target) primary
-  path plus fallbacks.
+* ``conversation_relay_paths`` — sticky per-(conv, sender) primary
+  path plus alternatives (spec §18587).
 * ``dm_relay_seen`` — 1-hour dedup ring.
 * ``conversation_sender_sequences`` — per-(conv, sender) monotonic seq.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Iterable, Protocol, runtime_checkable
 
@@ -38,14 +39,26 @@ class AbstractDmRoutingRepo(Protocol):
         hop_count: int,
     ) -> None: ...
 
-    async def upsert_conversation_path(
+    async def set_relay_paths(
         self,
         *,
         conversation_id: str,
+        sender_user_id: str,
         target_instance: str,
-        relay_via: str,
-        hop_count: int,
-        last_used_at: str,
+        primary: list[str],
+        alternatives: list[list[str]],
+    ) -> None: ...
+
+    async def get_relay_paths(
+        self,
+        conversation_id: str,
+        sender_user_id: str,
+    ) -> dict | None: ...
+
+    async def clear_relay_paths(
+        self,
+        conversation_id: str,
+        sender_user_id: str | None = None,
     ) -> None: ...
 
     async def mark_seen(self, message_id: str) -> None: ...
@@ -134,33 +147,121 @@ class SqliteDmRoutingRepo:
 
     # ── conversation_relay_paths ───────────────────────────────────────
 
-    async def upsert_conversation_path(
+    async def set_relay_paths(
         self,
         *,
         conversation_id: str,
+        sender_user_id: str,
         target_instance: str,
-        relay_via: str,
-        hop_count: int,
-        last_used_at: str,
+        primary: list[str],
+        alternatives: list[list[str]],
     ) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO conversation_relay_paths(
-                conversation_id, target_instance, relay_via, hop_count, last_used_at
-            ) VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id, target_instance) DO UPDATE SET
-                relay_via=excluded.relay_via,
-                hop_count=excluded.hop_count,
-                last_used_at=excluded.last_used_at
-            """,
-            (
-                conversation_id,
-                target_instance,
-                relay_via,
-                hop_count,
-                last_used_at,
-            ),
+        """Replace the stored paths for (conversation, sender).
+
+        Wipes prior rows and writes ``primary`` at ``path_index=0``,
+        then alternatives at ``1+`` in the order given. The full path
+        (each hop instance_id) is stored as JSON so
+        :meth:`get_or_select_path` can validate every hop, not just the
+        first one.
+        """
+
+        def _run(conn):
+            conn.execute(
+                "DELETE FROM conversation_relay_paths "
+                "WHERE conversation_id=? AND sender_user_id=?",
+                (conversation_id, sender_user_id),
+            )
+            now = utcnow_iso()
+            rows: list[tuple] = []
+            paths = [primary, *alternatives]
+            for idx, path in enumerate(paths):
+                if not path:
+                    continue
+                rows.append(
+                    (
+                        conversation_id,
+                        sender_user_id,
+                        idx,
+                        target_instance,
+                        json.dumps(path, separators=(",", ":")),
+                        len(path),
+                        now,
+                    ),
+                )
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO conversation_relay_paths(
+                        conversation_id, sender_user_id, path_index,
+                        target_instance, relay_path, hop_count, last_used_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+
+        await self._db.transact(_run)
+
+    async def get_relay_paths(
+        self,
+        conversation_id: str,
+        sender_user_id: str,
+    ) -> dict | None:
+        """Return the stored ``{primary, alternatives, target_instance}``
+        for (conversation, sender), or ``None`` if no paths are stored.
+        """
+        rows = await self._db.fetchall(
+            "SELECT path_index, target_instance, relay_path "
+            "FROM conversation_relay_paths "
+            "WHERE conversation_id=? AND sender_user_id=? "
+            "ORDER BY path_index",
+            (conversation_id, sender_user_id),
         )
+        if not rows:
+            return None
+        primary: list[str] = []
+        alternatives: list[list[str]] = []
+        target_instance = ""
+        for r in rows:
+            try:
+                path = json.loads(r["relay_path"])
+            except TypeError, ValueError:
+                continue
+            if not isinstance(path, list):
+                continue
+            target_instance = target_instance or r["target_instance"]
+            if int(r["path_index"]) == 0:
+                primary = [str(h) for h in path]
+            else:
+                alternatives.append([str(h) for h in path])
+        if not primary and not alternatives:
+            return None
+        return {
+            "primary": primary,
+            "alternatives": alternatives,
+            "target_instance": target_instance,
+        }
+
+    async def clear_relay_paths(
+        self,
+        conversation_id: str,
+        sender_user_id: str | None = None,
+    ) -> None:
+        """Drop all stored paths for (conversation, sender).
+
+        ``sender_user_id=None`` clears every sender's paths for the
+        conversation — used when a conversation is deleted.
+        """
+        if sender_user_id is None:
+            await self._db.enqueue(
+                "DELETE FROM conversation_relay_paths WHERE conversation_id=?",
+                (conversation_id,),
+            )
+        else:
+            await self._db.enqueue(
+                "DELETE FROM conversation_relay_paths "
+                "WHERE conversation_id=? AND sender_user_id=?",
+                (conversation_id, sender_user_id),
+            )
 
     # ── dedup ring ─────────────────────────────────────────────────────
 
@@ -297,21 +398,37 @@ class SqliteDmRoutingRepo:
         self,
         conversation_id: str,
     ) -> list[dict]:
+        """All stored paths for a conversation, primary-first.
+
+        Diagnostic view: returns one dict per row (across all senders +
+        path_index values) so admin tooling can inspect the full
+        ``conversation_relay_paths`` state.
+        """
         rows = await self._db.fetchall(
-            "SELECT target_instance, relay_via, hop_count, last_used_at "
+            "SELECT sender_user_id, path_index, target_instance, "
+            "relay_path, hop_count, last_used_at "
             "FROM conversation_relay_paths WHERE conversation_id=? "
-            "ORDER BY hop_count, last_used_at DESC",
+            "ORDER BY sender_user_id, path_index",
             (conversation_id,),
         )
-        return [
-            {
-                "target_instance": r["target_instance"],
-                "relay_via": r["relay_via"],
-                "hop_count": int(r["hop_count"]),
-                "last_used_at": r["last_used_at"],
-            }
-            for r in rows
-        ]
+        out: list[dict] = []
+        for r in rows:
+            try:
+                path = json.loads(r["relay_path"])
+            except TypeError, ValueError:
+                path = []
+            out.append(
+                {
+                    "sender_user_id": r["sender_user_id"],
+                    "path_index": int(r["path_index"]),
+                    "target_instance": r["target_instance"],
+                    "relay_path": path,
+                    "relay_via": path[0] if path else "",
+                    "hop_count": int(r["hop_count"]),
+                    "last_used_at": r["last_used_at"],
+                }
+            )
+        return out
 
 
 def utcnow_iso() -> str:
