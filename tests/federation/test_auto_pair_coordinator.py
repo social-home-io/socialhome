@@ -45,6 +45,14 @@ class _InMemoryFederationRepo:
     async def get_instance(self, iid: str) -> RemoteInstance | None:
         return self.instances.get(iid)
 
+    async def get_instance_by_local_inbox_id(
+        self, local_inbox_id: str
+    ) -> RemoteInstance | None:
+        for inst in self.instances.values():
+            if inst.local_inbox_id == local_inbox_id:
+                return inst
+        return None
+
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance:
         self.instances[inst.id] = inst
         return inst
@@ -54,6 +62,9 @@ class _InMemoryFederationRepo:
         if status is not None:
             out = [i for i in out if i.status.value == status]
         return out
+
+    async def list_instances_in_space(self, space_id):
+        return []
 
 
 def _make_peer_remote_instance(pk_hex: str, status=PairingStatus.CONFIRMED):

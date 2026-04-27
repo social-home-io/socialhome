@@ -108,12 +108,12 @@ class SpaceContentInboundHandlers:
         )
 
         # Polls — only registered when a poll_repo is attached (deployments
-        # without polls skip it entirely, classical behaviour).
+        # without polls skip it entirely, classical behaviour). Poll
+        # creation rides inline on ``SPACE_POST_CREATED`` (posts with
+        # ``type=poll`` carry the poll body), so there is no inbound
+        # handler for the bare ``SPACE_POLL_CREATED`` event — the
+        # dispatch registry no-ops on unknown events.
         if self._poll_repo is not None:
-            registry.register(
-                FederationEventType.SPACE_POLL_CREATED,
-                self._on_poll_created,
-            )
             registry.register(
                 FederationEventType.SPACE_POLL_VOTE_CAST,
                 self._on_poll_vote,
@@ -295,22 +295,6 @@ class SpaceContentInboundHandlers:
         await self._calendar_repo.delete_event(event_id)
 
     # ─── Polls ──────────────────────────────────────────────────────────
-
-    async def _on_poll_created(self, event: "FederationEvent") -> None:
-        """Poll creation is already carried inline on ``SPACE_POST_CREATED``
-        (posts with ``type=poll`` have a ``poll`` field). The dedicated
-        ``SPACE_POLL_CREATED`` event is a signal hook for subscribers —
-        we log + publish for future UI wiring, no persistence side-effect.
-        """
-        post_id = str(event.payload.get("post_id") or event.payload.get("id") or "")
-        if not post_id:
-            return
-        log.debug(
-            "SPACE_POLL_CREATED post=%s space=%s from=%s",
-            post_id,
-            event.space_id,
-            event.from_instance,
-        )
 
     async def _on_poll_vote(self, event: "FederationEvent") -> None:
         """Mirror a remote poll vote. Enforces the single-choice invariant

@@ -10,7 +10,9 @@ import pytest
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.domain.user import User
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.task_service import TaskService
 
 
@@ -35,7 +37,8 @@ async def env(tmp_dir):
     e.iid = iid
     e.task_repo = SqliteTaskRepo(db)
     e.space_task_repo = SqliteSpaceTaskRepo(db)
-    e.task_svc = TaskService(e.task_repo)
+    e.user_repo = SqliteUserRepo(db)
+    e.task_svc = TaskService(e.task_repo, user_repo=e.user_repo)
     yield e
     await db.shutdown()
 
@@ -252,6 +255,64 @@ async def test_update_task_invalid_due_date(env):
     t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
     with pytest.raises(ValueError, match="invalid due_date"):
         await env.task_svc.update_task(t.id, actor_user_id="u1", due_date="nope")
+
+
+async def test_update_task_rejected_for_non_creator_non_admin(env):
+    """Non-creator non-admin actors cannot update someone else's task."""
+    await env.user_repo.save(
+        User(user_id="u2", username="u2", display_name="U2", is_admin=False)
+    )
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    with pytest.raises(PermissionError):
+        await env.task_svc.update_task(t.id, actor_user_id="u2", title="Hijack")
+
+
+async def test_update_task_allowed_for_admin_non_creator(env):
+    """Admins can update tasks they didn't create."""
+    await env.user_repo.save(
+        User(user_id="admin1", username="admin1", display_name="Admin", is_admin=True)
+    )
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    updated = await env.task_svc.update_task(
+        t.id, actor_user_id="admin1", title="Edited by admin"
+    )
+    assert updated.title == "Edited by admin"
+
+
+async def test_update_task_unknown_actor_rejected(env):
+    """An actor_user_id that doesn't resolve to a stored user is rejected."""
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    with pytest.raises(PermissionError):
+        await env.task_svc.update_task(t.id, actor_user_id="ghost", title="Edit")
+
+
+async def test_archive_task_round_trip(env):
+    """archive_task sets archived_at; unarchive_task clears it."""
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    archived = await env.task_svc.archive_task(t.id, actor_user_id="u1")
+    assert archived.archived_at is not None
+    fetched = await env.task_svc.get_task(t.id)
+    assert fetched.archived_at is not None
+
+    unarchived = await env.task_svc.unarchive_task(t.id, actor_user_id="u1")
+    assert unarchived.archived_at is None
+    fetched_again = await env.task_svc.get_task(t.id)
+    assert fetched_again.archived_at is None
+
+
+async def test_archive_task_rejected_for_non_creator_non_admin(env):
+    """Non-creator non-admin actors cannot archive someone else's task."""
+    await env.user_repo.save(
+        User(user_id="u2", username="u2", display_name="U2", is_admin=False)
+    )
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    with pytest.raises(PermissionError):
+        await env.task_svc.archive_task(t.id, actor_user_id="u2")
 
 
 # ─── Recurrence (§15) ──────────────────────────────────────────────────────

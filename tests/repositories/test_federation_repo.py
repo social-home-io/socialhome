@@ -145,3 +145,89 @@ async def test_federation_instance_filtering(env):
 
     await env.fed_repo.delete_instance("peer-002")
     assert await env.fed_repo.get_instance("peer-002") is None
+
+
+async def test_get_instance_by_local_inbox_id_hit(env):
+    inst = RemoteInstance(
+        id="peer-aa",
+        display_name="AA",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://aa/wh",
+        local_inbox_id="inbox-aa",
+        status=PairingStatus.CONFIRMED,
+    )
+    await env.fed_repo.save_instance(inst)
+    got = await env.fed_repo.get_instance_by_local_inbox_id("inbox-aa")
+    assert got is not None
+    assert got.id == "peer-aa"
+
+
+async def test_get_instance_by_local_inbox_id_miss(env):
+    assert await env.fed_repo.get_instance_by_local_inbox_id("nope") is None
+
+
+async def test_list_instances_in_space_filters_membership_status_and_bans(env):
+    """JOIN excludes non-members, non-confirmed peers, and banned peers."""
+    member = RemoteInstance(
+        id="peer-mem",
+        display_name="Mem",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://mem/wh",
+        local_inbox_id="wh-mem",
+        status=PairingStatus.CONFIRMED,
+    )
+    outsider = RemoteInstance(
+        id="peer-out",
+        display_name="Out",
+        remote_identity_pk="bb" * 32,
+        key_self_to_remote="k3",
+        key_remote_to_self="k4",
+        remote_inbox_url="https://out/wh",
+        local_inbox_id="wh-out",
+        status=PairingStatus.CONFIRMED,
+    )
+    pending = RemoteInstance(
+        id="peer-pend",
+        display_name="Pend",
+        remote_identity_pk="cc" * 32,
+        key_self_to_remote="k5",
+        key_remote_to_self="k6",
+        remote_inbox_url="https://pend/wh",
+        local_inbox_id="wh-pend",
+        status=PairingStatus.PENDING_SENT,
+    )
+    banned = RemoteInstance(
+        id="peer-ban",
+        display_name="Ban",
+        remote_identity_pk="dd" * 32,
+        key_self_to_remote="k7",
+        key_remote_to_self="k8",
+        remote_inbox_url="https://ban/wh",
+        local_inbox_id="wh-ban",
+        status=PairingStatus.CONFIRMED,
+    )
+    for inst in (member, outsider, pending, banned):
+        await env.fed_repo.save_instance(inst)
+
+    # Add a space and seed membership.
+    space_id = "sp-1"
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, space_type, owner_instance_id, "
+        "owner_username, identity_public_key) "
+        "VALUES(?,?,?,?,?,?)",
+        (space_id, "Space", "household", env.iid, "owner", "00" * 32),
+    )
+    for iid in (member.id, pending.id, banned.id):
+        await env.db.enqueue(
+            "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",
+            (space_id, iid),
+        )
+    await env.fed_repo.ban_instance_from_space(space_id, banned.id)
+
+    got = await env.fed_repo.list_instances_in_space(space_id)
+    got_ids = {i.id for i in got}
+    assert got_ids == {member.id}

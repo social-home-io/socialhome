@@ -295,7 +295,8 @@ class HomeAssistantAdapter:
         await user_service.set_picture(local.user_id, bytes_)
 
     async def on_cleanup(self, app: "web.Application") -> None:  # noqa: RUF029
-        """No-op — nothing to tear down for the HA adapter yet."""
+        """No-op — the HA adapter holds nothing the base lifecycle does
+        not already release."""
 
     def get_extra_services(self) -> dict:
         """Return the HA bridge service keyed on its app key."""

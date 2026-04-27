@@ -64,6 +64,7 @@ class Task:
     assignees: tuple[str, ...] = ()  # user_ids
     recurrence: RecurrenceRule | None = None
     recurrence_parent_id: str | None = None
+    archived_at: datetime | None = None
 
     def is_recurring(self) -> bool:
         return self.recurrence is not None

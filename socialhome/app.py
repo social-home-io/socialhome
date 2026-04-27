@@ -59,6 +59,8 @@ from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
 from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
+from .infrastructure.dm_gc_scheduler import DmGcScheduler
+from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
 from .platform import build_platform_adapter
@@ -90,6 +92,7 @@ from .repositories.dm_routing_repo import SqliteDmRoutingRepo
 from .repositories.gallery_repo import SqliteGalleryRepo
 from .repositories.alias_repo import SqliteAliasRepo
 from .repositories.household_features_repo import SqliteHouseholdFeaturesRepo
+from .repositories.pairing_relay_repo import SqlitePairingRelayRepo
 from .repositories.poll_repo import SqlitePollRepo
 from .repositories.space_poll_repo import SqliteSpacePollRepo
 from .repositories.profile_picture_repo import SqliteProfilePictureRepo
@@ -306,6 +309,7 @@ def _build_repos(db: AsyncDatabase):
         space_cover=SqliteSpaceCoverRepo(db),
         space_bot=SqliteSpaceBotRepo(db),
         alias=SqliteAliasRepo(db),
+        pairing_relay=SqlitePairingRelayRepo(db),
     )
 
 
@@ -343,6 +347,7 @@ def _wire_federation_stack(
     dm_routing_repo,
     presence_service,
     report_service,
+    pairing_relay_repo,
 ):
     """Build :class:`FederationService` + attach the whole federation stack.
 
@@ -693,6 +698,7 @@ def _wire_federation_stack(
     pairing_relay_queue = PairingRelayQueue(
         bus=bus,
         federation=federation_service,
+        repo=pairing_relay_repo,
         own_instance_id=identity.instance_id,
     )
     pairing_relay_queue.wire()
@@ -864,7 +870,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=space_repo,
         space_post_repo=space_post_repo,
     )
-    task_service = TaskService(task_repo, bus)
+    task_service = TaskService(task_repo, bus, user_repo=user_repo)
     space_task_service = SpaceTaskService(space_task_repo, bus)
     calendar_service = CalendarService(calendar_repo, bus)
     space_cal_service = SpaceCalendarService(space_cal_repo, bus)
@@ -1078,6 +1084,8 @@ def create_app(config: Config | None = None) -> web.Application:
     stale_call_scheduler: StaleCallCleanupScheduler | None = None
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
+    pairing_relay_scheduler: PairingRelayRetentionScheduler | None = None
+    dm_gc_scheduler: DmGcScheduler | None = None
     page_lock_scheduler: PageLockExpiryScheduler | None = None
     space_retention_scheduler: SpaceRetentionScheduler | None = None
     post_draft_scheduler: PostDraftCleanupScheduler | None = None
@@ -1282,6 +1290,7 @@ def create_app(config: Config | None = None) -> web.Application:
             dm_routing_repo=repos.dm_routing,
             presence_service=presence_service,
             report_service=report_service,
+            pairing_relay_repo=repos.pairing_relay,
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
@@ -1392,6 +1401,21 @@ def create_app(config: Config | None = None) -> web.Application:
         replay_cache_scheduler = ReplayCachePruneScheduler(federation_repo)
         await replay_cache_scheduler.start()
 
+        # Pairing-relay retention (§11.9) — drops approved/declined
+        # rows after a week and pending rows after a month so the
+        # admin queue table stays bounded.
+        nonlocal pairing_relay_scheduler
+        pairing_relay_scheduler = PairingRelayRetentionScheduler(
+            repos.pairing_relay,
+        )
+        await pairing_relay_scheduler.start()
+
+        # DM GC (§23.47c) — hard-deletes conversations whose every
+        # local member has soft-left and which have no remote members.
+        nonlocal dm_gc_scheduler
+        dm_gc_scheduler = DmGcScheduler(conversation_repo)
+        await dm_gc_scheduler.start()
+
         # Bazaar auction expiry — closes due auctions on a 60-s cadence.
         await bazaar_expiry_scheduler.start()
 
@@ -1451,6 +1475,10 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        if pairing_relay_scheduler is not None:
+            await pairing_relay_scheduler.stop()
+        if dm_gc_scheduler is not None:
+            await dm_gc_scheduler.stop()
         if page_lock_scheduler is not None:
             await page_lock_scheduler.stop()
         if space_retention_scheduler is not None:

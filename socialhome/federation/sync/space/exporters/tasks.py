@@ -19,12 +19,12 @@ class TasksExporter:
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         tasks = await self._repo.list_by_space(space_id)
-        return [_task_to_dict(t) for t in tasks]
+        return [_task_to_dict(t) for t in tasks if t.archived_at is None]
 
 
 def _task_to_dict(task) -> dict[str, Any]:
     d = asdict(task)
-    for field in ("created_at", "updated_at"):
+    for field in ("created_at", "updated_at", "archived_at"):
         v = d.get(field)
         if v is not None and not isinstance(v, str):
             d[field] = v.isoformat()

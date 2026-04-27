@@ -439,6 +439,12 @@ Bearer auth (the integration holds the auto-provisioned token).
 | `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; JSON `{"type":"typing","conversation_id":"..."}`. |
 | `GET /api/stt/stream` | Streaming speech-to-text (binary audio frames → `{"type":"final","text":"..."}`). |
 
+> Speech-to-text and AI data generation are HA-adapter-only in v1 — the
+> standalone adapter raises `NotImplementedError` on
+> `transcribe_audio` / `stream_transcribe_audio` / `generate_ai_data`.
+> The HA adapter requires `[homeassistant].stt_entity_id` to be set
+> (e.g. `stt.home_assistant_cloud`) before STT routes return data.
+
 ## HFS — federation inbox
 
 | Method | Path | Purpose |

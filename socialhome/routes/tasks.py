@@ -23,6 +23,7 @@ def _task_dict(task) -> dict:
         "assignees": list(task.assignees),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        "archived_at": task.archived_at.isoformat() if task.archived_at else None,
     }
 
 
@@ -208,6 +209,27 @@ class TaskDetailView(BaseView):
         svc = self.svc(task_service_key)
         await svc.delete_task(task_id, actor_user_id=ctx.user_id)
         return web.json_response({"ok": True})
+
+
+class TaskArchiveView(BaseView):
+    """``POST /api/tasks/{id}/archive`` — archive (soft-hide) a task.
+
+    ``DELETE /api/tasks/{id}/archive`` — unarchive.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        task_id = self.match("id")
+        svc = self.svc(task_service_key)
+        task = await svc.archive_task(task_id, actor_user_id=ctx.user_id)
+        return web.json_response(_task_dict(task))
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        task_id = self.match("id")
+        svc = self.svc(task_service_key)
+        task = await svc.unarchive_task(task_id, actor_user_id=ctx.user_id)
+        return web.json_response(_task_dict(task))
 
 
 class TaskCommentCollectionView(BaseView):
@@ -471,3 +493,33 @@ class SpaceTaskDetailView(_SpaceTasksBase):
         except KeyError:
             return error_response(404, "NOT_FOUND", "Task not found.")
         return web.json_response({"ok": True})
+
+
+class SpaceTaskArchiveView(_SpaceTasksBase):
+    """``POST`` / ``DELETE /api/spaces/{id}/tasks/{tid}/archive``."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        if not await self._require_member(space_id, ctx.user_id):
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        svc = self.svc(K.space_task_service_key)
+        try:
+            task = await svc.archive_task(self.match("tid"), actor_user_id=ctx.user_id)
+        except KeyError:
+            return error_response(404, "NOT_FOUND", "Task not found.")
+        return web.json_response(_task_dict(task))
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        if not await self._require_member(space_id, ctx.user_id):
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        svc = self.svc(K.space_task_service_key)
+        try:
+            task = await svc.unarchive_task(
+                self.match("tid"), actor_user_id=ctx.user_id
+            )
+        except KeyError:
+            return error_response(404, "NOT_FOUND", "Task not found.")
+        return web.json_response(_task_dict(task))

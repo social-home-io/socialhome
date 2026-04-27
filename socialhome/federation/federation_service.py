@@ -599,28 +599,16 @@ class FederationService:
         event_type: FederationEventType,
         payload: dict,
     ) -> BroadcastResult:
-        """Send to all remote instances that have members in the given space.
-
-        Queries for confirmed instances that are not banned from the space.
-        For v1 this broadcasts to all confirmed peers; space-membership
-        filtering is applied by the caller via the per-space FK join.
+        """Send to every confirmed peer that is a member of ``space_id``
+        and not instance-banned from it. Filtering happens in the repo
+        via a single JOIN — no Python-side scan over every confirmed
+        peer.
         """
-        instances = await self._federation_repo.list_instances(
-            status=PairingStatus.CONFIRMED.value,
-        )
-        target_ids: list[str] = []
-        for inst in instances:
-            banned = await self._federation_repo.is_instance_banned_from_space(
-                space_id,
-                inst.id,
-            )
-            if not banned:
-                target_ids.append(inst.id)
-
+        instances = await self._federation_repo.list_instances_in_space(space_id)
         return await self.broadcast_to_peers(
             event_type=event_type,
             payload=payload,
-            instance_ids=target_ids,
+            instance_ids=[inst.id for inst in instances],
             space_id=space_id,
         )
 
@@ -1168,17 +1156,9 @@ async def _lookup_by_inbox_id(
     repo: AbstractFederationRepo,
     inbox_id: str,
 ) -> "_InboxInstance | None":
-    """Find a ``RemoteInstance`` by its ``local_inbox_id``.
-
-    The repository protocol exposes ``get_instance(instance_id)`` only, so
-    we list all instances and scan for the matching inbox ID.  For v1
-    instance counts are small; a dedicated index can be added later.
-    """
-    instances = await repo.list_instances()
-    for inst in instances:
-        if inst.local_inbox_id == inbox_id:
-            return _InboxInstance(inst)
-    return None
+    """Find a ``RemoteInstance`` by its ``local_inbox_id``."""
+    inst = await repo.get_instance_by_local_inbox_id(inbox_id)
+    return _InboxInstance(inst) if inst is not None else None
 
 
 def _aiohttp_timeout(seconds: float):

@@ -79,6 +79,7 @@ def _row_to_task(row: dict) -> Task:
         assignees=tuple(load_json(row.get("assignees_json"), [])),
         recurrence=recurrence,
         recurrence_parent_id=row.get("recurrence_parent_id"),
+        archived_at=_parse_dt(row.get("archived_at")),
     )
 
 
@@ -189,8 +190,8 @@ class SqliteTaskRepo:
             INSERT INTO tasks(
                 id, list_id, title, description, due_date, assignees_json,
                 status, position, created_by, rrule, last_spawned_at,
-                recurrence_parent_id, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,
+                recurrence_parent_id, archived_at, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
@@ -203,6 +204,7 @@ class SqliteTaskRepo:
                 rrule=excluded.rrule,
                 last_spawned_at=excluded.last_spawned_at,
                 recurrence_parent_id=excluded.recurrence_parent_id,
+                archived_at=excluded.archived_at,
                 updated_at=excluded.updated_at
             """,
             (
@@ -218,6 +220,7 @@ class SqliteTaskRepo:
                 task.recurrence.rrule if task.recurrence else None,
                 _iso(task.recurrence.last_spawned_at) if task.recurrence else None,
                 task.recurrence_parent_id,
+                _iso(task.archived_at),
                 _iso(task.created_at),
                 _iso(task.updated_at),
             ),
@@ -491,8 +494,8 @@ class SqliteSpaceTaskRepo:
                 id, list_id, space_id, title, description, due_date,
                 assignees_json, status, position, created_by,
                 rrule, last_spawned_at, recurrence_parent_id,
-                created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,
+                archived_at, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
@@ -505,6 +508,7 @@ class SqliteSpaceTaskRepo:
                 rrule=excluded.rrule,
                 last_spawned_at=excluded.last_spawned_at,
                 recurrence_parent_id=excluded.recurrence_parent_id,
+                archived_at=excluded.archived_at,
                 updated_at=excluded.updated_at
             """,
             (
@@ -521,6 +525,7 @@ class SqliteSpaceTaskRepo:
                 task.recurrence.rrule if task.recurrence else None,
                 _iso(task.recurrence.last_spawned_at) if task.recurrence else None,
                 task.recurrence_parent_id,
+                _iso(task.archived_at),
                 _iso(task.created_at),
                 _iso(task.updated_at),
             ),

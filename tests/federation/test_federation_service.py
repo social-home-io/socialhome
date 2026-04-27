@@ -95,11 +95,25 @@ class InMemoryFederationRepo:
         self._pairings: dict[str, PairingSession] = {}
         self._replay: dict[str, str] = {}
         self._bans: set[tuple[str, str]] = set()
+        self._space_members: set[tuple[str, str]] = set()
         self.reachable_calls: list[str] = []
         self.unreachable_calls: list[str] = []
 
+    def add_space_member(self, space_id: str, instance_id: str) -> None:
+        """Test helper — not part of AbstractFederationRepo."""
+        self._space_members.add((space_id, instance_id))
+
     async def get_instance(self, instance_id: str) -> RemoteInstance | None:
         return self._instances.get(instance_id)
+
+    async def get_instance_by_local_inbox_id(
+        self,
+        local_inbox_id: str,
+    ) -> RemoteInstance | None:
+        for inst in self._instances.values():
+            if inst.local_inbox_id == local_inbox_id:
+                return inst
+        return None
 
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance:
         self._instances[inst.id] = inst
@@ -115,6 +129,21 @@ class InMemoryFederationRepo:
         if status is not None:
             result = [i for i in result if i.status.value == status]
         return result
+
+    async def list_instances_in_space(
+        self,
+        space_id: str,
+    ) -> list[RemoteInstance]:
+        out: list[RemoteInstance] = []
+        for inst in self._instances.values():
+            if (space_id, inst.id) not in self._space_members:
+                continue
+            if inst.status.value != "confirmed":
+                continue
+            if (space_id, inst.id) in self._bans:
+                continue
+            out.append(inst)
+        return out
 
     async def delete_instance(self, instance_id: str) -> None:
         self._instances.pop(instance_id, None)
@@ -916,6 +945,101 @@ async def test_broadcast_to_all_confirmed_when_no_ids():
 
     assert result.attempted == 3
     assert result.succeeded == 3
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_filters_non_members():
+    """Only peers that are space members receive the event."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+
+    import os
+
+    member_kp = generate_identity_keypair()
+    outsider_kp = generate_identity_keypair()
+    member_inst, _ = _make_remote_instance(
+        km, peer_kp=member_kp, session_key=os.urandom(32)
+    )
+    outsider_inst, _ = _make_remote_instance(
+        km, peer_kp=outsider_kp, session_key=os.urandom(32)
+    )
+    await fed_repo.save_instance(member_inst)
+    await fed_repo.save_instance(outsider_inst)
+
+    space_id = "space-x"
+    fed_repo.add_space_member(space_id, member_inst.id)
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(return_value=mock_resp)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=mock_http,
+    )
+
+    result = await svc.broadcast_to_space_members(
+        space_id=space_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"post_id": "p1"},
+    )
+
+    assert result.attempted == 1
+    assert result.succeeded == 1
+    assert mock_http.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_skips_banned():
+    """Banned peers are excluded even if they are space members."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+
+    import os
+
+    banned_kp = generate_identity_keypair()
+    ok_kp = generate_identity_keypair()
+    banned_inst, _ = _make_remote_instance(
+        km, peer_kp=banned_kp, session_key=os.urandom(32)
+    )
+    ok_inst, _ = _make_remote_instance(km, peer_kp=ok_kp, session_key=os.urandom(32))
+    await fed_repo.save_instance(banned_inst)
+    await fed_repo.save_instance(ok_inst)
+
+    space_id = "space-y"
+    fed_repo.add_space_member(space_id, banned_inst.id)
+    fed_repo.add_space_member(space_id, ok_inst.id)
+    await fed_repo.ban_instance_from_space(space_id, banned_inst.id)
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(return_value=mock_resp)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=mock_http,
+    )
+
+    result = await svc.broadcast_to_space_members(
+        space_id=space_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"post_id": "p1"},
+    )
+
+    assert result.attempted == 1
+    assert result.succeeded == 1
 
 
 # ─── Dispatch event match arms ────────────────────────────────────────────

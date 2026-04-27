@@ -250,10 +250,12 @@ from .reports import (
 )
 from .storage import StorageQuotaView, StorageUsageView
 from .tasks import (
+    SpaceTaskArchiveView,
     SpaceTaskDetailView,
     SpaceTaskListCollectionView,
     SpaceTaskListDetailView,
     SpaceTaskListTasksView,
+    TaskArchiveView,
     TaskAttachmentCollectionView,
     TaskAttachmentDetailView,
     TaskCommentCollectionView,
@@ -483,6 +485,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         TaskListReorderView,
     )
     app.router.add_view("/api/tasks/{id}", TaskDetailView)
+    app.router.add_view("/api/tasks/{id}/archive", TaskArchiveView)
     app.router.add_view(
         "/api/tasks/{id}/comments",
         TaskCommentCollectionView,
@@ -514,6 +517,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view(
         "/api/spaces/{id}/tasks/{tid}",
         SpaceTaskDetailView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/tasks/{tid}/archive",
+        SpaceTaskArchiveView,
     )
 
     # ── Calendar ────────────────────────────────────────────────────────

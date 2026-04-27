@@ -37,17 +37,25 @@ from ..domain.task import (
     TaskStatus,
 )
 from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
+from ..repositories.user_repo import AbstractUserRepo
 
 
 class TaskService:
     """Household task list operations."""
 
-    __slots__ = ("_repo", "_bus", "_household")
+    __slots__ = ("_repo", "_bus", "_household", "_users")
 
-    def __init__(self, task_repo: AbstractTaskRepo, bus=None) -> None:
+    def __init__(
+        self,
+        task_repo: AbstractTaskRepo,
+        bus=None,
+        *,
+        user_repo: AbstractUserRepo | None = None,
+    ) -> None:
         self._repo = task_repo
         self._bus = bus
         self._household = None
+        self._users = user_repo
 
     def attach_household_features(self, svc) -> None:
         """Wire :class:`HouseholdFeaturesService` so ``create_list`` /
@@ -230,11 +238,12 @@ class TaskService:
     ) -> Task:
         task = await self.get_task(task_id)
 
-        if task.created_by != actor_user_id:
-            # allow if caller is an admin — service doesn't have user repo,
-            # so we just allow any authenticated user to update tasks for now.
-            # Stricter permission checks can be added once admin flag flows through.
-            pass
+        if task.created_by != actor_user_id and self._users is not None:
+            actor = await self._users.get_by_user_id(actor_user_id)
+            if actor is None or not actor.is_admin:
+                raise PermissionError(
+                    "only the task creator or an admin can update this task"
+                )
 
         kwargs: dict = {"updated_at": datetime.now(timezone.utc)}
         if position is not None:
@@ -305,6 +314,37 @@ class TaskService:
                     list_id=task.list_id,
                 )
             )
+
+    async def archive_task(self, task_id: str, *, actor_user_id: str) -> Task:
+        return await self._set_archived(task_id, actor_user_id, archived=True)
+
+    async def unarchive_task(self, task_id: str, *, actor_user_id: str) -> Task:
+        return await self._set_archived(task_id, actor_user_id, archived=False)
+
+    async def _set_archived(
+        self,
+        task_id: str,
+        actor_user_id: str,
+        *,
+        archived: bool,
+    ) -> Task:
+        task = await self.get_task(task_id)
+        if task.created_by != actor_user_id and self._users is not None:
+            actor = await self._users.get_by_user_id(actor_user_id)
+            if actor is None or not actor.is_admin:
+                raise PermissionError(
+                    "only the task creator or an admin can archive this task"
+                )
+        now = datetime.now(timezone.utc)
+        updated = replace(
+            task,
+            archived_at=now if archived else None,
+            updated_at=now,
+        )
+        saved = await self._repo.save(updated)
+        if self._bus is not None:
+            await self._bus.publish(TaskUpdated(task=saved))
+        return saved
 
     async def reorder_tasks(
         self,
@@ -742,3 +782,31 @@ class SpaceTaskService:
                     space_id=space_id,
                 )
             )
+
+    async def archive_task(self, task_id: str, *, actor_user_id: str) -> Task:
+        return await self._set_archived(task_id, actor_user_id, archived=True)
+
+    async def unarchive_task(self, task_id: str, *, actor_user_id: str) -> Task:
+        return await self._set_archived(task_id, actor_user_id, archived=False)
+
+    async def _set_archived(
+        self,
+        task_id: str,
+        actor_user_id: str,
+        *,
+        archived: bool,
+    ) -> Task:
+        result = await self._repo.get(task_id)
+        if result is None:
+            raise KeyError(f"space task {task_id!r} not found")
+        space_id, task = result
+        now = datetime.now(timezone.utc)
+        updated = replace(
+            task,
+            archived_at=now if archived else None,
+            updated_at=now,
+        )
+        saved = await self._repo.save(space_id, updated)
+        if self._bus is not None:
+            await self._bus.publish(TaskUpdated(task=saved, space_id=space_id))
+        return saved

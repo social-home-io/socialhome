@@ -32,6 +32,9 @@ from .base import bool_col, row_to_dict, rows_to_dicts
 class AbstractFederationRepo(Protocol):
     # Remote instances ----------------------------------------------------
     async def get_instance(self, instance_id: str) -> RemoteInstance | None: ...
+    async def get_instance_by_local_inbox_id(
+        self, local_inbox_id: str
+    ) -> RemoteInstance | None: ...
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance: ...
     async def list_instances(
         self,
@@ -39,6 +42,7 @@ class AbstractFederationRepo(Protocol):
         source: str | None = None,
         status: str | None = None,
     ) -> list[RemoteInstance]: ...
+    async def list_instances_in_space(self, space_id: str) -> list[RemoteInstance]: ...
     async def delete_instance(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
@@ -84,6 +88,16 @@ class SqliteFederationRepo:
         row = await self._db.fetchone(
             "SELECT * FROM remote_instances WHERE id=?",
             (instance_id,),
+        )
+        return _row_to_instance(row_to_dict(row))
+
+    async def get_instance_by_local_inbox_id(
+        self,
+        local_inbox_id: str,
+    ) -> RemoteInstance | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM remote_instances WHERE local_inbox_id=? LIMIT 1",
+            (local_inbox_id,),
         )
         return _row_to_instance(row_to_dict(row))
 
@@ -164,6 +178,29 @@ class SqliteFederationRepo:
         rows = await self._db.fetchall(
             f"SELECT * FROM remote_instances{where} ORDER BY display_name",
             tuple(params),
+        )
+        return [i for i in (_row_to_instance(d) for d in rows_to_dicts(rows)) if i]
+
+    async def list_instances_in_space(
+        self,
+        space_id: str,
+    ) -> list[RemoteInstance]:
+        """Confirmed peers that are members of ``space_id`` and not
+        instance-banned from it (§24.11)."""
+        rows = await self._db.fetchall(
+            """
+            SELECT ri.* FROM remote_instances ri
+            JOIN space_instances si ON si.instance_id = ri.id
+            WHERE si.space_id = ?
+              AND ri.status = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM space_instance_bans sib
+                  WHERE sib.space_id = si.space_id
+                    AND sib.instance_id = ri.id
+              )
+            ORDER BY ri.display_name
+            """,
+            (space_id, PairingStatus.CONFIRMED.value),
         )
         return [i for i in (_row_to_instance(d) for d in rows_to_dicts(rows)) if i]
 

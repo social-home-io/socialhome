@@ -1,16 +1,12 @@
 """Archived tasks exporter.
 
-v1 scope: the local repo has no "archived" flag — :class:`Task` carries
-only ``status`` (todo/in_progress/done). Treat DONE tasks as the
-archived set for sync purposes. A future enhancement may introduce a
-dedicated archive flag.
+Surfaces tasks the user has explicitly archived (``archived_at`` set)
+for the §4.2.3 initial-sync resource catalog.
 """
 
 from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
-
-from .....domain.task import TaskStatus
 
 from .tasks import _task_to_dict
 
@@ -28,4 +24,4 @@ class TasksArchivedExporter:
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         tasks = await self._repo.list_by_space(space_id)
-        return [_task_to_dict(t) for t in tasks if t.status is TaskStatus.DONE]
+        return [_task_to_dict(t) for t in tasks if t.archived_at is not None]

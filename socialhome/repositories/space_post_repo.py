@@ -5,14 +5,13 @@ those tables is near-identical to the household ones, so the row-mapping
 and JSON helpers are imported from :mod:`post_repo` rather than
 duplicated.
 
-Scope for v1:
+Scope:
 
 * :class:`SqliteSpacePostRepo` covers save / get / list_feed (scoped by
   ``space_id``) / soft_delete / edit / reactions (atomic, with cap) /
-  comment counters / comment CRUD.
-* Does NOT cover space polls, schedule polls, moderation queue, or
-  pinning — those ride on separate tables and will land in follow-up
-  repos as the space services come online.
+  comment counters / comment CRUD / pinning.
+* Polls live in :mod:`space_poll_repo` and :mod:`poll_repo`; moderation
+  reports live in :mod:`report_repo`.
 """
 
 from __future__ import annotations

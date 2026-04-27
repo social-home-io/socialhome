@@ -221,6 +221,22 @@ CREATE TABLE IF NOT EXISTS pending_pairings (
     expires_at          TEXT NOT NULL
 );
 
+-- §11.9 — admin-pending PAIRING_INTRO_RELAY requests. Persisted so a
+-- restart doesn't lose admin queue state.
+CREATE TABLE IF NOT EXISTS pairing_relay (
+    id                  TEXT PRIMARY KEY,
+    from_instance       TEXT NOT NULL,
+    target_instance_id  TEXT NOT NULL,
+    message             TEXT NOT NULL,
+    received_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','approved','declined'))
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_relay_received_at
+    ON pairing_relay(received_at);
+CREATE INDEX IF NOT EXISTS idx_pairing_relay_status
+    ON pairing_relay(status);
+
 CREATE TABLE IF NOT EXISTS federation_outbox (
     id              TEXT PRIMARY KEY,              -- msg_id
     instance_id     TEXT NOT NULL,
@@ -950,11 +966,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     rrule                TEXT,
     last_spawned_at      TEXT,
     recurrence_parent_id TEXT,
+    archived_at          TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_tasks_list   ON tasks(list_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_list        ON tasks(list_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status      ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_archived_at ON tasks(archived_at);
 
 CREATE TABLE IF NOT EXISTS space_task_lists (
     id          TEXT PRIMARY KEY,
@@ -979,10 +997,12 @@ CREATE TABLE IF NOT EXISTS space_tasks (
     rrule                TEXT,
     last_spawned_at      TEXT,
     recurrence_parent_id TEXT,
+    archived_at          TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_space_tasks_list ON space_tasks(list_id);
+CREATE INDEX IF NOT EXISTS idx_space_tasks_list        ON space_tasks(list_id);
+CREATE INDEX IF NOT EXISTS idx_space_tasks_archived_at ON space_tasks(archived_at);
 
 CREATE TABLE IF NOT EXISTS task_deadline_notifications (
     task_id    TEXT NOT NULL,

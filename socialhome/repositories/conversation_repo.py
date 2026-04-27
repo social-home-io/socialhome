@@ -65,6 +65,8 @@ class AbstractConversationRepo(Protocol):
         *,
         at: str | None = None,
     ) -> None: ...
+    async def list_fully_left_conversation_ids(self) -> list[str]: ...
+    async def hard_delete(self, conversation_id: str) -> None: ...
 
     # Messages ------------------------------------------------------------
     async def save_message(
@@ -318,6 +320,35 @@ class SqliteConversationRepo:
              WHERE conversation_id=? AND username=?
             """,
             (at, conversation_id, username),
+        )
+
+    async def list_fully_left_conversation_ids(self) -> list[str]:
+        """Conversations whose every local member has ``deleted_at`` set
+        and that have no remote members (§23.47c). Federated conversations
+        are skipped — their lifecycle is owned by the federation peer.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT c.id FROM conversations c
+            WHERE NOT EXISTS (
+                SELECT 1 FROM conversation_members m
+                WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM conversation_remote_members rm
+                WHERE rm.conversation_id = c.id
+            )
+            """,
+        )
+        return [r["id"] for r in rows]
+
+    async def hard_delete(self, conversation_id: str) -> None:
+        """Drop the conversation row. ``ON DELETE CASCADE`` removes
+        members, messages, reactions, delivery state, and gap rows.
+        """
+        await self._db.enqueue(
+            "DELETE FROM conversations WHERE id=?",
+            (conversation_id,),
         )
 
     # ── Messages ───────────────────────────────────────────────────────

@@ -143,38 +143,58 @@ async def test_tasks_exporter_normalises_status_and_assignees():
     assert recs[0]["recurrence"]["rrule"] == "FREQ=DAILY"
 
 
-async def test_tasks_archived_filters_to_done():
-    from socialhome.federation.sync.space.exporters import TasksArchivedExporter
+async def test_tasks_archived_filters_to_archived_at():
+    """TasksArchivedExporter surfaces tasks with archived_at set,
+    regardless of their status (a DONE task is *not* archived unless
+    the user explicitly archived it).
+    """
+    from socialhome.federation.sync.space.exporters import (
+        TasksArchivedExporter,
+        TasksExporter,
+    )
 
     now = datetime.now(timezone.utc)
     active = Task(
         id="t-1",
         list_id="l",
-        title="X",
+        title="Active",
         status=TaskStatus.TODO,
         position=0,
         created_by="u-1",
         created_at=now,
         updated_at=now,
     )
-    done = Task(
+    done_not_archived = Task(
         id="t-2",
         list_id="l",
-        title="Y",
+        title="Done but not archived",
         status=TaskStatus.DONE,
         position=1,
         created_by="u-1",
         created_at=now,
         updated_at=now,
     )
+    archived = Task(
+        id="t-3",
+        list_id="l",
+        title="Archived",
+        status=TaskStatus.TODO,
+        position=2,
+        created_by="u-1",
+        created_at=now,
+        updated_at=now,
+        archived_at=now,
+    )
 
     class _Repo:
         async def list_by_space(self, space_id):
-            return [active, done]
+            return [active, done_not_archived, archived]
 
-    recs = await TasksArchivedExporter(_Repo()).list_records("sp-1")
-    assert len(recs) == 1
-    assert recs[0]["id"] == "t-2"
+    archived_recs = await TasksArchivedExporter(_Repo()).list_records("sp-1")
+    assert {r["id"] for r in archived_recs} == {"t-3"}
+
+    active_recs = await TasksExporter(_Repo()).list_records("sp-1")
+    assert {r["id"] for r in active_recs} == {"t-1", "t-2"}
 
 
 async def test_pages_exporter():

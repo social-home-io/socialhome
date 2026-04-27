@@ -67,9 +67,9 @@ NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
 class ClusterService:
     """Spec-shape :class:`ClusterService`.
 
-    Compatible with the earlier single-node stub: the legacy
-    ``announce(node_id, address)`` / ``list_nodes()`` / ``get_leader()``
-    methods still work when cluster mode is disabled.
+    All nodes are equal — no leader election or consensus protocol
+    (spec §28431). ``announce`` / ``list_nodes`` work whether cluster
+    mode is enabled or not.
     """
 
     __slots__ = (
@@ -136,7 +136,7 @@ class ClusterService:
         #: them after a partition heals.
         self._partition_gaps: dict[str, dict] = {}
 
-    # ─── Back-compat single-node stub API ─────────────────────────────
+    # ─── Node registry API ────────────────────────────────────────────
 
     async def announce(self, node_id: str, address: str) -> None:
         await self._repo.upsert_node(
@@ -149,9 +149,6 @@ class ClusterService:
 
     async def list_nodes(self) -> list[ClusterNode]:
         return await self._repo.list_nodes()
-
-    async def get_leader(self) -> str | None:
-        return await self._repo.get_leader_id()
 
     # ─── Cluster lifecycle ────────────────────────────────────────────
 
