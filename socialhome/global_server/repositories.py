@@ -825,7 +825,6 @@ class AbstractClusterRepo(Protocol):
     async def upsert_node(self, node: ClusterNode) -> None: ...
     async def list_nodes(self) -> list[ClusterNode]: ...
     async def remove_node(self, node_id: str) -> None: ...
-    async def get_leader_id(self) -> str | None: ...
     async def update_active_sync_sessions(
         self,
         node_id: str,
@@ -878,13 +877,6 @@ class SqliteClusterRepo:
             "DELETE FROM cluster_nodes WHERE node_id=?",
             (node_id,),
         )
-
-    async def get_leader_id(self) -> str | None:
-        """Return the first-registered node_id (v1 leader-election stub)."""
-        row = await self._db.fetchone(
-            "SELECT node_id FROM cluster_nodes ORDER BY added_at LIMIT 1",
-        )
-        return row["node_id"] if row else None
 
     async def update_active_sync_sessions(
         self,

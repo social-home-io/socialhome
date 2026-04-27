@@ -506,19 +506,16 @@ class DmService:
         *,
         username: str,
     ) -> None:
-        """Soft-leave: hides the conversation from the user's sidebar.
+        """Soft-leave: sets ``deleted_at`` on the member row.
 
-        For 1:1 DMs the member row gets ``deleted_at`` set. For group DMs
-        this is a hard-leave — the member row is removed (v1 simplification;
-        the spec §23.47c describes a richer flow for future).
+        Applies to both 1:1 DMs and group DMs (§23.47c). The user can be
+        re-invited; their messages stay visible to remaining members. A
+        background sweeper hard-deletes the conversation once every member
+        has left.
         """
         await self._require_membership(conversation_id, username)
-        conv = await self._require_conversation(conversation_id)
-        if conv.type is ConversationType.DM:
-            await self._convos.soft_leave(conversation_id, username)
-        else:
-            # Group DM: soft-leave still — user can rejoin via invitation
-            await self._convos.soft_leave(conversation_id, username)
+        await self._require_conversation(conversation_id)
+        await self._convos.soft_leave(conversation_id, username)
 
     # ── Internal helpers ───────────────────────────────────────────────
 

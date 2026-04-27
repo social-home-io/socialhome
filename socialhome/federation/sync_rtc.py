@@ -8,9 +8,7 @@ DataChannel itself, never through the relay.
 ``aiolibdatachannel`` is a hard runtime dependency — WebRTC is the primary
 transport for sync (and for federation in general, §24.12), with the
 relay HTTPS inbox only as fallback. Missing the native binding is treated
-as a hard configuration error; tests that want to exercise the
-signalling state machine without a real peer can use
-``SyncRtcSession.stub_session(...)``.
+as a hard configuration error.
 
 Security audit findings addressed here (§25.6.2):
     * **S-13** — :meth:`SyncRtcSession.create_answer` and
