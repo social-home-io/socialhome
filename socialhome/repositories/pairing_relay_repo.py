@@ -32,6 +32,7 @@ class AbstractPairingRelayRepo(Protocol):
     async def set_status(self, request_id: str, status: str) -> None: ...
     async def count_pending(self) -> int: ...
     async def delete_oldest_pending(self, keep: int) -> int: ...
+    async def delete_older_than(self, *, status: str, cutoff_iso: str) -> int: ...
 
 
 class SqlitePairingRelayRepo:
@@ -114,5 +115,21 @@ class SqlitePairingRelayRepo:
         await self._db.enqueue(
             "DELETE FROM pairing_relay WHERE status='pending' AND received_at <= ?",
             (cutoff,),
+        )
+        return int(before)
+
+    async def delete_older_than(self, *, status: str, cutoff_iso: str) -> int:
+        """Delete rows in *status* with ``received_at < cutoff_iso``.
+        Returns the count purged. Used by
+        :class:`PairingRelayRetentionScheduler`.
+        """
+        before = await self._db.fetchval(
+            "SELECT COUNT(*) FROM pairing_relay WHERE status=? AND received_at < ?",
+            (status, cutoff_iso),
+            default=0,
+        )
+        await self._db.enqueue(
+            "DELETE FROM pairing_relay WHERE status=? AND received_at < ?",
+            (status, cutoff_iso),
         )
         return int(before)

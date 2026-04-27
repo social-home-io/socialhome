@@ -113,3 +113,29 @@ async def test_delete_oldest_pending_keeps_most_recent(env):
     assert deleted == 3
     pending = await env.repo.list_pending()
     assert {p["id"] for p in pending} == {"r-3", "r-4"}
+
+
+async def test_delete_older_than_filters_by_status_and_age(env):
+    now = datetime.now(timezone.utc)
+
+    async def _seed(rid, status, dt):
+        await env.db.enqueue(
+            """
+            INSERT INTO pairing_relay(
+                id, from_instance, target_instance_id, message,
+                received_at, status
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (rid, "a", "b", "m", dt.isoformat(), status),
+        )
+
+    await _seed("old-approved", "approved", now - timedelta(days=10))
+    await _seed("new-approved", "approved", now - timedelta(days=2))
+    await _seed("old-declined", "declined", now - timedelta(days=10))
+
+    cutoff = (now - timedelta(days=7)).isoformat()
+    purged_a = await env.repo.delete_older_than(status="approved", cutoff_iso=cutoff)
+    assert purged_a == 1
+
+    rows = await env.db.fetchall("SELECT id FROM pairing_relay ORDER BY id")
+    assert {r["id"] for r in rows} == {"new-approved", "old-declined"}

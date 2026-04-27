@@ -87,6 +87,16 @@ class _MemRelayRepo:
             self._rows.pop(r["id"], None)
         return len(excess)
 
+    async def delete_older_than(self, *, status, cutoff_iso):
+        targets = [
+            rid
+            for rid, r in self._rows.items()
+            if r["status"] == status and r["received_at"] < cutoff_iso
+        ]
+        for rid in targets:
+            self._rows.pop(rid, None)
+        return len(targets)
+
 
 def _make_queue(*, fed=None, repo=None) -> tuple[PairingRelayQueue, EventBus]:
     bus = EventBus()

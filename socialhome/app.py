@@ -59,6 +59,7 @@ from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
 from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
+from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
 from .platform import build_platform_adapter
@@ -1082,6 +1083,7 @@ def create_app(config: Config | None = None) -> web.Application:
     stale_call_scheduler: StaleCallCleanupScheduler | None = None
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
+    pairing_relay_scheduler: PairingRelayRetentionScheduler | None = None
     page_lock_scheduler: PageLockExpiryScheduler | None = None
     space_retention_scheduler: SpaceRetentionScheduler | None = None
     post_draft_scheduler: PostDraftCleanupScheduler | None = None
@@ -1397,6 +1399,15 @@ def create_app(config: Config | None = None) -> web.Application:
         replay_cache_scheduler = ReplayCachePruneScheduler(federation_repo)
         await replay_cache_scheduler.start()
 
+        # Pairing-relay retention (§11.9) — drops approved/declined
+        # rows after a week and pending rows after a month so the
+        # admin queue table stays bounded.
+        nonlocal pairing_relay_scheduler
+        pairing_relay_scheduler = PairingRelayRetentionScheduler(
+            repos.pairing_relay,
+        )
+        await pairing_relay_scheduler.start()
+
         # Bazaar auction expiry — closes due auctions on a 60-s cadence.
         await bazaar_expiry_scheduler.start()
 
@@ -1456,6 +1467,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        if pairing_relay_scheduler is not None:
+            await pairing_relay_scheduler.stop()
         if page_lock_scheduler is not None:
             await page_lock_scheduler.stop()
         if space_retention_scheduler is not None:
