@@ -162,7 +162,8 @@ async def test_attach_registers_all_content_event_types(bus, repos):
         FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
         FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
         FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
-        FederationEventType.SPACE_POLL_CREATED,
+        # SPACE_POLL_CREATED is intentionally not registered — poll
+        # creation rides inline on SPACE_POST_CREATED.
         FederationEventType.SPACE_POLL_VOTE_CAST,
         FederationEventType.SPACE_POLL_CLOSED,
     ):
@@ -354,18 +355,6 @@ async def test_calendar_deleted(repos, handlers):
 
 
 # ─── Polls ──────────────────────────────────────────────────────────
-
-
-async def test_poll_created_logs_noop(repos, handlers):
-    """POLL_CREATED is a signal hook; no persistence side effect."""
-    await handlers._on_poll_created(
-        _event(
-            FederationEventType.SPACE_POLL_CREATED,
-            {"post_id": "p-1"},
-        )
-    )
-    assert repos["poll"].inserted == []
-    assert repos["poll"].closed == []
 
 
 async def test_poll_vote_clears_and_inserts(repos, handlers):
