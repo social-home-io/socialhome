@@ -326,7 +326,7 @@ class PairingRelayRequestCollectionView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         queue = self.svc(pairing_relay_queue_key)
         return web.json_response(
-            [_relay_request_dict(r) for r in queue.list_pending()],
+            [_relay_request_dict(r) for r in await queue.list_pending()],
         )
 
 
@@ -354,7 +354,7 @@ class PairingRelayDeclineView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         request_id = self.match("id")
         queue = self.svc(pairing_relay_queue_key)
-        dropped = queue.decline(request_id)
+        dropped = await queue.decline(request_id)
         if dropped is None:
             return error_response(404, "NOT_FOUND", "Relay request not found.")
         return web.Response(status=204)

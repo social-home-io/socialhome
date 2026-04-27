@@ -103,3 +103,25 @@ async def test_sweep_skips_conversation_with_remote_member(env):
 async def test_sweep_is_idempotent_on_empty(env):
     sched = DmGcScheduler(env.repo)
     assert await sched._sweep_once() == 0
+
+
+async def test_double_start_is_idempotent(env):
+    sched = DmGcScheduler(env.repo, interval_seconds=10.0)
+    await sched.start()
+    await sched.start()  # no-op
+    await sched.stop()
+
+
+async def test_stop_without_start_is_safe(env):
+    sched = DmGcScheduler(env.repo)
+    await sched.stop()
+
+
+async def test_loop_runs_periodically(env):
+    """Quick interval lets the loop tick at least once."""
+    import asyncio
+
+    sched = DmGcScheduler(env.repo, interval_seconds=0.05)
+    await sched.start()
+    await asyncio.sleep(0.12)
+    await sched.stop()
