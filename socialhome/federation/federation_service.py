@@ -1168,17 +1168,9 @@ async def _lookup_by_inbox_id(
     repo: AbstractFederationRepo,
     inbox_id: str,
 ) -> "_InboxInstance | None":
-    """Find a ``RemoteInstance`` by its ``local_inbox_id``.
-
-    The repository protocol exposes ``get_instance(instance_id)`` only, so
-    we list all instances and scan for the matching inbox ID.  For v1
-    instance counts are small; a dedicated index can be added later.
-    """
-    instances = await repo.list_instances()
-    for inst in instances:
-        if inst.local_inbox_id == inbox_id:
-            return _InboxInstance(inst)
-    return None
+    """Find a ``RemoteInstance`` by its ``local_inbox_id``."""
+    inst = await repo.get_instance_by_local_inbox_id(inbox_id)
+    return _InboxInstance(inst) if inst is not None else None
 
 
 def _aiohttp_timeout(seconds: float):

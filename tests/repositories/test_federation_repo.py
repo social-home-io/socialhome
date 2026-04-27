@@ -145,3 +145,24 @@ async def test_federation_instance_filtering(env):
 
     await env.fed_repo.delete_instance("peer-002")
     assert await env.fed_repo.get_instance("peer-002") is None
+
+
+async def test_get_instance_by_local_inbox_id_hit(env):
+    inst = RemoteInstance(
+        id="peer-aa",
+        display_name="AA",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://aa/wh",
+        local_inbox_id="inbox-aa",
+        status=PairingStatus.CONFIRMED,
+    )
+    await env.fed_repo.save_instance(inst)
+    got = await env.fed_repo.get_instance_by_local_inbox_id("inbox-aa")
+    assert got is not None
+    assert got.id == "peer-aa"
+
+
+async def test_get_instance_by_local_inbox_id_miss(env):
+    assert await env.fed_repo.get_instance_by_local_inbox_id("nope") is None

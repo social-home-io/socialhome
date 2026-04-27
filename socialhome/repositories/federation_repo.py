@@ -32,6 +32,9 @@ from .base import bool_col, row_to_dict, rows_to_dicts
 class AbstractFederationRepo(Protocol):
     # Remote instances ----------------------------------------------------
     async def get_instance(self, instance_id: str) -> RemoteInstance | None: ...
+    async def get_instance_by_local_inbox_id(
+        self, local_inbox_id: str
+    ) -> RemoteInstance | None: ...
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance: ...
     async def list_instances(
         self,
@@ -84,6 +87,16 @@ class SqliteFederationRepo:
         row = await self._db.fetchone(
             "SELECT * FROM remote_instances WHERE id=?",
             (instance_id,),
+        )
+        return _row_to_instance(row_to_dict(row))
+
+    async def get_instance_by_local_inbox_id(
+        self,
+        local_inbox_id: str,
+    ) -> RemoteInstance | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM remote_instances WHERE local_inbox_id=? LIMIT 1",
+            (local_inbox_id,),
         )
         return _row_to_instance(row_to_dict(row))
 

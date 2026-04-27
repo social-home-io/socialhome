@@ -101,6 +101,15 @@ class InMemoryFederationRepo:
     async def get_instance(self, instance_id: str) -> RemoteInstance | None:
         return self._instances.get(instance_id)
 
+    async def get_instance_by_local_inbox_id(
+        self,
+        local_inbox_id: str,
+    ) -> RemoteInstance | None:
+        for inst in self._instances.values():
+            if inst.local_inbox_id == local_inbox_id:
+                return inst
+        return None
+
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance:
         self._instances[inst.id] = inst
         return inst
