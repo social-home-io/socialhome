@@ -116,7 +116,11 @@ class PresenceService:
         )
         # Real-time fan-out so other household members see the change
         # without polling. The event carries the post-truncation
-        # coordinates (§25 GPS rule).
+        # coordinates (§25 GPS rule). ``gps_accuracy_m`` and
+        # ``updated_at`` are carried alongside ``zone_name`` so the
+        # per-space outbound service can build a GPS-only payload
+        # without a second DB hit; subscribers that target a
+        # space-bound channel must drop ``zone_name`` (§23.8.6).
         if self._bus is not None:
             await self._bus.publish(
                 PresenceUpdated(
@@ -125,6 +129,8 @@ class PresenceService:
                     zone_name=update.zone_name,
                     latitude=lat,
                     longitude=lon,
+                    gps_accuracy_m=acc,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
                 )
             )
 

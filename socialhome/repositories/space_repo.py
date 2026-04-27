@@ -54,6 +54,9 @@ class AbstractSpaceRepo(Protocol):
     ) -> None: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
+    async def list_location_shared_spaces_for_user(
+        self, user_id: str
+    ) -> list[Space]: ...
     async def list_subscriptions_for_user(self, user_id: str) -> list[dict]: ...
     async def list_all(self) -> list[Space]: ...
     async def mark_dissolved(self, space_id: str) -> None: ...
@@ -384,6 +387,32 @@ class SqliteSpaceRepo:
               JOIN space_members m ON m.space_id = s.id
              WHERE m.user_id = ? AND s.dissolved = 0
              ORDER BY s.name
+            """,
+            (user_id,),
+        )
+        return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
+
+    async def list_location_shared_spaces_for_user(
+        self, user_id: str
+    ) -> list[Space]:
+        """Return every space where this user has opted in to location
+        sharing (``location_share_enabled = 1``) AND the space has the
+        feature on (``feature_location = 1``).
+
+        Used by :class:`SpaceLocationOutbound` to fan a household
+        ``PresenceUpdated`` out to the spaces that should receive a
+        space-bound payload (§23.8.6). Both gates must be ON — the
+        space-level admin toggle and the per-member opt-in.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT s.* FROM spaces s
+              JOIN space_members m ON m.space_id = s.id
+             WHERE m.user_id = ?
+               AND m.location_share_enabled = 1
+               AND s.feature_location = 1
+               AND s.dissolved = 0
+             ORDER BY s.id
             """,
             (user_id,),
         )
