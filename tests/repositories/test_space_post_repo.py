@@ -104,6 +104,50 @@ async def test_list_feed_excludes_deleted(env):
     assert not any(p.id == "sp-del-1" for p in results)
 
 
+async def test_list_since_returns_strictly_newer_posts(env):
+    """``list_since`` is exclusive on ``since`` and ASC-ordered by created_at."""
+    older = Post(
+        id="sp-old",
+        author="uid-alice",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        content="old",
+    )
+    newer = Post(
+        id="sp-new",
+        author="uid-alice",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+        content="new",
+    )
+    await env.repo.save(env.space_id, older)
+    await env.repo.save(env.space_id, newer)
+    cutoff = datetime(2026, 4, 1, tzinfo=timezone.utc).isoformat()
+    results = await env.repo.list_since(env.space_id, cutoff)
+    assert [p.id for p in results] == ["sp-new"]
+
+
+async def test_list_since_excludes_deleted(env):
+    """Soft-deleted posts are not replayed on resume."""
+    post = _post("sp-deleted")
+    await env.repo.save(env.space_id, post)
+    await env.repo.soft_delete("sp-deleted")
+    results = await env.repo.list_since(env.space_id, "2020-01-01T00:00:00+00:00")
+    assert not any(p.id == "sp-deleted" for p in results)
+
+
+async def test_list_since_respects_limit(env):
+    """``limit`` caps the burst size to bound a single resume."""
+    for i in range(5):
+        await env.repo.save(env.space_id, _post(f"sp-l-{i}"))
+    results = await env.repo.list_since(
+        env.space_id,
+        "2020-01-01T00:00:00+00:00",
+        limit=2,
+    )
+    assert len(results) == 2
+
+
 async def test_soft_delete_sets_moderated_flag(env):
     """soft_delete with moderated_by sets the moderated flag on the post."""
     post = _post("sp-mod-1")

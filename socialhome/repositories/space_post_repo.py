@@ -51,6 +51,13 @@ class AbstractSpacePostRepo(Protocol):
         before: str | None = None,
         limit: int = 20,
     ) -> list[Post]: ...
+    async def list_since(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        limit: int = 500,
+    ) -> list[Post]: ...
     async def soft_delete(
         self, post_id: str, *, moderated_by: str | None = None
     ) -> None: ...
@@ -164,6 +171,30 @@ class SqliteSpacePostRepo:
                 "ORDER BY created_at DESC LIMIT ?",
                 (space_id, before, int(limit)),
             )
+        return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
+
+    async def list_since(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        limit: int = 500,
+    ) -> list[Post]:
+        """Posts created after ``since`` (ISO-8601), oldest-first.
+
+        Used by ``SpaceSyncResumeProvider`` (spec §11452) to replay
+        catch-up events to a peer that just reconnected. Soft-deleted
+        rows are skipped — the provider will not back-emit deletes.
+        Capped at ``limit`` (default 500) to bound a single resume
+        burst; callers paginate by re-issuing with the latest
+        ``created_at`` as the new ``since``.
+        """
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_posts "
+            "WHERE space_id=? AND deleted=0 AND created_at > ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (space_id, since, int(limit)),
+        )
         return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
 
     async def soft_delete(

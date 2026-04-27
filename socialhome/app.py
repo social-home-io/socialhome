@@ -165,6 +165,7 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
+from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
 from .services.pairing_relay_queue import PairingRelayQueue
 from .services.household_features_service import HouseholdFeaturesService
@@ -636,6 +637,25 @@ def _wire_federation_stack(
         FederationEventType.DM_HISTORY_CHUNK_ACK,
         _dm_history_chunk_ack,
     )
+
+    # Spec §4.4 / §11452 — long-offline catch-up. Reconnecting peer asks
+    # for events newer than ``since``; we replay individual
+    # SPACE_POST_CREATED events. Other resource types follow the same
+    # pattern in subsequent PRs.
+    space_sync_resume_provider = SpaceSyncResumeProvider(
+        federation_service=federation_service,
+        space_repo=space_repo,
+        space_post_repo=space_post_repo,
+    )
+
+    async def _space_sync_resume(event) -> None:
+        await space_sync_resume_provider.handle_request(event)
+
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_SYNC_RESUME,
+        _space_sync_resume,
+    )
+
     dm_history_scheduler = DmHistoryScheduler(
         bus=bus,
         federation=federation_service,

@@ -53,19 +53,35 @@ sequenceDiagram
     P->>R: SPACE_SYNC_COMPLETE
 ```
 
-## Flow — resume after disconnect
+## Flow — long-offline catch-up
+
+When a peer reconnects after the 7-day outbox-retention window has
+expired (spec §4.4.1), the requester asks each provider for events
+newer than the last `created_at` it persisted locally. The provider
+replies with a **burst of individual federation events** —
+`SPACE_POST_CREATED`, `SPACE_TASK_CREATED`, etc. — that the receiver's
+existing inbound handlers apply by primary key (re-deliveries are
+idempotent).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant R as Requester
     participant P as Provider
-    Note over R,P: earlier sync interrupted at seq=42
-    R->>P: SPACE_SYNC_RESUME<br/>(last_seq=42)
-    P->>R: SPACE_SYNC_CHUNK (seq=43)
-    R->>P: SPACE_SYNC_CHUNK_ACK (seq=43)
-    Note over R,P: continues from seq 43
+    Note over R,P: R has been offline >7 days
+    R->>P: SPACE_SYNC_RESUME<br/>(space_id, since)
+    P->>R: SPACE_POST_CREATED (oldest missed)
+    P->>R: SPACE_POST_CREATED ...
+    P->>R: SPACE_POST_CREATED (newest missed)
+    Note over R,P: receiver dedups by post id
 ```
+
+Implemented by `socialhome/federation/sync/space/resume.py`
+(`SpaceSyncResumeProvider`). The current cut covers posts; tasks,
+comments, pages, stickies, calendar events, and gallery items will
+extend the same provider as follow-up PRs without changing the wire
+format. Capped at `MAX_POSTS_PER_RESUME = 500` events per request —
+receivers paginate by re-issuing with the new high-water mark.
 
 ## Backpressure
 
