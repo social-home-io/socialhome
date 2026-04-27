@@ -587,6 +587,24 @@ CREATE TABLE IF NOT EXISTS space_aliases (
     PRIMARY KEY (space_id, local_username)
 );
 
+-- Per-viewer private aliases for users (§4.1.6).
+-- ``viewer_user_id`` is the local user setting the alias (their own
+-- ``users.user_id``); ``target_user_id`` is the user being renamed
+-- and may live in either ``users`` or ``remote_users``. The alias
+-- is never federated and applies only to the viewer's view.
+-- Resolution priority on read: space_display_name > personal alias >
+-- global display_name (see ``DisplayableUser``).
+CREATE TABLE IF NOT EXISTS user_aliases (
+    viewer_user_id  TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    target_user_id  TEXT NOT NULL,
+    alias           TEXT NOT NULL,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (viewer_user_id, target_user_id),
+    CHECK(length(alias) > 0 AND length(alias) <= 80)
+);
+CREATE INDEX IF NOT EXISTS idx_user_aliases_target
+    ON user_aliases(target_user_id);
+
 CREATE TABLE IF NOT EXISTS pinned_sidebar_spaces (
     user_id   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     space_id  TEXT NOT NULL,

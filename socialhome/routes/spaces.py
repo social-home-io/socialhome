@@ -10,6 +10,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 from ..app_keys import (
+    alias_resolver_key,
     federation_repo_key,
     notification_repo_key,
     presence_service_key,
@@ -156,7 +157,13 @@ class SpaceDetailView(BaseView):
         return web.json_response({"ok": True})
 
 
-def _member_to_dict(m, space_id: str) -> dict:
+def _member_to_dict(
+    m,
+    space_id: str,
+    *,
+    display_name: str | None = None,
+    personal_alias: str | None = None,
+) -> dict:
     picture_url = (
         f"/api/spaces/{space_id}/members/{m.user_id}/picture?v={m.picture_hash}"
         if m.picture_hash
@@ -166,7 +173,12 @@ def _member_to_dict(m, space_id: str) -> dict:
         "user_id": m.user_id,
         "role": m.role,
         "joined_at": m.joined_at,
+        "display_name": display_name,
         "space_display_name": m.space_display_name,
+        # Spec §4.1.6 — viewer-private rename for this user. The frontend
+        # applies the resolution priority space_display_name >
+        # personal_alias > display_name when picking what to render.
+        "personal_alias": personal_alias,
         "picture_hash": m.picture_hash,
         "picture_url": picture_url,
     }
@@ -178,8 +190,34 @@ class SpaceMembersView(BaseView):
     async def get(self) -> web.Response:
         space_id = self.match("id")
         members = await self.svc(space_repo_key).list_members(space_id)
+        # Resolve global display_name + viewer's personal alias for each
+        # member in two bulk calls (no N+1).
+        user_repo = self.svc(user_repo_key)
+        display_names: dict[str, str] = {}
+        for m in members:
+            local = await user_repo.get_by_user_id(m.user_id)
+            if local is not None:
+                display_names[m.user_id] = local.display_name
+                continue
+            remote = await user_repo.get_remote(m.user_id)
+            if remote is not None:
+                display_names[m.user_id] = remote.display_name
+        viewer = self.user
+        viewer_id = viewer.user_id if viewer is not None else ""
+        aliases = await self.svc(alias_resolver_key).resolve_users(
+            viewer_id,
+            [m.user_id for m in members],
+        )
         return web.json_response(
-            [_member_to_dict(m, space_id) for m in members],
+            [
+                _member_to_dict(
+                    m,
+                    space_id,
+                    display_name=display_names.get(m.user_id),
+                    personal_alias=aliases.get(m.user_id),
+                )
+                for m in members
+            ],
         )
 
     async def post(self) -> web.Response:

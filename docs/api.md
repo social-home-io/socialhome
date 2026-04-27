@@ -74,6 +74,16 @@ Admins also have:
 | GET | `/api/users/{user_id}/picture` | Fetch another user's avatar. |
 | GET | `/api/users/{user_id}/export` | Admin-only export of another user's data. |
 
+### Personal user aliases (§4.1.6)
+
+Viewer-private renames of other users (local or remote). Aliases never federate — only the requesting user sees them. Resolution priority `space_display_name > personal_alias > display_name` is applied server-side wherever a user reference is rendered (currently the space-members endpoint; other endpoints follow incrementally).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/aliases/users` | List the viewer's personal aliases. |
+| PUT | `/api/aliases/users/{user_id}` | Set or update the viewer's alias for a target user. |
+| DELETE | `/api/aliases/users/{user_id}` | Clear the viewer's alias for a target user. |
+
 ## HFS — Household feed
 
 | Method | Path | Purpose |

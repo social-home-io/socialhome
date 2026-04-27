@@ -281,6 +281,7 @@ from .users import (
     UserExportView,
     UserPictureView,
 )
+from .aliases import AliasCollectionView, AliasItemView
 from .stt import SttStreamView
 from .ws import WebSocketView
 
@@ -310,6 +311,9 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/users/{user_id}", UserDetailView)
     app.router.add_view("/api/users/{user_id}/picture", UserPictureView)
     app.router.add_view("/api/users/{user_id}/export", UserExportView)
+    # Personal user aliases (§4.1.6) — viewer-private renames.
+    app.router.add_view("/api/aliases/users", AliasCollectionView)
+    app.router.add_view("/api/aliases/users/{user_id}", AliasItemView)
     app.router.add_view("/api/auth/token", AuthTokenView)
 
     # ── Feed / posts ────────────────────────────────────────────────────

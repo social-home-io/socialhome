@@ -3046,6 +3046,84 @@ hr {
 }
 .sh-member-actions { display: flex; gap: var(--sh-space-xs); }
 
+/* ── Personal nickname (§4.1.6) ─────────────────────────────────────── */
+/* Subtle pencil glyph on member rows that opens the alias dialog. The
+   button only appears on hover/focus to keep the row visually quiet,
+   then becomes a 28×28 hit-target so it's tappable on phones. */
+.sh-member-row { position: relative; }
+.sh-member-rename-btn {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--sh-muted); border-radius: var(--sh-radius-md);
+  font-size: 14px; line-height: 1; padding: 0;
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+.sh-member-row:hover .sh-member-rename-btn,
+.sh-member-rename-btn:focus-visible { opacity: 1; }
+.sh-member-rename-btn:hover,
+.sh-member-rename-btn:focus-visible {
+  background: var(--sh-surface-2);
+  color: var(--sh-text);
+}
+@media (hover: none) {
+  /* Phones never trigger :hover — keep the affordance always visible. */
+  .sh-member-rename-btn { opacity: 0.6; }
+}
+.sh-member-alias-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--sh-font-size-xs);
+  padding: 1px 8px;
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  color: var(--sh-primary);
+  border-radius: var(--sh-radius-full);
+  font-weight: 600;
+}
+.sh-member-original-name {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-muted);
+}
+
+.sh-alias-dialog { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+.sh-alias-dialog-lead {
+  margin: 0; color: var(--sh-text);
+  font-size: var(--sh-font-size-sm); line-height: 1.5;
+}
+.sh-alias-dialog-label {
+  font-size: var(--sh-font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--sh-muted);
+  font-weight: 700;
+}
+.sh-alias-dialog-input {
+  width: 100%;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  border: 1px solid var(--sh-border);
+  background: var(--sh-surface);
+  color: var(--sh-text);
+  font: inherit;
+}
+.sh-alias-dialog-input:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+  border-color: var(--sh-primary);
+}
+.sh-alias-dialog-help {
+  margin: 0;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-muted);
+  line-height: 1.4;
+}
+.sh-alias-dialog-actions {
+  display: flex; align-items: center; gap: var(--sh-space-xs);
+}
+.sh-alias-dialog-actions-spacer { flex: 1; }
+
 .sh-space-profile-dialog { display: flex; flex-direction: column; gap: var(--sh-space-md); }
 
 .sh-landing-picker {

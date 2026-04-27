@@ -13,6 +13,7 @@ import { Avatar } from './Avatar'
 import { Spinner } from './Spinner'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { AliasDialog, openAliasDialog } from './AliasDialog'
 import { openMemberActions, MemberActionSheet } from './MemberActionSheet'
 import {
   SpaceProfileDialog,
@@ -22,10 +23,12 @@ import { currentUser } from '@/store/auth'
 
 interface Member {
   user_id: string
-  display_name?: string
+  display_name?: string | null
   role: string
   joined_at: string
   space_display_name?: string | null
+  /** §4.1.6 — viewer's private rename (only the requesting user sees it). */
+  personal_alias?: string | null
   picture_url?: string | null
   picture_hash?: string | null
 }
@@ -99,6 +102,19 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
     ?? null
   const hasOverride = !!(myRow?.space_display_name || myRow?.picture_url)
 
+  // §4.1.6 resolution priority — space_display_name > personal_alias > display_name.
+  // Returns the canonical name to show plus a flag for the "✏ nickname" chip.
+  const resolveName = (m: Member) => {
+    const fallback = m.display_name || m.user_id
+    if (m.space_display_name) {
+      return { name: m.space_display_name, source: 'space' as const, fallback }
+    }
+    if (m.personal_alias) {
+      return { name: m.personal_alias, source: 'personal' as const, fallback }
+    }
+    return { name: fallback, source: 'global' as const, fallback }
+  }
+
   return (
     <>
       <div class="sh-member-list">
@@ -125,19 +141,23 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
         )}
         <h3>{members.value.length} members</h3>
         {members.value.map(m => {
-          const displayName =
-            m.space_display_name || m.display_name || m.user_id
+          const r = resolveName(m)
           const isMe = m.user_id === me
           return (
             <div key={m.user_id}
                  class={`sh-member-row ${isMe ? 'sh-member-row--me' : ''}`}>
-              <Avatar name={displayName} src={m.picture_url ?? null} size={32} />
+              <Avatar name={r.name} src={m.picture_url ?? null} size={32} />
               <div class="sh-member-info">
-                <span class="sh-member-name">{displayName}</span>
-                {m.space_display_name && m.space_display_name !== m.display_name && (
-                  <span class="sh-muted"
-                        style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+                <span class="sh-member-name">{r.name}</span>
+                {r.source === 'space' && r.name !== m.display_name && (
+                  <span class="sh-member-original-name">
                     (household: {m.display_name || m.user_id})
+                  </span>
+                )}
+                {r.source === 'personal' && (
+                  <span class="sh-member-alias-chip"
+                        title={`Originally: ${r.fallback}`}>
+                    ✏ Your nickname
                   </span>
                 )}
                 {roleBadge(m.role)}
@@ -148,11 +168,41 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
               <time class="sh-muted">
                 {new Date(m.joined_at).toLocaleDateString()}
               </time>
+              {!isMe && (
+                <button
+                  class="sh-member-rename-btn"
+                  type="button"
+                  aria-label={
+                    m.personal_alias
+                      ? `Edit nickname for ${r.fallback}`
+                      : `Set nickname for ${r.fallback}`
+                  }
+                  title="Set a nickname (only you see it)"
+                  onClick={() =>
+                    openAliasDialog({
+                      targetUserId: m.user_id,
+                      globalDisplayName: m.display_name || m.user_id,
+                      currentAlias: m.personal_alias ?? null,
+                      onSave: (newAlias) => {
+                        // Optimistic update — patch the row in place so
+                        // the new name shows before the next reload tick.
+                        members.value = members.value.map(row =>
+                          row.user_id === m.user_id
+                            ? { ...row, personal_alias: newAlias }
+                            : row,
+                        )
+                      },
+                    })
+                  }
+                >
+                  ✏
+                </button>
+              )}
               {canManage.value && !isMe && (
                 <button
                   class="sh-post-overflow"
                   type="button"
-                  aria-label={`Manage ${displayName}`}
+                  aria-label={`Manage ${r.name}`}
                   onClick={() => openMemberActions(spaceId, m.user_id, m.role)}
                 >
                   ···
@@ -187,6 +237,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
       </div>
       <MemberActionSheet onUpdate={reload} />
       <SpaceProfileDialog />
+      <AliasDialog />
     </>
   )
 }

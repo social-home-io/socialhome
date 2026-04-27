@@ -88,6 +88,7 @@ from .repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from .repositories.dm_contact_repo import SqliteDmContactRepo
 from .repositories.dm_routing_repo import SqliteDmRoutingRepo
 from .repositories.gallery_repo import SqliteGalleryRepo
+from .repositories.alias_repo import SqliteAliasRepo
 from .repositories.household_features_repo import SqliteHouseholdFeaturesRepo
 from .repositories.poll_repo import SqlitePollRepo
 from .repositories.space_poll_repo import SqliteSpacePollRepo
@@ -169,6 +170,7 @@ from .federation.sync.dm_history import (
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
 from .services.pairing_relay_queue import PairingRelayQueue
+from .services.alias_service import AliasResolver, AliasService
 from .services.household_features_service import HouseholdFeaturesService
 from .services.page_conflict_service import PageConflictService
 from .services.poll_service import PollService
@@ -303,6 +305,7 @@ def _build_repos(db: AsyncDatabase):
         profile_picture=SqliteProfilePictureRepo(db),
         space_cover=SqliteSpaceCoverRepo(db),
         space_bot=SqliteSpaceBotRepo(db),
+        alias=SqliteAliasRepo(db),
     )
 
 
@@ -941,6 +944,13 @@ def create_app(config: Config | None = None) -> web.Application:
     child_protection_service.attach_space_repo(space_repo)
     child_protection_service.attach_conversation_repo(conversation_repo)
 
+    # ── Personal user aliases (§4.1.6) ──────────────────────────────────
+    # Viewer-private renames of other users (local or remote). Used by
+    # the member-list endpoint and any future render path that needs
+    # alias resolution. Aliases never federate.
+    alias_service = AliasService(repos.alias, repos.user)
+    alias_resolver = AliasResolver(repos.alias)
+
     # ── Household feature toggles (§22) ─────────────────────────────────
     household_features_service = HouseholdFeaturesService(
         repos.household_features,
@@ -1101,6 +1111,8 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.child_protection_service_key] = child_protection_service
     app[K.typing_service_key] = typing_service
     app[K.household_features_service_key] = household_features_service
+    app[K.alias_service_key] = alias_service
+    app[K.alias_resolver_key] = alias_resolver
     app[K.data_export_service_key] = data_export_service
     app[K.i18n_key] = i18n
     app[K.platform_adapter_key] = platform_adapter
