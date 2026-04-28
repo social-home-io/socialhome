@@ -51,6 +51,7 @@ class _FakeRepos:
         self.calendar = []
         self.gallery_albums = []
         self.gallery_items = []
+        self.zones = []
 
     # space_repo
     async def save_member(self, member):
@@ -155,6 +156,15 @@ class _GalleryRepoStub:
         self._c.gallery_items.append(item)
 
 
+class _ZoneRepoStub:
+    def __init__(self, collector):
+        self._c = collector
+
+    async def upsert(self, zone):
+        self._c.zones.append(zone)
+        return zone
+
+
 class _SpaceRepoStub:
     def __init__(self, collector):
         self._c = collector
@@ -210,6 +220,7 @@ def setup(bus, peer):
         sticky_repo=_StickyRepoStub(collector),
         space_calendar_repo=_CalendarRepoStub(collector),
         gallery_repo=_GalleryRepoStub(collector),
+        zone_repo=_ZoneRepoStub(collector),
     )
     return r, collector, peer_kp
 
@@ -518,3 +529,105 @@ async def test_ban_missing_user_id_drops(setup):
     r, c, kp = setup
     await _send(r, kp, "bans", [{"banned_by": "admin"}])
     assert c.bans == []
+
+
+async def test_space_zones(setup):
+    """The zone catalogue (§23.8.7) rides the chunked sync so a remote
+    member instance joining mid-life picks up every zone, not only
+    the ones added after the join."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "space_zones",
+        [
+            {
+                "id": "z_office",
+                "space_id": "sp-1",
+                "name": "Office",
+                "latitude": 47.3769,
+                "longitude": 8.5417,
+                "radius_m": 150,
+                "color": "#3b82f6",
+                "created_by": "u-1",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+            },
+        ],
+    )
+    assert len(c.zones) == 1
+    z = c.zones[0]
+    assert z.id == "z_office"
+    assert z.name == "Office"
+    assert z.latitude == 47.3769
+    assert z.radius_m == 150
+    assert z.color == "#3b82f6"
+
+
+async def test_space_zones_malformed_record_dropped(setup):
+    """Lenient receiver: a record missing latitude is dropped, others
+    in the same chunk still apply."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "space_zones",
+        [
+            {"id": "z_bad", "name": "NoCoords"},  # malformed
+            {
+                "id": "z_ok",
+                "name": "Office",
+                "latitude": 47.0,
+                "longitude": 8.0,
+                "radius_m": 200,
+                "created_by": "u-1",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+            },
+        ],
+    )
+    assert [z.id for z in c.zones] == ["z_ok"]
+
+
+async def test_space_zones_skipped_when_repo_not_wired(bus, peer):
+    """An older deployment without a zone repo wired silently skips
+    inbound zone chunks rather than erroring."""
+    peer_inst, peer_kp = peer
+    collector = _FakeRepos()
+    self_kp = generate_identity_keypair()
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(self_kp.private_key),
+        crypto=_FakeCrypto(),
+        federation_repo=_FakeFedRepo(peer_inst),
+        space_repo=_SpaceRepoStub(collector),
+        space_post_repo=_PostRepoStub(collector),
+        space_task_repo=_TaskRepoStub(collector),
+        page_repo=_PageRepoStub(collector),
+        sticky_repo=_StickyRepoStub(collector),
+        space_calendar_repo=_CalendarRepoStub(collector),
+        gallery_repo=_GalleryRepoStub(collector),
+        # zone_repo deliberately omitted
+    )
+    await _send(
+        r,
+        peer_kp,
+        "space_zones",
+        [
+            {
+                "id": "z_office",
+                "name": "Office",
+                "latitude": 47.0,
+                "longitude": 8.0,
+                "radius_m": 200,
+                "created_by": "u-1",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+            },
+        ],
+    )
+    assert c_zones_count(collector) == 0
+
+
+def c_zones_count(collector) -> int:
+    return len(collector.zones)

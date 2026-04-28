@@ -1088,3 +1088,49 @@ async def test_subscribe_banned_user_rejected(stack):
     )
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+
+
+async def test_update_config_publishes_location_mode_changed(stack):
+    """Flipping ``features.location_mode`` publishes
+    :class:`SpaceLocationModeChanged` so SpaceLocationOutbound can
+    refire the latest presence under the new tier (§23.8.6)."""
+    from socialhome.domain.events import SpaceLocationModeChanged
+
+    captured: list[SpaceLocationModeChanged] = []
+
+    async def _capture(ev: SpaceLocationModeChanged) -> None:
+        captured.append(ev)
+
+    stack.space_svc._bus.subscribe(SpaceLocationModeChanged, _capture)
+
+    _a = await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="Loc",
+    )
+    # Default mode is gps; flipping to zone_only must publish.
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(location=True, location_mode="zone_only"),
+    )
+    assert len(captured) == 1
+    assert captured[0].space_id == space.id
+    assert captured[0].new_mode == "zone_only"
+
+    # Same mode again — no extra publish.
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(location=True, location_mode="zone_only"),
+    )
+    assert len(captured) == 1
+
+    # Back to gps — publishes again.
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(location=True, location_mode="gps"),
+    )
+    assert len(captured) == 2
+    assert captured[1].new_mode == "gps"

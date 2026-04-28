@@ -98,6 +98,7 @@ from .repositories.space_poll_repo import SqliteSpacePollRepo
 from .repositories.profile_picture_repo import SqliteProfilePictureRepo
 from .repositories.space_bot_repo import SqliteSpaceBotRepo
 from .repositories.space_cover_repo import SqliteSpaceCoverRepo
+from .repositories.space_zone_repo import SqliteSpaceZoneRepo
 from .repositories.presence_repo import SqlitePresenceRepo
 from .repositories.peer_space_directory_repo import SqlitePeerSpaceDirectoryRepo
 from .repositories.public_space_repo import SqlitePublicSpaceRepo
@@ -141,6 +142,9 @@ from .services.space_member_profile_federation_outbound import (
 )
 from .services.gallery_federation_outbound import GalleryFederationOutbound
 from .services.sticky_federation_outbound import StickyFederationOutbound
+from .services.space_location_outbound import SpaceLocationOutbound
+from .services.space_zone_outbound import SpaceZoneOutbound
+from .services.space_zone_service import SpaceZoneService
 from .services.task_federation_outbound import TaskFederationOutbound
 from .services.federation_inbound import (
     PairingInboundHandlers,
@@ -164,6 +168,7 @@ from .federation.sync import (
     StickiesExporter,
     TasksArchivedExporter,
     TasksExporter,
+    ZonesExporter,
 )
 from .federation.sync.dm_history import (
     DmHistoryProvider,
@@ -310,6 +315,7 @@ def _build_repos(db: AsyncDatabase):
         space_bot=SqliteSpaceBotRepo(db),
         alias=SqliteAliasRepo(db),
         pairing_relay=SqlitePairingRelayRepo(db),
+        space_zone=SqliteSpaceZoneRepo(db),
     )
 
 
@@ -348,6 +354,9 @@ def _wire_federation_stack(
     presence_service,
     report_service,
     pairing_relay_repo,
+    space_zone_repo,
+    presence_repo,
+    ws_manager,
 ):
     """Build :class:`FederationService` + attach the whole federation stack.
 
@@ -484,6 +493,7 @@ def _wire_federation_stack(
         calendar_repo=space_calendar_repo,
         poll_repo=space_poll_repo,
         gallery_repo=gallery_repo,
+        zone_repo=space_zone_repo,
     ).attach_to(federation_service)
 
     # §25.6 Direct Space Sync — content transfer over DataChannel.
@@ -499,6 +509,7 @@ def _wire_federation_stack(
         "calendar": CalendarExporter(space_calendar_repo),
         "gallery": GalleryExporter(gallery_repo),
         "polls": PollsExporter(space_poll_repo, space_post_repo),
+        "space_zones": ZonesExporter(space_zone_repo),
     }
     chunk_builder = ChunkBuilder(
         encoder=federation_service._encoder,
@@ -521,6 +532,7 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
+        zone_repo=space_zone_repo,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,
@@ -557,6 +569,28 @@ def _wire_federation_stack(
         space_repo=space_repo,
     )
     task_federation_outbound.wire()
+
+    # §23.8.6 — fan a household PresenceUpdated out to opted-in spaces
+    # as a GPS-only WS frame + sealed federation event. ``zone_name`` is
+    # never on a space-bound payload (HA zones are household-only data).
+    space_location_outbound = SpaceLocationOutbound(
+        bus=bus,
+        ws=ws_manager,
+        federation_service=federation_service,
+        space_repo=space_repo,
+        space_zone_repo=space_zone_repo,
+        user_repo=user_repo,
+        presence_repo=presence_repo,
+    )
+    space_location_outbound.wire()
+
+    # §23.8.7 — federate per-space zone CRUD to remote member instances.
+    space_zone_outbound = SpaceZoneOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        space_repo=space_repo,
+    )
+    space_zone_outbound.wire()
 
     schedule_federation_outbound = ScheduleFederationOutbound(
         bus=bus,
@@ -997,6 +1031,14 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Presence service (local + remote) ──────────────────────────────
     presence_service = PresenceService(repos.presence, bus)
 
+    # ── Per-space zone catalogue (§23.8.7) ─────────────────────────────
+    space_zone_service = SpaceZoneService(
+        repos.space_zone,
+        repos.space,
+        repos.user,
+        bus,
+    )
+
     # ── Poll + schedule-poll service (§9) ──────────────────────────────
     poll_service = PollService(repos.poll, bus)
     space_poll_service = PollService(repos.space_poll, bus)
@@ -1167,6 +1209,8 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.page_repo_key] = page_repo
     app[K.page_conflict_service_key] = page_conflict_service
     app[K.presence_service_key] = presence_service
+    app[K.space_zone_service_key] = space_zone_service
+    app[K.space_zone_repo_key] = repos.space_zone
     app[K.poll_service_key] = poll_service
     app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service
@@ -1291,6 +1335,9 @@ def create_app(config: Config | None = None) -> web.Application:
             presence_service=presence_service,
             report_service=report_service,
             pairing_relay_repo=repos.pairing_relay,
+            space_zone_repo=repos.space_zone,
+            presence_repo=repos.presence,
+            ws_manager=ws_manager,
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager

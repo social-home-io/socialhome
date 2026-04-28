@@ -48,6 +48,7 @@ RESOURCE_ORDER: tuple[str, ...] = (
     "calendar",
     "gallery",
     "polls",
+    "space_zones",
 )
 
 

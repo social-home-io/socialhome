@@ -308,7 +308,10 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 |---|---|---|
 | GET / POST / DELETE | `/api/presence` | Own presence. |
 | POST | `/api/presence/location` | Location update (rate-limited 10/min). |
-| GET | `/api/spaces/{id}/presence` | Presence visible in this space. |
+| GET | `/api/spaces/{id}/presence` | Presence visible in this space. Carries GPS only — `zone_name` is stripped at the household boundary (§23.8.6). |
+| GET / POST | `/api/spaces/{id}/zones` | List or create a per-space display zone (§23.8.7). `GET` open to space members; `POST` admin/owner only. Body: `{name, latitude, longitude, radius_m, color?}`. |
+| PATCH / DELETE | `/api/spaces/{id}/zones/{zone_id}` | Update or delete a per-space zone. Admin/owner only. Partial update; `color: null` clears, omitting fields leaves them. |
+| PATCH | `/api/spaces/{id}/members/me/location-sharing` | Member-self-service opt in or out of GPS sharing for this space (§23.8.8). Body: `{enabled: bool}`. Returns `{location_share_enabled: bool}`. |
 | GET | `/api/notifications` | Paginated list. |
 | GET | `/api/notifications/unread-count` | Count. |
 | POST | `/api/notifications/{id}/read` | Mark read. |

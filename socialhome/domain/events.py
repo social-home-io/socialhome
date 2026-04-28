@@ -169,6 +169,51 @@ class SpaceConfigChanged(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class SpaceLocationModeChanged(DomainEvent):
+    """Admin flipped a space's ``features.location_mode`` (§23.8.6).
+
+    Picked up by :class:`SpaceLocationOutbound` to refire the latest
+    presence for every opted-in member of *this one space* — so
+    receivers see the new mode (GPS pin → zone label, or vice versa)
+    within seconds, rather than waiting for the next HA push.
+    """
+
+    space_id: str
+    new_mode: str  # "gps" | "zone_only"
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceZoneUpserted(DomainEvent):
+    """A per-space display zone was created or modified (§23.8.7).
+
+    Picked up by ``SpaceZoneOutboundService`` (federation fan-out)
+    and ``RealtimeService`` (local WS ``space_zone_changed`` frame).
+    """
+
+    space_id: str
+    zone_id: str
+    name: str
+    latitude: float
+    longitude: float
+    radius_m: int
+    color: str | None
+    created_by: str
+    updated_at: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceZoneDeleted(DomainEvent):
+    """A per-space display zone was deleted (§23.8.7)."""
+
+    space_id: str
+    zone_id: str
+    deleted_by: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Tasks ────────────────────────────────────────────────────────────────
 
 
@@ -603,6 +648,13 @@ class PresenceUpdated(DomainEvent):
     Carries only the fields the WS layer needs to fan out — coordinates
     are already 4-dp-truncated by :class:`PresenceService` per §25 GPS
     rule before this event is published.
+
+    ``user_id`` and ``gps_accuracy_m`` are carried alongside the
+    household-only ``zone_name`` so the per-space outbound service
+    (:mod:`space_location_outbound`) can build a GPS-only payload
+    without a second DB hit. Subscribers that target the space-bound
+    channel must drop ``zone_name`` — HA zones are household-only data
+    (§7.3, §23.8.6).
     """
 
     username: str
@@ -610,6 +662,9 @@ class PresenceUpdated(DomainEvent):
     zone_name: str | None = None
     latitude: float | None = None
     longitude: float | None = None
+    user_id: str | None = None
+    gps_accuracy_m: float | None = None
+    updated_at: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

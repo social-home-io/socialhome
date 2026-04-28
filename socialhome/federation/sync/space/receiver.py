@@ -34,7 +34,7 @@ from ....domain.post import (
     Post,
     PostType,
 )
-from ....domain.space import SpaceMember
+from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
 from ....domain.task import RecurrenceRule, Task, TaskStatus
 from ....infrastructure.event_bus import EventBus
@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
+    from ....repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ....repositories.sticky_repo import AbstractStickyRepo
     from ....repositories.task_repo import AbstractSpaceTaskRepo
     from ....services.space_crypto_service import SpaceContentEncryption
@@ -79,6 +80,7 @@ class SpaceSyncReceiver:
         "_sticky_repo",
         "_space_calendar_repo",
         "_gallery_repo",
+        "_zone_repo",
     )
 
     def __init__(
@@ -95,6 +97,7 @@ class SpaceSyncReceiver:
         sticky_repo: "AbstractStickyRepo",
         space_calendar_repo: "AbstractSpaceCalendarRepo",
         gallery_repo: "AbstractGalleryRepo",
+        zone_repo: "AbstractSpaceZoneRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._encoder = encoder
@@ -107,6 +110,7 @@ class SpaceSyncReceiver:
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
         self._gallery_repo = gallery_repo
+        self._zone_repo = zone_repo
 
     async def on_chunk(
         self,
@@ -284,6 +288,20 @@ class SpaceSyncReceiver:
             log.debug(
                 "received %d poll records — skipped (see Post.poll)", len(records)
             )
+        elif resource == "space_zones":
+            # §23.8.7: per-space zone catalogue. Receiver may be
+            # configured without a zone repo (older deployments) — in
+            # that case skip rather than error.
+            if self._zone_repo is None:
+                log.debug(
+                    "received %d zone records — no zone_repo wired, skipping",
+                    len(records),
+                )
+                return
+            for r in records:
+                zone = _zone_from_record(r, space_id)
+                if zone is not None:
+                    await self._zone_repo.upsert(zone)
 
     async def _persist_album(self, record: dict[str, Any]) -> None:
         from ....domain.gallery import (
@@ -444,6 +462,39 @@ def _sticky_from_record(r: dict[str, Any], space_id: str) -> Sticky | None:
         created_at=str(r.get("created_at") or ""),
         updated_at=str(r.get("updated_at") or ""),
         space_id=space_id or r.get("space_id"),
+    )
+
+
+def _zone_from_record(r: dict[str, Any], space_id: str) -> SpaceZone | None:
+    """Reconstruct a :class:`SpaceZone` from an exporter chunk record.
+
+    Lenient: skip the row rather than raising if a malformed record
+    leaks into the chunk. The federation layer has already verified
+    the envelope signature, so the worst case is a peer with a buggy
+    catalogue — log and drop the offending row, keep the others.
+    """
+    zone_id = r.get("id")
+    name = r.get("name")
+    if not zone_id or not name:
+        return None
+    try:
+        latitude = float(r["latitude"])
+        longitude = float(r["longitude"])
+        radius_m = int(r["radius_m"])
+    except KeyError, TypeError, ValueError:
+        log.debug("zone record missing coords/radius: %r", r)
+        return None
+    return SpaceZone(
+        id=str(zone_id),
+        space_id=space_id or str(r.get("space_id") or ""),
+        name=str(name),
+        latitude=latitude,
+        longitude=longitude,
+        radius_m=radius_m,
+        color=r.get("color"),
+        created_by=str(r.get("created_by") or ""),
+        created_at=str(r.get("created_at") or ""),
+        updated_at=str(r.get("updated_at") or ""),
     )
 
 

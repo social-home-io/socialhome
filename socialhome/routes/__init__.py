@@ -215,6 +215,7 @@ from .spaces import (
     SpaceLinkCollectionView,
     SpaceLinkDetailView,
     SpaceNotifPrefsView,
+    SpaceMemberLocationSharingView,
     SpacePresenceView,
     SpaceJoinRequestCollectionView,
     SpaceJoinRequestDetailView,
@@ -236,6 +237,7 @@ from .spaces import (
     SpaceSyncTriggerView,
     SpaceUnbanView,
 )
+from .space_zones import SpaceZoneDetailView, SpaceZonesCollectionView
 from .stickies import (
     SpaceStickyCollectionView,
     SpaceStickyDetailView,
@@ -362,6 +364,15 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}/ban", SpaceBanView)
     app.router.add_view("/api/spaces/{id}/invite-tokens", SpaceInviteTokenView)
     app.router.add_view("/api/spaces/{id}/presence", SpacePresenceView)
+    app.router.add_view("/api/spaces/{id}/zones", SpaceZonesCollectionView)
+    app.router.add_view(
+        "/api/spaces/{id}/zones/{zone_id}",
+        SpaceZoneDetailView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/members/me/location-sharing",
+        SpaceMemberLocationSharingView,
+    )
     app.router.add_view(
         "/api/spaces/{id}/remote-invites",
         SpaceRemoteInviteView,

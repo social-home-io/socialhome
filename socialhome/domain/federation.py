@@ -90,6 +90,13 @@ class FederationEventType(str, enum.Enum):
     SPACE_SCHEDULE_RESPONSE_UPDATED = "space_schedule_response_updated"
     SPACE_SCHEDULE_FINALIZED = "space_schedule_finalized"
     SPACE_LOCATION_UPDATED = "space_location_updated"
+    # ── Space-defined zones (§23.8.7). Per-space display catalogue,
+    # sealed under the space content key. CRUD is admin-only at the
+    # source; the inbound handler applies the upsert/delete to the
+    # local space_zones table. Zones are a display layer — they never
+    # replace coordinates on the wire, and HA zones do not propagate.
+    SPACE_ZONE_UPSERTED = "space_zone_upserted"
+    SPACE_ZONE_DELETED = "space_zone_deleted"
     # ── Gallery (§23.119) — per-event push complementing the chunked
     # initial sync. Carries the thumbnail-only projection per S-9; the
     # full file is fetched lazily via ``gallery_item_full``. Albums

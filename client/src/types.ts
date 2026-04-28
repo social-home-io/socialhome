@@ -109,10 +109,38 @@ export interface Space {
 export interface SpaceFeatures {
   calendar: boolean
   todo: boolean
+  /** When true, the space exposes the per-member GPS map (§23.8.6).
+   *  Each member must additionally opt in via PATCH
+   *  /api/spaces/{id}/members/me/location-sharing. HA-defined zone
+   *  names never reach a space-bound payload — the per-space zone
+   *  catalogue (§23.8.7) is what labels GPS pins. */
   location: boolean
+  /** Privacy tier for the per-space map (§23.8.6). Only meaningful
+   *  when ``location`` is true. ``'gps'`` (default) broadcasts 4dp
+   *  GPS to the space; ``'zone_only'`` makes the originating
+   *  instance match GPS to a space-defined zone (§23.8.7) and
+   *  broadcast only the zone label — raw coordinates never leave
+   *  the originating household. */
+  location_mode?: 'gps' | 'zone_only'
   stickies: boolean
   pages: boolean
   posts_access: 'open' | 'moderated' | 'admin_only'
+}
+
+/** Per-space display zone (§23.8.7). Members' GPS pins are matched to
+ *  zones client-side for display; the wire never carries
+ *  preprocessed "member X is in zone Y" labels. */
+export interface SpaceZone {
+  id: string
+  space_id: string
+  name: string
+  latitude: number
+  longitude: number
+  radius_m: number
+  color: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
 }
 
 export interface Conversation {

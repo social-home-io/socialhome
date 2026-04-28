@@ -15,6 +15,22 @@ from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 
 
+# pytest-homeassistant-custom-component (a transitive dev dep of the
+# ha-integration repo when both repos share a venv) installs a
+# socket-blocking guard. CI doesn't install that plugin, so the
+# fixture is a no-op there. Locally it lets ``aiohttp_client`` open
+# its TestServer port.
+try:
+    import pytest_socket  # noqa: F401
+
+    @pytest.fixture(autouse=True)
+    def _enable_sockets(socket_enabled):
+        """Re-enable sockets if the HA pytest plugin disabled them."""
+
+except ImportError:  # pragma: no cover - CI path
+    pass
+
+
 @pytest.fixture
 async def client(aiohttp_client, tmp_dir):
     """Authenticated test client using pytest-aiohttp (no TCP overhead).

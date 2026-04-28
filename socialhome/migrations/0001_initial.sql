@@ -401,10 +401,19 @@ CREATE TABLE IF NOT EXISTS spaces (
     feature_calendar       INTEGER NOT NULL DEFAULT 0,
     feature_todo           INTEGER NOT NULL DEFAULT 1,
     feature_location       INTEGER NOT NULL DEFAULT 0,
+    location_mode          TEXT NOT NULL DEFAULT 'gps'
+                           CHECK(location_mode IN ('gps', 'zone_only')),
+    -- feature_location is the on/off switch for the per-space map (§23.8.6).
+    -- location_mode picks the privacy tier when the feature is on:
+    --   gps       — opted-in members broadcast 4dp GPS to the space.
+    --   zone_only — the originating instance matches the member's GPS to a
+    --               space-defined zone (§23.8.7) and broadcasts only the
+    --               matched zone label; raw coordinates never leave the
+    --               originating household. Outside-zone updates are skipped.
+    -- HA-defined zone names never reach a space-bound channel under either
+    -- mode — see §23.8.5/§23.8.6.
     feature_stickies       INTEGER NOT NULL DEFAULT 0,
     feature_pages          INTEGER NOT NULL DEFAULT 1,
-    location_mode          TEXT NOT NULL DEFAULT 'off'
-                           CHECK(location_mode IN ('off','zone_only','gps')),
     posts_access           TEXT NOT NULL DEFAULT 'open'
                            CHECK(posts_access IN ('open','moderated','admin_only')),
     pages_access           TEXT NOT NULL DEFAULT 'open'
@@ -499,6 +508,26 @@ CREATE TABLE IF NOT EXISTS space_member_profile_pictures (
     updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (space_id, user_id)
 );
+
+-- Per-space zone catalogue (§23.8.7). Each row is a labelled circle on the
+-- space map. Members' GPS positions are matched to zones client-side for
+-- display labels — zones never replace coordinates on the wire. The catalogue
+-- is owned by space admins and replicated to remote member instances via
+-- sealed SPACE_ZONE_UPSERTED / SPACE_ZONE_DELETED federation events.
+CREATE TABLE IF NOT EXISTS space_zones (
+    id           TEXT PRIMARY KEY,
+    space_id     TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    latitude     REAL NOT NULL,                       -- 4dp truncated
+    longitude    REAL NOT NULL,                       -- 4dp truncated
+    radius_m     INTEGER NOT NULL CHECK(radius_m BETWEEN 25 AND 50000),
+    color        TEXT,                                -- "#RRGGBB", optional
+    created_by   TEXT NOT NULL,                       -- user_id of creating admin
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (space_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_space_zones_space ON space_zones(space_id);
 
 -- Space cover image (hero banner on the space feed page). One row per
 -- space that has a cover set; WebP bytes transcoded from the admin's

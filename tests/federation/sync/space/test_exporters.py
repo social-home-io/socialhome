@@ -336,3 +336,38 @@ async def test_polls_exporter_skips_posts_without_polls():
 
     recs = await PollsExporter(_Polls(), _Posts()).list_records("sp-1")
     assert recs == []
+
+
+async def test_zones_exporter_serialises_catalogue():
+    """Per-space zones (§23.8.7) ride the chunked sync so a remote
+    member instance joining mid-life picks up every zone, not only
+    the ones added after the join. The exporter is a thin asdict
+    over what the repo returns."""
+    from socialhome.domain.space import SpaceZone
+    from socialhome.federation.sync.space.exporters import ZonesExporter
+
+    z = SpaceZone(
+        id="z_office",
+        space_id="sp-1",
+        name="Office",
+        latitude=47.3769,
+        longitude=8.5417,
+        radius_m=150,
+        color="#3b82f6",
+        created_by="u-1",
+        created_at="2026-04-27T00:00:00+00:00",
+        updated_at="2026-04-27T00:00:00+00:00",
+    )
+
+    class _Repo:
+        async def list_for_space(self, space_id):
+            return [z]
+
+    recs = await ZonesExporter(_Repo()).list_records("sp-1")
+    assert len(recs) == 1
+    assert recs[0]["id"] == "z_office"
+    assert recs[0]["name"] == "Office"
+    assert recs[0]["latitude"] == 47.3769
+    assert recs[0]["radius_m"] == 150
+    # Match the on-the-wire shape the receiver expects.
+    assert recs[0]["color"] == "#3b82f6"

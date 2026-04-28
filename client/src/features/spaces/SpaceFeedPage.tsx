@@ -38,7 +38,6 @@ interface SpaceDetail {
   cover_hash: string | null
   features?: {
     location?: boolean
-    location_mode?: 'off' | 'zone_only' | 'gps'
   }
 }
 

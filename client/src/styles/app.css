@@ -6771,3 +6771,338 @@ hr {
   .sh-toast-container { top: var(--sh-space-sm); right: var(--sh-space-sm); left: var(--sh-space-sm); }
   .sh-toast { max-width: 100%; }
 }
+
+/* ───── Space-zones admin (§23.8.7) + sharing chip (§23.8.8) ────────── */
+
+/*
+ * Sharing chip — persistent banner above the space map that always
+ * shows whether the *current user* is sharing GPS with this space, and
+ * exposes a one-tap toggle. Two variants: "on" (warm green) and "off"
+ * (muted neutral). The chip never auto-dismisses; it's the affordance
+ * that makes opt-in state legible.
+ */
+.sh-sharing-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  border: 1px solid var(--sh-border);
+  margin-bottom: var(--sh-space-sm);
+  background: var(--sh-bg-soft);
+}
+.sh-sharing-chip--on {
+  background: rgba(34, 197, 94, 0.10);
+  border-color: rgba(34, 197, 94, 0.30);
+}
+.sh-sharing-chip--off {
+  background: var(--sh-bg-soft);
+  border-color: var(--sh-border);
+  color: var(--sh-text-muted);
+}
+
+/* Space-location footer line (markers / zones counters). */
+.sh-location-map-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--sh-space-xs);
+  font-size: var(--sh-font-size-xs);
+}
+
+/* Per-zone label drawn permanently on the map circle. */
+.sh-zone-label.leaflet-tooltip {
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--sh-text);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-sm);
+  padding: 2px 6px;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+/* Two-pane admin layout. */
+.sh-zones-admin__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-md);
+  margin-bottom: var(--sh-space-md);
+}
+.sh-zones-admin__split {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 2fr;
+  gap: var(--sh-space-md);
+}
+.sh-zones-admin__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-zones-admin__item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+.sh-zones-admin__swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--sh-border);
+}
+.sh-zones-admin__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sh-zones-admin__meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-zones-admin__actions {
+  display: flex;
+  gap: var(--sh-space-xs);
+}
+.sh-zones-admin__map,
+.sh-zones-admin__canvas {
+  width: 100%;
+  height: 360px;
+  border-radius: var(--sh-radius-md);
+  overflow: hidden;
+  border: 1px solid var(--sh-border);
+}
+
+/* Zone create/edit modal contents. */
+.sh-zone-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-md) var(--sh-space-lg);
+}
+.sh-zone-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-zone-form__palette {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+}
+.sh-zone-form__palette legend {
+  font-size: var(--sh-font-size-sm);
+  margin-bottom: 4px;
+}
+.sh-zone-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.sh-zone-swatch--selected {
+  border-color: var(--sh-text);
+  box-shadow: 0 0 0 2px var(--sh-bg);
+}
+.sh-zone-form__map {
+  width: 100%;
+  height: 240px;
+  border-radius: var(--sh-radius-md);
+  overflow: hidden;
+  border: 1px solid var(--sh-border);
+}
+.sh-zone-form__coords {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sh-space-sm);
+}
+.sh-zone-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sh-space-xs);
+  margin-top: var(--sh-space-sm);
+}
+
+@media (max-width: 720px) {
+  .sh-zones-admin__split { grid-template-columns: 1fr; }
+  .sh-zones-admin__map,
+  .sh-zones-admin__canvas { height: 280px; }
+}
+
+/* Zone-only mode (§23.8.6) — when the space privacy tier is set to
+ * zone_only, SpaceLocationCard renders members as a flat list with
+ * their matched zone label instead of a Leaflet map. */
+.sh-zone-only-list {
+  list-style: none;
+  margin: 0 0 var(--sh-space-xs);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-zone-only-list__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+
+/* Privacy-mode radios in SpaceSettings. */
+.sh-radio-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-xs) 0;
+}
+
+/* Privacy-mode picker (§23.8.6) — proper bordered fieldset, not the
+ * swatch-palette class previously misused. */
+.sh-mode-fieldset {
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  margin: var(--sh-space-xs) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-mode-fieldset legend {
+  font-size: var(--sh-font-size-sm);
+  padding: 0 var(--sh-space-xs);
+  font-weight: 600;
+}
+.sh-mode-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--sh-radius-sm);
+  cursor: pointer;
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+}
+.sh-mode-option:hover {
+  background: var(--sh-bg-soft);
+}
+.sh-mode-option--selected {
+  background: var(--sh-bg-soft);
+  border-color: var(--sh-border);
+}
+.sh-mode-option__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sh-mode-option__title {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  font-weight: 600;
+}
+.sh-mode-option__badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #047857;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* Sharing chip — extra subtitle line under the headline */
+.sh-sharing-chip__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sh-sharing-chip__text .sh-muted {
+  font-size: var(--sh-font-size-xs);
+}
+
+/* Zone-only members list — beefed up from the bare-text version. */
+.sh-zone-only-list__row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+.sh-zone-only-list__avatar {
+  position: relative;
+  display: inline-flex;
+}
+.sh-zone-only-list__avatar .sh-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--sh-bg);
+}
+.sh-zone-only-list__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sh-zone-only-list__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  padding: 2px var(--sh-space-sm);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zone-colour, #3b82f6) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--zone-colour, #3b82f6) 35%, transparent);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sh-zone-only-list__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--zone-colour, #3b82f6);
+}
+.sh-zone-only-list__empty {
+  padding: var(--sh-space-md);
+  text-align: center;
+}
+
+/* Picker row — "use my location" button next to the help text. */
+.sh-zone-form__picker-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sh-space-md);
+}
+.sh-zone-form__picker-row p {
+  flex: 1;
+  margin: 0;
+}

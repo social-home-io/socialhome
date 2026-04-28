@@ -21,6 +21,7 @@ from .posts import PostsExporter
 from .stickies import StickiesExporter
 from .tasks import TasksExporter
 from .tasks_archived import TasksArchivedExporter
+from .zones import ZonesExporter
 
 __all__ = [
     "BansExporter",
@@ -34,4 +35,5 @@ __all__ = [
     "StickiesExporter",
     "TasksExporter",
     "TasksArchivedExporter",
+    "ZonesExporter",
 ]

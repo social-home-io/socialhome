@@ -54,6 +54,9 @@ class AbstractSpaceRepo(Protocol):
     ) -> None: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
+    async def list_location_shared_spaces_for_user(
+        self, user_id: str
+    ) -> list[Space]: ...
     async def list_subscriptions_for_user(self, user_id: str) -> list[dict]: ...
     async def list_all(self) -> list[Space]: ...
     async def mark_dissolved(self, space_id: str) -> None: ...
@@ -72,6 +75,12 @@ class AbstractSpaceRepo(Protocol):
     async def list_members(self, space_id: str) -> list[SpaceMember]: ...
     async def delete_member(self, space_id: str, user_id: str) -> None: ...
     async def set_role(self, space_id: str, user_id: str, role: str) -> None: ...
+    async def set_member_location_sharing(
+        self,
+        space_id: str,
+        user_id: str,
+        enabled: bool,
+    ) -> bool: ...
     async def set_member_profile(
         self,
         space_id: str,
@@ -243,8 +252,8 @@ class SqliteSpaceRepo:
                 owner_instance_id, owner_username, identity_public_key,
                 config_sequence, space_type, join_mode, join_code,
                 retention_days, retention_exempt_json,
-                feature_calendar, feature_todo, feature_location,
-                feature_stickies, feature_pages, location_mode,
+                feature_calendar, feature_todo, feature_location, location_mode,
+                feature_stickies, feature_pages,
                 posts_access, pages_access, stickies_access,
                 calendar_access, tasks_access,
                 allow_post_text, allow_post_image, allow_post_video,
@@ -253,19 +262,20 @@ class SqliteSpaceRepo:
                 lat, lon, radius_km, bot_enabled, allow_here_mention,
                 dissolved, about_markdown, cover_hash
             ) VALUES(
-                ?,?,?,?,
-                ?,?,?,
-                ?,?,?,?,
-                ?,?,
-                ?,?,?,
-                ?,?,?,
-                ?,?,?,
-                ?,?,
-                ?,?,?,
-                ?,?,?,
-                ?,?,
-                ?,?,?,?,?,
-                ?, ?, ?
+                -- 40 placeholders, one per column listed above.
+                ?, ?, ?, ?,                   -- id, name, description, emoji
+                ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
+                ?, ?, ?, ?,                   -- config_sequence, space_type, join_mode, join_code
+                ?, ?,                         -- retention_days, retention_exempt_json
+                ?, ?, ?, ?,                   -- feature_calendar, feature_todo, feature_location, location_mode
+                ?, ?,                         -- feature_stickies, feature_pages
+                ?, ?, ?,                      -- posts_access, pages_access, stickies_access
+                ?, ?,                         -- calendar_access, tasks_access
+                ?, ?, ?,                      -- allow_post_text, allow_post_image, allow_post_video
+                ?, ?, ?,                      -- allow_post_transcript, allow_post_poll, allow_post_schedule
+                ?, ?,                         -- allow_post_file, allow_post_bazaar
+                ?, ?, ?, ?, ?,                -- lat, lon, radius_km, bot_enabled, allow_here_mention
+                ?, ?, ?                       -- dissolved, about_markdown, cover_hash
             )
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
@@ -280,9 +290,9 @@ class SqliteSpaceRepo:
                 feature_calendar=excluded.feature_calendar,
                 feature_todo=excluded.feature_todo,
                 feature_location=excluded.feature_location,
+                location_mode=excluded.location_mode,
                 feature_stickies=excluded.feature_stickies,
                 feature_pages=excluded.feature_pages,
-                location_mode=excluded.location_mode,
                 posts_access=excluded.posts_access,
                 pages_access=excluded.pages_access,
                 stickies_access=excluded.stickies_access,
@@ -322,9 +332,9 @@ class SqliteSpaceRepo:
                 cols["feature_calendar"],
                 cols["feature_todo"],
                 cols["feature_location"],
+                cols["location_mode"],
                 cols["feature_stickies"],
                 cols["feature_pages"],
-                cols["location_mode"],
                 cols["posts_access"],
                 cols["pages_access"],
                 cols["stickies_access"],
@@ -385,6 +395,30 @@ class SqliteSpaceRepo:
               JOIN space_members m ON m.space_id = s.id
              WHERE m.user_id = ? AND s.dissolved = 0
              ORDER BY s.name
+            """,
+            (user_id,),
+        )
+        return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
+
+    async def list_location_shared_spaces_for_user(self, user_id: str) -> list[Space]:
+        """Return every space where this user has opted in to location
+        sharing (``location_share_enabled = 1``) AND the space has the
+        feature on (``feature_location = 1``).
+
+        Used by :class:`SpaceLocationOutbound` to fan a household
+        ``PresenceUpdated`` out to the spaces that should receive a
+        space-bound payload (§23.8.6). Both gates must be ON — the
+        space-level admin toggle and the per-member opt-in.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT s.* FROM spaces s
+              JOIN space_members m ON m.space_id = s.id
+             WHERE m.user_id = ?
+               AND m.location_share_enabled = 1
+               AND s.feature_location = 1
+               AND s.dissolved = 0
+             ORDER BY s.id
             """,
             (user_id,),
         )
@@ -577,6 +611,32 @@ class SqliteSpaceRepo:
             "UPDATE space_members SET role=? WHERE space_id=? AND user_id=?",
             (role, space_id, user_id),
         )
+
+    async def set_member_location_sharing(
+        self,
+        space_id: str,
+        user_id: str,
+        enabled: bool,
+    ) -> bool:
+        """Flip a member's ``location_share_enabled`` in this space.
+
+        Returns ``True`` if the row existed and was updated; ``False``
+        if no matching member row exists. Used by §23.8.8's
+        member-self-service ``PATCH /spaces/{id}/members/me/location-sharing``
+        endpoint and by the space admin UI.
+        """
+        existing = await self._db.fetchone(
+            "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, user_id),
+        )
+        if existing is None:
+            return False
+        await self._db.enqueue(
+            "UPDATE space_members SET location_share_enabled=?"
+            " WHERE space_id=? AND user_id=?",
+            (1 if enabled else 0, space_id, user_id),
+        )
+        return True
 
     async def list_local_member_user_ids(self, space_id: str) -> list[str]:
         """Return ``user_id`` values for space members whose home instance is ours.

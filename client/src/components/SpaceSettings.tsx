@@ -52,8 +52,6 @@ async function togglePublish(spaceId: string, gfsId: string) {
   }
 }
 
-type LocationMode = 'off' | 'zone_only' | 'gps'
-
 export function SpaceSettings({ space, onUpdate }: { space: Space; onUpdate: () => void }) {
   const name = signal(space.name)
   const description = signal(space.description || '')
@@ -62,9 +60,9 @@ export function SpaceSettings({ space, onUpdate }: { space: Space; onUpdate: () 
   const locationEnabled = signal(
     Boolean((space.features as { location?: boolean } | undefined)?.location),
   )
-  const locationMode = signal<LocationMode>(
-    ((space.features as { location_mode?: LocationMode } | undefined)
-      ?.location_mode) ?? 'off',
+  const locationMode = signal<'gps' | 'zone_only'>(
+    ((space.features as { location_mode?: 'gps' | 'zone_only' } | undefined)
+      ?.location_mode) ?? 'gps',
   )
 
   useEffect(() => {
@@ -72,6 +70,10 @@ export function SpaceSettings({ space, onUpdate }: { space: Space; onUpdate: () 
   }, [space.id])
 
   const save = async () => {
+    const previousMode = (space.features as { location_mode?: string } | undefined)
+      ?.location_mode ?? 'gps'
+    const modeChanged = locationEnabled.value
+      && locationMode.value !== previousMode
     try {
       await api.patch(`/api/spaces/${space.id}`, {
         name: name.value,
@@ -81,10 +83,19 @@ export function SpaceSettings({ space, onUpdate }: { space: Space; onUpdate: () 
         features: {
           ...(space.features as object),
           location: locationEnabled.value,
-          location_mode: locationEnabled.value ? locationMode.value : 'off',
+          location_mode: locationMode.value,
         },
       })
-      showToast('Space updated', 'success')
+      if (modeChanged) {
+        showToast(
+          locationMode.value === 'zone_only'
+            ? 'Zone-only mode on. Members will see only zone labels within seconds.'
+            : 'Live GPS mode on. Members will see GPS pins within seconds.',
+          'success',
+        )
+      } else {
+        showToast('Space updated', 'success')
+      }
       onUpdate()
     } catch (e: any) {
       showToast(e.message || 'Failed to update', 'error')
@@ -124,32 +135,66 @@ export function SpaceSettings({ space, onUpdate }: { space: Space; onUpdate: () 
               checked={locationEnabled.value}
               onChange={(e) => {
                 locationEnabled.value = (e.target as HTMLInputElement).checked
-                if (locationEnabled.value && locationMode.value === 'off') {
-                  locationMode.value = 'zone_only'
-                }
               }}
             />
             Show a map tab to members of this space
           </label>
           {locationEnabled.value && (
-            <label>
-              Privacy mode
-              <select
-                value={locationMode.value}
-                onChange={(e) => {
-                  const v = (e.target as HTMLSelectElement).value
-                  locationMode.value = (v === 'gps' || v === 'zone_only' ? v : 'off') as LocationMode
-                }}
-              >
-                <option value="zone_only">Zone only — show names, no coordinates</option>
-                <option value="gps">Live GPS — show members on a map</option>
-              </select>
-            </label>
+            <>
+              <fieldset class="sh-mode-fieldset" aria-label="Privacy mode">
+                <legend>Privacy mode</legend>
+                <label class={`sh-mode-option ${locationMode.value === 'gps' ? 'sh-mode-option--selected' : ''}`}>
+                  <input
+                    type="radio"
+                    name={`location-mode-${space.id}`}
+                    value="gps"
+                    checked={locationMode.value === 'gps'}
+                    onChange={() => { locationMode.value = 'gps' }}
+                  />
+                  <span class="sh-mode-option__body">
+                    <span class="sh-mode-option__title">
+                      🛰️ Live GPS
+                    </span>
+                    <span class="sh-muted">
+                      Opted-in members broadcast their GPS to the space.
+                      Coordinates are rounded to ~10 m before they leave
+                      your home server.
+                    </span>
+                  </span>
+                </label>
+                <label class={`sh-mode-option ${locationMode.value === 'zone_only' ? 'sh-mode-option--selected' : ''}`}>
+                  <input
+                    type="radio"
+                    name={`location-mode-${space.id}`}
+                    value="zone_only"
+                    checked={locationMode.value === 'zone_only'}
+                    onChange={() => { locationMode.value = 'zone_only' }}
+                  />
+                  <span class="sh-mode-option__body">
+                    <span class="sh-mode-option__title">
+                      🔒 Zone only
+                      <span class="sh-mode-option__badge">stronger privacy</span>
+                    </span>
+                    <span class="sh-muted">
+                      Your home server matches each member's GPS to a
+                      space-defined zone and sends only the zone label.
+                      Raw coordinates never leave your household. Members
+                      outside every zone show nothing.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+              <p class="sh-muted">
+                <a href={`/spaces/${space.id}/zones`}>Manage zones →</a>
+                {locationMode.value === 'zone_only'
+                  && ' (required for zone-only mode)'}
+              </p>
+            </>
           )}
           <p class="sh-muted">
-            Each member must also opt in individually from their own
-            privacy settings. GPS coordinates are always rounded to
-            ~10 metres (§25 GPS truncation) regardless of mode.
+            HA-defined zone names are never sent to a space, regardless
+            of mode. Per-space zones (managed above) are the only labels
+            ever shared.
           </p>
         </fieldset>
         <div class="sh-form-actions">

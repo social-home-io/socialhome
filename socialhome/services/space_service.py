@@ -37,6 +37,7 @@ from ..domain.events import (
     CommentUpdated,
     RemoteJoinRequestApproved,
     SpaceConfigChanged,
+    SpaceLocationModeChanged,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
@@ -407,7 +408,11 @@ class SpaceService:
         if emoji is not None:
             new_fields["emoji"] = emoji or None
             payload["emoji"] = new_fields["emoji"]
+        location_mode_changed = False
         if features is not None:
+            location_mode_changed = (
+                features.location_mode != space.features.location_mode
+            )
             new_fields["features"] = features
             payload["features"] = features.to_wire_dict()
         if join_mode is not None:
@@ -474,6 +479,16 @@ class SpaceService:
             was_global=was_global,
             is_global=will_be_global,
         )
+        if location_mode_changed:
+            # §23.8.6: refire latest presence so receivers see the new
+            # privacy tier within seconds rather than waiting for the
+            # next HA push. SpaceLocationOutbound listens.
+            await self._bus.publish(
+                SpaceLocationModeChanged(
+                    space_id=space_id,
+                    new_mode=updated.features.location_mode,
+                ),
+            )
         return updated
 
     # ── Membership ─────────────────────────────────────────────────────

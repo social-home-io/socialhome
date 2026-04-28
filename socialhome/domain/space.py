@@ -62,7 +62,16 @@ class SpaceFeatures:
     calendar: bool = False
     todo: bool = True
     location: bool = False
-    location_mode: str = "off"  # "off" | "zone_only" | "gps"
+    #: Privacy tier for the per-space map (§23.8.6). Only meaningful
+    #: when ``location`` is True.
+    #:
+    #: * ``"gps"`` — opted-in members broadcast 4dp GPS to the space.
+    #: * ``"zone_only"`` — the originating instance matches each
+    #:   member's GPS to a space-defined zone (§23.8.7) and broadcasts
+    #:   only the matched zone label. Raw coordinates never leave the
+    #:   originating household. Updates outside every zone are silently
+    #:   skipped.
+    location_mode: Literal["gps", "zone_only"] = "gps"
     stickies: bool = False
     pages: bool = True
 
@@ -126,11 +135,15 @@ class SpaceFeatures:
                 if row.get(col, 1)
             )
         )
+        raw_mode = row.get("location_mode", "gps")
+        location_mode: Literal["gps", "zone_only"] = (
+            "zone_only" if raw_mode == "zone_only" else "gps"
+        )
         return cls(
             calendar=bool(row.get("feature_calendar", 0)),
             todo=bool(row.get("feature_todo", 1)),
             location=bool(row.get("feature_location", 0)),
-            location_mode=row.get("location_mode", "off"),
+            location_mode=location_mode,
             stickies=bool(row.get("feature_stickies", 0)),
             pages=bool(row.get("feature_pages", 1)),
             posts_access=SpaceFeatureAccess(row.get("posts_access", "open")),
@@ -146,9 +159,9 @@ class SpaceFeatures:
             "feature_calendar": int(self.calendar),
             "feature_todo": int(self.todo),
             "feature_location": int(self.location),
+            "location_mode": self.location_mode,
             "feature_stickies": int(self.stickies),
             "feature_pages": int(self.pages),
-            "location_mode": self.location_mode,
             "posts_access": self.posts_access.value,
             "pages_access": self.pages_access.value,
             "stickies_access": self.stickies_access.value,
@@ -466,6 +479,38 @@ class SpaceMember:
     # Per-space picture hash (bytes live in
     # ``space_member_profile_pictures``). NULL means inherit household.
     picture_hash: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceZone:
+    """A per-space display zone (§23.8.7).
+
+    Each zone is a labelled circle on the space map. The space owns its
+    own catalogue — Home Assistant zones never reach a space. Member GPS
+    pins are matched to zones client-side; the wire never carries
+    "member X is in zone Y" preprocessed labels.
+
+    Fields:
+
+    * ``id`` — opaque identifier (``z_<urlsafe>``).
+    * ``space_id`` — owning space.
+    * ``name`` — display label, unique within the space.
+    * ``latitude``/``longitude`` — centre, 4dp-truncated.
+    * ``radius_m`` — display radius (25 m – 50 km).
+    * ``color`` — ``"#RRGGBB"`` or ``None`` (client picks from palette).
+    * ``created_by`` — ``user_id`` of the admin who first saved the zone.
+    """
+
+    id: str
+    space_id: str
+    name: str
+    latitude: float
+    longitude: float
+    radius_m: int
+    created_by: str
+    created_at: str
+    updated_at: str
+    color: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

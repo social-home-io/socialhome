@@ -413,7 +413,12 @@ async def test_presence_update_truncates_gps_to_4dp(client):
         assert abs(me["latitude"] - 47.1235) < 1e-3
 
 
-async def test_presence_update_zone_only_no_coords(client):
+async def test_presence_update_zone_without_coords_accepted(client):
+    """HA push without GPS but with a zone state is still a valid update.
+
+    The household dashboard uses ``zone_name`` even when the device lacks
+    coordinates; the route must accept that shape and persist it.
+    """
     r = await client.post(
         "/api/presence/location",
         json={"username": "admin", "zone_name": "Work"},

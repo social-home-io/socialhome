@@ -19,6 +19,7 @@ from ...domain.calendar import CalendarEvent
 from ...domain.federation import FederationEventType
 from ...domain.gallery import GalleryItem
 from ...domain.page import Page
+from ...domain.space import SpaceZone
 from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
 from ...infrastructure.event_bus import EventBus
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from ...repositories.gallery_repo import AbstractGalleryRepo
     from ...repositories.page_repo import AbstractPageRepo
     from ...repositories.poll_repo import AbstractPollRepo
+    from ...repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ...repositories.sticky_repo import AbstractStickyRepo
     from ...repositories.task_repo import AbstractSpaceTaskRepo
 
@@ -48,6 +50,7 @@ class SpaceContentInboundHandlers:
         "_calendar_repo",
         "_poll_repo",
         "_gallery_repo",
+        "_zone_repo",
     )
 
     def __init__(
@@ -60,6 +63,7 @@ class SpaceContentInboundHandlers:
         calendar_repo: "AbstractSpaceCalendarRepo",
         poll_repo: "AbstractPollRepo | None" = None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
+        zone_repo: "AbstractSpaceZoneRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._page_repo = page_repo
@@ -68,6 +72,7 @@ class SpaceContentInboundHandlers:
         self._calendar_repo = calendar_repo
         self._poll_repo = poll_repo
         self._gallery_repo = gallery_repo
+        self._zone_repo = zone_repo
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry
@@ -145,6 +150,19 @@ class SpaceContentInboundHandlers:
             registry.register(
                 FederationEventType.SPACE_GALLERY_ITEM_DELETED,
                 self._on_gallery_item_deleted,
+            )
+
+        # Per-space zones (§23.8.7). Only registered when a zone_repo
+        # is wired — keeps the handler optional so older deployments
+        # without the catalogue don't choke on inbound zone events.
+        if self._zone_repo is not None:
+            registry.register(
+                FederationEventType.SPACE_ZONE_UPSERTED,
+                self._on_zone_upserted,
+            )
+            registry.register(
+                FederationEventType.SPACE_ZONE_DELETED,
+                self._on_zone_deleted,
             )
 
     # ─── Tasks ───────────────────────────────────────────────────────────
@@ -451,3 +469,59 @@ class SpaceContentInboundHandlers:
                 existing.album_id,
                 -1,
             )
+
+    # ─── Space zones (§23.8.7) ─────────────────────────────────────────
+
+    async def _on_zone_upserted(self, event: "FederationEvent") -> None:
+        """Mirror a remote ``SPACE_ZONE_UPSERTED`` into ``space_zones``.
+
+        Inbound is lenient: a malformed or partial payload is logged
+        and dropped rather than raising — by the time we get here the
+        envelope signature + replay cache have already passed (§24.11).
+        """
+        if self._zone_repo is None:
+            return
+        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        p = event.payload
+        zone_id = str(p.get("zone_id") or p.get("id") or "")
+        name = str(p.get("name") or "")
+        if not space_id or not zone_id or not name:
+            log.debug("SPACE_ZONE_UPSERTED missing required field")
+            return
+        try:
+            latitude = float(p["latitude"])
+            longitude = float(p["longitude"])
+            radius_m = int(p["radius_m"])
+        except KeyError, TypeError, ValueError:
+            log.debug(
+                "SPACE_ZONE_UPSERTED malformed coords/radius: %r",
+                p,
+            )
+            return
+        zone = SpaceZone(
+            id=zone_id,
+            space_id=space_id,
+            name=name,
+            latitude=latitude,
+            longitude=longitude,
+            radius_m=radius_m,
+            color=p.get("color"),
+            created_by=str(p.get("created_by") or ""),
+            created_at=str(
+                p.get("created_at") or p.get("updated_at") or "",
+            ),
+            updated_at=str(
+                p.get("updated_at") or p.get("occurred_at") or "",
+            ),
+        )
+        await self._zone_repo.upsert(zone)
+
+    async def _on_zone_deleted(self, event: "FederationEvent") -> None:
+        if self._zone_repo is None:
+            return
+        zone_id = str(
+            event.payload.get("zone_id") or event.payload.get("id") or "",
+        )
+        if not zone_id:
+            return
+        await self._zone_repo.delete(zone_id)

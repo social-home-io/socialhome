@@ -1,15 +1,19 @@
 /**
  * SpaceLocationCard — map widget shown inside a space's "Map" tab
  * (§23.80). Polls :path:`GET /api/spaces/{id}/presence` and hands the
- * filtered entries to the shared :component:`LocationMap`.
+ * filtered entries to the shared :component:`LocationMap` together
+ * with the per-space zone catalogue (§23.8.7).
  *
- * Respects the space-level ``location_mode`` returned by the server:
+ * The space-level switch is now a single boolean (`feature_enabled`).
+ * When OFF the map tab is hidden — this component renders an
+ * explanatory banner so admins know why. When ON, members who opted
+ * in surface as GPS pins; the per-space zones are drawn as labelled
+ * overlay circles. HA-defined zone names never reach this component
+ * (the server strips them at the household boundary).
  *
- *   * ``off``       — renders an explanatory banner so admins know
- *                     why the map is empty.
- *   * ``zone_only`` — server already nulled lat/lon; we render the
- *                     per-member zone chips instead of a pinned map.
- *   * ``gps``       — regular map with pins + accuracy rings.
+ * The persistent **sharing chip** above the map shows the current
+ * user's own opt-in state and exposes a one-tap toggle that calls
+ * PATCH /api/spaces/{id}/members/me/location-sharing (§23.8.8).
  *
  * Polling cadence is 30 s — presence changes fan out via the WS
  * presence channel, but this page isn't always the active tab so we
@@ -17,41 +21,91 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
+import { ws } from '@/ws'
 import { Spinner } from './Spinner'
 import { Avatar } from './Avatar'
+import { Button } from './Button'
 import { LocationMap, type LocationMarker } from './LocationMap'
+import { Modal } from './Modal'
+import { showToast } from './Toast'
+import type { SpaceZone } from '@/types'
+
+const _ZONE_PALETTE = [
+  '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
+  '#facc15', '#14b8a6', '#ef4444', '#6366f1', '#84cc16',
+]
+function _zoneColor(zone: SpaceZone | undefined): string {
+  if (!zone) return _ZONE_PALETTE[0]
+  if (zone.color) return zone.color
+  let hash = 0
+  for (const ch of zone.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0
+  return _ZONE_PALETTE[Math.abs(hash) % _ZONE_PALETTE.length]
+}
+
+function _stateDotClass(state: string | undefined): string {
+  switch (state) {
+    case 'home':     return 'sh-dot sh-dot--home'
+    case 'away':     return 'sh-dot sh-dot--away'
+    case 'not_home': return 'sh-dot sh-dot--not-home'
+    case 'zone':     return 'sh-dot sh-dot--home'
+    default:         return 'sh-dot sh-dot--unknown'
+  }
+}
 
 interface SpacePresenceEntry {
   user_id: string
   username: string
   display_name: string
   state: string
-  zone_name: string | null
-  latitude: number | null
-  longitude: number | null
-  gps_accuracy_m: number | null
+  /** GPS-mode shape — present when ``location_mode === 'gps'``. */
+  latitude?: number | null
+  longitude?: number | null
+  gps_accuracy_m?: number | null
+  /** Zone-only-mode shape — present when ``location_mode === 'zone_only'``.
+   *  The originating instance has matched the member's GPS to a
+   *  space-defined zone and stripped the coordinates. */
+  zone_id?: string
+  zone_name?: string
   picture_url: string | null
 }
 
 interface SpacePresenceResponse {
   feature_enabled: boolean
-  location_mode: 'off' | 'zone_only' | 'gps'
+  /** Privacy tier of the response. ``undefined`` means the feature is
+   *  off; otherwise either ``"gps"`` (default) or ``"zone_only"``. */
+  location_mode?: 'gps' | 'zone_only'
   entries: SpacePresenceEntry[]
+}
+
+interface SpaceZonesResponse {
+  zones: SpaceZone[]
+}
+
+interface SpaceMember {
+  user_id: string
+  location_share_enabled?: boolean
 }
 
 const POLL_INTERVAL_MS = 30_000
 
-function _dotClass(state: string): string {
-  switch (state) {
-    case 'home':     return 'sh-dot sh-dot--home'
-    case 'away':     return 'sh-dot sh-dot--away'
-    case 'not_home': return 'sh-dot sh-dot--not-home'
-    default:         return 'sh-dot sh-dot--unknown'
-  }
+function modalSeenKey(spaceId: string): string {
+  return `sh.space.${spaceId}.locationModalSeen`
 }
 
-export function SpaceLocationCard({ spaceId }: { spaceId: string }) {
+export function SpaceLocationCard({
+  spaceId,
+  currentUserId,
+}: {
+  spaceId: string
+  /** Optional: when present, drives the sharing chip + onboarding
+   *  modal. When absent we still render the map but skip the
+   *  member-self-service surface. */
+  currentUserId?: string
+}) {
   const [data, setData] = useState<SpacePresenceResponse | null>(null)
+  const [zones, setZones] = useState<SpaceZone[]>([])
+  const [sharingMe, setSharingMe] = useState<boolean>(false)
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -59,8 +113,38 @@ export function SpaceLocationCard({ spaceId }: { spaceId: string }) {
     let cancelled = false
     const load = async () => {
       try {
-        const body = await api.get(`/api/spaces/${spaceId}/presence`)
-        if (!cancelled) setData(body as SpacePresenceResponse)
+        const [presence, zonesResp] = await Promise.all([
+          api.get(`/api/spaces/${spaceId}/presence`),
+          api.get(`/api/spaces/${spaceId}/zones`).catch(() => ({ zones: [] })),
+        ])
+        if (cancelled) return
+        setData(presence as SpacePresenceResponse)
+        setZones((zonesResp as SpaceZonesResponse).zones || [])
+
+        // Resolve the caller's own opt-in state from /members so the
+        // chip + onboarding can render. Members endpoint is small; we
+        // intentionally fetch it here to avoid threading membership
+        // state through every callsite.
+        if (currentUserId) {
+          try {
+            const members = await api.get<SpaceMember[]>(
+              `/api/spaces/${spaceId}/members`,
+            )
+            const me = members.find((m) => m.user_id === currentUserId)
+            const enabled = Boolean(me?.location_share_enabled)
+            setSharingMe(enabled)
+            const seen = window.localStorage.getItem(modalSeenKey(spaceId))
+            if (
+              !enabled
+              && !seen
+              && (presence as SpacePresenceResponse).feature_enabled
+            ) {
+              setShowOnboarding(true)
+            }
+          } catch {
+            /* members endpoint optional for this surface */
+          }
+        }
       } catch (e) {
         if (!cancelled) setError((e as Error).message)
       } finally {
@@ -69,8 +153,64 @@ export function SpaceLocationCard({ spaceId }: { spaceId: string }) {
     }
     void load()
     const t = setInterval(() => { void load() }, POLL_INTERVAL_MS)
-    return () => { cancelled = true; clearInterval(t) }
-  }, [spaceId])
+
+    // §23.8.7: live zone CRUD frames from RealtimeService.
+    // Apply upserts/deletes to the local zone array without a refetch.
+    const offZone = ws.on('space_zone_changed', (e) => {
+      const d = e.data as {
+        space_id: string
+        action: 'upsert' | 'delete'
+        zone_id: string
+        zone: SpaceZone | null
+      }
+      if (!d || d.space_id !== spaceId) return
+      if (d.action === 'upsert' && d.zone) {
+        const z = d.zone
+        setZones((prev) => {
+          const existing = prev.findIndex((p) => p.id === z.id)
+          if (existing >= 0) {
+            const out = prev.slice()
+            out[existing] = z
+            return out
+          }
+          return [...prev, z]
+        })
+      } else if (d.action === 'delete') {
+        setZones((prev) => prev.filter((p) => p.id !== d.zone_id))
+      }
+    })
+
+    return () => {
+      cancelled = true
+      clearInterval(t)
+      offZone()
+    }
+  }, [spaceId, currentUserId])
+
+  const setMyOptIn = async (enabled: boolean) => {
+    try {
+      await api.patch(
+        `/api/spaces/${spaceId}/members/me/location-sharing`,
+        { enabled },
+      )
+      setSharingMe(enabled)
+      const what = data?.location_mode === 'zone_only' ? 'zone' : 'location'
+      showToast(
+        enabled
+          ? `Now sharing your ${what} with this space`
+          : `You stopped sharing your ${what} with this space`,
+        'success',
+      )
+    } catch (e: any) {
+      showToast(e.message || 'Failed to update', 'error')
+    }
+  }
+
+  const dismissOnboarding = (decision: boolean | null) => {
+    window.localStorage.setItem(modalSeenKey(spaceId), '1')
+    setShowOnboarding(false)
+    if (decision === true) void setMyOptIn(true)
+  }
 
   if (loading) return <Spinner />
   if (error) return (
@@ -87,70 +227,199 @@ export function SpaceLocationCard({ spaceId }: { spaceId: string }) {
           <strong>Location sharing is off for this space.</strong>
         </p>
         <p>
-          An admin can turn it on in Space Settings → Features. Options:
-          members share their live GPS (<em>gps</em>), their current
-          zone name only (<em>zone_only</em>), or keep it fully off.
+          An admin can turn it on in Space Settings → Location sharing.
+          When enabled, each member also opts in individually so their
+          GPS reaches the space.
         </p>
       </div>
     )
   }
 
-  if (data.location_mode === 'zone_only') {
-    return (
-      <div class="sh-space-location">
-        <div class="sh-space-location__mode-banner sh-muted">
-          🔒 Zone-only mode — space members share zone labels but no map
-          coordinates.
-        </div>
-        <div class="sh-presence-overview">
-          {data.entries.length === 0 && (
-            <p class="sh-muted">No presence data from any member yet.</p>
-          )}
-          {data.entries.map((p) => (
-            <div key={p.user_id} class="sh-presence-mini">
-              <span class={_dotClass(p.state)} />
-              <Avatar name={p.display_name} src={p.picture_url} size={28} />
-              <span>{p.display_name}</span>
-              <span class="sh-muted">{p.zone_name || p.state}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    )
-  }
+  const isZoneOnly = data.location_mode === 'zone_only'
 
-  // gps mode
-  const markers: LocationMarker[] = data.entries
-    .filter((p) => p.latitude != null && p.longitude != null)
-    .map((p) => ({
-      id: p.user_id,
-      lat: p.latitude as number,
-      lon: p.longitude as number,
-      accuracy_m: p.gps_accuracy_m,
-      label: p.display_name,
-      sub_label: p.zone_name || p.state,
-      avatar_url: p.picture_url,
-      state: p.state,
-    }))
+  const markers: LocationMarker[] = isZoneOnly
+    ? []
+    : data.entries
+        .filter((p) => p.latitude != null && p.longitude != null)
+        .map((p) => ({
+          id: p.user_id,
+          lat: p.latitude as number,
+          lon: p.longitude as number,
+          accuracy_m: p.gps_accuracy_m ?? null,
+          label: p.display_name,
+          sub_label:
+            matchZoneName(zones, p.latitude as number, p.longitude as number)
+            || p.state,
+          avatar_url: p.picture_url,
+          state: p.state,
+        }))
 
-  const sharing = markers.length
+  const sharing = isZoneOnly
+    ? data.entries.filter((p) => p.zone_id != null).length
+    : markers.length
   const total = data.entries.length
 
   return (
     <div class="sh-space-location">
-      <LocationMap
-        markers={markers}
-        height={380}
-        emptyLabel={
-          total === 0
-            ? 'No presence data from this space\'s members yet.'
-            : 'No one in this space is sharing GPS right now.'
-        }
-      />
+      {currentUserId && (
+        <div class={`sh-sharing-chip ${sharingMe ? 'sh-sharing-chip--on' : 'sh-sharing-chip--off'}`}>
+          <div class="sh-sharing-chip__text">
+            <strong>
+              {sharingMe
+                ? (isZoneOnly
+                    ? '📍 You are sharing your zone with this space'
+                    : '📍 You are sharing your location with this space')
+                : '📵 Your location is private here'}
+            </strong>
+            {sharingMe && (
+              <span class="sh-muted">
+                {isZoneOnly
+                  ? 'Only the matched zone label is shared — never your exact GPS.'
+                  : 'Your 4-decimal GPS is shared with members who have the map open.'}
+              </span>
+            )}
+          </div>
+          <Button
+            variant={sharingMe ? 'danger' : 'primary'}
+            onClick={() => setMyOptIn(!sharingMe)}
+          >
+            {sharingMe ? 'Stop sharing' : 'Share my location'}
+          </Button>
+        </div>
+      )}
+      {isZoneOnly ? (
+        <ul class="sh-zone-only-list" data-testid="zone-only-list">
+          {data.entries.length === 0 && (
+            <li class="sh-zone-only-list__empty sh-muted">
+              No one in this space is in any zone right now.
+            </li>
+          )}
+          {data.entries.map((p) => {
+            const zone = zones.find((z) => z.id === p.zone_id)
+            const colour = _zoneColor(zone)
+            return (
+              <li key={p.user_id} class="sh-zone-only-list__row">
+                <span class="sh-zone-only-list__avatar">
+                  <Avatar name={p.display_name} src={p.picture_url} size={32} />
+                  <span class={_stateDotClass(p.state)} />
+                </span>
+                <div class="sh-zone-only-list__meta">
+                  <strong>{p.display_name}</strong>
+                  <span class="sh-muted">{p.state}</span>
+                </div>
+                <span
+                  class="sh-zone-only-list__chip"
+                  style={`--zone-colour: ${colour}`}
+                  title={`Zone: ${p.zone_name ?? 'unknown'}`}
+                >
+                  <span
+                    class="sh-zone-only-list__swatch"
+                    aria-hidden="true"
+                  />
+                  {p.zone_name ?? 'unknown zone'}
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <LocationMap
+          markers={markers}
+          zones={zones}
+          height={380}
+          emptyLabel={
+            total === 0
+              ? 'No one in this space is sharing GPS yet.'
+              : 'No one in this space is sharing GPS right now.'
+          }
+        />
+      )}
       <div class="sh-location-map-footer sh-muted">
-        <span>{sharing} of {total} sharing GPS</span>
-        <span>Location mode: {data.location_mode}</span>
+        <span>
+          {isZoneOnly
+            ? `${sharing} of ${total} in a zone`
+            : `${sharing} of ${total} sharing GPS`}
+        </span>
+        <span>{zones.length} zone{zones.length === 1 ? '' : 's'} configured</span>
       </div>
+      <Modal
+        open={showOnboarding}
+        onClose={() => dismissOnboarding(null)}
+        title={isZoneOnly
+          ? '📍 Share your zone with this space?'
+          : '📍 Share your location with this space?'}
+      >
+        <div class="sh-modal-body">
+          {isZoneOnly ? (
+            <>
+              <p>
+                This space tracks members by <strong>zone</strong>, not by
+                exact GPS. If you opt in, your home server will match your
+                location to one of this space's zones (e.g. "Office",
+                "Home") and share <strong>only the zone name</strong>.
+              </p>
+              <ul>
+                <li>Your GPS coordinates never leave your home server.</li>
+                <li>If you're not in any of this space's zones, nothing is shared.</li>
+                <li>You can stop sharing at any time from the map tab.</li>
+              </ul>
+            </>
+          ) : (
+            <>
+              <p>
+                This space shows members on a map. If you opt in, your
+                GPS coordinates (rounded to ~10 m) will be visible to
+                other members of this space — but never to other spaces
+                or other households outside this space.
+              </p>
+              <ul>
+                <li>You can stop sharing at any time from the map tab.</li>
+                <li>Your home assistant zones never reach this space.</li>
+              </ul>
+            </>
+          )}
+          <div class="sh-modal-actions">
+            <Button variant="secondary" onClick={() => dismissOnboarding(null)}>
+              Not now
+            </Button>
+            <Button variant="primary" onClick={() => dismissOnboarding(true)}>
+              {isZoneOnly ? 'Share my zone' : 'Share my location'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
+}
+
+/** Client-side match of a marker's GPS to the closest zone whose
+ *  haversine distance is ≤ radius_m. Returns the zone name, or null
+ *  when the pin is outside every zone. The server never sends
+ *  preprocessed labels — see §23.8.7. */
+function matchZoneName(
+  zones: SpaceZone[],
+  lat: number,
+  lon: number,
+): string | null {
+  let best: { name: string; d: number } | null = null
+  for (const z of zones) {
+    const d = haversineMeters(lat, lon, z.latitude, z.longitude)
+    if (d <= z.radius_m && (best === null || d < best.d)) {
+      best = { name: z.name, d }
+    }
+  }
+  return best?.name ?? null
+}
+
+function haversineMeters(
+  lat1: number, lon1: number, lat2: number, lon2: number,
+): number {
+  const R = 6_371_000
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a =
+    Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
 }

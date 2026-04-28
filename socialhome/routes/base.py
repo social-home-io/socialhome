@@ -45,6 +45,11 @@ from ..services.child_protection_service import (
 from ..services.gallery_service import GalleryNotFoundError, GalleryPermissionError
 from ..services.page_conflict_service import NoActiveConflictError
 from ..services.poll_service import PollClosedError, PollNotFoundError
+from ..services.space_zone_service import (
+    SpaceZoneLimitError,
+    SpaceZoneNameConflictError,
+    SpaceZoneNotFoundError,
+)
 from ..services.storage_quota_service import StorageQuotaExceeded
 
 log = logging.getLogger(__name__)
@@ -128,8 +133,13 @@ class BaseView(web.View):
             PollNotFoundError,
             ListingNotFoundError,
             GalleryNotFoundError,
+            SpaceZoneNotFoundError,
         ) as exc:
             return error_response(404, "NOT_FOUND", str(exc))
+        except SpaceZoneLimitError as exc:
+            return error_response(409, "ZONE_LIMIT", str(exc))
+        except SpaceZoneNameConflictError as exc:
+            return error_response(409, "ZONE_NAME_TAKEN", str(exc))
         except KeyError as exc:
             return error_response(404, "NOT_FOUND", str(exc).strip("'\""))
         except PublicSpaceLimitError as exc:
