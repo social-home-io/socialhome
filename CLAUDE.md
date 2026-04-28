@@ -194,6 +194,15 @@ perfect?" Incremental accuracy beats big bang rewrites.
 - Never commit `.env` files or secrets
 - Never change the LICENSE file or SPDX identifier without explicit instruction — all source code is Mozilla Public License 2.0 (MPL-2.0)
 - Never call `broadcast_to_all()` for space-scoped events — use `broadcast_to_space_members()`
+- Never inline a `member.role == "subscriber"` check on a space write
+  path — call `_assert_writable_member()` (or `_reject_subscriber()` if
+  the member row hasn't been fetched yet) so subscriber gating stays
+  uniform across post / comment / reaction / future mutations
+- Never compare `member.role` against bare role strings in service
+  code — import :class:`SpaceRole` from `domain.space` and use
+  `SpaceRole.OWNER` / `SpaceRole.ADMIN` / `SpaceRole.MEMBER` /
+  `SpaceRole.SUBSCRIBER`. The schema CHECK constraint stays the
+  on-disk authority; the enum is the in-code authority
 - Never store passwords, emails, phone numbers, or GPS coordinates in federation payloads
 - Never bypass `_require_space_admin()` / `_require_space_member()` guards
 - Never add an endpoint without a matching integration test

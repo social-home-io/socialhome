@@ -2,6 +2,7 @@
 
 Defines:
 
+* :class:`SpaceRole` — membership roles (§4.2.3).
 * :class:`SpaceFeatureAccess` — per-feature permission levels.
 * :class:`SpaceFeatures` — per-space feature toggles + access levels.
 * :class:`HouseholdFeatures` — feature toggles for the local HA household.
@@ -23,6 +24,28 @@ from typing import Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .post import PostType
+
+
+# ─── Space membership roles (§4.2.3) ──────────────────────────────────────
+
+
+class SpaceRole(StrEnum):
+    """Membership role stored in ``space_members.role``.
+
+    Per spec §4.2.3, admin authority is *holding the space private key* —
+    not a row in an ACL table. The four roles below are a social-layer
+    distinction: ``OWNER`` and ``ADMIN`` are programmatically identical
+    at the signing level, ``MEMBER`` is the regular participant, and
+    ``SUBSCRIBER`` is the read-only follower of public/global spaces.
+    Adding a fifth role, custom per-space roles, or per-user permission
+    bitfields would break the federation model — extend
+    :class:`SpaceFeatures` with a new feature gate instead.
+    """
+
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+    SUBSCRIBER = "subscriber"
 
 
 # ─── Space feature access levels (§4.3) ───────────────────────────────────
@@ -467,11 +490,19 @@ class Space:
 
 @dataclass(slots=True, frozen=True)
 class SpaceMember:
-    """A single member row in a space."""
+    """A single member row in a space.
+
+    ``role`` is one of :class:`SpaceRole`'s values. The dataclass keeps
+    it as ``str`` because rows are hydrated directly from SQLite, but
+    service-layer code should compare against :class:`SpaceRole` members
+    rather than bare string literals. Per §4.2.3 there is no separate
+    ACL/permissions field — the role string is the only authorization
+    record on the member row.
+    """
 
     space_id: str
     user_id: str
-    role: str  # "owner" | "admin" | "member"
+    role: str  # one of SpaceRole values
     joined_at: str
     history_visible_from: str | None = None
     location_share_enabled: bool = False
