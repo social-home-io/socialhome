@@ -5,8 +5,13 @@ import type { CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { CalendarEventDialog, openEventDialog } from '@/components/CalendarEventDialog'
+import { CapacityStrip } from '@/components/CapacityStrip'
+import { HostApprovalQueue } from '@/components/HostApprovalQueue'
+import { ReminderPicker } from '@/components/ReminderPicker'
 import { showToast } from '@/components/Toast'
-import { events, rsvpCounts } from '@/store/calendar'
+import { currentUser } from '@/store/auth'
+import { events, rsvpCounts, myRsvpStatus } from '@/store/calendar'
+import { t } from '@/i18n/i18n'
 
 type ViewMode = 'month' | 'week' | 'day'
 
@@ -98,17 +103,35 @@ export default function CalendarPage() {
     if (calendarId.value) loadEvents()
   }, [viewMode.value, currentDate.value])
 
-  const handleRsvp = async (eventId: string, status: 'going' | 'maybe' | 'declined') => {
-    const key = `${eventId}:${status}`
+  const handleRsvp = async (
+    event: CalendarEvent,
+    status: 'going' | 'maybe' | 'declined',
+  ) => {
+    const key = `${event.id}:${status}`
     rsvpPending.value = key
     try {
-      await api.post(`/api/calendars/${calendarId.value}/events/${eventId}/rsvp`, { status })
-      showToast(`RSVP: ${status}`, 'success')
-    } catch {
-      showToast('RSVP failed', 'error')
+      // Phase A — RSVP lives at the event-level path (no calendar
+      // segment); the server reads occurrence_at from the body for
+      // recurring events.
+      const body: Record<string, unknown> = { status }
+      if (event.rrule) body.occurrence_at = event.start
+      await api.post(`/api/calendars/events/${event.id}/rsvp`, body)
+      // Optimistic local update — corrected by next WS frame.
+      const isCapped = event.capacity != null
+      const landing = isCapped && status === 'going' ? 'requested' : status
+      myRsvpStatus.value = { ...myRsvpStatus.value, [event.id]: landing }
+      showToast(t(`event.rsvp.${landing}_toast`), 'success')
+    } catch (err) {
+      const msg = (err as Error)?.message ?? t('event.rsvp.failed')
+      showToast(msg, 'error')
     } finally {
       if (rsvpPending.value === key) rsvpPending.value = null
     }
+  }
+
+  const isEventEnded = (event: CalendarEvent): boolean => {
+    const end = new Date(event.end).getTime()
+    return end < Date.now()
   }
 
   const handleDelete = async (eventId: string) => {
@@ -204,32 +227,72 @@ export default function CalendarPage() {
                 <div class="sh-event-detail">
                   {e.description && <p>{e.description}</p>}
                   <div class="sh-event-times">
-                    <span>Start: {new Date(e.start).toLocaleString()}</span>
-                    <span>End: {new Date(e.end).toLocaleString()}</span>
+                    <span>{t('event.starts')} {new Date(e.start).toLocaleString()}</span>
+                    <span>{t('event.ends')} {new Date(e.end).toLocaleString()}</span>
                   </div>
-                  <div class="sh-event-rsvp">
-                    <Button variant="primary"
-                            loading={rsvpPending.value === `${e.id}:going`}
-                            onClick={() => handleRsvp(e.id, 'going')}>
-                      Going {rsvpCounts.value[e.id]?.going
-                        ? `· ${rsvpCounts.value[e.id].going}` : ''}
-                    </Button>
-                    <Button variant="secondary"
-                            loading={rsvpPending.value === `${e.id}:maybe`}
-                            onClick={() => handleRsvp(e.id, 'maybe')}>
-                      Maybe {rsvpCounts.value[e.id]?.maybe
-                        ? `· ${rsvpCounts.value[e.id].maybe}` : ''}
-                    </Button>
-                    <Button variant="secondary"
-                            loading={rsvpPending.value === `${e.id}:declined`}
-                            onClick={() => handleRsvp(e.id, 'declined')}>
-                      Declined {rsvpCounts.value[e.id]?.declined
-                        ? `· ${rsvpCounts.value[e.id].declined}` : ''}
-                    </Button>
+
+                  <CapacityStrip
+                    counts={rsvpCounts.value[e.id]}
+                    capacity={e.capacity}
+                    myStatus={
+                      (myRsvpStatus.value[e.id] ?? null) as
+                        | 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist' | null
+                    }
+                  />
+
+                  <div class="sh-event-rsvp" role="group" aria-label={t('event.rsvp.aria')}>
+                    {(['going', 'maybe', 'declined'] as const).map((status) => {
+                      const ended = isEventEnded(e)
+                      const isCapped = e.capacity != null
+                      const labelKey = isCapped && status === 'going'
+                        ? 'event.rsvp.request_to_join'
+                        : `event.rsvp.${status}`
+                      const ariaTip = ended ? t('event.has_ended_tooltip') : ''
+                      return (
+                        <Button
+                          key={status}
+                          variant={status === 'going' ? 'primary' : 'secondary'}
+                          loading={rsvpPending.value === `${e.id}:${status}`}
+                          disabled={ended}
+                          title={ariaTip || undefined}
+                          onClick={() => handleRsvp(e, status)}
+                        >
+                          {t(labelKey)}
+                        </Button>
+                      )
+                    })}
                   </div>
+
+                  <ReminderPicker
+                    eventId={e.id}
+                    occurrenceAt={e.rrule ? e.start : null}
+                  />
+
+                  {e.capacity != null && (
+                    e.created_by === currentUser.value?.user_id
+                      || currentUser.value?.is_admin
+                  ) && (
+                    <HostApprovalQueue
+                      eventId={e.id}
+                      spaceId={null}
+                      occurrenceAt={e.rrule ? e.start : null}
+                    />
+                  )}
+
                   <div class="sh-event-admin sh-row">
-                    <Button variant="secondary" onClick={() => handleEdit(e)}>Edit</Button>
-                    <Button variant="danger" onClick={() => handleDelete(e.id)}>Delete</Button>
+                    <a
+                      class="sh-btn sh-btn--ghost"
+                      href={`/api/calendars/events/${e.id}/export.ics`}
+                      download
+                    >
+                      📥 {t('event.add_to_calendar')}
+                    </a>
+                    <Button variant="secondary" onClick={() => handleEdit(e)}>
+                      {t('event.edit')}
+                    </Button>
+                    <Button variant="danger" onClick={() => handleDelete(e.id)}>
+                      {t('event.delete')}
+                    </Button>
                   </div>
                 </div>
               )}

@@ -20,11 +20,21 @@ export interface RsvpCounts {
   going:    number
   maybe:    number
   declined: number
+  /** Phase C — pending host approval on capacity-limited events. */
+  requested?: number
+  /** Phase C — overflow on capacity-limited events; auto-promotes when seats free. */
+  waitlist?: number
 }
 
 export const events = signal<CalendarEvent[]>([])
 /** Map of event_id → live RSVP counts (backfilled by calendar.rsvp_updated). */
 export const rsvpCounts = signal<Record<string, RsvpCounts>>({})
+
+/** Map of event_id → current user's RSVP status for the next occurrence,
+ *  used by the EventPostCard / status pill. Backfilled lazily as the
+ *  user RSVPs and from inbound calendar.rsvp_updated frames that include
+ *  ``user_status``. */
+export const myRsvpStatus = signal<Record<string, RsvpCounts['going'] | string | null>>({})
 
 /** Idempotent: subscribes once. */
 export function wireCalendarWs(): void {

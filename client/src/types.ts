@@ -37,7 +37,7 @@ export interface FileAttachment {
 export interface FeedPost {
   id: string
   author: string
-  type: 'text' | 'image' | 'video' | 'transcript' | 'poll' | 'schedule' | 'file' | 'bazaar'
+  type: 'text' | 'image' | 'video' | 'transcript' | 'poll' | 'schedule' | 'file' | 'bazaar' | 'event'
   content: string | null
   media_url: string | null
   file_meta: FileAttachment | null
@@ -50,6 +50,11 @@ export interface FeedPost {
    *  were created via the bot-bridge. Null when the originating bot has been
    *  deleted — feed renderer falls back to a generic Home Assistant chrome. */
   bot?: SpaceBotSummary | null
+  /** Phase B: when ``type === 'event'`` this is the linked
+   *  ``space_calendar_events.id``. The post body is the event summary;
+   *  the comment thread is the event's discussion. NULL on non-event
+   *  posts and on posts whose calendar event was deleted. */
+  linked_event_id?: string | null
 }
 
 export type BotScope = 'space' | 'member'
@@ -194,6 +199,30 @@ export interface CalendarEvent {
   all_day: boolean
   attendees?: string[]
   created_by: string
+  /** RFC 5545 RRULE string for recurring events. ``null`` for one-off events. */
+  rrule?: string | null
+  /** Phase C: optional per-occurrence "going" capacity. ``null`` = no
+   *  cap (open RSVP); integer = host approval required for "going",
+   *  overflow lands on waitlist. */
+  capacity?: number | null
+}
+
+/** Per-event reminder configured by a user (Phase D). */
+export interface EventReminder {
+  event_id: string
+  user_id: string
+  occurrence_at: string
+  minutes_before: number
+  fire_at: string
+  sent_at: string | null
+}
+
+/** Per-(event, user, occurrence) RSVP row (Phase A+C). */
+export interface EventRsvp {
+  user_id: string
+  status: 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist'
+  occurrence_at: string
+  updated_at: string
 }
 
 export interface TaskItem {
