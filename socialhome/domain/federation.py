@@ -87,6 +87,11 @@ class FederationEventType(str, enum.Enum):
     SPACE_CALENDAR_EVENT_CREATED = "space_calendar_event_created"
     SPACE_CALENDAR_EVENT_UPDATED = "space_calendar_event_updated"
     SPACE_CALENDAR_EVENT_DELETED = "space_calendar_event_deleted"
+    # Per-(event, user, occurrence) RSVP propagation. Out-of-order
+    # arrivals (RSVP before its event) buffer in pending_federated_rsvps
+    # and flush on event arrival.
+    SPACE_RSVP_UPDATED = "space_rsvp_updated"
+    SPACE_RSVP_DELETED = "space_rsvp_deleted"
     SPACE_SCHEDULE_RESPONSE_UPDATED = "space_schedule_response_updated"
     SPACE_SCHEDULE_FINALIZED = "space_schedule_finalized"
     SPACE_LOCATION_UPDATED = "space_location_updated"

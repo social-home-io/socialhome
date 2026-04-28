@@ -15,7 +15,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ...domain.calendar import CalendarEvent
+from ...domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from ...domain.events import (
+    CalendarEventCreated,
+    CalendarEventDeleted,
+)
 from ...domain.federation import FederationEventType
 from ...domain.gallery import GalleryItem
 from ...domain.page import Page
@@ -110,6 +114,15 @@ class SpaceContentInboundHandlers:
         registry.register(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
             self._on_calendar_deleted,
+        )
+        # Per-(event, user, occurrence) RSVPs.
+        registry.register(
+            FederationEventType.SPACE_RSVP_UPDATED,
+            self._on_rsvp_updated,
+        )
+        registry.register(
+            FederationEventType.SPACE_RSVP_DELETED,
+            self._on_rsvp_deleted,
         )
 
         # Polls — only registered when a poll_repo is attached (deployments
@@ -303,14 +316,104 @@ class SpaceContentInboundHandlers:
             all_day=bool(p.get("all_day", False)),
             attendees=tuple(str(a) for a in (p.get("attendees") or ())),
             mirrored_from=p.get("mirrored_from"),
+            rrule=p.get("rrule"),
         )
+        is_new = await self._calendar_repo.get_event(event_id) is None
         await self._calendar_repo.save_event(space_id, ev)
+        # Publish on the local bus so the calendar→feed bridge (Phase B)
+        # can mirror the event into space_posts on inbound federation
+        # arrivals too. The bridge guards against duplicates by linked_event_id.
+        if is_new:
+            await self._bus.publish(CalendarEventCreated(event=ev))
+        # Drain any RSVPs that arrived ahead of this event.
+        try:
+            await self._calendar_repo.flush_pending_rsvps(event_id)
+        except AttributeError:
+            # In-memory test fakes may not implement the buffer.
+            pass
 
     async def _on_calendar_deleted(self, event: "FederationEvent") -> None:
         event_id = str(event.payload.get("id") or event.payload.get("event_id") or "")
         if not event_id:
             return
         await self._calendar_repo.delete_event(event_id)
+        # Mirror to the feed bridge so the linked post soft-deletes.
+        await self._bus.publish(CalendarEventDeleted(event_id=event_id))
+
+    # ─── RSVPs (per-occurrence) ──────────────────────────────────────────
+
+    async def _on_rsvp_updated(self, event: "FederationEvent") -> None:
+        """Apply a peer's RSVP. If the underlying event hasn't propagated
+        yet, buffer the RSVP and let it flush on event arrival."""
+        p = event.payload
+        event_id = str(p.get("event_id") or "")
+        user_id = str(p.get("user_id") or "")
+        occurrence_at = str(p.get("occurrence_at") or "")
+        status = str(p.get("status") or "")
+        updated_at = str(p.get("updated_at") or "")
+        if (
+            not event_id
+            or not user_id
+            or not occurrence_at
+            or status not in RSVPStatus.ALL
+        ):
+            log.debug("SPACE_RSVP_UPDATED missing or invalid field")
+            return
+        result = await self._calendar_repo.get_event(event_id)
+        if result is None:
+            # Out-of-order: event hasn't arrived yet — buffer for flush.
+            try:
+                await self._calendar_repo.buffer_pending_rsvp(
+                    event_id=event_id,
+                    user_id=user_id,
+                    occurrence_at=occurrence_at,
+                    status=status,
+                    updated_at=updated_at,
+                )
+            except AttributeError:
+                log.debug("calendar_repo lacks buffer_pending_rsvp")
+            return
+        await self._calendar_repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=event_id,
+                user_id=user_id,
+                status=status,
+                updated_at=updated_at,
+                occurrence_at=occurrence_at,
+            )
+        )
+
+    async def _on_rsvp_deleted(self, event: "FederationEvent") -> None:
+        """Apply a peer's RSVP removal. Like _on_rsvp_updated, buffers
+        with status='removed' if the event hasn't propagated yet — so a
+        later flush honours the deletion rather than resurrecting the
+        RSVP."""
+        p = event.payload
+        event_id = str(p.get("event_id") or "")
+        user_id = str(p.get("user_id") or "")
+        occurrence_at = str(p.get("occurrence_at") or "")
+        updated_at = str(p.get("updated_at") or "")
+        if not event_id or not user_id or not occurrence_at:
+            log.debug("SPACE_RSVP_DELETED missing required field")
+            return
+        result = await self._calendar_repo.get_event(event_id)
+        if result is None:
+            try:
+                await self._calendar_repo.buffer_pending_rsvp(
+                    event_id=event_id,
+                    user_id=user_id,
+                    occurrence_at=occurrence_at,
+                    status="removed",
+                    updated_at=updated_at,
+                )
+            except AttributeError:
+                log.debug("calendar_repo lacks buffer_pending_rsvp")
+            return
+        await self._calendar_repo.remove_rsvp(
+            event_id,
+            user_id,
+            occurrence_at=occurrence_at,
+        )
 
     # ─── Polls ──────────────────────────────────────────────────────────
 

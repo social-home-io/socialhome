@@ -21,6 +21,7 @@ from ..domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarRSVP,
+    EventReminder,
     RSVPStatus,
 )
 from ..utils.rrule import expand_rrule
@@ -293,8 +294,93 @@ class AbstractSpaceCalendarRepo(Protocol):
     async def delete_event(self, event_id: str) -> None: ...
 
     async def upsert_rsvp(self, rsvp: CalendarRSVP) -> None: ...
-    async def remove_rsvp(self, event_id: str, user_id: str) -> None: ...
-    async def list_rsvps(self, event_id: str) -> list[CalendarRSVP]: ...
+    async def remove_rsvp(
+        self,
+        event_id: str,
+        user_id: str,
+        *,
+        occurrence_at: str,
+    ) -> None: ...
+    async def list_rsvps(
+        self,
+        event_id: str,
+        *,
+        occurrence_at: str | None = None,
+    ) -> list[CalendarRSVP]: ...
+
+    # ── Federation buffer (§Phase A out-of-order RSVPs) ───────────────
+    async def buffer_pending_rsvp(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        status: str,
+        updated_at: str,
+    ) -> None: ...
+    async def flush_pending_rsvps(
+        self,
+        event_id: str,
+    ) -> list[CalendarRSVP]: ...
+    async def gc_pending_rsvps(self, *, older_than_iso: str) -> int: ...
+
+    # ── Phase D: reminders ─────────────────────────────────────────────
+    async def upsert_reminder(self, reminder: EventReminder) -> None: ...
+    async def remove_reminder(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+    ) -> None: ...
+    async def list_reminders(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str | None = None,
+    ) -> list[EventReminder]: ...
+    async def list_due_reminders(
+        self,
+        *,
+        now_iso: str,
+        limit: int = 100,
+    ) -> list[EventReminder]: ...
+    async def mark_reminder_sent(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+        sent_at: str,
+    ) -> None: ...
+
+    # ── Phase F: iCal feed tokens ─────────────────────────────────────
+    async def upsert_feed_token(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+        token: str,
+    ) -> None: ...
+    async def get_feed_token(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+    ) -> str | None: ...
+    async def get_user_for_feed_token(
+        self,
+        token: str,
+    ) -> tuple[str, str] | None: ...
+    async def revoke_feed_token(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+    ) -> None: ...
 
 
 class SqliteSpaceCalendarRepo:
@@ -312,9 +398,9 @@ class SqliteSpaceCalendarRepo:
             """
             INSERT INTO space_calendar_events(
                 id, space_id, summary, description, start_dt, end_dt,
-                all_day, attendees_json, rrule,
+                all_day, attendees_json, rrule, capacity,
                 created_by, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
@@ -325,6 +411,7 @@ class SqliteSpaceCalendarRepo:
                 all_day=excluded.all_day,
                 attendees_json=excluded.attendees_json,
                 rrule=excluded.rrule,
+                capacity=excluded.capacity,
                 updated_at=datetime('now')
             """,
             (
@@ -337,6 +424,7 @@ class SqliteSpaceCalendarRepo:
                 int(event.all_day),
                 dump_json(list(event.attendees)),
                 event.rrule,
+                event.capacity,
                 event.created_by,
                 None,
                 None,
@@ -413,38 +501,348 @@ class SqliteSpaceCalendarRepo:
     async def upsert_rsvp(self, rsvp: CalendarRSVP) -> None:
         if rsvp.status not in RSVPStatus.ALL:
             raise ValueError(f"invalid RSVP status {rsvp.status!r}")
+        if not rsvp.occurrence_at:
+            raise ValueError("CalendarRSVP.occurrence_at must be set")
         await self._db.enqueue(
             """
             INSERT INTO space_calendar_rsvps(
-                event_id, user_id, status, updated_at
-            ) VALUES(?, ?, ?, COALESCE(?, datetime('now')))
-            ON CONFLICT(event_id, user_id) DO UPDATE SET
+                event_id, user_id, occurrence_at, status, updated_at
+            ) VALUES(?, ?, ?, ?, COALESCE(?, datetime('now')))
+            ON CONFLICT(event_id, user_id, occurrence_at) DO UPDATE SET
                 status=excluded.status,
                 updated_at=excluded.updated_at
             """,
-            (rsvp.event_id, rsvp.user_id, rsvp.status, rsvp.updated_at),
+            (
+                rsvp.event_id,
+                rsvp.user_id,
+                rsvp.occurrence_at,
+                rsvp.status,
+                rsvp.updated_at,
+            ),
         )
 
-    async def remove_rsvp(self, event_id: str, user_id: str) -> None:
+    async def remove_rsvp(
+        self,
+        event_id: str,
+        user_id: str,
+        *,
+        occurrence_at: str,
+    ) -> None:
         await self._db.enqueue(
-            "DELETE FROM space_calendar_rsvps WHERE event_id=? AND user_id=?",
-            (event_id, user_id),
+            """
+            DELETE FROM space_calendar_rsvps
+             WHERE event_id=? AND user_id=? AND occurrence_at=?
+            """,
+            (event_id, user_id, occurrence_at),
         )
 
-    async def list_rsvps(self, event_id: str) -> list[CalendarRSVP]:
-        rows = await self._db.fetchall(
-            "SELECT * FROM space_calendar_rsvps WHERE event_id=? ORDER BY updated_at",
-            (event_id,),
-        )
+    async def list_rsvps(
+        self,
+        event_id: str,
+        *,
+        occurrence_at: str | None = None,
+    ) -> list[CalendarRSVP]:
+        if occurrence_at is None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_calendar_rsvps "
+                "WHERE event_id=? ORDER BY occurrence_at, updated_at",
+                (event_id,),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_calendar_rsvps "
+                "WHERE event_id=? AND occurrence_at=? ORDER BY updated_at",
+                (event_id, occurrence_at),
+            )
         return [
             CalendarRSVP(
                 event_id=r["event_id"],
                 user_id=r["user_id"],
                 status=r["status"],
                 updated_at=r["updated_at"],
+                occurrence_at=r["occurrence_at"],
             )
             for r in rows
         ]
+
+    # ── Federation out-of-order buffer ─────────────────────────────────
+
+    async def buffer_pending_rsvp(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        status: str,
+        updated_at: str,
+    ) -> None:
+        """Buffer an inbound RSVP whose event hasn't propagated yet.
+
+        Idempotent: last-write-wins on (event_id, user_id, occurrence_at).
+        Status ``"removed"`` represents a DELETE that arrived before its
+        event — so when the event lands and we flush, the deletion is
+        honoured (rather than the buffer resurrecting a stale RSVP).
+        """
+        await self._db.enqueue(
+            """
+            INSERT INTO pending_federated_rsvps(
+                event_id, user_id, occurrence_at, status, updated_at
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(event_id, user_id, occurrence_at) DO UPDATE SET
+                status=excluded.status,
+                updated_at=excluded.updated_at,
+                received_at=datetime('now')
+            """,
+            (event_id, user_id, occurrence_at, status, updated_at),
+        )
+
+    async def flush_pending_rsvps(self, event_id: str) -> list[CalendarRSVP]:
+        """Drain buffered RSVPs for ``event_id`` and apply them.
+
+        Called when an event lands locally (either local create or
+        inbound federation). Returns the list of applied RSVPs (excluding
+        ``removed`` rows which result in a delete). The buffer rows are
+        always cleared regardless of whether the apply succeeded —
+        callers shouldn't see the same buffered RSVP twice.
+        """
+        rows = await self._db.fetchall(
+            "SELECT * FROM pending_federated_rsvps WHERE event_id=?",
+            (event_id,),
+        )
+        applied: list[CalendarRSVP] = []
+        for r in rows:
+            status = r["status"]
+            occurrence_at = r["occurrence_at"]
+            if status == "removed":
+                await self.remove_rsvp(
+                    event_id,
+                    r["user_id"],
+                    occurrence_at=occurrence_at,
+                )
+            elif status in RSVPStatus.ALL:
+                rsvp = CalendarRSVP(
+                    event_id=event_id,
+                    user_id=r["user_id"],
+                    status=status,
+                    updated_at=r["updated_at"],
+                    occurrence_at=occurrence_at,
+                )
+                await self.upsert_rsvp(rsvp)
+                applied.append(rsvp)
+        if rows:
+            await self._db.enqueue(
+                "DELETE FROM pending_federated_rsvps WHERE event_id=?",
+                (event_id,),
+            )
+        return applied
+
+    async def gc_pending_rsvps(self, *, older_than_iso: str) -> int:
+        """Drop buffered RSVPs older than ``older_than_iso``.
+
+        Returns the row count that was purged. Called periodically by a
+        scheduler (Phase E) to bound the buffer when an event never
+        arrives (e.g. cancelled upstream before propagating).
+        """
+        cur = await self._db.fetchall(
+            "SELECT COUNT(*) AS n FROM pending_federated_rsvps WHERE received_at<?",
+            (older_than_iso,),
+        )
+        n = int(cur[0]["n"]) if cur else 0
+        if n:
+            await self._db.enqueue(
+                "DELETE FROM pending_federated_rsvps WHERE received_at<?",
+                (older_than_iso,),
+            )
+        return n
+
+    # ── Phase D: reminders ─────────────────────────────────────────────
+
+    async def upsert_reminder(self, reminder: EventReminder) -> None:
+        if reminder.minutes_before < 0:
+            raise ValueError("minutes_before must be >= 0")
+        await self._db.enqueue(
+            """
+            INSERT INTO space_calendar_rsvp_reminders(
+                event_id, user_id, occurrence_at, minutes_before, fire_at, sent_at
+            ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(event_id, user_id, occurrence_at, minutes_before) DO UPDATE SET
+                fire_at=excluded.fire_at,
+                sent_at=excluded.sent_at
+            """,
+            (
+                reminder.event_id,
+                reminder.user_id,
+                reminder.occurrence_at,
+                int(reminder.minutes_before),
+                reminder.fire_at,
+                reminder.sent_at,
+            ),
+        )
+
+    async def remove_reminder(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+    ) -> None:
+        await self._db.enqueue(
+            """
+            DELETE FROM space_calendar_rsvp_reminders
+             WHERE event_id=? AND user_id=? AND occurrence_at=? AND minutes_before=?
+            """,
+            (event_id, user_id, occurrence_at, int(minutes_before)),
+        )
+
+    async def list_reminders(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str | None = None,
+    ) -> list[EventReminder]:
+        if occurrence_at is None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_calendar_rsvp_reminders "
+                "WHERE event_id=? AND user_id=? "
+                "ORDER BY occurrence_at, minutes_before",
+                (event_id, user_id),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_calendar_rsvp_reminders "
+                "WHERE event_id=? AND user_id=? AND occurrence_at=? "
+                "ORDER BY minutes_before",
+                (event_id, user_id, occurrence_at),
+            )
+        return [
+            EventReminder(
+                event_id=r["event_id"],
+                user_id=r["user_id"],
+                occurrence_at=r["occurrence_at"],
+                minutes_before=int(r["minutes_before"]),
+                fire_at=r["fire_at"],
+                sent_at=r["sent_at"],
+            )
+            for r in rows
+        ]
+
+    async def list_due_reminders(
+        self,
+        *,
+        now_iso: str,
+        limit: int = 100,
+    ) -> list[EventReminder]:
+        """Reminders whose ``fire_at <= now`` and not yet sent.
+
+        Used by :class:`CalendarReminderScheduler` to drain a small
+        batch each tick (default 30 s).
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT * FROM space_calendar_rsvp_reminders
+             WHERE sent_at IS NULL AND fire_at <= ?
+             ORDER BY fire_at ASC
+             LIMIT ?
+            """,
+            (now_iso, int(limit)),
+        )
+        return [
+            EventReminder(
+                event_id=r["event_id"],
+                user_id=r["user_id"],
+                occurrence_at=r["occurrence_at"],
+                minutes_before=int(r["minutes_before"]),
+                fire_at=r["fire_at"],
+                sent_at=r["sent_at"],
+            )
+            for r in rows
+        ]
+
+    async def mark_reminder_sent(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+        sent_at: str,
+    ) -> None:
+        await self._db.enqueue(
+            """
+            UPDATE space_calendar_rsvp_reminders
+               SET sent_at=?
+             WHERE event_id=? AND user_id=? AND occurrence_at=? AND minutes_before=?
+            """,
+            (sent_at, event_id, user_id, occurrence_at, int(minutes_before)),
+        )
+
+    # ── Phase F: iCal feed tokens ─────────────────────────────────────
+
+    async def upsert_feed_token(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+        token: str,
+    ) -> None:
+        """Persist a feed token. Idempotent: a regenerate replaces the
+        previous (user, space) row, also clearing any prior revoke."""
+        await self._db.enqueue(
+            """
+            INSERT INTO space_calendar_feed_tokens(user_id, space_id, token)
+            VALUES(?, ?, ?)
+            ON CONFLICT(user_id, space_id) DO UPDATE SET
+                token=excluded.token,
+                created_at=datetime('now'),
+                revoked_at=NULL
+            """,
+            (user_id, space_id, token),
+        )
+
+    async def get_feed_token(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+    ) -> str | None:
+        row = await self._db.fetchone(
+            "SELECT token FROM space_calendar_feed_tokens "
+            "WHERE user_id=? AND space_id=? AND revoked_at IS NULL",
+            (user_id, space_id),
+        )
+        d = row_to_dict(row)
+        return d["token"] if d else None
+
+    async def get_user_for_feed_token(
+        self,
+        token: str,
+    ) -> tuple[str, str] | None:
+        """Resolve a feed token to ``(user_id, space_id)``, or None if
+        the token is unknown or revoked."""
+        row = await self._db.fetchone(
+            "SELECT user_id, space_id FROM space_calendar_feed_tokens "
+            "WHERE token=? AND revoked_at IS NULL",
+            (token,),
+        )
+        d = row_to_dict(row)
+        if d is None:
+            return None
+        return d["user_id"], d["space_id"]
+
+    async def revoke_feed_token(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+    ) -> None:
+        await self._db.enqueue(
+            "UPDATE space_calendar_feed_tokens "
+            "SET revoked_at=datetime('now') "
+            "WHERE user_id=? AND space_id=? AND revoked_at IS NULL",
+            (user_id, space_id),
+        )
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
@@ -483,6 +881,7 @@ def _row_to_event(row: dict | None) -> CalendarEvent | None:
 def _row_to_space_event(row: dict) -> CalendarEvent:
     # Space events have no calendar_id column — use space_id as the
     # effective container so the domain object is still populated.
+    cap = row.get("capacity")
     return CalendarEvent(
         id=row["id"],
         calendar_id=row["space_id"],
@@ -494,4 +893,5 @@ def _row_to_space_event(row: dict) -> CalendarEvent:
         all_day=bool_col(row.get("all_day", 0)),
         attendees=tuple(load_json(row.get("attendees_json"), [])),
         rrule=row.get("rrule"),
+        capacity=int(cap) if cap is not None else None,
     )

@@ -387,12 +387,46 @@ class CalendarEventCreated(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class CalendarEventUpdated(DomainEvent):
     event: "CalendarEvent"
+    #: Phase D: names of *material* fields that changed in this update
+    #: (start / end / summary / capacity-down). Empty tuple means the
+    #: update was cosmetic-only (e.g. attendees list reorder) — push
+    #: notifications skip it.
+    material_changes: tuple[str, ...] = ()
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class CalendarEventDeleted(DomainEvent):
     event_id: str
+    #: Phase D: snapshot the event so the cancellation push handler can
+    #: still produce a meaningful title even though the row is now gone.
+    #: ``None`` when the deletion path doesn't have the prior event in
+    #: hand (e.g. inbound federation only carries the id).
+    summary: str | None = None
+    space_id: str | None = None
+    #: Phase D: user_ids to notify (RSVPed `going` / `waitlist` /
+    #: `requested` at deletion time). Captured pre-delete since the
+    #: ``ON DELETE CASCADE`` FK on `space_calendar_rsvps` wipes the rows
+    #: before subscribers run.
+    notify_user_ids: tuple[str, ...] = ()
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class EventReminderDue(DomainEvent):
+    """Phase D: scheduler emits this when a reminder window comes due.
+
+    The notification service subscribes and produces a push + an in-app
+    notification row. ``minutes_before`` is the user's configured offset
+    (carried for analytics + the UI badge — "in 1 hour: …").
+    """
+
+    event_id: str
+    user_id: str
+    occurrence_at: str
+    minutes_before: int
+    summary: str
+    space_id: str
     occurred_at: datetime = field(default_factory=_now)
 
 

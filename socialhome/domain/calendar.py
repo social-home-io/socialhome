@@ -40,6 +40,11 @@ class CalendarEvent:
     #: the first occurrence's window; ``list_events_in_range`` expands
     #: additional virtual occurrences on the fly (§17.2).
     rrule: str | None = None
+    #: Phase C: per-occurrence "going" capacity. ``None`` = no cap (the
+    #: original three-state RSVP flow). ``int`` = max ``going`` RSVPs
+    #: per occurrence; further requests become ``REQUESTED`` (pending
+    #: approval) or ``WAITLIST``.
+    capacity: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,18 +77,58 @@ class CalendarEventUpdate:
 
 
 class RSVPStatus:
-    """Canonical RSVP status strings (see migration 0024_add_calendar_rsvp)."""
+    """Canonical RSVP status strings.
+
+    ``GOING`` / ``MAYBE`` / ``DECLINED`` are the self-reported responses
+    from the original three-state model. ``REQUESTED`` and ``WAITLIST``
+    are added for capacity-limited events: when an event has
+    ``capacity is not None`` the host approves requests, and overflow
+    RSVPs land on the waitlist with auto-promotion when seats free up.
+    """
 
     GOING = "going"
     MAYBE = "maybe"
     DECLINED = "declined"
+    REQUESTED = "requested"
+    WAITLIST = "waitlist"
 
-    ALL = frozenset({GOING, MAYBE, DECLINED})
+    ALL = frozenset({GOING, MAYBE, DECLINED, REQUESTED, WAITLIST})
+
+    #: Statuses a member can choose directly (the rest are host-driven
+    #: transitions on capped events).
+    USER_SETTABLE = frozenset({GOING, MAYBE, DECLINED})
 
 
 @dataclass(slots=True, frozen=True)
 class CalendarRSVP:
+    """A single RSVP row for a (event, user, occurrence) triple.
+
+    For non-recurring events ``occurrence_at`` equals ``event.start``;
+    for recurring events it's the specific instance's start datetime.
+    """
+
     event_id: str
     user_id: str
     status: str  # one of RSVPStatus.ALL
     updated_at: str  # ISO-8601
+    occurrence_at: str = ""  # ISO-8601; empty only on legacy in-memory test fakes
+
+
+@dataclass(slots=True, frozen=True)
+class EventReminder:
+    """Phase D: per-user reminder for a specific occurrence of an event.
+
+    ``fire_at`` is the precomputed UTC ISO instant the scheduler should
+    deliver the push notification. ``minutes_before`` is the user's
+    chosen offset (e.g. 60 = "1 hour before"); 0 means at start.
+    ``sent_at`` is filled in after the scheduler emits the notification
+    — un-sent rows with ``fire_at <= now()`` are the scheduler's
+    work-queue.
+    """
+
+    event_id: str
+    user_id: str
+    occurrence_at: str
+    minutes_before: int
+    fire_at: str
+    sent_at: str | None = None

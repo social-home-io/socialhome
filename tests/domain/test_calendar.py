@@ -119,11 +119,20 @@ def test_calendar_event_update_partial():
 
 
 def test_rsvp_status_constants():
-    """RSVPStatus exposes GOING, MAYBE, DECLINED and an ALL frozenset."""
+    """RSVPStatus exposes the user-settable trio + the host-driven
+    REQUESTED / WAITLIST states (Phase C). USER_SETTABLE is the subset
+    a member can choose directly; ALL includes everything the schema
+    accepts.
+    """
     assert RSVPStatus.GOING == "going"
     assert RSVPStatus.MAYBE == "maybe"
     assert RSVPStatus.DECLINED == "declined"
-    assert RSVPStatus.ALL == frozenset({"going", "maybe", "declined"})
+    assert RSVPStatus.REQUESTED == "requested"
+    assert RSVPStatus.WAITLIST == "waitlist"
+    assert RSVPStatus.USER_SETTABLE == frozenset({"going", "maybe", "declined"})
+    assert RSVPStatus.ALL == frozenset(
+        {"going", "maybe", "declined", "requested", "waitlist"}
+    )
 
 
 def test_calendar_rsvp_construction():

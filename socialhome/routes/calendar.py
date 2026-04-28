@@ -38,6 +38,7 @@ def _event_dict(event) -> dict:
         "attendees": list(event.attendees),
         "created_by": event.created_by,
         "rrule": event.rrule,
+        "capacity": getattr(event, "capacity", None),
     }
 
 
@@ -329,17 +330,21 @@ class SpaceCalendarEventsView(BaseView):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         space_cal_svc = self.svc(K.space_cal_service_key)
-        event = await space_cal_svc.create_event(
-            space_id=space_id,
-            summary=str(body.get("summary") or body.get("title") or ""),
-            start=str(body.get("start") or body.get("start_at") or ""),
-            end=str(body.get("end") or body.get("end_at") or ""),
-            created_by=ctx.user_id,
-            description=body.get("description"),
-            all_day=bool(body.get("all_day", False)),
-            attendees=tuple(body.get("attendees") or ()),
-            rrule=body.get("rrule"),
-        )
+        try:
+            event = await space_cal_svc.create_event(
+                space_id=space_id,
+                summary=str(body.get("summary") or body.get("title") or ""),
+                start=str(body.get("start") or body.get("start_at") or ""),
+                end=str(body.get("end") or body.get("end_at") or ""),
+                created_by=ctx.user_id,
+                description=body.get("description"),
+                all_day=bool(body.get("all_day", False)),
+                attendees=tuple(body.get("attendees") or ()),
+                rrule=body.get("rrule"),
+                capacity=body.get("capacity"),
+            )
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
         # Service publishes CalendarEventCreated internally — don't
         # double-publish (previous route called bus.publish again,
         # double-firing HA bridge + WS).
@@ -375,6 +380,8 @@ class SpaceCalendarEventDetailView(BaseView):
                     else None
                 ),
                 rrule=body.get("rrule"),
+                capacity=body.get("capacity"),
+                clear_capacity=bool(body.get("clear_capacity", False)),
             )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Event not found.")
@@ -398,13 +405,18 @@ SpaceCalendarEventDeleteView = SpaceCalendarEventDetailView
 
 
 class CalendarEventRsvpView(BaseView):
-    """``POST /api/calendars/events/{id}/rsvp`` — RSVP to an event.
+    """``POST`` / ``DELETE /api/calendars/events/{id}/rsvp`` — RSVP to / clear-RSVP from an event.
 
     Space-scoped: the event's ``calendar_id`` doubles as the owning
     ``space_id`` (see :class:`SpaceCalendarService.create_event`). We
     reject non-members so a user who only knows the event id can't
     vote on a private space, and scope the fan-out to space members
     so RSVP counts don't leak to unrelated households.
+
+    For recurring events, ``occurrence_at`` is required (body field on
+    POST, query string on DELETE) and must match a real occurrence
+    under the event's RRULE. For non-recurring events it may be
+    omitted; the service defaults to ``event.start``.
     """
 
     async def post(self) -> web.Response:
@@ -412,9 +424,9 @@ class CalendarEventRsvpView(BaseView):
         event_id = self.match("id")
         body = await self.body()
         status = str(body.get("status") or "")
+        occurrence_at = body.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
 
-        # Resolve the owning space so we can gate + scope the broadcast.
         space_id = await _resolve_space_id_for_event(self, event_id)
         if space_id is None:
             return error_response(404, "NOT_FOUND", "Event not found.")
@@ -423,28 +435,96 @@ class CalendarEventRsvpView(BaseView):
         if member is None:
             return error_response(403, "FORBIDDEN", "Not a space member.")
 
-        await space_cal_svc.rsvp(
+        try:
+            await space_cal_svc.rsvp(
+                event_id=event_id,
+                user_id=ctx.user_id,
+                status=status,
+                occurrence_at=occurrence_at,
+            )
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        except KeyError:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+
+        return await _broadcast_rsvp_counts(
+            self,
             event_id=event_id,
-            user_id=ctx.user_id,
-            status=status,
+            space_id=space_id,
+            occurrence_at=occurrence_at,
         )
 
-        rsvps = await space_cal_svc.list_rsvps(event_id)
-        counts: dict[str, int] = {"going": 0, "maybe": 0, "declined": 0}
-        for r in rsvps:
-            counts[r.status] = counts.get(r.status, 0) + 1
-        ws = self.svc(K.ws_manager_key)
-        member_ids = await space_repo.list_local_member_user_ids(space_id)
-        await ws.broadcast_to_users(
-            member_ids,
-            {
-                "type": "calendar.rsvp_updated",
-                "event_id": event_id,
-                "space_id": space_id,
-                "counts": counts,
-            },
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        event_id = self.match("id")
+        occurrence_at = self.request.query.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+
+        space_id = await _resolve_space_id_for_event(self, event_id)
+        if space_id is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        space_repo = self.svc(K.space_repo_key)
+        member = await space_repo.get_member(space_id, ctx.user_id)
+        if member is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+
+        try:
+            await space_cal_svc.remove_rsvp(
+                event_id=event_id,
+                user_id=ctx.user_id,
+                occurrence_at=occurrence_at,
+            )
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+
+        return await _broadcast_rsvp_counts(
+            self,
+            event_id=event_id,
+            space_id=space_id,
+            occurrence_at=occurrence_at,
         )
-        return web.json_response({"ok": True, "counts": counts})
+
+
+async def _broadcast_rsvp_counts(
+    view: BaseView,
+    *,
+    event_id: str,
+    space_id: str,
+    occurrence_at: str | None,
+    extra: dict | None = None,
+) -> web.Response:
+    """Aggregate RSVP counts (per-occurrence when given), broadcast a
+    ``calendar.rsvp_updated`` WS frame, return the JSON response."""
+    space_cal_svc = view.svc(K.space_cal_service_key)
+    space_repo = view.svc(K.space_repo_key)
+    rsvps = await space_cal_svc.list_rsvps(
+        event_id,
+        occurrence_at=occurrence_at,
+    )
+    counts: dict[str, int] = {
+        "going": 0,
+        "maybe": 0,
+        "declined": 0,
+        "requested": 0,
+        "waitlist": 0,
+    }
+    for r in rsvps:
+        counts[r.status] = counts.get(r.status, 0) + 1
+    ws = view.svc(K.ws_manager_key)
+    member_ids = await space_repo.list_local_member_user_ids(space_id)
+    frame: dict = {
+        "type": "calendar.rsvp_updated",
+        "event_id": event_id,
+        "space_id": space_id,
+        "counts": counts,
+    }
+    if occurrence_at is not None:
+        frame["occurrence_at"] = occurrence_at
+    await ws.broadcast_to_users(member_ids, frame)
+    body: dict = {"ok": True, "counts": counts}
+    if extra:
+        body.update(extra)
+    return web.json_response(body)
 
 
 async def _resolve_space_id_for_event(view, event_id: str) -> str | None:
@@ -455,14 +535,251 @@ async def _resolve_space_id_for_event(view, event_id: str) -> str | None:
     return await svc.resolve_space_id(event_id)
 
 
+class CalendarEventApprovalView(BaseView):
+    """``POST /api/calendars/events/{id}/approve`` — host approval action.
+
+    Phase C: approve or deny a member's pending request-to-join on a
+    capped event. Body: ``{"user_id": str, "occurrence_at"?: str,
+    "action": "approve" | "deny"}``. Approver gate: caller must be the
+    event creator OR a space admin/owner.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        event_id = self.match("id")
+        body = await self.body()
+        target_user = str(body.get("user_id") or "").strip()
+        action = str(body.get("action") or "").strip()
+        occurrence_at = body.get("occurrence_at")
+        if not target_user or action not in ("approve", "deny"):
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "user_id and action ('approve' | 'deny') required.",
+            )
+
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        space_id = await _resolve_space_id_for_event(self, event_id)
+        if space_id is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        # Approver = event creator OR space admin/owner.
+        space_repo = self.svc(K.space_repo_key)
+        member = await space_repo.get_member(space_id, ctx.user_id)
+        if member is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        result = await space_cal_svc._repo.get_event(event_id)
+        if result is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        _sid, event = result
+        is_creator = event.created_by == ctx.user_id
+        is_admin = member.role in ("owner", "admin")
+        if not (is_creator or is_admin):
+            return error_response(
+                403,
+                "FORBIDDEN",
+                "Only the event creator or a space admin can approve.",
+            )
+
+        try:
+            if action == "approve":
+                new_status = await space_cal_svc.approve_rsvp(
+                    event_id=event_id,
+                    user_id=target_user,
+                    occurrence_at=occurrence_at,
+                )
+            else:
+                await space_cal_svc.deny_rsvp(
+                    event_id=event_id,
+                    user_id=target_user,
+                    occurrence_at=occurrence_at,
+                )
+                new_status = None
+        except KeyError as exc:
+            return error_response(404, "NOT_FOUND", str(exc))
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+
+        return await _broadcast_rsvp_counts(
+            self,
+            event_id=event_id,
+            space_id=space_id,
+            occurrence_at=occurrence_at,
+            extra={"action": action, "new_status": new_status},
+        )
+
+
+class CalendarEventPendingView(BaseView):
+    """``GET /api/calendars/events/{id}/pending`` — list pending requests.
+
+    Phase C: returns ``requested`` RSVPs for the host UI. Approver-only.
+    Optional ``?occurrence_at=`` query string to scope to one occurrence.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        event_id = self.match("id")
+        occurrence_at = self.request.query.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        space_id = await _resolve_space_id_for_event(self, event_id)
+        if space_id is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        space_repo = self.svc(K.space_repo_key)
+        member = await space_repo.get_member(space_id, ctx.user_id)
+        if member is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        result = await space_cal_svc._repo.get_event(event_id)
+        if result is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        _sid, event = result
+        if event.created_by != ctx.user_id and member.role not in ("owner", "admin"):
+            return error_response(
+                403,
+                "FORBIDDEN",
+                "Only the event creator or a space admin can list pending requests.",
+            )
+        pending = await space_cal_svc.list_pending(
+            event_id,
+            occurrence_at=occurrence_at,
+        )
+        return web.json_response(
+            {
+                "pending": [
+                    {
+                        "user_id": r.user_id,
+                        "occurrence_at": r.occurrence_at,
+                        "updated_at": r.updated_at,
+                    }
+                    for r in pending
+                ],
+            }
+        )
+
+
+class CalendarEventRemindersView(BaseView):
+    """``GET / POST / DELETE /api/calendars/events/{id}/reminders``.
+
+    Phase D: per-user, per-occurrence reminders. The scheduler polls
+    rows whose ``fire_at`` window has come due and emits a push.
+    """
+
+    async def _ensure_member(self, event_id: str) -> tuple[str, str] | web.Response:
+        ctx = self.user
+        space_id = await _resolve_space_id_for_event(self, event_id)
+        if space_id is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        space_repo = self.svc(K.space_repo_key)
+        member = await space_repo.get_member(space_id, ctx.user_id)
+        if member is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        return space_id, ctx.user_id
+
+    async def get(self) -> web.Response:
+        event_id = self.match("id")
+        gate = await self._ensure_member(event_id)
+        if isinstance(gate, web.Response):
+            return gate
+        _space_id, user_id = gate
+        occurrence_at = self.request.query.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        reminders = await space_cal_svc.list_reminders(
+            event_id=event_id,
+            user_id=user_id,
+            occurrence_at=occurrence_at,
+        )
+        return web.json_response(
+            {
+                "reminders": [
+                    {
+                        "minutes_before": r.minutes_before,
+                        "occurrence_at": r.occurrence_at,
+                        "fire_at": r.fire_at,
+                        "sent_at": r.sent_at,
+                    }
+                    for r in reminders
+                ]
+            }
+        )
+
+    async def post(self) -> web.Response:
+        event_id = self.match("id")
+        gate = await self._ensure_member(event_id)
+        if isinstance(gate, web.Response):
+            return gate
+        _space_id, user_id = gate
+        body = await self.body()
+        try:
+            minutes_before = int(body.get("minutes_before", -1))
+        except TypeError, ValueError:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "minutes_before must be an integer.",
+            )
+        occurrence_at = body.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        try:
+            reminder = await space_cal_svc.add_reminder(
+                event_id=event_id,
+                user_id=user_id,
+                minutes_before=minutes_before,
+                occurrence_at=occurrence_at,
+            )
+        except KeyError:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        return web.json_response(
+            {
+                "minutes_before": reminder.minutes_before,
+                "occurrence_at": reminder.occurrence_at,
+                "fire_at": reminder.fire_at,
+            },
+            status=201,
+        )
+
+    async def delete(self) -> web.Response:
+        event_id = self.match("id")
+        gate = await self._ensure_member(event_id)
+        if isinstance(gate, web.Response):
+            return gate
+        _space_id, user_id = gate
+        try:
+            minutes_before = int(self.request.query.get("minutes_before", -1))
+        except TypeError, ValueError:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "minutes_before query string required.",
+            )
+        occurrence_at = self.request.query.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        await space_cal_svc.remove_reminder(
+            event_id=event_id,
+            user_id=user_id,
+            minutes_before=minutes_before,
+            occurrence_at=occurrence_at,
+        )
+        return web.json_response({"ok": True})
+
+
 class CalendarEventRsvpsView(BaseView):
-    """``GET /api/calendars/events/{id}/rsvps`` — list RSVPs for an event."""
+    """``GET /api/calendars/events/{id}/rsvps`` — list RSVPs for an event.
+
+    Accepts ``?occurrence_at=<iso>`` to scope to a single occurrence
+    of a recurring event. Without it, returns RSVPs across all
+    occurrences (each row carries its own ``occurrence_at`` so callers
+    can group client-side).
+    """
 
     async def get(self) -> web.Response:
         self.user  # auth check
         event_id = self.match("id")
+        occurrence_at = self.request.query.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
-        rsvps = await space_cal_svc.list_rsvps(event_id)
+        rsvps = await space_cal_svc.list_rsvps(
+            event_id,
+            occurrence_at=occurrence_at,
+        )
         return web.json_response(
             {
                 "rsvps": [
@@ -470,6 +787,7 @@ class CalendarEventRsvpsView(BaseView):
                         "user_id": r.user_id,
                         "status": r.status,
                         "updated_at": r.updated_at,
+                        "occurrence_at": r.occurrence_at,
                     }
                     for r in rsvps
                 ],

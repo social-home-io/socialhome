@@ -55,6 +55,14 @@ _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
     "/api/bot-bridge/spaces/",
 )
 
+#: Phase F — iCal subscription feeds carry a per-(user, space) token in
+#: the query string because most desktop calendar clients refresh
+#: without OAuth. The route handler validates the token; this regex
+#: lets the auth middleware skip the standard Bearer-token requirement.
+_DEFAULT_PUBLIC_PATH_PATTERNS: tuple[str, ...] = (
+    r"^/api/spaces/[^/]+/calendar/export\.ics$",
+)
+
 
 @dataclass(slots=True, frozen=True)
 class AuthContext:
@@ -115,7 +123,7 @@ def require_auth(
     strategy: AuthStrategy,
     *,
     public_paths: tuple[str, ...] = _DEFAULT_PUBLIC_PATHS,
-    public_path_patterns: tuple[str, ...] = (),
+    public_path_patterns: tuple[str, ...] = _DEFAULT_PUBLIC_PATH_PATTERNS,
 ):
     """Build an aiohttp middleware that gates handlers on authentication.
 

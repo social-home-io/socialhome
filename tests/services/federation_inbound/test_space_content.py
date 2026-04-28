@@ -65,13 +65,69 @@ class _FakeSpaceCalendarRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        # Per-event store keyed by event_id → (space_id, event)
+        self._events: dict = {}
+        # In-memory RSVP store keyed by (event_id, user_id, occurrence_at)
+        self.rsvps: dict = {}
+        # Buffer keyed the same way; status="removed" means apply-as-delete on flush.
+        self.buffer: dict = {}
+        self.flush_calls: list[str] = []
 
     async def save_event(self, space_id, event):
         self.saved.append((space_id, event))
+        self._events[event.id] = (space_id, event)
         return event
+
+    async def get_event(self, event_id):
+        return self._events.get(event_id)
 
     async def delete_event(self, event_id):
         self.deleted.append(event_id)
+        self._events.pop(event_id, None)
+
+    async def upsert_rsvp(self, rsvp):
+        self.rsvps[(rsvp.event_id, rsvp.user_id, rsvp.occurrence_at)] = rsvp
+
+    async def remove_rsvp(self, event_id, user_id, *, occurrence_at):
+        self.rsvps.pop((event_id, user_id, occurrence_at), None)
+
+    async def buffer_pending_rsvp(
+        self,
+        *,
+        event_id,
+        user_id,
+        occurrence_at,
+        status,
+        updated_at,
+    ):
+        self.buffer[(event_id, user_id, occurrence_at)] = {
+            "status": status,
+            "updated_at": updated_at,
+        }
+
+    async def flush_pending_rsvps(self, event_id):
+        self.flush_calls.append(event_id)
+        applied = []
+        from socialhome.domain.calendar import CalendarRSVP, RSVPStatus
+
+        keys_to_drop = [k for k in self.buffer if k[0] == event_id]
+        for key in keys_to_drop:
+            entry = self.buffer.pop(key)
+            _, user_id, occ = key
+            status = entry["status"]
+            if status == "removed":
+                self.rsvps.pop(key, None)
+            elif status in RSVPStatus.ALL:
+                rsvp = CalendarRSVP(
+                    event_id=event_id,
+                    user_id=user_id,
+                    status=status,
+                    updated_at=entry["updated_at"],
+                    occurrence_at=occ,
+                )
+                self.rsvps[key] = rsvp
+                applied.append(rsvp)
+        return applied
 
 
 class _FakePollRepo:
@@ -162,6 +218,8 @@ async def test_attach_registers_all_content_event_types(bus, repos):
         FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
         FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
         FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+        FederationEventType.SPACE_RSVP_UPDATED,
+        FederationEventType.SPACE_RSVP_DELETED,
         # SPACE_POLL_CREATED is intentionally not registered — poll
         # creation rides inline on SPACE_POST_CREATED.
         FederationEventType.SPACE_POLL_VOTE_CAST,
@@ -352,6 +410,182 @@ async def test_calendar_deleted(repos, handlers):
         )
     )
     assert repos["calendar"].deleted == ["e-1"]
+
+
+async def test_calendar_inbound_publishes_bus_event(bus, repos, handlers):
+    """Inbound SPACE_CALENDAR_EVENT_CREATED publishes CalendarEventCreated
+    on the local bus so the calendar→feed bridge fires (Phase B)."""
+    from socialhome.domain.events import CalendarEventCreated
+
+    received: list = []
+
+    async def _capture(evt):
+        received.append(evt)
+
+    bus.subscribe(CalendarEventCreated, _capture)
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-fed",
+                "calendar_id": "cal-1",
+                "summary": "Federated event",
+                "created_by": "u-remote",
+                "start": "2026-09-01T18:00:00+00:00",
+                "end": "2026-09-01T20:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert len(received) == 1
+    assert received[0].event.id == "e-fed"
+
+
+# ─── RSVP federation (Phase A) ─────────────────────────────────────────
+
+
+async def test_rsvp_updated_applies_when_event_present(repos, handlers):
+    """RSVP arriving after the event lands → applied directly."""
+    from socialhome.domain.calendar import CalendarEvent
+
+    seed = datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc)
+    repos["calendar"]._events["e-known"] = (
+        "sp-1",
+        CalendarEvent(
+            id="e-known",
+            calendar_id="cal-1",
+            summary="x",
+            start=seed,
+            end=seed,
+            created_by="u-1",
+        ),
+    )
+    await handlers._on_rsvp_updated(
+        _event(
+            FederationEventType.SPACE_RSVP_UPDATED,
+            {
+                "event_id": "e-known",
+                "user_id": "u-2",
+                "occurrence_at": seed.isoformat(),
+                "status": "going",
+                "updated_at": "2026-04-15T00:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    key = ("e-known", "u-2", seed.isoformat())
+    assert key in repos["calendar"].rsvps
+    assert repos["calendar"].rsvps[key].status == "going"
+
+
+async def test_rsvp_updated_buffers_when_event_missing(repos, handlers):
+    """RSVP arriving before its event → goes to the pending buffer."""
+    occ = "2026-05-01T18:00:00+00:00"
+    await handlers._on_rsvp_updated(
+        _event(
+            FederationEventType.SPACE_RSVP_UPDATED,
+            {
+                "event_id": "e-future",
+                "user_id": "u-2",
+                "occurrence_at": occ,
+                "status": "going",
+                "updated_at": "2026-04-30T00:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    # No live RSVP row yet
+    assert repos["calendar"].rsvps == {}
+    # Buffered
+    assert ("e-future", "u-2", occ) in repos["calendar"].buffer
+
+
+async def test_calendar_event_arrival_flushes_buffer(repos, handlers):
+    """When the event finally arrives, _on_calendar_saved flushes its buffer."""
+    occ = "2026-05-15T18:00:00+00:00"
+    # Buffer an orphan RSVP first.
+    await repos["calendar"].buffer_pending_rsvp(
+        event_id="e-late",
+        user_id="u-9",
+        occurrence_at=occ,
+        status="going",
+        updated_at="2026-05-10T00:00:00+00:00",
+    )
+    # Event arrives.
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-late",
+                "calendar_id": "cal-1",
+                "summary": "Game night",
+                "created_by": "u-1",
+                "start": "2026-05-15T18:00:00+00:00",
+                "end": "2026-05-15T20:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    # Flush was called and the RSVP applied.
+    assert repos["calendar"].flush_calls == ["e-late"]
+    assert ("e-late", "u-9", occ) in repos["calendar"].rsvps
+
+
+async def test_rsvp_deleted_with_event_present(repos, handlers):
+    """SPACE_RSVP_DELETED removes the live row when the event is local."""
+    from socialhome.domain.calendar import CalendarEvent, CalendarRSVP
+
+    seed = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    repos["calendar"]._events["e-rm"] = (
+        "sp-1",
+        CalendarEvent(
+            id="e-rm",
+            calendar_id="cal-1",
+            summary="Dinner",
+            start=seed,
+            end=seed,
+            created_by="u-1",
+        ),
+    )
+    occ = seed.isoformat()
+    repos["calendar"].rsvps[("e-rm", "u-2", occ)] = CalendarRSVP(
+        event_id="e-rm",
+        user_id="u-2",
+        status="going",
+        updated_at="2026-05-19T00:00:00+00:00",
+        occurrence_at=occ,
+    )
+    await handlers._on_rsvp_deleted(
+        _event(
+            FederationEventType.SPACE_RSVP_DELETED,
+            {
+                "event_id": "e-rm",
+                "user_id": "u-2",
+                "occurrence_at": occ,
+                "updated_at": "2026-05-21T00:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert ("e-rm", "u-2", occ) not in repos["calendar"].rsvps
+
+
+async def test_rsvp_updated_invalid_status_drops(repos, handlers):
+    """Unknown status values are ignored — no buffer, no live row."""
+    await handlers._on_rsvp_updated(
+        _event(
+            FederationEventType.SPACE_RSVP_UPDATED,
+            {
+                "event_id": "e-1",
+                "user_id": "u-1",
+                "occurrence_at": "2026-04-01T00:00:00+00:00",
+                "status": "tentative",  # not in RSVPStatus.ALL
+                "updated_at": "now",
+            },
+        )
+    )
+    assert repos["calendar"].rsvps == {}
+    assert repos["calendar"].buffer == {}
 
 
 # ─── Polls ──────────────────────────────────────────────────────────

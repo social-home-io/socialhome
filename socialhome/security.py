@@ -57,6 +57,10 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset(
         # Federation envelope material — never echoed in API responses
         "encrypted_payload",
         "signature",
+        # Phase F: per-(user, space) iCal feed token. The token IS the
+        # authentication for the .ics URL, so a leaked one lets a
+        # third party subscribe to the user's space calendar.
+        "feed_token",
         "signatures",
         "session_key",
         # Precise GPS — approximate (4dp-truncated ``lat``/``lon``) is OK

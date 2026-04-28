@@ -43,6 +43,10 @@ from .post_repo import (  # reuse the household post helpers verbatim
 class AbstractSpacePostRepo(Protocol):
     async def save(self, space_id: str, post: Post) -> Post: ...
     async def get(self, post_id: str) -> tuple[str, Post] | None: ...
+    async def get_by_linked_event_id(
+        self,
+        event_id: str,
+    ) -> tuple[str, Post] | None: ...
     async def list_feed(
         self,
         space_id: str,
@@ -108,10 +112,10 @@ class SqliteSpacePostRepo:
         await self._db.enqueue(
             """
             INSERT INTO space_posts(
-                id, space_id, author, bot_id, type, content, media_url, reactions,
-                comment_count, pinned, deleted, edited_at, no_link_preview,
-                moderated, file_meta_json, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                id, space_id, author, bot_id, linked_event_id, type, content,
+                media_url, reactions, comment_count, pinned, deleted, edited_at,
+                no_link_preview, moderated, file_meta_json, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -122,13 +126,15 @@ class SqliteSpacePostRepo:
                 edited_at=excluded.edited_at,
                 no_link_preview=excluded.no_link_preview,
                 moderated=excluded.moderated,
-                file_meta_json=excluded.file_meta_json
+                file_meta_json=excluded.file_meta_json,
+                linked_event_id=excluded.linked_event_id
             """,
             (
                 post.id,
                 space_id,
                 post.author,
                 post.bot_id,
+                post.linked_event_id,
                 post.type.value,
                 post.content,
                 post.media_url,
@@ -150,6 +156,25 @@ class SqliteSpacePostRepo:
         row = await self._db.fetchone(
             "SELECT * FROM space_posts WHERE id=?",
             (post_id,),
+        )
+        d = row_to_dict(row)
+        if d is None:
+            return None
+        return d["space_id"], _row_to_space_post(d)
+
+    async def get_by_linked_event_id(
+        self,
+        event_id: str,
+    ) -> tuple[str, Post] | None:
+        """Return the auto-created event post for ``event_id``, if any.
+
+        Used by :class:`CalendarFeedBridge` to find the post produced for
+        a given calendar event so subsequent updates / deletes can edit
+        the same row rather than creating a duplicate.
+        """
+        row = await self._db.fetchone(
+            "SELECT * FROM space_posts WHERE linked_event_id=? LIMIT 1",
+            (event_id,),
         )
         d = row_to_dict(row)
         if d is None:
@@ -430,6 +455,7 @@ def _row_to_space_post(row: dict) -> Post:
         moderated=bool_col(row.get("moderated", 0)),
         file_meta=_decode_file_meta(row.get("file_meta_json")),
         bot_id=row.get("bot_id"),
+        linked_event_id=row.get("linked_event_id"),
     )
 
 

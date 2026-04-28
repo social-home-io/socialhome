@@ -311,12 +311,17 @@ async def test_space_rsvp_bad_status(env):
 
 
 async def test_space_rsvp_happy(env):
+    """Member RSVP roundtrip on a future event."""
+    from datetime import datetime, timedelta, timezone
+
     await _seed_space(env)
+    # Event must be in the future — Phase E rejects RSVPs to ended events.
+    future = datetime.now(timezone.utc) + timedelta(days=30)
     event = await env.space_svc.create_event(
         space_id="sp1",
         summary="m",
-        start="2026-01-01T00:00:00Z",
-        end="2026-01-01T01:00:00Z",
+        start=future.isoformat(),
+        end=(future + timedelta(hours=1)).isoformat(),
         created_by="u1",
     )
     await env.space_svc.rsvp(
@@ -326,4 +331,7 @@ async def test_space_rsvp_happy(env):
     )
     await env.space_svc.remove_rsvp(event_id=event.id, user_id="u2")
     rows = await env.space_svc.list_rsvps(event.id)
-    assert rows == []
+    # Phase C: the creator is auto-RSVP'd as going on event creation; the
+    # only row that should remain after u2's removal is u1's auto-RSVP.
+    assert [r.user_id for r in rows] == ["u1"]
+    assert rows[0].status == RSVPStatus.GOING

@@ -432,6 +432,10 @@ CREATE TABLE IF NOT EXISTS spaces (
     allow_post_schedule    INTEGER NOT NULL DEFAULT 1,
     allow_post_file        INTEGER NOT NULL DEFAULT 1,
     allow_post_bazaar      INTEGER NOT NULL DEFAULT 1,
+    -- Phase B: auto-created event posts in the feed when a calendar
+    -- event is created. One post per event series — recurring events
+    -- don't generate per-occurrence posts.
+    allow_post_event       INTEGER NOT NULL DEFAULT 1,
     -- Public / discover fields (populated only when join_mode IN ('public','open'))
     lat                    REAL,
     lon                    REAL,
@@ -692,6 +696,13 @@ CREATE TABLE IF NOT EXISTS space_posts (
     -- leaves its historical posts readable (they fall back to generic
     -- "Home Assistant" rendering) rather than triggering a cascade wipe.
     bot_id          TEXT REFERENCES space_bots(bot_id) ON DELETE SET NULL,
+    -- Phase B: auto-created event post. When non-NULL, this post is the
+    -- feed surface for the linked calendar event. No FK — the
+    -- :class:`CalendarFeedBridge` proactively soft-deletes the post on
+    -- :class:`CalendarEventDeleted`; an FK with ON DELETE SET NULL would
+    -- race with the bridge (the cascade fires before the bus subscriber
+    -- can locate the post by event id).
+    linked_event_id TEXT,
     type            TEXT NOT NULL,
     content         TEXT,
     media_url       TEXT,
@@ -712,6 +723,10 @@ CREATE INDEX IF NOT EXISTS idx_space_posts_created
 -- bot_id, so the index exists for the delete path + future analytics.
 CREATE INDEX IF NOT EXISTS idx_space_posts_bot
     ON space_posts(bot_id) WHERE bot_id IS NOT NULL;
+-- Phase B lookup: bridge fetches the existing post for a calendar
+-- event id on update / delete to keep the feed in sync.
+CREATE INDEX IF NOT EXISTS idx_space_posts_linked_event
+    ON space_posts(linked_event_id) WHERE linked_event_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS space_post_comments (
     id          TEXT PRIMARY KEY,
@@ -1078,6 +1093,12 @@ CREATE TABLE IF NOT EXISTS space_calendar_events (
     attendees_json         TEXT NOT NULL DEFAULT '[]',
     rrule                  TEXT,            -- RFC 5545 recurrence rule (§17.2)
     created_by             TEXT NOT NULL,
+    -- Phase C: per-occurrence capacity. NULL = no cap (the original
+    -- three-state RSVP flow); INTEGER >= 0 = max "going" RSVPs per
+    -- occurrence. When set, "going" RSVPs become "requested" pending
+    -- host approval; overflow lands on the waitlist with auto-
+    -- promotion when seats free up.
+    capacity               INTEGER,
     notify_before_minutes  INTEGER,
     notified_at            TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1087,11 +1108,68 @@ CREATE INDEX IF NOT EXISTS idx_space_calendar_events_space
     ON space_calendar_events(space_id, start_dt);
 
 CREATE TABLE IF NOT EXISTS space_calendar_rsvps (
-    event_id    TEXT NOT NULL REFERENCES space_calendar_events(id) ON DELETE CASCADE,
-    user_id     TEXT NOT NULL,
-    status      TEXT NOT NULL CHECK(status IN ('going','maybe','declined')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (event_id, user_id)
+    event_id      TEXT NOT NULL REFERENCES space_calendar_events(id) ON DELETE CASCADE,
+    user_id       TEXT NOT NULL,
+    -- Per-occurrence RSVP key. For non-recurring events this equals
+    -- ``event.start``. For recurring events (rrule != NULL) this is
+    -- the specific occurrence's start datetime, so each instance gets
+    -- its own RSVP row.
+    occurrence_at TEXT NOT NULL,
+    status        TEXT NOT NULL CHECK(
+        status IN ('going','maybe','declined','requested','waitlist')
+    ),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (event_id, user_id, occurrence_at)
+);
+CREATE INDEX IF NOT EXISTS idx_space_calendar_rsvps_event_occ
+    ON space_calendar_rsvps(event_id, occurrence_at);
+
+-- Phase D: per-user, per-occurrence reminders. The
+-- :class:`CalendarReminderScheduler` polls fire_at on a 30 s tick and
+-- emits a push notification when each row's window comes due. sent_at
+-- is set after delivery so retries are easy to detect; the partial
+-- index covers the hot-path scan (un-sent + future).
+CREATE TABLE IF NOT EXISTS space_calendar_rsvp_reminders (
+    event_id        TEXT NOT NULL REFERENCES space_calendar_events(id) ON DELETE CASCADE,
+    user_id         TEXT NOT NULL,
+    occurrence_at   TEXT NOT NULL,
+    minutes_before  INTEGER NOT NULL CHECK(minutes_before >= 0),
+    fire_at         TEXT NOT NULL,
+    sent_at         TEXT,
+    PRIMARY KEY (event_id, user_id, occurrence_at, minutes_before)
+);
+CREATE INDEX IF NOT EXISTS idx_rsvp_reminders_pending
+    ON space_calendar_rsvp_reminders(fire_at) WHERE sent_at IS NULL;
+
+-- Phase F: per-(user, space) iCal feed token. Used by external calendar
+-- apps (Apple Calendar, Google Calendar, etc.) that GET the .ics feed
+-- on a stable URL without OAuth. The token is unique and revocable;
+-- separate from the user's API token so revoking it doesn't affect
+-- other API access.
+CREATE TABLE IF NOT EXISTS space_calendar_feed_tokens (
+    user_id    TEXT NOT NULL,
+    space_id   TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at TEXT,
+    PRIMARY KEY (user_id, space_id)
+);
+CREATE INDEX IF NOT EXISTS idx_feed_tokens_token
+    ON space_calendar_feed_tokens(token) WHERE revoked_at IS NULL;
+
+-- Out-of-order federation RSVP buffer. When a SPACE_RSVP_UPDATED arrives
+-- before its event has propagated, the FK to space_calendar_events
+-- would fail; we hold the RSVP here and flush on event arrival.
+CREATE TABLE IF NOT EXISTS pending_federated_rsvps (
+    event_id      TEXT NOT NULL,
+    user_id       TEXT NOT NULL,
+    occurrence_at TEXT NOT NULL,
+    status        TEXT NOT NULL CHECK(
+        status IN ('going','maybe','declined','requested','waitlist','removed')
+    ),
+    updated_at    TEXT NOT NULL,
+    received_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (event_id, user_id, occurrence_at)
 );
 
 

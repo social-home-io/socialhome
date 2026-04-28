@@ -65,6 +65,7 @@ from ..domain.space import (
     SpaceMember,
     SpaceModerationItem,
     SpacePermissionError,
+    SpaceRole,
     SpaceType,
 )
 from ..infrastructure.event_bus import EventBus
@@ -329,7 +330,7 @@ class SpaceService:
             SpaceMember(
                 space_id=space.id,
                 user_id=owner.user_id,
-                role="owner",
+                role=SpaceRole.OWNER,
                 joined_at=datetime.now(timezone.utc).isoformat(),
             )
         )
@@ -499,7 +500,7 @@ class SpaceService:
         *,
         actor_username: str,
         user_id: str,
-        role: str = "member",
+        role: str = SpaceRole.MEMBER,
     ) -> SpaceMember:
         """Add a member directly. Used for the owner-admin path and for
         accepting an invite on this instance. Regular members join via
@@ -566,7 +567,7 @@ class SpaceService:
         target = await self._spaces.get_member(space_id, user_id)
         if target is None:
             return
-        if target.role == "owner":
+        if target.role == SpaceRole.OWNER:
             raise SpacePermissionError(
                 "owner cannot be removed (transfer ownership first)"
             )
@@ -596,18 +597,18 @@ class SpaceService:
         """Only the owner can promote/demote admins. Owner cannot be demoted."""
         space = await self._require_space(space_id)
         await self._require_owner(space, actor_username)
-        if role == "owner":
+        if role == SpaceRole.OWNER:
             raise ValueError("use transfer_ownership to assign owner role")
         target = await self._spaces.get_member(space_id, user_id)
         if target is None:
             raise KeyError(f"user {user_id!r} is not a member")
-        if target.role == "owner":
+        if target.role == SpaceRole.OWNER:
             raise SpacePermissionError("cannot demote the owner")
         await self._spaces.set_role(space_id, user_id, role)
         sequence = await self._spaces.increment_config_sequence(space_id)
         evt = (
             SpaceConfigEventType.ADMIN_GRANTED
-            if role == "admin"
+            if role == SpaceRole.ADMIN
             else SpaceConfigEventType.ADMIN_REVOKED
         )
         await self._bus.publish(
@@ -754,7 +755,7 @@ class SpaceService:
         if member.user_id == actor_user_id:
             return
         actor = await self._spaces.get_member(space_id, actor_user_id)
-        if actor is None or actor.role not in ("owner", "admin"):
+        if actor is None or actor.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
             raise PermissionError(
                 "only the member or a space admin may change this profile",
             )
@@ -774,8 +775,8 @@ class SpaceService:
         # The outgoing owner becomes admin; the new owner becomes owner.
         outgoing = await self._users.get(actor_username)
         assert outgoing is not None
-        await self._spaces.set_role(space_id, outgoing.user_id, "admin")
-        await self._spaces.set_role(space_id, to_user_id, "owner")
+        await self._spaces.set_role(space_id, outgoing.user_id, SpaceRole.ADMIN)
+        await self._spaces.set_role(space_id, to_user_id, SpaceRole.OWNER)
         new_owner_user = await self._users.get_by_user_id(to_user_id)
         updated = replace(
             space,
@@ -807,7 +808,7 @@ class SpaceService:
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         target = await self._spaces.get_member(space_id, user_id)
-        if target is not None and target.role == "owner":
+        if target is not None and target.role == SpaceRole.OWNER:
             raise SpacePermissionError("cannot ban the owner")
         actor = await self._users.get(actor_username)
         assert actor is not None
@@ -1049,7 +1050,7 @@ class SpaceService:
         member = SpaceMember(
             space_id=space_id,
             user_id=user_id,
-            role="member",
+            role=SpaceRole.MEMBER,
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
@@ -1057,7 +1058,7 @@ class SpaceService:
             SpaceMemberJoined(
                 space_id=space_id,
                 user_id=user_id,
-                role="member",
+                role=SpaceRole.MEMBER,
             )
         )
         return member
@@ -1167,7 +1168,7 @@ class SpaceService:
         member = SpaceMember(
             space_id=row["space_id"],
             user_id=row["user_id"],
-            role="member",
+            role=SpaceRole.MEMBER,
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
@@ -1183,7 +1184,7 @@ class SpaceService:
             SpaceMemberJoined(
                 space_id=row["space_id"],
                 user_id=row["user_id"],
-                role="member",
+                role=SpaceRole.MEMBER,
             )
         )
         return member
@@ -1337,16 +1338,13 @@ class SpaceService:
         member = await self._spaces.get_member(space_id, author_user_id)
         if member is None:
             raise SpacePermissionError("not a member of this space")
-        if member.role == "subscriber":
-            raise SpacePermissionError(
-                "subscribers can only read — joining as a member is required to post",
-            )
+        self._assert_writable_member(member, action="post")
         if not space.features.allows(type):
             raise SpacePermissionError(f"space does not allow {type!r} posts")
 
         post_type = _coerce_post_type(type)
         _validate_space_content(post_type, content, file_meta)
-        is_admin = member.role in ("owner", "admin")
+        is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
         decision = space.features.access_decision("posts", is_admin=is_admin)
         if decision == "deny":
             raise SpacePermissionError("posting is admin-only in this space")
@@ -1511,7 +1509,7 @@ class SpaceService:
             if editor is None:
                 raise PermissionError("not authorised")
             member = await self._spaces.get_member(space_id, editor_user_id)
-            if member is None or member.role not in ("owner", "admin"):
+            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError("only the author or a space admin can edit")
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
         await self._posts.edit(post_id, new_content)
@@ -1535,7 +1533,7 @@ class SpaceService:
         if post.author != actor_user_id:
             # Moderation path — actor must be admin/owner
             member = await self._spaces.get_member(space_id, actor_user_id)
-            if member is None or member.role not in ("owner", "admin"):
+            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError("only the author or a space admin can delete")
             moderated_by = actor_user_id
         await self._posts.soft_delete(post_id, moderated_by=moderated_by)
@@ -1563,7 +1561,7 @@ class SpaceService:
         got = await self._posts.get(post_id)
         if got is not None:
             space_id, _post = got
-            await self._reject_subscriber(space_id, user_id)
+            await self._reject_subscriber(space_id, user_id, action="react")
         return await self._posts.add_reaction(post_id, emoji, user_id)
 
     async def remove_reaction(
@@ -1577,7 +1575,7 @@ class SpaceService:
         got = await self._posts.get(post_id)
         if got is not None:
             space_id, _post = got
-            await self._reject_subscriber(space_id, user_id)
+            await self._reject_subscriber(space_id, user_id, action="react")
         return await self._posts.remove_reaction(post_id, emoji, user_id)
 
     async def add_comment(
@@ -1600,10 +1598,7 @@ class SpaceService:
         member = await self._spaces.get_member(space_id, author_user_id)
         if member is None:
             raise SpacePermissionError("not a member of this space")
-        if member.role == "subscriber":
-            raise SpacePermissionError(
-                "subscribers can only read — joining as a member is required to comment",
-            )
+        self._assert_writable_member(member, action="comment")
         ctype = _coerce_comment_type(comment_type)
         if ctype is CommentType.TEXT:
             _validate_text_length(content, limit=MAX_COMMENT_LENGTH)
@@ -1651,7 +1646,7 @@ class SpaceService:
         space_id, _post = got
         if comment.author != editor_user_id:
             member = await self._spaces.get_member(space_id, editor_user_id)
-            if member is None or member.role not in ("owner", "admin"):
+            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError(
                     "only the author or a space admin can edit this comment",
                 )
@@ -1687,7 +1682,7 @@ class SpaceService:
         space_id, _post = got
         if comment.author != actor_user_id:
             member = await self._spaces.get_member(space_id, actor_user_id)
-            if member is None or member.role not in ("owner", "admin"):
+            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError(
                     "only the author or a space admin can delete this comment"
                 )
@@ -1778,7 +1773,7 @@ class SpaceService:
         member = SpaceMember(
             space_id=space_id,
             user_id=user_id,
-            role="subscriber",
+            role=SpaceRole.SUBSCRIBER,
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
@@ -1786,7 +1781,7 @@ class SpaceService:
             SpaceMemberJoined(
                 space_id=space_id,
                 user_id=user_id,
-                role="subscriber",
+                role=SpaceRole.SUBSCRIBER,
             )
         )
         if self._child_protection is not None:
@@ -1803,7 +1798,7 @@ class SpaceService:
         ``leave_space`` (we refuse to silently demote them by
         "unsubscribing")."""
         existing = await self._spaces.get_member(space_id, user_id)
-        if existing is None or existing.role != "subscriber":
+        if existing is None or existing.role != SpaceRole.SUBSCRIBER:
             return
         await self._spaces.delete_member(space_id, user_id)
         await self._bus.publish(
@@ -1825,7 +1820,7 @@ class SpaceService:
 
     async def is_subscribed(self, user_id: str, space_id: str) -> bool:
         member = await self._spaces.get_member(space_id, user_id)
-        return member is not None and member.role == "subscriber"
+        return member is not None and member.role == SpaceRole.SUBSCRIBER
 
     # ── Sidebar links (§23 — admin-configurable quick-links) ───────────
 
@@ -1901,18 +1896,36 @@ class SpaceService:
         self,
         space_id: str,
         user_id: str,
+        *,
+        action: str = "post",
     ) -> None:
         """Raise :class:`SpacePermissionError` if ``user_id`` is a
-        subscriber of ``space_id``. Used on write paths (create post,
-        comment, react) to enforce subscriber = read-only.
-        Non-subscribers — real members and non-members — pass through
-        untouched; any further auth check (if one exists on the path)
-        runs normally.
+        subscriber of ``space_id``. Used on write paths that haven't
+        already fetched the member row (reactions). Non-subscribers —
+        real members and non-members — pass through untouched; any
+        further auth check (if one exists on the path) runs normally.
+
+        For paths that have already fetched the member row, prefer
+        :meth:`_assert_writable_member` to avoid a second lookup.
         """
         member = await self._spaces.get_member(space_id, user_id)
-        if member is not None and member.role == "subscriber":
+        if member is not None:
+            self._assert_writable_member(member, action=action)
+
+    @staticmethod
+    def _assert_writable_member(
+        member: SpaceMember,
+        *,
+        action: str = "post",
+    ) -> None:
+        """Raise :class:`SpacePermissionError` if ``member`` is a
+        read-only subscriber. Use on every write path after the
+        membership lookup so subscriber gating stays uniform across
+        post / comment / reaction / future mutations.
+        """
+        if member.role == SpaceRole.SUBSCRIBER:
             raise SpacePermissionError(
-                "subscribers can only read — joining as a member is required to post",
+                f"subscribers can only read — joining as a member is required to {action}",
             )
 
     async def _require_admin_or_owner(
@@ -1924,7 +1937,7 @@ class SpaceService:
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
         member = await self._spaces.get_member(space.id, actor.user_id)
-        if member is None or member.role not in ("owner", "admin"):
+        if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
             raise SpacePermissionError("admin or owner required")
         return member
 
@@ -1937,7 +1950,7 @@ class SpaceService:
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
         member = await self._spaces.get_member(space.id, actor.user_id)
-        if member is None or member.role != "owner":
+        if member is None or member.role != SpaceRole.OWNER:
             raise SpacePermissionError("owner required")
         return member
 

@@ -128,7 +128,11 @@ from .services.data_export_service import DataExportService
 from .services.dm_routing_service import DmRoutingService
 from .services.federation_inbound_service import FederationInboundService
 from .services.poll_federation_outbound import PollFederationOutbound
+from .services.calendar_feed_bridge import CalendarFeedBridge
 from .services.schedule_calendar_bridge import ScheduleCalendarBridge
+from .services.space_calendar_reminder_scheduler import (
+    SpaceCalendarReminderScheduler,
+)
 from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.comment_federation_outbound import CommentFederationOutbound
 from .services.corner_service import CornerService
@@ -908,6 +912,9 @@ def create_app(config: Config | None = None) -> web.Application:
     space_task_service = SpaceTaskService(space_task_repo, bus)
     calendar_service = CalendarService(calendar_repo, bus)
     space_cal_service = SpaceCalendarService(space_cal_repo, bus)
+    # Phase E: subscribe to SpaceMemberLeft so leaving a space drops
+    # your RSVPs on its events.
+    space_cal_service.wire()
     shopping_service = ShoppingService(shopping_repo, bus)
 
     # Wire notification handlers onto the bus
@@ -1014,6 +1021,27 @@ def create_app(config: Config | None = None) -> web.Application:
         household_features=household_features_service,
     )
     schedule_calendar_bridge.wire()
+
+    # Phase B: surface calendar events in the space feed. Subscribes to
+    # CalendarEventCreated/Updated/Deleted on the bus and writes a
+    # PostType.EVENT post via the post repo. Idempotent — a duplicate
+    # CalendarEventCreated (e.g. local + federation replay) is a no-op.
+    calendar_feed_bridge = CalendarFeedBridge(
+        bus=bus,
+        post_repo=space_post_repo,
+        calendar_repo=space_cal_repo,
+    )
+    calendar_feed_bridge.wire()
+
+    # Phase D: per-user space-event reminder scheduler. Polls fire_at
+    # on a 30 s cadence and emits EventReminderDue events that the
+    # notification service translates into push + in-app rows.
+    # Started/stopped from app's on_startup / on_cleanup hooks below.
+    space_calendar_reminder_scheduler = SpaceCalendarReminderScheduler(
+        calendar_repo=space_cal_repo,
+        bus=bus,
+    )
+    notification_service.attach_calendar_repo(space_cal_repo)
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
     data_export_service = DataExportService(db)
@@ -1341,6 +1369,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        # Wire RSVP propagation onto the calendar service. Done after
+        # federation_service is built so the service can broadcast on
+        # rsvp() / remove_rsvp() (§Phase A).
+        space_cal_service.attach_federation(federation_service)
         # Spec §24.10.7 — provider asks the paired GFS for a least-loaded
         # signaling node before generating SPACE_SYNC_OFFER, releases on
         # DIRECT_READY / DIRECT_FAILED.
@@ -1486,6 +1518,9 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await calendar_reminder_scheduler.start()
 
+        # Phase D: per-user space-event reminders.
+        await space_calendar_reminder_scheduler.start()
+
         task_deadline_scheduler = TaskDeadlineScheduler(
             repo=task_repo,
             db=db,
@@ -1534,6 +1569,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await post_draft_scheduler.stop()
         if calendar_reminder_scheduler is not None:
             await calendar_reminder_scheduler.stop()
+        await space_calendar_reminder_scheduler.stop()
         if task_deadline_scheduler is not None:
             await task_deadline_scheduler.stop()
         if task_recurrence_scheduler is not None:

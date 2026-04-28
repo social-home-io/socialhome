@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 from ..domain.events import SpaceZoneDeleted, SpaceZoneUpserted
 from ..domain.presence import truncate_coord
-from ..domain.space import SpacePermissionError, SpaceZone
+from ..domain.space import SpacePermissionError, SpaceRole, SpaceZone
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.space_zone_repo import AbstractSpaceZoneRepo
@@ -270,7 +270,7 @@ class SpaceZoneService:
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
         member = await self._spaces.get_member(space_id, actor.user_id)
-        if member is None or member.role not in ("owner", "admin"):
+        if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
             raise SpacePermissionError("admin or owner required")
 
     async def _publish_upserted(self, zone: SpaceZone) -> None:
