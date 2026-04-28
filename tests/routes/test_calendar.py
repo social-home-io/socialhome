@@ -424,3 +424,191 @@ async def test_rsvp_recurring_without_occurrence_422(client):
         headers=_auth(client._tok),
     )
     assert r2.status == 422
+
+
+# ─── Phase C: capacity + request-to-join + waitlist ─────────────────────────
+
+
+async def _seed_outsider_member(client, *, role="member"):
+    """Outsider with auth + a membership row in sp-cal."""
+    from socialhome.auth import sha256_token_hash
+
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) "
+        "VALUES('bob', 'uid-bob', 'Bob', 0)",
+    )
+    raw = "bob-tok"
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
+        "VALUES('to-bob', 'uid-bob', 't', ?)",
+        (sha256_token_hash(raw),),
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-cal', ?, ?)",
+        ("uid-bob", role),
+    )
+    return {"Authorization": f"Bearer {raw}"}
+
+
+async def test_capacity_creates_event_with_capacity_field(client):
+    await _seed_space(client)
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Limited",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "capacity": 5,
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["capacity"] == 5
+
+
+async def test_capped_event_member_rsvp_lands_in_pending_queue(client):
+    await _seed_space(client)
+    bob = await _seed_outsider_member(client)
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Tiny",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "capacity": 5,
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    r2 = await client.post(
+        f"/api/calendars/events/{eid}/rsvp",
+        json={"status": "going"},
+        headers=bob,
+    )
+    assert r2.status == 200
+    counts = (await r2.json())["counts"]
+    assert counts["requested"] == 1
+    # Host fetches pending queue
+    r3 = await client.get(
+        f"/api/calendars/events/{eid}/pending",
+        headers=_auth(client._tok),
+    )
+    assert r3.status == 200
+    pending = (await r3.json())["pending"]
+    assert len(pending) == 1
+    assert pending[0]["user_id"] == "uid-bob"
+
+
+async def test_approve_promotes_to_going(client):
+    await _seed_space(client)
+    bob = await _seed_outsider_member(client)
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Tiny",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "capacity": 5,
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    await client.post(
+        f"/api/calendars/events/{eid}/rsvp",
+        json={"status": "going"},
+        headers=bob,
+    )
+    r2 = await client.post(
+        f"/api/calendars/events/{eid}/approve",
+        json={"user_id": "uid-bob", "action": "approve"},
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+    body = await r2.json()
+    assert body["new_status"] == "going"
+    # Pending queue now empty.
+    r3 = await client.get(
+        f"/api/calendars/events/{eid}/pending",
+        headers=_auth(client._tok),
+    )
+    assert (await r3.json())["pending"] == []
+
+
+async def test_deny_clears_request(client):
+    await _seed_space(client)
+    bob = await _seed_outsider_member(client)
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Tiny",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "capacity": 5,
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    await client.post(
+        f"/api/calendars/events/{eid}/rsvp",
+        json={"status": "going"},
+        headers=bob,
+    )
+    r2 = await client.post(
+        f"/api/calendars/events/{eid}/approve",
+        json={"user_id": "uid-bob", "action": "deny"},
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+    counts = (await r2.json())["counts"]
+    assert counts["requested"] == 0
+
+
+async def test_approve_non_creator_non_admin_403(client):
+    """Random members can't approve other members' requests."""
+    await _seed_space(client)
+    bob = await _seed_outsider_member(client, role="member")
+    # Add another non-admin member
+    from socialhome.auth import sha256_token_hash
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) "
+        "VALUES('carol', 'uid-carol', 'Carol', 0)",
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
+        "VALUES('to-carol', 'uid-carol', 't', ?)",
+        (sha256_token_hash("carol-tok"),),
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) "
+        "VALUES('sp-cal', 'uid-carol', 'member')",
+    )
+    carol_auth = {"Authorization": "Bearer carol-tok"}
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Tiny",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "capacity": 5,
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    await client.post(
+        f"/api/calendars/events/{eid}/rsvp",
+        json={"status": "going"},
+        headers=bob,
+    )
+    # Carol (a regular member) tries to approve bob — must 403.
+    r2 = await client.post(
+        f"/api/calendars/events/{eid}/approve",
+        json={"user_id": "uid-bob", "action": "approve"},
+        headers=carol_auth,
+    )
+    assert r2.status == 403

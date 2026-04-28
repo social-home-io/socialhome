@@ -1093,6 +1093,12 @@ CREATE TABLE IF NOT EXISTS space_calendar_events (
     attendees_json         TEXT NOT NULL DEFAULT '[]',
     rrule                  TEXT,            -- RFC 5545 recurrence rule (§17.2)
     created_by             TEXT NOT NULL,
+    -- Phase C: per-occurrence capacity. NULL = no cap (the original
+    -- three-state RSVP flow); INTEGER >= 0 = max "going" RSVPs per
+    -- occurrence. When set, "going" RSVPs become "requested" pending
+    -- host approval; overflow lands on the waitlist with auto-
+    -- promotion when seats free up.
+    capacity               INTEGER,
     notify_before_minutes  INTEGER,
     notified_at            TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),

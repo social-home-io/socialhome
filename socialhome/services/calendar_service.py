@@ -269,11 +269,20 @@ class SpaceCalendarService:
         all_day: bool = False,
         attendees: tuple[str, ...] = (),
         rrule: str | None = None,
+        capacity: int | None = None,
     ) -> CalendarEvent:
-        """Create a space-scoped calendar event."""
+        """Create a space-scoped calendar event.
+
+        ``capacity`` (Phase C): when set, "going" RSVPs require host
+        approval and overflow lands on a waitlist. The creator is
+        auto-RSVP'd as ``going`` for the first occurrence and counts
+        toward capacity.
+        """
         summary = (summary or "").strip()
         if not summary:
             raise ValueError("summary must not be empty")
+        if capacity is not None and capacity < 0:
+            raise ValueError("capacity must be >= 0")
         try:
             start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
@@ -292,10 +301,23 @@ class SpaceCalendarService:
             attendees=tuple(attendees),
             created_by=created_by,
             rrule=rrule,
+            capacity=capacity,
         )
         saved = await self._repo.save_event(space_id, event)
         if self._bus is not None:
             await self._bus.publish(CalendarEventCreated(event=saved))
+        # Phase C: auto-RSVP the creator as going for the first
+        # occurrence — they're implicitly going, even on a capped event
+        # (skips the approval flow for self).
+        await self._repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=saved.id,
+                user_id=created_by,
+                status=RSVPStatus.GOING,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                occurrence_at=start_dt.isoformat(),
+            )
+        )
         return saved
 
     async def delete_event(self, event_id: str) -> None:
@@ -326,6 +348,8 @@ class SpaceCalendarService:
         description: str | None = None,
         attendees: tuple[str, ...] | None = None,
         rrule: str | None = None,
+        capacity: int | None = None,
+        clear_capacity: bool = False,
     ) -> CalendarEvent:
         """Partial-update a space event. Emits CalendarEventUpdated."""
         result = await self._repo.get_event(event_id)
@@ -341,6 +365,12 @@ class SpaceCalendarService:
         if new_end < new_start:
             raise ValueError("event end must not be before start")
 
+        if capacity is not None and capacity < 0:
+            raise ValueError("capacity must be >= 0")
+        new_capacity = (
+            None if clear_capacity
+            else (capacity if capacity is not None else existing.capacity)
+        )
         updated = replace(
             existing,
             summary=new_summary,
@@ -352,10 +382,22 @@ class SpaceCalendarService:
             else existing.description,
             attendees=tuple(attendees) if attendees is not None else existing.attendees,
             rrule=rrule if rrule is not None else existing.rrule,
+            capacity=new_capacity,
         )
         await self._repo.save_event(space_id, updated)
         if self._bus is not None:
             await self._bus.publish(CalendarEventUpdated(event=updated))
+        # Capacity raised — promote from waitlist to fill new seats.
+        if (
+            existing.capacity is not None
+            and new_capacity is not None
+            and new_capacity > existing.capacity
+        ):
+            await self._auto_promote_waitlist(
+                space_id=space_id,
+                event=updated,
+                occ_iso=updated.start.isoformat(),
+            )
         return updated
 
     async def rsvp(
@@ -386,11 +428,27 @@ class SpaceCalendarService:
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         occ_iso = occ_dt.isoformat()
         now_iso = datetime.now(timezone.utc).isoformat()
+        # Phase C: capacity-aware "going" routing. Only "going" is
+        # affected — "maybe" never counts toward capacity, "declined"
+        # frees a slot (which then auto-promotes the waitlist below).
+        effective_status = status
+        if (
+            event.capacity is not None
+            and status == RSVPStatus.GOING
+            and user_id != event.created_by
+        ):
+            existing = await self._existing_rsvp(event_id, user_id, occ_iso)
+            if existing != RSVPStatus.GOING:
+                effective_status = await self._route_capped_going(
+                    event=event,
+                    user_id=user_id,
+                    occ_iso=occ_iso,
+                )
         await self._repo.upsert_rsvp(
             CalendarRSVP(
                 event_id=event_id,
                 user_id=user_id,
-                status=status,
+                status=effective_status,
                 updated_at=now_iso,
                 occurrence_at=occ_iso,
             )
@@ -400,9 +458,17 @@ class SpaceCalendarService:
             event_id=event_id,
             user_id=user_id,
             occurrence_at=occ_iso,
-            status=status,
+            status=effective_status,
             updated_at=now_iso,
         )
+        # If this RSVP frees a seat (declined / maybe replacing a
+        # previous "going"), promote the oldest waitlist row.
+        if status != RSVPStatus.GOING and event.capacity is not None:
+            await self._auto_promote_waitlist(
+                space_id=space_id,
+                event=event,
+                occ_iso=occ_iso,
+            )
 
     async def remove_rsvp(
         self,
@@ -429,6 +495,13 @@ class SpaceCalendarService:
             status=None,  # signals delete
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
+        # Removing a "going" RSVP frees a seat — promote from waitlist.
+        if event.capacity is not None:
+            await self._auto_promote_waitlist(
+                space_id=space_id,
+                event=event,
+                occ_iso=occ_iso,
+            )
 
     async def list_rsvps(
         self,
@@ -451,6 +524,178 @@ class SpaceCalendarService:
             else str(occurrence_at)
         )
         return await self._repo.list_rsvps(event_id, occurrence_at=occ_iso)
+
+    # ── Capacity / request-to-join (Phase C) ─────────────────────────────
+
+    async def list_pending(
+        self,
+        event_id: str,
+        *,
+        occurrence_at: datetime | str | None = None,
+    ) -> list[CalendarRSVP]:
+        """List `requested` RSVPs awaiting host approval for an event.
+
+        Approver-side helper — the route gates this on actor approver-
+        status before invoking. With ``occurrence_at`` returns just that
+        instance; without, returns all pending across occurrences.
+        """
+        rsvps = await self.list_rsvps(event_id, occurrence_at=occurrence_at)
+        return [r for r in rsvps if r.status == RSVPStatus.REQUESTED]
+
+    async def approve_rsvp(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: datetime | str | None = None,
+    ) -> str:
+        """Approve a pending request-to-join.
+
+        Promotes the user to ``going`` if a seat is free, otherwise to
+        ``waitlist``. Returns the resulting status. Raises
+        :class:`KeyError` if the event or RSVP doesn't exist.
+
+        The approver gate (event creator OR space admin) is enforced at
+        the route layer because it needs the actor's space-membership
+        which the calendar service doesn't depend on.
+        """
+        result = await self._repo.get_event(event_id)
+        if result is None:
+            raise KeyError(f"event {event_id!r} not found")
+        space_id, event = result
+        occ_dt = self._resolve_occurrence(event, occurrence_at)
+        occ_iso = occ_dt.isoformat()
+        existing = await self._existing_rsvp(event_id, user_id, occ_iso)
+        if existing != RSVPStatus.REQUESTED:
+            raise KeyError(
+                f"no pending request for user {user_id!r} on this occurrence",
+            )
+        new_status = (
+            RSVPStatus.GOING
+            if event.capacity is None
+            or await self._going_count(event_id, occ_iso) < event.capacity
+            else RSVPStatus.WAITLIST
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await self._repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=event_id,
+                user_id=user_id,
+                status=new_status,
+                updated_at=now_iso,
+                occurrence_at=occ_iso,
+            )
+        )
+        await self._publish_federation_rsvp(
+            space_id=space_id,
+            event_id=event_id,
+            user_id=user_id,
+            occurrence_at=occ_iso,
+            status=new_status,
+            updated_at=now_iso,
+        )
+        return new_status
+
+    async def deny_rsvp(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: datetime | str | None = None,
+    ) -> None:
+        """Deny a pending request-to-join — removes the row entirely."""
+        result = await self._repo.get_event(event_id)
+        if result is None:
+            raise KeyError(f"event {event_id!r} not found")
+        _space_id, event = result
+        occ_dt = self._resolve_occurrence(event, occurrence_at)
+        occ_iso = occ_dt.isoformat()
+        existing = await self._existing_rsvp(event_id, user_id, occ_iso)
+        if existing != RSVPStatus.REQUESTED:
+            raise KeyError(
+                f"no pending request for user {user_id!r} on this occurrence",
+            )
+        # Reuse remove_rsvp so federation propagation + waitlist
+        # promotion (no-op for a denied REQUESTED row) all happen.
+        await self.remove_rsvp(
+            event_id=event_id,
+            user_id=user_id,
+            occurrence_at=occ_dt,
+        )
+
+    async def _existing_rsvp(
+        self,
+        event_id: str,
+        user_id: str,
+        occ_iso: str,
+    ) -> str | None:
+        for r in await self._repo.list_rsvps(
+            event_id, occurrence_at=occ_iso,
+        ):
+            if r.user_id == user_id:
+                return r.status
+        return None
+
+    async def _going_count(self, event_id: str, occ_iso: str) -> int:
+        return sum(
+            1
+            for r in await self._repo.list_rsvps(
+                event_id, occurrence_at=occ_iso,
+            )
+            if r.status == RSVPStatus.GOING
+        )
+
+    async def _route_capped_going(
+        self,
+        *,
+        event: CalendarEvent,
+        user_id: str,
+        occ_iso: str,
+    ) -> str:
+        """For a capped event, return the effective status when a member
+        attempts to set ``going``: always REQUESTED first (host
+        approval). Capacity-vs-waitlist routing happens at approval
+        time."""
+        return RSVPStatus.REQUESTED
+
+    async def _auto_promote_waitlist(
+        self,
+        *,
+        space_id: str,
+        event: CalendarEvent,
+        occ_iso: str,
+    ) -> None:
+        """If an occurrence has free capacity, promote the oldest
+        ``waitlist`` row to ``going``."""
+        if event.capacity is None:
+            return
+        going = await self._going_count(event.id, occ_iso)
+        if going >= event.capacity:
+            return
+        rows = await self._repo.list_rsvps(event.id, occurrence_at=occ_iso)
+        candidates = [r for r in rows if r.status == RSVPStatus.WAITLIST]
+        if not candidates:
+            return
+        candidates.sort(key=lambda r: r.updated_at)
+        promoted = candidates[0]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await self._repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=promoted.event_id,
+                user_id=promoted.user_id,
+                status=RSVPStatus.GOING,
+                updated_at=now_iso,
+                occurrence_at=occ_iso,
+            )
+        )
+        await self._publish_federation_rsvp(
+            space_id=space_id,
+            event_id=promoted.event_id,
+            user_id=promoted.user_id,
+            occurrence_at=occ_iso,
+            status=RSVPStatus.GOING,
+            updated_at=now_iso,
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────────
 

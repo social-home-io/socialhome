@@ -230,6 +230,8 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 | GET | `/api/calendars/events/{id}/rsvps` | List RSVPs. `?occurrence_at=<iso>` (URL-encoded) scopes to one occurrence of a recurring event. |
 | POST | `/api/calendars/events/{id}/rsvp` | Set own RSVP. Body: `{"status": "going\|maybe\|declined", "occurrence_at": "<iso>"}`. `occurrence_at` required for recurring events; defaults to `event.start` for non-recurring. |
 | DELETE | `/api/calendars/events/{id}/rsvp` | Clear own RSVP. `?occurrence_at=<iso>` (URL-encoded) required for recurring. |
+| POST | `/api/calendars/events/{id}/approve` | Approve / deny pending request-to-join (capped events, Phase C). Approver = event creator OR space admin. Body: `{"user_id": "<uid>", "action": "approve\|deny", "occurrence_at"?: "<iso>"}`. |
+| GET | `/api/calendars/events/{id}/pending` | List pending requests (capped events). Approver-only. `?occurrence_at=<iso>` to scope. |
 | POST | `/api/calendars/{id}/import_ics` | Upload iCal. |
 | POST | `/api/calendars/{id}/{import_image\|import_prompt}` | AI-assisted import. |
 | GET | `/api/calendar/{id}/export.ics` | iCal export. |

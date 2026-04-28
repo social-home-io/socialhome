@@ -326,6 +326,265 @@ async def test_rsvp_status_must_be_user_settable(space_cal_env):
         )
 
 
+# ── Phase C: capacity + request-to-join + waitlist ─────────────────────────
+
+
+async def test_create_event_auto_rsvps_creator_as_going(space_cal_env):
+    env = space_cal_env
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Birthday party",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+    )
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    assert len(rsvps) == 1
+    assert rsvps[0].user_id == "uid-alice"
+    assert rsvps[0].status == RSVPStatus.GOING
+
+
+async def test_capped_event_member_rsvp_becomes_requested(space_cal_env):
+    env = space_cal_env
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    now = datetime(2026, 9, 5, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Capped event",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=5,
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id,
+        user_id="uid-bob",
+        status=RSVPStatus.GOING,
+    )
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    assert bob.status == RSVPStatus.REQUESTED
+
+
+async def test_creator_skips_approval_even_when_capped(space_cal_env):
+    env = space_cal_env
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Capped event",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=2,
+    )
+    # Creator's auto-RSVP from create_event lands as GOING.
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    alice = [r for r in rsvps if r.user_id == "uid-alice"][0]
+    assert alice.status == RSVPStatus.GOING
+
+
+async def test_approve_promotes_requested_to_going(space_cal_env):
+    env = space_cal_env
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Capped event",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=5,
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    new_status = await env.space_cal_svc.approve_rsvp(
+        event_id=event.id, user_id="uid-bob",
+    )
+    assert new_status == RSVPStatus.GOING
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    assert bob.status == RSVPStatus.GOING
+
+
+async def test_approve_lands_on_waitlist_when_full(space_cal_env):
+    env = space_cal_env
+    for u in ("bob", "carol"):
+        await env.db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (u, f"uid-{u}", u.title()),
+        )
+    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Tiny event",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=1,
+    )
+    # Capacity is 1, alice already takes the seat.
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    bob_status = await env.space_cal_svc.approve_rsvp(
+        event_id=event.id, user_id="uid-bob",
+    )
+    assert bob_status == RSVPStatus.WAITLIST
+
+
+async def test_decline_promotes_waitlist(space_cal_env):
+    env = space_cal_env
+    for u in ("bob", "carol"):
+        await env.db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (u, f"uid-{u}", u.title()),
+        )
+    now = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Limited",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=1,
+    )
+    # bob requests, gets waitlisted on approval.
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    await env.space_cal_svc.approve_rsvp(event_id=event.id, user_id="uid-bob")
+    # alice declines (gives up her seat) — bob should auto-promote.
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-alice", status=RSVPStatus.DECLINED,
+    )
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    assert bob.status == RSVPStatus.GOING
+
+
+async def test_deny_removes_request(space_cal_env):
+    env = space_cal_env
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Capped",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=10,
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    await env.space_cal_svc.deny_rsvp(event_id=event.id, user_id="uid-bob")
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    bobs = [r for r in rsvps if r.user_id == "uid-bob"]
+    assert bobs == []
+
+
+async def test_list_pending_only_returns_requested(space_cal_env):
+    env = space_cal_env
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Capped",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=2,
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    pending = await env.space_cal_svc.list_pending(event.id)
+    assert len(pending) == 1
+    assert pending[0].user_id == "uid-bob"
+    assert pending[0].status == RSVPStatus.REQUESTED
+
+
+async def test_capacity_raise_promotes_waitlist(space_cal_env):
+    env = space_cal_env
+    for u in ("bob", "carol"):
+        await env.db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (u, f"uid-{u}", u.title()),
+        )
+    now = datetime(2026, 10, 15, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Capped",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+        capacity=1,
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    await env.space_cal_svc.approve_rsvp(event_id=event.id, user_id="uid-bob")
+    # bob is waitlisted (alice has the only seat).
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    assert any(r.user_id == "uid-bob" and r.status == RSVPStatus.WAITLIST for r in rsvps)
+    # Raise capacity — bob should promote.
+    await env.space_cal_svc.update_event(event.id, capacity=2)
+    rsvps2 = await env.space_cal_svc.list_rsvps(event.id)
+    bob = [r for r in rsvps2 if r.user_id == "uid-bob"][0]
+    assert bob.status == RSVPStatus.GOING
+
+
+async def test_uncapped_event_keeps_old_behaviour(space_cal_env):
+    """No capacity → "going" is direct, no approval flow."""
+    env = space_cal_env
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    now = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Open event",
+        start=now.isoformat(),
+        end=now.isoformat(),
+        created_by="uid-alice",
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    rsvps = await env.space_cal_svc.list_rsvps(event.id)
+    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    assert bob.status == RSVPStatus.GOING
+
+
+async def test_negative_capacity_rejected(space_cal_env):
+    env = space_cal_env
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="capacity"):
+        await env.space_cal_svc.create_event(
+            space_id="sp-cal",
+            summary="Bad",
+            start=now.isoformat(),
+            end=now.isoformat(),
+            created_by="uid-alice",
+            capacity=-1,
+        )
+
+
 async def test_rsvp_publishes_federation_event(space_cal_env):
     """rsvp() calls broadcast_to_space_members on the federation service."""
     env = space_cal_env

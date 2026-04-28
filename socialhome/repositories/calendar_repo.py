@@ -339,9 +339,9 @@ class SqliteSpaceCalendarRepo:
             """
             INSERT INTO space_calendar_events(
                 id, space_id, summary, description, start_dt, end_dt,
-                all_day, attendees_json, rrule,
+                all_day, attendees_json, rrule, capacity,
                 created_by, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
@@ -352,6 +352,7 @@ class SqliteSpaceCalendarRepo:
                 all_day=excluded.all_day,
                 attendees_json=excluded.attendees_json,
                 rrule=excluded.rrule,
+                capacity=excluded.capacity,
                 updated_at=datetime('now')
             """,
             (
@@ -364,6 +365,7 @@ class SqliteSpaceCalendarRepo:
                 int(event.all_day),
                 dump_json(list(event.attendees)),
                 event.rrule,
+                event.capacity,
                 event.created_by,
                 None,
                 None,
@@ -629,6 +631,7 @@ def _row_to_event(row: dict | None) -> CalendarEvent | None:
 def _row_to_space_event(row: dict) -> CalendarEvent:
     # Space events have no calendar_id column — use space_id as the
     # effective container so the domain object is still populated.
+    cap = row.get("capacity")
     return CalendarEvent(
         id=row["id"],
         calendar_id=row["space_id"],
@@ -640,4 +643,5 @@ def _row_to_space_event(row: dict) -> CalendarEvent:
         all_day=bool_col(row.get("all_day", 0)),
         attendees=tuple(load_json(row.get("attendees_json"), [])),
         rrule=row.get("rrule"),
+        capacity=int(cap) if cap is not None else None,
     )

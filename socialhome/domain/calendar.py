@@ -40,6 +40,11 @@ class CalendarEvent:
     #: the first occurrence's window; ``list_events_in_range`` expands
     #: additional virtual occurrences on the fly (§17.2).
     rrule: str | None = None
+    #: Phase C: per-occurrence "going" capacity. ``None`` = no cap (the
+    #: original three-state RSVP flow). ``int`` = max ``going`` RSVPs
+    #: per occurrence; further requests become ``REQUESTED`` (pending
+    #: approval) or ``WAITLIST``.
+    capacity: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -85,6 +85,30 @@ Export works the same way:
 of the calendar, including federated events from remote HFS instances
 the caller is peered with.
 
+## Capacity, request-to-join and waitlist (Phase C)
+
+`space_calendar_events.capacity` is an optional per-occurrence cap.
+
+* **NULL** — open RSVP, the original three-state flow (going / maybe /
+  declined). No host approval involved.
+* **INTEGER >= 0** — capped event. A member's "going" RSVP becomes
+  `requested` (pending host approval). On approval, the row is promoted
+  to `going` if a seat is free, otherwise to `waitlist`. Declined / removed
+  "going" RSVPs auto-promote the oldest `waitlist` row. Raising the
+  capacity (`update_event`) also drains the waitlist.
+
+The event creator is auto-RSVP'd as `going` for the first occurrence at
+create time, even on a capped event — they're implicitly attending and
+shouldn't have to approve themselves.
+
+The approver gate is **event creator OR space admin/owner**, enforced
+in the route layer (`POST /api/calendars/events/{id}/approve`). The
+service layer does not own a "who can approve" check because it would
+need a circular dependency on `SpaceService`.
+
+`maybe` never counts toward capacity — it's an "interested but not
+committed" signal.
+
 ## Recurring events
 
 Events carry an optional RRULE. The authoritative event row lives on
