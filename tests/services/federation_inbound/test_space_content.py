@@ -405,6 +405,35 @@ async def test_calendar_deleted(repos, handlers):
     assert repos["calendar"].deleted == ["e-1"]
 
 
+async def test_calendar_inbound_publishes_bus_event(bus, repos, handlers):
+    """Inbound SPACE_CALENDAR_EVENT_CREATED publishes CalendarEventCreated
+    on the local bus so the calendar→feed bridge fires (Phase B)."""
+    from socialhome.domain.events import CalendarEventCreated
+
+    received: list = []
+
+    async def _capture(evt):
+        received.append(evt)
+
+    bus.subscribe(CalendarEventCreated, _capture)
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-fed",
+                "calendar_id": "cal-1",
+                "summary": "Federated event",
+                "created_by": "u-remote",
+                "start": "2026-09-01T18:00:00+00:00",
+                "end": "2026-09-01T20:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert len(received) == 1
+    assert received[0].event.id == "e-fed"
+
+
 # ─── RSVP federation (Phase A) ─────────────────────────────────────────
 
 

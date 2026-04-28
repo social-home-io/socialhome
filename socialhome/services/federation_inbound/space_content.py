@@ -16,6 +16,10 @@ import logging
 from typing import TYPE_CHECKING
 
 from ...domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from ...domain.events import (
+    CalendarEventCreated,
+    CalendarEventDeleted,
+)
 from ...domain.federation import FederationEventType
 from ...domain.gallery import GalleryItem
 from ...domain.page import Page
@@ -314,7 +318,13 @@ class SpaceContentInboundHandlers:
             mirrored_from=p.get("mirrored_from"),
             rrule=p.get("rrule"),
         )
+        is_new = await self._calendar_repo.get_event(event_id) is None
         await self._calendar_repo.save_event(space_id, ev)
+        # Publish on the local bus so the calendar→feed bridge (Phase B)
+        # can mirror the event into space_posts on inbound federation
+        # arrivals too. The bridge guards against duplicates by linked_event_id.
+        if is_new:
+            await self._bus.publish(CalendarEventCreated(event=ev))
         # Drain any RSVPs that arrived ahead of this event.
         try:
             await self._calendar_repo.flush_pending_rsvps(event_id)
@@ -327,6 +337,8 @@ class SpaceContentInboundHandlers:
         if not event_id:
             return
         await self._calendar_repo.delete_event(event_id)
+        # Mirror to the feed bridge so the linked post soft-deletes.
+        await self._bus.publish(CalendarEventDeleted(event_id=event_id))
 
     # ─── RSVPs (per-occurrence) ──────────────────────────────────────────
 

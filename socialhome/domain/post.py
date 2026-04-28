@@ -27,6 +27,11 @@ class PostType(StrEnum):
     SCHEDULE = "schedule"
     FILE = "file"
     BAZAAR = "bazaar"
+    #: Auto-created feed surface for a calendar event (Phase B). The
+    #: post's ``linked_event_id`` points at ``space_calendar_events.id``.
+    #: One post per series — recurring events do not create per-occurrence
+    #: posts. RSVP buttons in the feed call the existing rsvp endpoint.
+    EVENT = "event"
 
 
 class CommentType(StrEnum):
@@ -432,6 +437,12 @@ class Post:
     # is deleted the FK goes to NULL (ON DELETE SET NULL) so the post
     # degrades gracefully to a generic "Home Assistant" system post.
     bot_id: str | None = None
+    #: Phase B: when ``type is PostType.EVENT`` this points at the linked
+    #: ``space_calendar_events.id``. The bridge keeps the post body in
+    #: sync with the event title; the comment thread on this post is
+    #: the event's discussion. Goes to NULL when the event is deleted
+    #: (the historical post + thread stays readable).
+    linked_event_id: str | None = None
 
     def with_reaction(self, emoji: str, user_id: str) -> "Post":
         current = self.reactions.get(emoji, frozenset())

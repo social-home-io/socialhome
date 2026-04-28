@@ -128,6 +128,7 @@ from .services.data_export_service import DataExportService
 from .services.dm_routing_service import DmRoutingService
 from .services.federation_inbound_service import FederationInboundService
 from .services.poll_federation_outbound import PollFederationOutbound
+from .services.calendar_feed_bridge import CalendarFeedBridge
 from .services.schedule_calendar_bridge import ScheduleCalendarBridge
 from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.comment_federation_outbound import CommentFederationOutbound
@@ -1014,6 +1015,17 @@ def create_app(config: Config | None = None) -> web.Application:
         household_features=household_features_service,
     )
     schedule_calendar_bridge.wire()
+
+    # Phase B: surface calendar events in the space feed. Subscribes to
+    # CalendarEventCreated/Updated/Deleted on the bus and writes a
+    # PostType.EVENT post via the post repo. Idempotent — a duplicate
+    # CalendarEventCreated (e.g. local + federation replay) is a no-op.
+    calendar_feed_bridge = CalendarFeedBridge(
+        bus=bus,
+        post_repo=space_post_repo,
+        calendar_repo=space_cal_repo,
+    )
+    calendar_feed_bridge.wire()
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
     data_export_service = DataExportService(db)

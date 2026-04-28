@@ -432,6 +432,10 @@ CREATE TABLE IF NOT EXISTS spaces (
     allow_post_schedule    INTEGER NOT NULL DEFAULT 1,
     allow_post_file        INTEGER NOT NULL DEFAULT 1,
     allow_post_bazaar      INTEGER NOT NULL DEFAULT 1,
+    -- Phase B: auto-created event posts in the feed when a calendar
+    -- event is created. One post per event series — recurring events
+    -- don't generate per-occurrence posts.
+    allow_post_event       INTEGER NOT NULL DEFAULT 1,
     -- Public / discover fields (populated only when join_mode IN ('public','open'))
     lat                    REAL,
     lon                    REAL,
@@ -692,6 +696,13 @@ CREATE TABLE IF NOT EXISTS space_posts (
     -- leaves its historical posts readable (they fall back to generic
     -- "Home Assistant" rendering) rather than triggering a cascade wipe.
     bot_id          TEXT REFERENCES space_bots(bot_id) ON DELETE SET NULL,
+    -- Phase B: auto-created event post. When non-NULL, this post is the
+    -- feed surface for the linked calendar event. No FK — the
+    -- :class:`CalendarFeedBridge` proactively soft-deletes the post on
+    -- :class:`CalendarEventDeleted`; an FK with ON DELETE SET NULL would
+    -- race with the bridge (the cascade fires before the bus subscriber
+    -- can locate the post by event id).
+    linked_event_id TEXT,
     type            TEXT NOT NULL,
     content         TEXT,
     media_url       TEXT,
@@ -712,6 +723,10 @@ CREATE INDEX IF NOT EXISTS idx_space_posts_created
 -- bot_id, so the index exists for the delete path + future analytics.
 CREATE INDEX IF NOT EXISTS idx_space_posts_bot
     ON space_posts(bot_id) WHERE bot_id IS NOT NULL;
+-- Phase B lookup: bridge fetches the existing post for a calendar
+-- event id on update / delete to keep the feed in sync.
+CREATE INDEX IF NOT EXISTS idx_space_posts_linked_event
+    ON space_posts(linked_event_id) WHERE linked_event_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS space_post_comments (
     id          TEXT PRIMARY KEY,

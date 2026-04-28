@@ -51,6 +51,29 @@ honoured at flush time rather than resurrected.
 The buffer is bounded by a periodic GC sweep that drops rows older
 than 24 h whose event still hasn't arrived (e.g. cancelled upstream).
 
+## Feed surface (Phase B)
+
+A calendar event auto-creates a `PostType.EVENT` post in the space feed
+via :class:`CalendarFeedBridge`. The bridge subscribes to
+`CalendarEventCreated` / `CalendarEventUpdated` /
+`CalendarEventDeleted` on the bus and:
+
+* **Created**: writes a single `Post(type=EVENT, linked_event_id=<id>,
+  content=<summary>)`. Idempotent — duplicate creates (e.g. local +
+  federation replay) are no-ops.
+* **Updated**: rewrites the post body when the title changes (otherwise
+  no-op).
+* **Deleted**: soft-deletes the linked post; the row + comment thread
+  remain readable as history.
+
+Recurring events get **one** post per series, not per occurrence — the
+feed card is the entry point and members RSVP per occurrence via the
+existing endpoint.
+
+`space_posts.linked_event_id` is a plain TEXT column with a partial
+index (`idx_space_posts_linked_event`); no FK because an `ON DELETE SET
+NULL` cascade would race the bridge's own soft-delete handler.
+
 ## iCal interop
 
 `POST /api/calendars/{id}/import_ics` parses an iCal file and creates

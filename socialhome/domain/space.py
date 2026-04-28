@@ -68,6 +68,7 @@ class SpaceFeatureAccess(StrEnum):
 # Default allowed post types for a fresh space. Ordered for a stable wire form.
 _ALL_POST_TYPES: tuple[str, ...] = (
     "bazaar",
+    "event",
     "file",
     "image",
     "poll",
@@ -154,6 +155,7 @@ class SpaceFeatures:
                     ("schedule", "allow_post_schedule"),
                     ("file", "allow_post_file"),
                     ("bazaar", "allow_post_bazaar"),
+                    ("event", "allow_post_event"),
                 )
                 if row.get(col, 1)
             )
@@ -198,6 +200,7 @@ class SpaceFeatures:
             "allow_post_schedule": int("schedule" in self.allowed_post_types),
             "allow_post_file": int("file" in self.allowed_post_types),
             "allow_post_bazaar": int("bazaar" in self.allowed_post_types),
+            "allow_post_event": int("event" in self.allowed_post_types),
         }
 
     def to_wire_dict(self) -> dict:
