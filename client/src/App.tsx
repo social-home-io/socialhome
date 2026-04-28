@@ -112,10 +112,6 @@ function LoginPage() {
           {busy ? 'Signing in…' : 'Sign in'}
         </Button>
       </form>
-      <p class="sh-muted">
-        On Home Assistant, this form is bypassed — Ingress signs you in
-        automatically.
-      </p>
     </div>
   )
 }
