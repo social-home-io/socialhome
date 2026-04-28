@@ -37,6 +37,7 @@ from .calendar import (
     CalendarEventApprovalView,
     CalendarEventDeleteView,
     CalendarEventPendingView,
+    CalendarEventRemindersView,
     CalendarEventRsvpsView,
     CalendarEventRsvpView,
     CalendarEventsView,
@@ -550,6 +551,9 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view(
         "/api/calendars/events/{id}/pending", CalendarEventPendingView,
+    )
+    app.router.add_view(
+        "/api/calendars/events/{id}/reminders", CalendarEventRemindersView,
     )
     app.router.add_view("/api/spaces/{id}/calendar/events", SpaceCalendarEventsView)
     app.router.add_view(

@@ -13,9 +13,15 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from ..domain.calendar import Calendar, CalendarEvent, CalendarRSVP, RSVPStatus
+from ..domain.calendar import (
+    Calendar,
+    CalendarEvent,
+    CalendarRSVP,
+    EventReminder,
+    RSVPStatus,
+)
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -321,9 +327,37 @@ class SpaceCalendarService:
         return saved
 
     async def delete_event(self, event_id: str) -> None:
+        # Snapshot the event + the cohort of "still attending"-ish RSVPs
+        # before deletion so the push handler can produce a meaningful
+        # title and reach affected members. The RSVP rows themselves
+        # CASCADE-delete with the event.
+        result = await self._repo.get_event(event_id)
+        snapshot_summary = result[1].summary if result is not None else None
+        snapshot_space = result[0] if result is not None else None
+        notify: tuple[str, ...] = ()
+        if result is not None:
+            rsvps = await self._repo.list_rsvps(event_id)
+            notify = tuple(
+                {
+                    r.user_id
+                    for r in rsvps
+                    if r.status in (
+                        RSVPStatus.GOING,
+                        RSVPStatus.WAITLIST,
+                        RSVPStatus.REQUESTED,
+                    )
+                }
+            )
         await self._repo.delete_event(event_id)
         if self._bus is not None:
-            await self._bus.publish(CalendarEventDeleted(event_id=event_id))
+            await self._bus.publish(
+                CalendarEventDeleted(
+                    event_id=event_id,
+                    summary=snapshot_summary,
+                    space_id=snapshot_space,
+                    notify_user_ids=notify,
+                )
+            )
 
     async def resolve_space_id(self, event_id: str) -> str | None:
         """Return the ``space_id`` that owns ``event_id`` or None.
@@ -385,8 +419,32 @@ class SpaceCalendarService:
             capacity=new_capacity,
         )
         await self._repo.save_event(space_id, updated)
+        # Compute *material* field changes — Phase D: only these
+        # trigger update push notifications. Cosmetic changes (description,
+        # attendees, rrule, all_day) are silent.
+        changes: list[str] = []
+        if existing.summary != updated.summary:
+            changes.append("summary")
+        if existing.start != updated.start:
+            changes.append("start")
+        if existing.end != updated.end:
+            changes.append("end")
+        # Capacity going *down* is material (it kicks people out / changes
+        # waitlist semantics). Capacity going up is silent — promotion
+        # happens automatically.
+        if (
+            existing.capacity is not None
+            and new_capacity is not None
+            and new_capacity < existing.capacity
+        ):
+            changes.append("capacity_down")
         if self._bus is not None:
-            await self._bus.publish(CalendarEventUpdated(event=updated))
+            await self._bus.publish(
+                CalendarEventUpdated(
+                    event=updated,
+                    material_changes=tuple(changes),
+                )
+            )
         # Capacity raised — promote from waitlist to fill new seats.
         if (
             existing.capacity is not None
@@ -524,6 +582,81 @@ class SpaceCalendarService:
             else str(occurrence_at)
         )
         return await self._repo.list_rsvps(event_id, occurrence_at=occ_iso)
+
+    # ── Reminders (Phase D) ──────────────────────────────────────────────
+
+    async def add_reminder(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        minutes_before: int,
+        occurrence_at: datetime | str | None = None,
+    ) -> EventReminder:
+        """Schedule a reminder for ``user_id`` on a specific occurrence.
+
+        ``minutes_before`` is the offset; ``fire_at`` is computed as
+        ``occurrence - minutes_before``. The reminder lives in the
+        scheduler's queue until either delivered or removed.
+        """
+        if minutes_before < 0:
+            raise ValueError("minutes_before must be >= 0")
+        result = await self._repo.get_event(event_id)
+        if result is None:
+            raise KeyError(f"event {event_id!r} not found")
+        _space_id, event = result
+        occ_dt = self._resolve_occurrence(event, occurrence_at)
+        fire_at_dt = occ_dt - timedelta(minutes=minutes_before)
+        reminder = EventReminder(
+            event_id=event_id,
+            user_id=user_id,
+            occurrence_at=occ_dt.isoformat(),
+            minutes_before=int(minutes_before),
+            fire_at=fire_at_dt.isoformat(),
+        )
+        await self._repo.upsert_reminder(reminder)
+        return reminder
+
+    async def remove_reminder(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        minutes_before: int,
+        occurrence_at: datetime | str | None = None,
+    ) -> None:
+        result = await self._repo.get_event(event_id)
+        if result is None:
+            return
+        _space_id, event = result
+        occ_dt = self._resolve_occurrence(event, occurrence_at)
+        await self._repo.remove_reminder(
+            event_id=event_id,
+            user_id=user_id,
+            occurrence_at=occ_dt.isoformat(),
+            minutes_before=int(minutes_before),
+        )
+
+    async def list_reminders(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: datetime | str | None = None,
+    ) -> list[EventReminder]:
+        occ_iso: str | None
+        if occurrence_at is None:
+            occ_iso = None
+        else:
+            result = await self._repo.get_event(event_id)
+            if result is None:
+                return []
+            _space_id, event = result
+            occ_dt = self._resolve_occurrence(event, occurrence_at)
+            occ_iso = occ_dt.isoformat()
+        return await self._repo.list_reminders(
+            event_id=event_id, user_id=user_id, occurrence_at=occ_iso,
+        )
 
     # ── Capacity / request-to-join (Phase C) ─────────────────────────────
 
@@ -732,9 +865,10 @@ class SpaceCalendarService:
                 )
             return occ_dt
         # Recurring — check the rrule actually emits this occurrence.
-        from datetime import timedelta as _td
-
-        window_end = max(occ_dt + _td(seconds=1), event.start + _td(days=365 * 5))
+        window_end = max(
+            occ_dt + timedelta(seconds=1),
+            event.start + timedelta(days=365 * 5),
+        )
         starts = {
             s for s, _ in expand_rrule(
                 event.start,

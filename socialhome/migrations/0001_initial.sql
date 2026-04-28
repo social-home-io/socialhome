@@ -1124,6 +1124,23 @@ CREATE TABLE IF NOT EXISTS space_calendar_rsvps (
 CREATE INDEX IF NOT EXISTS idx_space_calendar_rsvps_event_occ
     ON space_calendar_rsvps(event_id, occurrence_at);
 
+-- Phase D: per-user, per-occurrence reminders. The
+-- :class:`CalendarReminderScheduler` polls fire_at on a 30 s tick and
+-- emits a push notification when each row's window comes due. sent_at
+-- is set after delivery so retries are easy to detect; the partial
+-- index covers the hot-path scan (un-sent + future).
+CREATE TABLE IF NOT EXISTS space_calendar_rsvp_reminders (
+    event_id        TEXT NOT NULL REFERENCES space_calendar_events(id) ON DELETE CASCADE,
+    user_id         TEXT NOT NULL,
+    occurrence_at   TEXT NOT NULL,
+    minutes_before  INTEGER NOT NULL CHECK(minutes_before >= 0),
+    fire_at         TEXT NOT NULL,
+    sent_at         TEXT,
+    PRIMARY KEY (event_id, user_id, occurrence_at, minutes_before)
+);
+CREATE INDEX IF NOT EXISTS idx_rsvp_reminders_pending
+    ON space_calendar_rsvp_reminders(fire_at) WHERE sent_at IS NULL;
+
 -- Out-of-order federation RSVP buffer. When a SPACE_RSVP_UPDATED arrives
 -- before its event has propagated, the FK to space_calendar_events
 -- would fail; we hold the RSVP here and flush on event arrival.

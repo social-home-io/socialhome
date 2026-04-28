@@ -35,7 +35,10 @@ from ..domain.events import (
     BazaarOfferAccepted,
     BazaarOfferRejected,
     CalendarEventCreated,
+    CalendarEventDeleted,
+    CalendarEventUpdated,
     CommentAdded,
+    EventReminderDue,
     DmContactRequested,
     DmMessageCreated,
     NotificationCreated,
@@ -88,6 +91,7 @@ class NotificationService:
         "_i18n",
         "_push",
         "_adapter",
+        "_calendar_repo",
     )
 
     def __init__(
@@ -106,6 +110,7 @@ class NotificationService:
         self._i18n = i18n
         self._push = None  # attach_push_service(PushService)
         self._adapter = None  # attach_platform_adapter(PlatformAdapter)
+        self._calendar_repo = None  # attach_calendar_repo(...) Phase D
 
     def attach_push_service(self, push_service) -> None:
         """Attach a :class:`PushService` to fan out Web Push alongside the
@@ -113,6 +118,12 @@ class NotificationService:
         replace the previous reference.
         """
         self._push = push_service
+
+    def attach_calendar_repo(self, calendar_repo) -> None:
+        """Wire :class:`AbstractSpaceCalendarRepo` so update-push handlers
+        can resolve the affected RSVP cohort. Optional — without it the
+        update-push handler is a no-op (Phase D)."""
+        self._calendar_repo = calendar_repo
 
     def attach_platform_adapter(self, adapter) -> None:
         """Attach the :class:`PlatformAdapter` so push notifications also
@@ -223,6 +234,9 @@ class NotificationService:
         self._bus.subscribe(BazaarListingExpired, self.on_bazaar_listing_expired)
         self._bus.subscribe(DmContactRequested, self.on_dm_contact_requested)
         self._bus.subscribe(CalendarEventCreated, self.on_calendar_event_created)
+        self._bus.subscribe(CalendarEventDeleted, self.on_calendar_event_deleted)
+        self._bus.subscribe(CalendarEventUpdated, self.on_calendar_event_updated)
+        self._bus.subscribe(EventReminderDue, self.on_event_reminder_due)
         self._bus.subscribe(TaskCompleted, self.on_task_completed)
         self._bus.subscribe(SpacePostModerated, self.on_space_post_moderated)
         self._bus.subscribe(SpaceMemberJoined, self.on_space_member_joined)
@@ -568,6 +582,116 @@ class NotificationService:
                     link_url="/calendar",
                 )
             )
+
+    async def on_calendar_event_deleted(
+        self,
+        event: CalendarEventDeleted,
+    ) -> None:
+        """Phase D: cancellation push to RSVPed members.
+
+        Receives the pre-delete snapshot from
+        :meth:`SpaceCalendarService.delete_event`. The cohort
+        (``notify_user_ids``) was captured before the FK CASCADE
+        wiped the RSVP rows.
+        """
+        if not event.notify_user_ids:
+            return
+        title = self._t(
+            "notification.calendar.cancelled",
+            locale=None,
+            fallback="Event cancelled: {summary}",
+            summary=event.summary or "(removed)",
+        )
+        for uid in event.notify_user_ids:
+            recipient = await self._users.get_by_user_id(uid)
+            if recipient is None:
+                continue
+            localized = self._t(
+                "notification.calendar.cancelled",
+                locale=self._locale(recipient),
+                fallback="Event cancelled: {summary}",
+                summary=event.summary or "(removed)",
+            ) or title
+            await self._save_notif(
+                new_notification(
+                    user_id=uid,
+                    type="calendar_event_cancelled",
+                    title=localized,
+                    link_url=(
+                        f"/spaces/{event.space_id}/calendar"
+                        if event.space_id
+                        else "/calendar"
+                    ),
+                )
+            )
+
+    async def on_calendar_event_updated(
+        self,
+        event: CalendarEventUpdated,
+    ) -> None:
+        """Phase D: push only when material fields change.
+
+        Material = start / end / summary / capacity-down. Cosmetic
+        updates (description, attendees, rrule, all_day) stay silent so
+        members don't get notification spam from incidental edits.
+        """
+        if not event.material_changes:
+            return
+        if self._calendar_repo is None:
+            return
+        cal_event = event.event
+        try:
+            rsvps = await self._calendar_repo.list_rsvps(cal_event.id)
+        except Exception:
+            return
+        cohort = {
+            r.user_id
+            for r in rsvps
+            if r.status in (
+                "going",
+                "waitlist",
+                "requested",
+                "maybe",
+            )
+        }
+        if not cohort:
+            return
+        for uid in cohort:
+            recipient = await self._users.get_by_user_id(uid)
+            if recipient is None:
+                continue
+            await self._save_notif(
+                new_notification(
+                    user_id=uid,
+                    type="calendar_event_updated",
+                    title=self._t(
+                        "notification.calendar.updated",
+                        locale=self._locale(recipient),
+                        fallback="Event updated: {summary}",
+                        summary=cal_event.summary,
+                    ),
+                    link_url=f"/spaces/{cal_event.calendar_id}/calendar",
+                )
+            )
+
+    async def on_event_reminder_due(self, event: EventReminderDue) -> None:
+        """Phase D: deliver the user's chosen reminder."""
+        recipient = await self._users.get_by_user_id(event.user_id)
+        if recipient is None:
+            return
+        await self._save_notif(
+            new_notification(
+                user_id=event.user_id,
+                type="calendar_reminder",
+                title=self._t(
+                    "notification.calendar.reminder",
+                    locale=self._locale(recipient),
+                    fallback="Reminder: {summary}",
+                    summary=event.summary,
+                ),
+                link_url=f"/spaces/{event.space_id}/calendar",
+            )
+        )
 
     async def on_task_completed(self, event: TaskCompleted) -> None:
         """Notify task assignees when a task is completed."""

@@ -232,6 +232,9 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 | DELETE | `/api/calendars/events/{id}/rsvp` | Clear own RSVP. `?occurrence_at=<iso>` (URL-encoded) required for recurring. |
 | POST | `/api/calendars/events/{id}/approve` | Approve / deny pending request-to-join (capped events, Phase C). Approver = event creator OR space admin. Body: `{"user_id": "<uid>", "action": "approve\|deny", "occurrence_at"?: "<iso>"}`. |
 | GET | `/api/calendars/events/{id}/pending` | List pending requests (capped events). Approver-only. `?occurrence_at=<iso>` to scope. |
+| GET | `/api/calendars/events/{id}/reminders` | List own reminders (Phase D). Optional `?occurrence_at=<iso>` filter. |
+| POST | `/api/calendars/events/{id}/reminders` | Add a reminder for the calling user. Body: `{"minutes_before": <int>, "occurrence_at"?: "<iso>"}`. |
+| DELETE | `/api/calendars/events/{id}/reminders` | Remove a reminder. Required `?minutes_before=<int>` and optional `?occurrence_at=<iso>`. |
 | POST | `/api/calendars/{id}/import_ics` | Upload iCal. |
 | POST | `/api/calendars/{id}/{import_image\|import_prompt}` | AI-assisted import. |
 | GET | `/api/calendar/{id}/export.ics` | iCal export. |

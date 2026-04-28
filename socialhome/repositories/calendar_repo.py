@@ -21,6 +21,7 @@ from ..domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarRSVP,
+    EventReminder,
     RSVPStatus,
 )
 from ..utils.rrule import expand_rrule
@@ -323,6 +324,39 @@ class AbstractSpaceCalendarRepo(Protocol):
     ) -> list[CalendarRSVP]: ...
     async def gc_pending_rsvps(self, *, older_than_iso: str) -> int: ...
 
+    # ── Phase D: reminders ─────────────────────────────────────────────
+    async def upsert_reminder(self, reminder: EventReminder) -> None: ...
+    async def remove_reminder(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+    ) -> None: ...
+    async def list_reminders(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str | None = None,
+    ) -> list[EventReminder]: ...
+    async def list_due_reminders(
+        self,
+        *,
+        now_iso: str,
+        limit: int = 100,
+    ) -> list[EventReminder]: ...
+    async def mark_reminder_sent(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+        sent_at: str,
+    ) -> None: ...
+
 
 class SqliteSpaceCalendarRepo:
     """SQLite-backed :class:`AbstractSpaceCalendarRepo`."""
@@ -593,6 +627,129 @@ class SqliteSpaceCalendarRepo:
                 (older_than_iso,),
             )
         return n
+
+    # ── Phase D: reminders ─────────────────────────────────────────────
+
+    async def upsert_reminder(self, reminder: EventReminder) -> None:
+        if reminder.minutes_before < 0:
+            raise ValueError("minutes_before must be >= 0")
+        await self._db.enqueue(
+            """
+            INSERT INTO space_calendar_rsvp_reminders(
+                event_id, user_id, occurrence_at, minutes_before, fire_at, sent_at
+            ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(event_id, user_id, occurrence_at, minutes_before) DO UPDATE SET
+                fire_at=excluded.fire_at,
+                sent_at=excluded.sent_at
+            """,
+            (
+                reminder.event_id,
+                reminder.user_id,
+                reminder.occurrence_at,
+                int(reminder.minutes_before),
+                reminder.fire_at,
+                reminder.sent_at,
+            ),
+        )
+
+    async def remove_reminder(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+    ) -> None:
+        await self._db.enqueue(
+            """
+            DELETE FROM space_calendar_rsvp_reminders
+             WHERE event_id=? AND user_id=? AND occurrence_at=? AND minutes_before=?
+            """,
+            (event_id, user_id, occurrence_at, int(minutes_before)),
+        )
+
+    async def list_reminders(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str | None = None,
+    ) -> list[EventReminder]:
+        if occurrence_at is None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_calendar_rsvp_reminders "
+                "WHERE event_id=? AND user_id=? "
+                "ORDER BY occurrence_at, minutes_before",
+                (event_id, user_id),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_calendar_rsvp_reminders "
+                "WHERE event_id=? AND user_id=? AND occurrence_at=? "
+                "ORDER BY minutes_before",
+                (event_id, user_id, occurrence_at),
+            )
+        return [
+            EventReminder(
+                event_id=r["event_id"],
+                user_id=r["user_id"],
+                occurrence_at=r["occurrence_at"],
+                minutes_before=int(r["minutes_before"]),
+                fire_at=r["fire_at"],
+                sent_at=r["sent_at"],
+            )
+            for r in rows
+        ]
+
+    async def list_due_reminders(
+        self,
+        *,
+        now_iso: str,
+        limit: int = 100,
+    ) -> list[EventReminder]:
+        """Reminders whose ``fire_at <= now`` and not yet sent.
+
+        Used by :class:`CalendarReminderScheduler` to drain a small
+        batch each tick (default 30 s).
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT * FROM space_calendar_rsvp_reminders
+             WHERE sent_at IS NULL AND fire_at <= ?
+             ORDER BY fire_at ASC
+             LIMIT ?
+            """,
+            (now_iso, int(limit)),
+        )
+        return [
+            EventReminder(
+                event_id=r["event_id"],
+                user_id=r["user_id"],
+                occurrence_at=r["occurrence_at"],
+                minutes_before=int(r["minutes_before"]),
+                fire_at=r["fire_at"],
+                sent_at=r["sent_at"],
+            )
+            for r in rows
+        ]
+
+    async def mark_reminder_sent(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        minutes_before: int,
+        sent_at: str,
+    ) -> None:
+        await self._db.enqueue(
+            """
+            UPDATE space_calendar_rsvp_reminders
+               SET sent_at=?
+             WHERE event_id=? AND user_id=? AND occurrence_at=? AND minutes_before=?
+            """,
+            (sent_at, event_id, user_id, occurrence_at, int(minutes_before)),
+        )
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────

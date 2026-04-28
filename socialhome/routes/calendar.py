@@ -650,6 +650,109 @@ class CalendarEventPendingView(BaseView):
         )
 
 
+class CalendarEventRemindersView(BaseView):
+    """``GET / POST / DELETE /api/calendars/events/{id}/reminders``.
+
+    Phase D: per-user, per-occurrence reminders. The scheduler polls
+    rows whose ``fire_at`` window has come due and emits a push.
+    """
+
+    async def _ensure_member(self, event_id: str) -> tuple[str, str] | web.Response:
+        ctx = self.user
+        space_id = await _resolve_space_id_for_event(self, event_id)
+        if space_id is None:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        space_repo = self.svc(K.space_repo_key)
+        member = await space_repo.get_member(space_id, ctx.user_id)
+        if member is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        return space_id, ctx.user_id
+
+    async def get(self) -> web.Response:
+        event_id = self.match("id")
+        gate = await self._ensure_member(event_id)
+        if isinstance(gate, web.Response):
+            return gate
+        _space_id, user_id = gate
+        occurrence_at = self.request.query.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        reminders = await space_cal_svc.list_reminders(
+            event_id=event_id,
+            user_id=user_id,
+            occurrence_at=occurrence_at,
+        )
+        return web.json_response(
+            {
+                "reminders": [
+                    {
+                        "minutes_before": r.minutes_before,
+                        "occurrence_at": r.occurrence_at,
+                        "fire_at": r.fire_at,
+                        "sent_at": r.sent_at,
+                    }
+                    for r in reminders
+                ]
+            }
+        )
+
+    async def post(self) -> web.Response:
+        event_id = self.match("id")
+        gate = await self._ensure_member(event_id)
+        if isinstance(gate, web.Response):
+            return gate
+        _space_id, user_id = gate
+        body = await self.body()
+        try:
+            minutes_before = int(body.get("minutes_before", -1))
+        except (TypeError, ValueError):
+            return error_response(
+                422, "UNPROCESSABLE", "minutes_before must be an integer.",
+            )
+        occurrence_at = body.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        try:
+            reminder = await space_cal_svc.add_reminder(
+                event_id=event_id,
+                user_id=user_id,
+                minutes_before=minutes_before,
+                occurrence_at=occurrence_at,
+            )
+        except KeyError:
+            return error_response(404, "NOT_FOUND", "Event not found.")
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        return web.json_response(
+            {
+                "minutes_before": reminder.minutes_before,
+                "occurrence_at": reminder.occurrence_at,
+                "fire_at": reminder.fire_at,
+            },
+            status=201,
+        )
+
+    async def delete(self) -> web.Response:
+        event_id = self.match("id")
+        gate = await self._ensure_member(event_id)
+        if isinstance(gate, web.Response):
+            return gate
+        _space_id, user_id = gate
+        try:
+            minutes_before = int(self.request.query.get("minutes_before", -1))
+        except (TypeError, ValueError):
+            return error_response(
+                422, "UNPROCESSABLE", "minutes_before query string required.",
+            )
+        occurrence_at = self.request.query.get("occurrence_at")
+        space_cal_svc = self.svc(K.space_cal_service_key)
+        await space_cal_svc.remove_reminder(
+            event_id=event_id,
+            user_id=user_id,
+            minutes_before=minutes_before,
+            occurrence_at=occurrence_at,
+        )
+        return web.json_response({"ok": True})
+
+
 class CalendarEventRsvpsView(BaseView):
     """``GET /api/calendars/events/{id}/rsvps`` — list RSVPs for an event.
 

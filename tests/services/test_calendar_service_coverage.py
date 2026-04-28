@@ -326,4 +326,7 @@ async def test_space_rsvp_happy(env):
     )
     await env.space_svc.remove_rsvp(event_id=event.id, user_id="u2")
     rows = await env.space_svc.list_rsvps(event.id)
-    assert rows == []
+    # Phase C: the creator is auto-RSVP'd as going on event creation; the
+    # only row that should remain after u2's removal is u1's auto-RSVP.
+    assert [r.user_id for r in rows] == ["u1"]
+    assert rows[0].status == RSVPStatus.GOING

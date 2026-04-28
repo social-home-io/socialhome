@@ -109,6 +109,24 @@ need a circular dependency on `SpaceService`.
 `maybe` never counts toward capacity — it's an "interested but not
 committed" signal.
 
+## Reminders + cancellation/update push (Phase D)
+
+`space_calendar_rsvp_reminders` stores per-(event, user, occurrence,
+offset) reminders. `SpaceCalendarReminderScheduler` polls fire_at on a
+30 s cadence and emits `EventReminderDue` events; the notification
+service translates each into a push + an in-app row.
+
+`CalendarEventDeleted` snapshots the cohort of "still-attending"
+RSVPs (`going` / `waitlist` / `requested`) before the FK CASCADE wipes
+them. The notification service uses that snapshot to push "Event
+cancelled: …" to affected members.
+
+`CalendarEventUpdated` carries `material_changes` — a tuple of field
+names that changed (`summary`, `start`, `end`, or `capacity_down`).
+The push handler skips cosmetic-only updates (description, attendees,
+rrule, all_day, capacity_up) so members don't get notification spam
+from incidental edits.
+
 ## Recurring events
 
 Events carry an optional RRULE. The authoritative event row lives on

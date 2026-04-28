@@ -130,6 +130,9 @@ from .services.federation_inbound_service import FederationInboundService
 from .services.poll_federation_outbound import PollFederationOutbound
 from .services.calendar_feed_bridge import CalendarFeedBridge
 from .services.schedule_calendar_bridge import ScheduleCalendarBridge
+from .services.space_calendar_reminder_scheduler import (
+    SpaceCalendarReminderScheduler,
+)
 from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.comment_federation_outbound import CommentFederationOutbound
 from .services.corner_service import CornerService
@@ -1027,6 +1030,16 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     calendar_feed_bridge.wire()
 
+    # Phase D: per-user space-event reminder scheduler. Polls fire_at
+    # on a 30 s cadence and emits EventReminderDue events that the
+    # notification service translates into push + in-app rows.
+    # Started/stopped from app's on_startup / on_cleanup hooks below.
+    space_calendar_reminder_scheduler = SpaceCalendarReminderScheduler(
+        calendar_repo=space_cal_repo,
+        bus=bus,
+    )
+    notification_service.attach_calendar_repo(space_cal_repo)
+
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
     data_export_service = DataExportService(db)
 
@@ -1502,6 +1515,9 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await calendar_reminder_scheduler.start()
 
+        # Phase D: per-user space-event reminders.
+        await space_calendar_reminder_scheduler.start()
+
         task_deadline_scheduler = TaskDeadlineScheduler(
             repo=task_repo,
             db=db,
@@ -1550,6 +1566,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await post_draft_scheduler.stop()
         if calendar_reminder_scheduler is not None:
             await calendar_reminder_scheduler.stop()
+        await space_calendar_reminder_scheduler.stop()
         if task_deadline_scheduler is not None:
             await task_deadline_scheduler.stop()
         if task_recurrence_scheduler is not None:

@@ -112,3 +112,23 @@ class CalendarRSVP:
     status: str  # one of RSVPStatus.ALL
     updated_at: str  # ISO-8601
     occurrence_at: str = ""  # ISO-8601; empty only on legacy in-memory test fakes
+
+
+@dataclass(slots=True, frozen=True)
+class EventReminder:
+    """Phase D: per-user reminder for a specific occurrence of an event.
+
+    ``fire_at`` is the precomputed UTC ISO instant the scheduler should
+    deliver the push notification. ``minutes_before`` is the user's
+    chosen offset (e.g. 60 = "1 hour before"); 0 means at start.
+    ``sent_at`` is filled in after the scheduler emits the notification
+    — un-sent rows with ``fire_at <= now()`` are the scheduler's
+    work-queue.
+    """
+
+    event_id: str
+    user_id: str
+    occurrence_at: str
+    minutes_before: int
+    fire_at: str
+    sent_at: str | None = None
