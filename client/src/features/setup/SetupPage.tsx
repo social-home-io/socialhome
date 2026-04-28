@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useMemo, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { setToken } from '@/store/auth'
@@ -41,11 +41,83 @@ export function SetupPage() {
   const cfg = instanceConfig.value
   if (!cfg) {
     // App.tsx fetches before rendering, so this is defensive only.
-    return <div class="sh-setup-loading">{t('setup.loading')}</div>
+    return (
+      <SetupShell>
+        <SetupSpinner label={t('setup.loading')} />
+      </SetupShell>
+    )
   }
   if (cfg.mode === 'haos') return <HaosAutoComplete />
   if (cfg.mode === 'ha') return <HaOwnerForm />
   return <StandaloneSetupForm />
+}
+
+// ── Shared shell + bits ──────────────────────────────────────────────────────
+
+interface SetupShellProps {
+  step?: { current: number; total: number }
+  children: any
+}
+
+function SetupShell({ step, children }: SetupShellProps) {
+  return (
+    <div class="sh-setup" role="main">
+      <div class="sh-setup-card">
+        <header class="sh-setup-brand">
+          <span class="sh-setup-brand-mark" aria-hidden="true">🏠</span>
+          <span class="sh-setup-brand-name">Social Home</span>
+        </header>
+        {step && (
+          <ol class="sh-setup-steps" aria-label={`Step ${step.current} of ${step.total}`}>
+            {Array.from({ length: step.total }, (_, i) => (
+              <li
+                key={i}
+                aria-current={i + 1 === step.current ? 'step' : undefined}
+                class={
+                  i + 1 < step.current
+                    ? 'sh-setup-step sh-setup-step--done'
+                    : i + 1 === step.current
+                    ? 'sh-setup-step sh-setup-step--active'
+                    : 'sh-setup-step'
+                }
+              />
+            ))}
+          </ol>
+        )}
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function SetupSpinner({ label }: { label: string }) {
+  return (
+    <div class="sh-setup-spinner-wrap">
+      <div class="sh-setup-spinner" aria-hidden="true" />
+      <p class="sh-muted">{label}</p>
+    </div>
+  )
+}
+
+function PasswordStrength({ value }: { value: string }) {
+  const score = useMemo(() => {
+    let s = 0
+    if (value.length >= 8) s += 1
+    if (value.length >= 12) s += 1
+    if (/[A-Z]/.test(value) && /[a-z]/.test(value)) s += 1
+    if (/[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value)) s += 1
+    return s
+  }, [value])
+  const filled = value.length === 0 ? 0 : Math.max(score, 1)
+  return (
+    <div
+      class="sh-setup-strength"
+      aria-label={`Password strength ${filled} of 4`}
+      data-score={filled}
+    >
+      <span /><span /><span /><span />
+    </div>
+  )
 }
 
 // ── Standalone: username + password ─────────────────────────────────────────
@@ -86,12 +158,12 @@ function StandaloneSetupForm() {
   }
 
   return (
-    <div class="sh-setup" role="main">
-      <h1>{t('setup.standalone.title')}</h1>
-      <p>{t('setup.standalone.intro')}</p>
+    <SetupShell>
+      <h1 class="sh-setup-title">{t('setup.standalone.title')}</h1>
+      <p class="sh-setup-intro">{t('setup.standalone.intro')}</p>
       <form onSubmit={submit} class="sh-setup-form">
-        <label>
-          {t('setup.username')}
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.username')}</span>
           <input
             name="username"
             type="text"
@@ -101,8 +173,8 @@ function StandaloneSetupForm() {
             onInput={(e) => setUsername((e.target as HTMLInputElement).value)}
           />
         </label>
-        <label>
-          {t('setup.password')}
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.password')}</span>
           <input
             name="password"
             type="password"
@@ -111,9 +183,10 @@ function StandaloneSetupForm() {
             value={password}
             onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
           />
+          <PasswordStrength value={password} />
         </label>
-        <label>
-          {t('setup.password_confirm')}
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.password_confirm')}</span>
           <input
             name="password_confirm"
             type="password"
@@ -128,7 +201,7 @@ function StandaloneSetupForm() {
           {busy ? t('setup.submitting') : t('setup.submit')}
         </Button>
       </form>
-    </div>
+    </SetupShell>
   )
 }
 
@@ -182,49 +255,72 @@ function HaOwnerForm() {
     }
   }
 
-  if (loading) return <div class="sh-setup-loading">{t('setup.loading')}</div>
+  if (loading) {
+    return (
+      <SetupShell>
+        <SetupSpinner label={t('setup.loading')} />
+      </SetupShell>
+    )
+  }
   if (haPersonsError.value) {
     return (
-      <div class="sh-setup-error">
-        <h1>{t('setup.ha.title')}</h1>
+      <SetupShell>
+        <h1 class="sh-setup-title">{t('setup.ha.title')}</h1>
         <FormError id="setup-error" message={haPersonsError.value} />
-      </div>
+      </SetupShell>
     )
   }
   if (!persons || persons.length === 0) {
     return (
-      <div class="sh-setup" role="main">
-        <h1>{t('setup.ha.title')}</h1>
-        <p>{t('setup.ha.no_persons')}</p>
-      </div>
+      <SetupShell>
+        <h1 class="sh-setup-title">{t('setup.ha.title')}</h1>
+        <p class="sh-setup-intro">{t('setup.ha.no_persons')}</p>
+      </SetupShell>
     )
   }
 
+  // Two visual steps: pick person, then set password. We surface them as
+  // a progress indicator without splitting the form (a single submit keeps
+  // the flow snappy and avoids a backwards-arrow dance for the operator).
+  const step = picked ? 2 : 1
+
   return (
-    <div class="sh-setup" role="main">
-      <h1>{t('setup.ha.title')}</h1>
-      <p>{t('setup.ha.intro')}</p>
+    <SetupShell step={{ current: step, total: 2 }}>
+      <h1 class="sh-setup-title">{t('setup.ha.title')}</h1>
+      <p class="sh-setup-intro">{t('setup.ha.intro')}</p>
       <form onSubmit={submit} class="sh-setup-form">
         <fieldset class="sh-setup-persons">
-          <legend>{t('setup.ha.pick_owner')}</legend>
-          {persons.map((p) => (
-            <label key={p.username} class="sh-setup-person">
-              <input
-                type="radio"
-                name="picked"
-                value={p.username}
-                checked={picked === p.username}
-                onChange={() => setPicked(p.username)}
-              />
-              {p.picture_url && (
-                <img src={p.picture_url} alt="" class="sh-setup-avatar" />
-              )}
-              <span>{p.display_name}</span>
-            </label>
-          ))}
+          <legend class="sh-setup-label">{t('setup.ha.pick_owner')}</legend>
+          <div class="sh-setup-persons-grid">
+            {persons.map((p) => (
+              <label
+                key={p.username}
+                class={
+                  picked === p.username
+                    ? 'sh-setup-person sh-setup-person--picked'
+                    : 'sh-setup-person'
+                }
+              >
+                <input
+                  type="radio"
+                  name="picked"
+                  value={p.username}
+                  checked={picked === p.username}
+                  onChange={() => setPicked(p.username)}
+                />
+                <span class="sh-setup-person-avatar">
+                  {p.picture_url
+                    ? <img src={p.picture_url} alt="" />
+                    : <span aria-hidden="true">{initials(p.display_name)}</span>}
+                </span>
+                <span class="sh-setup-person-name">{p.display_name}</span>
+                <span class="sh-setup-person-username">@{p.username}</span>
+              </label>
+            ))}
+          </div>
         </fieldset>
-        <label>
-          {t('setup.password')}
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.password')}</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -232,9 +328,10 @@ function HaOwnerForm() {
             value={password}
             onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
           />
+          <PasswordStrength value={password} />
         </label>
-        <label>
-          {t('setup.password_confirm')}
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.password_confirm')}</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -248,7 +345,7 @@ function HaOwnerForm() {
           {busy ? t('setup.submitting') : t('setup.submit')}
         </Button>
       </form>
-    </div>
+    </SetupShell>
   )
 }
 
@@ -275,13 +372,18 @@ function HaosAutoComplete() {
   }, [])
 
   return (
-    <div class="sh-setup-loading" role="main">
-      <h1>{t('setup.haos.title')}</h1>
+    <SetupShell>
+      <h1 class="sh-setup-title">{t('setup.haos.title')}</h1>
       {error
         ? <FormError id="setup-error" message={error} />
-        : <p>{t('setup.haos.completing')}</p>}
-    </div>
+        : <SetupSpinner label={t('setup.haos.completing')} />}
+    </SetupShell>
   )
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).slice(0, 2)
+  return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || '?'
 }
 
 export default SetupPage

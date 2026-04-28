@@ -3340,6 +3340,291 @@ hr {
   gap: var(--sh-space-md);
 }
 
+/* First-boot setup wizard ───────────────────────────────────────────── */
+.sh-setup {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sh-space-lg);
+  background:
+    radial-gradient(circle at top right,
+      color-mix(in srgb, var(--sh-primary) 18%, transparent) 0%,
+      transparent 50%),
+    radial-gradient(circle at bottom left,
+      color-mix(in srgb, var(--sh-success) 12%, transparent) 0%,
+      transparent 55%),
+    var(--sh-bg-secondary);
+}
+.sh-setup-card {
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-xl);
+  padding: var(--sh-space-xl);
+  box-shadow: var(--sh-shadow-xl);
+  max-width: 520px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+  animation: sh-setup-in 320ms ease-out both;
+}
+@keyframes sh-setup-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.sh-setup-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--sh-text);
+}
+.sh-setup-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  font-size: 1.25rem;
+}
+.sh-setup-brand-name {
+  font-size: 1rem;
+  color: var(--sh-text-muted);
+}
+.sh-setup-title {
+  margin: var(--sh-space-xs) 0 0;
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+}
+.sh-setup-intro {
+  margin: 0;
+  color: var(--sh-text-muted);
+  line-height: 1.5;
+}
+.sh-setup-steps {
+  display: flex;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sh-setup-step {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sh-border);
+  transition: background 200ms ease;
+}
+.sh-setup-step--active {
+  background: var(--sh-primary);
+}
+.sh-setup-step--done {
+  background: color-mix(in srgb, var(--sh-primary) 70%, transparent);
+}
+.sh-setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+}
+.sh-setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sh-setup-label {
+  font-weight: 500;
+  font-size: 0.875rem;
+  color: var(--sh-text-muted);
+}
+.sh-setup-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  font-size: 1rem;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.sh-setup-field input:focus {
+  outline: none;
+  border-color: var(--sh-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 20%, transparent);
+}
+.sh-setup-strength {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.sh-setup-strength span {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sh-border);
+  transition: background 200ms ease;
+}
+.sh-setup-strength[data-score="1"] span:nth-child(-n+1) { background: var(--sh-danger); }
+.sh-setup-strength[data-score="2"] span:nth-child(-n+2) { background: var(--sh-warning); }
+.sh-setup-strength[data-score="3"] span:nth-child(-n+3) { background: var(--sh-success); }
+.sh-setup-strength[data-score="4"] span { background: var(--sh-success); }
+
+.sh-setup-persons {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sh-setup-persons-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--sh-space-sm);
+}
+.sh-setup-person {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: var(--sh-space-md) var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+.sh-setup-person:hover {
+  border-color: color-mix(in srgb, var(--sh-primary) 50%, var(--sh-border));
+  transform: translateY(-1px);
+}
+.sh-setup-person:focus-within {
+  border-color: var(--sh-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 20%, transparent);
+}
+.sh-setup-person--picked {
+  border-color: var(--sh-primary);
+  background: color-mix(in srgb, var(--sh-primary) 6%, var(--sh-bg));
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--sh-primary) 18%, transparent);
+}
+.sh-setup-person input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.sh-setup-person-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--sh-bg-secondary);
+  font-weight: 600;
+  font-size: 1.25rem;
+  color: var(--sh-text-muted);
+  overflow: hidden;
+}
+.sh-setup-person-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.sh-setup-person-name {
+  font-weight: 500;
+  margin-top: 2px;
+}
+.sh-setup-person-username {
+  font-size: 0.8rem;
+  color: var(--sh-text-muted);
+}
+
+.sh-setup-spinner-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sh-space-md);
+  padding: var(--sh-space-lg) 0;
+}
+.sh-setup-spinner {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid var(--sh-border);
+  border-top-color: var(--sh-primary);
+  animation: sh-setup-spin 900ms linear infinite;
+}
+@keyframes sh-setup-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 480px) {
+  .sh-setup-card {
+    padding: var(--sh-space-lg);
+  }
+  .sh-setup-persons-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-setup-card { animation: none; }
+  .sh-setup-spinner { animation: none; border-top-color: var(--sh-primary); }
+}
+
+/* Admin > Create user form (standalone mode only) ─────────────────────── */
+.sh-admin-create-summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--sh-primary);
+  user-select: none;
+}
+.sh-admin-create-summary:hover {
+  text-decoration: underline;
+}
+.sh-admin-create-user {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sh-space-md);
+  margin-top: var(--sh-space-md);
+}
+.sh-admin-create-user label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.875rem;
+  color: var(--sh-text-muted);
+}
+.sh-admin-create-user input[type="text"],
+.sh-admin-create-user input[type="password"] {
+  padding: 8px 10px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  font-size: 0.95rem;
+}
+.sh-admin-create-user input:focus {
+  outline: none;
+  border-color: var(--sh-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 18%, transparent);
+}
+.sh-admin-checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+}
+.sh-admin-create-user button[type="submit"] {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+@media (max-width: 540px) {
+  .sh-admin-create-user { grid-template-columns: 1fr; }
+}
+
 /* Calls — in-call UI */
 .sh-calls-page { max-width: 820px; margin: 0 auto; }
 .sh-incall {

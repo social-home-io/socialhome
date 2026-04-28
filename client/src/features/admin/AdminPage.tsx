@@ -152,7 +152,9 @@ function CreateStandaloneUserForm() {
 
   return (
     <details class="sh-admin-section">
-      <summary><h3 style="display:inline">Create user</h3></summary>
+      <summary>
+        <span class="sh-admin-create-summary">+ Create new user</span>
+      </summary>
       <form onSubmit={submit} class="sh-admin-create-user">
         <label>
           Username
