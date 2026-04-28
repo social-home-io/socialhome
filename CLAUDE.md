@@ -6,14 +6,19 @@ The spec is the source of truth — if code and spec disagree, fix the code.
 
 ### Architecture
 
-- **Platform adapters:** `SOCIAL_HOME_MODE=ha` → `HomeAssistantAdapter`,
-  `=standalone` → `StandaloneAdapter`. ALL adapter-specific code lives in
-  `socialhome/platform/`. Never branch on `config.mode` outside `platform/`
-  and `config.py`. Never `isinstance`-check concrete adapters — use protocol
-  methods (e.g. `adapter.supports_bearer_token_auth`). Adapter lifecycle hooks
-  (`on_startup`, `on_cleanup`, `get_extra_services`, `get_extra_routes`) handle
-  mode-specific wiring. Platform events for HA automations are defined in
-  `HaBridgeService` — add new event types there, not in `app.py`.
+- **Platform adapters:** three modes selected by `SH_MODE`:
+  `standalone` → `StandaloneAdapter` (local users, password auth),
+  `ha` → `HaAdapter` (HA Core REST + local password auth),
+  `haos` → `HaosAdapter` (HA Supervisor add-on with Ingress).
+  ALL adapter-specific code lives in `socialhome/platform/`. Never branch
+  on `config.mode` outside `platform/` and `config.py` — query
+  `adapter.capabilities` instead. Never `isinstance`-check concrete
+  adapters — use Provider methods (`adapter.auth.authenticate`,
+  `adapter.users.list_users`, etc.). Adapter lifecycle hooks
+  (`on_startup`, `on_cleanup`, `get_extra_services`, `get_extra_routes`)
+  handle mode-specific wiring. Platform events for HA automations are
+  defined in `HaBridgeService` — add new event types there, not in
+  `app.py`.
 - **Service layer:** all business logic lives in `socialhome/services/`.
   Route handlers in `routes/` are thin `BaseView` subclasses — one view class
   per REST resource, dispatched by HTTP method (`get()`, `post()`, `patch()`,
@@ -79,6 +84,20 @@ The spec is the source of truth — if code and spec disagree, fix the code.
   so a handler crash never publishes events whose writes rolled back.
   See `db/unit_of_work.py`. Single-write handlers can keep using
   `db.enqueue` directly.
+- **Adapter** for platform integration. The `PlatformAdapter` ABC in
+  `platform/adapter.py` composes small `*Provider` Protocols
+  (`AuthProvider`, `UserDirectory`, `PushProvider`, `STTProvider`,
+  `AIProvider`, `ExternalEventSink`) plus a `capabilities` set
+  (`Capability.PUSH | STT | AI | INGRESS | PASSWORD_AUTH |
+  HA_PERSON_DIRECTORY`). Concrete adapters
+  (`StandaloneAdapter`, `HaAdapter`, `HaosAdapter`) wire mode-specific
+  providers in their constructor and never branch on `config.mode`
+  themselves. Add a new platform by writing a new adapter class plus
+  the providers it needs; route handlers and services consume the
+  adapter through the Provider interfaces. Reference:
+  `platform/adapter.py`, `platform/{standalone,ha,haos}/`,
+  `platform/local_credentials.py` (shared password+token machinery
+  composed by adapters that opt into `PASSWORD_AUTH`).
 
 ### Code Conventions
 
@@ -207,7 +226,19 @@ perfect?" Incremental accuracy beats big bang rewrites.
 - Never bypass `_require_space_admin()` / `_require_space_member()` guards
 - Never add an endpoint without a matching integration test
 - Never add bootstrap logic to `run.sh` — it belongs in `ha_bootstrap.py`
-- Never assume `SUPERVISOR_TOKEN` is always present — check before calling Supervisor API
+- Never assume `SUPERVISOR_TOKEN` is always present — it's only set in
+  `haos` mode. The Config validator enforces this at startup; route /
+  service code should query `adapter.capabilities` (e.g.
+  `Capability.INGRESS in caps`) instead of probing the env var
+- Never branch on `config.mode` outside `platform/__init__.py` and
+  `config.py` — query `adapter.capabilities` instead. The same applies to
+  `isinstance`-checks against concrete adapter classes; consume the
+  Provider interfaces (`adapter.auth`, `adapter.users`, `adapter.push`,
+  ...) so a fourth platform can drop in without touching call sites
+- Never auto-generate an admin password on first boot — the `/setup`
+  wizard collects one from the operator, or `[standalone].admin_password`
+  / `SH_ADMIN_PASSWORD` provides a headless override. Never log a
+  generated password
 - Never write a function-based route handler — use a `BaseView` subclass
   (see `routes/base.py`). Group handlers by URL resource, not by function
 - Never add try/except for domain exceptions in a handler — `BaseView._iter`
