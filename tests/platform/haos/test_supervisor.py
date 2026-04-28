@@ -1,11 +1,11 @@
-"""Tests for socialhome.platform.ha.supervisor."""
+"""Tests for socialhome.platform.haos.supervisor."""
 
 from __future__ import annotations
 
 import pytest
 from aiohttp import web
 
-from socialhome.platform.ha.supervisor import SupervisorClient
+from socialhome.platform.haos.supervisor import SupervisorClient
 
 
 @pytest.fixture

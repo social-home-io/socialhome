@@ -458,62 +458,56 @@ class StandaloneAdapter(PlatformAdapter):
     async def on_startup(self, app: "web.Application") -> None:
         """Standalone-mode startup wiring.
 
-        Two responsibilities:
+        Picks up the shared aiohttp session and forwards it to
+        :class:`StandalonePushProvider` for outbound push.
 
-        * Pick up the shared aiohttp session and forward it to
-          :class:`StandalonePushProvider` for outbound push.
-        * **First-boot admin provisioning.** When ``platform_users`` is
-          empty (a fresh data dir, no pairing has happened yet), seed
-          a single ``admin`` user so the SPA login form actually has
-          something to authenticate against. The username, password
-          source (``$SH_ADMIN_PASSWORD`` or generated), and the printed-
-          once password are documented in :meth:`_bootstrap_admin`.
+        First-boot admin provisioning lives in :meth:`provision_admin`,
+        which is called from the ``POST /api/setup/standalone`` route.
+        When ``[standalone].admin_password`` (or ``SH_ADMIN_PASSWORD``)
+        is set, the same code path runs here so headless deployments
+        come up with a usable login without a wizard click-through.
+        Without that override the wizard is the only path — fresh DBs
+        boot with no admin and the SPA redirects to ``/setup``.
         """
         if self._session is None:
             self._session = app[K.http_session_key]
         if self.push is not None and isinstance(self.push, StandalonePushProvider):
             self.push.attach_session(self._session)
-        await self._bootstrap_admin()
+        if self._config.admin_password:
+            await self.provision_admin(
+                username=self._config.admin_username,
+                password=self._config.admin_password,
+            )
 
-    async def _bootstrap_admin(self) -> None:
-        """Seed the first admin user when ``platform_users`` is empty.
+    async def provision_admin(
+        self,
+        *,
+        username: str,
+        password: str,
+        display_name: str = "Admin",
+    ) -> bool:
+        """Seed the first admin in ``platform_users`` + ``users``.
 
-        Idempotent: any pre-existing row short-circuits the bootstrap.
-        Honors two environment overrides:
-
-        * ``SH_ADMIN_USERNAME`` — defaults to ``"admin"``.
-        * ``SH_ADMIN_PASSWORD`` — when unset, a random urlsafe password
-          is generated and printed (once) to the log so the operator
-          can capture it. Never persisted in plaintext anywhere.
-
-        The freshly-created user is wired across both the platform side
-        (``platform_users`` for password verification) and the domain
-        side (``users`` for the bearer-auth join) with matching
-        ``username``. Without the ``users`` row, downstream
-        ``user_repo.get_user_by_token_hash`` would never find the
-        principal once a token gets minted.
+        Idempotent: returns ``False`` when an admin already exists
+        (either platform-side or domain-side). Returns ``True`` on
+        first-boot success. Used by both the headless env-var path
+        (``on_startup``) and the ``POST /api/setup/standalone`` route.
         """
+        username = (username or "admin").strip() or "admin"
+        if not password:
+            raise ValueError("provision_admin requires a non-empty password")
+
         existing = await self._db.fetchone(
             "SELECT 1 FROM platform_users LIMIT 1",
         )
         if existing is not None:
-            return
-
-        username = os.environ.get("SH_ADMIN_USERNAME", "admin").strip() or "admin"
-        env_pw = os.environ.get("SH_ADMIN_PASSWORD")
-        password = env_pw if env_pw else secrets.token_urlsafe(16)
-        display_name = "Admin"
-
-        # Defensive: tests / external migrations may have already seeded a
-        # ``users`` row for this username before the standalone adapter
-        # boots (the conftest in tests/routes does this). Skip the bootstrap
-        # entirely so we don't fight a UNIQUE conflict on ``users.username``.
+            return False
         existing_user = await self._db.fetchone(
             "SELECT 1 FROM users WHERE username=?",
             (username,),
         )
         if existing_user is not None:
-            return
+            return False
 
         pw_hash = self.hash_password(password)
         await self._db.enqueue(
@@ -524,10 +518,6 @@ class StandaloneAdapter(PlatformAdapter):
             """,
             (username, display_name, pw_hash),
         )
-
-        # Mirror into ``users`` so bearer auth can resolve the principal.
-        # We mint a stable user_id so re-running the bootstrap with a
-        # cleared platform_users table doesn't leave dangling rows.
         user_id = f"uid-{username}"
         await self._db.enqueue(
             """
@@ -537,24 +527,7 @@ class StandaloneAdapter(PlatformAdapter):
             """,
             (username, user_id, display_name),
         )
-
-        # Log once. With ``SH_ADMIN_PASSWORD`` set we avoid printing the
-        # secret (the operator already knows it); with a generated one
-        # we MUST print or the user can never log in.
-        if env_pw:
-            log.warning(
-                "standalone: bootstrapped admin user %r (password from "
-                "SH_ADMIN_PASSWORD)",
-                username,
-            )
-        else:
-            log.warning(
-                "standalone: bootstrapped admin user %r with generated "
-                "password %r — change it via the SPA / API; rerun with "
-                "SH_ADMIN_PASSWORD to set a known value before first boot",
-                username,
-                password,
-            )
+        return True
 
     async def on_cleanup(self, app: "web.Application") -> None:  # noqa: RUF029
         """No-op — the shared session is owned by :mod:`socialhome.app`."""

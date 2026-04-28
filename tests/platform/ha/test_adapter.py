@@ -105,8 +105,6 @@ def _build_adapter(
     return HomeAssistantAdapter(
         ha_url="http://ha-test:8123",
         ha_token="test-token",
-        supervisor_url="http://supervisor",
-        supervisor_token="",
         data_dir="/tmp/irrelevant",
         options=options,
         ha_client=client,
@@ -396,16 +394,15 @@ async def test_adapter_raises_before_on_startup_when_client_not_injected():
     adapter = HomeAssistantAdapter(
         ha_url="http://ha",
         ha_token="t",
-        supervisor_url="http://supervisor",
-        supervisor_token="",
         data_dir="/tmp/unused",
     )
     with pytest.raises(RuntimeError, match="on_startup"):
         await adapter.list_external_users()
 
 
-async def test_on_startup_skips_bootstrap_without_supervisor_token(tmp_path):
-    """If SUPERVISOR_TOKEN is empty, on_startup does not provision users."""
+async def test_on_startup_does_not_provision_users(tmp_path):
+    """HaAdapter (Core mode) never bootstraps users on startup —
+    that's haos territory."""
     db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
     await db.startup()
     kp = generate_identity_keypair()
@@ -424,8 +421,6 @@ async def test_on_startup_skips_bootstrap_without_supervisor_token(tmp_path):
         adapter = HomeAssistantAdapter(
             ha_url="http://ha.local:8123",
             ha_token="",
-            supervisor_url="http://supervisor",
-            supervisor_token="",
             data_dir=str(tmp_path),
         )
         await adapter.on_startup(app)
@@ -469,8 +464,6 @@ async def test_get_federation_base_reads_instance_config(tmp_path):
         adapter = HomeAssistantAdapter(
             ha_url="http://ha.local:8123",
             ha_token="",
-            supervisor_url="http://supervisor",
-            supervisor_token="",
             data_dir=str(tmp_path),
         )
         await adapter.on_startup(app)
@@ -504,8 +497,6 @@ async def test_get_federation_base_strips_trailing_slash(tmp_path):
         adapter = HomeAssistantAdapter(
             ha_url="http://ha.local:8123",
             ha_token="",
-            supervisor_url="http://supervisor",
-            supervisor_token="",
             data_dir=str(tmp_path),
         )
         await adapter.on_startup(app)

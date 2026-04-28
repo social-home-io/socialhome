@@ -18,12 +18,52 @@ namespace.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+
+
+log = logging.getLogger(__name__)
+
+
+_VALID_MODES: frozenset[str] = frozenset({"standalone", "ha", "haos"})
+
+
+def _resolve_mode(raw: str) -> str:
+    """Validate ``SH_MODE`` and warn on legacy combinations.
+
+    * ``haos`` requires ``SUPERVISOR_TOKEN`` in the environment — without
+      it the Supervisor proxy isn't reachable, so the adapter would
+      crash on the first HA call. We raise instead of silently falling
+      back so misconfigured deployments fail loudly at startup.
+    * ``ha`` + ``SUPERVISOR_TOKEN`` is the legacy combo (pre-platform-v2
+      add-ons set ``SH_MODE=ha`` and relied on the supervisor branch
+      inside the HA adapter). Now ``haos`` is its own adapter; warn the
+      operator so they switch to ``SH_MODE=haos`` before the back-compat
+      shim is removed.
+    """
+    if raw not in _VALID_MODES:
+        raise ValueError(
+            f"SH_MODE must be one of {sorted(_VALID_MODES)} (got {raw!r})",
+        )
+    has_supervisor = bool(os.environ.get("SUPERVISOR_TOKEN"))
+    if raw == "haos" and not has_supervisor:
+        raise ValueError(
+            "SH_MODE=haos requires SUPERVISOR_TOKEN in the environment "
+            "(injected by the Home Assistant Supervisor); did you mean "
+            "SH_MODE=ha?",
+        )
+    if raw == "ha" and has_supervisor:
+        log.warning(
+            "SH_MODE=ha but SUPERVISOR_TOKEN is set — did you mean "
+            "SH_MODE=haos? The Supervisor proxy will be ignored under "
+            "the ha adapter.",
+        )
+    return raw
 
 
 # ── XDG-compliant default paths ──────────────────────────────────────────
@@ -55,6 +95,7 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
         "storage",
         "federation",
         "webrtc",
+        "standalone",
     }
 )
 
@@ -90,11 +131,18 @@ class Config:
     cors_allowed_origins: tuple[str, ...] = ()
 
     # Deployment mode (affects PlatformAdapter selection)
-    mode: str = "standalone"  # "ha" | "standalone"
+    mode: str = "standalone"  # "standalone" | "ha" | "haos"
 
-    # Home Assistant credentials (HA mode, when not running as a Supervisor
-    # add-on). In add-on mode these are ignored — the Supervisor injects
-    # SUPERVISOR_TOKEN and the adapter routes through http://supervisor/core/api.
+    # Standalone first-boot admin seed (mirrors [standalone] TOML section).
+    # ``admin_password`` empty → a random urlsafe password is generated and
+    # logged once on first boot.
+    admin_username: str = "admin"
+    admin_password: str = ""
+
+    # Home Assistant credentials (HA mode). The ``haos`` mode talks to HA via
+    # the Supervisor proxy and does not consume these — it uses the
+    # ``SUPERVISOR_TOKEN`` environment variable instead, which the Supervisor
+    # injects at runtime.
     ha_url: str = "http://homeassistant.local:8123"
     ha_token: str = ""
 
@@ -206,7 +254,17 @@ class Config:
                 ).split(",")
                 if v.strip()
             ),
-            mode=_str_opt("mode", "SH_MODE", "standalone").lower(),
+            mode=_resolve_mode(_str_opt("mode", "SH_MODE", "standalone").lower()),
+            admin_username=_str_opt(
+                "admin_username",
+                "SH_ADMIN_USERNAME",
+                "admin",
+            ),
+            admin_password=_str_opt(
+                "admin_password",
+                "SH_ADMIN_PASSWORD",
+                "",
+            ),
             ha_url=_str_opt(
                 "ha_url",
                 "SH_HA_URL",

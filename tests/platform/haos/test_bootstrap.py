@@ -1,4 +1,4 @@
-"""Tests for socialhome.platform.ha.bootstrap."""
+"""Tests for socialhome.platform.haos.bootstrap."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.platform.ha.bootstrap import (
+from socialhome.platform.haos.bootstrap import (
     BOOTSTRAP_FLAG,
     INTEGRATION_TOKEN_FILENAME,
     INTEGRATION_TOKEN_LABEL,

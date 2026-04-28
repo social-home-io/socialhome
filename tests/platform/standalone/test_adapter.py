@@ -355,58 +355,38 @@ async def test_get_federation_base_empty_string_is_none(db, cfg):
     assert await adapter.get_federation_base() is None
 
 
-# ── First-boot admin bootstrap (§platform/standalone) ─────────────────────────
+# ── First-boot admin provisioning (§platform/standalone) ─────────────────────
 
 
-async def test_bootstrap_admin_seeds_user_when_empty(db, adapter, monkeypatch):
+async def test_provision_admin_seeds_user_when_empty(db, adapter):
     """An empty platform_users gets a fresh admin row + a matching users row."""
-    monkeypatch.delenv("SH_ADMIN_USERNAME", raising=False)
-    monkeypatch.setenv("SH_ADMIN_PASSWORD", "secret123")
-    await adapter._bootstrap_admin()
+    created = await adapter.provision_admin(username="admin", password="secret123")
+    assert created is True
     pu = await db.fetchone("SELECT * FROM platform_users WHERE username='admin'")
     assert pu is not None
     assert pu["is_admin"] == 1
     u = await db.fetchone("SELECT * FROM users WHERE username='admin'")
     assert u is not None
     assert u["is_admin"] == 1
-    # The password we set was used.
     assert StandaloneAdapter._verify_password("secret123", pu["password_hash"])
 
 
-async def test_bootstrap_admin_is_idempotent(db, adapter, monkeypatch):
+async def test_provision_admin_is_idempotent(db, adapter):
     """Re-running with a populated platform_users is a no-op."""
     await _add_user(db, "alice")
-    monkeypatch.setenv("SH_ADMIN_PASSWORD", "irrelevant")
-    await adapter._bootstrap_admin()
+    created = await adapter.provision_admin(username="admin", password="irrelevant")
+    assert created is False
     rows = await db.fetchall("SELECT username FROM platform_users")
     assert {r["username"] for r in rows} == {"alice"}
 
 
-async def test_bootstrap_admin_generates_password_when_env_unset(
-    db,
-    adapter,
-    monkeypatch,
-    caplog,
-):
-    """Without SH_ADMIN_PASSWORD, a random password is generated and logged."""
-    monkeypatch.delenv("SH_ADMIN_PASSWORD", raising=False)
-    monkeypatch.delenv("SH_ADMIN_USERNAME", raising=False)
-    with caplog.at_level("WARNING"):
-        await adapter._bootstrap_admin()
-    pu = await db.fetchone("SELECT * FROM platform_users WHERE username='admin'")
-    assert pu is not None
-    # The generated password is logged so the operator can capture it
-    # — this is the only path the user gets the secret on first boot.
-    assert any(
-        "bootstrapped admin" in rec.message and "generated password" in rec.message
-        for rec in caplog.records
-    )
+async def test_provision_admin_requires_password(adapter):
+    with pytest.raises(ValueError, match="non-empty password"):
+        await adapter.provision_admin(username="admin", password="")
 
 
-async def test_bootstrap_admin_respects_username_override(db, adapter, monkeypatch):
-    monkeypatch.setenv("SH_ADMIN_USERNAME", "owner")
-    monkeypatch.setenv("SH_ADMIN_PASSWORD", "pw")
-    await adapter._bootstrap_admin()
+async def test_provision_admin_respects_username_override(db, adapter):
+    await adapter.provision_admin(username="owner", password="pw")
     pu = await db.fetchone("SELECT * FROM platform_users WHERE username='owner'")
     assert pu is not None
     u = await db.fetchone("SELECT * FROM users WHERE username='owner'")
@@ -417,15 +397,14 @@ async def test_bootstrap_admin_respects_username_override(db, adapter, monkeypat
 # ── issue_bearer_token ↔ api_tokens mirror (§platform/standalone) ────────────
 
 
-async def test_issue_bearer_token_mirrors_to_api_tokens(db, adapter, monkeypatch):
+async def test_issue_bearer_token_mirrors_to_api_tokens(db, adapter):
     """Successful login writes the token hash to BOTH platform_tokens and api_tokens.
 
     Without the api_tokens mirror, BearerTokenStrategy (which joins
     users → api_tokens) wouldn't accept the freshly-issued token and
     GET /api/me would 401 immediately after login.
     """
-    monkeypatch.setenv("SH_ADMIN_PASSWORD", "pw-1")
-    await adapter._bootstrap_admin()
+    await adapter.provision_admin(username="admin", password="pw-1")
     raw = await adapter.issue_bearer_token("admin", "pw-1")
     assert raw is not None
     h = _sha256(raw)
@@ -465,10 +444,7 @@ async def test_issue_bearer_token_skips_api_mirror_when_no_users_row(db, adapter
     assert at is None
 
 
-async def test_issue_bearer_token_invalid_credentials_returns_none(
-    db, adapter, monkeypatch
-):
-    monkeypatch.setenv("SH_ADMIN_PASSWORD", "pw-1")
-    await adapter._bootstrap_admin()
+async def test_issue_bearer_token_invalid_credentials_returns_none(db, adapter):
+    await adapter.provision_admin(username="admin", password="pw-1")
     assert await adapter.issue_bearer_token("admin", "wrong") is None
     assert await adapter.issue_bearer_token("ghost", "pw-1") is None
