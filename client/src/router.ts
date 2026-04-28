@@ -7,6 +7,7 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/spaces/browse':  lazy(() => import('@/features/spaces/SpaceBrowserPage')),
   '/spaces/:id':     lazy(() => import('@/features/spaces/SpaceFeedPage')),
   '/spaces/:id/settings': lazy(() => import('@/features/spaces/SpaceSettingsPage')),
+  '/spaces/:id/zones': lazy(() => import('@/features/spaces/SpaceZonesPage')),
   '/join':           lazy(() => import('@/features/spaces/SpaceJoinLanding')),
   '/dms':            lazy(() => import('@/features/dms/DmInboxPage')),
   '/dms/:id':        lazy(() => import('@/features/dms/DmThreadPage')),
