@@ -20,6 +20,7 @@ import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { HouseholdToggles, loadToggles } from '@/components/HouseholdToggles'
 import { HaUsersPanel } from './HaUsersPanel'
+import { instanceConfig } from '@/store/instance'
 import CpAdminPanel from '@/features/child-protection/CpAdminPanel'
 import type { User } from '@/types'
 
@@ -115,6 +116,88 @@ function _tabLabel(t: TabId): string {
 
 // ─── Tabs ──────────────────────────────────────────────────────────────────
 
+function CreateStandaloneUserForm() {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const submit = async (e: Event) => {
+    e.preventDefault()
+    if (!username || !password) {
+      showToast('Username and password are required.', 'error')
+      return
+    }
+    if (password.length < 8) {
+      showToast('Password must be at least 8 characters.', 'error')
+      return
+    }
+    setBusy(true)
+    try {
+      await api.post('/api/admin/users', {
+        username, password,
+        display_name: displayName || username,
+        is_admin: isAdmin,
+      })
+      showToast(`Created @${username}`, 'success')
+      setUsername(''); setPassword(''); setDisplayName(''); setIsAdmin(false)
+      await loadAll()  // refresh the users list below
+    } catch (e: any) {
+      showToast(e?.message || 'Create failed', 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <details class="sh-admin-section">
+      <summary><h3 style="display:inline">Create user</h3></summary>
+      <form onSubmit={submit} class="sh-admin-create-user">
+        <label>
+          Username
+          <input
+            type="text"
+            value={username}
+            onInput={(e) => setUsername((e.target as HTMLInputElement).value)}
+            required
+          />
+        </label>
+        <label>
+          Password
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={password}
+            onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
+            required
+          />
+        </label>
+        <label>
+          Display name
+          <input
+            type="text"
+            value={displayName}
+            onInput={(e) => setDisplayName((e.target as HTMLInputElement).value)}
+            placeholder={username || 'Optional'}
+          />
+        </label>
+        <label class="sh-admin-checkbox">
+          <input
+            type="checkbox"
+            checked={isAdmin}
+            onChange={(e) => setIsAdmin((e.target as HTMLInputElement).checked)}
+          />
+          {' '}Make this user an admin
+        </label>
+        <Button type="submit" disabled={busy}>
+          {busy ? 'Creating…' : 'Create user'}
+        </Button>
+      </form>
+    </details>
+  )
+}
+
 function MembersTab() {
   const toggleAdmin = async (userId: string, isAdmin: boolean) => {
     try {
@@ -155,10 +238,12 @@ function MembersTab() {
       showToast(`Export failed: ${(e as Error)?.message ?? e}`, 'error')
     }
   }
+  const isStandalone = instanceConfig.value?.mode === 'standalone'
   if (users.value.length === 0) {
     return (
       <section class="sh-admin-section">
         <h2>Household Members</h2>
+        {isStandalone && <CreateStandaloneUserForm />}
         <p class="sh-muted">No household members yet.</p>
       </section>
     )
@@ -166,6 +251,7 @@ function MembersTab() {
   return (
     <section class="sh-admin-section">
       <h2>Household Members</h2>
+      {isStandalone && <CreateStandaloneUserForm />}
       <table class="sh-admin-table">
         <thead>
           <tr>

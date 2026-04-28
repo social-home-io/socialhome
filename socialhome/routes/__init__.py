@@ -279,13 +279,14 @@ from .tasks import (
 from .themes import HouseholdThemeView, SpaceThemeView
 from .corner import CornerView
 from .users import (
+    AdminTokenCollectionView,
+    AdminTokenDetailView,
+    AdminUserCollectionView,
     AuthTokenView,
     MeExportView,
     MePictureRefreshFromHaView,
     MePictureView,
     MeView,
-    AdminTokenCollectionView,
-    AdminTokenDetailView,
     TokenCollectionView,
     TokenDetailView,
     UserCollectionView,
@@ -325,6 +326,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/me/tokens/{id}", TokenDetailView)
     app.router.add_view("/api/admin/tokens", AdminTokenCollectionView)
     app.router.add_view("/api/admin/tokens/{id}", AdminTokenDetailView)
+    app.router.add_view("/api/admin/users", AdminUserCollectionView)
     app.router.add_view("/api/me/export", MeExportView)
     app.router.add_view("/api/users", UserCollectionView)
     app.router.add_view("/api/users/{user_id}", UserDetailView)

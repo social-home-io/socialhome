@@ -15,6 +15,7 @@ import { api } from '@/api'
 import { showToast } from '@/components/Toast'
 import { Spinner } from '@/components/Spinner'
 import { Avatar } from '@/components/Avatar'
+import { instanceConfig } from '@/store/instance'
 
 interface HaUser {
   username:     string
@@ -57,6 +58,22 @@ export function HaUsersPanel() {
 
   const toggle = async (row: HaUser) => {
     const wasSynced = row.synced
+    const mode = instanceConfig.value?.mode
+    // ha mode: server requires a password on provision so the picked
+    // HA person can sign in via /api/auth/token. haos mode: ingress
+    // signs them in, so no password.
+    let body: { password?: string } | undefined
+    if (!wasSynced && mode === 'ha') {
+      const pw = window.prompt(
+        `Set a password for ${row.display_name} (${row.username}). They'll use this to log in to Social Home from the web UI or mobile app.`,
+      )
+      if (pw === null) return  // cancelled
+      if (pw.length < 8) {
+        showToast('Password must be at least 8 characters.', 'error')
+        return
+      }
+      body = { password: pw }
+    }
     users.value = users.value.map(u =>
       u.username === row.username ? { ...u, synced: !wasSynced } : u,
     )
@@ -65,7 +82,10 @@ export function HaUsersPanel() {
         await api.delete(`/api/admin/ha-users/${row.username}/provision`)
         showToast(`${row.display_name} removed`, 'info')
       } else {
-        await api.post(`/api/admin/ha-users/${row.username}/provision`)
+        await api.post(
+          `/api/admin/ha-users/${row.username}/provision`,
+          body,
+        )
         showToast(`${row.display_name} added`, 'success')
       }
     } catch (e: any) {

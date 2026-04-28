@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { instanceConfig, instanceConfigError, loadInstanceConfig, hasCapability } from './instance'
 
 describe('instance store', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>
+  let fetchSpy: any
 
   beforeEach(() => {
     instanceConfig.value = null

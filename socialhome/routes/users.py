@@ -332,6 +332,76 @@ class TokenDetailView(BaseView):
         return web.Response(status=204)
 
 
+class AdminUserCollectionView(BaseView):
+    """``POST /api/admin/users`` — standalone-mode admin user creation.
+
+    Returns 405 in ha/haos modes (provisioning there goes through
+    ``POST /api/admin/ha-users/{username}/provision``). The body is
+    ``{username, password, display_name?, is_admin?}``.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or not ctx.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        config = self.svc(config_key)
+        if config.mode != "standalone":
+            return error_response(
+                405,
+                "WRONG_MODE",
+                "Use /api/admin/ha-users/{username}/provision in ha/haos modes.",
+            )
+        body = await self.body()
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "")
+        if not username or not password:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "username and password are required.",
+            )
+        if len(password) < 8:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "Password must be at least 8 characters.",
+            )
+        display_name = str(body.get("display_name") or username)
+        is_admin = bool(body.get("is_admin"))
+        adapter = self.svc(platform_adapter_key)
+        # Reject duplicates loudly so the SPA can surface a clean
+        # message rather than a generic 422 from the UNIQUE
+        # constraint downstream.
+        existing = await adapter.users.get(username)
+        if existing is not None:
+            return error_response(
+                409,
+                "USERNAME_TAKEN",
+                f"User {username!r} already exists.",
+            )
+        # Adapter handles the platform_users + password row.
+        await adapter.users.enable(username, password=password)
+        # Domain side — the user_service emits the UserProvisioned event
+        # and writes the users row used by federation, feeds, etc.
+        user_service = self.svc(user_service_key)
+        user = await user_service.provision(
+            username=username,
+            display_name=display_name,
+            is_admin=is_admin,
+            email=None,
+            picture_url=None,
+            source="manual",
+        )
+        return web.json_response(
+            {
+                "username": user.username,
+                "user_id": user.user_id,
+                "is_admin": user.is_admin,
+            },
+            status=201,
+        )
+
+
 class AdminTokenCollectionView(BaseView):
     """``GET /api/admin/tokens`` — §A7 list every user's active API
     tokens for the household sessions admin panel. Admin-only.
