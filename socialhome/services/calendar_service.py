@@ -26,6 +26,7 @@ from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
     CalendarEventUpdated,
+    SpaceMemberLeft,
 )
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
@@ -243,6 +244,50 @@ class SpaceCalendarService:
         automatically reach every peer co-hosting the space.
         """
         self._federation = federation_service
+
+    def wire(self) -> None:
+        """Phase E: subscribe to SpaceMemberLeft so a user leaving a
+        space cleans up their RSVPs on its events.
+
+        Idempotent. Call once at app startup; the bus de-duplicates
+        subscribers internally."""
+        if self._bus is None:
+            return
+        self._bus.subscribe(SpaceMemberLeft, self._on_member_left)
+
+    async def _on_member_left(self, event: SpaceMemberLeft) -> None:
+        """When a member leaves a space, drop their RSVPs on its events.
+
+        We list the space's events for the next-year window (matches the
+        lifetime of typical space content) and remove the user's RSVP
+        for each. RSVPs on far-future recurring events outside the
+        window are left in place — they expire naturally via
+        ``ON DELETE CASCADE`` when the event is eventually deleted.
+        """
+        events = await self._repo.list_events_in_range(
+            event.space_id,
+            start=datetime.now(timezone.utc) - timedelta(days=1),
+            end=datetime.now(timezone.utc) + timedelta(days=365),
+        )
+        # `list_events_in_range` may return virtual occurrences (id
+        # suffixed with ``@<iso>``) for recurring events; canonical
+        # rows only here.
+        seen: set[str] = set()
+        for ev in events:
+            base_id = ev.id.split("@", 1)[0]
+            if base_id in seen:
+                continue
+            seen.add(base_id)
+            # Drop every per-occurrence row for this user — fetch their
+            # rows for the event and delete each.
+            user_rows = [
+                r for r in await self._repo.list_rsvps(base_id)
+                if r.user_id == event.user_id
+            ]
+            for r in user_rows:
+                await self._repo.remove_rsvp(
+                    base_id, event.user_id, occurrence_at=r.occurrence_at,
+                )
 
     async def list_events_in_range(
         self,
@@ -484,6 +529,18 @@ class SpaceCalendarService:
             raise KeyError(f"event {event_id!r} not found")
         space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
+        # Phase E: past-event RSVP lock. Once an occurrence has *ended*
+        # (its window is fully in the past), responding to it is a
+        # write into the past — reject. We compare against
+        # ``occurrence_end = occ_dt + (event.end - event.start)`` so
+        # recurring events get the correct per-occurrence window.
+        # The creator's auto-RSVP at create_event time goes through a
+        # different code path so this guard doesn't block it.
+        duration = event.end - event.start
+        if occ_dt + duration < datetime.now(timezone.utc):
+            raise ValueError(
+                "cannot RSVP to an occurrence that has already ended",
+            )
         occ_iso = occ_dt.isoformat()
         now_iso = datetime.now(timezone.utc).isoformat()
         # Phase C: capacity-aware "going" routing. Only "going" is

@@ -207,7 +207,10 @@ async def space_cal_env(env):
         ) VALUES(?,?,?,?,?,0,'private','invite_only')""",
         ("sp-cal", "TestSpace", env.iid, "alice", kp.public_key.hex()),
     )
-    env.space_cal_svc = SpaceCalendarService(env.space_cal_repo)
+    from socialhome.infrastructure.event_bus import EventBus
+
+    env.bus = EventBus()
+    env.space_cal_svc = SpaceCalendarService(env.space_cal_repo, env.bus)
     yield env
 
 
@@ -571,6 +574,55 @@ async def test_uncapped_event_keeps_old_behaviour(space_cal_env):
     assert bob.status == RSVPStatus.GOING
 
 
+async def test_rsvp_to_ended_event_rejected(space_cal_env):
+    """Phase E: RSVPs to occurrences whose window is fully in the past
+    are rejected at the service layer."""
+    env = space_cal_env
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Past event",
+        start=past.isoformat(),
+        end=(past + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+    )
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    with pytest.raises(ValueError, match="already ended"):
+        await env.space_cal_svc.rsvp(
+            event_id=event.id,
+            user_id="uid-bob",
+            status=RSVPStatus.GOING,
+        )
+
+
+async def test_rsvp_during_event_window_allowed(space_cal_env):
+    """While an event is happening (started but not ended), RSVPs go through."""
+    env = space_cal_env
+    now = datetime.now(timezone.utc)
+    # Event that started 30 min ago and lasts 2 h.
+    started = now - timedelta(minutes=30)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Currently happening",
+        start=started.isoformat(),
+        end=(now + timedelta(hours=1, minutes=30)).isoformat(),
+        created_by="uid-alice",
+    )
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    # Should NOT raise.
+    await env.space_cal_svc.rsvp(
+        event_id=event.id,
+        user_id="uid-bob",
+        status=RSVPStatus.GOING,
+    )
+
+
 async def test_negative_capacity_rejected(space_cal_env):
     env = space_cal_env
     now = datetime(2026, 11, 1, tzinfo=timezone.utc)
@@ -583,6 +635,37 @@ async def test_negative_capacity_rejected(space_cal_env):
             created_by="uid-alice",
             capacity=-1,
         )
+
+
+async def test_member_left_cleans_up_rsvps(space_cal_env):
+    """Phase E: SpaceMemberLeft subscriber drops the user's RSVPs in the space."""
+    from socialhome.domain.events import SpaceMemberLeft
+
+    env = space_cal_env
+    env.space_cal_svc.wire()
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    future = datetime.now(timezone.utc) + timedelta(days=10)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Anniversary",
+        start=future.isoformat(),
+        end=(future + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+    )
+    await env.space_cal_svc.rsvp(
+        event_id=event.id, user_id="uid-bob", status=RSVPStatus.GOING,
+    )
+    rsvps_before = await env.space_cal_svc.list_rsvps(event.id)
+    assert any(r.user_id == "uid-bob" for r in rsvps_before)
+    # Bob leaves the space.
+    await env.bus.publish(SpaceMemberLeft(space_id="sp-cal", user_id="uid-bob"))
+    rsvps_after = await env.space_cal_svc.list_rsvps(event.id)
+    assert not any(r.user_id == "uid-bob" for r in rsvps_after)
+    # Alice (the creator) is still RSVPed.
+    assert any(r.user_id == "uid-alice" for r in rsvps_after)
 
 
 async def test_rsvp_publishes_federation_event(space_cal_env):

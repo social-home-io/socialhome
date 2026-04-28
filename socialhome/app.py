@@ -912,6 +912,9 @@ def create_app(config: Config | None = None) -> web.Application:
     space_task_service = SpaceTaskService(space_task_repo, bus)
     calendar_service = CalendarService(calendar_repo, bus)
     space_cal_service = SpaceCalendarService(space_cal_repo, bus)
+    # Phase E: subscribe to SpaceMemberLeft so leaving a space drops
+    # your RSVPs on its events.
+    space_cal_service.wire()
     shopping_service = ShoppingService(shopping_repo, bus)
 
     # Wire notification handlers onto the bus
