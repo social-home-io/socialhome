@@ -15,6 +15,13 @@ present in the environment) the adapter talks to HA Core through the
 Supervisor proxy at ``http://supervisor/core/api``, and a
 :class:`~.supervisor.SupervisorClient` drives the one-time
 :class:`~.bootstrap.HaBootstrap` on startup.
+
+This module composes Provider classes (:class:`HaAuthProvider`,
+:class:`HaUserDirectory`, :class:`HaPushProvider`, :class:`HaSTTProvider`,
+:class:`HaAIProvider`, :class:`HaEventSink`) into a
+:class:`HomeAssistantAdapter` that satisfies the :class:`PlatformAdapter`
+ABC. Phase 4 of the platform-adapter-v2 refactor extracts the
+Supervisor-specific behaviour into a separate :class:`HaosAdapter`.
 """
 
 from __future__ import annotations
@@ -25,7 +32,13 @@ from typing import TYPE_CHECKING, Any, AsyncIterable, Mapping
 
 from ... import app_keys as K
 from ...services.ha_bridge_service import HaBridgeService
-from ..adapter import ExternalUser, InstanceConfig, _extract_bearer
+from ..adapter import (
+    Capability,
+    ExternalUser,
+    InstanceConfig,
+    PlatformAdapter,
+    _extract_bearer,
+)
 from .bootstrap import HaBootstrap
 from .client import HaClient, build_ha_client
 from .supervisor import SupervisorClient
@@ -37,7 +50,242 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class HomeAssistantAdapter:
+# ── Providers ────────────────────────────────────────────────────────────────
+
+
+class HaAuthProvider:
+    """Resolve a request via ``X-Ingress-User`` header or HA bearer token.
+
+    HAOS routes through Supervisor's ingress proxy which injects
+    ``X-Ingress-User``. When that header is absent we fall back to
+    bearer-token validation against the HA REST API — the long-lived
+    token in the integration's config or a `?token=` query string from
+    the WS client.
+    """
+
+    __slots__ = ("_adapter",)
+
+    def __init__(self, adapter: "HomeAssistantAdapter") -> None:
+        self._adapter = adapter
+
+    async def authenticate(
+        self,
+        request: "web.Request",
+    ) -> ExternalUser | None:
+        ingress_user = request.headers.get("X-Ingress-User")
+        if ingress_user:
+            return await self._adapter.users.get(ingress_user)
+        token = _extract_bearer(request)
+        if token:
+            return await self._authenticate_bearer(token)
+        return None
+
+    async def _authenticate_bearer(self, token: str) -> ExternalUser | None:
+        data = await self._adapter._client.verify_token(token)
+        if data is None:
+            return None
+        # A valid HA token does not carry a specific username — return a
+        # minimal sentinel user so callers know authentication succeeded.
+        # In production the Ingress path is preferred; bearer is for API use.
+        username = data.get("username") or "ha_api_user"
+        return ExternalUser(
+            username=username,
+            display_name=username,
+            picture_url=None,
+            is_admin=True,
+        )
+
+
+class HaUserDirectory:
+    """List / get principals from the HA ``person.*`` entity registry.
+
+    HA mode tracks users in HA itself; the directory is read-only as
+    far as enable/disable/passwords go — provisioning happens elsewhere
+    (the HA users sync routes in :mod:`socialhome.routes.ha_users`).
+    """
+
+    __slots__ = ("_adapter",)
+
+    def __init__(self, adapter: "HomeAssistantAdapter") -> None:
+        self._adapter = adapter
+
+    async def list_users(self) -> list[ExternalUser]:
+        states = await self._adapter._client.get_states()
+        users: list[ExternalUser] = []
+        for state in states:
+            entity_id: str = state.get("entity_id", "")
+            if not entity_id.startswith("person."):
+                continue
+            users.append(_state_to_user(state))
+        return users
+
+    async def get(self, username: str) -> ExternalUser | None:
+        state = await self._adapter._client.get_state(f"person.{username}")
+        return _state_to_user(state) if state else None
+
+    async def is_enabled(self, username: str) -> bool:
+        # In HA mode "enabled" means there's a corresponding ``person.*``
+        # entity — same as ``get(...) is not None``.
+        return (await self.get(username)) is not None
+
+    async def enable(
+        self,
+        username: str,
+        *,
+        password: str | None = None,
+    ) -> ExternalUser:
+        """HA mode does not provision HA persons from the SH side.
+
+        The SH-side enable flow (set Social Home password for an existing
+        HA person) is handled by the steady-state user-management routes,
+        not the directory. Raised here to make misuse loud.
+        """
+        raise NotImplementedError(
+            "HA-mode enable goes through ha_users routes; the directory "
+            "is read-only as far as HA persons are concerned",
+        )
+
+    async def disable(self, username: str) -> None:
+        raise NotImplementedError(
+            "HA-mode disable goes through ha_users routes",
+        )
+
+
+class HaPushProvider:
+    """Deliver via ``notify.mobile_app_{username}`` HA service call."""
+
+    __slots__ = ("_adapter",)
+
+    def __init__(self, adapter: "HomeAssistantAdapter") -> None:
+        self._adapter = adapter
+
+    async def send(
+        self,
+        user: ExternalUser,
+        title: str,
+        message: str,
+        data: dict | None = None,
+    ) -> None:
+        body: dict = {"title": title, "message": message}
+        if data:
+            body["data"] = data
+        await self._adapter._client.call_service(
+            "notify",
+            f"mobile_app_{user.username}",
+            body,
+        )
+
+
+class HaSTTProvider:
+    """Stream PCM16 audio to ``/api/stt/{stt_entity_id}``."""
+
+    __slots__ = ("_adapter",)
+
+    def __init__(self, adapter: "HomeAssistantAdapter") -> None:
+        self._adapter = adapter
+
+    async def transcribe(
+        self,
+        audio: bytes,
+        language: str = "en",
+    ) -> str:
+        async def _single_chunk() -> AsyncIterable[bytes]:
+            if audio:
+                yield audio
+
+        return await self.stream_transcribe(_single_chunk(), language=language)
+
+    async def stream_transcribe(
+        self,
+        stream: AsyncIterable[bytes],
+        *,
+        language: str = "en",
+        sample_rate: int = 16000,
+        channels: int = 1,
+    ) -> str:
+        entity_id = self._adapter._options.get("stt_entity_id")
+        if not entity_id:
+            raise NotImplementedError(
+                "HomeAssistantAdapter: no [homeassistant].stt_entity_id "
+                "configured — set it to an HA STT entity id (e.g. "
+                "'stt.home_assistant_cloud') to enable transcription."
+            )
+        payload = await self._adapter._client.stream_stt(
+            entity_id,
+            stream,
+            language=language,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+        if not isinstance(payload, dict) or payload.get("result") != "success":
+            return ""
+        text = payload.get("text") or ""
+        return text if isinstance(text, str) else str(text)
+
+
+class HaAIProvider:
+    """Run HA's ``ai_task.generate_data`` action."""
+
+    __slots__ = ("_adapter",)
+
+    def __init__(self, adapter: "HomeAssistantAdapter") -> None:
+        self._adapter = adapter
+
+    async def generate_data(
+        self,
+        *,
+        task_name: str,
+        instructions: str,
+    ) -> str:
+        body: dict = {"task_name": task_name, "instructions": instructions}
+        entity_id = self._adapter._options.get("ai_task_entity_id")
+        if entity_id:
+            body["entity_id"] = entity_id
+        payload = await self._adapter._client.call_service(
+            "ai_task",
+            "generate_data",
+            body,
+            return_response=True,
+        )
+        if payload is None:
+            return ""
+        service_response = (payload or {}).get("service_response") or {}
+        data = service_response.get("data", "")
+        if isinstance(data, str):
+            return data
+        return str(data) if data else ""
+
+
+class HaEventSink:
+    """``POST /api/events/{event_type}`` so HA automations can subscribe."""
+
+    __slots__ = ("_adapter",)
+
+    def __init__(self, adapter: "HomeAssistantAdapter") -> None:
+        self._adapter = adapter
+
+    async def fire(self, event_type: str, data: dict) -> bool:
+        return await self._adapter._client.fire_event(event_type, data)
+
+
+def _state_to_user(state: dict) -> ExternalUser:
+    """Convert an HA ``person.*`` state dict to :class:`ExternalUser`."""
+    entity_id: str = state.get("entity_id", "")
+    username = entity_id.removeprefix("person.")
+    attrs: dict = state.get("attributes", {})
+    return ExternalUser(
+        username=username,
+        display_name=attrs.get("friendly_name") or username,
+        picture_url=attrs.get("entity_picture"),
+        is_admin=False,
+        email=None,
+    )
+
+
+# ── Adapter ──────────────────────────────────────────────────────────────────
+
+
+class HomeAssistantAdapter(PlatformAdapter):
     """Platform adapter that delegates to the Home Assistant REST API.
 
     Constructed upfront in the app factory with raw connection settings;
@@ -58,6 +306,12 @@ class HomeAssistantAdapter:
         "_supervisor_client",
         "_ha_bridge",
         "_db",
+        "auth",
+        "users",
+        "push",
+        "stt",
+        "ai",
+        "events",
     )
 
     def __init__(
@@ -85,6 +339,29 @@ class HomeAssistantAdapter:
         # HA-integration-pushed federation base URL from ``instance_config``.
         self._db: Any | None = None
 
+        # Compose providers. Each holds a back-reference to the adapter
+        # so they can lazily access ``self._client`` (only available after
+        # :meth:`on_startup`) and ``self._options``.
+        self.auth = HaAuthProvider(self)
+        self.users = HaUserDirectory(self)
+        self.push = HaPushProvider(self)
+        self.stt = HaSTTProvider(self)
+        self.ai = HaAIProvider(self)
+        self.events = HaEventSink(self)
+
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        caps = {
+            Capability.PUSH,
+            Capability.AI,
+            Capability.HA_PERSON_DIRECTORY,
+        }
+        if self._options.get("stt_entity_id"):
+            caps.add(Capability.STT)
+        if self._supervisor_token:
+            caps.add(Capability.INGRESS)
+        return frozenset(caps)
+
     @property
     def _client(self) -> HaClient:
         """Return the wired :class:`HaClient`.
@@ -98,64 +375,13 @@ class HomeAssistantAdapter:
             )
         return self._ha_client
 
-    # ── Authentication ────────────────────────────────────────────────────
-
-    async def authenticate(self, request: "web.Request") -> ExternalUser | None:
-        """Authenticate via ``X-Ingress-User`` header, falling back to bearer.
-
-        When the HA Supervisor routes a request through Ingress it injects
-        ``X-Ingress-User`` with the HA username. If that header is absent the
-        method falls back to bearer-token validation.
-        """
-        ingress_user = request.headers.get("X-Ingress-User")
-        if ingress_user:
-            return await self.get_external_user(ingress_user)
-
-        token = _extract_bearer(request)
-        if token:
-            return await self.authenticate_bearer(token)
-
-        return None
+    # ── Authentication (back-compat shim) ─────────────────────────────────
 
     async def authenticate_bearer(self, token: str) -> ExternalUser | None:
-        """Validate ``token`` against ``GET {ha_url}/api/``.
-
-        A valid HA token returns ``200`` with ``{"message": "API running."}``.
-        Any non-200 response means the token is invalid or insufficient.
-        """
-        data = await self._client.verify_token(token)
-        if data is None:
-            return None
-        # A valid HA token does not carry a specific username — return a
-        # minimal sentinel user so callers know authentication succeeded.
-        # In production the Ingress path is preferred; bearer is for API use.
-        username = data.get("username") or "ha_api_user"
-        return ExternalUser(
-            username=username,
-            display_name=username,
-            picture_url=None,
-            is_admin=True,
-        )
-
-    # ── User listing ──────────────────────────────────────────────────────
-
-    async def list_external_users(self) -> list[ExternalUser]:
-        """Return all ``person.*`` entities from HA states as users."""
-        states = await self._client.get_states()
-        users: list[ExternalUser] = []
-        for state in states:
-            entity_id: str = state.get("entity_id", "")
-            if not entity_id.startswith("person."):
-                continue
-            users.append(self._state_to_user(state))
-        return users
-
-    async def get_external_user(self, username: str) -> ExternalUser | None:
-        """Fetch ``person.<username>`` from HA and convert to :class:`ExternalUser`."""
-        state = await self._client.get_state(f"person.{username}")
-        if state is None:
-            return None
-        return self._state_to_user(state)
+        """Public wrapper around :meth:`HaAuthProvider._authenticate_bearer`
+        kept for tests / API consumers that drive the bearer flow without
+        going through an HTTP request."""
+        return await self.auth._authenticate_bearer(token)
 
     # ── Instance config ───────────────────────────────────────────────────
 
@@ -186,8 +412,8 @@ class HomeAssistantAdapter:
         The addon never guesses this — the HA integration knows the
         externally-reachable URL (admin-set ``external_url`` or Nabu
         Casa Remote UI) and pushes it to the addon via the
-        ``federation.set_base`` WS command (wired in PR 4). The value
-        is cached in ``instance_config['ha_federation_base']``.
+        ``federation.set_base`` WS command. The value is cached in
+        ``instance_config['ha_federation_base']``.
 
         Returns ``None`` before the integration has pushed a base; the
         pairing route surfaces that as 422 ``NOT_CONFIGURED`` so the
@@ -205,37 +431,6 @@ class HomeAssistantAdapter:
         if not raw:
             return None
         return raw.rstrip("/")
-
-    # ── Push notifications ────────────────────────────────────────────────
-
-    async def send_push(
-        self,
-        user: ExternalUser,
-        title: str,
-        message: str,
-        data: dict | None = None,
-    ) -> None:
-        """POST to ``notify.mobile_app_{username}``. Best-effort — swallows errors."""
-        body: dict = {"title": title, "message": message}
-        if data:
-            body["data"] = data
-        await self._client.call_service(
-            "notify",
-            f"mobile_app_{user.username}",
-            body,
-        )
-
-    # ── Home Assistant bridge (event firing for automations) ──────────────
-
-    async def fire_event(self, event_type: str, data: dict | None = None) -> bool:
-        """POST to ``/api/events/{event_type}`` so HA automations can react.
-
-        ``event_type`` is namespaced — Social Home publishes under
-        ``socialhome.*`` (e.g. ``socialhome.post_created``,
-        ``socialhome.task_assigned``).  Returns ``True`` on 2xx, ``False``
-        otherwise. Best-effort — never raises.
-        """
-        return await self._client.fire_event(event_type, data)
 
     # ── Lifecycle hooks ────────────────────────────────────────────────────
 
@@ -304,112 +499,7 @@ class HomeAssistantAdapter:
             return {K.ha_bridge_service_key: self._ha_bridge}
         return {}
 
-    def get_extra_routes(self) -> list[tuple[str, type]]:
-        """HA adapter provides no extra routes."""
-        return []
-
-    @property
-    def supports_bearer_token_auth(self) -> bool:
-        """HA adapter does not support standalone bearer-token auth."""
-        return False
-
-    # ── Speech-to-text (HA STT platform) ──────────────────────────────────
-
-    @property
-    def supports_stt(self) -> bool:
-        """STT is available when ``[homeassistant].stt_entity_id`` is set."""
-        return bool(self._options.get("stt_entity_id"))
-
-    async def transcribe_audio(
-        self,
-        audio_bytes: bytes,
-        language: str = "en",
-    ) -> str:
-        """Buffered transcription — delegates to :meth:`stream_transcribe_audio`.
-
-        Kept for callers that already have the full clip in memory.
-        """
-
-        async def _single_chunk() -> AsyncIterable[bytes]:
-            if audio_bytes:
-                yield audio_bytes
-
-        return await self.stream_transcribe_audio(
-            _single_chunk(),
-            language=language,
-        )
-
-    async def stream_transcribe_audio(
-        self,
-        audio_stream: AsyncIterable[bytes],
-        *,
-        language: str = "en",
-        sample_rate: int = 16000,
-        channels: int = 1,
-    ) -> str:
-        """POST a chunked PCM16 stream to ``/api/stt/{stt_entity_id}``.
-
-        Returns the transcript on ``result=="success"`` and an empty
-        string otherwise (mirrors :meth:`generate_ai_data` — STT is a
-        best-effort helper, not a critical path).
-        """
-        entity_id = self._options.get("stt_entity_id")
-        if not entity_id:
-            raise NotImplementedError(
-                "HomeAssistantAdapter: no [homeassistant].stt_entity_id "
-                "configured — set it to an HA STT entity id (e.g. "
-                "'stt.home_assistant_cloud') to enable transcription."
-            )
-
-        payload = await self._client.stream_stt(
-            entity_id,
-            audio_stream,
-            language=language,
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-        if not isinstance(payload, dict) or payload.get("result") != "success":
-            return ""
-        text = payload.get("text") or ""
-        return text if isinstance(text, str) else str(text)
-
-    async def generate_ai_data(
-        self,
-        *,
-        task_name: str,
-        instructions: str,
-    ) -> str:
-        """POST to HA's ``ai_task.generate_data`` action.
-
-        Requests ``?return_response`` so HA includes the task's
-        ``service_response.data`` in the reply. When
-        ``options["ai_task_entity_id"]`` is set we pin the task to that
-        HA AI-task entity (e.g. ``ai_task.openai``); otherwise HA picks
-        the default. Returns the ``data`` field as a string, or empty
-        string on any non-2xx / network error.
-        """
-        body: dict = {"task_name": task_name, "instructions": instructions}
-        entity_id = self._options.get("ai_task_entity_id")
-        if entity_id:
-            body["entity_id"] = entity_id
-        payload = await self._client.call_service(
-            "ai_task",
-            "generate_data",
-            body,
-            return_response=True,
-        )
-        if payload is None:
-            return ""
-        # HA returns {"changed_states": [...], "service_response": {...}}
-        # when ?return_response is set. The task's generated text lives
-        # at service_response.data (string or dict when 'structure' set).
-        service_response = (payload or {}).get("service_response") or {}
-        data = service_response.get("data", "")
-        if isinstance(data, str):
-            return data
-        # Some backends return structured output; stringify for callers
-        # that only expect text.
-        return str(data) if data else ""
+    # ``get_extra_routes`` inherits the empty default from PlatformAdapter.
 
     # ── Location override ─────────────────────────────────────────────────
 
@@ -419,12 +509,13 @@ class HomeAssistantAdapter:
         longitude: float,
         location_name: str,
     ) -> InstanceConfig:
-        """Store a location override in ``instance_identity``.
+        """Store a location override in :class:`InstanceConfig`.
 
-        HA adapter does not carry a ``db`` reference; callers that need DB
-        persistence in HA mode should store via the service layer. This
-        implementation returns the override wrapped in a fresh config using
-        HA's time_zone and currency.
+        HA adapter does not carry a ``db`` reference for arbitrary
+        writes; callers that need DB persistence in HA mode should
+        store via the service layer. This implementation returns the
+        override wrapped in a fresh config using HA's time_zone and
+        currency.
         """
         base = await self.get_instance_config()
         return InstanceConfig(
@@ -456,16 +547,7 @@ class HomeAssistantAdapter:
 
     # ── Internals ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _state_to_user(state: dict) -> ExternalUser:
-        """Convert a HA state dict for a ``person.*`` entity to an :class:`ExternalUser`."""
-        entity_id: str = state.get("entity_id", "")
-        username = entity_id.removeprefix("person.")
-        attrs: dict = state.get("attributes", {})
-        return ExternalUser(
-            username=username,
-            display_name=attrs.get("friendly_name") or username,
-            picture_url=attrs.get("entity_picture"),
-            is_admin=False,
-            email=None,
-        )
+    # Module-level ``_state_to_user`` is the canonical helper; the class
+    # attribute alias preserves any historical caller that referenced it
+    # via the class.
+    _state_to_user = staticmethod(_state_to_user)
