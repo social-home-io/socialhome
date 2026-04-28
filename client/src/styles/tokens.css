@@ -59,6 +59,7 @@
                             'Segoe UI', Roboto, sans-serif;
   --sh-font-family-display: 'Manrope', -apple-system, BlinkMacSystemFont,
                             'Segoe UI', system-ui, sans-serif;
+  --sh-font-family-wordmark:'Fraunces', 'Iowan Old Style', Georgia, serif;
   --sh-font-family-mono:    'JetBrains Mono', ui-monospace, 'SF Mono',
                             'Menlo', 'Cascadia Code', monospace;
   --sh-font-size-xs:    0.75rem;

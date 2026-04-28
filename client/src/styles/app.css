@@ -17,11 +17,14 @@
  *     connections, widgets, shopping, pages, search, sessions)
  */
 
-/* Brand fonts — Manrope (body + display) + JetBrains Mono
-   (technical accents). Loaded with display=swap so the system
-   fallback in ``--sh-font-family`` keeps the first paint
-   responsive while the WOFF2 streams in. */
-@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap");
+/* Brand fonts — Manrope (body + display) + Fraunces (wordmark
+   only) + JetBrains Mono (technical accents). Fraunces matches
+   the social-home.io marketing site's display serif and is
+   scoped to ``.sh-wordmark__name`` via ``--sh-font-family-wordmark``.
+   Loaded with display=swap so the system fallback in
+   ``--sh-font-family`` keeps the first paint responsive while
+   the WOFF2 streams in. */
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500..700&family=Manrope:wght@400..700&family=JetBrains+Mono:wght@400..700&display=swap");
 
 /* ───── 1. Reset + base ──────────────────────────────────────────────── */
 
@@ -117,13 +120,53 @@ a:focus:not(:focus-visible) { outline: none; }
   top: 0;
   overflow-y: auto;
 }
-.sh-sidenav-brand {
-  font-size: var(--sh-font-size-lg);
-  font-weight: 700;
+/* Wordmark — the canonical "Social Home" lockup, mirroring the
+   masthead on social-home.io. Used both as the login-hero and as
+   the sidebar brand; size is driven by the LogoMark size prop and
+   the parent context, not by overrides on `.sh-wordmark` itself. */
+.sh-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
   color: var(--sh-text);
+}
+.sh-wordmark--link {
+  text-decoration: none;
+  color: inherit;
+}
+.sh-wordmark--link:hover {
+  text-decoration: none;
+  color: inherit;
+}
+.sh-wordmark__set {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+.sh-wordmark__name {
+  font-family: var(--sh-font-family-wordmark);
+  font-weight: 600;
+  font-size: var(--sh-font-size-lg);
+  letter-spacing: -0.012em;
+  line-height: 1;
+}
+.sh-wordmark__name em {
+  font-style: normal;
+  color: var(--sh-primary);
+}
+.sh-wordmark__motto {
+  margin-top: 4px;
+  font-family: var(--sh-font-family-mono);
+  font-weight: 500;
+  font-size: var(--sh-font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+}
+
+.sh-sidenav-brand {
   padding: var(--sh-space-sm) var(--sh-space-md);
   margin-bottom: var(--sh-space-sm);
-  letter-spacing: -0.01em;
 }
 .sh-sidenav a {
   display: flex;
@@ -3319,6 +3362,7 @@ hr {
 .sh-login {
   min-height: 100vh;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   background:
@@ -3338,6 +3382,17 @@ hr {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-md);
+}
+/* Login hero — wordmark + tagline lockup centred above the form.
+   Bumps the wordmark name to the display size so the brand reads
+   from across the room on first launch. */
+.sh-login-hero {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--sh-space-xl);
+}
+.sh-login-hero .sh-wordmark__name {
+  font-size: var(--sh-font-size-2xl);
 }
 
 /* Calls — in-call UI */

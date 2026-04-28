@@ -20,6 +20,7 @@ import { InstallPrompt } from '@/components/InstallPrompt'
 import { SpaceInviteDialog } from '@/components/SpaceInviteDialog'
 import IncomingCallDialog from '@/features/calls/IncomingCallDialog'
 import { FormError } from '@/components/FormError'
+import { Wordmark } from '@/components/Wordmark'
 
 const showOnboarding = signal(false)
 
@@ -72,7 +73,9 @@ function LoginPage() {
 
   return (
     <div class="sh-login" role="main">
-      <h1>Social Home</h1>
+      <div class="sh-login-hero">
+        <Wordmark size={48} tagline="The social home for your household." />
+      </div>
       <form onSubmit={submit} class="sh-login-form">
         <label>
           Username
@@ -121,7 +124,7 @@ function SideNav() {
   const user = currentUser.value
   return (
     <nav class="sh-sidenav" role="navigation" aria-label="Main navigation">
-      <div class="sh-sidenav-brand">🏠 Social Home</div>
+      <Wordmark as="a" href="/" size={28} className="sh-sidenav-brand" />
       <a href="/">Feed</a>
       <a href="/spaces">Spaces</a>
       <a href="/dms">Messages</a>
