@@ -76,6 +76,8 @@ from ..domain.events import (
     SpaceModerationRejected,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceZoneDeleted,
+    SpaceZoneUpserted,
     PollClosed,
     PollCreated,
     PollVoted,
@@ -191,6 +193,8 @@ class RealtimeService:
         self._bus.subscribe(SpaceModerationApproved, self._on_space_mod_approved)
         self._bus.subscribe(SpaceModerationRejected, self._on_space_mod_rejected)
         self._bus.subscribe(SpaceConfigChanged, self._on_space_config_changed)
+        self._bus.subscribe(SpaceZoneUpserted, self._on_space_zone_upserted)
+        self._bus.subscribe(SpaceZoneDeleted, self._on_space_zone_deleted)
         self._bus.subscribe(TaskAssigned, self._on_task_assigned)
         self._bus.subscribe(TaskCompleted, self._on_task_completed)
         self._bus.subscribe(TaskDeadlineDue, self._on_task_deadline)
@@ -504,6 +508,50 @@ class RealtimeService:
                 "space_id": event.space_id,
                 "sequence": event.sequence,
                 "event_type": event.event_type,
+            },
+        )
+
+    # ─── Space zones (§23.8.7) ───────────────────────────────────────────
+
+    async def _on_space_zone_upserted(self, event: SpaceZoneUpserted) -> None:
+        """Local fan-out for an admin's zone CRUD. Federation to remote
+        member instances is owned by :class:`SpaceZoneOutbound`; this
+        handler is just the WS frame for clients on this instance.
+        """
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "space_zone_changed",
+                "data": {
+                    "space_id": event.space_id,
+                    "action": "upsert",
+                    "zone_id": event.zone_id,
+                    "zone": {
+                        "id": event.zone_id,
+                        "space_id": event.space_id,
+                        "name": event.name,
+                        "latitude": event.latitude,
+                        "longitude": event.longitude,
+                        "radius_m": event.radius_m,
+                        "color": event.color,
+                        "created_by": event.created_by,
+                        "updated_at": event.updated_at,
+                    },
+                },
+            },
+        )
+
+    async def _on_space_zone_deleted(self, event: SpaceZoneDeleted) -> None:
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "space_zone_changed",
+                "data": {
+                    "space_id": event.space_id,
+                    "action": "delete",
+                    "zone_id": event.zone_id,
+                    "zone": None,
+                },
             },
         )
 

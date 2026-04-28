@@ -19,6 +19,8 @@ the household ``presence.updated`` frame upstream. Concretely:
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 import pytest
@@ -38,6 +40,7 @@ from socialhome.domain.space import (
     SpaceMember,
     SpaceType,
 )
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
@@ -58,12 +61,25 @@ class _FakeWS:
 
 
 class _FakeFederation:
-    """Captures every send_event for assertion."""
+    """Captures every send_event for assertion.
+
+    When ``encoder`` + ``session_key`` are wired the fake also
+    encrypts the JSON payload with the real :class:`FederationEncoder`
+    before stashing it, so tests can decrypt and assert on the actual
+    sealed envelope payload — not just the dict the caller passed.
+    """
 
     _own_instance_id = "self_instance"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        encoder: FederationEncoder | None = None,
+        session_key: bytes | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._encoder = encoder
+        self._session_key = session_key
 
     async def send_event(
         self,
@@ -73,11 +89,18 @@ class _FakeFederation:
         payload: dict,
         space_id: str | None = None,
     ) -> None:
+        encrypted: str | None = None
+        if self._encoder is not None and self._session_key is not None:
+            encrypted = self._encoder.encrypt_payload(
+                json.dumps(payload),
+                self._session_key,
+            )
         self.calls.append(
             {
                 "to_instance_id": to_instance_id,
                 "event_type": event_type,
                 "payload": payload,
+                "encrypted_payload": encrypted,
                 "space_id": space_id,
             },
         )
@@ -351,6 +374,81 @@ async def test_skips_own_instance_in_federation(env):
     )
     [call] = env.federation.calls
     assert call["to_instance_id"] == "remote_instance_b"
+
+
+async def test_no_zone_name_in_decrypted_federation_envelope(env, tmp_dir):
+    """§27: decrypt the outbound `SPACE_LOCATION_UPDATED` envelope and
+    assert `zone_name` is absent from the *plaintext* of the encrypted
+    payload — not just the dict at the call site.
+
+    Pins the GPS-only invariant at the actual sealed envelope boundary,
+    which is where remote member instances see the bytes. If a future
+    change leaks `zone_name` into the encrypter, this test catches it
+    even if the call-site dict still looked clean.
+    """
+    # Fresh outbound wired against a real FederationEncoder so the
+    # fake's send_event runs the real encrypt path.
+    kp = generate_identity_keypair()
+    encoder = FederationEncoder(kp.private_key)
+    session_key = os.urandom(32)
+    real_fed = _FakeFederation(encoder=encoder, session_key=session_key)
+
+    # Re-wire a brand-new outbound on the same db / bus / ws so the
+    # earlier outbound (subscribed in the env fixture) doesn't double-fire.
+    bus = EventBus()
+    ws = _FakeWS()
+    sp = await env.make_space("sp_decrypt_assert")
+    await env.space_repo.save_member(
+        SpaceMember(
+            space_id=sp.id,
+            user_id=env.alice_uid,
+            role="member",
+            joined_at="2026-04-28T00:00:00+00:00",
+            location_share_enabled=True,
+        ),
+    )
+    await env.space_repo.add_space_instance(sp.id, "remote_decrypt")
+
+    from socialhome.repositories.user_repo import SqliteUserRepo
+    outbound = SpaceLocationOutbound(
+        bus=bus,
+        ws=ws,
+        federation_service=real_fed,  # type: ignore[arg-type]
+        space_repo=env.space_repo,
+        user_repo=SqliteUserRepo(env.db),
+    )
+    outbound.wire()
+
+    await bus.publish(
+        PresenceUpdated(
+            username="alice",
+            state="zone",
+            zone_name="Office",  # household-only — must NOT appear after decrypt
+            latitude=47.3769,
+            longitude=8.5417,
+            gps_accuracy_m=12.0,
+            updated_at="2026-04-28T12:00:00+00:00",
+        ),
+    )
+
+    [call] = real_fed.calls
+    assert call["event_type"] == FederationEventType.SPACE_LOCATION_UPDATED
+    assert call["encrypted_payload"] is not None
+    # The literal byte stream that goes on the wire must not even
+    # *contain* the ASCII string "zone_name" (encrypted noise has zero
+    # chance of producing that string — this catches an accidental
+    # routing-field leak).
+    assert "zone_name" not in call["encrypted_payload"]
+    # And the decrypted plaintext is structurally GPS-only.
+    plaintext = encoder.decrypt_payload(
+        call["encrypted_payload"], session_key,
+    )
+    parsed = json.loads(plaintext)
+    assert "zone_name" not in parsed
+    assert "state" not in parsed
+    assert parsed["lat"] == 47.3769
+    assert parsed["lon"] == 8.5417
+    assert parsed["accuracy_m"] == 12.0
 
 
 async def test_publishes_to_each_opted_in_space(env):

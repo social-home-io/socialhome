@@ -18,6 +18,8 @@ from socialhome.domain.events import (
     SpaceConfigChanged,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceZoneDeleted,
+    SpaceZoneUpserted,
     TaskAssigned,
     TaskCompleted,
     TaskDeadlineDue,
@@ -193,6 +195,56 @@ async def test_space_config_changed_fans(env):
         )
     )
     assert any("space.config.changed" in m for m in sock.sent)
+
+
+async def test_space_zone_upserted_fans_to_space_members(env):
+    """SpaceZoneUpserted → ``space_zone_changed`` (action=upsert) WS frame
+    on every space-member's session — drives §23.8.7 live admin updates."""
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        SpaceZoneUpserted(
+            space_id="sp-1",
+            zone_id="z_office",
+            name="Office",
+            latitude=47.3769,
+            longitude=8.5417,
+            radius_m=150,
+            color="#3b82f6",
+            created_by="u_admin",
+            updated_at="2026-04-28T00:00:00+00:00",
+        )
+    )
+    assert any("space_zone_changed" in m for m in sock.sent)
+    # Frame must carry the full zone payload, action=upsert.
+    import json
+    frame = next(m for m in sock.sent if "space_zone_changed" in m)
+    parsed = json.loads(frame)
+    assert parsed["type"] == "space_zone_changed"
+    assert parsed["data"]["action"] == "upsert"
+    assert parsed["data"]["zone"]["name"] == "Office"
+    assert parsed["data"]["zone"]["radius_m"] == 150
+    assert parsed["data"]["zone"]["color"] == "#3b82f6"
+
+
+async def test_space_zone_deleted_fans_with_action_delete(env):
+    import json
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        SpaceZoneDeleted(
+            space_id="sp-1",
+            zone_id="z_office",
+            deleted_by="u_admin",
+        )
+    )
+    [frame] = [m for m in sock.sent if "space_zone_changed" in m]
+    parsed = json.loads(frame)
+    assert parsed["data"]["action"] == "delete"
+    assert parsed["data"]["zone_id"] == "z_office"
+    assert parsed["data"]["zone"] is None
 
 
 def _task(*, status=TaskStatus.TODO, assignees=()):

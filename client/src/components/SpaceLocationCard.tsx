@@ -21,9 +21,11 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
+import { ws } from '@/ws'
 import { Spinner } from './Spinner'
 import { Button } from './Button'
 import { LocationMap, type LocationMarker } from './LocationMap'
+import { Modal } from './Modal'
 import { showToast } from './Toast'
 import type { SpaceZone } from '@/types'
 
@@ -119,7 +121,38 @@ export function SpaceLocationCard({
     }
     void load()
     const t = setInterval(() => { void load() }, POLL_INTERVAL_MS)
-    return () => { cancelled = true; clearInterval(t) }
+
+    // §23.8.7: live zone CRUD frames from RealtimeService.
+    // Apply upserts/deletes to the local zone array without a refetch.
+    const offZone = ws.on('space_zone_changed', (e) => {
+      const d = e.data as {
+        space_id: string
+        action: 'upsert' | 'delete'
+        zone_id: string
+        zone: SpaceZone | null
+      }
+      if (!d || d.space_id !== spaceId) return
+      if (d.action === 'upsert' && d.zone) {
+        const z = d.zone
+        setZones((prev) => {
+          const existing = prev.findIndex((p) => p.id === z.id)
+          if (existing >= 0) {
+            const out = prev.slice()
+            out[existing] = z
+            return out
+          }
+          return [...prev, z]
+        })
+      } else if (d.action === 'delete') {
+        setZones((prev) => prev.filter((p) => p.id !== d.zone_id))
+      }
+    })
+
+    return () => {
+      cancelled = true
+      clearInterval(t)
+      offZone()
+    }
   }, [spaceId, currentUserId])
 
   const setMyOptIn = async (enabled: boolean) => {
@@ -216,31 +249,32 @@ export function SpaceLocationCard({
         <span>{sharing} of {total} sharing GPS</span>
         <span>{zones.length} zone{zones.length === 1 ? '' : 's'} configured</span>
       </div>
-      {showOnboarding && (
-        <div class="sh-modal-backdrop" role="dialog" aria-modal="true">
-          <div class="sh-modal">
-            <h3>📍 Share your location with this space?</h3>
-            <p>
-              This space shows members on a map. If you opt in, your GPS
-              coordinates will be visible to other members of this space —
-              but never to other spaces or other households outside this
-              space.
-            </p>
-            <ul>
-              <li>You can stop sharing at any time from the map tab.</li>
-              <li>Your home assistant zones never reach this space.</li>
-            </ul>
-            <div class="sh-modal-actions">
-              <Button variant="secondary" onClick={() => dismissOnboarding(null)}>
-                Not now
-              </Button>
-              <Button variant="primary" onClick={() => dismissOnboarding(true)}>
-                Share my location
-              </Button>
-            </div>
+      <Modal
+        open={showOnboarding}
+        onClose={() => dismissOnboarding(null)}
+        title="📍 Share your location with this space?"
+      >
+        <div class="sh-modal-body">
+          <p>
+            This space shows members on a map. If you opt in, your GPS
+            coordinates will be visible to other members of this space —
+            but never to other spaces or other households outside this
+            space.
+          </p>
+          <ul>
+            <li>You can stop sharing at any time from the map tab.</li>
+            <li>Your home assistant zones never reach this space.</li>
+          </ul>
+          <div class="sh-modal-actions">
+            <Button variant="secondary" onClick={() => dismissOnboarding(null)}>
+              Not now
+            </Button>
+            <Button variant="primary" onClick={() => dismissOnboarding(true)}>
+              Share my location
+            </Button>
           </div>
         </div>
-      )}
+      </Modal>
     </div>
   )
 }
