@@ -492,7 +492,7 @@ class SpaceContentInboundHandlers:
             latitude = float(p["latitude"])
             longitude = float(p["longitude"])
             radius_m = int(p["radius_m"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             log.debug(
                 "SPACE_ZONE_UPSERTED malformed coords/radius: %r",
                 p,

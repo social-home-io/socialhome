@@ -53,9 +53,7 @@ class _FakeWS:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], dict]] = []
 
-    async def broadcast_to_users(
-        self, user_ids: list[str], payload: dict
-    ) -> int:
+    async def broadcast_to_users(self, user_ids: list[str], payload: dict) -> int:
         self.calls.append((list(user_ids), payload))
         return len(user_ids)
 
@@ -131,9 +129,7 @@ async def env(tmp_dir):
 
     space_repo = SqliteSpaceRepo(db)
 
-    async def _make_space(
-        space_id: str, *, feature_location: bool = True
-    ) -> Space:
+    async def _make_space(space_id: str, *, feature_location: bool = True) -> Space:
         space = Space(
             id=space_id,
             name=f"Space {space_id}",
@@ -359,7 +355,8 @@ async def test_skips_own_instance_in_federation(env):
     )
     # Record both our own instance and a remote one as space members.
     await env.space_repo.add_space_instance(
-        sp.id, env.federation._own_instance_id,
+        sp.id,
+        env.federation._own_instance_id,
     )
     await env.space_repo.add_space_instance(sp.id, "remote_instance_b")
 
@@ -410,6 +407,7 @@ async def test_no_zone_name_in_decrypted_federation_envelope(env, tmp_dir):
     await env.space_repo.add_space_instance(sp.id, "remote_decrypt")
 
     from socialhome.repositories.user_repo import SqliteUserRepo
+
     outbound = SpaceLocationOutbound(
         bus=bus,
         ws=ws,
@@ -441,7 +439,8 @@ async def test_no_zone_name_in_decrypted_federation_envelope(env, tmp_dir):
     assert "zone_name" not in call["encrypted_payload"]
     # And the decrypted plaintext is structurally GPS-only.
     plaintext = encoder.decrypt_payload(
-        call["encrypted_payload"], session_key,
+        call["encrypted_payload"],
+        session_key,
     )
     parsed = json.loads(plaintext)
     assert "zone_name" not in parsed

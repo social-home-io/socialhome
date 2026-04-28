@@ -481,7 +481,7 @@ def _zone_from_record(r: dict[str, Any], space_id: str) -> SpaceZone | None:
         latitude = float(r["latitude"])
         longitude = float(r["longitude"])
         radius_m = int(r["radius_m"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         log.debug("zone record missing coords/radius: %r", r)
         return None
     return SpaceZone(

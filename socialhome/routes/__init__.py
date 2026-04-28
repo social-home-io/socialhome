@@ -366,7 +366,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}/presence", SpacePresenceView)
     app.router.add_view("/api/spaces/{id}/zones", SpaceZonesCollectionView)
     app.router.add_view(
-        "/api/spaces/{id}/zones/{zone_id}", SpaceZoneDetailView,
+        "/api/spaces/{id}/zones/{zone_id}",
+        SpaceZoneDetailView,
     )
     app.router.add_view(
         "/api/spaces/{id}/members/me/location-sharing",

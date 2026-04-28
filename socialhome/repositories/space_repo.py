@@ -398,9 +398,7 @@ class SqliteSpaceRepo:
         )
         return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
 
-    async def list_location_shared_spaces_for_user(
-        self, user_id: str
-    ) -> list[Space]:
+    async def list_location_shared_spaces_for_user(self, user_id: str) -> list[Space]:
         """Return every space where this user has opted in to location
         sharing (``location_share_enabled = 1``) AND the space has the
         feature on (``feature_location = 1``).

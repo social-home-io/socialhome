@@ -219,6 +219,7 @@ async def test_space_zone_upserted_fans_to_space_members(env):
     assert any("space_zone_changed" in m for m in sock.sent)
     # Frame must carry the full zone payload, action=upsert.
     import json
+
     frame = next(m for m in sock.sent if "space_zone_changed" in m)
     parsed = json.loads(frame)
     assert parsed["type"] == "space_zone_changed"
@@ -230,6 +231,7 @@ async def test_space_zone_upserted_fans_to_space_members(env):
 
 async def test_space_zone_deleted_fans_with_action_delete(env):
     import json
+
     svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)

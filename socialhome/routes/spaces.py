@@ -328,7 +328,9 @@ class SpaceMemberLocationSharingView(BaseView):
         ctx = self.user
         if ctx is None or ctx.user_id is None:
             return error_response(
-                401, "UNAUTHENTICATED", "Authentication required.",
+                401,
+                "UNAUTHENTICATED",
+                "Authentication required.",
             )
         space_id = self.match("id")
         body = await self.body()
@@ -340,7 +342,9 @@ class SpaceMemberLocationSharingView(BaseView):
             )
         repo = self.svc(space_repo_key)
         ok = await repo.set_member_location_sharing(
-            space_id, ctx.user_id, body["enabled"],
+            space_id,
+            ctx.user_id,
+            body["enabled"],
         )
         if not ok:
             return error_response(
@@ -952,9 +956,7 @@ class SpacePresenceView(BaseView):
                 }
             )
         members = await repo.list_members(space_id)
-        opted_in = {
-            m.user_id for m in members if m.location_share_enabled
-        }
+        opted_in = {m.user_id for m in members if m.location_share_enabled}
         presence_svc = self.svc(presence_service_key)
         entries = await presence_svc.list_presence_for_members(opted_in)
         return web.json_response(

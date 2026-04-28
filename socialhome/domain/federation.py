@@ -96,7 +96,7 @@ class FederationEventType(str, enum.Enum):
     # local space_zones table. Zones are a display layer — they never
     # replace coordinates on the wire, and HA zones do not propagate.
     SPACE_ZONE_UPSERTED = "space_zone_upserted"
-    SPACE_ZONE_DELETED  = "space_zone_deleted"
+    SPACE_ZONE_DELETED = "space_zone_deleted"
     # ── Gallery (§23.119) — per-event push complementing the chunked
     # initial sync. Carries the thumbnail-only projection per S-9; the
     # full file is fetched lazily via ``gallery_item_full``. Albums

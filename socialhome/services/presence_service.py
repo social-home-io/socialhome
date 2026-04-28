@@ -73,9 +73,7 @@ class PresenceService:
         """
         all_entries = await self._repo.list_active()
         return [
-            replace(p, zone_name=None)
-            for p in all_entries
-            if p.user_id in user_ids
+            replace(p, zone_name=None) for p in all_entries if p.user_id in user_ids
         ]
 
     async def update_location(self, update: LocationUpdate) -> None:
