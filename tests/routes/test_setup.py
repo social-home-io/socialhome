@@ -27,7 +27,8 @@ async def _build_standalone_app(aiohttp_client, tmp_dir):
 
 
 async def test_standalone_setup_seeds_admin_and_returns_token(
-    aiohttp_client, tmp_dir,
+    aiohttp_client,
+    tmp_dir,
 ):
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     r = await tc.post(
@@ -46,7 +47,8 @@ async def test_standalone_setup_seeds_admin_and_returns_token(
 
 
 async def test_standalone_setup_requires_username_and_password(
-    aiohttp_client, tmp_dir,
+    aiohttp_client,
+    tmp_dir,
 ):
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     r = await tc.post("/api/setup/standalone", json={"username": "x"})
@@ -54,7 +56,8 @@ async def test_standalone_setup_requires_username_and_password(
 
 
 async def test_standalone_setup_locked_after_completion(
-    aiohttp_client, tmp_dir,
+    aiohttp_client,
+    tmp_dir,
 ):
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     r1 = await tc.post(
@@ -75,7 +78,8 @@ async def test_standalone_setup_locked_after_completion(
 
 
 async def test_ha_owner_setup_mode_mismatch_in_standalone(
-    aiohttp_client, tmp_dir,
+    aiohttp_client,
+    tmp_dir,
 ):
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     r = await tc.post(
@@ -87,7 +91,8 @@ async def test_ha_owner_setup_mode_mismatch_in_standalone(
 
 
 async def test_haos_complete_setup_mode_mismatch_in_standalone(
-    aiohttp_client, tmp_dir,
+    aiohttp_client,
+    tmp_dir,
 ):
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     r = await tc.post("/api/setup/haos/complete")

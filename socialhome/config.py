@@ -95,7 +95,6 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
         "storage",
         "federation",
         "webrtc",
-        "standalone",
     }
 )
 
@@ -202,6 +201,31 @@ class Config:
                 toml_options.setdefault("ha_url", ha_section["url"])
             if "token" in ha_section:
                 toml_options.setdefault("ha_token", ha_section["token"])
+
+        # `admin_username` / `admin_password` inside [standalone] mirror the
+        # SH_ADMIN_USERNAME / SH_ADMIN_PASSWORD env vars (PR #35 introduced
+        # the env path; this hoists the TOML form). Other keys in
+        # [standalone] (e.g. external_url) stay in platform_options.
+        sa_section = platform_options.get("standalone")
+        if sa_section is not None and (
+            "admin_username" in sa_section or "admin_password" in sa_section
+        ):
+            remaining = {
+                k: v
+                for k, v in sa_section.items()
+                if k not in ("admin_username", "admin_password")
+            }
+            platform_options["standalone"] = MappingProxyType(remaining)
+            if "admin_username" in sa_section:
+                toml_options.setdefault(
+                    "admin_username",
+                    sa_section["admin_username"],
+                )
+            if "admin_password" in sa_section:
+                toml_options.setdefault(
+                    "admin_password",
+                    sa_section["admin_password"],
+                )
 
         def _opt(key: str, env: str, default: object) -> object:
             # Layer 1: environment (highest)

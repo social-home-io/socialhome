@@ -74,7 +74,8 @@ class HaIngressAuthProvider:
         self._adapter = adapter
 
     async def authenticate(
-        self, request: "web.Request",
+        self,
+        request: "web.Request",
     ) -> ExternalUser | None:
         ingress_user = request.headers.get("X-Ingress-User")
         if not ingress_user:
@@ -100,7 +101,12 @@ class HaosAdapter(PlatformAdapter):
         "_supervisor_client",
         "_ha_bridge",
         "_db",
-        "auth", "users", "push", "stt", "ai", "events",
+        "auth",
+        "users",
+        "push",
+        "stt",
+        "ai",
+        "events",
     )
 
     def __init__(

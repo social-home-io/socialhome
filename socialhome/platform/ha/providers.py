@@ -15,14 +15,12 @@ access ``adapter._client`` (only available after the adapter's
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, AsyncIterable
+from typing import TYPE_CHECKING, Any, AsyncIterable
 
 from ..adapter import ExternalUser, _extract_bearer
 
 if TYPE_CHECKING:
     from aiohttp import web
-
-    from .adapter import HaAdapter
 
 
 def _state_to_user(state: dict) -> ExternalUser:
@@ -49,11 +47,12 @@ class HaAuthProvider:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaAdapter") -> None:
+    def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
 
     async def authenticate(
-        self, request: "web.Request",
+        self,
+        request: "web.Request",
     ) -> ExternalUser | None:
         ingress_user = request.headers.get("X-Ingress-User")
         if ingress_user:
@@ -97,7 +96,7 @@ class HaUserDirectory:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaAdapter") -> None:
+    def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
 
     async def list_users(self) -> list[ExternalUser]:
@@ -139,7 +138,7 @@ class HaPushProvider:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaAdapter") -> None:
+    def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
 
     async def send(
@@ -164,7 +163,7 @@ class HaSTTProvider:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaAdapter") -> None:
+    def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
 
     async def transcribe(self, audio: bytes, language: str = "en") -> str:
@@ -207,7 +206,7 @@ class HaAIProvider:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaAdapter") -> None:
+    def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
 
     async def generate_data(
@@ -240,7 +239,7 @@ class HaEventSink:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaAdapter") -> None:
+    def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
 
     async def fire(self, event_type: str, data: dict) -> bool:

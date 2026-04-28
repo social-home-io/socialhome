@@ -108,7 +108,8 @@ async def test_create_user_non_admin_403(client):
 async def test_create_user_405_in_ha_mode(client):
     """ha and haos modes use /api/admin/ha-users/.../provision instead."""
     client.server.app[config_key] = replace(
-        client.server.app[config_key], mode="ha",
+        client.server.app[config_key],
+        mode="ha",
     )
     r = await client.post(
         "/api/admin/users",

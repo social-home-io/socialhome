@@ -57,9 +57,7 @@ def hash_password(password: str, *, salt: bytes | None = None) -> str:
     p = 1
     if salt is None:
         salt = os.urandom(16)
-    dk = hashlib.scrypt(
-        password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32
-    )
+    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32)
     return f"scrypt${n}${r}${p}${salt.hex()}${dk.hex()}"
 
 
@@ -81,7 +79,7 @@ def verify_password(password: str, stored: str) -> bool:
             dklen=len(expected),
         )
         return hmac.compare_digest(dk, expected)
-    except (ValueError, KeyError):
+    except ValueError, KeyError:
         return False
 
 

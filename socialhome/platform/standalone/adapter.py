@@ -189,7 +189,7 @@ class StandalonePushProvider:
             )
 
 
-def _row_to_user(row: Mapping[str, Any]) -> ExternalUser:
+def _row_to_user(row: Any) -> ExternalUser:
     """Convert a ``platform_users`` row to an :class:`ExternalUser`."""
     return ExternalUser(
         username=row["username"],
@@ -263,7 +263,7 @@ class StandaloneAdapter(PlatformAdapter):
         tools that drive the bearer flow without going through an HTTP
         request can still call it. Internally delegates to the
         :class:`StandaloneAuthProvider`."""
-        return await self.auth._authenticate_bearer(token)
+        return await self._credentials.authenticate_bearer(token)
 
     # ── Password-based token issuance (§auth/token) ───────────────────────
     # Thin delegators to LocalCredentialStore. Kept as adapter methods so
@@ -277,7 +277,9 @@ class StandaloneAdapter(PlatformAdapter):
         label: str = "web",
     ) -> str | None:
         return await self._credentials.issue_bearer_token(
-            username, password, label=label,
+            username,
+            password,
+            label=label,
         )
 
     @staticmethod

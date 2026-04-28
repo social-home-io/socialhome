@@ -176,7 +176,8 @@ async def test_provision_ha_user_rejects_password_in_haos_mode(client):
         [ExternalUser("kid", "Little Pascal", None, is_admin=False)],
     )
     client.server.app[config_key] = replace(
-        client.server.app[config_key], mode="haos",
+        client.server.app[config_key],
+        mode="haos",
     )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",
@@ -193,7 +194,8 @@ async def test_provision_ha_user_in_haos_mode_no_password(client):
         [ExternalUser("kid", "Little Pascal", None, is_admin=False)],
     )
     client.server.app[config_key] = replace(
-        client.server.app[config_key], mode="haos",
+        client.server.app[config_key],
+        mode="haos",
     )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",

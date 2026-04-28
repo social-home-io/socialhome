@@ -66,7 +66,12 @@ class HaAdapter(PlatformAdapter):
         "_ha_bridge",
         "_db",
         "_credentials",
-        "auth", "users", "push", "stt", "ai", "events",
+        "auth",
+        "users",
+        "push",
+        "stt",
+        "ai",
+        "events",
     )
 
     def __init__(
@@ -125,7 +130,9 @@ class HaAdapter(PlatformAdapter):
         if self._credentials is None:
             return None
         return await self._credentials.issue_bearer_token(
-            username, password, label=label,
+            username,
+            password,
+            label=label,
         )
 
     async def set_local_password(
@@ -143,7 +150,10 @@ class HaAdapter(PlatformAdapter):
                 "HaAdapter.set_local_password called before on_startup",
             )
         await self._credentials.set_password(
-            username, password, display_name=display_name, is_admin=is_admin,
+            username,
+            password,
+            display_name=display_name,
+            is_admin=is_admin,
         )
 
     @staticmethod
@@ -163,9 +173,24 @@ class HaAdapter(PlatformAdapter):
     async def authenticate_bearer(self, token: str) -> ExternalUser | None:
         """Public wrapper around the auth provider's bearer flow.
 
-        Kept for tests / API consumers that drive the bearer flow without
-        going through an HTTP request."""
-        return await self.auth._authenticate_bearer(token)
+        Kept for tests / API consumers that drive the bearer flow
+        without going through an HTTP request. Tries the local
+        credential store (wizard-set passwords) first, then HA's own
+        verify_token for long-lived access tokens."""
+        if self._credentials is not None:
+            local = await self._credentials.authenticate_bearer(token)
+            if local is not None:
+                return local
+        data = await self._client.verify_token(token)
+        if data is None:
+            return None
+        username = data.get("username") or "ha_api_user"
+        return ExternalUser(
+            username=username,
+            display_name=username,
+            picture_url=None,
+            is_admin=True,
+        )
 
     async def get_instance_config(self) -> InstanceConfig:
         cfg = await self._client.get_config()
