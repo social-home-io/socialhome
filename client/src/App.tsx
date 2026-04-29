@@ -1,5 +1,5 @@
 import type { JSX } from 'preact'
-import { Router } from 'preact-iso'
+import { LocationProvider, Router } from 'preact-iso'
 import { useComputed, signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -203,36 +203,44 @@ export function App() {
 
   startNotificationPolling()
 
+  // <Router> from preact-iso requires a <LocationProvider> ancestor —
+  // it reads the current location from that context. Without the
+  // wrapper, mounting Router throws "preact-iso's <Router> must be
+  // used within a <LocationProvider>", which the ErrorBoundary surfaces
+  // as the generic "Something went wrong" page after the operator
+  // closes the onboarding wizard.
   return (
     <ErrorBoundary>
-      <a href="#main" class="sh-skip-link">Skip to main content</a>
-      <InstallPrompt />
-      <div class="sh-layout">
-        <SideNav />
-        <div class="sh-content">
-          <TopBar />
-          <main class="sh-main" id="main" role="main" tabIndex={-1}>
-            <Router>
-              {Object.entries(routes).map(([path, Component]) => {
-                // preact-iso's ``lazy()`` returns an AsyncComponent with
-                // a ``.preload`` property; TypeScript's JSX checker
-                // doesn't recognise it as a valid element constructor.
-                // Cast through ``any`` only at the JSX site.
-                const C = Component as unknown as (props: { path: string }) => JSX.Element
-                return <C path={path} key={path} />
-              })}
-            </Router>
-          </main>
+      <LocationProvider>
+        <a href="#main" class="sh-skip-link">Skip to main content</a>
+        <InstallPrompt />
+        <div class="sh-layout">
+          <SideNav />
+          <div class="sh-content">
+            <TopBar />
+            <main class="sh-main" id="main" role="main" tabIndex={-1}>
+              <Router>
+                {Object.entries(routes).map(([path, Component]) => {
+                  // preact-iso's ``lazy()`` returns an AsyncComponent with
+                  // a ``.preload`` property; TypeScript's JSX checker
+                  // doesn't recognise it as a valid element constructor.
+                  // Cast through ``any`` only at the JSX site.
+                  const C = Component as unknown as (props: { path: string }) => JSX.Element
+                  return <C path={path} key={path} />
+                })}
+              </Router>
+            </main>
+          </div>
+          <QuickSwitcher />
+          <ToastContainer />
+          <SpaceCreateDialog />
+          <NewDmDialog />
+          <SpaceInviteDialog />
+          <RejectReasonDialog />
+          <ReportDialog />
+          <IncomingCallDialog />
         </div>
-        <QuickSwitcher />
-        <ToastContainer />
-        <SpaceCreateDialog />
-        <NewDmDialog />
-        <SpaceInviteDialog />
-        <RejectReasonDialog />
-        <ReportDialog />
-        <IncomingCallDialog />
-      </div>
+      </LocationProvider>
     </ErrorBoundary>
   )
 }
