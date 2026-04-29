@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -80,18 +81,55 @@ def build_cors_deny_middleware(
 ):
     """Refuse any cross-origin request with an unallowed ``Origin``.
 
-    A request without an ``Origin`` header (most native clients +
-    same-origin browser fetches) passes through. When ``Origin`` is
-    present and not in ``allowed_origins`` the request is rejected
-    with 403.  CORS preflight (``OPTIONS``) requests are answered
-    with the same allowlist — no permissive ``*`` ever.
+    A request passes through when:
+
+    * No ``Origin`` header — most native clients and some same-origin
+      ``GET`` fetches.
+    * ``Origin`` is **same-origin** with the request itself — i.e. the
+      ``Origin`` host:port matches the request's host (or the
+      ``X-Forwarded-Host`` if the operator sits behind a trusting
+      reverse proxy). Modern browsers always set ``Origin`` on
+      mutating same-origin fetches (POST/PUT/PATCH/DELETE) so a strict
+      "no Origin" check would 403 every API call from the SPA when
+      it's served by the same backend that handles the API — which is
+      exactly how every prod path (haos via HA Ingress, ha behind a
+      reverse proxy, standalone serving its own static bundle) works.
+    * ``Origin`` is in the explicit ``allowed_origins`` allowlist —
+      this stays the only knob for genuinely cross-origin SPAs.
+
+    Any other ``Origin`` is rejected with 403 ``cors_denied``. CORS
+    preflight (``OPTIONS``) requests are answered with the same
+    allowlist — no permissive ``*`` ever.
     """
     allowlist: frozenset[str] = frozenset(allowed_origins or ())
+
+    def _same_origin(origin: str, request: web.Request) -> bool:
+        """``Origin``'s host:port matches what the client used to reach
+        us. We trust ``X-Forwarded-Host`` when present (HA Ingress and
+        most reverse proxies set it); otherwise fall back to ``Host``.
+        Behind a misconfigured proxy that lets clients smuggle
+        ``X-Forwarded-Host`` we'd over-trust — that's a deployment bug
+        independent of CORS, and the operator who configured the proxy
+        is responsible for not letting clients spoof it."""
+        try:
+            parsed = urlparse(origin)
+        except ValueError:
+            return False
+        if not parsed.netloc:
+            return False
+        request_host = (
+            request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or ""
+        ).strip()
+        if not request_host:
+            return False
+        return parsed.netloc.lower() == request_host.lower()
 
     @web.middleware
     async def middleware(request: web.Request, handler):
         origin = request.headers.get("Origin")
         if origin is None:
+            return await handler(request)
+        if _same_origin(origin, request):
             return await handler(request)
         if origin not in allowlist:
             log.debug("cors deny: blocked Origin=%r path=%s", origin, request.path)
