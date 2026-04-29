@@ -3,6 +3,11 @@ import { App } from './App'
 import { ws } from './ws'
 import './styles/tokens.css'
 import './styles/app.css'
+// Eagerly initialise the theme signal + effect so the `<html>` class
+// is set on cold start, not on first /settings visit. The inline
+// pre-paint script in index.html handles the very-first paint; this
+// keeps the signal in sync for live toggles and system-theme flips.
+import './store/theme'
 import { wireFeedWs } from './store/feed'
 import { wireShoppingWs } from './store/shopping'
 import { wireGalleryWs } from './store/gallery'

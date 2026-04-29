@@ -1,30 +1,14 @@
 /**
  * ThemeToggle — dark/light/auto theme switcher (§23.35).
+ *
+ * Pure UI button. The signal + effect that drives the `<html>` class
+ * lives in `@/store/theme.ts` so it can be loaded eagerly from
+ * `main.tsx` rather than on first /settings visit.
  */
-import { signal, effect } from '@preact/signals'
+import { theme, type Theme } from '@/store/theme'
 
-export type Theme = 'light' | 'dark' | 'auto'
-export const theme = signal<Theme>(
-  (localStorage.getItem('sh_theme') as Theme) || 'auto'
-)
-
-// Apply theme to document
-if (typeof document !== 'undefined') {
-  effect(() => {
-    const t = theme.value
-    localStorage.setItem('sh_theme', t)
-    const root = document.documentElement
-    root.classList.remove('sh-theme-light', 'sh-theme-dark')
-    if (t === 'auto') {
-      const prefersDark = typeof window.matchMedia === 'function'
-        ? window.matchMedia('(prefers-color-scheme: dark)').matches
-        : false
-      root.classList.add(prefersDark ? 'sh-theme-dark' : 'sh-theme-light')
-    } else {
-      root.classList.add(`sh-theme-${t}`)
-    }
-  })
-}
+export { theme }
+export type { Theme }
 
 export function ThemeToggle() {
   const next = () => {

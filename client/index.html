@@ -10,6 +10,27 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <title>Social Home</title>
+  <!--
+    Pre-paint theme bootstrap. Runs synchronously before any module
+    bundle, so the `<html>` class matches the user's stored or
+    system preference on the very first paint — no light→dark flash
+    on reload. The matching effect in @/store/theme.ts takes over
+    once the SPA mounts.
+  -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('sh_theme') || 'auto';
+        var dark = t === 'dark' ||
+          (t === 'auto' &&
+            window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.add(
+          dark ? 'sh-theme-dark' : 'sh-theme-light'
+        );
+      } catch (e) { /* sandboxed / no-storage — silently fall back */ }
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>
