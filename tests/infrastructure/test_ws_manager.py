@@ -15,11 +15,16 @@ class _FakeWS:
         self.fail = fail
         self.closed = closed
         self.sent: list[str] = []
+        self.close_calls: list[tuple] = []
 
     async def send_str(self, msg: str) -> None:
         if self.fail:
             raise ConnectionResetError("boom")
         self.sent.append(msg)
+
+    async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        self.close_calls.append((code, message))
+        self.closed = True
 
 
 # ─── Registry ────────────────────────────────────────────────────────────
@@ -111,3 +116,52 @@ async def test_broadcast_all_hits_every_user():
 async def test_broadcast_to_users_handles_empty_list():
     mgr = WebSocketManager()
     assert await mgr.broadcast_to_users([], {}) == 0
+
+
+# ─── Shutdown ────────────────────────────────────────────────────────────
+
+
+async def test_close_all_sends_going_away_to_every_socket():
+    """The shutdown path must close every socket so the WS handler's
+    `async for msg in ws` loop unblocks. Without it, Ctrl-C hangs as
+    long as any browser tab still has the SPA open."""
+    from aiohttp import WSCloseCode
+
+    mgr = WebSocketManager()
+    a = _FakeWS()
+    b = _FakeWS()
+    c = _FakeWS()
+    await mgr.register("alice", a)
+    await mgr.register("alice", b)
+    await mgr.register("bob", c)
+
+    await mgr.close_all()
+
+    for ws in (a, b, c):
+        assert len(ws.close_calls) == 1
+        code, message = ws.close_calls[0]
+        assert code == WSCloseCode.GOING_AWAY
+        assert message == b"server shutting down"
+
+
+async def test_close_all_no_op_when_empty():
+    mgr = WebSocketManager()
+    # Just confirm no-op doesn't raise.
+    await mgr.close_all()
+
+
+async def test_close_all_swallows_close_failures():
+    """A broken socket whose close() raises must not block the rest."""
+
+    class _ExplodingWS(_FakeWS):
+        async def close(self, *, code=1000, message=b""):  # type: ignore[override]
+            raise ConnectionResetError("boom")
+
+    mgr = WebSocketManager()
+    bad = _ExplodingWS()
+    good = _FakeWS()
+    await mgr.register("alice", bad)
+    await mgr.register("bob", good)
+    # Should not raise.
+    await mgr.close_all()
+    assert good.close_calls  # the good socket still got the close frame

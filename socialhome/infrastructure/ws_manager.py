@@ -30,7 +30,7 @@ import logging
 from collections import defaultdict
 from typing import Any
 
-from aiohttp import web
+from aiohttp import WSCloseCode, web
 
 from ..security import sanitise_for_api
 
@@ -105,6 +105,48 @@ class WebSocketManager:
     async def broadcast_all(self, payload: dict[str, Any]) -> int:
         """Send to every connected session (admin-broadcast)."""
         return await self.broadcast_to_users(list(self._by_user.keys()), payload)
+
+    # ─── Shutdown ─────────────────────────────────────────────────────────
+
+    async def close_all(self, *, timeout: float = 5.0) -> None:
+        """Close every registered WebSocket with a GOING_AWAY frame.
+
+        Wired into the app's ``on_shutdown`` hook. aiohttp doesn't
+        cancel pending request handlers on shutdown — without this,
+        each handler sits in ``async for msg in ws`` forever and the
+        process hangs on Ctrl-C until every browser tab is closed by
+        hand. Sending the close frame unblocks the iterator, the
+        handler's ``finally`` runs (which calls
+        :meth:`unregister`), and the task exits.
+
+        Bounded by ``timeout`` so a misbehaving client can't extend
+        shutdown indefinitely.
+        """
+        async with self._lock:
+            sockets = [ws for sessions in self._by_user.values() for ws in sessions]
+        if not sockets:
+            return
+        log.info("ws.close_all: closing %d sockets", len(sockets))
+
+        async def _close(ws: web.WebSocketResponse) -> None:
+            try:
+                await ws.close(
+                    code=WSCloseCode.GOING_AWAY,
+                    message=b"server shutting down",
+                )
+            except Exception as exc:  # defensive — closing should not raise
+                log.debug("ws.close_all: close failed: %s", exc)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(_close(ws) for ws in sockets), return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "ws.close_all: %.1fs timeout — some sockets did not close cleanly",
+                timeout,
+            )
 
     # ─── Internal ─────────────────────────────────────────────────────────
 

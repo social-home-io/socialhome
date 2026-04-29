@@ -1553,6 +1553,18 @@ def create_app(config: Config | None = None) -> web.Application:
         for key, svc in platform_adapter.get_extra_services().items():
             app[key] = svc
 
+    async def _on_shutdown(app: web.Application) -> None:  # noqa: RUF029
+        """Tell every connected WebSocket client we're going away.
+
+        Runs before ``on_cleanup`` so the handler tasks can exit their
+        ``async for msg in ws`` loops and run their ``finally`` blocks
+        (which call ``ws_manager.unregister``) while the rest of the
+        app is still alive. Without this, Ctrl-C hangs as long as any
+        browser tab still has the SPA open.
+        """
+        log.info("socialhome: shutdown — closing live WebSockets")
+        await ws_manager.close_all()
+
     async def _on_cleanup(app: web.Application) -> None:  # noqa: RUF029
         log.info("socialhome: shutting down")
         await platform_adapter.on_cleanup(app)
@@ -1599,6 +1611,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await http_session.close()
 
     app.on_startup.append(_on_startup)
+    app.on_shutdown.append(_on_shutdown)
     app.on_cleanup.append(_on_cleanup)
 
     return app
