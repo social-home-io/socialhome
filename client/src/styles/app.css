@@ -752,17 +752,61 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
 /* ───── 6. Skeletons + spinners ──────────────────────────────────────── */
 
-.sh-spinner, .sh-spinner-sm {
-  display: inline-block;
-  border: 3px solid var(--sh-border);
-  border-top-color: var(--sh-primary);
-  border-radius: var(--sh-radius-full);
-  width: 28px;
-  height: 28px;
-  animation: sh-spin 0.8s linear infinite;
+/* Spinner — three pulsing dots in the brand accent. The dot diameter
+   is driven by the --sh-spinner-dot custom property (the Spinner
+   component sets it from its `size` prop) so a single rule scales for
+   inline buttons (size=6) and full-page loaders (size=12) alike. */
+.sh-spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--sh-spinner-dot, 8px) * 0.6);
+  vertical-align: middle;
+  --sh-spinner-dot: 8px;
 }
-.sh-spinner-sm { width: 14px; height: 14px; border-width: 2px; }
-@keyframes sh-spin { to { transform: rotate(360deg); } }
+.sh-spinner .sh-spinner-dot {
+  width: var(--sh-spinner-dot);
+  height: var(--sh-spinner-dot);
+  border-radius: 50%;
+  background: var(--sh-primary);
+  opacity: 0.35;
+  animation: sh-spinner-pulse 1.1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+.sh-spinner .sh-spinner-dot:nth-child(2) { animation-delay: 0.16s; }
+.sh-spinner .sh-spinner-dot:nth-child(3) { animation-delay: 0.32s; }
+@keyframes sh-spinner-pulse {
+  0%, 80%, 100% { opacity: 0.35; transform: scale(0.85); }
+  40%           { opacity: 1;    transform: scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sh-spinner .sh-spinner-dot { animation: none; opacity: 0.7; }
+}
+
+/* Backwards-compat: a few callers still hand-emit `<div class="sh-spinner-sm">`.
+   Keep them looking similar to the new look — a single small dot pulse. */
+.sh-spinner-sm {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--sh-primary);
+  vertical-align: middle;
+  animation: sh-spinner-pulse 1.1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Visually hidden but exposed to assistive tech. Used to live as a
+   `<span class="sr-only">` inside the old Spinner — putting it here so
+   any other components that rely on the same convention work too. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 .sh-skeleton-line, .sh-skeleton-rect {
   height: 16px;

@@ -3,20 +3,23 @@ import { render } from '@testing-library/preact'
 import { Spinner } from './Spinner'
 
 describe('Spinner', () => {
-  it('renders with default size', () => {
+  it('renders three pulsing dots', () => {
     const { container } = render(<Spinner />)
-    const el = container.firstElementChild as HTMLElement
-    expect(el.style.width).toContain('24')
+    const dots = container.querySelectorAll('.sh-spinner-dot')
+    expect(dots.length).toBe(3)
   })
 
-  it('renders with custom size', () => {
-    const { container } = render(<Spinner size={48} />)
-    const el = container.firstElementChild as HTMLElement
-    expect(el.style.width).toContain('48')
+  it('drives the dot diameter from the size prop via a custom property', () => {
+    const { container } = render(<Spinner size={12} />)
+    const wrap = container.firstElementChild as HTMLElement
+    // Custom properties land on the inline style attribute as `--name`.
+    expect(wrap.getAttribute('style')).toContain('--sh-spinner-dot: 12px')
   })
 
-  it('has status role for a11y', () => {
-    const { container } = render(<Spinner />)
-    expect(container.querySelector('[role="status"]')).toBeTruthy()
+  it('exposes role=status with the loading label for a11y', () => {
+    const { container } = render(<Spinner label="Working" />)
+    const wrap = container.querySelector('[role="status"]') as HTMLElement
+    expect(wrap).toBeTruthy()
+    expect(wrap.getAttribute('aria-label')).toBe('Working')
   })
 })

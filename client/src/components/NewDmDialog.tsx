@@ -1,8 +1,9 @@
 /**
  * NewDmDialog — start a new DM conversation (§23.47b).
  */
-import { signal } from '@preact/signals'
+import { signal, computed } from '@preact/signals'
 import { api } from '@/api'
+import { currentUser } from '@/store/auth'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
@@ -12,6 +13,12 @@ const open = signal(false)
 const users = signal<User[]>([])
 const selected = signal('')
 const loading = signal(false)
+
+// You can't DM yourself — drop the current user from the recipient list.
+const recipients = computed(() => {
+  const me = currentUser.value?.username
+  return users.value.filter((u) => u.username !== me)
+})
 
 export function openNewDm() {
   open.value = true
@@ -44,7 +51,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
           <select value={selected.value}
             onChange={(e) => selected.value = (e.target as HTMLSelectElement).value}>
             <option value="">Select a user...</option>
-            {users.value.map(u => (
+            {recipients.value.map(u => (
               <option key={u.username} value={u.username}>
                 {u.display_name} (@{u.username})
               </option>

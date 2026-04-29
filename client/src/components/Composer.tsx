@@ -34,14 +34,27 @@ const content = signal('')
 const postType = signal('text')
 const submitting = signal(false)
 
-const TYPE_ICONS: Record<string, string> = {
+// bazaar listings are space-scoped — they only make sense inside a
+// space feed where buyers see them. The household feed composer omits
+// the icon so the option doesn't dangle there with no working flow.
+const TYPE_ICONS_HOUSEHOLD: Record<string, string> = {
   text: '🔤', image: '📷', video: '🎬', file: '📄',
-  poll: '📊', schedule: '📅', bazaar: '🛍',
+  poll: '📊', schedule: '📅',
+}
+const TYPE_ICONS_SPACE: Record<string, string> = {
+  ...TYPE_ICONS_HOUSEHOLD,
+  bazaar: '🛍',
 }
 
 const MEDIA_TYPES = new Set(['image', 'video', 'file'])
+// Types whose body lives in a dedicated builder modal (poll question,
+// schedule slots) — the textarea is hidden in their compose state so
+// the operator isn't confused by an extra "what's on your mind" field
+// next to the modal trigger.
+const BUILDER_TYPES = new Set(['poll', 'schedule'])
 
 function typeAcceptsMedia(t: string): boolean { return MEDIA_TYPES.has(t) }
+function typeUsesBuilder(t: string): boolean { return BUILDER_TYPES.has(t) }
 
 function inferTypeFromFile(file: File): 'image' | 'video' | 'file' {
   if (file.type.startsWith('image/')) return 'image'
@@ -51,6 +64,7 @@ function inferTypeFromFile(file: File): 'image' | 'video' | 'file' {
 
 export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerProps) {
   const user = currentUser.value
+  const TYPE_ICONS = spaceId ? TYPE_ICONS_SPACE : TYPE_ICONS_HOUSEHOLD
   const charCount = content.value.length
   const showCount = charCount > MAX_LENGTH * 0.8
   const overLimit = charCount > MAX_LENGTH
@@ -111,7 +125,10 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
   const handleSubmit = async (e: Event) => {
     e.preventDefault()
     if (submitting.value || overLimit) return
-    const needsText = !typeAcceptsMedia(postType.value)
+    // Poll/schedule carry their content in a builder modal; media types
+    // carry it in the upload. Only "text" requires a body in the
+    // textarea before we'll submit.
+    const needsText = !typeAcceptsMedia(postType.value) && !typeUsesBuilder(postType.value)
     const hasBody = content.value.trim().length > 0
     if (needsText && !hasBody) return
     if (typeAcceptsMedia(postType.value) && !mediaUrl && !hasBody) return
@@ -203,19 +220,23 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
           onUpdate={(newText) => { content.value = newText.slice(0, MAX_LENGTH) }}
         />
       )}
-      <textarea
-        ref={textareaRef}
-        class="sh-composer-input"
-        placeholder={placeholder || "What's on your mind?"}
-        value={content.value}
-        onInput={(e) => content.value = (e.target as HTMLTextAreaElement).value}
-        rows={3}
-        maxLength={MAX_LENGTH}
-      />
-      {showCount && (
-        <div class={`sh-char-count ${overLimit ? 'sh-char-count--over' : ''}`}>
-          {charCount}/{MAX_LENGTH}
-        </div>
+      {!typeUsesBuilder(postType.value) && (
+        <>
+          <textarea
+            ref={textareaRef}
+            class="sh-composer-input"
+            placeholder={placeholder || "What's on your mind?"}
+            value={content.value}
+            onInput={(e) => content.value = (e.target as HTMLTextAreaElement).value}
+            rows={3}
+            maxLength={MAX_LENGTH}
+          />
+          {showCount && (
+            <div class={`sh-char-count ${overLimit ? 'sh-char-count--over' : ''}`}>
+              {charCount}/{MAX_LENGTH}
+            </div>
+          )}
+        </>
       )}
       {showMediaAttach && mediaUrl && (
         <div class="sh-composer-attachment">
@@ -280,12 +301,14 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
           content.value = (content.value + sep + t).slice(0, MAX_LENGTH)
         }} />
         <Button type="submit" loading={submitting.value}
-          disabled={
-            overLimit ||
-            (typeAcceptsMedia(postType.value)
-              ? !mediaUrl && !content.value.trim()
-              : !content.value.trim())
-          }>
+          disabled={(() => {
+            if (overLimit) return true
+            if (typeUsesBuilder(postType.value)) return false  // opens modal or posts
+            if (typeAcceptsMedia(postType.value)) {
+              return !mediaUrl && !content.value.trim()
+            }
+            return !content.value.trim()
+          })()}>
           {postType.value === 'schedule' && !pendingSchedule
             ? 'Propose times…'
             : postType.value === 'poll' && !pendingPoll
