@@ -13,8 +13,7 @@ beforeEach(() => {
 
 afterEach(() => {
   // Clean up the geolocation mock so tests stay isolated.
-  // @ts-expect-error -- test-only patch
-  delete (navigator as any).geolocation
+  delete (navigator as unknown as { geolocation?: unknown }).geolocation
 })
 
 function mockGeolocation(coords: { latitude: number; longitude: number }) {

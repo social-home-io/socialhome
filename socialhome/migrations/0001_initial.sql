@@ -442,6 +442,9 @@ CREATE TABLE IF NOT EXISTS spaces (
     -- event is created. One post per event series — recurring events
     -- don't generate per-occurrence posts.
     allow_post_event       INTEGER NOT NULL DEFAULT 1,
+    -- One-shot location-share posts (composer's 📍 picker).
+    -- Coordinates are stored 4dp-truncated in the post's location_json.
+    allow_post_location    INTEGER NOT NULL DEFAULT 1,
     -- Public / discover fields (populated only when join_mode IN ('public','open'))
     lat                    REAL,
     lon                    REAL,
