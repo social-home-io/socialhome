@@ -159,6 +159,18 @@ class MePictureView(BaseView):
         return web.Response(status=204)
 
 
+class MeOnboardingCompleteView(BaseView):
+    """``POST /api/me/onboarding-complete`` — flip the caller's
+    ``is_new_member`` flag false so the SPA stops re-showing the
+    first-run wizard. Idempotent — already-cleared accounts no-op."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(user_service_key)
+        await svc.clear_onboarding(ctx.username)
+        return web.Response(status=204)
+
+
 class MePictureRefreshFromHaView(BaseView):
     """POST /api/me/picture/refresh-from-ha — import the HA ``person.*``
     entity_picture as the caller's avatar.
