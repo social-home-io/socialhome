@@ -18,14 +18,23 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     Using this keeps the service layer free of sqlite-specific types; a
     service that received a ``Row`` could tiptoe into using its column index
     access and couple itself to the DB layer.
+
+    Implemented as ``dict(zip(keys, row))`` rather than the more obvious
+    ``{k: row[k] ...}`` so it doesn't go through ``Row.__getitem__`` for
+    every column. The name-based path has surfaced an
+    ``IndexError: tuple index out of range`` on at least one operator's
+    long-lived dev DB; iterating the Row positionally and zipping with
+    the column descriptions sidesteps that codepath entirely. The two
+    forms are equivalent for healthy Row instances — same keys, same
+    values, same order.
     """
     if row is None:
         return None
-    return {k: row[k] for k in row.keys()}
+    return dict(zip(row.keys(), row))
 
 
 def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
-    return [{k: r[k] for k in r.keys()} for r in rows]
+    return [dict(zip(r.keys(), r)) for r in rows]
 
 
 def dump_json(value: Any) -> str:
