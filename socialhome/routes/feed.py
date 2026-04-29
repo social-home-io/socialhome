@@ -27,6 +27,7 @@ from urllib.parse import unquote
 from aiohttp import web
 
 from ..app_keys import feed_service_key, post_repo_key
+from ..domain.post import LocationData
 from ..security import error_response, sanitise_for_api
 from .base import BaseView
 
@@ -102,10 +103,33 @@ class PostCollectionView(BaseView):
             type=body.get("type", "text"),
             content=body.get("content"),
             media_url=body.get("media_url"),
+            location=_extract_location(body),
             pinned=bool(body.get("pinned", False)),
             no_link_preview=bool(body.get("no_link_preview", False)),
         )
         return web.json_response(_serialise(post), status=201)
+
+
+def _extract_location(body: dict) -> LocationData | None:
+    """Pull a ``location`` block out of the request body.
+
+    Returns ``None`` when the field is missing — the service layer
+    raises ``ValueError`` if the post type is ``location`` but no
+    coords were supplied. Routes don't validate; the service is the
+    authority on shape (and BaseView._iter maps ValueError → 422).
+    """
+    raw = body.get("location")
+    if not isinstance(raw, dict):
+        return None
+    lat = raw.get("lat")
+    lon = raw.get("lon")
+    if lat is None or lon is None:
+        return None
+    return LocationData(
+        lat=float(lat),
+        lon=float(lon),
+        label=raw.get("label"),
+    )
 
 
 class PostDetailView(BaseView):

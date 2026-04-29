@@ -37,6 +37,7 @@ POST_TYPE_ALLOW: dict[str, str] = {
     "poll": "allow_poll",
     "schedule": "allow_schedule",
     "bazaar": "allow_bazaar",
+    "location": "allow_location",
 }
 
 
@@ -58,6 +59,7 @@ class HouseholdFeatures:
     allow_poll: bool = True
     allow_schedule: bool = True
     allow_bazaar: bool = True
+    allow_location: bool = True
 
     def is_enabled(self, section: str) -> bool:
         """``True`` if the ``feat_{section}`` toggle is on."""

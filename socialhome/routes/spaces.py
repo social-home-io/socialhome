@@ -25,6 +25,7 @@ from ..app_keys import (
     space_zone_repo_key,
     user_repo_key,
 )
+from ..domain.post import LocationData
 from ..domain.space import SpaceZone
 from ..domain.user import SYSTEM_AUTHOR
 from ..domain.federation import PairingStatus
@@ -1061,17 +1062,39 @@ class SpacePostCollectionView(BaseView):
             type=body.get("type", "text"),
             content=body.get("content"),
             media_url=body.get("media_url"),
+            location=_extract_location(body),
         )
         if post is None:
             return web.json_response({"queued": True}, status=202)
-        return web.json_response(
-            {
-                "id": post.id,
-                "type": post.type.value,
-                "content": post.content,
-            },
-            status=201,
-        )
+        response: dict = {
+            "id": post.id,
+            "type": post.type.value,
+            "content": post.content,
+        }
+        if post.location is not None:
+            response["location"] = {
+                "lat": post.location.lat,
+                "lon": post.location.lon,
+                "label": post.location.label,
+            }
+        return web.json_response(response, status=201)
+
+
+def _extract_location(body: dict) -> LocationData | None:
+    """Pull a ``location`` block out of the request body.
+
+    Mirrors :func:`socialhome.routes.feed._extract_location`. Returns
+    ``None`` when no location was supplied; the service rejects a
+    ``LOCATION`` post that arrives without coords.
+    """
+    raw = body.get("location")
+    if not isinstance(raw, dict):
+        return None
+    lat = raw.get("lat")
+    lon = raw.get("lon")
+    if lat is None or lon is None:
+        return None
+    return LocationData(lat=float(lat), lon=float(lon), label=raw.get("label"))
 
 
 class SpaceOwnershipView(BaseView):

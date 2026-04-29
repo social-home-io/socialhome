@@ -34,13 +34,25 @@ export interface FileAttachment {
   size_bytes: number
 }
 
+export interface LocationData {
+  /** 4-decimal-place truncated by the server (~11 m precision). */
+  lat: number
+  lon: number
+  /** Optional user-typed label (max 80 chars). */
+  label?: string | null
+}
+
 export interface FeedPost {
   id: string
   author: string
-  type: 'text' | 'image' | 'video' | 'transcript' | 'poll' | 'schedule' | 'file' | 'bazaar' | 'event'
+  type: 'text' | 'image' | 'video' | 'transcript' | 'poll' | 'schedule' | 'file' | 'bazaar' | 'event' | 'location'
   content: string | null
   media_url: string | null
   file_meta: FileAttachment | null
+  /** Present when ``type === 'location'`` — drops a marker on a small
+   *  map in the feed card. The composer's LocationPicker captures
+   *  coordinates via navigator.geolocation. */
+  location?: LocationData | null
   reactions: Record<string, string[]>
   comment_count: number
   pinned: boolean

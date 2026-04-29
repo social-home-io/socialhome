@@ -35,9 +35,11 @@ from ..domain.post import (
     Comment,
     CommentType,
     FileMeta,
+    LocationData,
     Post,
     PostType,
 )
+from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
 from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -50,6 +52,12 @@ MAX_POST_LENGTH = 10_000
 
 #: Max comment length.
 MAX_COMMENT_LENGTH = 2_000
+
+#: Cap for the optional location-post label (composer hint, not a hard
+#: spec). Long enough for "Pascal's Cottage near Sintra" without
+#: collapsing the feed card; short enough to keep the federated payload
+#: lean.
+LOCATION_LABEL_MAX = 80
 
 
 class FeedService:
@@ -91,6 +99,7 @@ class FeedService:
         content: str | None = None,
         media_url: str | None = None,
         file_meta: FileMeta | None = None,
+        location: LocationData | None = None,
         pinned: bool = False,
         no_link_preview: bool = False,
     ) -> Post:
@@ -102,7 +111,16 @@ class FeedService:
         """
         author = await self._require_author(author_user_id)
         post_type = _coerce_post_type(type)
-        _validate_content(post_type, content, file_meta)
+        _validate_content(post_type, content, file_meta, location)
+        # Truncate to 4dp at the service boundary regardless of what the
+        # client sent — the column never holds higher precision than the
+        # federated form (§GPS truncation).
+        if location is not None:
+            location = LocationData(
+                lat=truncate_coord(location.lat) or 0.0,
+                lon=truncate_coord(location.lon) or 0.0,
+                label=location.label,
+            )
 
         # Household feature toggles (§18). Feed can be disabled entirely
         # or only certain post types (e.g. allow_video=False) may be on.
@@ -125,6 +143,7 @@ class FeedService:
             content=content,
             media_url=media_url,
             file_meta=file_meta,
+            location=location,
             pinned=bool(pinned),
             no_link_preview=bool(no_link_preview),
         )
@@ -395,6 +414,7 @@ def _validate_content(
     post_type: PostType,
     content: str | None,
     file_meta: FileMeta | None,
+    location: LocationData | None = None,
 ) -> None:
     if post_type is PostType.FILE:
         if file_meta is None:
@@ -404,6 +424,13 @@ def _validate_content(
         # passes the URL through to create_post. Content (caption) is
         # optional but bounded.
         pass
+    elif post_type is PostType.LOCATION:
+        if location is None:
+            raise ValueError("location post requires lat/lon")
+        if location.label is not None and len(location.label) > LOCATION_LABEL_MAX:
+            raise ValueError(
+                f"location label exceeds {LOCATION_LABEL_MAX} characters",
+            )
     elif post_type in (PostType.TEXT, PostType.TRANSCRIPT):
         if not content or not content.strip():
             raise ValueError(f"{post_type.value} post requires content")

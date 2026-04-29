@@ -170,6 +170,82 @@ async def test_space_post_created_persists(db, bus, inbound):
     assert captured[0].space_id == "sp-1"
 
 
+async def test_space_post_created_carries_location(db, bus, inbound):
+    """Location posts ride on SPACE_POST_CREATED with a `location` block
+    in the payload. Inbound decodes it into a LocationData."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            "sp-loc",
+            "Space",
+            "peer-a",
+            "owner",
+            "aa" * 32,
+            SpaceType.HOUSEHOLD.value,
+            JoinMode.INVITE_ONLY.value,
+        ),
+    )
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-loc",
+                "author": "user-remote",
+                "type": "location",
+                "content": "Sunset",
+                "location": {"lat": 52.5200, "lon": 4.0600, "label": "Marina"},
+            },
+            space_id="sp-loc",
+        )
+    )
+    assert captured and captured[0].post.location is not None
+    loc = captured[0].post.location
+    assert loc.lat == 52.5200
+    assert loc.lon == 4.0600
+    assert loc.label == "Marina"
+
+
+async def test_space_post_created_drops_malformed_location(db, bus, inbound):
+    """A peer that sends a non-numeric lat shouldn't break the post —
+    the location is silently dropped, the rest is preserved."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            "sp-loc-bad",
+            "Space",
+            "peer-a",
+            "owner",
+            "aa" * 32,
+            SpaceType.HOUSEHOLD.value,
+            JoinMode.INVITE_ONLY.value,
+        ),
+    )
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-loc-bad",
+                "author": "user-remote",
+                "type": "location",
+                "location": {"lat": "not-a-number", "lon": 4.0600},
+            },
+            space_id="sp-loc-bad",
+        )
+    )
+    assert captured
+    assert captured[0].post.location is None
+
+
 # ─── User status ─────────────────────────────────────────────────────────
 
 

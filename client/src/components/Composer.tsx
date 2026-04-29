@@ -10,6 +10,7 @@ import { useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
+import { LocationPicker, type LocationDraft } from './LocationPicker'
 import { MarkdownToolbar } from './MarkdownToolbar'
 import { PollBuilder, type PollDraft } from './PollUI'
 import { ScheduleBuilder, type ScheduleDraft } from './ScheduleBuilder'
@@ -20,8 +21,19 @@ import { currentUser } from '@/store/auth'
 
 const MAX_LENGTH = 5000
 
+/** Extra fields the composer hands back alongside type/content/mediaUrl.
+ *  Currently only carries `location` for the location-share post type. */
+export interface ComposerExtras {
+  location?: LocationDraft
+}
+
 interface ComposerProps {
-  onSubmit: (type: string, content: string, mediaUrl?: string) => Promise<string | void>
+  onSubmit: (
+    type: string,
+    content: string,
+    mediaUrl?: string,
+    extras?: ComposerExtras,
+  ) => Promise<string | void>
   context?: string
   placeholder?: string
   /** Set when the composer lives inside a space feed — the schedule
@@ -39,7 +51,7 @@ const submitting = signal(false)
 // the icon so the option doesn't dangle there with no working flow.
 const TYPE_ICONS_HOUSEHOLD: Record<string, string> = {
   text: '🔤', image: '📷', video: '🎬', file: '📄',
-  poll: '📊', schedule: '📅',
+  poll: '📊', schedule: '📅', location: '📍',
 }
 const TYPE_ICONS_SPACE: Record<string, string> = {
   ...TYPE_ICONS_HOUSEHOLD,
@@ -48,13 +60,20 @@ const TYPE_ICONS_SPACE: Record<string, string> = {
 
 const MEDIA_TYPES = new Set(['image', 'video', 'file'])
 // Types whose body lives in a dedicated builder modal (poll question,
-// schedule slots) — the textarea is hidden in their compose state so
-// the operator isn't confused by an extra "what's on your mind" field
-// next to the modal trigger.
-const BUILDER_TYPES = new Set(['poll', 'schedule'])
+// schedule slots, location pin) — the textarea stays available for an
+// optional caption (location, especially), but the type-specific data
+// rides on a draft populated by the modal.
+const BUILDER_TYPES = new Set(['poll', 'schedule', 'location'])
+// Types whose builder fully replaces the textarea — poll/schedule have
+// their question / slots inside the modal so a redundant "What's on
+// your mind" field next to the modal trigger is confusing. Location
+// keeps the textarea visible so the user can add an optional caption
+// alongside the pin.
+const TEXTAREA_HIDDEN_FOR = new Set(['poll', 'schedule'])
 
 function typeAcceptsMedia(t: string): boolean { return MEDIA_TYPES.has(t) }
 function typeUsesBuilder(t: string): boolean { return BUILDER_TYPES.has(t) }
+function typeHidesTextarea(t: string): boolean { return TEXTAREA_HIDDEN_FOR.has(t) }
 
 function inferTypeFromFile(file: File): 'image' | 'video' | 'file' {
   if (file.type.startsWith('image/')) return 'image'
@@ -74,6 +93,8 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
   const [pendingSchedule, setPendingSchedule] = useState<ScheduleDraft | null>(null)
   const [pollOpen, setPollOpen] = useState(false)
   const [pendingPoll, setPendingPoll] = useState<PollDraft | null>(null)
+  const [locationOpen, setLocationOpen] = useState(false)
+  const [pendingLocation, setPendingLocation] = useState<LocationDraft | null>(null)
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [mediaName, setMediaName] = useState<string | null>(null)
   const [dragActive, setDragActive] = useState(false)
@@ -140,12 +161,17 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
       setPollOpen(true)
       return
     }
+    if (postType.value === 'location' && !pendingLocation) {
+      setLocationOpen(true)
+      return
+    }
     submitting.value = true
     try {
       const newPostId = await onSubmit(
         postType.value,
         content.value,
         mediaUrl ?? undefined,
+        pendingLocation ? { location: pendingLocation } : undefined,
       )
       if (postType.value === 'schedule' && pendingSchedule && newPostId) {
         const base = spaceId
@@ -185,6 +211,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
       resetAttached()
       setPendingSchedule(null)
       setPendingPoll(null)
+      setPendingLocation(null)
     } finally {
       submitting.value = false
     }
@@ -220,7 +247,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
           onUpdate={(newText) => { content.value = newText.slice(0, MAX_LENGTH) }}
         />
       )}
-      {!typeUsesBuilder(postType.value) && (
+      {!typeHidesTextarea(postType.value) && (
         <>
           <textarea
             ref={textareaRef}
@@ -284,6 +311,18 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
           </button>
         </div>
       )}
+      {postType.value === 'location' && pendingLocation && (
+        <div class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+          📍 {pendingLocation.label
+            ? `${pendingLocation.label} (${pendingLocation.lat.toFixed(4)}, ${pendingLocation.lon.toFixed(4)})`
+            : `${pendingLocation.lat.toFixed(4)}, ${pendingLocation.lon.toFixed(4)}`}
+          {' — '}
+          <button type="button" class="sh-link-button"
+                  onClick={() => setLocationOpen(true)}>
+            edit
+          </button>
+        </div>
+      )}
       {postType.value === 'poll' && pendingPoll && (
         <div class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
           📊 "{pendingPoll.question}" · {pendingPoll.options.length} options
@@ -313,7 +352,9 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
             ? 'Propose times…'
             : postType.value === 'poll' && !pendingPoll
               ? 'Build poll…'
-              : 'Post'}
+              : postType.value === 'location' && !pendingLocation
+                ? 'Pick location…'
+                : 'Post'}
         </Button>
       </div>
       <ScheduleBuilder
@@ -331,6 +372,14 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
           setPollOpen(false)
         }}
         onClose={() => setPollOpen(false)}
+      />
+      <LocationPicker
+        open={locationOpen}
+        onSubmit={(draft) => {
+          setPendingLocation(draft)
+          setLocationOpen(false)
+        }}
+        onClose={() => setLocationOpen(false)}
       />
     </form>
   )

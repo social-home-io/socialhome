@@ -33,7 +33,7 @@ from ..domain.events import (
     SpacePostCreated,
     UserStatusChanged,
 )
-from ..domain.post import Comment, CommentType, Post, PostType
+from ..domain.post import Comment, CommentType, LocationData, Post, PostType
 from ..domain.space import SpaceMember
 from ..domain.user import RemoteUser, UserStatus
 from ..infrastructure.event_bus import EventBus
@@ -522,6 +522,20 @@ class FederationInboundService:
             post_type = PostType(type_str)
         except ValueError:
             post_type = PostType.TEXT
+        # Location is carried inside the encrypted payload alongside the
+        # rest of the post body. Drop it silently if the peer sent
+        # malformed coords — the post itself is still readable.
+        location: LocationData | None = None
+        raw_loc = payload.get("location")
+        if isinstance(raw_loc, dict):
+            try:
+                location = LocationData(
+                    lat=float(raw_loc["lat"]),
+                    lon=float(raw_loc["lon"]),
+                    label=raw_loc.get("label"),
+                )
+            except KeyError, TypeError, ValueError:
+                location = None
         return Post(
             id=post_id,
             author=author,
@@ -529,5 +543,6 @@ class FederationInboundService:
             content=payload.get("content"),
             media_url=payload.get("media_url"),
             file_meta=None,
+            location=location,
             created_at=parse_iso8601_lenient(payload.get("occurred_at")),
         )

@@ -92,7 +92,7 @@ Viewer-private renames of other users (local or remote). Aliases never federate 
 |---|---|---|
 | GET | `/api/feed` | Summary with latest posts + highlights. |
 | GET | `/api/feed/posts` | Paginated post list. |
-| POST | `/api/feed/posts` | Create a household post. |
+| POST | `/api/feed/posts` | Create a household post. Body: `{type, content?, media_url?, location?, pinned?, no_link_preview?}`. `type` ∈ `text\|image\|video\|file\|poll\|schedule\|location`. When `type='location'` the body **must** include `location: {lat, lon, label?}` — server truncates `lat`/`lon` to 4 decimal places (~11 m) at the boundary, `label` is optional and capped at 80 characters. `bazaar` posts are space-scoped; `event` posts are auto-created by the calendar bridge. |
 | GET / PATCH / DELETE | `/api/feed/posts/{id}` | Read / edit / delete one post. |
 | GET / POST / DELETE | `/api/feed/posts/{id}/reactions[/{emoji}]` | List reactions; add / remove own. |
 | GET / POST | `/api/feed/posts/{id}/comments` | List / add comments. |
@@ -193,6 +193,12 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 /api/spaces/{id}/posts/{pid}/reactions[/{emoji}]
 /api/spaces/{id}/posts/{pid}/comments[/{cid}]
 ```
+
+`POST /api/spaces/{id}/posts` accepts the same body as the household
+endpoint, including `{type: "location", location: {lat, lon, label?}}`.
+Space-scoped location posts ride on the existing
+`SPACE_POST_CREATED` federation event — peers receive the location
+inside the encrypted payload and render the same map card.
 
 ### Pages
 

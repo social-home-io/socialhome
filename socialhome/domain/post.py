@@ -32,6 +32,12 @@ class PostType(StrEnum):
     #: One post per series — recurring events do not create per-occurrence
     #: posts. RSVP buttons in the feed call the existing rsvp endpoint.
     EVENT = "event"
+    #: One-shot location pin. The post carries a :class:`LocationData`
+    #: with 4dp-truncated lat/lon and an optional user-typed label; the
+    #: feed renderer drops a marker on a small map. No live tracking —
+    #: the pin freezes at the position the operator captured at post
+    #: time. See :data:`Post.location`.
+    LOCATION = "location"
 
 
 class CommentType(StrEnum):
@@ -303,6 +309,23 @@ class PollData:
     user_vote: tuple[int, ...] | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class LocationData:
+    """One-shot location pin attached to a post.
+
+    Coordinates are 4-decimal-place truncated at the service layer
+    (``domain.presence.truncate_coord``) before they reach this
+    dataclass — every consumer can assume the values they see are the
+    rounded form. Stored as JSON in ``feed_posts.location_json`` /
+    ``space_posts.location_json``; federated inside the encrypted
+    payload of ``SPACE_LOCATION_POST_CREATED`` events.
+    """
+
+    lat: float
+    lon: float
+    label: str | None = None
+
+
 # ─── Schedule polls (Doodle-style) ────────────────────────────────────────
 
 
@@ -431,6 +454,10 @@ class Post:
     no_link_preview: bool = False
     moderated: bool = False
     file_meta: FileMeta | None = None
+    #: Set when ``type is PostType.LOCATION``. The renderer drops a
+    #: marker on a small map; the optional label is whatever the
+    #: operator typed in the composer (no reverse geocoding).
+    location: LocationData | None = None
     # SpaceBot that authored this post via the bot-bridge. Non-NULL iff
     # ``author == SYSTEM_AUTHOR``; the feed renderer uses it to resolve
     # bot icon, name and scope-based attribution. Nullable: when the bot

@@ -149,11 +149,18 @@ export default function SpaceFeedPage() {
   }
 
   const handleSubmit = async (
-    type: string, content: string, mediaUrl?: string,
+    type: string,
+    content: string,
+    mediaUrl?: string,
+    extras?: { location?: { lat: number; lon: number; label: string | null } },
   ) => {
+    const body: Record<string, unknown> = {
+      type, content, media_url: mediaUrl ?? null,
+    }
+    if (extras?.location) body.location = extras.location
     const post = await api.post(
       `/api/spaces/${spaceId}/posts`,
-      { type, content, media_url: mediaUrl ?? null },
+      body,
     ) as { id: string }
     showToast('Post shared', 'success')
     await loadSpaceFeed(spaceId)

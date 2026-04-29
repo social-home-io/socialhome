@@ -6123,6 +6123,45 @@ hr {
   gap: var(--sh-space-xs);
 }
 
+/* Feed-card location post (LocationPostCard) ─────────────────────── */
+.sh-location-post {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-location-post-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sh-space-sm);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-location-post-label {
+  font-weight: 600;
+}
+.sh-location-post-coords {
+  font-family: var(--sh-font-family-mono, monospace);
+  font-size: var(--sh-font-size-xs);
+}
+.sh-location-post-open {
+  margin-left: auto;
+}
+
+/* LocationPicker modal body */
+.sh-location-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+}
+.sh-location-picker-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-md) 0;
+  text-align: center;
+}
+
 /* Mention */
 .sh-mention {
   color: var(--sh-primary);

@@ -225,6 +225,51 @@ async def test_create_post_bad_type_422(client):
     assert resp.status == 422
 
 
+async def test_create_location_post_round_trip(client):
+    """A location post stores lat/lon and returns them in the response,
+    truncated to 4 decimals at the service boundary."""
+    resp = await client.post(
+        "/api/feed/posts",
+        json={
+            "type": "location",
+            "content": "Beach day 🌊",
+            "location": {
+                "lat": 52.5200123456,
+                "lon": 4.0600987654,
+                "label": "Marina",
+            },
+        },
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201, await resp.text()
+    body = await resp.json()
+    assert body["type"] == "location"
+    assert body["location"]["lat"] == 52.5200
+    assert body["location"]["lon"] == 4.0601
+    assert body["location"]["label"] == "Marina"
+
+
+async def test_create_location_post_missing_coords_422(client):
+    resp = await client.post(
+        "/api/feed/posts",
+        json={"type": "location"},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+
+
+async def test_create_location_post_label_too_long_422(client):
+    resp = await client.post(
+        "/api/feed/posts",
+        json={
+            "type": "location",
+            "location": {"lat": 0.0, "lon": 0.0, "label": "x" * 81},
+        },
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+
+
 async def test_get_nonexistent_post_comments_returns_empty(client):
     """GET /api/feed/posts/{id}/comments for an unknown post returns 200 with empty list."""
     resp = await client.get(

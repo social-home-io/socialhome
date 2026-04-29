@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
-from socialhome.domain.post import PostType
+from socialhome.domain.post import LocationData, Post, PostType
 
 
 @pytest.fixture
@@ -73,6 +75,58 @@ async def test_get_missing_post_raises(env):
     """Getting a nonexistent post raises KeyError."""
     with pytest.raises(KeyError):
         await env.feed_svc.get_post("nonexistent")
+
+
+async def test_location_post_round_trip(env):
+    """A LOCATION post persists its lat/lon/label through location_json
+    and rehydrates into a LocationData on read."""
+    u = await env.user_svc.provision(username="alice", display_name="Alice")
+    saved = await env.post_repo.save(
+        Post(
+            id="post-loc-1",
+            author=u.user_id,
+            type=PostType.LOCATION,
+            created_at=datetime.now(timezone.utc),
+            content="Beach day",
+            location=LocationData(lat=52.5200, lon=4.0600, label="Marina"),
+        ),
+    )
+    got = await env.post_repo.get(saved.id)
+    assert got is not None
+    assert got.type is PostType.LOCATION
+    assert got.location is not None
+    assert got.location.lat == 52.5200
+    assert got.location.lon == 4.0600
+    assert got.location.label == "Marina"
+
+
+async def test_location_post_label_optional(env):
+    """label is None ⇒ stored omitted; round-trips back as None."""
+    u = await env.user_svc.provision(username="alice", display_name="Alice")
+    await env.post_repo.save(
+        Post(
+            id="post-loc-2",
+            author=u.user_id,
+            type=PostType.LOCATION,
+            created_at=datetime.now(timezone.utc),
+            location=LocationData(lat=10.0, lon=20.0),
+        ),
+    )
+    got = await env.post_repo.get("post-loc-2")
+    assert got is not None and got.location is not None
+    assert got.location.label is None
+
+
+async def test_non_location_post_keeps_location_none(env):
+    """A regular text post round-trips with location=None."""
+    u = await env.user_svc.provision(username="alice", display_name="Alice")
+    p = await env.feed_svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.TEXT,
+        content="hi",
+    )
+    got = await env.feed_svc.get_post(p.id)
+    assert got.location is None
 
 
 # ── Read watermark ─────────────────────────────────────────────────────────

@@ -400,7 +400,7 @@ class SpaceSyncResumeProvider:
 
 
 def _post_to_payload(post: "Post") -> dict:
-    return {
+    payload: dict = {
         "id": post.id,
         "author": post.author,
         "type": post.type.value,
@@ -408,6 +408,16 @@ def _post_to_payload(post: "Post") -> dict:
         "media_url": post.media_url,
         "occurred_at": _iso(post.created_at),
     }
+    # Location posts ride on the existing SPACE_POST_CREATED event —
+    # no new event type. Coords are already 4dp-truncated by
+    # feed_service / space_service before the post is persisted, so
+    # the payload carries the canonical wire form.
+    if post.location is not None:
+        loc: dict = {"lat": post.location.lat, "lon": post.location.lon}
+        if post.location.label is not None:
+            loc["label"] = post.location.label
+        payload["location"] = loc
+    return payload
 
 
 def _comment_to_payload(post_id: str, comment: "Comment") -> dict:

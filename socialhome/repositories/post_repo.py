@@ -24,7 +24,7 @@ reused by that module.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..utils.datetime import parse_iso8601_optional
@@ -32,6 +32,7 @@ from ..domain.post import (
     Comment,
     CommentType,
     FileMeta,
+    LocationData,
     MAX_DISTINCT_REACTIONS_PER_POST,
     Post,
     PostType,
@@ -133,8 +134,8 @@ class SqlitePostRepo:
             INSERT INTO feed_posts(
                 id, author, type, content, media_url, reactions,
                 comment_count, pinned, deleted, edited_at, no_link_preview,
-                moderated, file_meta_json, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                moderated, file_meta_json, location_json, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -145,7 +146,8 @@ class SqlitePostRepo:
                 edited_at=excluded.edited_at,
                 no_link_preview=excluded.no_link_preview,
                 moderated=excluded.moderated,
-                file_meta_json=excluded.file_meta_json
+                file_meta_json=excluded.file_meta_json,
+                location_json=excluded.location_json
             """,
             (
                 post.id,
@@ -161,6 +163,7 @@ class SqlitePostRepo:
                 int(post.no_link_preview),
                 int(post.moderated),
                 _encode_file_meta(post.file_meta),
+                _encode_location(post.location),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -513,6 +516,26 @@ def _decode_file_meta(raw: str | None) -> FileMeta | None:
     )
 
 
+def _encode_location(loc: LocationData | None) -> str | None:
+    if loc is None:
+        return None
+    payload: dict[str, Any] = {"lat": float(loc.lat), "lon": float(loc.lon)}
+    if loc.label is not None:
+        payload["label"] = loc.label
+    return dump_json(payload)
+
+
+def _decode_location(raw: str | None) -> LocationData | None:
+    obj = load_json(raw, None)
+    if not obj:
+        return None
+    return LocationData(
+        lat=float(obj["lat"]),
+        lon=float(obj["lon"]),
+        label=obj.get("label"),
+    )
+
+
 def _row_to_post(row: dict | None) -> Post | None:
     if row is None:
         return None
@@ -535,6 +558,7 @@ def _row_to_post(row: dict | None) -> Post | None:
         no_link_preview=bool_col(row.get("no_link_preview", 0)),
         moderated=bool_col(row.get("moderated", 0)),
         file_meta=_decode_file_meta(row.get("file_meta_json")),
+        location=_decode_location(row.get("location_json")),
     )
 
 

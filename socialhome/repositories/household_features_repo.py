@@ -31,6 +31,7 @@ _ALLOW_KEYS: tuple[str, ...] = (
     "allow_poll",
     "allow_schedule",
     "allow_bazaar",
+    "allow_location",
 )
 ALL_KEYS: frozenset[str] = frozenset(_FEATURE_KEYS + _ALLOW_KEYS)
 

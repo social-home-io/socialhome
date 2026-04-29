@@ -11,12 +11,13 @@ from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.gallery import GalleryItem
 from socialhome.domain.page import Page
-from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
+    _post_to_payload,
 )
 
 
@@ -518,3 +519,48 @@ async def test_handle_request_skips_resources_when_repo_missing(provider_factory
     )
     assert sent == 1
     assert fed.sent[0]["type"] == FederationEventType.SPACE_POST_CREATED
+
+
+# ── _post_to_payload location handling ─────────────────────────────────
+
+
+def test_post_to_payload_omits_location_when_unset():
+    """A normal post (no location) doesn't pollute the wire payload."""
+    post = Post(
+        id="p-1",
+        author="alice",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        content="hi",
+    )
+    payload = _post_to_payload(post)
+    assert "location" not in payload
+
+
+def test_post_to_payload_includes_location_with_label():
+    """LOCATION posts ride on SPACE_POST_CREATED with a `location`
+    sub-block that includes lat/lon/label."""
+    post = Post(
+        id="p-loc",
+        author="alice",
+        type=PostType.LOCATION,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        content="Sunset",
+        location=LocationData(lat=52.52, lon=4.06, label="Marina"),
+    )
+    payload = _post_to_payload(post)
+    assert payload["type"] == "location"
+    assert payload["location"] == {"lat": 52.52, "lon": 4.06, "label": "Marina"}
+
+
+def test_post_to_payload_omits_label_when_none():
+    """A LocationData with label=None ⇒ no `label` key on the wire."""
+    post = Post(
+        id="p-loc-2",
+        author="alice",
+        type=PostType.LOCATION,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        location=LocationData(lat=10.0, lon=20.0),
+    )
+    payload = _post_to_payload(post)
+    assert payload["location"] == {"lat": 10.0, "lon": 20.0}

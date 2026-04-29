@@ -177,6 +177,49 @@ async def test_file_post_requires_meta(stack):
         )
 
 
+async def test_location_post_requires_coords(stack):
+    """LOCATION without a LocationData payload is a 422 / ValueError."""
+    from socialhome.domain.post import LocationData  # local import: type-narrow
+
+    _ = LocationData  # silence "unused" lint
+    u = await stack.provision_user("pascal")
+    with pytest.raises(ValueError, match="lat/lon"):
+        await stack.feed_svc.create_post(
+            author_user_id=u.user_id,
+            type=PostType.LOCATION,
+        )
+
+
+async def test_location_post_truncates_to_4dp(stack):
+    """High-precision coords are rounded at the service boundary so the
+    stored / federated values never exceed 4dp."""
+    from socialhome.domain.post import LocationData
+
+    u = await stack.provision_user("pascal")
+    p = await stack.feed_svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.LOCATION,
+        location=LocationData(lat=52.5200123456, lon=4.06009876, label="Marina"),
+    )
+    assert p.location is not None
+    assert p.location.lat == 52.5200
+    assert p.location.lon == 4.0601
+    assert p.location.label == "Marina"
+
+
+async def test_location_post_label_length_capped(stack):
+    """A label longer than LOCATION_LABEL_MAX (80) raises ValueError."""
+    from socialhome.domain.post import LocationData
+
+    u = await stack.provision_user("pascal")
+    with pytest.raises(ValueError, match="label exceeds"):
+        await stack.feed_svc.create_post(
+            author_user_id=u.user_id,
+            type=PostType.LOCATION,
+            location=LocationData(lat=10.0, lon=20.0, label="x" * 81),
+        )
+
+
 async def test_list_feed_pagination(stack):
     """list_feed respects limit and before-cursor pagination."""
     u = await stack.provision_user("pascal")

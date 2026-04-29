@@ -8,6 +8,7 @@ import { BazaarPostBody } from './BazaarPostBody'
 import { BotAvatar } from './BotAvatar'
 import { EventPostCard } from './EventPostCard'
 import { FileRenderer, VideoRenderer, ImageRenderer } from './FileRenderer'
+import { LocationPostCard } from './LocationPostCard'
 import { renderMarkdown } from './markdown'
 import { openReport } from './ReportDialog'
 import { PollUI } from './PollUI'
@@ -190,10 +191,13 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, show
             {post.type === 'event' && (
               <EventPostCard eventId={post.linked_event_id ?? null} />
             )}
+            {post.type === 'location' && post.location && (
+              <LocationPostCard location={post.location} />
+            )}
             {post.type !== 'file' && post.type !== 'video' &&
               post.type !== 'image' && post.type !== 'schedule' &&
               post.type !== 'poll' && post.type !== 'bazaar' &&
-              post.type !== 'event' &&
+              post.type !== 'event' && post.type !== 'location' &&
               post.media_url && (
                 <ImageRenderer src={post.media_url} alt={post.content ?? undefined} />
               )}

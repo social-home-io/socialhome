@@ -139,6 +139,53 @@ async def test_non_owner_cannot_dissolve(stack):
         await stack.space_svc.dissolve_space(space.id, actor_username="bob")
 
 
+async def test_space_location_post_round_trip(stack):
+    """Space-scoped location post: lat/lon truncated to 4dp at the
+    service boundary, label preserved, post persisted."""
+    from socialhome.domain.post import LocationData
+
+    a = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.LOCATION,
+        location=LocationData(lat=52.5200123456, lon=4.0600987, label="Marina"),
+    )
+    assert p is not None
+    assert p.location is not None
+    assert p.location.lat == 52.5200
+    assert p.location.lon == 4.0601
+    assert p.location.label == "Marina"
+
+
+async def test_space_location_post_requires_coords(stack):
+    """LOCATION without a LocationData payload is a 422 / ValueError."""
+    a = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    with pytest.raises(ValueError, match="lat/lon"):
+        await stack.space_svc.create_post(
+            space.id,
+            author_user_id=a.user_id,
+            type=PostType.LOCATION,
+        )
+
+
+async def test_space_location_post_label_capped(stack):
+    """Label longer than LOCATION_LABEL_MAX (80) raises ValueError."""
+    from socialhome.domain.post import LocationData
+
+    a = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    with pytest.raises(ValueError, match="label exceeds"):
+        await stack.space_svc.create_post(
+            space.id,
+            author_user_id=a.user_id,
+            type=PostType.LOCATION,
+            location=LocationData(lat=10.0, lon=20.0, label="x" * 81),
+        )
+
+
 async def test_space_post_with_moderation(stack):
     """Moderated space queues regular member posts; admin posts go through directly."""
     a = await stack.provision_user("anna")

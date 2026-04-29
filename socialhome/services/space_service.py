@@ -53,7 +53,8 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType, PairingStatus
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
-from ..domain.post import Comment, CommentType, FileMeta, Post, PostType
+from ..domain.post import Comment, CommentType, FileMeta, LocationData, Post, PostType
+from ..domain.presence import truncate_coord
 from ..domain.space import (
     JoinMode,
     ModerationAlreadyDecidedError,
@@ -1323,6 +1324,7 @@ class SpaceService:
         content: str | None = None,
         media_url: str | None = None,
         file_meta: FileMeta | None = None,
+        location: LocationData | None = None,
     ) -> Post | None:
         """Create a post in the space, subject to the feature's access level.
 
@@ -1343,11 +1345,21 @@ class SpaceService:
             raise SpacePermissionError(f"space does not allow {type!r} posts")
 
         post_type = _coerce_post_type(type)
-        _validate_space_content(post_type, content, file_meta)
+        _validate_space_content(post_type, content, file_meta, location)
         is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
         decision = space.features.access_decision("posts", is_admin=is_admin)
         if decision == "deny":
             raise SpacePermissionError("posting is admin-only in this space")
+
+        # Truncate to 4dp at the service boundary regardless of what the
+        # client sent — the column never holds higher precision than the
+        # federated form (§GPS truncation).
+        if location is not None:
+            location = LocationData(
+                lat=truncate_coord(location.lat) or 0.0,
+                lon=truncate_coord(location.lon) or 0.0,
+                label=location.label,
+            )
 
         post = Post(
             id=uuid.uuid4().hex,
@@ -1357,6 +1369,7 @@ class SpaceService:
             content=content,
             media_url=media_url,
             file_meta=file_meta,
+            location=location,
         )
         if decision == "queue":
             now = datetime.now(timezone.utc)
@@ -1372,6 +1385,15 @@ class SpaceService:
                     "content": content,
                     "media_url": media_url,
                     "file_meta": _file_meta_to_payload(file_meta),
+                    "location": (
+                        {
+                            "lat": location.lat,
+                            "lon": location.lon,
+                            "label": location.label,
+                        }
+                        if location is not None
+                        else None
+                    ),
                 },
                 current_snapshot=None,
                 submitted_at=now,
@@ -1994,13 +2016,27 @@ def _coerce_comment_type(value: CommentType | str) -> CommentType:
         raise ValueError(f"invalid comment type {value!r}") from exc
 
 
+#: Cap for the optional location-post label. Mirrors
+#: feed_service.LOCATION_LABEL_MAX so the household + space surfaces
+#: agree.
+LOCATION_LABEL_MAX = 80
+
+
 def _validate_space_content(
     post_type: PostType,
     content: str | None,
     file_meta: FileMeta | None,
+    location: LocationData | None = None,
 ) -> None:
     if post_type is PostType.FILE and file_meta is None:
         raise ValueError("file post requires file_meta")
+    if post_type is PostType.LOCATION:
+        if location is None:
+            raise ValueError("location post requires lat/lon")
+        if location.label is not None and len(location.label) > LOCATION_LABEL_MAX:
+            raise ValueError(
+                f"location label exceeds {LOCATION_LABEL_MAX} characters",
+            )
     if post_type in (PostType.TEXT, PostType.TRANSCRIPT):
         if not content or not content.strip():
             raise ValueError(f"{post_type.value} post requires content")
