@@ -112,13 +112,25 @@ a:focus:not(:focus-visible) { outline: none; }
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: var(--sh-space-lg) var(--sh-space-md);
+  padding: var(--sh-space-lg) var(--sh-space-md) 0;
   background: var(--sh-bg);
   border-right: 1px solid var(--sh-border);
   min-height: 100vh;
+  height: 100vh;
   position: sticky;
   top: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.sh-sidenav::-webkit-scrollbar {
+  width: 6px;
+}
+.sh-sidenav::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sh-text-muted) 30%, transparent);
+  border-radius: 3px;
+}
+.sh-sidenav::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--sh-text-muted) 55%, transparent);
 }
 /* Wordmark — the canonical "Social Home" lockup, mirroring the
    masthead on social-home.io. Used both as the login-hero and as
@@ -165,24 +177,52 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 
 .sh-sidenav-brand {
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  margin-bottom: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md) var(--sh-space-md);
+  margin-bottom: var(--sh-space-xs);
+  border-bottom: 1px solid color-mix(in srgb, var(--sh-border) 60%, transparent);
 }
+.sh-sidenav-brand,
+.sh-sidenav-brand:hover {
+  text-decoration: none;
+}
+.sh-sidenav-brand .sh-logo {
+  transition: transform var(--sh-transition-fast);
+}
+.sh-sidenav-brand:hover .sh-logo {
+  transform: rotate(-4deg);
+}
+
 .sh-sidenav a {
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm) var(--sh-space-md);
+  padding: 7px var(--sh-space-md);
   border-radius: var(--sh-radius-md);
   color: var(--sh-text);
   font-weight: 500;
   font-size: var(--sh-font-size-sm);
-  transition: background var(--sh-transition-fast), color var(--sh-transition-fast);
+  transition:
+    background var(--sh-transition-fast),
+    color var(--sh-transition-fast),
+    box-shadow var(--sh-transition-fast),
+    transform var(--sh-transition-fast);
+}
+.sh-sidenav a .sh-sidenav-icon {
+  transition: transform var(--sh-transition-fast), color var(--sh-transition-fast);
+  color: var(--sh-text-muted);
 }
 .sh-sidenav a:hover {
   background: var(--sh-bg-secondary);
   text-decoration: none;
   color: var(--sh-primary);
+}
+.sh-sidenav a:hover .sh-sidenav-icon {
+  color: var(--sh-primary);
+  transform: scale(1.08);
+}
+.sh-sidenav a:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
 }
 .sh-sidenav a[aria-current="page"],
 .sh-sidenav a.sh-active {
@@ -191,10 +231,92 @@ a:focus:not(:focus-visible) { outline: none; }
   font-weight: 600;
   box-shadow: inset 3px 0 0 var(--sh-primary);
 }
-.sh-sidenav hr {
+.sh-sidenav a[aria-current="page"] .sh-sidenav-icon,
+.sh-sidenav a.sh-active .sh-sidenav-icon {
+  color: var(--sh-primary);
+}
+
+.sh-sidenav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: var(--sh-space-md);
+}
+.sh-sidenav-group:first-of-type {
+  margin-top: var(--sh-space-sm);
+}
+.sh-sidenav-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-md);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+  transition: color var(--sh-transition-fast);
+}
+.sh-sidenav-group-header::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  transition: opacity var(--sh-transition-fast), background var(--sh-transition-fast);
+}
+.sh-sidenav-group--active .sh-sidenav-group-header {
+  color: var(--sh-primary);
+}
+.sh-sidenav-group--active .sh-sidenav-group-header::before {
+  opacity: 1;
+  background: var(--sh-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 20%, transparent);
+}
+
+.sh-sidenav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+.sh-sidenav-link-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sh-sidenav-divider {
   border: none;
   border-top: 1px solid var(--sh-border);
-  margin: var(--sh-space-sm) var(--sh-space-md);
+  margin: var(--sh-space-md) var(--sh-space-md);
+}
+
+.sh-sidenav-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  margin: auto calc(var(--sh-space-md) * -1) 0;
+  padding: var(--sh-space-md);
+  border-top: 1px solid var(--sh-border);
+  position: sticky;
+  bottom: 0;
+  background: var(--sh-bg);
+}
+.sh-sidenav-identity__name {
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  color: var(--sh-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-sidenav-identity .sh-avatar {
+  flex: 0 0 auto;
 }
 
 .sh-main {
@@ -752,37 +874,74 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
 /* ───── 6. Skeletons + spinners ──────────────────────────────────────── */
 
-/* Spinner — three pulsing dots in the brand accent. The dot diameter
-   is driven by the --sh-spinner-dot custom property (the Spinner
-   component sets it from its `size` prop) so a single rule scales for
-   inline buttons (size=6) and full-page loaders (size=12) alike. */
+/* Spinner — the LogoMark itself, animating. Inherits the surrounding
+   ink colour for the house outline + dots; the chat notch breathes
+   in --sh-primary so the mark stays warm even on monochrome
+   surfaces. The wrapper exists to centre the SVG and carry
+   role="status" / aria-label for assistive tech. */
 .sh-spinner {
   display: inline-flex;
   align-items: center;
-  gap: calc(var(--sh-spinner-dot, 8px) * 0.6);
+  justify-content: center;
   vertical-align: middle;
-  --sh-spinner-dot: 8px;
 }
-.sh-spinner .sh-spinner-dot {
-  width: var(--sh-spinner-dot);
-  height: var(--sh-spinner-dot);
-  border-radius: 50%;
-  background: var(--sh-primary);
-  opacity: 0.35;
-  animation: sh-spinner-pulse 1.1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+
+/* Animated logo — three layered animations:
+   1. The chat-notch fill breathes (opacity 0.4 → 1) on a 1.6s loop.
+   2. The three feed dots cascade in a wave with 0.18s offsets — each
+      dot fades up and gently scales out, then settles back. The
+      cascade direction reads left-to-right, matching how a feed
+      streams in.
+   3. The whole mark rocks ±3° on a slow 2.4s sine — the house never
+      fully rotates (asymmetric → would look broken) but enough sway
+      to signal "alive / thinking" at a glance.
+   Suppressed under prefers-reduced-motion so the mark stays still
+   for users who opted out of motion. */
+.sh-logo {
+  display: inline-block;
+  transform-origin: 32px 56px; /* foot of the house — rocks off the floor, not the roof */
 }
-.sh-spinner .sh-spinner-dot:nth-child(2) { animation-delay: 0.16s; }
-.sh-spinner .sh-spinner-dot:nth-child(3) { animation-delay: 0.32s; }
-@keyframes sh-spinner-pulse {
-  0%, 80%, 100% { opacity: 0.35; transform: scale(0.85); }
-  40%           { opacity: 1;    transform: scale(1.1); }
+.sh-logo--loading {
+  animation: sh-logo-rock 2.4s ease-in-out infinite;
 }
+.sh-logo--loading .sh-logo__notch {
+  transform-origin: 49px 30px;
+  animation: sh-logo-notch 1.6s ease-in-out infinite;
+}
+.sh-logo--loading .sh-logo__dot {
+  transform-origin: center;
+  animation: sh-logo-dot 1.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+.sh-logo--loading .sh-logo__dot--1 { animation-delay: 0s; }
+.sh-logo--loading .sh-logo__dot--2 { animation-delay: 0.18s; }
+.sh-logo--loading .sh-logo__dot--3 { animation-delay: 0.36s; }
+
+@keyframes sh-logo-rock {
+  0%, 100% { transform: rotate(-3deg); }
+  50%      { transform: rotate(3deg);  }
+}
+@keyframes sh-logo-notch {
+  0%, 100% { opacity: 0.4; transform: scale(0.92); }
+  50%      { opacity: 1;   transform: scale(1.06); }
+}
+@keyframes sh-logo-dot {
+  0%, 70%, 100% { opacity: 0.35; transform: scale(0.85); }
+  35%           { opacity: 1;    transform: scale(1.25); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .sh-spinner .sh-spinner-dot { animation: none; opacity: 0.7; }
+  .sh-logo--loading,
+  .sh-logo--loading .sh-logo__notch,
+  .sh-logo--loading .sh-logo__dot {
+    animation: none;
+  }
+  .sh-logo--loading .sh-logo__dot { opacity: 0.7; }
+  .sh-logo--loading .sh-logo__notch { opacity: 0.85; }
 }
 
 /* Backwards-compat: a few callers still hand-emit `<div class="sh-spinner-sm">`.
-   Keep them looking similar to the new look — a single small dot pulse. */
+   Single small dot pulse — keeps inline button affordances tiny without
+   pulling in the whole logo mark. */
 .sh-spinner-sm {
   display: inline-block;
   width: 10px;
@@ -791,6 +950,13 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   background: var(--sh-primary);
   vertical-align: middle;
   animation: sh-spinner-pulse 1.1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes sh-spinner-pulse {
+  0%, 80%, 100% { opacity: 0.35; transform: scale(0.85); }
+  40%           { opacity: 1;    transform: scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sh-spinner-sm { animation: none; opacity: 0.7; }
 }
 
 /* Visually hidden but exposed to assistive tech. Used to live as a

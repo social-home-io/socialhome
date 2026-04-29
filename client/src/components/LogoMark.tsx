@@ -14,16 +14,31 @@ interface LogoMarkProps {
   size?: number
   class?: string
   ariaLabel?: string
+  /**
+   * When true, the mark animates as a brand load indicator: the chat
+   * notch breathes and the three feed dots cascade in sequence. The
+   * SVG also rocks gently on a slow tilt so the whole house feels
+   * "thinking" without ever fully rotating (a rotating asymmetric
+   * house looks broken). Animation is suppressed when the user has
+   * `prefers-reduced-motion: reduce`.
+   */
+  loading?: boolean
 }
 
 export function LogoMark({
   size = 32,
   class: className,
   ariaLabel = 'Social Home',
+  loading = false,
 }: LogoMarkProps) {
+  const classes = [
+    'sh-logo',
+    loading ? 'sh-logo--loading' : null,
+    className,
+  ].filter(Boolean).join(' ')
   return (
     <svg
-      class={className}
+      class={classes}
       width={size}
       height={size}
       viewBox="0 0 64 64"
@@ -33,6 +48,7 @@ export function LogoMark({
       aria-label={ariaLabel}
     >
       <path
+        class="sh-logo__house"
         d="M8 30 L32 8 L56 30 V52 a4 4 0 0 1 -4 4 H12 a4 4 0 0 1 -4 -4 Z"
         stroke="currentColor"
         stroke-width="3"
@@ -40,13 +56,15 @@ export function LogoMark({
         fill="none"
       />
       <path
+        class="sh-logo__notch"
         d="M44 22 H52 a3 3 0 0 1 3 3 V32 a3 3 0 0 1 -3 3 H49 L45 39 V35 H46 a0 0 0 0 0 -1 0 Z"
         fill="var(--sh-primary)"
       />
-      <circle cx="20" cy="42" r="2.4" fill="currentColor" />
-      <circle cx="32" cy="42" r="2.4" fill="currentColor" />
-      <circle cx="44" cy="42" r="2.4" fill="currentColor" />
+      <circle class="sh-logo__dot sh-logo__dot--1" cx="20" cy="42" r="2.4" fill="currentColor" />
+      <circle class="sh-logo__dot sh-logo__dot--2" cx="32" cy="42" r="2.4" fill="currentColor" />
+      <circle class="sh-logo__dot sh-logo__dot--3" cx="44" cy="42" r="2.4" fill="currentColor" />
       <path
+        class="sh-logo__rail"
         d="M22 42 H42"
         stroke="currentColor"
         stroke-width="1.4"
