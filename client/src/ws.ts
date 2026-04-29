@@ -15,8 +15,8 @@ class WsManager {
   connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const url = token.value
-      ? `${proto}://${location.host}/ws?token=${encodeURIComponent(token.value)}`
-      : `${proto}://${location.host}/ws`
+      ? `${proto}://${location.host}/api/ws?token=${encodeURIComponent(token.value)}`
+      : `${proto}://${location.host}/api/ws`
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => { this.retryDelay = 5000 }

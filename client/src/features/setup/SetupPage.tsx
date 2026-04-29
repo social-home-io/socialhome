@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
-import { setToken } from '@/store/auth'
+import { loadCurrentUser, setToken } from '@/store/auth'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
@@ -200,6 +200,9 @@ function StandaloneSetupForm() {
       const resp = await api.post('/api/setup/standalone', { username, password }) as
         { token: string }
       setToken(resp.token)
+      // Populate currentUser so isAuthed flips true on the next render
+      // (otherwise the SPA bounces straight to the login screen).
+      await loadCurrentUser()
       // Refresh the instance config so setup_required flips to false
       // and the SPA stops redirecting here.
       await loadInstanceConfig()
@@ -314,6 +317,7 @@ function HaOwnerForm() {
         username: picked, password,
       }) as { token: string }
       setToken(resp.token)
+      await loadCurrentUser()
       await loadInstanceConfig()
       showToast(t('setup.success'), 'success')
       window.location.href = '/'

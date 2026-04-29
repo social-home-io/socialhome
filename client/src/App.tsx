@@ -3,7 +3,7 @@ import { Router } from 'preact-iso'
 import { useComputed, signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
-import { isAuthed, currentUser, setToken } from '@/store/auth'
+import { isAuthed, currentUser, loadCurrentUser, setToken, token } from '@/store/auth'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { SetupPage } from '@/features/setup/SetupPage'
 import { routes } from './router'
@@ -56,6 +56,10 @@ function LoginPage() {
       const resp = await api.post('/api/auth/token', { username, password }) as
         { token: string }
       setToken(resp.token)
+      // Without this the SPA stays stuck on the login form: isAuthed
+      // is `token != null && currentUser != null`, and currentUser is
+      // null until we fetch /api/me.
+      await loadCurrentUser()
       showToast('Welcome back', 'success')
     } catch (err: any) {
       const status = err?.status
@@ -168,6 +172,15 @@ export function App() {
         // Silent — surfaces errors via the InstanceConfigError signal.
         // The login form remains the safe fallback.
       })
+    }
+  }, [])
+
+  // Cold-start auth rehydrate: if localStorage handed us a token but we
+  // haven't loaded /api/me yet, do it now. Without this a refresh of an
+  // already-signed-in session boots into the login screen.
+  useEffect(() => {
+    if (token.value !== null && currentUser.value === null) {
+      void loadCurrentUser()
     }
   }, [])
 
