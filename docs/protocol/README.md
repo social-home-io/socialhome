@@ -6,6 +6,12 @@ directly, peer-to-peer. A **Global Federation Server (GFS)** is only
 consulted for public-space discovery, push fan-out to offline peers,
 and WebRTC signalling bootstrap — it never sees private content.
 
+> **Higher-level system shape** — identity, three-tier sync, space
+> crypto, resilience — lives in [`../architecture.md`](../architecture.md).
+> This page is the wire-level protocol reference. Start with
+> `architecture.md` if you want the "how does it all fit together?"
+> picture; come here for envelope shapes and per-feature flows.
+
 ## Architecture
 
 ```mermaid

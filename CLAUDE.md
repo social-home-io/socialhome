@@ -206,13 +206,18 @@ matching doc file as part of the same change.
   third-party trust, raising GPS precision, removing fail-closed
   behaviour)? Update `docs/principles.md` AND surface the change in
   the PR description so the reviewer flags it for explicit sign-off.
+- **Changed the test strategy** (new test directory, new pytest
+  marker, coverage-gate adjustment, change to the §27.9 protocol-
+  test set)? Update `docs/testing.md` so the markers + commands
+  there match `pyproject.toml`.
 - **Added a new top-level doc file under `docs/`?** Link it from
   `docs/README.md` and add a pointer in the repo-root `README.md`
   under "Documentation".
 
 Reviewer checklist: if a PR adds a federation event, a route, a
-crypto change, a schema change, an architectural shift, or a
-principle change and the docs aren't touched, push back. The check
+crypto change, a schema change, an architectural shift, a
+principle change, or a test-strategy change and the docs aren't
+touched, push back. The check
 is "did the author update the matching doc?" — not "are the docs
 perfect?" Incremental accuracy beats big bang rewrites.
 

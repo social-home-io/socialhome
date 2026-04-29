@@ -71,6 +71,9 @@ Docs live in `docs/`. Ship the matching doc update in the same commit:
   third-party trust, raise GPS precision, remove fail-closed) →
   `docs/principles.md`, **and** flag it in the PR description for
   explicit reviewer sign-off.
+- Test-strategy change (new test directory, new pytest marker,
+  coverage-gate adjustment, change to the §27.9 protocol-test set) →
+  `docs/testing.md`.
 - New top-level doc file under `docs/` → link from `docs/README.md`
   and from the repo-root `README.md`.
 
@@ -81,4 +84,4 @@ Docs live in `docs/`. Ship the matching doc update in the same commit:
 - Route handlers: socialhome/routes/ (or app.py for small handlers)
 - Migrations: socialhome/migrations/00NN_description.sql
 - Documentation: docs/ (principles, architecture, database schema,
-  API reference, crypto notes, protocol pages)
+  test strategy, API reference, crypto notes, protocol pages)

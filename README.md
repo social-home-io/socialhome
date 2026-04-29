@@ -43,6 +43,8 @@ Run the test suite with `pytest` (backend) and `pnpm exec vitest run`
   identity, sync tiers, space crypto, resilience.
 - [`docs/database.md`](docs/database.md) — v1 schema reference,
   grouped by domain.
+- [`docs/testing.md`](docs/testing.md) — test strategy + the 90 %
+  coverage gate.
 - [`docs/api.md`](docs/api.md) — HTTP + WebSocket API reference.
 - [`docs/crypto.md`](docs/crypto.md) — cryptographic design.
 - [`docs/protocol/`](docs/protocol/) — federation protocol,

@@ -11,7 +11,9 @@ Social Home exposes HTTP APIs on two distinct surfaces:
 
 This file lists every live endpoint. For the *why* behind the
 protocol events these routes trigger, see
-[protocol/](./protocol/README.md).
+[protocol/](./protocol/README.md). For the high-level shape — HFS ↔
+GFS topology, identity model, sync tiers — see
+[architecture.md](./architecture.md).
 
 ## Authentication
 
