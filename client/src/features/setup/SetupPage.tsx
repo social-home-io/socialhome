@@ -48,7 +48,7 @@ export function SetupPage() {
       </SetupShell>
     )
   }
-  if (cfg.mode === 'haos') return <HaosAutoComplete />
+  if (cfg.mode === 'haos') return <HaosWelcome />
   if (cfg.mode === 'ha') return <HaOwnerForm />
   return <StandaloneSetupForm />
 }
@@ -347,34 +347,52 @@ function HaOwnerForm() {
   )
 }
 
-// ── haos: silent auto-complete via Supervisor ──────────────────────────────
+// ── haos: welcome screen → Continue → Supervisor handshake ───────────────
 
-function HaosAutoComplete() {
+function HaosWelcome() {
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    api.post('/api/setup/haos/complete').then(
-      async () => {
-        if (cancelled) return
-        await loadInstanceConfig()
-        // Ingress already provides the auth headers, so we don't need
-        // a token — bounce straight into the app.
-        window.location.href = '/'
-      },
-      (err) => {
-        if (cancelled) return
-        setError(err?.message || t('setup.error.generic'))
-      },
+
+  async function continueSetup() {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post('/api/setup/haos/complete')
+      await loadInstanceConfig()
+      // Ingress already provides the auth headers, so we don't need
+      // a token — bounce straight into the app.
+      window.location.href = '/'
+    } catch (err: any) {
+      setError(err?.message || t('setup.error.generic'))
+      setBusy(false)
+    }
+  }
+
+  if (busy && !error) {
+    return (
+      <SetupShell>
+        <h1 class="sh-setup-title">{t('setup.haos.completing_title')}</h1>
+        <SetupSpinner label={t('setup.haos.completing')} />
+      </SetupShell>
     )
-    return () => { cancelled = true }
-  }, [])
+  }
 
   return (
     <SetupShell>
-      <h1 class="sh-setup-title">{t('setup.haos.title')}</h1>
-      {error
-        ? <FormError id="setup-error" message={error} />
-        : <SetupSpinner label={t('setup.haos.completing')} />}
+      <div class="sh-setup-welcome" aria-hidden="true">
+        <span class="sh-setup-welcome-icon">👋</span>
+      </div>
+      <h1 class="sh-setup-title">{t('setup.haos.welcome_title')}</h1>
+      <p class="sh-setup-intro">{t('setup.haos.welcome_intro')}</p>
+      <ul class="sh-setup-checklist">
+        <li>{t('setup.haos.bullet_owner')}</li>
+        <li>{t('setup.haos.bullet_ingress')}</li>
+        <li>{t('setup.haos.bullet_invite')}</li>
+      </ul>
+      <FormError id="setup-error" message={error} />
+      <Button onClick={continueSetup} disabled={busy}>
+        {busy ? t('setup.submitting') : t('setup.haos.continue')}
+      </Button>
     </SetupShell>
   )
 }

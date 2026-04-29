@@ -3582,6 +3582,63 @@ hr {
   color: var(--sh-text-muted);
 }
 
+.sh-setup-welcome {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sh-setup-welcome-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--sh-primary) 14%, transparent);
+  font-size: 2rem;
+  /* A gentle wave that fires once on mount and then settles. */
+  animation: sh-setup-wave 1.6s cubic-bezier(.34,.82,.62,1) 1 both;
+  transform-origin: 70% 70%;
+}
+@keyframes sh-setup-wave {
+  0%   { transform: rotate(0deg); }
+  20%  { transform: rotate(-14deg); }
+  40%  { transform: rotate(12deg); }
+  60%  { transform: rotate(-10deg); }
+  80%  { transform: rotate(6deg); }
+  100% { transform: rotate(0deg); }
+}
+.sh-setup-checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--sh-text-muted);
+}
+.sh-setup-checklist li {
+  position: relative;
+  padding-left: 26px;
+  line-height: 1.45;
+}
+.sh-setup-checklist li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--sh-success) 20%, transparent);
+  color: var(--sh-success);
+  font-size: 0.75rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .sh-setup-spinner-wrap {
   display: flex;
   flex-direction: column;
@@ -3613,6 +3670,7 @@ hr {
 @media (prefers-reduced-motion: reduce) {
   .sh-setup-card { animation: none; }
   .sh-setup-spinner { animation: none; border-top-color: var(--sh-primary); }
+  .sh-setup-welcome-icon { animation: none; }
 }
 
 /* Admin > Create user form (standalone mode only) ─────────────────────── */
