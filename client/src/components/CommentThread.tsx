@@ -8,10 +8,11 @@
  * one doesn't echo into the other when both are on screen at the
  * same time. Edit uses local component state (multiple can coexist).
  */
-import { signal } from '@preact/signals'
+import { signal, type Signal } from '@preact/signals'
 import { useState } from 'preact/hooks'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
+import { ReactionPicker } from './ReactionPicker'
 import { currentUser } from '@/store/auth'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment } from '@/types'
@@ -34,6 +35,38 @@ const replyContent = signal('')
 // drafted while the user opens a reply form on a sibling comment.
 const newCommentContent = signal('')
 const submitting = signal(false)
+// At most one emoji-insert popover open at a time across all
+// comment inputs in the page. ``'new'`` targets ``newCommentContent``;
+// any other value targets ``replyContent`` (since only one reply form
+// is open at a time, the comment id doubles as the unique key).
+const emojiPickerFor = signal<string | null>(null)
+
+function EmojiInsertButton(
+  { target, openKey }: { target: Signal<string>; openKey: string },
+) {
+  const isOpen = emojiPickerFor.value === openKey
+  return (
+    <div class="sh-comment-emoji-wrap">
+      <button
+        type="button"
+        class="sh-comment-emoji-btn"
+        aria-label="Insert emoji"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        onClick={() => {
+          emojiPickerFor.value = isOpen ? null : openKey
+        }}>
+        😀
+      </button>
+      {isOpen && (
+        <ReactionPicker
+          onSelect={(emoji) => { target.value = target.value + emoji }}
+          onClose={() => { emojiPickerFor.value = null }}
+        />
+      )}
+    </div>
+  )
+}
 
 export function CommentThread(
   { comments, spaceId, onReply, onDelete, onEdit }: CommentThreadProps,
@@ -66,6 +99,7 @@ export function CommentThread(
             onInput={(e) => newCommentContent.value = (e.target as HTMLInputElement).value}
             onKeyDown={(e) => e.key === 'Enter' && handleSubmit(null)}
             aria-label="New comment" />
+          <EmojiInsertButton target={newCommentContent} openKey="new" />
           <Button onClick={() => handleSubmit(null)} loading={submitting.value}
                   disabled={!newCommentContent.value.trim()}>
             Post
@@ -97,6 +131,7 @@ export function CommentThread(
                 value={replyContent.value} autoFocus
                 onInput={(e) => replyContent.value = (e.target as HTMLInputElement).value}
                 onKeyDown={(e) => e.key === 'Enter' && handleSubmit(c.id)} />
+              <EmojiInsertButton target={replyContent} openKey={c.id} />
               <Button variant="secondary"
                       onClick={() => { replyTo.value = null; replyContent.value = '' }}>
                 Cancel
@@ -115,6 +150,7 @@ export function CommentThread(
           onInput={(e) => newCommentContent.value = (e.target as HTMLInputElement).value}
           onKeyDown={(e) => e.key === 'Enter' && handleSubmit(null)}
           aria-label="New comment" />
+        <EmojiInsertButton target={newCommentContent} openKey="new" />
         <Button onClick={() => handleSubmit(null)} loading={submitting.value}
                 disabled={!newCommentContent.value.trim()}>
           Post

@@ -1649,6 +1649,30 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   align-items: center;
 }
 .sh-comment-new input, .sh-comment-reply-form input { flex: 1; }
+/* Emoji-insert button next to the comment input. The popover
+ * (``ReactionPicker``) opens above the button so it doesn't push
+ * surrounding posts down. */
+.sh-comment-emoji-wrap { position: relative; display: inline-flex; }
+.sh-comment-emoji-btn {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 1.1rem;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--sh-radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--sh-transition-fast);
+}
+.sh-comment-emoji-btn:hover { background: var(--sh-bg-secondary); }
+.sh-comment-emoji-wrap .sh-reaction-picker {
+  bottom: calc(100% + 6px);
+  right: 0;
+  left: auto;
+  top: auto;
+}
 .sh-comment-replies {
   padding-left: var(--sh-space-md);
   display: flex;
@@ -1762,13 +1786,16 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   color: var(--sh-text-muted);
   font-size: var(--sh-font-size-sm);
 }
+/* Type picker — embedded in the footer next to the mic so the
+ * textarea area itself reads as a clean text input with the
+ * microphone, while photo / poll / schedule / location stay one
+ * tap away. */
 .sh-composer-type-picker {
   display: flex;
   gap: 2px;
   background: var(--sh-bg-secondary);
   border-radius: var(--sh-radius-full);
   padding: 3px;
-  margin-left: auto;
 }
 .sh-type-btn {
   background: transparent;
@@ -1797,9 +1824,11 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
-  justify-content: flex-end;
   flex-wrap: wrap;
 }
+/* Push the Post button to the right edge of the footer; everything
+ * before it (type picker, mic, context badge) flows from the left. */
+.sh-composer-footer > .sh-btn:last-child { margin-left: auto; }
 .sh-context-badge {
   display: inline-flex;
   align-items: center;
@@ -1810,7 +1839,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
-  margin-right: auto;
 }
 .sh-char-count {
   font-size: var(--sh-font-size-xs);
