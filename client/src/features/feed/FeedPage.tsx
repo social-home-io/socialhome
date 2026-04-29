@@ -14,7 +14,7 @@ import { CommentThread } from '@/components/CommentThread'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
-import type { Comment } from '@/types'
+import type { Comment, FeedPost } from '@/types'
 
 const expandedComments = signal<Record<string, Comment[]>>({})
 
@@ -62,15 +62,18 @@ export default function FeedPage() {
       media_url: mediaUrl ?? null,
     }
     if (extras?.location) body.location = extras.location
-    const post = await api.post('/api/feed/posts', body) as { id: string }
+    const post = await api.post('/api/feed/posts', body) as FeedPost
     showToast('Post shared', 'success')
-    loadFeed()
+    // No local prepend here — wireFeedWs() handles `post.created` and
+    // dedupes by id, so the new post lands at the top exactly once.
     return post?.id
   }
 
   const handleReact = async (postId: string, emoji: string) => {
-    await api.post(`/api/feed/posts/${postId}/reactions`, { emoji })
-    loadFeed()
+    const updated = await api.post(
+      `/api/feed/posts/${postId}/reactions`, { emoji },
+    ) as FeedPost
+    posts.value = posts.value.map((p) => (p.id === postId ? updated : p))
   }
 
   const refreshComments = async (postId: string) => {
@@ -99,7 +102,7 @@ export default function FeedPage() {
       { content, parent_id: parentId },
     )
     await refreshComments(postId)
-    loadFeed()
+    // wireFeedWs() bumps comment_count on `comment.added`. No reload.
   }
 
   const handleCommentEdit = async (
@@ -124,7 +127,14 @@ export default function FeedPage() {
         `/api/feed/posts/${postId}/comments/${commentId}`,
       )
       await refreshComments(postId)
-      loadFeed()
+      // No `comment.deleted` count-decrement event today, so adjust
+      // the local count optimistically; the next cold-load is
+      // authoritative.
+      posts.value = posts.value.map((p) =>
+        p.id === postId
+          ? { ...p, comment_count: Math.max(0, p.comment_count - 1) }
+          : p,
+      )
       showToast('Comment deleted', 'info')
     } catch (err: unknown) {
       showToast(
@@ -137,7 +147,7 @@ export default function FeedPage() {
     if (!confirm('Delete this post?')) return
     await api.delete(`/api/feed/posts/${postId}`)
     showToast('Post deleted', 'info')
-    loadFeed()
+    // wireFeedWs() removes the row on `post.deleted`. No reload.
   }
 
   return (
@@ -145,7 +155,7 @@ export default function FeedPage() {
       <h1>Household Feed</h1>
       <Composer onSubmit={handleSubmit} context="Household" />
       {posts.value.map(post => (
-        <div key={post.id}>
+        <div key={post.id} class="sh-feed-item">
           <PostCard
             post={post}
             onReact={(emoji) => handleReact(post.id, emoji)}

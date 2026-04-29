@@ -52,12 +52,30 @@ describe('PostCard', () => {
     expect(container.textContent).toContain('edited')
   })
 
-  it('calls onReact when reaction clicked', () => {
+  it('calls onReact when an existing reaction chip is clicked', () => {
     const fn = vi.fn()
     const { container } = render(<PostCard post={mockPost} onReact={fn} />)
-    const addBtn = container.querySelector('.sh-reaction-add')
-    if (addBtn) fireEvent.click(addBtn)
+    const chip = container.querySelector('.sh-reaction-chip')
+    if (chip) fireEvent.click(chip)
     expect(fn).toHaveBeenCalledWith('👍')
+  })
+
+  it('opens the reaction picker when + is clicked, then forwards onReact', () => {
+    const fn = vi.fn()
+    const { container } = render(<PostCard post={mockPost} onReact={fn} />)
+    const addBtn = container.querySelector('.sh-reaction-add') as HTMLButtonElement | null
+    expect(addBtn).toBeTruthy()
+    fireEvent.click(addBtn!)
+    // Picker mounts inside the same wrapper.
+    const picker = container.querySelector('.sh-reaction-picker')
+    expect(picker).toBeTruthy()
+    // Picking an emoji from the frequent strip dispatches onReact.
+    const firstFrequent = picker!.querySelector('.sh-reaction-frequent .sh-emoji-btn') as HTMLButtonElement | null
+    expect(firstFrequent).toBeTruthy()
+    fireEvent.click(firstFrequent!)
+    expect(fn).toHaveBeenCalledTimes(1)
+    // Picker closes after selection.
+    expect(container.querySelector('.sh-reaction-picker')).toBeNull()
   })
 
   it('calls onComment when comment button clicked', () => {

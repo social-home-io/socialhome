@@ -458,7 +458,22 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 .sh-link-button:hover { text-decoration: underline; }
 
-.sh-link { color: var(--sh-primary); cursor: pointer; }
+/* Used on both anchors and bare buttons that should *look* like a
+ * link. The rule normalises browser button chrome (background,
+ * border, padding) so a ``<button class="sh-link">`` lines up
+ * cleanly next to neighbouring text — important for the comment
+ * action row where the buttons sit alongside ``<time>``. */
+.sh-link {
+  color: var(--sh-primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-decoration: none;
+}
+.sh-link:hover { text-decoration: underline; }
+.sh-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .sh-link--danger { color: var(--sh-danger); }
 .sh-danger-link {
   color: var(--sh-danger);
@@ -988,8 +1003,21 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
 /* ───── 7. Feature surfaces ──────────────────────────────────────────── */
 
-/* Feed + posts + comments */
-.sh-feed { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+/* Feed + posts + comments
+ *
+ * Feed posts borrow the "taped to the wall" look from the marketing
+ * site's ``FamilyWall`` collage — paper-tinted background, washi-tape
+ * accent at the top, and a small per-card rotation stagger so the
+ * feed reads as hand-curated rather than spreadsheet-rigid. The
+ * effect is feed-scoped (``.sh-feed-item``) — PostCard usage outside
+ * the household feed (search results, space feeds) keeps the flat
+ * ``.sh-post`` chrome below. */
+.sh-feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-lg);
+  padding-top: 12px;  /* room for the tape strip on the first item */
+}
 .sh-post, .sh-post-card {
   position: relative;
   background: var(--sh-bg);
@@ -1002,6 +1030,96 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-post:hover, .sh-post-card:hover {
   box-shadow: var(--sh-shadow-md);
   border-color: var(--sh-border-strong);
+}
+
+/* Feed-scoped: each post (and the composer) sits on a slightly more
+ * saturated paper tone with a pinned-to-the-wall shadow, a tiny
+ * rotation, and a washi-tape strip at the top. The strip lives on
+ * the wrapping ``.sh-feed-item`` for posts and on ``.sh-composer``
+ * directly so it can sit *above* the card edge (negative top). */
+.sh-feed > .sh-composer {
+  position: relative;
+  background: var(--sh-bg-tertiary);
+  box-shadow: var(--sh-shadow-pinned);
+  transform: rotate(-0.6deg);
+  transition:
+    box-shadow var(--sh-transition-fast),
+    border-color var(--sh-transition-fast),
+    transform var(--sh-transition-normal);
+  margin-top: 8px;  /* leave room for the tape */
+}
+.sh-feed > .sh-composer::before,
+.sh-feed-item::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 18px;
+  width: 64px;
+  height: 16px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-6deg);
+  pointer-events: none;
+  z-index: 1;
+}
+.sh-feed > .sh-composer:hover,
+.sh-feed > .sh-composer:focus-within {
+  transform: rotate(0deg) translateY(-1px);
+}
+
+.sh-feed-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-feed-item > .sh-post {
+  background: var(--sh-bg-tertiary);
+  box-shadow: var(--sh-shadow-pinned);
+  transform: rotate(var(--sh-feed-rot, 0deg));
+  transition:
+    box-shadow var(--sh-transition-fast),
+    border-color var(--sh-transition-fast),
+    transform var(--sh-transition-normal);
+}
+.sh-feed-item > .sh-post:hover {
+  transform: rotate(0deg) translateY(-2px);
+  z-index: 2;
+}
+/* Stagger rotations so the feed reads as taped rather than tilted in
+ * a single direction. Four-step cycle keeps the pattern from feeling
+ * mechanical even in a long scroll. */
+.sh-feed-item:nth-child(4n+1) { --sh-feed-rot: -0.5deg; }
+.sh-feed-item:nth-child(4n+2) { --sh-feed-rot:  0.4deg; }
+.sh-feed-item:nth-child(4n+3) { --sh-feed-rot: -0.3deg; }
+.sh-feed-item:nth-child(4n)   { --sh-feed-rot:  0.6deg; }
+
+/* Tape strip alternates terracotta / moss to feel hand-placed.
+ * Positioning matches ``.sh-onboard-tape`` and ``FamilyWall.card__tape``
+ * so the brand language is consistent across surfaces. */
+.sh-feed-item:nth-child(odd)::before {
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  left: auto;
+  right: 18px;
+  transform: rotate(8deg);
+}
+.sh-feed-item:nth-child(even)::before {
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+}
+/* Pinned post — full-strength terracotta tape so the at-a-glance
+ * "this is anchored" cue still wins against the alternating strip. */
+.sh-feed-item:has(.sh-post--pinned)::before {
+  background: color-mix(in srgb, var(--sh-primary) 70%, transparent);
+  left: 18px;
+  right: auto;
+  transform: rotate(-6deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sh-feed > .sh-composer,
+  .sh-feed-item > .sh-post {
+    transform: none;
+  }
 }
 .sh-post--pinned {
   background:
@@ -1334,6 +1452,16 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   flex-wrap: wrap;
   gap: var(--sh-space-xs);
   flex: 1;
+  align-items: center;
+}
+/* Anchor for the reaction picker. ``position: relative`` lets the
+ * absolutely-positioned ``.sh-reaction-picker`` open above-right of
+ * the + button rather than relative to the entire post. */
+.sh-reaction-add-wrap { position: relative; display: inline-flex; }
+.sh-reaction-add-wrap .sh-reaction-picker {
+  bottom: calc(100% + 6px);
+  left: 0;
+  top: auto;
 }
 .sh-reaction-chip, .sh-reaction-add {
   display: inline-flex;
@@ -1441,16 +1569,52 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   font-style: italic;
   font-size: var(--sh-font-size-xs);
 }
+.sh-comment-bubble {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: var(--sh-bg-secondary);
+  border-radius: var(--sh-radius-lg);
+  padding: 6px 12px;
+  max-width: 100%;
+  gap: 1px;
+}
+.sh-comment-bubble--editing { width: 100%; padding: 8px 12px; }
+.sh-comment-bubble .sh-comment-author {
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.sh-comment-bubble .sh-comment-text {
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.4;
+}
 .sh-comment-actions {
   display: flex;
-  gap: var(--sh-space-sm);
+  gap: 8px;
   align-items: center;
   font-size: var(--sh-font-size-xs);
   color: var(--sh-text-muted);
-  flex-wrap: wrap;
+  padding: 2px 12px 0;
 }
 .sh-comment-actions time { font-variant-numeric: tabular-nums; }
+/* Action-row buttons inherit muted color so the row reads as a
+ * single secondary strip; hover lifts to ink. The danger variant
+ * keeps red for Delete. */
+.sh-comment-actions .sh-link {
+  color: var(--sh-text-muted);
+  font-weight: 600;
+}
+.sh-comment-actions .sh-link:hover { color: var(--sh-text); text-decoration: none; }
+.sh-comment-actions .sh-link.sh-link--danger { color: var(--sh-danger); }
 .sh-comment-actions .sh-link:disabled { opacity: 0.5; cursor: default; }
+/* FB-style "Reply · 5m · edited · ⋯" — middle-dot separator between
+ * adjacent inline children of the action row. */
+.sh-comment-actions > * + *::before {
+  content: "·";
+  margin-right: 8px;
+  color: var(--sh-text-muted);
+}
 .sh-link--muted {
   color: var(--sh-text-muted);
   cursor: pointer;
@@ -1460,6 +1624,24 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   font: inherit;
 }
 .sh-link--muted:hover { color: var(--sh-text); }
+/* Comment overflow menu — same shape as PostCard's, scaled down for
+ * the comment row. The button is a tiny inline glyph; the menu reuses
+ * ``.sh-post-menu``. */
+.sh-comment-overflow-wrap { position: relative; display: inline-flex; }
+.sh-comment-overflow {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: var(--sh-radius-sm);
+  line-height: 1;
+  transition: color var(--sh-transition-fast), background var(--sh-transition-fast);
+}
+.sh-comment-overflow:hover { background: var(--sh-bg-secondary); color: var(--sh-text); }
+.sh-comment-overflow-wrap .sh-post-menu { right: 0; top: calc(100% + 4px); }
 .sh-comment-new, .sh-comment-reply-form {
   display: flex;
   gap: var(--sh-space-xs);

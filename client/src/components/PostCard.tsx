@@ -3,6 +3,7 @@
  * Renders in household feed, space feeds, search results.
  */
 import { useState } from 'preact/hooks'
+import { signal } from '@preact/signals'
 import { Avatar } from './Avatar'
 import { BazaarPostBody } from './BazaarPostBody'
 import { BotAvatar } from './BotAvatar'
@@ -12,10 +13,16 @@ import { LocationPostCard } from './LocationPostCard'
 import { renderMarkdown } from './markdown'
 import { openReport } from './ReportDialog'
 import { PollUI } from './PollUI'
+import { ReactionPicker } from './ReactionPicker'
 import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { FeedPost } from '@/types'
+
+// Module-level signal so only one reaction picker is open across the
+// feed at a time. Holds the post id of the currently open picker, or
+// ``null``.
+const reactionPickerFor = signal<string | null>(null)
 
 // DB-level marker for posts created by BotBridgeService. Matches
 // socialhome.domain.user.SYSTEM_AUTHOR on the backend.
@@ -218,7 +225,25 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, show
                 {emoji} {(users as string[]).length}
               </button>
             ))}
-            <button class="sh-reaction-add" onClick={() => onReact?.('👍')}>+</button>
+            <div class="sh-reaction-add-wrap">
+              <button
+                class="sh-reaction-add"
+                aria-label="Add reaction"
+                aria-haspopup="dialog"
+                aria-expanded={reactionPickerFor.value === post.id}
+                onClick={() => {
+                  reactionPickerFor.value =
+                    reactionPickerFor.value === post.id ? null : post.id
+                }}>
+                +
+              </button>
+              {reactionPickerFor.value === post.id && (
+                <ReactionPicker
+                  onSelect={(emoji) => onReact?.(emoji)}
+                  onClose={() => { reactionPickerFor.value = null }}
+                />
+              )}
+            </div>
           </div>
           <button class="sh-comment-btn" onClick={onComment}>
             💬 {post.comment_count}

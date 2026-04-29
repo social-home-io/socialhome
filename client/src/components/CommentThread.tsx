@@ -126,6 +126,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(comment.content ?? '')
   const [saving, setSaving] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
 
   const isMine = currentUser.value?.user_id === comment.author
   const canDelete = !!onDelete && (isMine || currentUser.value?.is_admin)
@@ -155,15 +156,17 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
     }
     return (
       <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
-        <Avatar name={authorName} src={avatarUrl} size={24} />
+        <Avatar name={authorName} src={avatarUrl} size={28} />
         <div class="sh-comment-body">
-          <span class="sh-comment-author">{authorName}</span>
-          <input type="text" value={draft} maxLength={2000} autoFocus
-            onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void save()
-              if (e.key === 'Escape') setEditing(false)
-            }} />
+          <div class="sh-comment-bubble sh-comment-bubble--editing">
+            <span class="sh-comment-author">{authorName}</span>
+            <input type="text" value={draft} maxLength={2000} autoFocus
+              onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void save()
+                if (e.key === 'Escape') setEditing(false)
+              }} />
+          </div>
           <div class="sh-comment-actions">
             <button type="button" class="sh-link"
                     disabled={saving}
@@ -183,41 +186,71 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
     )
   }
 
+  const closeMenu = () => setMenuOpen(false)
+  const hasMenu = canEdit || canDelete
+
   return (
     <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
-      <Avatar name={authorName} src={avatarUrl} size={24} />
+      <Avatar name={authorName} src={avatarUrl} size={28} />
       <div class="sh-comment-body">
-        <span class="sh-comment-author">{authorName}</span>
-        <span class="sh-comment-text">{comment.content}</span>
+        <div class="sh-comment-bubble">
+          <span class="sh-comment-author">{authorName}</span>
+          <span class="sh-comment-text">{comment.content}</span>
+        </div>
         <div class="sh-comment-actions">
-          <time title={new Date(comment.created_at).toLocaleString()}>
-            {formatRelative(comment.created_at)}
-          </time>
-          {comment.edited_at && (
-            <span class="sh-comment-edited">(edited)</span>
-          )}
           {onReplyClick && (
             <button class="sh-link" type="button"
                     onClick={onReplyClick}>Reply</button>
           )}
-          {canEdit && (
-            <button class="sh-link" type="button"
-                    onClick={() => {
-                      setDraft(comment.content ?? '')
-                      setEditing(true)
-                    }}>
-              Edit
-            </button>
+          <time title={new Date(comment.created_at).toLocaleString()}>
+            {formatRelative(comment.created_at)}
+          </time>
+          {comment.edited_at && (
+            <span class="sh-comment-edited">edited</span>
           )}
-          {canDelete && (
-            <button class="sh-link sh-link--danger" type="button"
-                    onClick={() => {
-                      if (confirm('Delete this comment?')) {
-                        void onDelete!(comment.id)
-                      }
-                    }}>
-              Delete
-            </button>
+          {hasMenu && (
+            <div class="sh-comment-overflow-wrap">
+              <button
+                type="button"
+                class="sh-comment-overflow"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-label="Comment options"
+                onClick={() => setMenuOpen((v) => !v)}
+                onBlur={() => setTimeout(closeMenu, 100)}>
+                ···
+              </button>
+              {menuOpen && (
+                <div class="sh-post-menu" role="menu">
+                  {canEdit && (
+                    <button
+                      role="menuitem"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        closeMenu()
+                        setDraft(comment.content ?? '')
+                        setEditing(true)
+                      }}>
+                      Edit
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button
+                      role="menuitem"
+                      class="sh-post-menu-danger"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        closeMenu()
+                        if (confirm('Delete this comment?')) {
+                          void onDelete!(comment.id)
+                        }
+                      }}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

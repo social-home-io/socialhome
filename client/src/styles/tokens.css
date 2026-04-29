@@ -48,6 +48,10 @@
                   0 4px 6px -4px rgba(26, 24, 20, 0.10);
   --sh-shadow-xl: 0 20px 25px -5px rgba(26, 24, 20, 0.15),
                   0 8px 10px -6px rgba(26, 24, 20, 0.10);
+  /* Pinned-to-the-wall lift for feed cards — mirrors the website's
+     ``--lift-pinned`` so paper-on-paper still reads as elevated. */
+  --sh-shadow-pinned: 0 1px 0 var(--sh-border),
+                      0 26px 60px -28px rgba(26, 24, 20, 0.55);
   /* Legacy alias — pre-existing rules use a flat --sh-shadow. */
   --sh-shadow:    var(--sh-shadow-sm);
 
@@ -145,6 +149,8 @@
                   0 4px 8px -4px rgba(0, 0, 0, 0.45);
   --sh-shadow-xl: 0 20px 30px -5px rgba(0, 0, 0, 0.75),
                   0 8px 12px -6px rgba(0, 0, 0, 0.55);
+  --sh-shadow-pinned: 0 1px 0 rgba(0, 0, 0, 0.5),
+                      0 26px 60px -28px rgba(0, 0, 0, 0.85);
   --sh-shadow:    var(--sh-shadow-sm);
 }
 .sh-theme-dark :focus-visible {
