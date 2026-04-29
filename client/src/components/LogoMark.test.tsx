@@ -25,6 +25,15 @@ describe('LogoMark', () => {
     )
     const svg = container.querySelector('svg')
     expect(svg?.getAttribute('aria-label')).toBe('Home')
-    expect(svg?.getAttribute('class')).toBe('brand-mark')
+    expect(svg?.classList.contains('sh-logo')).toBe(true)
+    expect(svg?.classList.contains('brand-mark')).toBe(true)
+  })
+
+  it('toggles the sh-logo--loading class when loading=true', () => {
+    const { container, rerender } = render(<LogoMark />)
+    const svg = container.querySelector('svg')!
+    expect(svg.classList.contains('sh-logo--loading')).toBe(false)
+    rerender(<LogoMark loading />)
+    expect(container.querySelector('svg')!.classList.contains('sh-logo--loading')).toBe(true)
   })
 })

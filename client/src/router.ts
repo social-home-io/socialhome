@@ -28,6 +28,6 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/search':         lazy(() => import('@/features/search/SearchPage')),
   '/calls':          lazy(() => import('@/features/calls/CallsPage')),
   '/calls/:callId':  lazy(() => import('@/features/calls/InCallPage')),
-  '/family':         lazy(() => import('@/features/child-protection/ParentDashboard')),
+  '/parent':         lazy(() => import('@/features/child-protection/ParentDashboard')),
   '/setup':          lazy(() => import('@/features/setup/SetupPage')),
 }

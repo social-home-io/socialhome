@@ -7,7 +7,7 @@ describe('router', () => {
     //   /dms/:id/calls   — per-conversation call history
     //   /calls/:callId   — in-call page
     //   /join            — space invite deep link (§23.62)
-    //   /family          — parent dashboard (§CP)
+    //   /parent          — parent dashboard (§CP)
     //   /feed            — explicit household-feed route (§23 dashboard)
     //   /spaces/:id/settings — admin space settings (§23 customization)
     //   /spaces/browse   — unified space browser (§D3)
@@ -24,7 +24,7 @@ describe('router', () => {
     for (const path of ['/spaces', '/dms', '/calendar', '/shopping',
       '/notifications', '/tasks', '/pages', '/stickies', '/bazaar',
       '/settings', '/admin', '/connections',
-      '/gallery', '/search', '/calls', '/family']) {
+      '/gallery', '/search', '/calls', '/parent']) {
       expect(routes[path]).toBeTruthy()
     }
   })

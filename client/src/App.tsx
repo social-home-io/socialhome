@@ -5,6 +5,8 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { isAuthed, currentUser, loadCurrentUser, setToken, token } from '@/store/auth'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
+import { isGuardian, loadGuardian } from '@/store/guardian'
+import { toggles, loadToggles } from '@/components/HouseholdToggles'
 import { SetupPage } from '@/features/setup/SetupPage'
 import { routes } from './router'
 import { Button } from '@/components/Button'
@@ -23,6 +25,7 @@ import { SpaceInviteDialog } from '@/components/SpaceInviteDialog'
 import IncomingCallDialog from '@/features/calls/IncomingCallDialog'
 import { FormError } from '@/components/FormError'
 import { Wordmark } from '@/components/Wordmark'
+import { SideNav } from '@/components/SideNav'
 
 const showOnboarding = signal(false)
 
@@ -122,35 +125,6 @@ function LoginPage() {
   )
 }
 
-function SideNav() {
-  const user = currentUser.value
-  return (
-    <nav class="sh-sidenav" role="navigation" aria-label="Main navigation">
-      <Wordmark as="a" href="/" size={28} className="sh-sidenav-brand" />
-      <a href="/">Feed</a>
-      <a href="/spaces">Spaces</a>
-      <a href="/dms">Messages</a>
-      <a href="/calls">Calls</a>
-      <a href="/notifications">Notifications</a>
-      <a href="/calendar">Calendar</a>
-      <a href="/tasks">Tasks</a>
-      <a href="/pages">Pages</a>
-      <a href="/gallery">Gallery</a>
-      <a href="/shopping">Shopping</a>
-      <a href="/stickies">Stickies</a>
-      <a href="/bazaar">Bazaar</a>
-      <a href="/presence">Presence</a>
-      <a href="/family">Family</a>
-      <a href="/search">Search</a>
-      <a href="/dashboard">Dashboard</a>
-      <hr />
-      <a href="/settings">Settings</a>
-      <a href="/connections">Connections</a>
-      {user?.is_admin && <a href="/admin">Admin</a>}
-    </nav>
-  )
-}
-
 function TopBar() {
   return (
     <header class="sh-topbar" role="banner">
@@ -183,6 +157,17 @@ export function App() {
       void loadCurrentUser()
     }
   }, [])
+
+  // Cold-start sidebar inputs: household feature toggles drive
+  // gating (`feat_feed`, `feat_pages`, …) and `/api/cp/minors`
+  // gates the Parent Control link. Both run only when authed; the
+  // sidebar treats null/loading as "all visible" / "not a guardian"
+  // so the first paint doesn't flicker items in.
+  useEffect(() => {
+    if (token.value === null) return
+    if (toggles.value === null) void loadToggles()
+    if (isGuardian.value === null) void loadGuardian()
+  }, [authed.value])
 
   // While the config is loading, render nothing (avoids a flash of
   // login form before we know whether to redirect to /setup).
