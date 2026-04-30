@@ -181,6 +181,7 @@ function StandaloneSetupForm() {
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [householdName, setHouseholdName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -197,8 +198,9 @@ function StandaloneSetupForm() {
     setBusy(true)
     setError(null)
     try {
-      const resp = await api.post('/api/setup/standalone', { username, password }) as
-        { token: string }
+      const resp = await api.post('/api/setup/standalone', {
+        username, password, household_name: householdName.trim() || undefined,
+      }) as { token: string }
       setToken(resp.token)
       // Populate currentUser so isAuthed flips true on the next render
       // (otherwise the SPA bounces straight to the login screen).
@@ -220,6 +222,18 @@ function StandaloneSetupForm() {
       <h1 class="sh-setup-title">{t('setup.standalone.title')}</h1>
       <p class="sh-setup-intro">{t('setup.standalone.intro')}</p>
       <form onSubmit={submit} class="sh-setup-form">
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.household_name')}</span>
+          <input
+            name="household_name"
+            type="text"
+            maxLength={80}
+            placeholder={t('setup.household_name_placeholder')}
+            value={householdName}
+            onInput={(e) => setHouseholdName((e.target as HTMLInputElement).value)}
+          />
+          <span class="sh-setup-hint">{t('setup.household_name_hint')}</span>
+        </label>
         <label class="sh-setup-field">
           <span class="sh-setup-label">{t('setup.username')}</span>
           <input
@@ -285,6 +299,7 @@ function HaOwnerForm() {
   const [picked, setPicked] = useState<string | null>(null)
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [householdName, setHouseholdName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -315,6 +330,7 @@ function HaOwnerForm() {
     try {
       const resp = await api.post('/api/setup/ha/owner', {
         username: picked, password,
+        household_name: householdName.trim() || undefined,
       }) as { token: string }
       setToken(resp.token)
       await loadCurrentUser()
@@ -357,6 +373,18 @@ function HaOwnerForm() {
       <h1 class="sh-setup-title">{t('setup.ha.title')}</h1>
       <p class="sh-setup-intro">{t('setup.ha.intro')}</p>
       <form onSubmit={submit} class="sh-setup-form">
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.household_name')}</span>
+          <input
+            name="household_name"
+            type="text"
+            maxLength={80}
+            placeholder={t('setup.household_name_placeholder')}
+            value={householdName}
+            onInput={(e) => setHouseholdName((e.target as HTMLInputElement).value)}
+          />
+          <span class="sh-setup-hint">{t('setup.household_name_hint')}</span>
+        </label>
         <fieldset class="sh-setup-persons">
           <legend class="sh-setup-label">{t('setup.ha.pick_owner')}</legend>
           <div class="sh-setup-persons-grid">
@@ -420,6 +448,8 @@ function HaOwnerForm() {
 // ── haos: welcome → supervisor handshake → redirect ────────────────────────
 
 function HaosFlow() {
+  const [stage, setStage] = useState<'welcome' | 'name'>('welcome')
+  const [householdName, setHouseholdName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -427,7 +457,10 @@ function HaosFlow() {
     setBusy(true)
     setError(null)
     try {
-      await api.post('/api/setup/haos/complete')
+      const body = householdName.trim()
+        ? { household_name: householdName.trim() }
+        : {}
+      await api.post('/api/setup/haos/complete', body)
       await loadInstanceConfig()
       // Ingress already provides the auth headers, so we don't need
       // a token — bounce straight into the app.
@@ -447,14 +480,45 @@ function HaosFlow() {
     )
   }
 
+  if (stage === 'welcome') {
+    return (
+      <WelcomeCard
+        mode="haos"
+        step={{ current: 1, total: 2 }}
+        busy={busy}
+        error={error}
+        ctaLabelKey="setup.haos.continue"
+        onContinue={() => setStage('name')}
+      />
+    )
+  }
+
   return (
-    <WelcomeCard
-      mode="haos"
-      busy={busy}
-      error={error}
-      ctaLabelKey="setup.haos.continue"
-      onContinue={continueSetup}
-    />
+    <SetupShell step={{ current: 2, total: 2 }}>
+      <h1 class="sh-setup-title">{t('setup.haos.name_title')}</h1>
+      <p class="sh-setup-intro">{t('setup.haos.name_intro')}</p>
+      <form
+        onSubmit={(e) => { e.preventDefault(); void continueSetup() }}
+        class="sh-setup-form"
+      >
+        <label class="sh-setup-field">
+          <span class="sh-setup-label">{t('setup.household_name')}</span>
+          <input
+            name="household_name"
+            type="text"
+            maxLength={80}
+            placeholder={t('setup.household_name_placeholder')}
+            value={householdName}
+            onInput={(e) => setHouseholdName((e.target as HTMLInputElement).value)}
+          />
+          <span class="sh-setup-hint">{t('setup.household_name_hint')}</span>
+        </label>
+        <FormError id="setup-error" message={error} />
+        <Button type="submit" disabled={busy}>
+          {busy ? t('setup.submitting') : t('setup.submit')}
+        </Button>
+      </form>
+    </SetupShell>
   )
 }
 
