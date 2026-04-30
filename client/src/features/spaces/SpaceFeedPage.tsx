@@ -6,6 +6,7 @@ import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
+import { useTitle } from '@/store/pageTitle'
 import type { Comment, FeedPost, CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
@@ -18,13 +19,11 @@ import { Button } from '@/components/Button'
 import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
 import { CommentThread } from '@/components/CommentThread'
-import { SpaceHero } from '@/components/SpaceHero'
+import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
 import { CalendarEventDialog, openEventDialog } from '@/components/CalendarEventDialog'
 import { SpaceLinksStrip } from './SpaceLinksStrip'
 import { SpaceNotifPrefsMenu } from './SpaceNotifPrefsMenu'
-
-type SpaceTab = 'feed' | 'members' | 'pages' | 'calendar' | 'gallery' | 'map' | 'moderation'
 
 interface SpacePage { id: string; title: string; updated_at: string }
 
@@ -52,6 +51,7 @@ const viewerRole = signal<
 >(undefined)
 const expandedComments = signal<Record<string, Comment[]>>({})
 const spaceDetail = signal<SpaceDetail | null>(null)
+const memberCount = signal<number | null>(null)
 
 async function loadSpaceFeed(spaceId: string) {
   const rows = await api.get(`/api/spaces/${spaceId}/feed`) as FeedPost[]
@@ -66,6 +66,15 @@ export default function SpaceFeedPage() {
   // fetches /api/spaces/{id}/theme, sets CSS vars, and cleans up on
   // unmount so household colours return as the user leaves.
   useSpaceTheme(spaceId)
+  // Surface the space's name in the global TopBar (matches the
+  // household feed pattern). Falls back to "Space" while the detail
+  // request is in flight.
+  const detail = spaceDetail.value
+  useTitle(
+    detail
+      ? (detail.emoji ? `${detail.emoji} ${detail.name}` : detail.name)
+      : 'Space',
+  )
 
   useEffect(() => {
     activeTab.value = 'feed'
@@ -73,6 +82,7 @@ export default function SpaceFeedPage() {
     viewerRole.value = undefined
     expandedComments.value = {}
     spaceDetail.value = null
+    memberCount.value = null
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
     api.get(`/api/spaces/${spaceId}`).then((d) => {
@@ -86,6 +96,7 @@ export default function SpaceFeedPage() {
     if (me) {
       api.get(`/api/spaces/${spaceId}/members`)
         .then((members: { user_id: string; role: string }[]) => {
+          memberCount.value = members.length
           const mine = members.find(m => m.user_id === me)
           if (
             mine
@@ -247,53 +258,38 @@ export default function SpaceFeedPage() {
   const canAdmin = viewerRole.value === 'owner' || viewerRole.value === 'admin'
   const s = spaceDetail.value
 
+  const visibleTabs: readonly SpaceTab[] = [
+    'feed', 'members', 'pages', 'calendar', 'gallery',
+    ...(s?.features?.location ? (['map'] as const) : []),
+    ...(canAdmin ? (['moderation'] as const) : []),
+  ]
+
   return (
     <div class="sh-space-feed sh-space-scope">
-      {s ? (
-        <>
-          <div class="sh-space-feed-header">
-            <SpaceHero
-              name={s.name}
-              emoji={s.emoji}
-              coverUrl={s.cover_url}
-              about={s.about_markdown} />
-            <div class="sh-space-feed-header__actions">
-              {viewerRole.value !== null && (
-                <SpaceNotifPrefsMenu spaceId={spaceId} />
-              )}
-              {canAdmin && (
-                <a href={`/spaces/${spaceId}/settings`}
-                   class="sh-space-settings-btn"
-                   aria-label="Space settings">
-                  ⚙ Settings
-                </a>
-              )}
-            </div>
-          </div>
-          <SpaceLinksStrip spaceId={spaceId} />
-        </>
-      ) : (
-        <h1>Space</h1>
-      )}
-
-      <nav class="sh-space-tabs" role="tablist">
-        {([
-          'feed', 'members', 'pages', 'calendar', 'gallery',
-          ...(s?.features?.location ? (['map'] as SpaceTab[]) : []),
-          ...(canAdmin ? (['moderation'] as SpaceTab[]) : []),
-        ] as SpaceTab[]).map(tab => (
-          <button
-            key={tab}
-            type="button"
-            role="tab"
-            aria-selected={activeTab.value === tab}
-            class={activeTab.value === tab ? 'sh-tab sh-tab--active' : 'sh-tab'}
-            onClick={() => loadTabData(tab)}
-          >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
-          </button>
-        ))}
-      </nav>
+      <SpaceSubHeader
+        name={s?.name ?? 'Space'}
+        emoji={s?.emoji ?? null}
+        coverUrl={s?.cover_url ?? null}
+        memberCount={memberCount.value}
+        activeTab={activeTab}
+        visibleTabs={visibleTabs}
+        onSelectTab={loadTabData}
+        actions={
+          <>
+            {s && viewerRole.value !== undefined && (
+              <SpaceNotifPrefsMenu spaceId={spaceId} />
+            )}
+            {canAdmin && (
+              <a href={`/spaces/${spaceId}/settings`}
+                 class="sh-space-settings-btn"
+                 aria-label="Space settings">
+                ⚙ Settings
+              </a>
+            )}
+          </>
+        }
+      />
+      {s && <SpaceLinksStrip spaceId={spaceId} />}
 
       {activeTab.value === 'feed' && (
         <div class="sh-space-feed-content">
