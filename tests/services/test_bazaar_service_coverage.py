@@ -46,16 +46,29 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
+_DEFAULT_SPACE_ID = "space-bazaar-cov"
+
+
 async def _seed_listing(env, *, mode: BazaarMode, seller="u-seller") -> str:
     pid = uuid.uuid4().hex
     await env.db.enqueue(
-        "INSERT INTO feed_posts(id, author, type, content) VALUES(?,?,?,?)",
-        (pid, seller, "bazaar", ""),
+        """
+        INSERT OR IGNORE INTO spaces(
+            id, name, owner_instance_id, owner_username, identity_public_key
+        ) VALUES(?, ?, ?, ?, ?)
+        """,
+        (_DEFAULT_SPACE_ID, "Test Space", "iid-test", seller, "00" * 32),
+    )
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content) "
+        "VALUES(?,?,?,?,?)",
+        (pid, _DEFAULT_SPACE_ID, seller, "bazaar", ""),
     )
     end_iso = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     await env.repo.save_listing(
         BazaarListing(
             post_id=pid,
+            space_id=_DEFAULT_SPACE_ID,
             seller_user_id=seller,
             mode=mode,
             title="Item",

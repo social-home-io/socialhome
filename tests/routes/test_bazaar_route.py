@@ -6,20 +6,49 @@ from __future__ import annotations
 from .conftest import _auth
 
 
+_TEST_SPACE_ID = "space-bazaar-route"
+
+
+async def _seed_space(client, space_id: str = _TEST_SPACE_ID) -> str:
+    """Insert a space + add the test user as a member (idempotent)."""
+    db = client._db
+    await db.enqueue(
+        """
+        INSERT OR IGNORE INTO spaces(
+            id, name, owner_instance_id, owner_username, identity_public_key
+        ) VALUES(?, ?, ?, ?, ?)
+        """,
+        (space_id, "Bazaar Test Space", "iid-test", client._uid, "00" * 32),
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO space_members(space_id, user_id, role) "
+        "VALUES(?, ?, 'owner')",
+        (space_id, client._uid),
+    )
+    return space_id
+
+
 async def _seed_listing(
-    client, *, listing_id: str = "lst-1", seller: str | None = None
+    client,
+    *,
+    listing_id: str = "lst-1",
+    seller: str | None = None,
+    space_id: str = _TEST_SPACE_ID,
 ) -> None:
     seller = seller or client._uid
     db = client._db
-    # bazaar_listings.post_id FKs feed_posts(id), so we need a parent feed post.
+    await _seed_space(client, space_id)
+    # bazaar_listings.post_id now FKs space_posts(id).
     await db.enqueue(
-        "INSERT INTO feed_posts(id, author, type, content) VALUES(?, ?, 'text', '')",
-        (listing_id, seller),
+        "INSERT INTO space_posts(id, space_id, author, type, content) "
+        "VALUES(?, ?, ?, 'bazaar', '')",
+        (listing_id, space_id, seller),
     )
     await db.enqueue(
-        "INSERT INTO bazaar_listings(post_id, seller_user_id, title, mode, end_time, currency)"
-        " VALUES(?, ?, ?, 'fixed', '2099-01-01T00:00:00+00:00', 'USD')",
-        (listing_id, seller, "Test listing"),
+        "INSERT INTO bazaar_listings("
+        "  post_id, space_id, seller_user_id, title, mode, end_time, currency"
+        ") VALUES(?, ?, ?, ?, 'fixed', '2099-01-01T00:00:00+00:00', 'USD')",
+        (listing_id, space_id, seller, "Test listing"),
     )
 
 
@@ -163,9 +192,11 @@ async def test_place_bid_invalid_json_400(client):
 
 
 async def test_create_listing_succeeds(client):
+    space_id = await _seed_space(client)
     r = await client.post(
         "/api/bazaar",
         json={
+            "space_id": space_id,
             "title": "Classic bike",
             "description": "good condition",
             "mode": "fixed",
@@ -175,17 +206,58 @@ async def test_create_listing_succeeds(client):
         },
         headers=_auth(client._tok),
     )
-    assert r.status == 201
+    assert r.status == 201, await r.text()
     body = await r.json()
     assert body["title"] == "Classic bike"
     assert body["mode"] == "fixed"
     assert body["status"] == "active"
+    assert body["space_id"] == space_id
+
+
+async def test_create_listing_missing_space_id_422(client):
+    r = await client.post(
+        "/api/bazaar",
+        json={"title": "x", "mode": "fixed", "price": 100, "currency": "USD"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_create_listing_non_member_403(client):
+    # Seed a space the test user isn't a member of.
+    db = client._db
+    await db.enqueue(
+        """
+        INSERT INTO spaces(
+            id, name, owner_instance_id, owner_username, identity_public_key
+        ) VALUES('space-foreign', 'Foreign', 'iid-test', 'someone-else', ?)
+        """,
+        ("00" * 32,),
+    )
+    r = await client.post(
+        "/api/bazaar",
+        json={
+            "space_id": "space-foreign",
+            "title": "Sneaky listing",
+            "mode": "fixed",
+            "price": 100,
+            "currency": "USD",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
 
 
 async def test_create_listing_missing_title_422(client):
+    space_id = await _seed_space(client)
     r = await client.post(
         "/api/bazaar",
-        json={"mode": "fixed", "price": 100, "currency": "USD"},
+        json={
+            "space_id": space_id,
+            "mode": "fixed",
+            "price": 100,
+            "currency": "USD",
+        },
         headers=_auth(client._tok),
     )
     assert r.status == 422

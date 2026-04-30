@@ -566,9 +566,10 @@ class BazaarListingExpired(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class BazaarListingCreated(DomainEvent):
-    """A new listing + parent feed post were just persisted together."""
+    """A new listing + parent space post were just persisted together."""
 
     listing_post_id: str
+    space_id: str
     seller_user_id: str
     mode: str
     title: str
