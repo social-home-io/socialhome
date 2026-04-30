@@ -365,8 +365,17 @@ class RealtimeService:
         self,
         event: UserProfileUpdated,
     ) -> None:
-        """Household-wide broadcast (bytes excluded — clients refetch
-        via ``/api/users/{id}/picture?v=<hash>``)."""
+        """Household-wide broadcast (bytes excluded — clients render
+        ``picture_url`` directly so they don't have to know the
+        signing scheme)."""
+        picture_url = (
+            f"/api/users/{event.user_id}/picture?v={event.picture_hash}"
+            if event.picture_hash
+            else None
+        )
+        # ``_broadcast_household`` signs ``picture_url`` automatically via
+        # ``sign_media_urls_in()``, so the SPA can drop the value into
+        # ``<img src>`` directly.
         await self._broadcast_household(
             {
                 "type": "user.profile_updated",
@@ -375,6 +384,7 @@ class RealtimeService:
                 "display_name": event.display_name,
                 "bio": event.bio,
                 "picture_hash": event.picture_hash,
+                "picture_url": picture_url,
             }
         )
 
@@ -382,6 +392,12 @@ class RealtimeService:
         self,
         event: SpaceMemberProfileUpdated,
     ) -> None:
+        picture_url = (
+            f"/api/spaces/{event.space_id}/members/{event.user_id}"
+            f"/picture?v={event.picture_hash}"
+            if event.picture_hash
+            else None
+        )
         await self._broadcast_space(
             event.space_id,
             {
@@ -390,6 +406,7 @@ class RealtimeService:
                 "user_id": event.user_id,
                 "space_display_name": event.space_display_name,
                 "picture_hash": event.picture_hash,
+                "picture_url": picture_url,
             },
         )
 

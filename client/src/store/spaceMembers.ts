@@ -39,21 +39,21 @@ ws.on('space.member.profile_updated', (e) => {
     user_id: string
     space_display_name: string | null
     picture_hash: string | null
+    /** Pre-signed URL from the server so the SPA can drop it straight
+     *  into ``<img src>`` without knowing the signing scheme. */
+    picture_url: string | null
   }
   if (!d.space_id || !d.user_id) return
   const current = spaceMembers.value[d.space_id]
   if (!current) return
   const prev = current.get(d.user_id)
   if (!prev) return
-  const picture_url = d.picture_hash
-    ? `/api/spaces/${d.space_id}/members/${d.user_id}/picture?v=${d.picture_hash}`
-    : null
   const next = new Map(current)
   next.set(d.user_id, {
     ...prev,
     space_display_name: d.space_display_name,
     picture_hash: d.picture_hash,
-    picture_url,
+    picture_url: d.picture_url,
   })
   spaceMembers.value = { ...spaceMembers.value, [d.space_id]: next }
 })

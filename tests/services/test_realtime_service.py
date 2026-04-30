@@ -156,6 +156,61 @@ async def test_ws_post_created_carries_signed_media_url(env):
     assert "sig=" in frame
 
 
+async def test_ws_user_profile_updated_carries_signed_picture_url(env):
+    """Profile-picture upload publishes ``UserProfileUpdated``; the WS
+    frame must include a *signed* ``picture_url`` so receiving tabs
+    can drop it straight into ``<img src>``. Without this the avatar
+    arrives as a raw ``/api/users/{id}/picture`` URL and 401s."""
+    from socialhome.domain.events import UserProfileUpdated
+    from socialhome.media_signer import MediaUrlSigner
+
+    svc, bus, ws = env
+    svc.attach_media_signer(MediaUrlSigner(key=b"\xab" * 32))
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        UserProfileUpdated(
+            user_id="u1",
+            username="alice",
+            display_name="Alice",
+            bio=None,
+            picture_hash="deadbeef",
+            picture_webp=b"webp-bytes",
+        )
+    )
+    assert sock.sent
+    frame = sock.sent[0]
+    assert "user.profile_updated" in frame
+    assert "/api/users/u1/picture?v=deadbeef" in frame
+    assert "exp=" in frame
+    assert "sig=" in frame
+
+
+async def test_ws_user_profile_updated_picture_url_null_when_cleared(env):
+    """``picture_hash=None`` (cleared avatar) → ``picture_url=null``
+    in the frame, not a signed URL pointing at nothing."""
+    from socialhome.domain.events import UserProfileUpdated
+    from socialhome.media_signer import MediaUrlSigner
+
+    svc, bus, ws = env
+    svc.attach_media_signer(MediaUrlSigner(key=b"\xab" * 32))
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        UserProfileUpdated(
+            user_id="u1",
+            username="alice",
+            display_name="Alice",
+            bio=None,
+            picture_hash=None,
+            picture_webp=None,
+        )
+    )
+    assert sock.sent
+    frame = sock.sent[0]
+    assert '"picture_url": null' in frame
+
+
 async def test_post_edited_fans_to_household(env):
     svc, bus, ws = env
     sock = _FakeWS()

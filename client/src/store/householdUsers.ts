@@ -42,20 +42,21 @@ ws.on('user.profile_updated', (e) => {
     display_name: string
     bio: string | null
     picture_hash: string | null
+    /** Pre-signed URL — sent by the server so the SPA can drop it
+     *  straight into ``<img src>`` without knowing the signing
+     *  scheme. ``null`` when no picture is set. */
+    picture_url: string | null
   }
   if (!d.user_id) return
   const prev = householdUsers.value.get(d.user_id)
   if (!prev) return
-  const picture_url = d.picture_hash
-    ? `/api/users/${d.user_id}/picture?v=${d.picture_hash}`
-    : null
   const next = new Map(householdUsers.value)
   next.set(d.user_id, {
     ...prev,
     display_name: d.display_name,
     bio: d.bio,
     picture_hash: d.picture_hash,
-    picture_url,
+    picture_url: d.picture_url,
   })
   householdUsers.value = next
 })

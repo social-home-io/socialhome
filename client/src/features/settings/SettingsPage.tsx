@@ -3,6 +3,7 @@ import { signal } from '@preact/signals'
 import { currentUser } from '@/store/auth'
 import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
+import type { User } from '@/types'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { theme, type Theme } from '@/store/theme'
@@ -71,14 +72,18 @@ export default function SettingsPage() {
 function ProfileTab() {
   const refresh = async () => {
     try {
-      const me = await api.get('/api/me') as {
-        display_name: string
-        bio: string | null
-        picture_url: string | null
-      }
+      const me = await api.get('/api/me') as User
       displayName.value = me.display_name
       bio.value = me.bio ?? ''
       avatarUrl.value = me.picture_url
+      // Mirror the fresh user onto the auth store so other surfaces
+      // (sidenav, profile card, post avatars built from currentUser)
+      // pick up the new ``picture_url`` immediately AND so leaving and
+      // returning to this page doesn't reset to a stale signed URL
+      // from the original ``loadCurrentUser`` fetch.
+      if (currentUser.value) {
+        currentUser.value = { ...currentUser.value, ...me }
+      }
     } catch { /* noop */ }
   }
 
