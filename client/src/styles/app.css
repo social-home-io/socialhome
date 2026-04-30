@@ -5089,42 +5089,114 @@ hr {
 /* ───── Space customization (§23) ────────────────────────────────── */
 .sh-space-scope { min-height: 100%; }
 
-.sh-space-feed-header {
-  position: relative;
-  margin-bottom: var(--sh-space-md);
+/* Sub-header — sticky strip directly under the global TopBar, holding
+ * the tab nav, an identity badge (small avatar + member count), and
+ * a trailing actions slot (settings button, notif prefs). The
+ * `--sh-bg-tertiary` cream + `--sh-border` hairline matches the
+ * household feed's pinned-card surface so the two pages feel like the
+ * same product. ``z-index: 50`` stacks below the TopBar (100) and
+ * above the feed cards. */
+.sh-space-subheader {
+  position: sticky;
+  top: var(--sh-topbar-height);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-md);
+  padding: var(--sh-space-sm) var(--sh-space-lg);
+  /* Negative left/right margin cancels the .sh-main padding so the
+   * strip spans edge-to-edge of the centred 960px content area. */
+  margin: 0 calc(-1 * var(--sh-space-lg));
+  background: var(--sh-bg-tertiary);
+  border-bottom: 1px solid var(--sh-border);
+  /* Soft pinned-wall lift, mirrors --sh-shadow-pinned but smaller so
+   * a sticky strip doesn't feel "pasted on top". */
+  box-shadow: 0 4px 12px -8px rgba(0, 0, 0, 0.12);
 }
-.sh-space-settings-btn {
-  position: absolute;
-  top: var(--sh-space-sm);
-  right: var(--sh-space-sm);
-  padding: 6px 14px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  border-radius: var(--sh-radius-full);
-  text-decoration: none;
-  font-size: var(--sh-font-size-sm);
-  font-weight: 600;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: background var(--sh-transition-fast);
+.sh-space-subheader-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  flex-shrink: 0;
 }
-.sh-space-settings-btn:hover {
-  background: rgba(0, 0, 0, 0.75);
-  color: #fff;
-  text-decoration: none;
+.sh-space-subheader-meta {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+.sh-space-subheader-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+@media (max-width: 768px) {
+  /* Mobile .sh-main switches to padding: var(--sh-space-md); the
+   * strip's negative margin has to track that or it overshoots. */
+  .sh-space-subheader {
+    margin: 0 calc(-1 * var(--sh-space-md));
+    padding: var(--sh-space-sm) var(--sh-space-md);
+  }
 }
 
-/* Header actions row — sits alongside the settings button, right-aligned. */
-.sh-space-feed-header__actions {
-  position: absolute;
-  top: var(--sh-space-sm);
-  right: var(--sh-space-sm);
+/* Tabs become pills when scoped to the sub-header. The base flat-
+ * underline rules (.sh-tab / .sh-tab--active above) keep firing for
+ * the settings page's secondary tabs. */
+.sh-space-subheader .sh-space-tabs {
   display: flex;
   gap: var(--sh-space-xs);
-  align-items: center;
+  border-bottom: none;
+  margin-bottom: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  flex: 1;
+  min-width: 0;
 }
-.sh-space-feed-header__actions .sh-space-settings-btn {
-  position: static;
+.sh-space-subheader .sh-tab {
+  border-radius: var(--sh-radius-md);
+  border: 1px solid transparent;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  background: transparent;
+  margin-bottom: 0;
+}
+.sh-space-subheader .sh-tab:hover {
+  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
+  color: var(--sh-text);
+}
+.sh-space-subheader .sh-tab--active {
+  background: var(--sh-bg);
+  border-color: var(--sh-border);
+  border-bottom: 2px solid var(--sh-primary);
+  box-shadow: var(--sh-shadow-pinned);
+  color: var(--sh-primary);
+  font-weight: 600;
+}
+
+/* Settings button: lives inline in the sub-header on a cream surface
+ * (no longer overlaying a dark cover image), so adopt a pill style
+ * that matches the active-tab treatment. */
+.sh-space-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  text-decoration: none;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+}
+.sh-space-settings-btn:hover {
+  background: var(--sh-bg-secondary);
+  border-color: var(--sh-border-strong);
+  color: var(--sh-text);
+  text-decoration: none;
 }
 
 /* Quick-links strip shown under the hero. */

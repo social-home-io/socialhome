@@ -108,6 +108,13 @@
   --sh-z-toast:    300;
   --sh-z-lightbox: 400;
 
+  /* ── Layout ───────────────────────────────────────────────────── */
+  /* Approximate height of the global TopBar — small input padding
+   * (0.5rem × 2) plus the search bar's own line-height. Used by
+   * page-level sticky sub-headers (e.g. .sh-space-subheader) that
+   * stack directly under the bar. */
+  --sh-topbar-height: 56px;
+
   /* §23.125.4 — Household theme custom properties.
    * HouseholdThemeStudio writes to these; they default to the tokens
    * above so untouched households look identical. */
