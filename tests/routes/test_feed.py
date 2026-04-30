@@ -99,28 +99,30 @@ async def test_create_post_appears_in_feed(client):
     assert any(p["id"] == post_id for p in body)
 
 
-async def test_post_media_url_is_signed(client):
-    """A post's ``media_url`` is returned with ``?exp=&sig=`` so the
-    SPA can drop it into ``<img src>`` without the bearer token."""
+async def test_post_image_urls_are_signed(client):
+    """Each entry in ``image_urls`` comes back with ``?exp=&sig=`` so
+    the SPA can drop it into ``<img src>`` without the bearer token.
+    Image posts use ``image_urls`` exclusively; ``media_url`` is None."""
     r = await client.post(
         "/api/feed/posts",
         json={
             "type": "image",
             "content": "with a pic",
-            "media_url": "/api/media/abc.webp",
+            "image_urls": ["/api/media/abc.webp", "/api/media/def.webp"],
         },
         headers=_auth(client._admin_token),
     )
     body = await r.json()
-    media_url = body["media_url"]
-    # Server signs at serialisation: canonical path is preserved,
-    # sig + exp added.
-    assert media_url.startswith("/api/media/abc.webp?")
-    assert "exp=" in media_url
-    assert "sig=" in media_url
+    assert body["media_url"] is None
+    image_urls = body["image_urls"]
+    assert len(image_urls) == 2
+    for url, name in zip(image_urls, ["abc", "def"]):
+        assert url.startswith(f"/api/media/{name}.webp?")
+        assert "exp=" in url
+        assert "sig=" in url
 
 
-async def test_post_media_url_query_stripped_on_create(client):
+async def test_post_image_urls_query_stripped_on_create(client):
     """If the client echoes a signed URL back to ``POST /api/feed/posts``
     (e.g. from the composer's preview), the server stores the canonical
     form — never the short-lived ``?exp=&sig=`` fragment. We assert by
@@ -131,14 +133,16 @@ async def test_post_media_url_query_stripped_on_create(client):
         json={
             "type": "image",
             "content": "echo test",
-            "media_url": "/api/media/xyz.webp?exp=99999999&sig=NOT_REAL",
+            "image_urls": [
+                "/api/media/xyz.webp?exp=99999999&sig=NOT_REAL",
+            ],
         },
         headers=_auth(client._admin_token),
     )
     body = await r.json()
-    media_url = body["media_url"]
-    assert media_url.startswith("/api/media/xyz.webp?")
-    assert "sig=NOT_REAL" not in media_url
+    image_url = body["image_urls"][0]
+    assert image_url.startswith("/api/media/xyz.webp?")
+    assert "sig=NOT_REAL" not in image_url
 
 
 async def test_edit_post(client):

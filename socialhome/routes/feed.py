@@ -113,11 +113,19 @@ class PostCollectionView(BaseView):
         ctx = self.user
         svc = self.svc(feed_service_key)
         body = await self.body()
+        raw_images = body.get("image_urls") or []
+        if not isinstance(raw_images, list):
+            return error_response(
+                422,
+                "VALIDATION_ERROR",
+                "image_urls must be a list of strings.",
+            )
         post = await svc.create_post(
             author_user_id=ctx.user_id,
             type=body.get("type", "text"),
             content=body.get("content"),
             media_url=strip_signature_query(body.get("media_url")),
+            image_urls=tuple(strip_signature_query(str(u)) for u in raw_images),
             location=_extract_location(body),
             pinned=bool(body.get("pinned", False)),
             no_link_preview=bool(body.get("no_link_preview", False)),

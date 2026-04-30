@@ -36,6 +36,8 @@ from .post_repo import (  # reuse the household post helpers verbatim
     _decode_file_meta,
     _encode_location,
     _decode_location,
+    _encode_image_urls,
+    _decode_image_urls,
     _iso_or_none,
     _to_frozenset,
 )
@@ -117,8 +119,8 @@ class SqliteSpacePostRepo:
                 id, space_id, author, bot_id, linked_event_id, type, content,
                 media_url, reactions, comment_count, pinned, deleted, edited_at,
                 no_link_preview, moderated, file_meta_json, location_json,
-                created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                image_urls_json, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -131,6 +133,7 @@ class SqliteSpacePostRepo:
                 moderated=excluded.moderated,
                 file_meta_json=excluded.file_meta_json,
                 location_json=excluded.location_json,
+                image_urls_json=excluded.image_urls_json,
                 linked_event_id=excluded.linked_event_id
             """,
             (
@@ -151,6 +154,7 @@ class SqliteSpacePostRepo:
                 int(post.moderated),
                 _encode_file_meta(post.file_meta),
                 _encode_location(post.location),
+                _encode_image_urls(post.image_urls),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -451,6 +455,7 @@ def _row_to_space_post(row: dict) -> Post:
         or datetime.now(timezone.utc),
         content=row.get("content"),
         media_url=row.get("media_url"),
+        image_urls=_decode_image_urls(row.get("image_urls_json")),
         reactions=reactions,
         comment_count=int(row.get("comment_count") or 0),
         pinned=bool_col(row.get("pinned", 0)),

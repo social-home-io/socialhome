@@ -27,11 +27,25 @@ import { UploadProgressBar, uploadWithProgress } from './UploadProgress'
 import { currentUser } from '@/store/auth'
 
 const MAX_LENGTH = 5000
+const MAX_IMAGES = 5
+
+interface ImageEntry {
+  /** Canonical URL stored in ``image_urls`` and persisted on the post. */
+  url: string
+  /** Short-lived signed URL used only for the local preview ``<img>``. */
+  preview: string
+  /** Original filename — only kept for the toast / accessibility text. */
+  name: string
+}
 
 /** Extra fields the composer hands back alongside type/content/mediaUrl.
- *  Currently only carries `location` for the location-share post type. */
+ *  Carries the location draft (location-share post) and image-post
+ *  multi-image URL list. ``mediaUrl`` (the third positional arg of
+ *  ``onSubmit``) stays for video / file posts only. */
 export interface ComposerExtras {
   location?: LocationDraft
+  /** 1..``MAX_IMAGES`` canonical (unsigned) URLs for an image post. */
+  imageUrls?: string[]
 }
 
 interface ComposerProps {
@@ -102,29 +116,45 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
   const [pendingPoll, setPendingPoll] = useState<PollDraft | null>(null)
   const [locationOpen, setLocationOpen] = useState(false)
   const [pendingLocation, setPendingLocation] = useState<LocationDraft | null>(null)
+  // Single-URL slot used by ``video`` / ``file`` posts.
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
-  // Short-lived signed URL for the local preview ``<img>`` / ``<video>``.
-  // Stored separately from ``mediaUrl`` (the canonical URL we send to
-  // the post-create endpoint) so we never echo signed query params back
-  // into a stored field.
+  // Short-lived signed URL used only for the video-preview ``<video>``.
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(null)
   const [mediaName, setMediaName] = useState<string | null>(null)
+  // Multi-image slot used by ``image`` posts (1 to ``MAX_IMAGES``).
+  // Each entry carries the canonical URL we send on create and the
+  // signed preview URL we drop into the local thumbnail.
+  const [images, setImages] = useState<ImageEntry[]>([])
   const [dragActive, setDragActive] = useState(false)
 
   const resetAttached = () => {
     setMediaUrl(null)
     setMediaPreviewUrl(null)
     setMediaName(null)
+    setImages([])
   }
 
+  /** Upload one file and route it into the right slot:
+   *  ``image`` → push onto the ``images`` list (capped),
+   *  ``video`` / ``file`` → fill the single ``mediaUrl`` slot. */
   const acceptFile = async (file: File) => {
     const inferred = inferTypeFromFile(file)
     postType.value = inferred
     try {
       const result = await uploadWithProgress(file)
-      setMediaUrl(result.url)
-      setMediaPreviewUrl(result.signed_url)
-      setMediaName(file.name)
+      if (inferred === 'image') {
+        setImages((prev) => {
+          if (prev.length >= MAX_IMAGES) return prev
+          return [
+            ...prev,
+            { url: result.url, preview: result.signed_url, name: file.name },
+          ]
+        })
+      } else {
+        setMediaUrl(result.url)
+        setMediaPreviewUrl(result.signed_url)
+        setMediaName(file.name)
+      }
       showToast(`Attached: ${file.name}`, 'success')
     } catch (err: unknown) {
       showToast(
@@ -133,19 +163,42 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
     }
   }
 
+  /** Upload every file in the iterable, capped collectively at
+   *  ``MAX_IMAGES`` for image posts. Video / file pickers only ever
+   *  pass a single file (the ``<input>`` for those types is single-
+   *  select), so the cap matters mainly for the image multi-select. */
+  const acceptFiles = async (files: Iterable<File>) => {
+    for (const f of files) {
+      const inferred = inferTypeFromFile(f)
+      // Stop early for image posts that already filled the cap; this
+      // matches the UX in BazaarCreateDialog.
+      if (
+        inferred === 'image'
+        && (images.length >= MAX_IMAGES)
+      ) {
+        break
+      }
+      await acceptFile(f)
+    }
+  }
+
+  const removeImage = (url: string) => {
+    setImages((prev) => prev.filter((e) => e.url !== url))
+  }
+
   const onFilePicked = async (e: Event) => {
     const input = e.target as HTMLInputElement
-    const file = input.files?.[0]
-    if (!file) return
-    await acceptFile(file)
+    const files = Array.from(input.files ?? [])
+    if (files.length === 0) return
+    await acceptFiles(files)
     input.value = ''  // allow re-selecting the same file later
   }
 
   const onDrop = async (e: DragEvent) => {
     e.preventDefault()
     setDragActive(false)
-    const file = e.dataTransfer?.files?.[0]
-    if (file) await acceptFile(file)
+    const dropped = Array.from(e.dataTransfer?.files ?? [])
+    if (dropped.length > 0) await acceptFiles(dropped)
   }
 
   const onDragOver = (e: DragEvent) => {
@@ -189,8 +242,12 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
     // textarea before we'll submit.
     const needsText = !typeAcceptsMedia(postType.value) && !typeUsesBuilder(postType.value)
     const hasBody = content.value.trim().length > 0
+    const isImage = postType.value === 'image'
     if (needsText && !hasBody) return
-    if (typeAcceptsMedia(postType.value) && !mediaUrl && !hasBody) return
+    // Image posts need at least one uploaded image; video/file posts
+    // need ``mediaUrl`` set. A caption alone isn't enough either way.
+    if (isImage && images.length === 0 && !hasBody) return
+    if (typeAcceptsMedia(postType.value) && !isImage && !mediaUrl && !hasBody) return
     if (postType.value === 'schedule' && !pendingSchedule) {
       setScheduleOpen(true)
       return
@@ -205,11 +262,19 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
     }
     submitting.value = true
     try {
+      const extras: ComposerExtras = {}
+      if (pendingLocation) extras.location = pendingLocation
+      if (isImage && images.length > 0) {
+        extras.imageUrls = images.map((e) => e.url)
+      }
       const newPostId = await onSubmit(
         postType.value,
         content.value,
-        mediaUrl ?? undefined,
-        pendingLocation ? { location: pendingLocation } : undefined,
+        // Image posts route their URLs through ``extras.imageUrls``;
+        // ``mediaUrl`` here is the single-URL slot used only by
+        // video/file posts.
+        isImage ? undefined : (mediaUrl ?? undefined),
+        Object.keys(extras).length > 0 ? extras : undefined,
       )
       if (postType.value === 'schedule' && pendingSchedule && newPostId) {
         const base = spaceId
@@ -313,11 +378,31 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
           )}
         </>
       )}
-      {showMediaAttach && mediaUrl && (
-        <div class="sh-composer-attachment">
-          {postType.value === 'image' && (
-            <img class="sh-composer-preview" src={mediaPreviewUrl ?? mediaUrl} alt={mediaName ?? ''} />
+      {/* Image post: multi-image grid preview + "Add more" tile up to
+          ``MAX_IMAGES``. Each tile has a ✕ to drop just that image
+          without resetting the whole post. */}
+      {postType.value === 'image' && images.length > 0 && (
+        <div class="sh-composer-images">
+          {images.map((img) => (
+            <div key={img.url} class="sh-composer-image-tile">
+              <img src={img.preview} alt={img.name} />
+              <button type="button" class="sh-composer-remove-attach"
+                      aria-label={`Remove ${img.name}`}
+                      onClick={() => removeImage(img.url)}>✕</button>
+            </div>
+          ))}
+          {images.length < MAX_IMAGES && (
+            <button type="button" class="sh-composer-image-add"
+                    onClick={() => fileInputRef.current?.click()}>
+              <span aria-hidden="true">＋</span>
+              <span>Add photo</span>
+            </button>
           )}
+        </div>
+      )}
+      {/* Video / file: keep the single-attachment tile + remove button. */}
+      {showMediaAttach && postType.value !== 'image' && mediaUrl && (
+        <div class="sh-composer-attachment">
           {postType.value === 'video' && (
             <video class="sh-composer-preview" src={mediaPreviewUrl ?? mediaUrl} controls muted />
           )}
@@ -329,23 +414,41 @@ export function Composer({ onSubmit, context, placeholder, spaceId }: ComposerPr
                   onClick={resetAttached}>✕</button>
         </div>
       )}
-      {showMediaAttach && !mediaUrl && (
+      {/* Empty-state dropzone: shown when no images yet (image post) or
+          no media yet (video/file post). The ``<input>`` carries
+          ``multiple`` for image posts, single for the rest. */}
+      {showMediaAttach
+        && (postType.value === 'image' ? images.length === 0 : !mediaUrl) && (
         <div class="sh-composer-dropzone">
           <span>
             {dragActive
               ? `Drop to attach ${postType.value}`
-              : `Drag a ${postType.value} here, or`}
+              : postType.value === 'image'
+                ? 'Drag photos here, or'
+                : `Drag a ${postType.value} here, or`}
           </span>
           <button type="button" class="sh-link"
                   onClick={() => fileInputRef.current?.click()}>
-            choose a file…
+            {postType.value === 'image' ? 'choose photos…' : 'choose a file…'}
           </button>
           <input ref={fileInputRef} type="file"
+                 multiple={postType.value === 'image'}
                  accept={postType.value === 'image' ? 'image/*'
                        : postType.value === 'video' ? 'video/*' : ''}
                  style={{ display: 'none' }}
                  onChange={onFilePicked} />
         </div>
+      )}
+      {/* Hidden picker reused by the "Add photo" tile so a user can
+          extend an existing image post without re-rendering the
+          dropzone path. The ``<input>`` above only renders in the
+          empty state, so we mount a second one here for the
+          fill-with-more case. */}
+      {postType.value === 'image' && images.length > 0
+        && images.length < MAX_IMAGES && (
+        <input ref={fileInputRef} type="file" multiple accept="image/*"
+               style={{ display: 'none' }}
+               onChange={onFilePicked} />
       )}
       <UploadProgressBar />
       {postType.value === 'schedule' && pendingSchedule && (

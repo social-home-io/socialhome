@@ -351,6 +351,11 @@ CREATE TABLE IF NOT EXISTS feed_posts (
     -- 4dp-truncated at the service layer (§GPS truncation), so the
     -- column never holds higher precision than the federated form.
     location_json   TEXT,
+    -- JSON [url, ...] of 1..FEED_POST_MAX_IMAGES URLs when type='image'.
+    -- Mirrors bazaar_listings.image_urls_json. Image posts use this
+    -- list exclusively — media_url stays NULL for them. Non-image
+    -- posts must store NULL or '[]' here.
+    image_urls_json TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_feed_posts_created ON feed_posts(created_at DESC);
@@ -727,6 +732,9 @@ CREATE TABLE IF NOT EXISTS space_posts (
     -- 4dp-truncated at the service layer; the federated payload
     -- carries the same shape inside its encrypted blob.
     location_json   TEXT,
+    -- Same multi-image shape as feed_posts.image_urls_json — image
+    -- posts in spaces use this list exclusively.
+    image_urls_json TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_space_posts_created

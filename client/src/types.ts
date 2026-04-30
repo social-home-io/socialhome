@@ -47,7 +47,11 @@ export interface FeedPost {
   author: string
   type: 'text' | 'image' | 'video' | 'transcript' | 'poll' | 'schedule' | 'file' | 'bazaar' | 'event' | 'location'
   content: string | null
+  /** Single-URL slot for ``video`` and ``file`` posts. ``image`` posts
+   *  leave this ``null`` and use :attr:`image_urls` instead. */
   media_url: string | null
+  /** 1..5 signed URLs when ``type === 'image'``; empty otherwise. */
+  image_urls: string[]
   file_meta: FileAttachment | null
   /** Present when ``type === 'location'`` — drops a marker on a small
    *  map in the feed card. The composer's LocationPicker captures

@@ -45,6 +45,44 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
+async def test_image_urls_round_trip(env):
+    """Multi-image posts persist their ``image_urls`` tuple in order."""
+    u = await env.user_svc.provision(username="alice", display_name="Alice")
+    saved = await env.post_repo.save(
+        Post(
+            id="post-img-1",
+            author=u.user_id,
+            type=PostType.IMAGE,
+            created_at=datetime.now(timezone.utc),
+            image_urls=(
+                "/api/media/a.webp",
+                "/api/media/b.webp",
+                "/api/media/c.webp",
+            ),
+        ),
+    )
+    got = await env.post_repo.get(saved.id)
+    assert got is not None
+    assert got.media_url is None
+    assert got.image_urls == (
+        "/api/media/a.webp",
+        "/api/media/b.webp",
+        "/api/media/c.webp",
+    )
+
+
+async def test_image_urls_empty_for_non_image_posts(env):
+    """A text post round-trips with ``image_urls=()``."""
+    u = await env.user_svc.provision(username="alice", display_name="Alice")
+    p = await env.feed_svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.TEXT,
+        content="just text",
+    )
+    got = await env.feed_svc.get_post(p.id)
+    assert got.image_urls == ()
+
+
 async def test_save_and_get_post(env):
     """A post created via feed_svc can be retrieved by ID."""
     u = await env.user_svc.provision(username="alice", display_name="Alice")

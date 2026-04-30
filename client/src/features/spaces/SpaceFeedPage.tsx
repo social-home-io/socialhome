@@ -152,10 +152,14 @@ export default function SpaceFeedPage() {
     type: string,
     content: string,
     mediaUrl?: string,
-    extras?: { location?: { lat: number; lon: number; label: string | null } },
+    extras?: {
+      location?: { lat: number; lon: number; label: string | null }
+      imageUrls?: string[]
+    },
   ) => {
     const body: Record<string, unknown> = {
       type, content, media_url: mediaUrl ?? null,
+      image_urls: extras?.imageUrls ?? [],
     }
     if (extras?.location) body.location = extras.location
     const post = await api.post(

@@ -53,7 +53,15 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType, PairingStatus
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
-from ..domain.post import Comment, CommentType, FileMeta, LocationData, Post, PostType
+from ..domain.post import (
+    FEED_POST_MAX_IMAGES,
+    Comment,
+    CommentType,
+    FileMeta,
+    LocationData,
+    Post,
+    PostType,
+)
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     JoinMode,
@@ -1323,6 +1331,7 @@ class SpaceService:
         type: PostType | str,
         content: str | None = None,
         media_url: str | None = None,
+        image_urls: tuple[str, ...] | list[str] = (),
         file_meta: FileMeta | None = None,
         location: LocationData | None = None,
     ) -> Post | None:
@@ -1345,7 +1354,14 @@ class SpaceService:
             raise SpacePermissionError(f"space does not allow {type!r} posts")
 
         post_type = _coerce_post_type(type)
-        _validate_space_content(post_type, content, file_meta, location)
+        image_urls_tuple = tuple(image_urls)
+        _validate_space_content(
+            post_type,
+            content,
+            file_meta,
+            location,
+            image_urls_tuple,
+        )
         is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
         decision = space.features.access_decision("posts", is_admin=is_admin)
         if decision == "deny":
@@ -1367,7 +1383,8 @@ class SpaceService:
             type=post_type,
             created_at=datetime.now(timezone.utc),
             content=content,
-            media_url=media_url,
+            media_url=None if post_type is PostType.IMAGE else media_url,
+            image_urls=image_urls_tuple,
             file_meta=file_meta,
             location=location,
         )
@@ -2027,9 +2044,17 @@ def _validate_space_content(
     content: str | None,
     file_meta: FileMeta | None,
     location: LocationData | None = None,
+    image_urls: tuple[str, ...] = (),
 ) -> None:
     if post_type is PostType.FILE and file_meta is None:
         raise ValueError("file post requires file_meta")
+    if post_type is PostType.IMAGE:
+        if not image_urls:
+            raise ValueError("image post requires at least one image_url")
+        if len(image_urls) > FEED_POST_MAX_IMAGES:
+            raise ValueError(
+                f"image post may carry at most {FEED_POST_MAX_IMAGES} images",
+            )
     if post_type is PostType.LOCATION:
         if location is None:
             raise ValueError("location post requires lat/lon")
@@ -2040,6 +2065,10 @@ def _validate_space_content(
     if post_type in (PostType.TEXT, PostType.TRANSCRIPT):
         if not content or not content.strip():
             raise ValueError(f"{post_type.value} post requires content")
+    if post_type is not PostType.IMAGE and image_urls:
+        raise ValueError(
+            f"{post_type.value} post must not carry image_urls",
+        )
     _validate_text_length(content, limit=MAX_POST_LENGTH)
 
 

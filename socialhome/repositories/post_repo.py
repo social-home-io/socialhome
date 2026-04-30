@@ -134,8 +134,9 @@ class SqlitePostRepo:
             INSERT INTO feed_posts(
                 id, author, type, content, media_url, reactions,
                 comment_count, pinned, deleted, edited_at, no_link_preview,
-                moderated, file_meta_json, location_json, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                moderated, file_meta_json, location_json, image_urls_json,
+                created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -147,7 +148,8 @@ class SqlitePostRepo:
                 no_link_preview=excluded.no_link_preview,
                 moderated=excluded.moderated,
                 file_meta_json=excluded.file_meta_json,
-                location_json=excluded.location_json
+                location_json=excluded.location_json,
+                image_urls_json=excluded.image_urls_json
             """,
             (
                 post.id,
@@ -164,6 +166,7 @@ class SqlitePostRepo:
                 int(post.moderated),
                 _encode_file_meta(post.file_meta),
                 _encode_location(post.location),
+                _encode_image_urls(post.image_urls),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -536,6 +539,21 @@ def _decode_location(raw: str | None) -> LocationData | None:
     )
 
 
+def _encode_image_urls(urls: tuple[str, ...]) -> str | None:
+    """Serialise a multi-image post's URL list. ``None`` for an empty
+    list so the column reads as NULL on non-image posts (slightly
+    cheaper than ``'[]'`` and matches existing convention)."""
+    if not urls:
+        return None
+    return dump_json(list(urls))
+
+
+def _decode_image_urls(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    return tuple(load_json(raw, []))
+
+
 def _row_to_post(row: dict | None) -> Post | None:
     if row is None:
         return None
@@ -550,6 +568,7 @@ def _row_to_post(row: dict | None) -> Post | None:
         or datetime.now(timezone.utc),
         content=row.get("content"),
         media_url=row.get("media_url"),
+        image_urls=_decode_image_urls(row.get("image_urls_json")),
         reactions=reactions,
         comment_count=int(row.get("comment_count") or 0),
         pinned=bool_col(row.get("pinned", 0)),

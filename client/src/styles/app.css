@@ -1773,6 +1773,52 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   border-radius: var(--sh-radius-sm);
   object-fit: cover;
 }
+/* Image-post composer: small grid of thumbnails + an "Add photo"
+ * tile. Mirrors ``.sh-bazaar-create-images`` but uses a slightly
+ * larger min-tile so the dropzone-replacement state feels less
+ * cramped at typical desktop widths. */
+.sh-composer-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--sh-space-xs);
+}
+.sh-composer-image-tile {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: var(--sh-radius-md);
+  overflow: hidden;
+  background: var(--sh-bg-secondary);
+}
+.sh-composer-image-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.sh-composer-image-add {
+  aspect-ratio: 1;
+  border: 2px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  color: var(--sh-text-muted);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: var(--sh-font-size-xs);
+  transition:
+    border-color var(--sh-transition-fast),
+    color var(--sh-transition-fast);
+}
+.sh-composer-image-add:hover {
+  border-color: var(--sh-primary);
+  color: var(--sh-primary);
+}
+.sh-composer-image-add > span:first-child {
+  font-size: 1.5rem;
+  line-height: 1;
+}
 .sh-composer-file-pill {
   display: inline-flex;
   align-items: center;
@@ -2543,6 +2589,95 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: var(--sh-space-xs);
+}
+
+/* WhatsApp-style image grid for an image post (1–5 photos).
+ *
+ * - 1 photo  → full-width, ``aspect-ratio: auto`` (lets tall photos
+ *   stay tall instead of being letterboxed into a square)
+ * - 2 photos → 2 columns, equal squares
+ * - 3 photos → 1 large left + 2 stacked right (16:9-ish ratio)
+ * - 4 photos → 2x2 grid
+ * - 5 photos → same 2x2; the 4th tile is a "+1" overlay (the
+ *   fifth image is the background, dimmed)
+ *
+ * Tiles are buttons (no border, no padding) so click → keyboard /
+ * a11y is free; the inner ``<img>`` does the visual work.
+ */
+.sh-post-image-grid {
+  display: grid;
+  gap: 2px;
+  border-radius: var(--sh-radius-md);
+  overflow: hidden;
+  margin-top: var(--sh-space-xs);
+}
+.sh-post-image-tile {
+  position: relative;
+  background: var(--sh-bg-secondary);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  transition: filter var(--sh-transition-fast);
+}
+.sh-post-image-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.sh-post-image-tile:hover img { filter: brightness(1.05); }
+.sh-post-image-tile:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+}
+
+/* Layouts. ``--1`` keeps the natural aspect; the rest force squares. */
+.sh-post-image-grid--1 {
+  grid-template-columns: 1fr;
+}
+.sh-post-image-grid--1 .sh-post-image-tile {
+  aspect-ratio: auto;
+  max-height: 60vh;
+}
+.sh-post-image-grid--1 .sh-post-image-tile img {
+  height: auto;
+  max-height: 60vh;
+  object-fit: contain;
+}
+.sh-post-image-grid--2 {
+  grid-template-columns: 1fr 1fr;
+  aspect-ratio: 2 / 1;
+}
+.sh-post-image-grid--3 {
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  aspect-ratio: 3 / 2;
+}
+.sh-post-image-grid--3 .sh-post-image-tile:first-child {
+  grid-row: span 2;
+}
+.sh-post-image-grid--4,
+.sh-post-image-grid--5 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  aspect-ratio: 1 / 1;
+}
+
+/* "+N" overlay for 5+ image posts. The bg image is the *fifth*
+ * URL, dimmed; the count sits on top in a light, large numeral. */
+.sh-post-image-tile--more img { filter: brightness(0.55); }
+.sh-post-image-more {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 1.75rem;
+  font-weight: 700;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
 }
 .sh-gallery-item, .sh-image-wrapper {
   position: relative;

@@ -429,6 +429,11 @@ class SchedulePoll:
 
 # ─── Post + Comment ───────────────────────────────────────────────────────
 
+#: Maximum number of images carried by a single ``PostType.IMAGE`` post.
+#: Mirrors :data:`BAZAAR_MAX_IMAGES` so both surfaces feel consistent in
+#: the composer.
+FEED_POST_MAX_IMAGES: int = 5
+
 
 @dataclass(slots=True, frozen=True)
 class Post:
@@ -443,7 +448,14 @@ class Post:
     created_at: datetime
 
     content: str | None = None
+    #: Single-URL slot for ``video`` and ``file`` posts. ``image`` posts
+    #: leave this ``None`` and use :attr:`image_urls` instead so a post
+    #: can carry multiple photos in one card.
     media_url: str | None = None
+    #: Set when ``type is PostType.IMAGE`` — 1 to
+    #: :data:`FEED_POST_MAX_IMAGES` URLs, rendered as a WhatsApp-style
+    #: grid in the SPA. Empty tuple for any other post type.
+    image_urls: tuple[str, ...] = ()
     reactions: Reactions = field(default_factory=dict)
     comment_count: int = 0
     poll: Poll | None = None
@@ -498,7 +510,13 @@ class Post:
 
     def soft_delete(self) -> "Post":
         """Retain the post node (reactions, comments, pin) but clear content."""
-        return copy.replace(self, content=None, media_url=None, deleted=True)
+        return copy.replace(
+            self,
+            content=None,
+            media_url=None,
+            image_urls=(),
+            deleted=True,
+        )
 
     def edit(self, new_content: str, now: datetime | None = None) -> "Post":
         return copy.replace(

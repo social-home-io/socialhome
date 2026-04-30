@@ -32,6 +32,7 @@ from ..domain.events import (
     PostReactionChanged,
 )
 from ..domain.post import (
+    FEED_POST_MAX_IMAGES,
     Comment,
     CommentType,
     FileMeta,
@@ -98,6 +99,7 @@ class FeedService:
         type: PostType | str,
         content: str | None = None,
         media_url: str | None = None,
+        image_urls: tuple[str, ...] | list[str] = (),
         file_meta: FileMeta | None = None,
         location: LocationData | None = None,
         pinned: bool = False,
@@ -108,10 +110,22 @@ class FeedService:
         Raises :class:`ValueError` on validation failures (missing author,
         bad type, over-length content, etc.) and :class:`KeyError` if the
         author is unknown.
+
+        Image posts use ``image_urls`` exclusively (1 to
+        :data:`FEED_POST_MAX_IMAGES` URLs); ``media_url`` stays ``None``.
+        Other types may set ``media_url`` (video / file) but must leave
+        ``image_urls`` empty.
         """
         author = await self._require_author(author_user_id)
         post_type = _coerce_post_type(type)
-        _validate_content(post_type, content, file_meta, location)
+        image_urls_tuple = tuple(image_urls)
+        _validate_content(
+            post_type,
+            content,
+            file_meta,
+            location,
+            image_urls_tuple,
+        )
         # Truncate to 4dp at the service boundary regardless of what the
         # client sent — the column never holds higher precision than the
         # federated form (§GPS truncation).
@@ -141,7 +155,10 @@ class FeedService:
             type=post_type,
             created_at=datetime.now(timezone.utc),
             content=content,
-            media_url=media_url,
+            # Image posts route their URLs through ``image_urls``;
+            # ``media_url`` stays for video / file scalars only.
+            media_url=None if post_type is PostType.IMAGE else media_url,
+            image_urls=image_urls_tuple,
             file_meta=file_meta,
             location=location,
             pinned=bool(pinned),
@@ -415,11 +432,21 @@ def _validate_content(
     content: str | None,
     file_meta: FileMeta | None,
     location: LocationData | None = None,
+    image_urls: tuple[str, ...] = (),
 ) -> None:
     if post_type is PostType.FILE:
         if file_meta is None:
             raise ValueError("file post requires file_meta")
-    elif post_type in (PostType.IMAGE, PostType.VIDEO):
+    elif post_type is PostType.IMAGE:
+        # Image posts must carry 1..FEED_POST_MAX_IMAGES URLs in
+        # ``image_urls`` — ``media_url`` is unused for this type.
+        if not image_urls:
+            raise ValueError("image post requires at least one image_url")
+        if len(image_urls) > FEED_POST_MAX_IMAGES:
+            raise ValueError(
+                f"image post may carry at most {FEED_POST_MAX_IMAGES} images",
+            )
+    elif post_type is PostType.VIDEO:
         # media_url check is implicit — the route uploads media first and
         # passes the URL through to create_post. Content (caption) is
         # optional but bounded.
@@ -434,6 +461,12 @@ def _validate_content(
     elif post_type in (PostType.TEXT, PostType.TRANSCRIPT):
         if not content or not content.strip():
             raise ValueError(f"{post_type.value} post requires content")
+    # Non-image post types must not carry ``image_urls`` — keeps the
+    # column meaning unambiguous on the read side.
+    if post_type is not PostType.IMAGE and image_urls:
+        raise ValueError(
+            f"{post_type.value} post must not carry image_urls",
+        )
     _validate_text_length(content, limit=MAX_POST_LENGTH)
 
 

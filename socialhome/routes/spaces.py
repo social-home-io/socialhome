@@ -1085,12 +1085,20 @@ class SpacePostCollectionView(BaseView):
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         body = await self.body()
+        raw_images = body.get("image_urls") or []
+        if not isinstance(raw_images, list):
+            return error_response(
+                422,
+                "VALIDATION_ERROR",
+                "image_urls must be a list of strings.",
+            )
         post = await svc.create_post(
             space_id,
             author_user_id=ctx.user_id,
             type=body.get("type", "text"),
             content=body.get("content"),
             media_url=strip_signature_query(body.get("media_url")),
+            image_urls=tuple(strip_signature_query(str(u)) for u in raw_images),
             location=_extract_location(body),
         )
         if post is None:

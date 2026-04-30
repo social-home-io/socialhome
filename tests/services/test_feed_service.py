@@ -239,15 +239,65 @@ async def test_list_feed_pagination(stack):
 
 
 async def test_image_post_accepted(stack):
-    """Image post with media_url is accepted."""
+    """Image post with image_urls is accepted."""
     u = await stack.provision_user("a")
     p = await stack.feed_svc.create_post(
         author_user_id=u.user_id,
         type="image",
-        media_url="/media/x.webp",
+        image_urls=("/media/x.webp",),
         content="caption",
     )
     assert p.type is PostType.IMAGE
+    # Image posts use ``image_urls`` exclusively — ``media_url`` stays None.
+    assert p.media_url is None
+    assert p.image_urls == ("/media/x.webp",)
+
+
+async def test_image_post_multi_url_accepted(stack):
+    u = await stack.provision_user("a")
+    p = await stack.feed_svc.create_post(
+        author_user_id=u.user_id,
+        type="image",
+        image_urls=("/media/a.webp", "/media/b.webp", "/media/c.webp"),
+    )
+    assert p.image_urls == (
+        "/media/a.webp",
+        "/media/b.webp",
+        "/media/c.webp",
+    )
+
+
+async def test_image_post_requires_image_urls(stack):
+    u = await stack.provision_user("a")
+    with pytest.raises(ValueError, match="requires at least one image_url"):
+        await stack.feed_svc.create_post(
+            author_user_id=u.user_id,
+            type="image",
+        )
+
+
+async def test_image_post_caps_at_max(stack):
+    from socialhome.domain.post import FEED_POST_MAX_IMAGES
+
+    u = await stack.provision_user("a")
+    too_many = tuple(f"/media/{i}.webp" for i in range(FEED_POST_MAX_IMAGES + 1))
+    with pytest.raises(ValueError, match="at most"):
+        await stack.feed_svc.create_post(
+            author_user_id=u.user_id,
+            type="image",
+            image_urls=too_many,
+        )
+
+
+async def test_text_post_rejects_image_urls(stack):
+    u = await stack.provision_user("a")
+    with pytest.raises(ValueError, match="must not carry image_urls"):
+        await stack.feed_svc.create_post(
+            author_user_id=u.user_id,
+            type="text",
+            content="hi",
+            image_urls=("/media/x.webp",),
+        )
 
 
 async def test_file_post_with_meta(stack):
