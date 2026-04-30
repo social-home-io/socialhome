@@ -20,6 +20,7 @@ import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
 import { CommentThread } from '@/components/CommentThread'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
+import { SpaceTasksTab, resetSpaceTasks } from './SpaceTasksTab'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
 import { CalendarEventDialog, openEventDialog } from '@/components/CalendarEventDialog'
 import { SpaceLinksStrip } from './SpaceLinksStrip'
@@ -83,6 +84,7 @@ export default function SpaceFeedPage() {
     expandedComments.value = {}
     spaceDetail.value = null
     memberCount.value = null
+    resetSpaceTasks()
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
     api.get(`/api/spaces/${spaceId}`).then((d) => {
@@ -259,7 +261,7 @@ export default function SpaceFeedPage() {
   const s = spaceDetail.value
 
   const visibleTabs: readonly SpaceTab[] = [
-    'feed', 'members', 'pages', 'calendar', 'gallery',
+    'feed', 'members', 'pages', 'calendar', 'tasks', 'gallery',
     ...(s?.features?.location ? (['map'] as const) : []),
     ...(canAdmin ? (['moderation'] as const) : []),
   ]
@@ -392,6 +394,10 @@ export default function SpaceFeedPage() {
           ))}
           <CalendarEventDialog onCreated={() => loadTabData('calendar')} />
         </div>
+      )}
+
+      {activeTab.value === 'tasks' && (
+        <SpaceTasksTab spaceId={spaceId} />
       )}
 
       {activeTab.value === 'gallery' && (

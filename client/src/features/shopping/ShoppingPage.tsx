@@ -204,7 +204,7 @@ export default function ShoppingPage() {
         </div>
       ) : (
         <>
-          <ul class="sh-shopping-list">
+          <ul class="sh-shopping-list sh-list-card">
             {active.map(item => (
               <li key={item.id} class="sh-shopping-item">
                 <label class="sh-shopping-item__main">
@@ -216,12 +216,16 @@ export default function ShoppingPage() {
                   />
                   <span class="sh-shopping-item__text">{item.text}</span>
                 </label>
-                <div class="sh-shopping-item__meta sh-muted">
+                <div
+                  class="sh-shopping-item__meta"
+                  title={
+                    item.created_at
+                      ? `Added ${_relativeTime(item.created_at)}`
+                      : undefined
+                  }
+                >
                   {item.created_by && (
-                    <span>by {userNameById(item.created_by)}</span>
-                  )}
-                  {item.created_at && (
-                    <span> · {_relativeTime(item.created_at)}</span>
+                    <span>+ {userNameById(item.created_by)}</span>
                   )}
                 </div>
                 <button
@@ -249,7 +253,7 @@ export default function ShoppingPage() {
                   Clear all
                 </button>
               </div>
-              <ul class="sh-shopping-list sh-shopping-list--done">
+              <ul class="sh-shopping-list sh-list-card sh-list-card--moss sh-shopping-list--done">
                 {completed.map(item => (
                   <li key={item.id} class="sh-shopping-item sh-item--done">
                     <label class="sh-shopping-item__main">
@@ -261,6 +265,11 @@ export default function ShoppingPage() {
                       />
                       <span class="sh-shopping-item__text">{item.text}</span>
                     </label>
+                    <div class="sh-shopping-item__meta">
+                      {item.created_by && (
+                        <span>+ {userNameById(item.created_by)}</span>
+                      )}
+                    </div>
                     <button
                       type="button"
                       class="sh-shopping-item__delete"

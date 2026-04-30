@@ -20,6 +20,7 @@ export type SpaceTab =
   | 'members'
   | 'pages'
   | 'calendar'
+  | 'tasks'
   | 'gallery'
   | 'map'
   | 'moderation'

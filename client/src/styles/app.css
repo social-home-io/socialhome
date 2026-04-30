@@ -2511,87 +2511,189 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 
 /* Tasks */
-.sh-task-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  background: var(--sh-bg);
+/* ─── Tape-card list surface ────────────────────────────────────────────
+ * Shared by tasks (.sh-task-row inside) and shopping (.sh-shopping-item
+ * inside). Cream paper, washi-tape ::before strip, pinned-wall lift.
+ * Mirrors the website's FamilyWall card so the SPA and the marketing
+ * site speak the same visual language.
+ *
+ * Children render as dashed-divider rows — no per-row borders or
+ * shadows, the card is the visual unit and its rows are entries
+ * inside it. */
+.sh-list-card {
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  margin-bottom: var(--sh-space-xs);
-  box-shadow: var(--sh-shadow-xs);
-  transition:
-    background var(--sh-transition-fast),
-    border-color var(--sh-transition-fast),
-    box-shadow var(--sh-transition-fast),
-    transform var(--sh-transition-fast);
+  border-radius: var(--sh-radius-lg);
+  padding: var(--sh-space-md) var(--sh-space-lg);
+  box-shadow: var(--sh-shadow-pinned);
+  margin-top: var(--sh-space-md);
 }
-.sh-task-row:hover {
-  background: var(--sh-bg-secondary);
-  border-color: var(--sh-border-strong);
-  box-shadow: var(--sh-shadow-sm);
-  transform: translateY(-1px);
+.sh-list-card::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 18px;
+  width: 64px;
+  height: 16px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-6deg);
+  pointer-events: none;
+  z-index: 1;
 }
-.sh-task-row:active { transform: translateY(0); }
-.sh-task-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; }
-.sh-task--done { opacity: 0.55; }
-.sh-task--done .sh-task-title { text-decoration: line-through; color: var(--sh-text-muted); }
+/* Alternate the tape colour for a wall-of-cards feel when stacked. */
+.sh-list-card--moss::before {
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+  left: auto;
+  right: 18px;
+  transform: rotate(8deg);
+}
+.sh-list-card__header {
+  margin-bottom: var(--sh-space-sm);
+}
+.sh-list-card__kicker {
+  display: block;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1 ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+  margin-bottom: 4px;
+}
+.sh-list-card__title {
+  font: 600 var(--sh-font-size-lg) / 1.1 var(--sh-font-family-display);
+  margin: 0;
+}
+
+/* Monospace "+ NAME" byline — used for assignees, added-by, due labels.
+ * Uppercase + tracked, JetBrains-style mono, muted ink. */
+.sh-byline {
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+.sh-byline--accent { color: var(--sh-primary); }
+
+/* ─── Task rows (grid layout matching website FamilyWall) ─────────────
+ * Row 1: [check] [title ............ ] [pin]
+ * Row 2:         [owner / assignees ] [pin spans both rows]
+ * Dashed bottom dividers; last row has no border. Rows live inside a
+ * .sh-list-card, so no card-per-row borders/shadows here. */
+.sh-task-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  column-gap: var(--sh-space-sm);
+  align-items: baseline;
+  padding: var(--sh-space-sm) 0;
+  border-bottom: 1px dashed var(--sh-border);
+  margin: 0;
+}
+.sh-task-row:last-child { border-bottom: none; }
+.sh-task-row input[type="checkbox"] {
+  grid-column: 1;
+  grid-row: 1;
+  width: 18px;
+  height: 18px;
+  align-self: center;
+  flex-shrink: 0;
+}
 .sh-task-title {
-  flex: 1;
-  min-width: 0;
+  grid-row: 1;
+  grid-column: 2 / span 2;
   text-align: left;
   font-size: var(--sh-font-size-base);
-  line-height: 1.4;
+  line-height: 1.2;
   color: var(--sh-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
-.sh-task-due {
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-warning);
-  font-weight: 600;
-  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
+.sh-task-title:hover { color: var(--sh-primary); }
+.sh-task-meta {
+  grid-row: 2;
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  margin-top: 2px;
+}
+.sh-task-meta:empty { display: none; }
+.sh-task-row .sh-icon-btn {
+  grid-row: 1 / span 2;
+  grid-column: 3;
+  align-self: center;
+  opacity: 0;
+  transition: opacity var(--sh-transition-fast);
+}
+.sh-task-row:hover .sh-icon-btn,
+.sh-task-row:focus-within .sh-icon-btn { opacity: 1; }
+.sh-task--done { opacity: 0.65; }
+.sh-task--done .sh-task-title {
+  text-decoration: line-through;
+  text-decoration-color: var(--sh-border);
+  color: var(--sh-text-muted);
+}
+
+/* "due" / "overdue" pin — sits in column 3, spans both grid rows.
+ * Small honey pill for due, terracotta on cream for overdue. */
+.sh-task-pin {
+  grid-row: 1 / span 2;
+  grid-column: 3;
+  align-self: center;
   padding: 2px 8px;
   border-radius: var(--sh-radius-full);
+  font: 600 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
+.sh-task-pin--due {
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  color: var(--sh-text);
+}
+.sh-task-pin--overdue {
+  background: var(--sh-primary);
+  color: var(--sh-bg);
+}
+
+/* Status segmented button (Todo / In progress / Done). Smaller pill so
+ * it fits next to the pin without a wide trailing column. */
 .sh-task-status {
-  font-size: var(--sh-font-size-xs);
-  padding: 3px 10px;
+  font: 600 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  padding: 2px 8px;
   border-radius: var(--sh-radius-full);
   background: var(--sh-bg-secondary);
   color: var(--sh-text-muted);
-  font-weight: 700;
-  text-transform: uppercase;
   letter-spacing: 0.04em;
+  text-transform: uppercase;
   border: 1px solid transparent;
   cursor: pointer;
-  transition:
-    background var(--sh-transition-fast),
-    color var(--sh-transition-fast),
-    border-color var(--sh-transition-fast),
-    box-shadow var(--sh-transition-fast),
-    transform var(--sh-transition-fast);
+  transition: background var(--sh-transition-fast),
+              color var(--sh-transition-fast);
 }
-.sh-task-status:hover:not(:disabled) { transform: translateY(-1px); }
-.sh-task-status:active:not(:disabled) { transform: translateY(0); }
 .sh-task-status--done {
-  background: color-mix(in srgb, var(--sh-success) 15%, transparent);
+  background: color-mix(in srgb, var(--sh-success) 18%, transparent);
   color: var(--sh-success);
-  border-color: color-mix(in srgb, var(--sh-success) 30%, transparent);
 }
 .sh-task-status--inprogress, .sh-task-status--in_progress {
-  background: color-mix(in srgb, var(--sh-warning) 15%, transparent);
+  background: color-mix(in srgb, var(--sh-warning) 18%, transparent);
   color: var(--sh-warning);
-  border-color: color-mix(in srgb, var(--sh-warning) 30%, transparent);
 }
 .sh-task-status--todo {
-  background: var(--sh-bg-secondary);
+  background: transparent;
   color: var(--sh-text-muted);
-  border-color: var(--sh-border);
 }
 
 /* Stickies */
@@ -2903,17 +3005,19 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
 }
+/* Shopping list — same tape-card surface as tasks. Items use dashed
+ * dividers; the "+ NAME" added-by byline is a .sh-byline mono pill on
+ * the right edge of each row, matching the website's FamilyWall card. */
 .sh-shopping-list { padding: 0; list-style: none; margin: 0; }
 .sh-shopping-item {
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  border-bottom: 1px solid var(--sh-border);
+  padding: var(--sh-space-sm) 0;
+  border-bottom: 1px dashed var(--sh-border);
   transition: background-color 120ms;
 }
 .sh-shopping-list li:last-child { border-bottom: none; }
-.sh-shopping-item:hover { background: color-mix(in srgb, var(--sh-accent) 5%, transparent); }
 .sh-shopping-item__main {
   flex: 1;
   display: flex; gap: var(--sh-space-sm);
@@ -2924,9 +3028,16 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sh-shopping-item__meta {
-  font-size: var(--sh-font-size-xs);
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
   white-space: nowrap;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .sh-shopping-item__delete {
   border: none;
