@@ -60,10 +60,10 @@ async def test_update_admin_changes_toggles(env):
     svc, _ = env
     await svc.update(
         actor_is_admin=True,
-        toggles={"feat_bazaar": False, "allow_video": False},
+        toggles={"feat_pages": False, "allow_video": False},
     )
     feats = await svc.get()
-    assert feats.feat_bazaar is False
+    assert feats.feat_pages is False
     assert feats.allow_video is False
     # Untouched defaults survive.
     assert feats.feat_feed is True
@@ -176,9 +176,9 @@ async def test_update_publishes_household_config_changed(env, tmp_dir):
         SqliteHouseholdFeaturesRepo(db),
         bus=bus,
     )
-    await svc_bus.update(actor_is_admin=True, toggles={"feat_bazaar": False})
+    await svc_bus.update(actor_is_admin=True, toggles={"feat_pages": False})
     assert received
-    assert received[0].changed == {"feat_bazaar": False}
+    assert received[0].changed == {"feat_pages": False}
 
 
 async def test_update_no_change_no_event(env, tmp_dir):

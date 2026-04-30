@@ -109,7 +109,6 @@ class BazaarCollectionView(BaseView):
 
     async def post(self) -> web.Response:
         ctx = self.user
-        await self.require_household_feature("bazaar")
         svc = self.svc(bazaar_service_key)
         body = await self.body()
 
@@ -219,7 +218,6 @@ class BazaarBidCollectionView(BaseView):
 
     async def post(self) -> web.Response:
         ctx = self.user
-        await self.require_household_feature("bazaar")
         svc = self.svc(bazaar_service_key)
         body = await self.body()
 
@@ -342,7 +340,6 @@ class BazaarOfferCollectionView(BaseView):
 
     async def post(self) -> web.Response:
         ctx = self.user
-        await self.require_household_feature("bazaar")
         svc = self.svc(bazaar_service_key)
         body = await self.body()
         amount = body.get("amount")

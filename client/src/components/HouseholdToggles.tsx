@@ -12,10 +12,9 @@ import { showToast } from './Toast'
 
 interface Toggles {
   feat_feed: boolean; feat_pages: boolean; feat_tasks: boolean
-  feat_stickies: boolean; feat_calendar: boolean; feat_bazaar: boolean
+  feat_stickies: boolean; feat_calendar: boolean
   allow_text: boolean; allow_image: boolean; allow_video: boolean
   allow_file: boolean; allow_poll: boolean; allow_schedule: boolean
-  allow_bazaar: boolean
   household_name: string
 }
 
@@ -52,15 +51,17 @@ export function HouseholdToggles() {
     }
   }
 
+  // Bazaar is a per-space feature only — no household-level section
+  // toggle, no post-type toggle. Listings live inside spaces and the
+  // Bazaar tab in the SPA stays visible to everyone for browsing.
   const features: [keyof Toggles, string][] = [
     ['feat_feed', 'Feed'], ['feat_pages', 'Pages'], ['feat_tasks', 'Tasks'],
     ['feat_stickies', 'Stickies'], ['feat_calendar', 'Calendar'],
-    ['feat_bazaar', 'Bazaar'],
   ]
   const postTypes: [keyof Toggles, string][] = [
     ['allow_text', 'Text'], ['allow_image', 'Image'], ['allow_video', 'Video'],
     ['allow_file', 'File'], ['allow_poll', 'Poll'],
-    ['allow_schedule', 'Schedule'], ['allow_bazaar', 'Bazaar listings'],
+    ['allow_schedule', 'Schedule'],
   ]
 
   return (

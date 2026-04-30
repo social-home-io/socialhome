@@ -47,7 +47,6 @@ interface SideNavState {
   feat_tasks: boolean
   feat_pages: boolean
   feat_stickies: boolean
-  feat_bazaar: boolean
 }
 
 const ALL_ON: Omit<SideNavState, 'isAdmin' | 'isGuardian'> = {
@@ -56,7 +55,6 @@ const ALL_ON: Omit<SideNavState, 'isAdmin' | 'isGuardian'> = {
   feat_tasks: true,
   feat_pages: true,
   feat_stickies: true,
-  feat_bazaar: true,
 }
 
 const HOME_GROUP: SideNavGroup = {
@@ -93,8 +91,7 @@ const BROWSE_GROUP: SideNavGroup = {
   label: 'Browse',
   items: [
     { key: 'spaces', label: 'Spaces', href: '/spaces',    icon: 'spaces' },
-    { key: 'bazaar', label: 'Bazaar', href: '/bazaar',    icon: 'bazaar',
-      gate: s => s.feat_bazaar },
+    { key: 'bazaar', label: 'Bazaar', href: '/bazaar',    icon: 'bazaar' },
     { key: 'corner', label: 'Corner', href: '/dashboard', icon: 'corner' },
   ],
 }
@@ -134,7 +131,6 @@ export function SideNav() {
             feat_tasks: t.feat_tasks,
             feat_pages: t.feat_pages,
             feat_stickies: t.feat_stickies,
-            feat_bazaar: t.feat_bazaar,
           }
         : ALL_ON),
     }

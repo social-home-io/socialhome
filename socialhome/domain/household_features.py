@@ -19,16 +19,25 @@ class FeatureDisabledError(Exception):
 
 
 #: Feature sections (one per toggleable UI surface).
+#:
+#: ``bazaar`` is intentionally absent — bazaar listings are a
+#: per-space feature (gated by ``space.features.bazaar`` /
+#: ``space.features.allow_bazaar``); the household-level feed never
+#: surfaces bazaar posts, so a household-wide toggle has no effect
+#: and only confuses operators. The Bazaar tab in the SPA is
+#: always visible (like Spaces) — it lists the user's
+#: space-scoped listings.
 SECTIONS: tuple[str, ...] = (
     "feed",
     "pages",
     "tasks",
     "stickies",
     "calendar",
-    "bazaar",
 )
 
-#: Post types mapped to their ``allow_*`` attribute names.
+#: Post types mapped to their ``allow_*`` attribute names. Bazaar
+#: posts are space-only and never enter the household feed, so
+#: ``allow_bazaar`` has no household-level meaning.
 POST_TYPE_ALLOW: dict[str, str] = {
     "text": "allow_text",
     "image": "allow_image",
@@ -36,7 +45,6 @@ POST_TYPE_ALLOW: dict[str, str] = {
     "file": "allow_file",
     "poll": "allow_poll",
     "schedule": "allow_schedule",
-    "bazaar": "allow_bazaar",
     "location": "allow_location",
 }
 
@@ -51,14 +59,12 @@ class HouseholdFeatures:
     feat_tasks: bool = True
     feat_stickies: bool = True
     feat_calendar: bool = True
-    feat_bazaar: bool = True
     allow_text: bool = True
     allow_image: bool = True
     allow_video: bool = True
     allow_file: bool = True
     allow_poll: bool = True
     allow_schedule: bool = True
-    allow_bazaar: bool = True
     allow_location: bool = True
 
     def is_enabled(self, section: str) -> bool:
@@ -72,7 +78,17 @@ class HouseholdFeatures:
         return bool(getattr(self, attr))
 
     def allows_post_type(self, post_type: str) -> bool:
-        """``True`` if the household allows creating posts of this type."""
+        """``True`` if the household allows creating posts of this type.
+
+        ``bazaar`` is a synthetic post type minted internally by the
+        bazaar service to wrap a listing — it's never user-selectable
+        in the feed composer. Gating it at the household level would
+        block the bazaar route from creating its own wrapper post,
+        without giving operators any meaningful control. Per-space
+        bazaar visibility is the real gate (``space.features.bazaar``).
+        """
+        if post_type == "bazaar":
+            return True
         attr = POST_TYPE_ALLOW.get(post_type)
         if attr is None:
             return False

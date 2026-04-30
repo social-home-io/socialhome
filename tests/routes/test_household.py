@@ -34,11 +34,11 @@ async def test_put_features_admin_renames_household(client):
 async def test_put_features_admin_toggles_feature(client):
     r = await client.put(
         "/api/household/features",
-        json={"toggles": {"feat_bazaar": False}},
+        json={"toggles": {"feat_pages": False}},
         headers=_auth(client._tok),
     )
     assert r.status == 200
-    assert (await r.json())["feat_bazaar"] is False
+    assert (await r.json())["feat_pages"] is False
 
 
 async def test_put_features_non_admin_403(client):

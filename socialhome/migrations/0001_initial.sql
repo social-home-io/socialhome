@@ -275,14 +275,15 @@ CREATE TABLE IF NOT EXISTS household_features (
     feat_tasks        INTEGER NOT NULL DEFAULT 1,
     feat_stickies     INTEGER NOT NULL DEFAULT 1,
     feat_calendar     INTEGER NOT NULL DEFAULT 1,
-    feat_bazaar       INTEGER NOT NULL DEFAULT 1,
+    -- Bazaar is a per-space feature only (gated by ``space.features``).
+    -- The household feed never carries bazaar posts, so no
+    -- ``feat_bazaar`` / ``allow_bazaar`` here.
     allow_text        INTEGER NOT NULL DEFAULT 1,
     allow_image       INTEGER NOT NULL DEFAULT 1,
     allow_video       INTEGER NOT NULL DEFAULT 1,
     allow_file        INTEGER NOT NULL DEFAULT 1,
     allow_poll        INTEGER NOT NULL DEFAULT 1,
     allow_schedule    INTEGER NOT NULL DEFAULT 1,
-    allow_bazaar      INTEGER NOT NULL DEFAULT 1,
     allow_location    INTEGER NOT NULL DEFAULT 1
 );
 

@@ -12,10 +12,9 @@ import { SideNav } from './SideNav'
 
 const ALL_FEATURES_ON = {
   feat_feed: true, feat_pages: true, feat_tasks: true,
-  feat_stickies: true, feat_calendar: true, feat_bazaar: true,
+  feat_stickies: true, feat_calendar: true,
   allow_text: true, allow_image: true, allow_video: true,
   allow_file: true, allow_poll: true, allow_schedule: true,
-  allow_bazaar: true,
   household_name: 'Hearth',
 }
 
@@ -80,11 +79,10 @@ describe('SideNav', () => {
     expect(queryByText('Gallery')).toBeTruthy()
   })
 
-  it('hides Bazaar when feat_bazaar is off but keeps the BROWSE header (Spaces is still there)', () => {
+  it('shows Bazaar unconditionally — it is a per-space feature, not gated by household toggles', () => {
     setUser({ is_admin: true })
-    toggles.value = { ...ALL_FEATURES_ON, feat_bazaar: false }
     const { queryByText, container } = renderAt('/')
-    expect(queryByText('Bazaar')).toBeNull()
+    expect(queryByText('Bazaar')).toBeTruthy()
     expect(queryByText('Spaces')).toBeTruthy()
     const headers = Array.from(container.querySelectorAll('.sh-sidenav-group-header'))
       .map((el) => el.textContent?.trim())
