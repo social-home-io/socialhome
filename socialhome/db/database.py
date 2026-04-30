@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,15 @@ class AsyncDatabase:
         # Serialises all write transactions (queue batches + transact() calls)
         # so the single shared sqlite3 connection never sees nested BEGINs.
         self._writer_lock: asyncio.Lock | None = None
+        # Threading-level lock around every operation on the shared
+        # ``sqlite3.Connection``. With ``check_same_thread=False`` and
+        # ``run_in_executor`` scheduling reads on a thread pool, two
+        # concurrent ``conn.execute()`` calls can race the Python wrapper
+        # state and surface as ``sqlite3.InterfaceError: bad parameter or
+        # other API misuse``. Acquired by ``_read`` and by every
+        # ``_run`` body that touches the connection (writer batch,
+        # ``transact``, ``checkpoint``).
+        self._conn_thread_lock = threading.RLock()
         self._closed = False
 
     # ── Lifecycle ────────────────────────────────────────────────────────
@@ -195,15 +205,18 @@ class AsyncDatabase:
         conn = self._conn  # capture for mypy narrowing
         loop = asyncio.get_running_loop()
 
+        lock = self._conn_thread_lock
+
         def _run():
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                result = fn(conn)
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            return result
+            with lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    result = fn(conn)
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+                return result
 
         async with self._writer_lock:
             return await loop.run_in_executor(None, _run)
@@ -238,10 +251,13 @@ class AsyncDatabase:
         conn = self._conn
         loop = asyncio.get_running_loop()
 
+        lock = self._conn_thread_lock
+
         def _run():
-            cur = conn.execute(f"PRAGMA wal_checkpoint({mode})")
-            row = cur.fetchone()
-            return tuple(row) if row else (0, 0, 0)
+            with lock:
+                cur = conn.execute(f"PRAGMA wal_checkpoint({mode})")
+                row = cur.fetchone()
+                return tuple(row) if row else (0, 0, 0)
 
         # Hold the writer lock so no in-flight batch races the checkpoint.
         async with self._writer_lock:
@@ -253,7 +269,13 @@ class AsyncDatabase:
         self._assert_running()
         assert self._conn is not None
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, fn, self._conn)
+        lock = self._conn_thread_lock
+
+        def _locked(conn):
+            with lock:
+                return fn(conn)
+
+        return await loop.run_in_executor(None, _locked, self._conn)
 
     async def _writer_loop(self) -> None:
         assert self._conn is not None
@@ -295,21 +317,24 @@ class AsyncDatabase:
         loop = asyncio.get_running_loop()
         assert self._writer_lock is not None
 
+        lock = self._conn_thread_lock
+
         def _run() -> list[tuple["_PendingWrite", Any]]:
             # Single transaction for the whole batch. If any statement fails,
             # the entire batch rolls back and every future receives the
             # exception — callers see the failure atomically.
-            results: list[tuple[_PendingWrite, Any]] = []
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                for pending in batch:
-                    cursor = conn.execute(pending.sql, pending.params)
-                    results.append((pending, cursor.lastrowid or 0))
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            return results
+            with lock:
+                results: list[tuple[_PendingWrite, Any]] = []
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for pending in batch:
+                        cursor = conn.execute(pending.sql, pending.params)
+                        results.append((pending, cursor.lastrowid or 0))
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+                return results
 
         try:
             async with self._writer_lock:

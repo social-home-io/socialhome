@@ -270,3 +270,24 @@ async def test_operations_before_startup_raise(tmp_dir):
     db = AsyncDatabase(tmp_dir / "not-started.db", batch_timeout_ms=10)
     with pytest.raises(RuntimeError, match="not started"):
         await db.fetchone("SELECT 1")
+
+
+async def test_concurrent_reads_do_not_misuse_connection(tmp_dir):
+    """Many parallel reads on the shared connection must serialise
+    via the threading lock. Without it, ``conn.execute()`` races on
+    the executor pool and surfaces as
+    ``sqlite3.InterfaceError: bad parameter or other API misuse``.
+    """
+    import asyncio
+
+    db = AsyncDatabase(tmp_dir / "concurrent.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        # Burst 50 parallel SELECTs. Pre-fix: surfaces InterfaceError
+        # within ~10–20 attempts under load. Post-fix: all succeed.
+        results = await asyncio.gather(
+            *[db.fetchval("SELECT COUNT(*) FROM users", default=0) for _ in range(50)],
+        )
+        assert all(r == 0 for r in results)
+    finally:
+        await db.shutdown()
