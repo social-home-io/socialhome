@@ -71,6 +71,7 @@ from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionSchedul
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
 from .platform import build_platform_adapter
+from .platform.adapter import Capability
 from .rate_limiter import RateLimiter, build_rate_limit_middleware
 from .repositories import (
     SqliteBazaarRepo,
@@ -1134,14 +1135,23 @@ def create_app(config: Config | None = None) -> web.Application:
     # video, download links) authenticate via ``?exp=&sig=`` without ever
     # surfacing the bearer token. Bearer + HA ingress remain as fallbacks
     # for fetch()-driven traffic.
+    #
+    # ``HaIngressStrategy`` only makes sense when the platform adapter
+    # actually advertises :data:`Capability.INGRESS` (i.e. ``haos`` mode
+    # behind the HA Supervisor ingress proxy). Wiring it on standalone or
+    # the basic ``ha`` adapter would noisily log the
+    # "token validation is disabled" warning on every cold start AND
+    # leave a tiny attack surface — a request smuggling
+    # ``X-Ingress-User`` past a non-ingress reverse proxy could bypass
+    # bearer auth. Gate on the capability and the strategy disappears
+    # entirely outside HAOS.
     bearer_strategy = BearerTokenStrategy(user_repo)
-    ha_strategy = HaIngressStrategy(user_repo)
     signed_media_strategy = SignedMediaStrategy()
-    chained_strategy = ChainedStrategy(
-        signed_media_strategy,
-        ha_strategy,
-        bearer_strategy,
-    )
+    strategies: list = [signed_media_strategy]
+    if Capability.INGRESS in platform_adapter.capabilities:
+        strategies.append(HaIngressStrategy(user_repo))
+    strategies.append(bearer_strategy)
+    chained_strategy = ChainedStrategy(*strategies)
     auth_middleware = require_auth(chained_strategy)
 
     # ── Rate-limit + hardening middleware (§25.7) ────────────────────────
