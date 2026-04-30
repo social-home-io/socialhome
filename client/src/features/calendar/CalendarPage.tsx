@@ -12,6 +12,7 @@ import { ReminderPicker } from '@/components/ReminderPicker'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
 import { events, rsvpCounts, myRsvpStatus } from '@/store/calendar'
+import { groupEventsByDay } from '@/utils/calendar'
 import { t } from '@/i18n/i18n'
 
 type ViewMode = 'month' | 'week' | 'day'
@@ -79,14 +80,21 @@ function formatDateHeading(date: Date, mode: ViewMode): string {
   return date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 }
 
-function groupEventsByDay(evts: CalendarEvent[]): Record<string, CalendarEvent[]> {
-  const groups: Record<string, CalendarEvent[]> = {}
-  for (const e of evts) {
-    const key = new Date(e.start).toLocaleDateString()
-    if (!groups[key]) groups[key] = []
-    groups[key].push(e)
+/** Lazily ensure a default household calendar exists.
+ *
+ * A fresh household starts with zero calendars and the SPA has no
+ * "create calendar" surface — so until this PR, the "+ New event"
+ * button hid until something else (a backend bootstrap, an admin
+ * action) seeded one. Now we just create one on demand the first
+ * time the user clicks New event. Returns the calendar id, caches
+ * it in the module-level signal. */
+async function ensureHouseholdCalendar(): Promise<string> {
+  if (calendarId.value) return calendarId.value
+  const cal = await api.post('/api/calendars', { name: 'Calendar' }) as {
+    id: string
   }
-  return groups
+  calendarId.value = cal.id
+  return cal.id
 }
 
 export default function CalendarPage() {
@@ -104,6 +112,15 @@ export default function CalendarPage() {
   useEffect(() => {
     if (calendarId.value) loadEvents()
   }, [viewMode.value, currentDate.value])
+
+  const handleNewEvent = async () => {
+    try {
+      const id = await ensureHouseholdCalendar()
+      openEventDialog(id)
+    } catch (e) {
+      showToast(`Couldn't open new-event dialog: ${(e as Error).message}`, 'error')
+    }
+  }
 
   const handleRsvp = async (
     event: CalendarEvent,
@@ -174,9 +191,7 @@ export default function CalendarPage() {
   return (
     <div class="sh-calendar">
       <div class="sh-page-header">
-        {calendarId.value && (
-          <Button onClick={() => openEventDialog(calendarId.value)}>+ New event</Button>
-        )}
+        <Button onClick={handleNewEvent}>+ New event</Button>
       </div>
 
       <div class="sh-calendar-controls">
