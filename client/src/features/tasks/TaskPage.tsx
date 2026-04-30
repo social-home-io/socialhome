@@ -15,6 +15,8 @@ import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { useTitle } from '@/store/pageTitle'
 import { lists, tasks } from '@/store/tasks'
+import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
+import { currentUser } from '@/store/auth'
 import type { TaskItem, TaskListEntry } from '@/types'
 
 const activeList = signal<string | null>(null)
@@ -36,8 +38,27 @@ const STATUS_CYCLE: Record<Status, Status> = {
   done:        'todo',
 }
 
+function dueLabel(due: string): { text: string; modifier: 'due' | 'overdue' | null } {
+  // Parse a YYYY-MM-DD or ISO timestamp; reduce to a date-only comparison
+  // against "today" so a task due today doesn't read as "overdue" until
+  // tomorrow rolls over.
+  const d = new Date(due)
+  if (Number.isNaN(d.getTime())) return { text: due, modifier: null }
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const dueDay = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const ms = dueDay.getTime() - today.getTime()
+  const days = Math.round(ms / 86400000)
+  if (days < 0) return { text: 'overdue', modifier: 'overdue' }
+  if (days === 0) return { text: 'today', modifier: 'due' }
+  if (days === 1) return { text: 'tomorrow', modifier: 'due' }
+  if (days <= 7) return { text: 'this week', modifier: 'due' }
+  return { text: due, modifier: null }
+}
+
 export default function TaskPage() {
   useEffect(() => {
+    void loadHouseholdUsers()
     void (async () => {
       try {
         const rows = await api.get('/api/tasks/lists') as TaskListEntry[]
@@ -162,6 +183,13 @@ export default function TaskPage() {
 
   if (loading.value) return <Spinner />
 
+  const me = currentUser.value
+  const userNameById = (uid: string): string => {
+    if (me?.user_id === uid) return 'you'
+    const found = householdUsers.value.get(uid)
+    return found?.display_name || found?.username || uid.slice(0, 6)
+  }
+
   const visibleTasks = tasks.value
     .filter(t => t.list_id === activeList.value)
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
@@ -219,40 +247,69 @@ export default function TaskPage() {
           </form>
         )}
 
-        {visibleTasks.map(t => (
-          <div key={t.id}
-               class={`sh-task-row ${t.status === 'done' ? 'sh-task--done' : ''}`}>
-            <input type="checkbox" checked={t.status === 'done'}
-              onChange={() => cycleStatus({
-                ...t,
-                status: t.status === 'done' ? 'todo' : 'done',
-              })}
-              aria-label={`Toggle ${t.title}`} />
-            <button
-              type="button"
-              class="sh-task-title sh-link-button"
-              onClick={() => (editingTask.value = t)}
-              title="Edit task"
-              aria-label={`Edit task: ${t.title}`}
-            >
-              {t.title}
-            </button>
-            {t.due_date && (
-              <span class="sh-task-due" aria-label={`Due ${t.due_date}`}>
-                📅 {t.due_date}
-              </span>
-            )}
-            <button type="button"
-              class={`sh-task-status sh-task-status--${t.status}`}
-              onClick={() => void cycleStatus(t)}
-              title="Click to cycle status"
-              aria-label={`Status: ${STATUS_LABEL[t.status as Status]}, click to change`}>
-              {STATUS_LABEL[t.status as Status] ?? t.status}
-            </button>
-            <button type="button" class="sh-icon-btn" aria-label={`Delete ${t.title}`}
-                    onClick={() => void deleteTask(t)}>🗑️</button>
-          </div>
-        ))}
+        {visibleTasks.length > 0 && (
+          <ul class="sh-list-card" style={{ listStyle: 'none', margin: 0 }}>
+            {visibleTasks.map(t => {
+              const due = t.due_date ? dueLabel(t.due_date) : null
+              const owners = (t.assignees ?? [])
+                .map(uid => userNameById(uid))
+                .filter(Boolean)
+              const ownerLine =
+                owners.length > 0
+                  ? owners.join(' · ')
+                  : t.created_by ? `+ ${userNameById(t.created_by)}` : ''
+              return (
+                <li key={t.id}
+                    class={`sh-task-row ${t.status === 'done' ? 'sh-task--done' : ''}`}>
+                  <input type="checkbox" checked={t.status === 'done'}
+                    onChange={() => cycleStatus({
+                      ...t,
+                      status: t.status === 'done' ? 'todo' : 'done',
+                    })}
+                    aria-label={`Toggle ${t.title}`} />
+                  <button
+                    type="button"
+                    class="sh-task-title"
+                    onClick={() => (editingTask.value = t)}
+                    title="Edit task"
+                    aria-label={`Edit task: ${t.title}`}
+                  >
+                    {t.title}
+                  </button>
+                  <div class="sh-task-meta">
+                    {ownerLine && (
+                      <span class="sh-byline">{ownerLine}</span>
+                    )}
+                    {due && due.text !== t.due_date && (
+                      <span class="sh-byline sh-byline--accent">
+                        · {due.text}
+                      </span>
+                    )}
+                    {due && due.text === t.due_date && (
+                      <span class="sh-byline">· {due.text}</span>
+                    )}
+                    <button type="button"
+                      class={`sh-task-status sh-task-status--${t.status}`}
+                      onClick={() => void cycleStatus(t)}
+                      title="Click to cycle status"
+                      aria-label={`Status: ${STATUS_LABEL[t.status as Status]}, click to change`}>
+                      {STATUS_LABEL[t.status as Status] ?? t.status}
+                    </button>
+                  </div>
+                  {due?.modifier === 'overdue' && (
+                    <span class="sh-task-pin sh-task-pin--overdue">overdue</span>
+                  )}
+                  {due?.modifier === 'due' && (
+                    <span class="sh-task-pin sh-task-pin--due">due</span>
+                  )}
+                  <button type="button" class="sh-icon-btn"
+                          aria-label={`Delete ${t.title}`}
+                          onClick={() => void deleteTask(t)}>🗑️</button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
 
         {visibleTasks.length === 0 && activeList.value && (
           <div class="sh-empty-state">
