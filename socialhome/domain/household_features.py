@@ -78,7 +78,17 @@ class HouseholdFeatures:
         return bool(getattr(self, attr))
 
     def allows_post_type(self, post_type: str) -> bool:
-        """``True`` if the household allows creating posts of this type."""
+        """``True`` if the household allows creating posts of this type.
+
+        ``bazaar`` is a synthetic post type minted internally by the
+        bazaar service to wrap a listing — it's never user-selectable
+        in the feed composer. Gating it at the household level would
+        block the bazaar route from creating its own wrapper post,
+        without giving operators any meaningful control. Per-space
+        bazaar visibility is the real gate (``space.features.bazaar``).
+        """
+        if post_type == "bazaar":
+            return True
         attr = POST_TYPE_ALLOW.get(post_type)
         if attr is None:
             return False
