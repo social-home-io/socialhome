@@ -1,18 +1,21 @@
 /**
  * BazaarCreateDialog — multi-step listing creation (§23.15 / §23.25).
  *
- * Step 1: title + description + images (multi-upload to /api/media/upload)
+ * Step 1: pick a space + title + description + images
  * Step 2: mode + price fields + currency + duration
  * Submit: POST /api/bazaar
+ *
+ * Listings are space-scoped — the wrapper post lives inside the picked
+ * space, so visibility / federation follow the space's rules.
  */
 import { signal } from '@preact/signals'
-import { useRef } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '@/api'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
 import { uploadWithProgress, UploadProgressBar } from './UploadProgress'
-import type { BazaarMode } from '@/types'
+import type { BazaarMode, Space } from '@/types'
 
 const ZERO_DECIMAL_CURRENCIES: ReadonlySet<string> =
   new Set(['JPY', 'KRW', 'ISK'])
@@ -36,6 +39,9 @@ const durationDays = signal(7)
 interface ImageEntry { url: string; preview: string }
 const imageUrls = signal<ImageEntry[]>([])
 const submitting = signal(false)
+const availableSpaces = signal<Space[]>([])
+const spacesLoading = signal(false)
+const spaceId = signal<string>('')
 
 function reset() {
   step.value = 1
@@ -49,6 +55,7 @@ function reset() {
   durationDays.value = 7
   imageUrls.value = []
   submitting.value = false
+  spaceId.value = ''
 }
 
 export function openBazaarCreate() {
@@ -63,8 +70,31 @@ function toCents(raw: string, cur: string): number | null {
   return ZERO_DECIMAL_CURRENCIES.has(cur) ? Math.round(n) : Math.round(n * 100)
 }
 
+async function loadSpaces() {
+  spacesLoading.value = true
+  try {
+    const rows = await api.get('/api/spaces') as Space[]
+    // Bazaar listings need a real "post target" space. ``global`` /
+    // ``public`` discovery rows are read-only browse surfaces, so
+    // exclude them from the picker.
+    availableSpaces.value = rows.filter(
+      (s) => s.space_type === 'private' || s.space_type === 'household',
+    )
+    if (!spaceId.value && availableSpaces.value.length > 0) {
+      spaceId.value = availableSpaces.value[0].id
+    }
+  } catch {
+    availableSpaces.value = []
+  } finally {
+    spacesLoading.value = false
+  }
+}
+
 export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
   const fileRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    if (open.value) void loadSpaces()
+  }, [open.value])
 
   const uploadImage = async (file: File) => {
     try {
@@ -99,7 +129,12 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
   }
 
   const submit = async () => {
+    if (!spaceId.value) {
+      showToast('Pick a space for this listing', 'error')
+      return
+    }
     const body: Record<string, unknown> = {
+      space_id:      spaceId.value,
       title:         title.value.trim(),
       description:   description.value.trim() || undefined,
       mode:          mode.value,
@@ -147,6 +182,29 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
       {step.value === 1 && (
         <div class="sh-form sh-bazaar-create">
           <label>
+            Space *
+            {spacesLoading.value ? (
+              <span class="sh-muted">Loading spaces…</span>
+            ) : availableSpaces.value.length === 0 ? (
+              <span class="sh-muted">
+                Create or join a space first — listings live inside spaces.
+              </span>
+            ) : (
+              <select
+                value={spaceId.value}
+                onChange={(e) => {
+                  spaceId.value = (e.target as HTMLSelectElement).value
+                }}
+              >
+                {availableSpaces.value.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.emoji ? `${s.emoji} ` : ''}{s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+          <label>
             Title *
             <input value={title.value} maxLength={200}
               onInput={(e) => title.value = (e.target as HTMLInputElement).value} />
@@ -191,7 +249,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
               Cancel
             </Button>
             <Button onClick={() => (step.value = 2)}
-                    disabled={!title.value.trim()}>
+                    disabled={!title.value.trim() || !spaceId.value}>
               Next →
             </Button>
           </div>

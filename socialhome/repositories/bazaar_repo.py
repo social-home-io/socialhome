@@ -56,6 +56,9 @@ class AbstractBazaarRepo(Protocol):
     async def save_listing(self, listing: BazaarListing) -> BazaarListing: ...
     async def get_listing(self, post_id: str) -> BazaarListing | None: ...
     async def list_active(self) -> list[BazaarListing]: ...
+    async def list_active_in_spaces(
+        self, space_ids: tuple[str, ...]
+    ) -> list[BazaarListing]: ...
     async def list_by_seller(self, seller_user_id: str) -> list[BazaarListing]: ...
     async def list_expired(
         self, *, now_iso: str | None = None
@@ -148,11 +151,11 @@ class SqliteBazaarRepo:
         await self._db.enqueue(
             """
             INSERT INTO bazaar_listings(
-                post_id, seller_user_id, mode, title, description,
+                post_id, space_id, seller_user_id, mode, title, description,
                 image_urls_json, end_time, currency, status,
                 price, start_price, step_price,
                 winner_user_id, winning_price, sold_at, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(post_id) DO UPDATE SET
                 seller_user_id=excluded.seller_user_id,
                 mode=excluded.mode,
@@ -171,6 +174,7 @@ class SqliteBazaarRepo:
             """,
             (
                 listing.post_id,
+                listing.space_id,
                 listing.seller_user_id,
                 listing.mode.value,
                 listing.title,
@@ -201,6 +205,21 @@ class SqliteBazaarRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM bazaar_listings WHERE status='active' "
             "ORDER BY created_at DESC",
+        )
+        return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
+
+    async def list_active_in_spaces(
+        self,
+        space_ids: tuple[str, ...],
+    ) -> list[BazaarListing]:
+        if not space_ids:
+            return []
+        placeholders = ",".join("?" * len(space_ids))
+        rows = await self._db.fetchall(
+            f"SELECT * FROM bazaar_listings "
+            f" WHERE status='active' AND space_id IN ({placeholders}) "
+            f" ORDER BY created_at DESC",
+            tuple(space_ids),
         )
         return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
 
@@ -642,6 +661,7 @@ def _row_to_listing(row: dict | None) -> BazaarListing | None:
     image_urls = tuple(load_json(row.get("image_urls_json"), []))
     return BazaarListing(
         post_id=row["post_id"],
+        space_id=row["space_id"],
         seller_user_id=row["seller_user_id"],
         mode=BazaarMode(row["mode"]),
         title=row["title"],

@@ -44,12 +44,31 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-async def _seed_post(db, post_id: str):
-    """Insert a minimal feed_posts row to satisfy the FK constraint."""
+_DEFAULT_SPACE_ID = "space-bazaar-test"
+
+
+async def _seed_space(db, space_id: str = _DEFAULT_SPACE_ID) -> str:
+    """Insert a space row (idempotent) so listings can FK to it."""
     await db.enqueue(
-        "INSERT INTO feed_posts(id, author, type, content) VALUES(?,?,?,?)",
-        (post_id, "u1", "bazaar", "listing"),
+        """
+        INSERT OR IGNORE INTO spaces(
+            id, name, owner_instance_id, owner_username, identity_public_key
+        ) VALUES(?, ?, ?, ?, ?)
+        """,
+        (space_id, "Test Space", "iid-test", "u1", "00" * 32),
     )
+    return space_id
+
+
+async def _seed_post(db, post_id: str, space_id: str = _DEFAULT_SPACE_ID):
+    """Insert a space + space_posts row to satisfy the bazaar listing FK."""
+    await _seed_space(db, space_id)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content) "
+        "VALUES(?,?,?,?,?)",
+        (post_id, space_id, "u1", "bazaar", "listing"),
+    )
+    return space_id
 
 
 async def test_bazaar_listing_lifecycle(env):
@@ -59,6 +78,7 @@ async def test_bazaar_listing_lifecycle(env):
 
     listing = BazaarListing(
         post_id=pid,
+        space_id=_DEFAULT_SPACE_ID,
         seller_user_id="u1",
         mode=BazaarMode.FIXED,
         title="Old bike",
@@ -89,6 +109,7 @@ async def test_bazaar_bid_state_machine(env):
     await _seed_post(env.db, pid)
     listing = BazaarListing(
         post_id=pid,
+        space_id=_DEFAULT_SPACE_ID,
         seller_user_id="u1",
         mode=BazaarMode.OFFER,
         title="Guitar",
@@ -126,6 +147,7 @@ async def test_bazaar_reject_offer(env):
     await _seed_post(env.db, pid)
     listing = BazaarListing(
         post_id=pid,
+        space_id=_DEFAULT_SPACE_ID,
         seller_user_id="u1",
         mode=BazaarMode.OFFER,
         title="Camera",
@@ -164,6 +186,7 @@ async def test_bazaar_expired_and_cancelled(env):
         await env.bazaar_repo.save_listing(
             BazaarListing(
                 post_id=pid,
+                space_id=_DEFAULT_SPACE_ID,
                 seller_user_id="u1",
                 mode=BazaarMode.FIXED,
                 title="Item",
@@ -193,6 +216,7 @@ async def test_bazaar_currency_validation(env):
     await _seed_post(env.db, pid)
     listing = BazaarListing(
         post_id=pid,
+        space_id=_DEFAULT_SPACE_ID,
         seller_user_id="u1",
         mode=BazaarMode.FIXED,
         title="Thing",
@@ -220,6 +244,7 @@ async def test_auction_antisnipe_extends_end_time(env):
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
+            space_id=_DEFAULT_SPACE_ID,
             seller_user_id="u1",
             mode=BazaarMode.AUCTION,
             title="Painting",
@@ -258,6 +283,7 @@ async def test_auction_no_extend_outside_snipe_window(env):
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
+            space_id=_DEFAULT_SPACE_ID,
             seller_user_id="u1",
             mode=BazaarMode.AUCTION,
             title="Vase",
@@ -290,6 +316,7 @@ async def test_non_auction_modes_do_not_extend(env):
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
+            space_id=_DEFAULT_SPACE_ID,
             seller_user_id="u1",
             mode=BazaarMode.OFFER,
             title="Clock",
@@ -319,6 +346,7 @@ async def _seed_listing(env, pid: str, *, seller: str = "u1"):
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
+            space_id=_DEFAULT_SPACE_ID,
             seller_user_id=seller,
             mode=BazaarMode.FIXED,
             title="Thing",

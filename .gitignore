@@ -32,6 +32,7 @@ integration_token.txt
 client/node_modules/
 client/dist/
 client/coverage/
+client/vite.config.ts.timestamp-*.mjs
 socialhome/static/*
 !socialhome/static/.gitkeep
 *.tsbuildinfo

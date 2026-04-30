@@ -357,6 +357,7 @@ export type BazaarStatus = 'active' | 'sold' | 'expired' | 'cancelled'
 
 export interface BazaarListing {
   post_id: string
+  space_id: string
   seller_user_id: string
   mode: BazaarMode
   title: string
