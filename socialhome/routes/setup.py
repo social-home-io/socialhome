@@ -8,9 +8,13 @@
   picked HA person; we mirror them into ``users`` as admin and mark
   setup complete. ha-mode auth runs through HA (X-Ingress-User or HA
   bearer tokens), so no password is needed at this step.
-* ``POST /api/setup/haos/complete`` — no body. Reads the HA owner from
-  ``http://supervisor/auth/list``, mirrors them, and marks setup
-  complete.
+* ``POST /api/setup/haos/complete`` — optional ``{household_name}``.
+  Reads the HA owner from ``http://supervisor/auth/list``, mirrors
+  them, applies the household name (if any), and marks setup complete.
+
+All three POST endpoints accept an optional ``household_name`` to seed
+the household's display name during the wizard so the operator doesn't
+have to hunt for it under Settings on first login.
 
 Every endpoint is a public path while ``setup_required`` is true; once
 complete, they all return 409 ``ALREADY_COMPLETE``. The SPA consults
@@ -27,6 +31,7 @@ from aiohttp import web
 from ..app_keys import (
     config_key,
     db_key,
+    household_features_service_key,
     platform_adapter_key,
     setup_service_key,
 )
@@ -51,6 +56,41 @@ async def _gate(view: BaseView) -> web.Response | None:
             "First-boot setup has already been completed.",
         )
     return None
+
+
+def _validate_household_name(
+    raw: object,
+) -> tuple[str | None, web.Response | None]:
+    """Validate the operator-supplied household name without touching the DB.
+
+    Returns ``(name, None)`` on success (with ``name=None`` meaning
+    "no override — keep the default"), or ``(None, response)`` with a
+    422 error response on validation failure. Length cap mirrors
+    :meth:`HouseholdFeaturesService.update` so we fail-fast before
+    provisioning touches the DB.
+    """
+    if raw is None:
+        return None, None
+    name = str(raw).strip()
+    if not name:
+        return None, None
+    if len(name) > 80:
+        return None, error_response(
+            422,
+            "UNPROCESSABLE",
+            "household_name must be 1-80 characters",
+        )
+    return name, None
+
+
+async def _apply_household_name(view: BaseView, name: str | None) -> None:
+    """Persist a pre-validated household name. No-op when ``name`` is None."""
+    if name is None:
+        return
+    await view.svc(household_features_service_key).update(
+        actor_is_admin=True,
+        household_name=name,
+    )
 
 
 class StandaloneSetupView(BaseView):
@@ -79,6 +119,9 @@ class StandaloneSetupView(BaseView):
                 "UNPROCESSABLE",
                 "username and password are required.",
             )
+        household_name, err = _validate_household_name(body.get("household_name"))
+        if err is not None:
+            return err
         adapter = self.svc(platform_adapter_key)
         provision = getattr(adapter, "provision_admin", None)
         if provision is None:
@@ -88,6 +131,7 @@ class StandaloneSetupView(BaseView):
                 "Standalone adapter is missing provision_admin.",
             )
         await provision(username=username, password=password)
+        await _apply_household_name(self, household_name)
         await self.svc(setup_service_key).mark_complete()
         token = await adapter.issue_bearer_token(username, password)
         return web.json_response({"token": token}, status=201)
@@ -152,6 +196,9 @@ class HaOwnerSetupView(BaseView):
                 "UNPROCESSABLE",
                 "username and password are required.",
             )
+        household_name, err = _validate_household_name(body.get("household_name"))
+        if err is not None:
+            return err
         adapter = self.svc(platform_adapter_key)
         external = await adapter.users.get(username)
         if external is None:
@@ -167,6 +214,7 @@ class HaOwnerSetupView(BaseView):
             display_name=external.display_name,
             is_admin=True,
         )
+        await _apply_household_name(self, household_name)
         await self.svc(setup_service_key).mark_complete()
         token = await adapter.issue_bearer_token(username, password)
         return web.json_response({"token": token}, status=201)
@@ -189,6 +237,20 @@ class HaosCompleteSetupView(BaseView):
                 "WRONG_MODE",
                 f"This endpoint is for haos mode (current: {config.mode}).",
             )
+        # haos POSTs an optional household_name. The body may be empty,
+        # so parse leniently — an empty body is a valid "no name" call.
+        if self.request.content_length:
+            try:
+                body = await self.request.json()
+                if not isinstance(body, dict):
+                    body = {}
+            except Exception:
+                return error_response(400, "BAD_REQUEST", "Invalid JSON body.")
+        else:
+            body = {}
+        household_name, err = _validate_household_name(body.get("household_name"))
+        if err is not None:
+            return err
         adapter = self.svc(platform_adapter_key)
         if Capability.INGRESS not in adapter.capabilities:
             return error_response(
@@ -218,6 +280,7 @@ class HaosCompleteSetupView(BaseView):
                 f"Supervisor owner {owner!r} has no person.* entity in HA.",
             )
         await _mirror_admin_user(self.svc(db_key), external)
+        await _apply_household_name(self, household_name)
         await self.svc(setup_service_key).mark_complete()
         return web.json_response({"username": owner})
 

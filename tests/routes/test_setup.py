@@ -7,6 +7,7 @@ from dataclasses import replace
 from socialhome.app import create_app
 from socialhome.app_keys import (
     config_key,
+    household_features_service_key,
     platform_adapter_key,
     setup_service_key,
 )
@@ -60,6 +61,60 @@ async def test_standalone_setup_requires_username_and_password(
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     r = await tc.post("/api/setup/standalone", json={"username": "x"})
     assert r.status == 422
+
+
+async def test_standalone_setup_persists_household_name(
+    aiohttp_client,
+    tmp_dir,
+):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    r = await tc.post(
+        "/api/setup/standalone",
+        json={
+            "username": "owner",
+            "password": "hunter2",
+            "household_name": "The Rivendells",
+        },
+    )
+    assert r.status == 201, await r.text()
+    feats = await tc._app[household_features_service_key].get()
+    assert feats.household_name == "The Rivendells"
+
+
+async def test_standalone_setup_blank_household_name_keeps_default(
+    aiohttp_client,
+    tmp_dir,
+):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    r = await tc.post(
+        "/api/setup/standalone",
+        json={
+            "username": "owner",
+            "password": "hunter2",
+            "household_name": "   ",
+        },
+    )
+    assert r.status == 201
+    feats = await tc._app[household_features_service_key].get()
+    assert feats.household_name == "Home"
+
+
+async def test_standalone_setup_household_name_too_long_422(
+    aiohttp_client,
+    tmp_dir,
+):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    r = await tc.post(
+        "/api/setup/standalone",
+        json={
+            "username": "owner",
+            "password": "hunter2",
+            "household_name": "x" * 200,
+        },
+    )
+    assert r.status == 422
+    # Setup must NOT have been marked complete on validation failure.
+    assert await tc._app[setup_service_key].is_required() is True
 
 
 async def test_standalone_setup_locked_after_completion(
@@ -172,6 +227,22 @@ async def test_ha_persons_lists_via_adapter(aiohttp_client, tmp_dir):
     assert by_name["bob"]["picture_url"] == "https://x/b.png"
 
 
+async def test_ha_owner_setup_persists_household_name(aiohttp_client, tmp_dir):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    _swap_to_ha(tc._app, [ExternalUser("alice", "Alice", None, is_admin=False)])
+    r = await tc.post(
+        "/api/setup/ha/owner",
+        json={
+            "username": "alice",
+            "password": "hunter22",
+            "household_name": "Casa Vizeli",
+        },
+    )
+    assert r.status == 201, await r.text()
+    feats = await tc._app[household_features_service_key].get()
+    assert feats.household_name == "Casa Vizeli"
+
+
 async def test_ha_owner_setup_happy_path(aiohttp_client, tmp_dir):
     tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     _swap_to_ha(
@@ -241,6 +312,39 @@ async def test_haos_complete_happy_path(aiohttp_client, tmp_dir):
     body = await r.json()
     assert body["username"] == "owner"
     assert await tc._app[setup_service_key].is_required() is False
+
+
+async def test_haos_complete_persists_household_name(aiohttp_client, tmp_dir):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    adapter = _FakeHaosAdapter(
+        [ExternalUser("owner", "The Owner", None, is_admin=False)],
+    )
+    adapter._supervisor_client = _FakeSupervisorClient("owner")
+    tc._app[platform_adapter_key] = adapter
+    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    r = await tc.post(
+        "/api/setup/haos/complete",
+        json={"household_name": "Hearth"},
+    )
+    assert r.status == 200, await r.text()
+    feats = await tc._app[household_features_service_key].get()
+    assert feats.household_name == "Hearth"
+
+
+async def test_haos_complete_household_name_too_long_422(aiohttp_client, tmp_dir):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    adapter = _FakeHaosAdapter(
+        [ExternalUser("owner", "The Owner", None, is_admin=False)],
+    )
+    adapter._supervisor_client = _FakeSupervisorClient("owner")
+    tc._app[platform_adapter_key] = adapter
+    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    r = await tc.post(
+        "/api/setup/haos/complete",
+        json={"household_name": "x" * 200},
+    )
+    assert r.status == 422
+    assert await tc._app[setup_service_key].is_required() is True
 
 
 async def test_haos_complete_no_owner_returns_422(aiohttp_client, tmp_dir):

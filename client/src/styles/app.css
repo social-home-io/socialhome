@@ -4453,6 +4453,10 @@ hr {
   border-color: var(--sh-primary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 20%, transparent);
 }
+.sh-setup-hint {
+  font-size: 0.8125rem;
+  color: var(--sh-text-muted);
+}
 .sh-setup-strength {
   display: flex;
   gap: 4px;
