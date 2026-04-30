@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import bazaar_repo_key, bazaar_service_key, media_signer_key
+from ..app_keys import (
+    bazaar_repo_key,
+    bazaar_service_key,
+    media_signer_key,
+    space_repo_key,
+)
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.bazaar_repo import BidStateError, OfferStateError
 from ..security import error_response
@@ -21,6 +26,7 @@ from .base import BaseView
 def _listing_dict(listing) -> dict:
     return {
         "post_id": listing.post_id,
+        "space_id": listing.space_id,
         "seller_user_id": listing.seller_user_id,
         "mode": listing.mode.value,
         "title": listing.title,
@@ -96,13 +102,22 @@ class BazaarCollectionView(BaseView):
     """
 
     async def get(self) -> web.Response:
+        """List active listings the caller can see.
+
+        Listings live inside spaces, so visibility follows space
+        membership: the caller sees their own listings (any status,
+        across all of their spaces) when ``seller=me``, otherwise the
+        active listings in spaces they belong to.
+        """
         ctx = self.user
         repo = self.svc(bazaar_repo_key)
         q = self.request.query
         if q.get("seller") == "me":
             listings = await repo.list_by_seller(ctx.user_id)
         else:
-            listings = await repo.list_active()
+            spaces = await self.svc(space_repo_key).list_for_user(ctx.user_id)
+            space_ids = tuple(s.id for s in spaces)
+            listings = await repo.list_active_in_spaces(space_ids)
         return web.json_response(
             [_listing_dict_signed(self.request, lst) for lst in listings],
         )
@@ -112,6 +127,9 @@ class BazaarCollectionView(BaseView):
         svc = self.svc(bazaar_service_key)
         body = await self.body()
 
+        space_id = str(body.get("space_id") or "").strip()
+        if not space_id:
+            return error_response(422, "UNPROCESSABLE", "space_id is required.")
         title = str(body.get("title") or "").strip()
         if not title:
             return error_response(422, "UNPROCESSABLE", "title is required.")
@@ -136,6 +154,7 @@ class BazaarCollectionView(BaseView):
 
         try:
             listing = await svc.create_listing(
+                space_id=space_id,
                 seller_user_id=ctx.user_id,
                 mode=mode,
                 title=title,

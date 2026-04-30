@@ -1080,8 +1080,12 @@ def create_app(config: Config | None = None) -> web.Application:
     space_poll_service = PollService(repos.space_poll, bus)
 
     # ── Bazaar service + expiry scheduler (§9, §23.15) ─────────────────
+    # Bazaar listings are space-scoped: the wrapper post lives in
+    # ``space_posts`` (not the household feed), so we wire SpaceService
+    # rather than FeedService. Membership / writability / moderation
+    # gates are inherited from SpaceService.create_post.
     bazaar_service = BazaarService(bazaar_repo, bus)
-    bazaar_service.attach_feed(feed_service)
+    bazaar_service.attach_spaces(space_service)
     bazaar_expiry_scheduler = BazaarExpiryScheduler(bazaar_service)
 
     # ── My Corner aggregator (§23) ─────────────────────────────────────

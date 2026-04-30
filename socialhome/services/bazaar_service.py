@@ -47,7 +47,7 @@ from ..repositories.bazaar_repo import (
 )
 
 if TYPE_CHECKING:
-    from .feed_service import FeedService
+    from .space_service import SpaceService
 
 log = logging.getLogger(__name__)
 
@@ -81,19 +81,25 @@ _UNSET = _Unset()
 
 
 class BazaarService:
-    """Service-level wrapper around :class:`AbstractBazaarRepo`."""
+    """Service-level wrapper around :class:`AbstractBazaarRepo`.
 
-    __slots__ = ("_repo", "_bus", "_feed")
+    Listings are scoped to a single :class:`Space` — :meth:`create_listing`
+    mints the wrapper post via :class:`SpaceService.create_post` so the
+    post lives in ``space_posts`` (not the household feed) and inherits
+    the space's membership / federation rules.
+    """
+
+    __slots__ = ("_repo", "_bus", "_spaces")
 
     def __init__(self, repo: AbstractBazaarRepo, bus: EventBus) -> None:
         self._repo = repo
         self._bus = bus
-        self._feed: FeedService | None = None
+        self._spaces: SpaceService | None = None
 
-    def attach_feed(self, feed_service: "FeedService") -> None:
-        """Wire :class:`FeedService` so ``create_listing`` can mint the
-        matching ``PostType.BAZAAR`` feed-post row in the same call."""
-        self._feed = feed_service
+    def attach_spaces(self, space_service: "SpaceService") -> None:
+        """Wire :class:`SpaceService` so ``create_listing`` can mint the
+        matching ``PostType.BAZAAR`` post inside the listing's space."""
+        self._spaces = space_service
 
     # ─── Listings ────────────────────────────────────────────────────────
 
@@ -115,6 +121,7 @@ class BazaarService:
     async def create_listing(
         self,
         *,
+        space_id: str,
         seller_user_id: str,
         mode: str,
         title: str,
@@ -126,13 +133,18 @@ class BazaarService:
         start_price: int | None = None,
         step_price: int | None = None,
     ) -> BazaarListing:
-        """Mint a listing + its parent feed post atomically.
+        """Mint a listing + its parent space post atomically.
 
-        Raises :class:`ValueError` on any validation failure, which the
-        route layer maps to HTTP 422.
+        ``space_id`` is required — bazaar listings live inside spaces.
+        :class:`SpaceService.create_post` enforces membership + the
+        space's per-feature access decisions, and a :class:`SpacePermissionError`
+        propagates out as HTTP 403 via the route layer's central mapper.
+
+        Raises :class:`ValueError` on shape-of-input validation failure
+        (mapped to HTTP 422).
         """
-        if self._feed is None:
-            raise RuntimeError("feed service not attached")
+        if self._spaces is None:
+            raise RuntimeError("space service not attached")
         mode_val = _coerce_mode(mode)
         title_clean = title.strip()
         if not title_clean:
@@ -151,18 +163,32 @@ class BazaarService:
         now = datetime.now(timezone.utc)
         end_time = (now + timedelta(days=duration_days)).isoformat()
 
-        # Mint the parent feed post first so ``post_id`` is stable.
         caption = f"🛍 {title_clean}" + (
             f" — {description.strip()}" if description else ""
         )
-        post = await self._feed.create_post(
+        # Mint the wrapper post inside the listing's space. SpaceService
+        # validates membership + writability + per-feature access; we
+        # don't duplicate those checks here.
+        post = await self._spaces.create_post(
+            space_id,
             author_user_id=seller_user_id,
             type="bazaar",
             content=caption,
         )
+        if post is None:
+            # Post entered the moderation queue (space's posts feature
+            # has access_level=moderated and the seller isn't an admin).
+            # Treat as "we cannot accept this listing right now" rather
+            # than partially persisting. SpaceService publishes its own
+            # SpaceModerationQueued event so the operator sees the item
+            # in the moderation tray.
+            raise BazaarServiceError(
+                "listing requires moderator approval — submitted for review",
+            )
 
         listing = BazaarListing(
             post_id=post.id,
+            space_id=space_id,
             seller_user_id=seller_user_id,
             mode=mode_val,
             title=title_clean,
@@ -180,6 +206,7 @@ class BazaarService:
         await self._bus.publish(
             BazaarListingCreated(
                 listing_post_id=listing.post_id,
+                space_id=space_id,
                 seller_user_id=seller_user_id,
                 mode=mode_val.value,
                 title=listing.title,
@@ -216,6 +243,7 @@ class BazaarService:
 
         updated = BazaarListing(
             post_id=listing.post_id,
+            space_id=listing.space_id,
             seller_user_id=listing.seller_user_id,
             mode=listing.mode,
             title=next_title,

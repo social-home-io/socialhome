@@ -47,17 +47,26 @@ async def test_corner_counts_overdue_task(client):
 async def test_corner_bundles_bazaar_summary(client):
     """An active listing counts; a sold listing doesn't."""
     db = client._db
-    # Active listing owned by the caller.
+    # Bazaar listings live in spaces — seed one + the wrapper space post.
     await db.enqueue(
-        "INSERT INTO feed_posts(id, author, type, content)"
-        " VALUES('p1', ?, 'bazaar', '')",
+        """
+        INSERT INTO spaces(
+            id, name, owner_instance_id, owner_username, identity_public_key
+        ) VALUES('space-corner', 'Corner Space', 'iid-test', ?, ?)
+        """,
+        (client._uid, "00" * 32),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES('p1', 'space-corner', ?, 'bazaar', '')",
         (client._uid,),
     )
     await db.enqueue(
-        "INSERT INTO bazaar_listings(post_id, seller_user_id, title, mode,"
-        " end_time, currency, status)"
-        " VALUES('p1', ?, 'Bike', 'fixed', '2099-01-01T00:00:00+00:00',"
-        " 'USD', 'active')",
+        "INSERT INTO bazaar_listings("
+        "  post_id, space_id, seller_user_id, title, mode,"
+        "  end_time, currency, status"
+        ") VALUES('p1', 'space-corner', ?, 'Bike', 'fixed',"
+        " '2099-01-01T00:00:00+00:00', 'USD', 'active')",
         (client._uid,),
     )
     r = await client.get("/api/me/corner", headers=_auth(client._tok))

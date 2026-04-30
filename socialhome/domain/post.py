@@ -158,11 +158,17 @@ BAZAAR_CURRENCIES: dict[str, int] = {
 class BazaarListing:
     """The listing payload embedded in a ``PostType.BAZAAR`` post.
 
+    Bazaar listings are scoped to a single :class:`Space` — the wrapper
+    post lives in ``space_posts``, and visibility follows the space's
+    membership rules. Cross-space "browse" views aggregate listings
+    from spaces the caller belongs to.
+
     Monetary amounts are integers in the currency's smallest unit (cents for
     EUR / USD, yen for JPY, etc.) — never floats.
     """
 
     post_id: str
+    space_id: str
     seller_user_id: str
     mode: BazaarMode
     title: str

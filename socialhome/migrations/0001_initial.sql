@@ -910,8 +910,13 @@ CREATE TABLE IF NOT EXISTS space_schedule_poll_meta (
 
 -- ── Bazaar (marketplace) ───────────────────────────────────────────────────
 
+-- ``post_id`` references ``space_posts(id)``: the wrapper post lives in
+-- the listing's space, not in the household feed. ``space_id`` is
+-- denormalised onto the listing row so cross-space aggregation
+-- (the SPA's "Bazaar" tab) can filter without a join.
 CREATE TABLE IF NOT EXISTS bazaar_listings (
-    post_id         TEXT PRIMARY KEY REFERENCES feed_posts(id) ON DELETE CASCADE,
+    post_id         TEXT PRIMARY KEY REFERENCES space_posts(id) ON DELETE CASCADE,
+    space_id        TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     seller_user_id  TEXT NOT NULL,
     mode            TEXT NOT NULL
                     CHECK(mode IN ('fixed','offer','bid_from','negotiable','auction')),
@@ -930,6 +935,7 @@ CREATE TABLE IF NOT EXISTS bazaar_listings (
     sold_at         TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_bazaar_listings_space ON bazaar_listings(space_id);
 
 CREATE TABLE IF NOT EXISTS bazaar_bids (
     id                TEXT PRIMARY KEY,
