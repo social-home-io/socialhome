@@ -5,7 +5,8 @@ from __future__ import annotations
 from aiohttp import web
 
 from .. import app_keys as K
-from ..app_keys import task_service_key
+from ..app_keys import media_signer_key, task_service_key
+from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from .base import BaseView
 
@@ -297,21 +298,23 @@ class TaskAttachmentCollectionView(BaseView):
         self.user
         svc = self.svc(task_service_key)
         atts = await svc.list_attachments(self.match("id"))
-        return web.json_response(
-            [
-                {
-                    "id": a.id,
-                    "task_id": a.task_id,
-                    "uploaded_by": a.uploaded_by,
-                    "url": a.url,
-                    "filename": a.filename,
-                    "mime": a.mime,
-                    "size_bytes": a.size_bytes,
-                    "created_at": a.created_at.isoformat() if a.created_at else None,
-                }
-                for a in atts
-            ]
-        )
+        signer = self.request.app.get(media_signer_key)
+        payload = [
+            {
+                "id": a.id,
+                "task_id": a.task_id,
+                "uploaded_by": a.uploaded_by,
+                "url": a.url,
+                "filename": a.filename,
+                "mime": a.mime,
+                "size_bytes": a.size_bytes,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in atts
+        ]
+        if signer is not None:
+            sign_media_urls_in(payload, signer, extra_fields=("url",))
+        return web.json_response(payload)
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -320,24 +323,25 @@ class TaskAttachmentCollectionView(BaseView):
         attachment = await svc.add_attachment(
             self.match("id"),
             uploaded_by=ctx.user_id,
-            url=str(body.get("url") or ""),
+            url=strip_signature_query(str(body.get("url") or "")),
             filename=str(body.get("filename") or ""),
             mime=str(body.get("mime") or "application/octet-stream"),
             size_bytes=int(body.get("size_bytes") or 0),
         )
-        return web.json_response(
-            {
-                "id": attachment.id,
-                "task_id": attachment.task_id,
-                "uploaded_by": attachment.uploaded_by,
-                "url": attachment.url,
-                "filename": attachment.filename,
-                "mime": attachment.mime,
-                "size_bytes": attachment.size_bytes,
-                "created_at": attachment.created_at.isoformat(),
-            },
-            status=201,
-        )
+        payload = {
+            "id": attachment.id,
+            "task_id": attachment.task_id,
+            "uploaded_by": attachment.uploaded_by,
+            "url": attachment.url,
+            "filename": attachment.filename,
+            "mime": attachment.mime,
+            "size_bytes": attachment.size_bytes,
+            "created_at": attachment.created_at.isoformat(),
+        }
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer, extra_fields=("url",))
+        return web.json_response(payload, status=201)
 
 
 class TaskAttachmentDetailView(BaseView):

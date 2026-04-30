@@ -172,17 +172,51 @@ def test_sign_media_urls_in_recurses_into_lists_and_dicts(
     assert "exp=" in payload["nested"]["author"]["picture_url"]
 
 
-def test_sign_media_urls_in_leaves_unrelated_fields_alone(
+def test_sign_media_urls_in_signs_thumbnail_and_cover(
     signer: MediaUrlSigner,
 ) -> None:
-    """``url`` / ``thumbnail_url`` are out of scope for this PR."""
+    """Gallery + space cover URLs use ``cover_url`` / ``thumbnail_url``."""
     payload = {
-        "url": "/api/media/g.webp",
-        "thumbnail_url": "/api/media/g-thumb.webp",
+        "cover_url": "/api/spaces/s1/cover?v=h",
+        "thumbnail_url": "/api/media/t.webp",
     }
     sign_media_urls_in(payload, signer)
+    assert "exp=" in payload["cover_url"]
+    assert "sig=" in payload["cover_url"]
+    assert "exp=" in payload["thumbnail_url"]
+
+
+def test_sign_media_urls_in_leaves_url_alone_by_default(
+    signer: MediaUrlSigner,
+) -> None:
+    """Generic ``url`` field stays untouched unless caller opts in via
+    ``extra_fields`` — it's used for things like calendar-ICS feed URLs
+    that have their own auth and shouldn't be over-signed."""
+    payload = {"url": "/api/media/g.webp"}
+    sign_media_urls_in(payload, signer)
     assert payload["url"] == "/api/media/g.webp"
-    assert payload["thumbnail_url"] == "/api/media/g-thumb.webp"
+
+
+def test_sign_media_urls_in_extra_fields_opts_in(signer: MediaUrlSigner) -> None:
+    """Gallery items / task attachments pass ``extra_fields=("url",)``."""
+    payload = {"url": "/api/media/g.webp", "thumbnail_url": "/api/media/t.webp"}
+    sign_media_urls_in(payload, signer, extra_fields=("url",))
+    assert "exp=" in payload["url"]
+    assert "sig=" in payload["url"]
+    assert "exp=" in payload["thumbnail_url"]
+
+
+def test_sign_media_urls_in_extra_fields_recurses(signer: MediaUrlSigner) -> None:
+    """``extra_fields`` propagates into nested dicts and lists."""
+    payload = {
+        "items": [
+            {"url": "/api/media/a.webp"},
+            {"url": "/api/media/b.webp"},
+        ],
+    }
+    sign_media_urls_in(payload, signer, extra_fields=("url",))
+    assert "exp=" in payload["items"][0]["url"]
+    assert "exp=" in payload["items"][1]["url"]
 
 
 def test_sign_media_urls_in_signs_image_urls_list(

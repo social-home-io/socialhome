@@ -117,8 +117,14 @@ class MediaUrlSigner:
 #: Field names whose **string** values get signed when present in a
 #: serialised payload. Each is checked against a ``/api/`` prefix so
 #: external (HA-served, federation, link-preview) URLs are left alone.
+#:
+#: ``url`` is intentionally excluded — it's too generic and would
+#: over-sign payloads like the calendar-ICS feed URL, which carries
+#: its own ``?token=``. Routes that genuinely return a media-shaped
+#: ``url`` (gallery items, task attachments) opt in via
+#: :func:`sign_media_urls_in`'s ``extra_fields`` kwarg.
 _SIGNABLE_URL_FIELDS: frozenset[str] = frozenset(
-    {"media_url", "picture_url"},
+    {"media_url", "picture_url", "cover_url", "thumbnail_url"},
 )
 #: Field names whose **list-of-string** values get signed (e.g. bazaar
 #: ``image_urls``). Each entry is signed independently.
@@ -140,26 +146,29 @@ def strip_signature_query(url):
     return url.split("?", 1)[0]
 
 
-def sign_media_urls_in(payload, signer: MediaUrlSigner):
+def sign_media_urls_in(
+    payload, signer: MediaUrlSigner, *, extra_fields: tuple[str, ...] = ()
+):
     """Recursively walk ``payload``, signing media-shaped URLs in place.
 
     Signs:
 
     * String values under :data:`_SIGNABLE_URL_FIELDS`
-      (``media_url``, ``picture_url``).
+      (``media_url``, ``picture_url``, ``cover_url``, ``thumbnail_url``).
     * List-of-string values under :data:`_SIGNABLE_URL_LIST_FIELDS`
       (``image_urls``) — each entry independently.
+    * String values under any name in ``extra_fields`` — used by callers
+      that expose a media URL on a generically-named field like
+      ``url`` (gallery items, task attachments) and want it signed
+      without polluting the global field set.
 
     Skips absolute URLs (``http://`` / ``https://``) and falsy values
     so HA-served avatars or federation URLs don't get corrupted.
     """
+    fields = _SIGNABLE_URL_FIELDS | frozenset(extra_fields)
     if isinstance(payload, dict):
         for k, v in payload.items():
-            if (
-                k in _SIGNABLE_URL_FIELDS
-                and isinstance(v, str)
-                and v.startswith("/api/")
-            ):
+            if k in fields and isinstance(v, str) and v.startswith("/api/"):
                 payload[k] = signer.sign(v)
             elif k in _SIGNABLE_URL_LIST_FIELDS and isinstance(v, list):
                 payload[k] = [
@@ -169,8 +178,8 @@ def sign_media_urls_in(payload, signer: MediaUrlSigner):
                     for u in v
                 ]
             else:
-                sign_media_urls_in(v, signer)
+                sign_media_urls_in(v, signer, extra_fields=extra_fields)
     elif isinstance(payload, list):
         for item in payload:
-            sign_media_urls_in(item, signer)
+            sign_media_urls_in(item, signer, extra_fields=extra_fields)
     return payload

@@ -133,25 +133,27 @@ class SpaceDetailView(BaseView):
             if space.cover_hash
             else None
         )
-        return web.json_response(
-            sanitise_for_api(
-                {
-                    "id": space.id,
-                    "name": space.name,
-                    "description": space.description,
-                    "emoji": space.emoji,
-                    "space_type": space.space_type.value,
-                    "join_mode": space.join_mode.value,
-                    "features": space.features.to_wire_dict(),
-                    "retention_days": space.retention_days,
-                    "retention_exempt_types": list(space.retention_exempt_types),
-                    "about_markdown": space.about_markdown,
-                    "cover_hash": space.cover_hash,
-                    "cover_url": cover_url,
-                    "bot_enabled": space.bot_enabled,
-                }
-            )
+        payload = sanitise_for_api(
+            {
+                "id": space.id,
+                "name": space.name,
+                "description": space.description,
+                "emoji": space.emoji,
+                "space_type": space.space_type.value,
+                "join_mode": space.join_mode.value,
+                "features": space.features.to_wire_dict(),
+                "retention_days": space.retention_days,
+                "retention_exempt_types": list(space.retention_exempt_types),
+                "about_markdown": space.about_markdown,
+                "cover_hash": space.cover_hash,
+                "cover_url": cover_url,
+                "bot_enabled": space.bot_enabled,
+            }
         )
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return web.json_response(payload)
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -496,7 +498,8 @@ class SpaceCoverView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        # Auth enforced upstream by :class:`SignedMediaStrategy` (signed
+        # URL) or :class:`BearerTokenStrategy` (fetch() callers).
         space_id = self.match("id")
         repo = self.svc(space_cover_repo_key)
         got = await repo.get(space_id)
@@ -533,12 +536,14 @@ class SpaceCoverView(BaseView):
             return error_response(403, "FORBIDDEN", str(exc))
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
-        return web.json_response(
-            {
-                "cover_hash": updated.cover_hash,
-                "cover_url": f"/api/spaces/{space_id}/cover?v={updated.cover_hash}",
-            }
-        )
+        payload = {
+            "cover_hash": updated.cover_hash,
+            "cover_url": f"/api/spaces/{space_id}/cover?v={updated.cover_hash}",
+        }
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return web.json_response(payload)
 
     async def delete(self) -> web.Response:
         ctx = self.user

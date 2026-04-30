@@ -779,7 +779,12 @@ async def test_space_cover_upload_and_fetch(client, tmp_path):
     )
     dbody = await detail.json()
     assert dbody["cover_hash"] == body["cover_hash"]
-    assert dbody["cover_url"] == body["cover_url"]
+    # Both responses sign the URL fresh (different ``exp`` values), so
+    # compare canonical paths + cache-buster, not the full string.
+    upload_canonical = body["cover_url"].split("&exp=", 1)[0]
+    detail_canonical = dbody["cover_url"].split("&exp=", 1)[0]
+    assert upload_canonical == detail_canonical
+    assert "sig=" in dbody["cover_url"]
 
     # DELETE clears it.
     rm = await client.delete(

@@ -22,6 +22,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 from .. import app_keys as K
+from ..media_signer import sign_media_urls_in
 from .base import BaseView
 
 
@@ -59,6 +60,26 @@ def _item_dict(i) -> dict:
     }
 
 
+def _album_signed(request: web.Request, a) -> dict:
+    """:func:`_album_dict` + sign ``cover_url`` for the SPA."""
+    payload = _album_dict(a)
+    signer = request.app.get(K.media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer)
+    return payload
+
+
+def _item_signed(request: web.Request, i) -> dict:
+    """:func:`_item_dict` + sign ``url`` and ``thumbnail_url``. Gallery
+    items expose the full media URL on the generic ``url`` field, so
+    we opt in via the signer's ``extra_fields``."""
+    payload = _item_dict(i)
+    signer = request.app.get(K.media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer, extra_fields=("url",))
+    return payload
+
+
 class HouseholdAlbumCollectionView(BaseView):
     """GET/POST /api/gallery/albums — household-level albums."""
 
@@ -75,7 +96,7 @@ class HouseholdAlbumCollectionView(BaseView):
             limit=limit,
             before=before,
         )
-        return web.json_response([_album_dict(a) for a in albums])
+        return web.json_response([_album_signed(self.request, a) for a in albums])
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -86,7 +107,7 @@ class HouseholdAlbumCollectionView(BaseView):
             name=str(body.get("name", "")),
             description=body.get("description"),
         )
-        return web.json_response(_album_dict(album), status=201)
+        return web.json_response(_album_signed(self.request, album), status=201)
 
 
 class SpaceAlbumCollectionView(BaseView):
@@ -106,7 +127,7 @@ class SpaceAlbumCollectionView(BaseView):
             limit=limit,
             before=before,
         )
-        return web.json_response([_album_dict(a) for a in albums])
+        return web.json_response([_album_signed(self.request, a) for a in albums])
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -118,7 +139,7 @@ class SpaceAlbumCollectionView(BaseView):
             name=str(body.get("name", "")),
             description=body.get("description"),
         )
-        return web.json_response(_album_dict(album), status=201)
+        return web.json_response(_album_signed(self.request, album), status=201)
 
 
 class AlbumDetailView(BaseView):
@@ -130,7 +151,7 @@ class AlbumDetailView(BaseView):
             self.match("album_id"),
             actor_user_id=ctx.user_id,
         )
-        return web.json_response(_album_dict(album))
+        return web.json_response(_album_signed(self.request, album))
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -187,7 +208,9 @@ class AlbumItemCollectionView(BaseView):
             limit=limit,
             before=before,
         )
-        return web.json_response([_item_dict(i) for i in items])
+        return web.json_response(
+            [_item_signed(self.request, i) for i in items],
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -238,7 +261,7 @@ class AlbumItemCollectionView(BaseView):
             caption=caption,
             uploader_user_id=ctx.user_id,
         )
-        return web.json_response(_item_dict(item), status=201)
+        return web.json_response(_item_signed(self.request, item), status=201)
 
 
 class GalleryItemDetailView(BaseView):
