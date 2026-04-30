@@ -33,7 +33,8 @@ const startPrice = signal('')
 const stepPrice = signal('')
 const currency = signal('EUR')
 const durationDays = signal(7)
-const imageUrls = signal<string[]>([])
+interface ImageEntry { url: string; preview: string }
+const imageUrls = signal<ImageEntry[]>([])
 const submitting = signal(false)
 
 function reset() {
@@ -67,8 +68,15 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
 
   const uploadImage = async (file: File) => {
     try {
-      const url = await uploadWithProgress(file)
-      imageUrls.value = [...imageUrls.value, url].slice(0, MAX_IMAGES)
+      // Store the **canonical** url (no ``?exp=&sig=``); the bazaar
+      // listing endpoint persists ``image_urls`` and the server signs
+      // them fresh on every read. ``signed_url`` is for the immediate
+      // preview only — see UploadProgress.uploadWithProgress.
+      const result = await uploadWithProgress(file)
+      imageUrls.value = [
+        ...imageUrls.value,
+        { url: result.url, preview: result.signed_url },
+      ].slice(0, MAX_IMAGES)
     } catch (err: unknown) {
       showToast(
         `Image upload failed: ${(err as Error).message ?? err}`, 'error',
@@ -87,7 +95,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
   }
 
   const removeImage = (url: string) => {
-    imageUrls.value = imageUrls.value.filter(u => u !== url)
+    imageUrls.value = imageUrls.value.filter(u => u.url !== url)
   }
 
   const submit = async () => {
@@ -97,7 +105,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
       mode:          mode.value,
       currency:      currency.value,
       duration_days: durationDays.value,
-      image_urls:    imageUrls.value,
+      image_urls:    imageUrls.value.map((e) => e.url),
     }
     const priceC = toCents(price.value, currency.value)
     const startC = toCents(startPrice.value, currency.value)
@@ -155,12 +163,12 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
               Up to {MAX_IMAGES} images. Drag or pick from your device.
             </p>
             <div class="sh-bazaar-create-images">
-              {imageUrls.value.map(url => (
-                <div key={url} class="sh-bazaar-create-img">
-                  <img src={url} alt="" />
+              {imageUrls.value.map(entry => (
+                <div key={entry.url} class="sh-bazaar-create-img">
+                  <img src={entry.preview} alt="" />
                   <button type="button" class="sh-composer-remove-attach"
                           aria-label="Remove image"
-                          onClick={() => removeImage(url)}>✕</button>
+                          onClick={() => removeImage(entry.url)}>✕</button>
                 </div>
               ))}
               {imageUrls.value.length < MAX_IMAGES && (

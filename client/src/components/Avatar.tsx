@@ -1,6 +1,7 @@
-import { withAuthToken } from '@/utils/authedUrl'
-
 interface AvatarProps {
+  /** Backend-signed URL — comes pre-tagged with ``?exp=&sig=`` so the
+   *  browser can load it via raw ``<img src>`` without needing an
+   *  ``Authorization`` header. */
   src?: string | null
   name: string
   size?: number
@@ -13,7 +14,7 @@ export function Avatar({ src, name, size = 40, onClick }: AvatarProps) {
   if (src) {
     return (
       <img
-        src={withAuthToken(src)}
+        src={src}
         alt={name}
         class={`sh-avatar ${onClick ? 'sh-avatar--clickable' : ''}`}
         width={size}

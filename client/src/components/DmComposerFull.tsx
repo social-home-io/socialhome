@@ -10,7 +10,10 @@ import { sendTyping } from './TypingIndicator'
 
 const content = signal('')
 const msgType = signal('text')
+// Canonical (unsigned) media URL, sent on the ``send_message`` API call.
 const mediaUrl = signal<string | null>(null)
+// Short-lived signed URL for the local preview ``<img>`` only.
+const mediaPreviewUrl = signal<string | null>(null)
 const sending = signal(false)
 
 const TYPE_ICONS: Record<string, string> = {
@@ -28,6 +31,7 @@ export function DmComposerFull({ conversationId, onSend }: {
       await onSend(content.value, msgType.value, mediaUrl.value || undefined)
       content.value = ''
       mediaUrl.value = null
+      mediaPreviewUrl.value = null
       msgType.value = 'text'
     } finally { sending.value = false }
   }
@@ -40,8 +44,9 @@ export function DmComposerFull({ conversationId, onSend }: {
       const file = input.files?.[0]
       if (!file) return
       try {
-        const url = await uploadWithProgress(file)
-        mediaUrl.value = url
+        const result = await uploadWithProgress(file)
+        mediaUrl.value = result.url
+        mediaPreviewUrl.value = result.signed_url
         msgType.value = file.type.startsWith('video/') ? 'video' : 'image'
       } catch {}
     }
@@ -66,8 +71,12 @@ export function DmComposerFull({ conversationId, onSend }: {
       </div>
       {mediaUrl.value && (
         <div class="sh-dm-media-preview">
-          <img src={mediaUrl.value} class="sh-dm-thumb" />
-          <button onClick={() => { mediaUrl.value = null; msgType.value = 'text' }}>✕</button>
+          <img src={mediaPreviewUrl.value ?? mediaUrl.value} class="sh-dm-thumb" />
+          <button onClick={() => {
+            mediaUrl.value = null
+            mediaPreviewUrl.value = null
+            msgType.value = 'text'
+          }}>✕</button>
         </div>
       )}
       <div class="sh-dm-input-row">

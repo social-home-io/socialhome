@@ -99,6 +99,48 @@ async def test_create_post_appears_in_feed(client):
     assert any(p["id"] == post_id for p in body)
 
 
+async def test_post_media_url_is_signed(client):
+    """A post's ``media_url`` is returned with ``?exp=&sig=`` so the
+    SPA can drop it into ``<img src>`` without the bearer token."""
+    r = await client.post(
+        "/api/feed/posts",
+        json={
+            "type": "image",
+            "content": "with a pic",
+            "media_url": "/api/media/abc.webp",
+        },
+        headers=_auth(client._admin_token),
+    )
+    body = await r.json()
+    media_url = body["media_url"]
+    # Server signs at serialisation: canonical path is preserved,
+    # sig + exp added.
+    assert media_url.startswith("/api/media/abc.webp?")
+    assert "exp=" in media_url
+    assert "sig=" in media_url
+
+
+async def test_post_media_url_query_stripped_on_create(client):
+    """If the client echoes a signed URL back to ``POST /api/feed/posts``
+    (e.g. from the composer's preview), the server stores the canonical
+    form — never the short-lived ``?exp=&sig=`` fragment. We assert by
+    checking the *returned* sig differs from a fixed nonce we passed in
+    (i.e. the server didn't just copy what we sent)."""
+    r = await client.post(
+        "/api/feed/posts",
+        json={
+            "type": "image",
+            "content": "echo test",
+            "media_url": "/api/media/xyz.webp?exp=99999999&sig=NOT_REAL",
+        },
+        headers=_auth(client._admin_token),
+    )
+    body = await r.json()
+    media_url = body["media_url"]
+    assert media_url.startswith("/api/media/xyz.webp?")
+    assert "sig=NOT_REAL" not in media_url
+
+
 async def test_edit_post(client):
     """PATCH /api/feed/posts/{id} updates the post content."""
     r = await client.post(

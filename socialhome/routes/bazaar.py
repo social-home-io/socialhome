@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import bazaar_repo_key, bazaar_service_key
+from ..app_keys import bazaar_repo_key, bazaar_service_key, media_signer_key
+from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.bazaar_repo import BidStateError, OfferStateError
 from ..security import error_response
 from ..services.bazaar_service import (
@@ -36,6 +37,15 @@ def _listing_dict(listing) -> dict:
         "sold_at": listing.sold_at,
         "created_at": listing.created_at,
     }
+
+
+def _listing_dict_signed(request: web.Request, listing) -> dict:
+    """:func:`_listing_dict` + sign ``image_urls`` for the SPA."""
+    payload = _listing_dict(listing)
+    signer = request.app.get(media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer)
+    return payload
 
 
 def _bid_dict(bid) -> dict:
@@ -93,7 +103,9 @@ class BazaarCollectionView(BaseView):
             listings = await repo.list_by_seller(ctx.user_id)
         else:
             listings = await repo.list_active()
-        return web.json_response([_listing_dict(lst) for lst in listings])
+        return web.json_response(
+            [_listing_dict_signed(self.request, lst) for lst in listings],
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -131,14 +143,16 @@ class BazaarCollectionView(BaseView):
                 currency=currency,
                 description=body.get("description"),
                 duration_days=int(body.get("duration_days") or 7),
-                image_urls=tuple(str(u) for u in image_urls),
+                image_urls=tuple(strip_signature_query(str(u)) for u in image_urls),
                 price=_int_or_none(body.get("price")),
                 start_price=_int_or_none(body.get("start_price")),
                 step_price=_int_or_none(body.get("step_price")),
             )
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
-        return web.json_response(_listing_dict(listing), status=201)
+        return web.json_response(
+            _listing_dict_signed(self.request, listing), status=201,
+        )
 
 
 class BazaarDetailView(BaseView):
@@ -151,7 +165,7 @@ class BazaarDetailView(BaseView):
         listing = await repo.get_listing(listing_id)
         if listing is None:
             return error_response(404, "NOT_FOUND", "Listing not found.")
-        return web.json_response(_listing_dict(listing))
+        return web.json_response(_listing_dict_signed(self.request, listing))
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -174,7 +188,7 @@ class BazaarDetailView(BaseView):
             return error_response(422, "UNPROCESSABLE", str(exc))
         except BazaarServiceError as exc:
             return error_response(409, "CONFLICT", str(exc))
-        return web.json_response(_listing_dict(listing))
+        return web.json_response(_listing_dict_signed(self.request, listing))
 
     async def delete(self) -> web.Response:
         ctx = self.user

@@ -2,9 +2,14 @@
  * FileRenderer — file & video post rendering (§23.51).
  * Renders file attachments, videos, and images within PostCard.
  * Images are click-to-zoom via :mod:`Lightbox`.
+ *
+ * URLs flowing in here are already short-lived signed (server-side
+ * ``MediaUrlSigner`` appends ``?exp=&sig=`` at serialization), so the
+ * browser can load them via raw ``<img src>`` / ``<video src>`` /
+ * ``<a download>`` without needing an ``Authorization`` header. See
+ * ``socialhome.media_signer`` and ``socialhome.auth.SignedMediaStrategy``.
  */
 import { useState } from 'preact/hooks'
-import { withAuthToken } from '@/utils/authedUrl'
 import { Lightbox } from './Lightbox'
 
 interface FileAttachment {
@@ -19,7 +24,7 @@ export function FileRenderer({ file }: { file: FileAttachment }) {
   const icon = iconFor(file.mime_type, file.original_name)
 
   return (
-    <a href={withAuthToken(file.url)} download={file.original_name}
+    <a href={file.url} download={file.original_name}
        class="sh-file-attachment" target="_blank" rel="noopener">
       <span class="sh-file-icon" aria-hidden="true">{icon}</span>
       <div class="sh-file-info">
@@ -36,8 +41,8 @@ export function VideoRenderer({ src, poster }: { src: string; poster?: string })
     <div class="sh-video-wrapper">
       <video
         class="sh-video"
-        src={withAuthToken(src)}
-        poster={poster ? withAuthToken(poster) : undefined}
+        src={src}
+        poster={poster}
         controls
         preload="metadata"
         playsinline
@@ -48,17 +53,16 @@ export function VideoRenderer({ src, poster }: { src: string; poster?: string })
 
 export function ImageRenderer({ src, alt }: { src: string; alt?: string }) {
   const [zoomed, setZoomed] = useState(false)
-  const authedSrc = withAuthToken(src)
   return (
     <>
       <button type="button" class="sh-image-wrapper"
               aria-label="Open image full-size"
               onClick={() => setZoomed(true)}>
-        <img class="sh-image" src={authedSrc} alt={alt || 'Post image'}
+        <img class="sh-image" src={src} alt={alt || 'Post image'}
              loading="lazy" />
       </button>
       {zoomed && (
-        <Lightbox src={authedSrc} alt={alt} onClose={() => setZoomed(false)} />
+        <Lightbox src={src} alt={alt} onClose={() => setZoomed(false)} />
       )}
     </>
   )

@@ -26,8 +26,9 @@ from urllib.parse import unquote
 
 from aiohttp import web
 
-from ..app_keys import feed_service_key, post_repo_key
+from ..app_keys import feed_service_key, media_signer_key, post_repo_key
 from ..domain.post import LocationData
+from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
 from .base import BaseView
 
@@ -44,6 +45,20 @@ def _serialise(obj) -> object:
     if isinstance(obj, list):
         return [_serialise(item) for item in obj]
     return obj
+
+
+def _serialise_signed(request: web.Request, obj):
+    """``_serialise`` + sign ``media_url`` / ``picture_url`` URLs in the
+    result so the SPA can load them via ``<img src>`` without a master
+    bearer token. Walks dicts and lists recursively (in place).
+    """
+    payload = _serialise(obj)
+    signer = request.app.get(media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer)
+    return payload
+
+
 
 
 def _coerce_datetimes(d: dict) -> dict:
@@ -88,7 +103,9 @@ class FeedCollectionView(BaseView):
         except ValueError:
             limit = 20
         posts = await svc.list_feed(before=before, limit=limit)
-        return web.json_response([_serialise(p) for p in posts])
+        return web.json_response(
+            [_serialise_signed(self.request, p) for p in posts],
+        )
 
 
 class PostCollectionView(BaseView):
@@ -102,12 +119,12 @@ class PostCollectionView(BaseView):
             author_user_id=ctx.user_id,
             type=body.get("type", "text"),
             content=body.get("content"),
-            media_url=body.get("media_url"),
+            media_url=strip_signature_query(body.get("media_url")),
             location=_extract_location(body),
             pinned=bool(body.get("pinned", False)),
             no_link_preview=bool(body.get("no_link_preview", False)),
         )
-        return web.json_response(_serialise(post), status=201)
+        return web.json_response(_serialise_signed(self.request, post), status=201)
 
 
 def _extract_location(body: dict) -> LocationData | None:
@@ -148,7 +165,7 @@ class PostDetailView(BaseView):
             editor_user_id=ctx.user_id,
             new_content=new_content,
         )
-        return web.json_response(_serialise(post))
+        return web.json_response(_serialise_signed(self.request, post))
 
     async def delete(self) -> web.Response:
         ctx = self.user
@@ -170,7 +187,7 @@ class PostReactionCollectionView(BaseView):
         if not emoji:
             return error_response(422, "VALIDATION_ERROR", "emoji is required.")
         post = await svc.add_reaction(post_id, user_id=ctx.user_id, emoji=emoji)
-        return web.json_response(_serialise(post))
+        return web.json_response(_serialise_signed(self.request, post))
 
 
 class PostReactionDetailView(BaseView):
@@ -182,7 +199,7 @@ class PostReactionDetailView(BaseView):
         post_id = self.match("id")
         emoji = unquote(self.match("emoji"))
         post = await svc.remove_reaction(post_id, user_id=ctx.user_id, emoji=emoji)
-        return web.json_response(_serialise(post))
+        return web.json_response(_serialise_signed(self.request, post))
 
 
 class PostCommentView(BaseView):
@@ -197,17 +214,21 @@ class PostCommentView(BaseView):
             post_id,
             author_user_id=ctx.user_id,
             content=body.get("content"),
-            media_url=body.get("media_url"),
+            media_url=strip_signature_query(body.get("media_url")),
             comment_type=body.get("type", "text"),
             parent_id=body.get("parent_id"),
         )
-        return web.json_response(_serialise(comment), status=201)
+        return web.json_response(
+            _serialise_signed(self.request, comment), status=201,
+        )
 
     async def get(self) -> web.Response:
         svc = self.svc(feed_service_key)
         post_id = self.match("id")
         comments = await svc.list_comments(post_id)
-        return web.json_response([_serialise(c) for c in comments])
+        return web.json_response(
+            [_serialise_signed(self.request, c) for c in comments],
+        )
 
 
 class PostCommentDetailView(BaseView):
@@ -225,7 +246,7 @@ class PostCommentDetailView(BaseView):
             editor_user_id=ctx.user_id,
             new_content=new_content,
         )
-        return web.json_response(_serialise(comment))
+        return web.json_response(_serialise_signed(self.request, comment))
 
     async def delete(self) -> web.Response:
         ctx = self.user
@@ -264,7 +285,9 @@ class SavedPostsView(BaseView):
         ctx = self.user
         repo = self.svc(post_repo_key)
         posts = await repo.list_bookmarks(ctx.user_id)
-        return web.json_response([_serialise(p) for p in posts])
+        return web.json_response(
+            [_serialise_signed(self.request, p) for p in posts],
+        )
 
 
 class FeedReadWatermarkView(BaseView):

@@ -28,7 +28,7 @@ import aiolibdatachannel as rtc
 from aiohttp import web
 
 from . import app_keys as K
-from .auth import BearerTokenStrategy, ChainedStrategy, HaIngressStrategy, require_auth
+from .auth import BearerTokenStrategy, ChainedStrategy, HaIngressStrategy, SignedMediaStrategy, require_auth
 from .config import Config
 from .db import AsyncDatabase
 from .domain.federation import FederationEventType
@@ -43,6 +43,7 @@ from .hardening import (
 )
 from .i18n import Catalog
 from .identity_bootstrap import ensure_instance_identity
+from .media_signer import MediaUrlSigner, derive_signing_key
 from .infrastructure import (
     EventBus,
     IdempotencyCache,
@@ -1123,9 +1124,16 @@ def create_app(config: Config | None = None) -> web.Application:
     setup_service = SetupService(db)
 
     # ── Auth middleware ───────────────────────────────────────────────────
+    # Order matters: signed-URL checks first so browser-loaded media (img,
+    # video, download links) authenticate via ``?exp=&sig=`` without ever
+    # surfacing the bearer token. Bearer + HA ingress remain as fallbacks
+    # for fetch()-driven traffic.
     bearer_strategy = BearerTokenStrategy(user_repo)
     ha_strategy = HaIngressStrategy(user_repo)
-    chained_strategy = ChainedStrategy(ha_strategy, bearer_strategy)
+    signed_media_strategy = SignedMediaStrategy()
+    chained_strategy = ChainedStrategy(
+        signed_media_strategy, ha_strategy, bearer_strategy,
+    )
     auth_middleware = require_auth(chained_strategy)
 
     # ── Rate-limit + hardening middleware (§25.7) ────────────────────────
@@ -1293,6 +1301,15 @@ def create_app(config: Config | None = None) -> web.Application:
         real_instance_id = identity.instance_id
         app[K.instance_id_key] = real_instance_id
         app[K.instance_signing_key_key] = identity_seed
+
+        # Short-lived signed URLs for browser-loaded media — see §23.21
+        # ``media_signer.py``. The HMAC key is HKDF-derived from the
+        # identity seed so it never reuses the federation Ed25519 key
+        # material directly. Stashed here (rather than at app-build time)
+        # because the seed only becomes available after this bootstrap.
+        app[K.media_signer_key] = MediaUrlSigner(
+            key=derive_signing_key(identity_seed),
+        )
 
         # Report service auto-forwards fraud reports to every paired GFS.
         # Identity seed is the Ed25519 signing key used on /gfs/report.

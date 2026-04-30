@@ -9,7 +9,7 @@ import pathlib
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
-from ..app_keys import config_key, storage_quota_service_key
+from ..app_keys import config_key, media_signer_key, storage_quota_service_key
 from ..domain.media_constraints import VIDEO_MAX_UPLOAD_BYTES
 from ..media.image_processor import ImageProcessor
 from ..media.video_processor import VideoProcessor
@@ -24,11 +24,16 @@ _DEFAULT_MAX_UPLOAD_BYTES = VIDEO_MAX_UPLOAD_BYTES
 
 
 class MediaServeView(BaseView):
-    """``GET /api/media/{filename}`` — stream a media file."""
+    """``GET /api/media/{filename}`` — stream a media file.
+
+    Auth is enforced upstream of this view by either
+    :class:`SignedMediaStrategy` (browser ``<img>``/``<video>``/download
+    links carrying ``?exp=&sig=``) or :class:`BearerTokenStrategy` (any
+    ``fetch()`` carrying ``Authorization: Bearer …``). Either populates
+    ``request['user']`` by the time the handler runs.
+    """
 
     async def get(self) -> web.StreamResponse:
-        self.user  # auth check
-
         config = self.svc(config_key)
         filename = self.match("filename")
 
@@ -141,4 +146,14 @@ class MediaUploadView(BaseView):
         dest.write_bytes(out_bytes)
 
         url = f"/api/media/{out_name}"
-        return web.json_response({"url": url, "filename": out_name}, status=201)
+        # The composer needs a URL it can drop straight into ``<img src>``
+        # for the local preview — that requires the short-lived
+        # signature. We return both forms: ``url`` is the canonical one
+        # the client sends back when creating the post (server signs
+        # again at every read), ``signed_url`` is for immediate display.
+        signer = self.request.app.get(media_signer_key)
+        signed_url = signer.sign(url) if signer is not None else url
+        return web.json_response(
+            {"url": url, "filename": out_name, "signed_url": signed_url},
+            status=201,
+        )

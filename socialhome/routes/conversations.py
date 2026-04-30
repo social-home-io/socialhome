@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import dm_service_key
+from ..app_keys import dm_service_key, media_signer_key
+from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import sanitise_for_api
 from .base import BaseView
 
@@ -75,26 +76,28 @@ class ConversationMessageView(BaseView):
             before=before,
             limit=limit,
         )
-        return web.json_response(
-            [
-                sanitise_for_api(
-                    {
-                        "id": m.id,
-                        "sender_user_id": m.sender_user_id,
-                        "content": m.content,
-                        "type": m.type,
-                        "media_url": m.media_url,
-                        "reply_to_id": m.reply_to_id,
-                        "deleted": m.deleted,
-                        "created_at": m.created_at.isoformat()
-                        if m.created_at
-                        else None,
-                        "edited_at": m.edited_at.isoformat() if m.edited_at else None,
-                    }
-                )
-                for m in msgs
-            ]
-        )
+        signer = self.request.app.get(media_signer_key)
+        payload = [
+            sanitise_for_api(
+                {
+                    "id": m.id,
+                    "sender_user_id": m.sender_user_id,
+                    "content": m.content,
+                    "type": m.type,
+                    "media_url": m.media_url,
+                    "reply_to_id": m.reply_to_id,
+                    "deleted": m.deleted,
+                    "created_at": m.created_at.isoformat()
+                    if m.created_at
+                    else None,
+                    "edited_at": m.edited_at.isoformat() if m.edited_at else None,
+                }
+            )
+            for m in msgs
+        ]
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return web.json_response(payload)
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -106,7 +109,7 @@ class ConversationMessageView(BaseView):
             sender_username=ctx.username,
             content=body.get("content", ""),
             type=body.get("type", "text"),
-            media_url=body.get("media_url"),
+            media_url=strip_signature_query(body.get("media_url")),
             reply_to_id=body.get("reply_to_id"),
         )
         return web.json_response({"id": msg.id}, status=201)

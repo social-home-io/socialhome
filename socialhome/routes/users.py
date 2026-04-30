@@ -26,6 +26,7 @@ from aiohttp.multipart import BodyPartReader
 from ..app_keys import (
     config_key,
     data_export_service_key,
+    media_signer_key,
     platform_adapter_key,
     profile_picture_repo_key,
     rate_limiter_key,
@@ -34,6 +35,7 @@ from ..app_keys import (
 )
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.user import _picture_url
+from ..media_signer import sign_media_urls_in
 from ..security import error_response, sanitise_for_api
 from ..services.user_service import _UNSET
 from .base import BaseView
@@ -52,6 +54,11 @@ def _user_to_dict(user) -> dict:
 
     Injects the synthetic ``picture_url`` derived from
     ``picture_hash`` so the frontend doesn't have to build the URL.
+
+    Note: this returns the *unsigned* picture_url. Routes returning a
+    user dict to the API call :func:`_user_to_dict_signed` instead so
+    the URL carries a short-lived signature for browser ``<img>``
+    loads.
     """
     if dataclasses.is_dataclass(user) and not isinstance(user, type):
         raw = dataclasses.asdict(user)
@@ -62,6 +69,15 @@ def _user_to_dict(user) -> dict:
         raw.get("picture_hash"),
     )
     return sanitise_for_api(raw)
+
+
+def _user_to_dict_signed(request: web.Request, user) -> dict:
+    """:func:`_user_to_dict` + sign ``picture_url`` for the SPA."""
+    payload = _user_to_dict(user)
+    signer = request.app.get(media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer)
+    return payload
 
 
 async def _read_multipart_image(request: web.Request) -> bytes:
@@ -97,7 +113,7 @@ class MeView(BaseView):
         user = await svc.get(ctx.username)
         if user is None:
             return error_response(404, "NOT_FOUND", "User not found.")
-        return web.json_response(_user_to_dict(user))
+        return web.json_response(_user_to_dict_signed(self.request, user))
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -110,7 +126,7 @@ class MeView(BaseView):
                 ctx.username,
                 body["preferences"],
             )
-            return web.json_response(_user_to_dict(user))
+            return web.json_response(_user_to_dict_signed(self.request, user))
 
         # Display-name + bio go through patch_profile so a
         # UserProfileUpdated event fires for WS + federation fan-out.
@@ -127,13 +143,13 @@ class MeView(BaseView):
                 return error_response(422, "UNPROCESSABLE", str(exc))
             except KeyError:
                 return error_response(404, "NOT_FOUND", "User not found.")
-            return web.json_response(_user_to_dict(user))
+            return web.json_response(_user_to_dict_signed(self.request, user))
 
         # No recognised fields → return current user unchanged.
         user = await svc.get(ctx.username)
         if user is None:
             return error_response(404, "NOT_FOUND", "User not found.")
-        return web.json_response(_user_to_dict(user))
+        return web.json_response(_user_to_dict_signed(self.request, user))
 
 
 class MePictureView(BaseView):
@@ -150,7 +166,7 @@ class MePictureView(BaseView):
             user = await svc.set_picture(ctx.user_id, raw)
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
-        return web.json_response(_user_to_dict(user))
+        return web.json_response(_user_to_dict_signed(self.request, user))
 
     async def delete(self) -> web.Response:
         ctx = self.user
@@ -209,7 +225,7 @@ class MePictureRefreshFromHaView(BaseView):
             user = await svc.set_picture(ctx.user_id, raw)
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
-        return web.json_response(_user_to_dict(user))
+        return web.json_response(_user_to_dict_signed(self.request, user))
 
 
 class UserPictureView(BaseView):
@@ -244,7 +260,9 @@ class UserCollectionView(BaseView):
     async def get(self) -> web.Response:
         svc = self.svc(user_service_key)
         users = await svc.list_active()
-        return web.json_response([_user_to_dict(u) for u in users])
+        return web.json_response(
+            [_user_to_dict_signed(self.request, u) for u in users],
+        )
 
 
 class UserDetailView(BaseView):
@@ -288,7 +306,7 @@ class UserDetailView(BaseView):
                     "Cannot demote the last remaining admin.",
                 )
         updated = await svc.set_admin(target.username, desired)
-        return web.json_response(_user_to_dict(updated))
+        return web.json_response(_user_to_dict_signed(self.request, updated))
 
 
 class TokenCollectionView(BaseView):

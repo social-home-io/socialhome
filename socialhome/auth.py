@@ -28,10 +28,12 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkab
 
 from aiohttp import web
 
+from .app_keys import media_signer_key
 from .security import error_response
 
 if TYPE_CHECKING:
     from .domain.user import User
+    from .media_signer import MediaUrlSigner
 
 
 log = logging.getLogger(__name__)
@@ -283,3 +285,59 @@ class ChainedStrategy:
             if ctx is not None:
                 return ctx
         return None
+
+
+# Sentinel user_id stamped onto :class:`AuthContext` instances minted by
+# :class:`SignedMediaStrategy`. The signed URL is a per-resource capability,
+# not a user session — anything that downstream tries to query users by
+# ``user_id == "__signed_url__"`` should miss the user table cleanly. Routes
+# that serve signed media (the GET handlers under ``/api/media``,
+# ``/api/users/{id}/picture``, ``/api/spaces/{id}/members/{user_id}/picture``)
+# only call ``self.user`` for the auth check and never read ``user_id``.
+SIGNED_URL_PRINCIPAL: str = "__signed_url__"
+
+# Path families that can be reached via a signed URL. The pattern matches
+# the canonical resource path only — query string is ignored. Any path that
+# matches AND carries valid ``?exp=&sig=`` query params is authorised by
+# :class:`SignedMediaStrategy`.
+_SIGNED_PATH_PATTERNS: tuple[str, ...] = (
+    r"^/api/media/[^/]+$",
+    r"^/api/users/[^/]+/picture$",
+    r"^/api/spaces/[^/]+/members/[^/]+/picture$",
+)
+
+
+class SignedMediaStrategy:
+    """Authenticate browser-loaded media via short-lived ``?exp=&sig=``.
+
+    Reads the :class:`MediaUrlSigner` from ``request.app[media_signer_key]``
+    so the strategy can be instantiated at app-build time even though the
+    signer itself is created later in ``_on_startup`` (it depends on the
+    instance identity seed). If the signer isn't ready yet, this strategy
+    declines and the chain falls back to bearer auth.
+    """
+
+    __slots__ = ("_compiled_patterns",)
+
+    def __init__(self) -> None:
+        self._compiled_patterns = tuple(re.compile(p) for p in _SIGNED_PATH_PATTERNS)
+
+    async def authenticate(self, request: "web.Request") -> AuthContext | None:
+        if not any(p.match(request.path) for p in self._compiled_patterns):
+            return None
+        signer: "MediaUrlSigner | None" = request.app.get(media_signer_key)
+        if signer is None:
+            return None
+        exp = request.query.get("exp", "")
+        sig = request.query.get("sig", "")
+        if not exp or not sig:
+            return None
+        if not signer.verify(request.path, exp, sig):
+            return None
+        return AuthContext(
+            user_id=SIGNED_URL_PRINCIPAL,
+            username=SIGNED_URL_PRINCIPAL,
+            is_admin=False,
+            auth_method="signed_url",
+            metadata={},
+        )
