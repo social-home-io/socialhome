@@ -4053,7 +4053,7 @@ hr {
   margin-bottom: var(--sh-space-md);
   overflow-x: auto;
 }
-.sh-space-feed, .sh-space-calendar, .sh-space-pages, .sh-space-settings,
+.sh-space-feed, .sh-space-pages, .sh-space-settings,
 .sh-space-feed-content { display: flex; flex-direction: column; gap: var(--sh-space-md); }
 .sh-space-about {
   padding: var(--sh-space-md);

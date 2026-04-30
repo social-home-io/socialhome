@@ -12,6 +12,7 @@ import { ReminderPicker } from '@/components/ReminderPicker'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
 import { events, rsvpCounts, myRsvpStatus } from '@/store/calendar'
+import { groupEventsByDay } from '@/utils/calendar'
 import { t } from '@/i18n/i18n'
 
 type ViewMode = 'month' | 'week' | 'day'
@@ -77,16 +78,6 @@ function formatDateHeading(date: Date, mode: ViewMode): string {
     return `${start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
   }
   return date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
-}
-
-function groupEventsByDay(evts: CalendarEvent[]): Record<string, CalendarEvent[]> {
-  const groups: Record<string, CalendarEvent[]> = {}
-  for (const e of evts) {
-    const key = new Date(e.start).toLocaleDateString()
-    if (!groups[key]) groups[key] = []
-    groups[key].push(e)
-  }
-  return groups
 }
 
 export default function CalendarPage() {

@@ -7,6 +7,7 @@ import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
+import { groupEventsByDay, formatMonthHeading, monthRange } from '@/utils/calendar'
 import type { Comment, FeedPost, CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
@@ -47,6 +48,8 @@ const activeTab = signal<SpaceTab>('feed')
 const spacePages = signal<SpacePage[]>([])
 const spaceCalEvents = signal<CalendarEvent[]>([])
 const spaceCalendarId = signal<string>('')
+const spaceCalCursor = signal(new Date())
+const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<
   'owner' | 'admin' | 'member' | 'subscriber' | undefined
 >(undefined)
@@ -57,6 +60,40 @@ const memberCount = signal<number | null>(null)
 async function loadSpaceFeed(spaceId: string) {
   const rows = await api.get(`/api/spaces/${spaceId}/feed`) as FeedPost[]
   posts.value = rows
+}
+
+async function loadSpaceCalendar(spaceId: string) {
+  try {
+    const cals = await api.get(
+      `/api/spaces/${spaceId}/calendars`,
+    ) as { id: string }[]
+    if (cals.length === 0) {
+      spaceCalEvents.value = []
+      return
+    }
+    spaceCalendarId.value = cals[0].id
+    const { start, end } = monthRange(spaceCalCursor.value)
+    spaceCalEvents.value = await api.get(
+      `/api/calendars/${cals[0].id}/events`,
+      { start, end },
+    ) as CalendarEvent[]
+  } catch {
+    spaceCalEvents.value = []
+  }
+}
+
+function navigateSpaceMonth(direction: number, spaceId: string) {
+  const next = new Date(spaceCalCursor.value)
+  next.setMonth(next.getMonth() + direction)
+  spaceCalCursor.value = next
+  selectedSpaceEventId.value = null
+  void loadSpaceCalendar(spaceId)
+}
+
+function jumpToSpaceToday(spaceId: string) {
+  spaceCalCursor.value = new Date()
+  selectedSpaceEventId.value = null
+  void loadSpaceCalendar(spaceId)
 }
 
 export default function SpaceFeedPage() {
@@ -85,6 +122,9 @@ export default function SpaceFeedPage() {
     spaceDetail.value = null
     memberCount.value = null
     resetSpaceTasks()
+    spaceCalEvents.value = []
+    spaceCalCursor.value = new Date()
+    selectedSpaceEventId.value = null
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
     api.get(`/api/spaces/${spaceId}`).then((d) => {
@@ -149,15 +189,7 @@ export default function SpaceFeedPage() {
       }).catch(() => { spacePages.value = [] })
     }
     if (tab === 'calendar') {
-      api.get(`/api/spaces/${spaceId}/calendars`).then(async (cals: { id: string }[]) => {
-        if (cals.length > 0) {
-          spaceCalendarId.value = cals[0].id
-          const now = new Date()
-          const start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-          const end = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString()
-          spaceCalEvents.value = await api.get(`/api/calendars/${cals[0].id}/events`, { start, end })
-        }
-      }).catch(() => { spaceCalEvents.value = [] })
+      void loadSpaceCalendar(spaceId)
     }
   }
 
@@ -294,7 +326,7 @@ export default function SpaceFeedPage() {
       {s && <SpaceLinksStrip spaceId={spaceId} />}
 
       {activeTab.value === 'feed' && (
-        <div class="sh-space-feed-content">
+        <div class="sh-feed sh-space-feed-content">
           {viewerRole.value === 'subscriber' ? (
             <div class="sh-subscriber-banner" role="status">
               <span class="sh-subscriber-banner__icon" aria-hidden="true">🔔</span>
@@ -330,7 +362,7 @@ export default function SpaceFeedPage() {
             <p class="sh-muted">No posts in this space yet.</p>
           )}
           {posts.value.map(post => (
-            <div key={post.id}>
+            <div key={post.id} class="sh-feed-item">
               <PostCard
                 post={post}
                 onReact={(emoji) => handleReact(post.id, emoji)}
@@ -377,24 +409,93 @@ export default function SpaceFeedPage() {
         </div>
       )}
 
-      {activeTab.value === 'calendar' && (
-        <div class="sh-space-calendar">
-          <div class="sh-page-header">
-            <h2>Calendar</h2>
-            {spaceCalendarId.value && (
-              <Button onClick={() => openEventDialog(spaceCalendarId.value)}>+ New event</Button>
-            )}
-          </div>
-          {spaceCalEvents.value.length === 0 && <p class="sh-muted">No events this month.</p>}
-          {spaceCalEvents.value.map(e => (
-            <div key={e.id} class="sh-event">
-              <strong>{e.summary}</strong>
-              <time>{new Date(e.start).toLocaleString()}</time>
+      {activeTab.value === 'calendar' && (() => {
+        const grouped = groupEventsByDay(spaceCalEvents.value)
+        const dayKeys = Object.keys(grouped).sort(
+          (a, b) => new Date(a).getTime() - new Date(b).getTime(),
+        )
+        return (
+          <div class="sh-calendar">
+            <div class="sh-page-header">
+              {spaceCalendarId.value && (
+                <Button onClick={() => openEventDialog(spaceCalendarId.value)}>
+                  + New event
+                </Button>
+              )}
             </div>
-          ))}
-          <CalendarEventDialog onCreated={() => loadTabData('calendar')} />
-        </div>
-      )}
+
+            <div class="sh-calendar-controls">
+              <div class="sh-calendar-nav">
+                <Button variant="secondary"
+                        aria-label="Previous month"
+                        onClick={() => navigateSpaceMonth(-1, spaceId)}>
+                  &#8249;
+                </Button>
+                <span class="sh-calendar-heading">
+                  {formatMonthHeading(spaceCalCursor.value)}
+                </span>
+                <Button variant="secondary"
+                        aria-label="Next month"
+                        onClick={() => navigateSpaceMonth(1, spaceId)}>
+                  &#8250;
+                </Button>
+                <Button variant="secondary"
+                        onClick={() => jumpToSpaceToday(spaceId)}>
+                  Today
+                </Button>
+              </div>
+            </div>
+
+            {spaceCalEvents.value.length === 0 && (
+              <div class="sh-empty-state">
+                <div style={{ fontSize: '2rem' }}>📅</div>
+                <h3>No events this month</h3>
+                <p>
+                  Click <strong>+ New event</strong> to schedule something
+                  in this space.
+                </p>
+              </div>
+            )}
+
+            {dayKeys.map(dayKey => (
+              <div key={dayKey} class="sh-calendar-day-group">
+                <h3 class="sh-calendar-day-heading">{dayKey}</h3>
+                {grouped[dayKey].map(e => (
+                  <div
+                    key={e.id}
+                    class="sh-event"
+                    onClick={() => {
+                      selectedSpaceEventId.value =
+                        selectedSpaceEventId.value === e.id ? null : e.id
+                    }}
+                  >
+                    <div class="sh-event-header">
+                      <strong>{e.summary}</strong>
+                      <time>
+                        {new Date(e.start).toLocaleTimeString(undefined, {
+                          hour: '2-digit', minute: '2-digit',
+                        })}
+                      </time>
+                      {e.all_day && <span class="sh-badge">All day</span>}
+                    </div>
+                    {selectedSpaceEventId.value === e.id && (
+                      <div class="sh-event-detail">
+                        {e.description && <p>{e.description}</p>}
+                        <div class="sh-event-times">
+                          <span>Starts {new Date(e.start).toLocaleString()}</span>
+                          <span>Ends {new Date(e.end).toLocaleString()}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+
+            <CalendarEventDialog onCreated={() => loadTabData('calendar')} />
+          </div>
+        )
+      })()}
 
       {activeTab.value === 'tasks' && (
         <SpaceTasksTab spaceId={spaceId} />
