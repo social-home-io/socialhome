@@ -23,7 +23,7 @@ import { CommentThread } from '@/components/CommentThread'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { SpaceTasksTab, resetSpaceTasks } from './SpaceTasksTab'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
-import { CalendarEventDialog, openEventDialog } from '@/components/CalendarEventDialog'
+import { CalendarEventDialog, openSpaceEventDialog } from '@/components/CalendarEventDialog'
 import { SpaceLinksStrip } from './SpaceLinksStrip'
 import { SpaceNotifPrefsMenu } from './SpaceNotifPrefsMenu'
 
@@ -47,7 +47,6 @@ const loading = signal(true)
 const activeTab = signal<SpaceTab>('feed')
 const spacePages = signal<SpacePage[]>([])
 const spaceCalEvents = signal<CalendarEvent[]>([])
-const spaceCalendarId = signal<string>('')
 const spaceCalCursor = signal(new Date())
 const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<
@@ -63,18 +62,14 @@ async function loadSpaceFeed(spaceId: string) {
 }
 
 async function loadSpaceCalendar(spaceId: string) {
+  // Use the per-space calendar endpoint directly — the route fans out
+  // to the space's own calendar without us having to look up its id
+  // first. Same shape as the household ``/api/calendars/{id}/events``
+  // response, just space-scoped.
   try {
-    const cals = await api.get(
-      `/api/spaces/${spaceId}/calendars`,
-    ) as { id: string }[]
-    if (cals.length === 0) {
-      spaceCalEvents.value = []
-      return
-    }
-    spaceCalendarId.value = cals[0].id
     const { start, end } = monthRange(spaceCalCursor.value)
     spaceCalEvents.value = await api.get(
-      `/api/calendars/${cals[0].id}/events`,
+      `/api/spaces/${spaceId}/calendar/events`,
       { start, end },
     ) as CalendarEvent[]
   } catch {
@@ -417,11 +412,9 @@ export default function SpaceFeedPage() {
         return (
           <div class="sh-calendar">
             <div class="sh-page-header">
-              {spaceCalendarId.value && (
-                <Button onClick={() => openEventDialog(spaceCalendarId.value)}>
-                  + New event
-                </Button>
-              )}
+              <Button onClick={() => openSpaceEventDialog(spaceId)}>
+                + New event
+              </Button>
             </div>
 
             <div class="sh-calendar-controls">
