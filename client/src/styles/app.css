@@ -566,17 +566,32 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 .sh-danger-link:hover { text-decoration: underline; }
 
-/* Cards */
+/* Generic cards — cream paper + pinned-wall shadow so anything that
+ * still uses the bare ``.sh-card`` class (CpAdminPanel forms,
+ * miscellaneous one-offs) inherits the household-OS aesthetic by
+ * default. ``--elevated`` and ``--interactive`` modifiers keep their
+ * existing meaning (extra lift / cursor + hover translate). */
 .sh-card {
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--hh-radius-card, var(--sh-radius-lg));
   padding: var(--sh-space-md);
-  box-shadow: var(--sh-shadow-sm);
-  transition: box-shadow var(--sh-transition-fast), border-color var(--sh-transition-fast), transform var(--sh-transition-fast);
+  box-shadow: var(--sh-shadow-pinned);
+  transition: box-shadow var(--sh-transition-fast),
+              border-color var(--sh-transition-fast),
+              transform var(--sh-transition-fast);
 }
-.sh-card:hover { box-shadow: var(--sh-shadow-md); border-color: var(--sh-border-strong); }
-.sh-card--elevated { box-shadow: var(--sh-shadow-md); }
+.sh-card:hover {
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
+  border-color: var(--sh-border-strong);
+}
+.sh-card--elevated {
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 24px 50px -28px rgba(26, 24, 20, 0.55);
+}
 .sh-card--interactive { cursor: pointer; }
 .sh-card--interactive:hover { transform: translateY(-1px); }
 
@@ -1709,15 +1724,20 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   padding-top: var(--sh-space-sm);
   border-top: 1px solid var(--sh-border);
 }
+/* Overflow menus / popovers — cream paper + pinned-wall shadow so
+ * they read as a paper card above the surface, not a flat dropdown.
+ * Same chrome the modal uses, just smaller. */
 .sh-post-menu {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
   min-width: 180px;
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-lg);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 18px 36px -22px rgba(26, 24, 20, 0.55);
   z-index: var(--sh-z-dropdown);
   padding: var(--sh-space-xs);
   display: flex;
@@ -1734,7 +1754,9 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   font-size: var(--sh-font-size-sm);
   color: var(--sh-text);
 }
-.sh-post-menu button:hover { background: var(--sh-bg-secondary); }
+.sh-post-menu button:hover {
+  background: color-mix(in srgb, var(--sh-bg) 70%, transparent);
+}
 .sh-post-menu-danger { color: var(--sh-danger) !important; }
 
 /* Reactions + comment button */
@@ -5947,10 +5969,12 @@ hr {
   right: 0;
   min-width: 220px;
   padding: 6px;
-  background: var(--sh-surface-1);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-md);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 18px 36px -22px rgba(26, 24, 20, 0.55);
   z-index: 10;
 }
 .sh-notif-prefs-menu__item {
