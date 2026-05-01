@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { spaces, loadSpaces } from '@/store/spaces'
 import type { Space } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
@@ -12,25 +13,24 @@ import { RemoteInviteInboxBanner } from '@/components/RemoteInviteInboxBanner'
 /** One row in the caller's /api/me/subscriptions list. */
 interface MySubscription { space_id: string; subscribed_at: string }
 
-const spaces = signal<Space[]>([])
 const subscribedIds = signal<Set<string>>(new Set())
 const loading = signal(true)
 
 async function loadAll() {
   loading.value = true
   try {
-    const [rawSpaces, rawSubs] = await Promise.all([
-      api.get('/api/spaces').catch(() => [] as Space[]),
+    await Promise.all([
+      loadSpaces(),
       api
         .get('/api/me/subscriptions')
-        .catch(() => ({ subscriptions: [] as MySubscription[] })),
+        .then((rawSubs) => {
+          subscribedIds.value = new Set(
+            ((rawSubs as { subscriptions: MySubscription[] }).subscriptions || [])
+              .map(s => s.space_id),
+          )
+        })
+        .catch(() => { /* leave set as-is */ }),
     ])
-    spaces.value = rawSpaces as Space[]
-    subscribedIds.value = new Set(
-      ((rawSubs as { subscriptions: MySubscription[] }).subscriptions || []).map(
-        (s) => s.space_id,
-      ),
-    )
   } finally {
     loading.value = false
   }

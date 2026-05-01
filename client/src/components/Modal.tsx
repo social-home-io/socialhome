@@ -26,6 +26,15 @@ interface ModalProps {
 export function Modal({ open, onClose, title, children }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const titleId = useRef<string>(`sh-modal-title-${Math.random().toString(36).slice(2, 8)}`)
+  // Stash ``onClose`` in a ref so the focus-trap effect only depends on
+  // ``open``. Callers usually pass an inline arrow (``onClose={() =>
+  // open.value = false}``) — without this ref, every parent re-render
+  // would change the function identity, re-run the effect, and yank
+  // focus back to the close ``×`` button on every keystroke. (Hit on
+  // SpaceCreateDialog: typing the space name kept jumping out of the
+  // input.)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return
@@ -42,7 +51,7 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     function onKeyDown(ev: KeyboardEvent) {
       if (ev.key === 'Escape') {
         ev.preventDefault()
-        onClose()
+        onCloseRef.current()
         return
       }
       if (ev.key !== 'Tab') return
@@ -64,7 +73,7 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
       // Restore focus to whatever triggered the dialog.
       previouslyFocused?.focus?.()
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
   return (
