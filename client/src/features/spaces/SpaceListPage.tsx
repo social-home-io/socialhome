@@ -48,13 +48,16 @@ function SpaceRow({
   busy?: boolean
 }) {
   return (
-    <a href={`/spaces/${space.id}`} class="sh-space-card">
+    <a
+      href={`/spaces/${space.id}`}
+      class={`sh-space-card sh-space-card--${space.space_type}`}
+    >
       <span class="sh-space-emoji">{space.emoji || '🏠'}</span>
       <div class="sh-space-card__body">
         <strong>{space.name}</strong>
         {space.description && <p class="sh-muted">{space.description}</p>}
         <div class="sh-space-card__chips">
-          <span class="sh-badge">{space.space_type}</span>
+          <span class="sh-byline">{space.space_type}</span>
           {subscribed && (
             <span
               class="sh-subscribed-pill"
