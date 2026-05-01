@@ -659,20 +659,53 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-badge--danger { background: color-mix(in srgb, var(--sh-danger) 15%, transparent); color: var(--sh-danger); border-color: transparent; }
 .sh-badge--peer, .sh-badge--owner { background: color-mix(in srgb, var(--sh-warning) 15%, transparent); color: var(--sh-warning); border-color: transparent; }
 
+/* Chips — cream pill on a warm hairline by default; active state
+ * tints the background instead of a hard primary fill (cleaner on
+ * cream paper, matches website kicker pills). Scope-coloured
+ * variants (--moss / --honey) expose moss + honey tints for spaces
+ * filters and similar. */
 .sh-chip {
   display: inline-flex;
   align-items: center;
   padding: var(--sh-space-xs) var(--sh-space-sm);
-  background: var(--sh-bg-secondary);
-  border: 1px solid var(--sh-border);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border-strong);
   border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
   color: var(--sh-text);
   cursor: pointer;
-  transition: background var(--sh-transition-fast), border-color var(--sh-transition-fast);
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast),
+              color var(--sh-transition-fast);
 }
-.sh-chip:hover { background: var(--sh-bg); border-color: var(--sh-primary); }
-.sh-chip--active { background: var(--sh-primary); color: #fff; border-color: var(--sh-primary); }
+.sh-chip:hover {
+  background: var(--sh-bg-tertiary);
+  border-color: var(--sh-primary);
+}
+.sh-chip--active {
+  background: color-mix(in srgb, var(--sh-primary) 15%, transparent);
+  color: var(--sh-primary);
+  border-color: var(--sh-primary);
+  font-weight: 600;
+}
+.sh-chip--moss {
+  background: color-mix(in srgb, var(--sh-success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--sh-success) 50%, transparent);
+  color: var(--sh-success);
+}
+.sh-chip--moss:hover, .sh-chip--moss.sh-chip--active {
+  background: color-mix(in srgb, var(--sh-success) 22%, transparent);
+  border-color: var(--sh-success);
+}
+.sh-chip--honey {
+  background: color-mix(in srgb, var(--sh-warning) 14%, transparent);
+  border-color: color-mix(in srgb, var(--sh-warning) 50%, transparent);
+  color: color-mix(in srgb, var(--sh-warning) 80%, var(--sh-text));
+}
+.sh-chip--honey:hover, .sh-chip--honey.sh-chip--active {
+  background: color-mix(in srgb, var(--sh-warning) 24%, transparent);
+  border-color: var(--sh-warning);
+}
 
 /* Avatars */
 .sh-avatar {
@@ -734,16 +767,37 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   from { opacity: 0; }
   to { opacity: 1; }
 }
+/* Modals — cream-paper card with washi-tape on the upper-left, dashed
+ * underline on the header so the title strip reads as the kicker of a
+ * paper card. Pinned-wall shadow replaces the previous flat box-shadow
+ * so the dialog visibly sits above the scrim instead of being painted
+ * onto it. */
 .sh-modal, .sh-dialog {
-  background: var(--sh-bg);
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border-radius: var(--sh-radius-xl);
   border: 1px solid var(--sh-border);
-  box-shadow: var(--sh-shadow-xl);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 36px 80px -36px rgba(26, 24, 20, 0.65);
   max-width: 560px;
   width: 100%;
   max-height: 90vh;
   overflow-y: auto;
   animation: sh-slide-up 280ms var(--sh-ease-spring);
+}
+.sh-modal::before, .sh-dialog::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 28px;
+  width: 64px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-5deg);
+  pointer-events: none;
 }
 @keyframes sh-slide-up {
   from { opacity: 0; transform: translateY(16px) scale(0.98); }
@@ -754,7 +808,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   align-items: center;
   justify-content: space-between;
   padding: var(--sh-space-md) var(--sh-space-lg);
-  border-bottom: 1px solid var(--sh-border);
+  border-bottom: 1px dashed var(--sh-border);
 }
 .sh-modal-body { padding: var(--sh-space-lg); }
 .sh-modal-close {
@@ -7905,9 +7959,16 @@ hr {
   margin-bottom: var(--sh-space-md);
 }
 .sh-filter-chips .sh-chip { cursor: pointer; }
-.sh-chip-active { background: var(--sh-primary) !important; color: #fff !important; border-color: var(--sh-primary) !important; }
+/* Hyphenated alias of .sh-chip--active for legacy callers — same
+ * tinted-fill treatment as the modifier class. */
+.sh-chip-active {
+  background: color-mix(in srgb, var(--sh-primary) 15%, transparent) !important;
+  color: var(--sh-primary) !important;
+  border-color: var(--sh-primary) !important;
+  font-weight: 600;
+}
 .sh-chip-count {
-  background: rgba(255,255,255,0.2);
+  background: color-mix(in srgb, var(--sh-primary) 18%, transparent);
   padding: 0 6px;
   border-radius: var(--sh-radius-full);
   font-size: 0.7rem;
