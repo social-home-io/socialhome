@@ -3430,13 +3430,32 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 
 /* Admin */
+/* Admin — each section becomes a tape-card; tables wear cream paper
+ * with dashed dividers between rows + monospace uppercase column
+ * headings (matches the website's ``card__kicker`` aesthetic). */
 .sh-admin { max-width: 1100px; }
 .sh-admin-section {
-  background: var(--sh-bg);
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   padding: var(--sh-space-lg);
   margin-bottom: var(--sh-space-md);
+  margin-top: 12px;
+  box-shadow: var(--sh-shadow-pinned);
+}
+.sh-admin-section::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  right: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(5deg);
+  pointer-events: none;
 }
 .sh-admin-table {
   width: 100%;
@@ -3445,16 +3464,27 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-admin-table th, .sh-admin-table td {
   text-align: left;
   padding: var(--sh-space-sm) var(--sh-space-md);
-  border-bottom: 1px solid var(--sh-border);
+  border-bottom: 1px dashed var(--sh-border);
   font-size: var(--sh-font-size-sm);
 }
+.sh-admin-table tr:last-child td { border-bottom: none; }
 .sh-admin-table th {
-  font-weight: 600;
+  font: 600 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--sh-text-muted);
-  background: var(--sh-bg-secondary);
+  background: transparent;
+  border-bottom: 1px solid var(--sh-border);
 }
 .sh-admin-queue { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sh-space-sm); }
-.sh-admin-row { background: var(--sh-bg-secondary); padding: var(--sh-space-md); border-radius: var(--sh-radius-md); }
+.sh-admin-row {
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-left: 3px solid var(--sh-primary);
+  padding: var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+}
 
 /* Notifications */
 .sh-notifications-page { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
@@ -3490,20 +3520,39 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   line-height: 18px;
 }
 
-/* Settings */
+/* Settings — each section is a tape-card with cream paper, pinned
+ * shadow, and dashed dividers between rows. Sub-page panels under
+ * `.sh-settings` follow the same surface so the whole settings tree
+ * reads as a stack of pinned cards rather than a flat panel. */
 .sh-settings, .sh-settings-section {
-  background: var(--sh-bg);
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   padding: var(--sh-space-lg);
   margin-bottom: var(--sh-space-md);
+  margin-top: 12px;
+  box-shadow: var(--sh-shadow-pinned);
+}
+.sh-settings::before, .sh-settings-section::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-4deg);
+  pointer-events: none;
 }
 .sh-settings-row, .sh-toggle-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--sh-space-sm) 0;
-  border-bottom: 1px solid var(--sh-border);
+  border-bottom: 1px dashed var(--sh-border);
   gap: var(--sh-space-md);
 }
 .sh-toggle-row:last-child, .sh-settings-row:last-child { border-bottom: none; }
@@ -3885,17 +3934,57 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 
 /* Search */
+/* Search results — wrap the whole hit list in one tape-card with
+ * dashed dividers between hits. Each row gets a 3px scope-coloured
+ * left edge (terracotta / moss / honey) once the hit type signal is
+ * available; the default neutral hairline keeps unknown types
+ * aligned. Hover tints the row, doesn't change the border. */
 .sh-search, .sh-search-page { display: flex; flex-direction: column; gap: var(--sh-space-md); }
-.sh-search-results { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
-.sh-search-result {
-  padding: var(--sh-space-md);
-  background: var(--sh-bg);
+.sh-search-results {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  cursor: pointer;
-  transition: border-color var(--sh-transition-fast);
+  border-radius: var(--sh-radius-lg);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  box-shadow: var(--sh-shadow-pinned);
+  margin-top: 12px;
+  gap: 0;
 }
-.sh-search-result:hover { border-color: var(--sh-primary); }
+.sh-search-results::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  right: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(7deg);
+  pointer-events: none;
+}
+.sh-search-result {
+  padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed var(--sh-border);
+  border-left: 3px solid transparent;
+  border-radius: var(--sh-radius-sm);
+  cursor: pointer;
+  transition: background var(--sh-transition-fast);
+}
+.sh-search-result:last-child { border-bottom: none; }
+.sh-search-result:hover {
+  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
+}
+/* Scope-coloured edges per hit type — opt-in from the SearchPage. */
+.sh-search-result--person { border-left-color: var(--sh-primary); }
+.sh-search-result--space  { border-left-color: var(--sh-success); }
+.sh-search-result--post,
+.sh-search-result--page,
+.sh-search-result--event  { border-left-color: var(--sh-warning); }
 
 /* Calls */
 .sh-incall {
