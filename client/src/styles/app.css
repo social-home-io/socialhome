@@ -2788,11 +2788,42 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   min-height: 140px;
   padding: var(--sh-space-md);
   border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-md);
-  transition: transform var(--sh-transition-fast), box-shadow var(--sh-transition-fast);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.12),
+    0 18px 36px -22px rgba(26, 24, 20, 0.55);
+  transform: rotate(var(--sh-sticky-rot, 0deg));
+  transition: transform var(--sh-transition-fast),
+              box-shadow var(--sh-transition-fast);
   color: #1A1A1A;  /* sticky backgrounds are saturated pastels — keep ink dark */
 }
-.sh-sticky:hover { transform: translateY(-2px) rotate(-1deg); box-shadow: var(--sh-shadow-lg); }
+/* Hand-pinned rotation stagger so the wall doesn't look like a grid. */
+.sh-sticky-grid > :nth-child(4n+1) { --sh-sticky-rot: -1.2deg; }
+.sh-sticky-grid > :nth-child(4n+2) { --sh-sticky-rot:  0.8deg; }
+.sh-sticky-grid > :nth-child(4n+3) { --sh-sticky-rot: -0.6deg; }
+.sh-sticky-grid > :nth-child(4n)   { --sh-sticky-rot:  1.4deg; }
+/* Tiny washi-tape patch on the upper-left of every sticky — small
+ * enough to feel like a thumbtack rather than a poster strip. */
+.sh-sticky::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 16px;
+  width: 36px;
+  height: 10px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  transform: rotate(-6deg);
+  pointer-events: none;
+  z-index: 1;
+}
+.sh-sticky:hover {
+  transform: rotate(0deg) translateY(-2px);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.16),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
+  z-index: 2;
+}
 .sh-sticky-content {
   background: transparent;
   border: none;
@@ -3528,15 +3559,27 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--sh-space-md);
 }
+/* Presence detail card (dedicated /presence page, not the household-
+ * feed strip). Pinned cream tape-card so the page reads like the rest
+ * of the household OS. The strip's polaroid-pin treatment is for the
+ * compact one-row variant; the page card is fuller. */
 .sh-presence-card {
-  background: var(--sh-bg);
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
+  border-left: 3px solid var(--sh-text-muted);
   border-radius: var(--sh-radius-lg);
   padding: var(--sh-space-md);
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
+  box-shadow: var(--sh-shadow-pinned);
+  margin-bottom: var(--sh-space-sm);
 }
+.sh-presence-card.sh-presence-card--home,
+.sh-presence-card.sh-presence-card--zone { border-left-color: var(--sh-success); }
+.sh-presence-card.sh-presence-card--away { border-left-color: var(--sh-warning); }
+.sh-presence-card.sh-presence-card--not_home { border-left-color: var(--sh-danger); }
 .sh-dot, .sh-status-dot {
   width: 10px;
   height: 10px;
@@ -4528,18 +4571,38 @@ hr {
       transparent 55%),
     var(--sh-bg-secondary);
 }
+/* Setup wizard hero card — pinned cream paper with a centred
+ * terracotta tape across the top, matching the join-landing card.
+ * The first impression of the SPA reads as a household OS, not a
+ * generic onboarding wizard. */
 .sh-setup-card {
-  background: var(--sh-bg);
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-xl);
   padding: var(--sh-space-xl);
-  box-shadow: var(--sh-shadow-xl);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 36px 80px -36px rgba(26, 24, 20, 0.55);
   max-width: 520px;
   width: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-md);
   animation: sh-setup-in 320ms ease-out both;
+}
+.sh-setup-card::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  width: 80px;
+  height: 16px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: translateX(-50%) rotate(-3deg);
+  pointer-events: none;
 }
 @keyframes sh-setup-in {
   from { opacity: 0; transform: translateY(8px); }
