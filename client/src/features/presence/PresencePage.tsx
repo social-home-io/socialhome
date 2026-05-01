@@ -174,7 +174,8 @@ export default function PresencePage() {
 
       <h2>Members</h2>
       {presenceList.value.map(p => (
-        <div key={p.username} class="sh-presence-card">
+        <div key={p.username}
+             class={`sh-presence-card sh-presence-card--${p.state}`}>
           <span class={presenceDot(p.state)} />
           <Avatar name={p.display_name} src={p.picture_url} />
           <div>
