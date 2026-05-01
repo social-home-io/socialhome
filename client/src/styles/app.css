@@ -390,21 +390,35 @@ a:focus:not(:focus-visible) { outline: none; }
 
 /* ───── 3. Primitives ────────────────────────────────────────────────── */
 
-/* Buttons */
+/* Buttons — pill-shaped to match the website (`.btn` in base.css). The
+ * pill radius reads as warmer / more handcrafted than the previous
+ * 10px corners; primary buttons get a layered shadow ("1px ink line
+ * + soft brand glow") borrowed from `.btn--hearth`. Hover lifts 1px.
+ *
+ * Variants: ``--primary`` (terracotta), ``--secondary`` (cream pill
+ * outline), ``--danger`` (warning red), ``--ghost`` (transparent
+ * inverts to ink on hover, like the website ghost CTA), and the new
+ * scope-coloured ``--moss`` / ``--honey`` for actions that should
+ * carry the colour of the surface they sit on (e.g. moss for a
+ * household-space action, honey for a public-space subscribe). */
 .sh-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--sh-space-xs);
-  padding: var(--sh-space-sm) var(--sh-space-md);
+  padding: 10px 18px;
   border: 1px solid transparent;
-  border-radius: var(--hh-radius-btn, var(--sh-radius-md));
+  border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
   line-height: 1;
   min-height: 38px;
   cursor: pointer;
-  transition: background var(--sh-transition-fast), border-color var(--sh-transition-fast), color var(--sh-transition-fast), transform var(--sh-transition-fast), box-shadow var(--sh-transition-fast);
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast),
+              color var(--sh-transition-fast),
+              transform var(--sh-transition-fast),
+              box-shadow var(--sh-transition-fast);
   user-select: none;
   white-space: nowrap;
 }
@@ -412,49 +426,87 @@ a:focus:not(:focus-visible) { outline: none; }
   opacity: 0.55;
   cursor: not-allowed;
 }
-.sh-btn:not(:disabled):active { transform: translateY(1px); }
+.sh-btn:not(:disabled):hover { transform: translateY(-1px); }
+.sh-btn:not(:disabled):active { transform: translateY(0); }
 
 .sh-btn--primary {
   background: var(--sh-primary);
-  color: #fff;
-  border-color: var(--sh-primary);
+  color: var(--sh-bg);
+  border-color: transparent;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.12),
+    0 8px 22px -12px color-mix(in srgb, var(--sh-primary) 70%, black);
 }
 .sh-btn--primary:not(:disabled):hover {
   background: var(--sh-primary-hover);
-  border-color: var(--sh-primary-hover);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  color: var(--sh-bg);
 }
 
 .sh-btn--secondary {
   background: var(--sh-bg);
   color: var(--sh-text);
-  border-color: var(--sh-border);
+  border-color: var(--sh-border-strong);
 }
 .sh-btn--secondary:not(:disabled):hover {
-  background: var(--sh-bg-secondary);
-  border-color: var(--sh-text-muted);
+  background: var(--sh-bg-tertiary);
+  border-color: var(--sh-text);
 }
 
 .sh-btn--danger {
   background: var(--sh-danger);
-  color: #fff;
-  border-color: var(--sh-danger);
+  color: var(--sh-bg);
+  border-color: transparent;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.12),
+    0 8px 22px -12px color-mix(in srgb, var(--sh-danger) 70%, black);
 }
 .sh-btn--danger:not(:disabled):hover {
   background: var(--sh-danger-hover);
-  border-color: var(--sh-danger-hover);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--sh-danger) 35%, transparent);
+  color: var(--sh-bg);
 }
 
+/* Ghost — like the website's ``.btn--ghost``: inset 1.5px hairline,
+ * inverts to ink-on-paper on hover. Used for tertiary affordances. */
 .sh-btn--ghost {
   background: transparent;
-  color: var(--sh-primary);
+  color: var(--sh-text);
   border-color: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--sh-border-strong);
 }
 .sh-btn--ghost:not(:disabled):hover {
-  background: color-mix(in srgb, var(--sh-primary) 10%, transparent);
+  background: var(--sh-text);
+  color: var(--sh-bg);
+  box-shadow: inset 0 0 0 1.5px var(--sh-text);
+}
+
+/* Scope-coloured variants — used for actions that visually belong on
+ * a moss-edged (household / member space) or honey-edged (public /
+ * global) surface. Picks up the same layered shadow as primary so all
+ * three solid-fill variants feel like siblings. */
+.sh-btn--moss {
+  background: var(--sh-success);
+  color: var(--sh-bg);
   border-color: transparent;
-  box-shadow: none;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.12),
+    0 8px 22px -12px color-mix(in srgb, var(--sh-success) 70%, black);
+}
+.sh-btn--moss:not(:disabled):hover {
+  background: color-mix(in srgb, var(--sh-success) 88%, black);
+  color: var(--sh-bg);
+}
+
+.sh-btn--honey {
+  background: var(--sh-warning);
+  color: var(--sh-text);
+  border-color: transparent;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.12),
+    0 8px 22px -12px color-mix(in srgb, var(--sh-warning) 70%, black);
+}
+.sh-btn--honey:not(:disabled):hover {
+  background: color-mix(in srgb, var(--sh-warning) 88%, black);
+  color: var(--sh-text);
 }
 
 .sh-icon-btn, .sh-emoji-btn {
@@ -564,6 +616,10 @@ a:focus:not(:focus-visible) { outline: none; }
   margin-bottom: var(--sh-space-xs);
 }
 
+/* Inputs — softer 14px radius (warmer than the previous 10px), the
+ * stronger ``--sh-border-strong`` rule (so the field actually reads as
+ * a field on a cream-paper page), and a hover state that nudges the
+ * border darker so the affordance is visible before you click in. */
 input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
 textarea,
 select,
@@ -571,13 +627,21 @@ select,
 .sh-search-input {
   width: 100%;
   padding: var(--sh-space-sm) var(--sh-space-md);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-lg);
   background: var(--sh-bg);
   color: var(--sh-text);
   font-size: var(--sh-font-size-sm);
   min-height: 38px;
-  transition: border-color var(--sh-transition-fast), box-shadow var(--sh-transition-fast);
+  transition: border-color var(--sh-transition-fast),
+              box-shadow var(--sh-transition-fast);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not(:focus):hover,
+textarea:not(:focus):hover,
+select:not(:focus):hover,
+.sh-input:not(:focus):hover,
+.sh-search-input:not(:focus):hover {
+  border-color: var(--sh-text-muted);
 }
 input[type="checkbox"], input[type="radio"] {
   accent-color: var(--sh-primary);
@@ -589,7 +653,7 @@ input:focus, textarea:focus, select:focus,
 .sh-input:focus, .sh-search-input:focus {
   outline: none;
   border-color: var(--sh-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 18%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 22%, transparent);
 }
 textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
