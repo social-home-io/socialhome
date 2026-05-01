@@ -3,6 +3,7 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
@@ -36,6 +37,9 @@ export function SpaceCreateDialog() {
         space_type: spaceType.value,
         join_mode: joinMode.value,
       })
+      // Refresh the cached spaces list so the new row appears on the
+      // list page without a hard reload.
+      await loadSpaces()
       showToast('Space created', 'success')
       open.value = false
     } catch (e: any) {
