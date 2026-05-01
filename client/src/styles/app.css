@@ -2407,6 +2407,52 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   font-size: var(--sh-font-size-base);
   font-variant-numeric: tabular-nums;
 }
+/* Picker that lets the user switch between members' calendars in the
+ * household. Only renders when there are 2+ calendars. */
+.sh-calendar-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-calendar-picker > select {
+  padding: 4px 8px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+
+/* Attendee picker on the household event dialog — household-member
+ * chips with avatar + name; toggle to invite. */
+.sh-attendee-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+  margin-top: 4px;
+}
+.sh-attendee-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border-radius: var(--sh-radius-full);
+  border: 1px solid var(--sh-border);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+  cursor: pointer;
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+}
+.sh-attendee-chip:hover {
+  background: var(--sh-bg-secondary);
+}
+.sh-attendee-chip--picked {
+  background: color-mix(in srgb, var(--sh-primary) 15%, transparent);
+  border-color: var(--sh-primary);
+  color: var(--sh-primary);
+  font-weight: 600;
+}
 .sh-calendar-day-group {
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);

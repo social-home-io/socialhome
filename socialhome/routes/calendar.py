@@ -51,7 +51,14 @@ class CalendarCollectionView(BaseView):
     async def get(self) -> web.Response:
         ctx = self.user
         svc = self.svc(calendar_service_key)
-        cals = await svc.list_calendars(ctx.username)
+        scope = self.request.query.get("scope", "user")
+        if scope not in ("user", "household"):
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "scope must be 'user' or 'household'.",
+            )
+        cals = await svc.list_calendars(ctx.username, scope=scope)
         return web.json_response([_cal_dict(c) for c in cals])
 
     async def post(self) -> web.Response:

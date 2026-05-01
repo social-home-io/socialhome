@@ -10,8 +10,11 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { Modal } from './Modal'
 import { Button } from './Button'
+import { Avatar } from './Avatar'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
+import { currentUser } from '@/store/auth'
+import { householdUsers } from '@/store/householdUsers'
 
 const open = signal(false)
 const calendarId = signal('')
@@ -25,6 +28,10 @@ const allDay = signal(false)
 const description = signal('')
 const limitAttendance = signal(false)
 const capacity = signal('')
+/** Selected attendee user_ids for household events. Spaces invite all
+ *  members implicitly via the ``capacity`` / RSVP flow, so this stays
+ *  empty for the space-event variant of the dialog. */
+const attendees = signal<Set<string>>(new Set())
 const submitting = signal(false)
 
 /** Open the dialog for a personal calendar (legacy entry point). */
@@ -57,6 +64,7 @@ function reset() {
   allDay.value = false
   limitAttendance.value = false
   capacity.value = ''
+  attendees.value = new Set()
 }
 
 export function CalendarEventDialog({ onCreated }: { onCreated?: () => void }) {
@@ -88,6 +96,11 @@ export function CalendarEventDialog({ onCreated }: { onCreated?: () => void }) {
       }
       if (limitAttendance.value && capacity.value) {
         body.capacity = parseInt(capacity.value, 10)
+      }
+      // Household-event invitees. Spaces broadcast to the membership
+      // implicitly so this field is unused on the space variant.
+      if (!isSpace && attendees.value.size > 0) {
+        body.attendees = Array.from(attendees.value)
       }
       const url = isSpace
         ? `/api/spaces/${spaceId.value}/calendar/events`
@@ -178,6 +191,52 @@ export function CalendarEventDialog({ onCreated }: { onCreated?: () => void }) {
             rows={2}
           />
         </label>
+
+        {!isSpace && (() => {
+          const me = currentUser.value?.user_id
+          const others = Array.from(householdUsers.value.values())
+            .filter(u => u.user_id !== me)
+            .sort((a, b) =>
+              (a.display_name || a.username).localeCompare(
+                b.display_name || b.username,
+              ),
+            )
+          if (others.length === 0) return null
+          const toggle = (uid: string) => {
+            const next = new Set(attendees.value)
+            if (next.has(uid)) next.delete(uid)
+            else next.add(uid)
+            attendees.value = next
+          }
+          return (
+            <div>
+              <span class="sh-form-label">Invite</span>
+              <div class="sh-attendee-picker">
+                {others.map(u => {
+                  const picked = attendees.value.has(u.user_id)
+                  return (
+                    <button
+                      key={u.user_id}
+                      type="button"
+                      class={
+                        picked
+                          ? 'sh-attendee-chip sh-attendee-chip--picked'
+                          : 'sh-attendee-chip'
+                      }
+                      aria-pressed={picked}
+                      onClick={() => toggle(u.user_id)}
+                    >
+                      <Avatar src={u.picture_url ?? null}
+                              name={u.display_name || u.username}
+                              size={20} />
+                      <span>{u.display_name || u.username}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })()}
 
         {isSpace && (
           <>
