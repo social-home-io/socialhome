@@ -3563,21 +3563,59 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-markdown th { background: var(--sh-bg-secondary); font-weight: 600; }
 
-/* Pages */
-.sh-pages { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+/* Pages — list-card with dashed dividers (matches tasks / shopping
+ * surface). Time bylines pick up the monospace uppercase byline. */
+.sh-pages {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  box-shadow: var(--sh-shadow-pinned);
+  margin-top: 12px;
+  gap: 0;
+}
+.sh-pages::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-4deg);
+  pointer-events: none;
+}
 .sh-page-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--sh-space-md);
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
+  padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed var(--sh-border);
+  border-left: 3px solid transparent;
+  border-radius: var(--sh-radius-sm);
   cursor: pointer;
-  transition: border-color var(--sh-transition-fast), box-shadow var(--sh-transition-fast);
+  transition: background var(--sh-transition-fast),
+              border-left-color var(--sh-transition-fast);
 }
-.sh-page-card:hover { border-color: var(--sh-primary); box-shadow: var(--sh-shadow); }
-.sh-page-card time { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
+.sh-page-card:last-child { border-bottom: none; }
+.sh-page-card:hover {
+  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
+  border-left-color: var(--sh-primary);
+}
+.sh-page-card time {
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+}
 .sh-page-viewer, .sh-page-editor { display: flex; flex-direction: column; gap: var(--sh-space-md); }
 .sh-page-textarea { font-family: ui-monospace, 'SF Mono', Menlo, monospace; line-height: 1.6; min-height: 400px; }
 .sh-page-content { white-space: pre-wrap; line-height: 1.7; }
@@ -3801,16 +3839,41 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-dot--not-home, .sh-status-dot--unreachable { background: var(--sh-danger); }
 .sh-dot--unknown { background: var(--sh-text-muted); }
 
-/* Connections */
+/* Connections — pinned cream cards with a moss tape (federation /
+ * pairing has a "trust" feel that fits the moss palette). Hover
+ * untilts; pinned-wall shadow on rest. */
 .sh-connection-card, .sh-card-connection {
-  background: var(--sh-bg);
+  position: relative;
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   padding: var(--sh-space-md);
   display: flex;
   align-items: center;
   gap: var(--sh-space-md);
-  margin-bottom: var(--sh-space-sm);
+  margin-bottom: var(--sh-space-md);
+  box-shadow: var(--sh-shadow-pinned);
+  transition: transform var(--sh-transition-fast),
+              box-shadow var(--sh-transition-fast);
+}
+.sh-connection-card::before, .sh-card-connection::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  right: 22px;
+  width: 48px;
+  height: 12px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(6deg);
+  pointer-events: none;
+}
+.sh-connection-card:hover, .sh-card-connection:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
 }
 
 /* Widgets / dashboard */
@@ -6569,9 +6632,13 @@ hr {
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--sh-space-md);
 }
+/* Bazaar tiles — pinboard polaroids matching .sh-album-card. Cream
+ * paper, washi-tape corner alternating moss/honey/terracotta by
+ * nth-child, pinned-wall shadow, untilt + lift on hover. */
 .sh-bazaar-tile {
+  position: relative;
   text-align: left;
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   overflow: hidden;
@@ -6579,16 +6646,41 @@ hr {
   padding: 0;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--sh-shadow-xs);
+  box-shadow: var(--sh-shadow-pinned);
   transition:
     transform var(--sh-transition-fast),
     box-shadow var(--sh-transition-fast),
     border-color var(--sh-transition-fast);
 }
+.sh-bazaar-tile::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: 18px;
+  width: 48px;
+  height: 12px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-5deg);
+  pointer-events: none;
+  z-index: 2;
+}
+.sh-bazaar-tile:nth-child(odd)::before {
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  left: auto;
+  right: 18px;
+  transform: rotate(6deg);
+}
+.sh-bazaar-tile:nth-child(even)::before {
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+}
 .sh-bazaar-tile:hover {
   transform: translateY(-2px);
-  box-shadow: var(--sh-shadow-md);
-  border-color: var(--sh-primary);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
+  border-color: var(--sh-border-strong);
 }
 .sh-bazaar-tile:active { transform: translateY(0); }
 .sh-bazaar-tile--sold { opacity: 0.8; }
