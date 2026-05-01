@@ -8,6 +8,7 @@
  */
 import { useState } from 'preact/hooks'
 import { Button } from './Button'
+import { Modal } from './Modal'
 
 export interface SlotDraft {
   slot_date:   string
@@ -31,8 +32,6 @@ export function ScheduleBuilder({ open, onSubmit, onClose }: Props) {
   const [slots, setSlots] = useState<SlotDraft[]>([
     { slot_date: '', start_time: '', end_time: '' },
   ])
-
-  if (!open) return null
 
   const addSlot = () => setSlots([...slots, { slot_date: '' }])
   const removeSlot = (i: number) =>
@@ -59,73 +58,63 @@ export function ScheduleBuilder({ open, onSubmit, onClose }: Props) {
   }
 
   return (
-    <div class="sh-modal-overlay" role="presentation" onClick={onClose}>
-      <div class="sh-modal" role="dialog" aria-modal="true"
-           aria-label="Propose meeting times"
-           onClick={(e) => e.stopPropagation()}>
-        <div class="sh-modal-header">
-          <h3 style={{ margin: 0 }}>📅 Propose meeting times</h3>
-          <button type="button" class="sh-modal-close"
-                  aria-label="Close dialog" onClick={onClose}>×</button>
+    <Modal open={open} onClose={onClose} title="📅 Propose meeting times">
+      <form class="sh-form sh-schedule-builder" onSubmit={handleSubmit}>
+        <label>
+          Title
+          <input type="text" value={title} maxLength={120}
+                 onInput={(e) =>
+                   setTitle((e.target as HTMLInputElement).value)}
+                 placeholder="e.g. Pizza night"
+                 autoFocus required />
+        </label>
+
+        <div>
+          <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Times</strong>
+          <p class="sh-muted" style={{
+            fontSize: 'var(--sh-font-size-xs)',
+            margin: '0 0 var(--sh-space-sm)',
+          }}>
+            Add one row per possible time. Leave the time fields blank
+            for all-day options.
+          </p>
+          {slots.map((s, i) => (
+            <div key={i} class="sh-schedule-builder-row">
+              <input type="date" aria-label={`Slot ${i + 1} date`}
+                     value={s.slot_date} required
+                     onInput={(e) => updateSlot(i, {
+                       slot_date: (e.target as HTMLInputElement).value,
+                     })} />
+              <input type="time" aria-label={`Slot ${i + 1} start time`}
+                     value={s.start_time} placeholder="Start"
+                     onInput={(e) => updateSlot(i, {
+                       start_time: (e.target as HTMLInputElement).value,
+                     })} />
+              <input type="time" aria-label={`Slot ${i + 1} end time`}
+                     value={s.end_time} placeholder="End"
+                     onInput={(e) => updateSlot(i, {
+                       end_time: (e.target as HTMLInputElement).value,
+                     })} />
+              <button type="button" class="sh-poll-remove"
+                      aria-label={`Remove slot ${i + 1}`}
+                      disabled={slots.length === 1}
+                      onClick={() => removeSlot(i)}>✕</button>
+            </div>
+          ))}
+          <button type="button" class="sh-link" onClick={addSlot}>
+            + Add another time
+          </button>
         </div>
-        <form class="sh-modal-body sh-form sh-schedule-builder"
-              onSubmit={handleSubmit}>
-          <label>
-            Title
-            <input type="text" value={title} maxLength={120}
-                   onInput={(e) =>
-                     setTitle((e.target as HTMLInputElement).value)}
-                   placeholder="e.g. Pizza night"
-                   autoFocus required />
-          </label>
 
-          <div>
-            <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Times</strong>
-            <p class="sh-muted" style={{
-              fontSize: 'var(--sh-font-size-xs)',
-              margin: '0 0 var(--sh-space-sm)',
-            }}>
-              Add one row per possible time. Leave the time fields blank
-              for all-day options.
-            </p>
-            {slots.map((s, i) => (
-              <div key={i} class="sh-schedule-builder-row">
-                <input type="date" aria-label={`Slot ${i + 1} date`}
-                       value={s.slot_date} required
-                       onInput={(e) => updateSlot(i, {
-                         slot_date: (e.target as HTMLInputElement).value,
-                       })} />
-                <input type="time" aria-label={`Slot ${i + 1} start time`}
-                       value={s.start_time} placeholder="Start"
-                       onInput={(e) => updateSlot(i, {
-                         start_time: (e.target as HTMLInputElement).value,
-                       })} />
-                <input type="time" aria-label={`Slot ${i + 1} end time`}
-                       value={s.end_time} placeholder="End"
-                       onInput={(e) => updateSlot(i, {
-                         end_time: (e.target as HTMLInputElement).value,
-                       })} />
-                <button type="button" class="sh-poll-remove"
-                        aria-label={`Remove slot ${i + 1}`}
-                        disabled={slots.length === 1}
-                        onClick={() => removeSlot(i)}>✕</button>
-              </div>
-            ))}
-            <button type="button" class="sh-link" onClick={addSlot}>
-              + Add another time
-            </button>
-          </div>
-
-          <div class="sh-form-actions">
-            <Button variant="secondary" type="button" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!canSubmit}>
-              Propose
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <div class="sh-form-actions">
+          <Button variant="secondary" type="button" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={!canSubmit}>
+            Propose
+          </Button>
+        </div>
+      </form>
+    </Modal>
   )
 }

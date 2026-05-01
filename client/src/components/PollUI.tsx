@@ -19,6 +19,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
+import { Modal } from './Modal'
 import { showToast } from './Toast'
 
 interface PollOption {
@@ -223,8 +224,6 @@ export function PollBuilder({ open, onSubmit, onClose }: BuilderProps) {
   const [allowMulti, setAllowMulti] = useState(false)
   const [duration, setDuration] = useState<'' | '1h' | '24h' | '7d'>('')
 
-  if (!open) return null
-
   const addOption = () => {
     if (options.length < 10) setOptions([...options, ''])
   }
@@ -257,73 +256,64 @@ export function PollBuilder({ open, onSubmit, onClose }: BuilderProps) {
   }
 
   return (
-    <div class="sh-modal-overlay" role="presentation" onClick={onClose}>
-      <div class="sh-modal" role="dialog" aria-modal="true"
-           aria-label="Create poll"
-           onClick={(e) => e.stopPropagation()}>
-        <div class="sh-modal-header">
-          <h3 style={{ margin: 0 }}>Create a poll</h3>
-          <button type="button" class="sh-modal-close"
-                  aria-label="Close dialog" onClick={onClose}>×</button>
+    <Modal open={open} onClose={onClose} title="Create a poll">
+      <form class="sh-form sh-poll-builder" onSubmit={submit}>
+        <label>
+          Question
+          <input class="sh-poll-question-input"
+                 type="text" maxLength={200}
+                 placeholder="e.g. Pizza or tacos tonight?"
+                 value={question} autoFocus
+                 onInput={(e) =>
+                   setQuestion((e.target as HTMLInputElement).value)} />
+        </label>
+
+        <div>
+          <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Options</strong>
+          {options.map((opt, i) => (
+            <div key={i} class="sh-poll-option-row">
+              <input type="text" maxLength={80}
+                     placeholder={`Option ${i + 1}`}
+                     value={opt}
+                     onInput={(e) =>
+                       setOption(i, (e.target as HTMLInputElement).value)} />
+              <button type="button" class="sh-poll-remove"
+                      aria-label={`Remove option ${i + 1}`}
+                      disabled={options.length <= 2}
+                      onClick={() => removeOption(i)}>✕</button>
+            </div>
+          ))}
+          <button type="button" class="sh-link" onClick={addOption}
+                  disabled={options.length >= 10}>
+            + Add option
+          </button>
         </div>
-        <form class="sh-modal-body sh-form sh-poll-builder" onSubmit={submit}>
-          <label>
-            Question
-            <input class="sh-poll-question-input"
-                   type="text" maxLength={200}
-                   placeholder="e.g. Pizza or tacos tonight?"
-                   value={question} autoFocus
-                   onInput={(e) =>
-                     setQuestion((e.target as HTMLInputElement).value)} />
-          </label>
 
-          <div>
-            <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Options</strong>
-            {options.map((opt, i) => (
-              <div key={i} class="sh-poll-option-row">
-                <input type="text" maxLength={80}
-                       placeholder={`Option ${i + 1}`}
-                       value={opt}
-                       onInput={(e) =>
-                         setOption(i, (e.target as HTMLInputElement).value)} />
-                <button type="button" class="sh-poll-remove"
-                        aria-label={`Remove option ${i + 1}`}
-                        disabled={options.length <= 2}
-                        onClick={() => removeOption(i)}>✕</button>
-              </div>
-            ))}
-            <button type="button" class="sh-link" onClick={addOption}
-                    disabled={options.length >= 10}>
-              + Add option
-            </button>
-          </div>
+        <label class="sh-toggle-row" style={{ borderBottom: 'none' }}>
+          <span>Allow multiple selections</span>
+          <input type="checkbox" checked={allowMulti}
+                 onChange={() => setAllowMulti(v => !v)} />
+        </label>
 
-          <label class="sh-toggle-row" style={{ borderBottom: 'none' }}>
-            <span>Allow multiple selections</span>
-            <input type="checkbox" checked={allowMulti}
-                   onChange={() => setAllowMulti(v => !v)} />
-          </label>
+        <label>
+          Closes after
+          <select value={duration}
+                  onChange={(e) =>
+                    setDuration((e.target as HTMLSelectElement).value as typeof duration)}>
+            <option value="">Stay open (author can close manually)</option>
+            <option value="1h">1 hour</option>
+            <option value="24h">24 hours</option>
+            <option value="7d">7 days</option>
+          </select>
+        </label>
 
-          <label>
-            Closes after
-            <select value={duration}
-                    onChange={(e) =>
-                      setDuration((e.target as HTMLSelectElement).value as typeof duration)}>
-              <option value="">Stay open (author can close manually)</option>
-              <option value="1h">1 hour</option>
-              <option value="24h">24 hours</option>
-              <option value="7d">7 days</option>
-            </select>
-          </label>
-
-          <div class="sh-form-actions">
-            <Button variant="secondary" type="button" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!canSubmit}>Create</Button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <div class="sh-form-actions">
+          <Button variant="secondary" type="button" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={!canSubmit}>Create</Button>
+        </div>
+      </form>
+    </Modal>
   )
 }

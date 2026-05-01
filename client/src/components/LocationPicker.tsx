@@ -17,6 +17,7 @@
 import { useState } from 'preact/hooks'
 import { Button } from './Button'
 import { LocationMap, type LocationMarker } from './LocationMap'
+import { Modal } from './Modal'
 import { showToast } from './Toast'
 
 export interface LocationDraft {
@@ -37,8 +38,6 @@ export function LocationPicker({ open, onSubmit, onClose }: LocationPickerProps)
   const [coords, setCoords] = useState<{ lat: number; lon: number } | null>(null)
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
-
-  if (!open) return null
 
   const useCurrentLocation = () => {
     if (!('geolocation' in navigator)) {
@@ -94,77 +93,60 @@ export function LocationPicker({ open, onSubmit, onClose }: LocationPickerProps)
     : null
 
   return (
-    <div class="sh-modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        class="sh-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Share location"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div class="sh-modal-header">
-          <h3 style={{ margin: 0 }}>Share a location</h3>
-          <button
-            type="button"
-            class="sh-modal-close"
-            aria-label="Close dialog"
-            onClick={onClose}
-          >×</button>
-        </div>
-        <form class="sh-modal-body sh-form sh-location-picker" onSubmit={submit}>
-          {!coords && (
-            <div class="sh-location-picker-empty">
-              <Button
-                type="button"
-                onClick={useCurrentLocation}
-                loading={busy}
-                disabled={busy}
-              >
-                📍 Use my current location
-              </Button>
-              <p class="sh-muted" style={{ margin: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-                We'll round the coordinates to ~11 m precision before
-                anyone sees them.
-              </p>
-            </div>
-          )}
-          {marker && (
-            <>
-              <LocationMap markers={[marker]} height={220} />
-              <p class="sh-muted" style={{ margin: 0, fontSize: 'var(--sh-font-size-xs)' }}>
-                {coords!.lat.toFixed(4)}, {coords!.lon.toFixed(4)} —{' '}
-                <button
-                  type="button"
-                  class="sh-link"
-                  onClick={useCurrentLocation}
-                >
-                  re-pin
-                </button>
-              </p>
-              <label>
-                Label (optional)
-                <input
-                  type="text"
-                  maxLength={LABEL_MAX}
-                  placeholder="e.g. Marina, Beach Park…"
-                  value={label}
-                  onInput={(e) =>
-                    setLabel((e.target as HTMLInputElement).value)
-                  }
-                />
-              </label>
-            </>
-          )}
-          <div class="sh-form-actions">
-            <Button type="button" variant="secondary" onClick={onClose}>
-              Cancel
+    <Modal open={open} onClose={onClose} title="Share a location">
+      <form class="sh-form sh-location-picker" onSubmit={submit}>
+        {!coords && (
+          <div class="sh-location-picker-empty">
+            <Button
+              type="button"
+              onClick={useCurrentLocation}
+              loading={busy}
+              disabled={busy}
+            >
+              📍 Use my current location
             </Button>
-            <Button type="submit" disabled={!coords}>
-              Use this location
-            </Button>
+            <p class="sh-muted" style={{ margin: 0, fontSize: 'var(--sh-font-size-sm)' }}>
+              We'll round the coordinates to ~11 m precision before
+              anyone sees them.
+            </p>
           </div>
-        </form>
-      </div>
-    </div>
+        )}
+        {marker && (
+          <>
+            <LocationMap markers={[marker]} height={220} />
+            <p class="sh-muted" style={{ margin: 0, fontSize: 'var(--sh-font-size-xs)' }}>
+              {coords!.lat.toFixed(4)}, {coords!.lon.toFixed(4)} —{' '}
+              <button
+                type="button"
+                class="sh-link"
+                onClick={useCurrentLocation}
+              >
+                re-pin
+              </button>
+            </p>
+            <label>
+              Label (optional)
+              <input
+                type="text"
+                maxLength={LABEL_MAX}
+                placeholder="e.g. Marina, Beach Park…"
+                value={label}
+                onInput={(e) =>
+                  setLabel((e.target as HTMLInputElement).value)
+                }
+              />
+            </label>
+          </>
+        )}
+        <div class="sh-form-actions">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={!coords}>
+            Use this location
+          </Button>
+        </div>
+      </form>
+    </Modal>
   )
 }
