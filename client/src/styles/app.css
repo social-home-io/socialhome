@@ -2905,10 +2905,17 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--sh-space-md);
 }
+/* Gallery album cards — pinned-card aesthetic (cream paper, washi
+ * tape, pinned-wall shadow) so the album wall reads as a stack of
+ * polaroids on the household OS pinboard rather than a flat grid of
+ * web cards. The cover image hugs the top of the card; the info
+ * footer takes the cream surface so the title reads as a paper
+ * caption under the photo. */
 .sh-album-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   overflow: hidden;
@@ -2917,13 +2924,37 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   padding: 0;
   font: inherit;
   color: inherit;
-  transition: transform var(--sh-transition-fast), box-shadow var(--sh-transition-fast), border-color var(--sh-transition-fast);
-  box-shadow: var(--sh-shadow-xs);
+  transition: transform var(--sh-transition-fast),
+              box-shadow var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+  box-shadow: var(--sh-shadow-pinned);
+}
+.sh-album-card::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  right: 18px;
+  width: 48px;
+  height: 12px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(6deg);
+  pointer-events: none;
+  z-index: 1;
+}
+.sh-album-card:nth-child(odd)::before {
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+}
+.sh-album-card:nth-child(even)::before {
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
 }
 .sh-album-card:hover {
   transform: translateY(-2px);
-  box-shadow: var(--sh-shadow-md);
-  border-color: var(--sh-primary);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
+  border-color: var(--sh-border-strong);
 }
 .sh-album-cover {
   width: 100%;
@@ -2945,6 +2976,8 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   display: flex;
   flex-direction: column;
   gap: 2px;
+  background: var(--sh-bg-tertiary);
+  border-top: 1px dashed var(--sh-border);
 }
 .sh-album-info strong { font-size: var(--sh-font-size-base); }
 
