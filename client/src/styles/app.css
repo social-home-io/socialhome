@@ -2232,8 +2232,13 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+/* DM bubble — warm cream paper for incoming, terracotta gradient for
+ * outgoing. Sender name + meta bylines pick up the monospace
+ * uppercase treatment used elsewhere in the household OS so DMs read
+ * as part of the same product. */
 .sh-message {
-  background: var(--sh-bg-secondary);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
   padding: var(--sh-space-sm) var(--sh-space-md);
   border-radius: 18px;
   border-bottom-left-radius: 6px;   /* tail */
@@ -2249,26 +2254,31 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-message--mine {
   background: linear-gradient(135deg, var(--sh-primary), var(--sh-primary-hover));
-  color: #fff;
+  border-color: transparent;
+  color: var(--sh-bg);
   align-self: flex-end;
   border-bottom-left-radius: 18px;
   border-bottom-right-radius: 6px;
 }
-.sh-message--mine strong { color: rgba(255,255,255,0.85); }
-.sh-message--mine a { color: #fff; text-decoration: underline; }
+.sh-message--mine strong { color: rgba(255, 255, 255, 0.85); }
+.sh-message--mine a { color: var(--sh-bg); text-decoration: underline; }
 .sh-message strong {
   display: block;
-  font-size: var(--sh-font-size-xs);
+  font: 600 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--sh-primary);
-  margin-bottom: 2px;
-  font-weight: 700;
+  margin-bottom: 4px;
 }
 .sh-message-meta {
   display: flex;
   gap: var(--sh-space-xs);
-  font-size: 0.72rem;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
   color: var(--sh-text-muted);
-  margin-top: 2px;
+  margin-top: 4px;
   align-items: center;
 }
 .sh-message--mine .sh-message-meta { color: rgba(255,255,255,0.75); justify-content: flex-end; }
@@ -3521,25 +3531,67 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-admin-row { background: var(--sh-bg-secondary); padding: var(--sh-space-md); border-radius: var(--sh-radius-md); }
 
 /* Notifications */
-.sh-notifications-page { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+/* Notifications page — single tape-card surface with dashed dividers
+ * between rows. Mirrors the .sh-list-card / .sh-task-row pattern used
+ * for tasks + shopping; unread rows pop with a 3px terracotta left
+ * edge that doubles as the role indicator. */
+.sh-notifications-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  box-shadow: var(--sh-shadow-pinned);
+  margin-top: 12px;
+  gap: 0;
+}
+.sh-notifications-page::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  right: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(6deg);
+  pointer-events: none;
+}
 .sh-notif-row {
   display: flex;
   align-items: center;
   gap: var(--sh-space-md);
-  padding: var(--sh-space-md);
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
+  padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed var(--sh-border);
+  border-left: 3px solid transparent;
+  border-radius: var(--sh-radius-sm);
   cursor: pointer;
   transition: background var(--sh-transition-fast);
 }
-.sh-notif-row:hover { background: var(--sh-bg-secondary); }
-.sh-notif-row--unread { border-left: 3px solid var(--sh-primary); }
+.sh-notif-row:last-child { border-bottom: none; }
+.sh-notif-row:hover {
+  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
+}
+.sh-notif-row--unread {
+  border-left-color: var(--sh-primary);
+  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
+}
 .sh-notif-icon { font-size: var(--sh-font-size-lg); color: var(--sh-primary); }
 .sh-notif-content { flex: 1; min-width: 0; }
 .sh-notif-title { font-weight: 600; }
 .sh-notif-body { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
-.sh-notif-time { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
+.sh-notif-time {
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+}
 .sh-notif-badge {
   display: inline-block;
   min-width: 18px;
@@ -7436,40 +7488,49 @@ hr {
   min-width: 18px;
   padding: 0 5px;
 }
+/* Bell popup — same cream paper + pinned shadow as the full
+ * notifications page, just smaller. Header sticks at the top with a
+ * dashed underline so it reads as a "label" of the cream-paper card. */
 .sh-notif-panel {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
   width: min(380px, 90vw);
   max-height: 70vh;
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
-  box-shadow: var(--sh-shadow-xl);
+  box-shadow: var(--sh-shadow-pinned);
   overflow-y: auto;
   z-index: var(--sh-z-dropdown);
 }
 .sh-notif-header {
   padding: var(--sh-space-sm) var(--sh-space-md);
-  border-bottom: 1px solid var(--sh-border);
+  border-bottom: 1px dashed var(--sh-border);
   display: flex;
   justify-content: space-between;
   align-items: center;
   position: sticky;
   top: 0;
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   z-index: 1;
 }
 .sh-notif-list { display: flex; flex-direction: column; }
 .sh-notif-item {
   padding: var(--sh-space-sm) var(--sh-space-md);
-  border-bottom: 1px solid var(--sh-border);
+  border-bottom: 1px dashed var(--sh-border);
+  border-left: 3px solid transparent;
   cursor: pointer;
   transition: background var(--sh-transition-fast);
 }
 .sh-notif-item:last-child { border-bottom: none; }
-.sh-notif-item:hover { background: var(--sh-bg-secondary); }
-.sh-notif--unread { background: color-mix(in srgb, var(--sh-primary) 4%, var(--sh-bg)); border-left: 3px solid var(--sh-primary); }
+.sh-notif-item:hover {
+  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
+}
+.sh-notif--unread {
+  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
+  border-left-color: var(--sh-primary);
+}
 .sh-notif-btn {
   background: transparent;
   border: none;
