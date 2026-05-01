@@ -4,7 +4,15 @@ import type { JSX } from 'preact'
 // (``type``, ``disabled`` for <button>). Use the specialised
 // ``ButtonHTMLAttributes`` so consumers can forward those props.
 interface ButtonProps extends JSX.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'danger'
+  /** Visual variant matching the website's button language:
+   *   - ``primary``   = terracotta hearth (default call-to-action)
+   *   - ``secondary`` = cream pill outline (paired tertiary)
+   *   - ``danger``    = warning red (destructive)
+   *   - ``ghost``     = transparent inset border, inverts on hover
+   *   - ``moss``      = household / private-space scope (success)
+   *   - ``honey``     = public / global-space scope (warning)
+   */
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'moss' | 'honey'
   loading?: boolean
 }
 
