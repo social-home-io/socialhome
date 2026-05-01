@@ -83,7 +83,21 @@ class CalendarService:
             raise KeyError(f"calendar {calendar_id!r} not found")
         return result
 
-    async def list_calendars(self, username: str) -> list[Calendar]:
+    async def list_calendars(
+        self,
+        username: str,
+        *,
+        scope: str = "user",
+    ) -> list[Calendar]:
+        """List calendars visible to *username*.
+
+        ``scope='user'`` (default) returns only the caller's own
+        calendars — the historical behaviour. ``scope='household'``
+        returns every calendar on the instance so the SPA's calendar
+        picker can let a member peek at another member's calendar.
+        """
+        if scope == "household":
+            return await self._repo.list_all_calendars()
         return await self._repo.list_calendars_for_user(username)
 
     async def delete_calendar(self, calendar_id: str) -> None:

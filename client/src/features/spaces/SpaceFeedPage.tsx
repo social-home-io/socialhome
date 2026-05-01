@@ -7,7 +7,10 @@ import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
-import { groupEventsByDay, formatMonthHeading, monthRange } from '@/utils/calendar'
+import {
+  advanceDate, dateRangeForMode, formatRangeHeading, groupEventsByDay,
+  type CalendarViewMode,
+} from '@/utils/calendar'
 import type { Comment, FeedPost, CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
@@ -48,6 +51,7 @@ const activeTab = signal<SpaceTab>('feed')
 const spacePages = signal<SpacePage[]>([])
 const spaceCalEvents = signal<CalendarEvent[]>([])
 const spaceCalCursor = signal(new Date())
+const spaceCalView = signal<CalendarViewMode>('month')
 const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<
   'owner' | 'admin' | 'member' | 'subscriber' | undefined
@@ -67,7 +71,9 @@ async function loadSpaceCalendar(spaceId: string) {
   // first. Same shape as the household ``/api/calendars/{id}/events``
   // response, just space-scoped.
   try {
-    const { start, end } = monthRange(spaceCalCursor.value)
+    const { start, end } = dateRangeForMode(
+      spaceCalCursor.value, spaceCalView.value,
+    )
     spaceCalEvents.value = await api.get(
       `/api/spaces/${spaceId}/calendar/events`,
       { start, end },
@@ -77,16 +83,23 @@ async function loadSpaceCalendar(spaceId: string) {
   }
 }
 
-function navigateSpaceMonth(direction: number, spaceId: string) {
-  const next = new Date(spaceCalCursor.value)
-  next.setMonth(next.getMonth() + direction)
-  spaceCalCursor.value = next
+function navigateSpaceCalendar(direction: number, spaceId: string) {
+  spaceCalCursor.value = advanceDate(
+    spaceCalCursor.value, direction, spaceCalView.value,
+  )
   selectedSpaceEventId.value = null
   void loadSpaceCalendar(spaceId)
 }
 
 function jumpToSpaceToday(spaceId: string) {
   spaceCalCursor.value = new Date()
+  selectedSpaceEventId.value = null
+  void loadSpaceCalendar(spaceId)
+}
+
+function setSpaceCalendarView(mode: CalendarViewMode, spaceId: string) {
+  if (spaceCalView.value === mode) return
+  spaceCalView.value = mode
   selectedSpaceEventId.value = null
   void loadSpaceCalendar(spaceId)
 }
@@ -119,6 +132,7 @@ export default function SpaceFeedPage() {
     resetSpaceTasks()
     spaceCalEvents.value = []
     spaceCalCursor.value = new Date()
+    spaceCalView.value = 'month'
     selectedSpaceEventId.value = null
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
@@ -420,16 +434,16 @@ export default function SpaceFeedPage() {
             <div class="sh-calendar-controls">
               <div class="sh-calendar-nav">
                 <Button variant="secondary"
-                        aria-label="Previous month"
-                        onClick={() => navigateSpaceMonth(-1, spaceId)}>
+                        aria-label={`Previous ${spaceCalView.value}`}
+                        onClick={() => navigateSpaceCalendar(-1, spaceId)}>
                   &#8249;
                 </Button>
                 <span class="sh-calendar-heading">
-                  {formatMonthHeading(spaceCalCursor.value)}
+                  {formatRangeHeading(spaceCalCursor.value, spaceCalView.value)}
                 </span>
                 <Button variant="secondary"
-                        aria-label="Next month"
-                        onClick={() => navigateSpaceMonth(1, spaceId)}>
+                        aria-label={`Next ${spaceCalView.value}`}
+                        onClick={() => navigateSpaceCalendar(1, spaceId)}>
                   &#8250;
                 </Button>
                 <Button variant="secondary"
@@ -437,12 +451,30 @@ export default function SpaceFeedPage() {
                   Today
                 </Button>
               </div>
+              <div class="sh-calendar-views" role="tablist">
+                {(['month', 'week', 'day'] as CalendarViewMode[]).map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="tab"
+                    aria-selected={spaceCalView.value === mode}
+                    class={
+                      spaceCalView.value === mode
+                        ? 'sh-tab sh-tab--active'
+                        : 'sh-tab'
+                    }
+                    onClick={() => setSpaceCalendarView(mode, spaceId)}
+                  >
+                    {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {spaceCalEvents.value.length === 0 && (
               <div class="sh-empty-state">
                 <div style={{ fontSize: '2rem' }}>📅</div>
-                <h3>No events this month</h3>
+                <h3>No events in this {spaceCalView.value}</h3>
                 <p>
                   Click <strong>+ New event</strong> to schedule something
                   in this space.

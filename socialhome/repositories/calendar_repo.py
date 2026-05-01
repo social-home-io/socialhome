@@ -90,6 +90,7 @@ class AbstractCalendarRepo(Protocol):
     async def save_calendar(self, calendar: Calendar) -> Calendar: ...
     async def get_calendar(self, calendar_id: str) -> Calendar | None: ...
     async def list_calendars_for_user(self, username: str) -> list[Calendar]: ...
+    async def list_all_calendars(self) -> list[Calendar]: ...
     async def delete_calendar(self, calendar_id: str) -> None: ...
 
     async def save_event(self, event: CalendarEvent) -> CalendarEvent: ...
@@ -150,6 +151,19 @@ class SqliteCalendarRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM calendars WHERE owner_username=? ORDER BY name",
             (username,),
+        )
+        return [c for c in (_row_to_calendar(d) for d in rows_to_dicts(rows)) if c]
+
+    async def list_all_calendars(self) -> list[Calendar]:
+        """Every personal calendar on the instance, ordered owner-then-name.
+
+        Used by the household-wide calendar picker in the SPA so a
+        member can switch between their own calendar and another
+        member's. The household = the instance, so an unfiltered
+        ``SELECT`` is the right scope.
+        """
+        rows = await self._db.fetchall(
+            "SELECT * FROM calendars ORDER BY owner_username, name",
         )
         return [c for c in (_row_to_calendar(d) for d in rows_to_dicts(rows)) if c]
 

@@ -11,44 +11,32 @@ import { HostApprovalQueue } from '@/components/HostApprovalQueue'
 import { ReminderPicker } from '@/components/ReminderPicker'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
-import { events, rsvpCounts, myRsvpStatus } from '@/store/calendar'
-import { groupEventsByDay } from '@/utils/calendar'
+import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
+import { events, rsvpCounts, myRsvpStatus, activeCalendarScope } from '@/store/calendar'
+import {
+  advanceDate, dateRangeForMode, formatRangeHeading, groupEventsByDay,
+  type CalendarViewMode,
+} from '@/utils/calendar'
 import { t } from '@/i18n/i18n'
 
-type ViewMode = 'month' | 'week' | 'day'
+interface CalendarSummary {
+  id: string
+  name: string
+  owner_username: string
+}
 
 const loading = signal(true)
-const viewMode = signal<ViewMode>('month')
+const viewMode = signal<CalendarViewMode>('month')
 const calendarId = signal<string>('')
+const calendars = signal<CalendarSummary[]>([])
 const currentDate = signal(new Date())
 const selectedEvent = signal<CalendarEvent | null>(null)
 const rsvpPending = signal<string | null>(null)
 
-function getDateRange(date: Date, mode: ViewMode): { start: string; end: string } {
-  const d = new Date(date)
-  if (mode === 'month') {
-    const start = new Date(d.getFullYear(), d.getMonth(), 1)
-    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0)
-    return { start: start.toISOString(), end: end.toISOString() }
-  }
-  if (mode === 'week') {
-    const dayOfWeek = d.getDay()
-    const start = new Date(d)
-    start.setDate(d.getDate() - dayOfWeek)
-    const end = new Date(start)
-    end.setDate(start.getDate() + 6)
-    return { start: start.toISOString(), end: end.toISOString() }
-  }
-  // day
-  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59)
-  return { start: start.toISOString(), end: end.toISOString() }
-}
-
 async function loadEvents() {
   if (!calendarId.value) return
   loading.value = true
-  const { start, end } = getDateRange(currentDate.value, viewMode.value)
+  const { start, end } = dateRangeForMode(currentDate.value, viewMode.value)
   try {
     const rows = await api.get(
       `/api/calendars/${calendarId.value}/events`, { start, end },
@@ -61,23 +49,7 @@ async function loadEvents() {
 }
 
 function navigateDate(direction: number) {
-  const d = new Date(currentDate.value)
-  if (viewMode.value === 'month') d.setMonth(d.getMonth() + direction)
-  else if (viewMode.value === 'week') d.setDate(d.getDate() + 7 * direction)
-  else d.setDate(d.getDate() + direction)
-  currentDate.value = d
-}
-
-function formatDateHeading(date: Date, mode: ViewMode): string {
-  if (mode === 'month') return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
-  if (mode === 'week') {
-    const start = new Date(date)
-    start.setDate(date.getDate() - date.getDay())
-    const end = new Date(start)
-    end.setDate(start.getDate() + 6)
-    return `${start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
-  }
-  return date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+  currentDate.value = advanceDate(currentDate.value, direction, viewMode.value)
 }
 
 /** Lazily ensure a default household calendar exists.
@@ -90,28 +62,58 @@ function formatDateHeading(date: Date, mode: ViewMode): string {
  * it in the module-level signal. */
 async function ensureHouseholdCalendar(): Promise<string> {
   if (calendarId.value) return calendarId.value
-  const cal = await api.post('/api/calendars', { name: 'Calendar' }) as {
-    id: string
-  }
+  const cal = await api.post('/api/calendars', { name: 'Calendar' }) as
+    CalendarSummary
   calendarId.value = cal.id
+  activeCalendarScope.value = cal.id
+  // Splice the freshly-created calendar into the picker list so the
+  // dropdown reflects it without a full re-fetch.
+  if (!calendars.value.some(c => c.id === cal.id)) {
+    calendars.value = [...calendars.value, cal]
+  }
   return cal.id
 }
 
 export default function CalendarPage() {
   useTitle('Calendar')
   useEffect(() => {
-    api.get('/api/calendars').then(async (cals: { id: string }[]) => {
-      if (cals.length > 0) {
-        calendarId.value = cals[0].id
+    // Drop any rows the WS handler accreted while we were on a
+    // different surface — we'll re-fetch the right ones below.
+    events.value = []
+    void loadHouseholdUsers()
+    api.get('/api/calendars', { scope: 'household' })
+      .then(async (cals: CalendarSummary[]) => {
+        calendars.value = cals
+        if (cals.length === 0) {
+          loading.value = false
+          return
+        }
+        // Default to the caller's first calendar if they have one;
+        // otherwise the first household calendar.
+        const me = currentUser.value?.username
+        const mine = me ? cals.find(c => c.owner_username === me) : null
+        const pick = mine ?? cals[0]
+        calendarId.value = pick.id
+        activeCalendarScope.value = pick.id
         await loadEvents()
-      }
-      loading.value = false
-    })
+        loading.value = false
+      })
+      .catch(() => { loading.value = false })
+    return () => {
+      // Stop accepting WS frames into the household ``events`` cache
+      // once the user navigates away — without this, a per-space
+      // calendar.* broadcast in the background would silently
+      // re-pollute the cache between visits.
+      activeCalendarScope.value = null
+    }
   }, [])
 
   useEffect(() => {
-    if (calendarId.value) loadEvents()
-  }, [viewMode.value, currentDate.value])
+    if (calendarId.value) {
+      activeCalendarScope.value = calendarId.value
+      loadEvents()
+    }
+  }, [viewMode.value, currentDate.value, calendarId.value])
 
   const handleNewEvent = async () => {
     try {
@@ -199,14 +201,45 @@ export default function CalendarPage() {
           <Button variant="secondary"
                   aria-label={`Previous ${viewMode.value}`}
                   onClick={() => navigateDate(-1)}>&#8249;</Button>
-          <span class="sh-calendar-heading">{formatDateHeading(currentDate.value, viewMode.value)}</span>
+          <span class="sh-calendar-heading">{formatRangeHeading(currentDate.value, viewMode.value)}</span>
           <Button variant="secondary"
                   aria-label={`Next ${viewMode.value}`}
                   onClick={() => navigateDate(1)}>&#8250;</Button>
           <Button variant="secondary" onClick={() => { currentDate.value = new Date() }}>Today</Button>
         </div>
+        {calendars.value.length > 1 && (
+          <label class="sh-calendar-picker">
+            <span class="sh-muted">Calendar</span>
+            <select
+              value={calendarId.value}
+              onChange={(ev) => {
+                const id = (ev.target as HTMLSelectElement).value
+                calendarId.value = id
+                activeCalendarScope.value = id
+              }}
+            >
+              {calendars.value.map(c => {
+                // householdUsers is keyed by user_id; the calendar
+                // carries the owner's username, so iterate to map back.
+                let ownerLabel = c.owner_username
+                for (const u of householdUsers.value.values()) {
+                  if (u.username === c.owner_username) {
+                    ownerLabel = u.display_name || u.username
+                    break
+                  }
+                }
+                const mine = c.owner_username === currentUser.value?.username
+                return (
+                  <option key={c.id} value={c.id}>
+                    {mine ? c.name : `${ownerLabel} · ${c.name}`}
+                  </option>
+                )
+              })}
+            </select>
+          </label>
+        )}
         <div class="sh-calendar-views" role="tablist">
-          {(['month', 'week', 'day'] as ViewMode[]).map(mode => (
+          {(['month', 'week', 'day'] as CalendarViewMode[]).map(mode => (
             <button
               key={mode}
               type="button"
