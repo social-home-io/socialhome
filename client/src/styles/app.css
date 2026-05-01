@@ -4024,27 +4024,72 @@ hr {
  * Wave 2 — remaining feature surfaces
  * ═════════════════════════════════════════════════════════════════════*/
 
-/* Spaces */
-.sh-spaces { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+/* Spaces — match the household pinned-card aesthetic from .sh-feed-item.
+ * Cream paper, washi-tape ::before, soft rotation stagger, untilt on
+ * hover. Scope-typed left edge (private = terracotta, household =
+ * moss, public/global = honey) reads as the website's tile__edge. */
+.sh-spaces { display: flex; flex-direction: column; gap: var(--sh-space-lg); padding-top: 12px; }
 .sh-space-card {
+  position: relative;
   display: flex;
   gap: var(--sh-space-md);
   padding: var(--sh-space-md);
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
+  border-left: 4px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   cursor: pointer;
   text-decoration: none;
   color: inherit;
-  box-shadow: var(--sh-shadow-xs);
-  transition: transform var(--sh-transition-fast), box-shadow var(--sh-transition-fast), border-color var(--sh-transition-fast);
+  box-shadow: var(--sh-shadow-pinned);
+  transform: rotate(var(--sh-space-rot, 0deg));
+  transition: transform var(--sh-transition-normal),
+              box-shadow var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
 }
+.sh-space-card::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 28px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-5deg);
+  pointer-events: none;
+  z-index: 1;
+}
+.sh-space-card:nth-child(odd)::before {
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  left: auto;
+  right: 28px;
+  transform: rotate(7deg);
+}
+.sh-space-card:nth-child(even)::before {
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+}
+.sh-space-card:nth-child(4n+1) { --sh-space-rot: -0.4deg; }
+.sh-space-card:nth-child(4n+2) { --sh-space-rot:  0.3deg; }
+.sh-space-card:nth-child(4n+3) { --sh-space-rot: -0.2deg; }
+.sh-space-card:nth-child(4n)   { --sh-space-rot:  0.5deg; }
 .sh-space-card:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--sh-shadow-md);
-  border-color: var(--sh-primary);
+  transform: rotate(0deg) translateY(-2px);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
+  border-color: var(--sh-border-strong);
+  border-left-color: var(--sh-primary);
   text-decoration: none;
+  z-index: 2;
 }
+/* Scope-colored left edge — communicates the space's reach at a glance
+ * (mirrors the website's tile__edge--private / --group / --global). */
+.sh-space-card--private    { border-left-color: var(--sh-primary); }
+.sh-space-card--household  { border-left-color: var(--sh-success); }
+.sh-space-card--public,
+.sh-space-card--global     { border-left-color: var(--sh-warning); }
 .sh-space-cover {
   width: 96px;
   aspect-ratio: 1;
@@ -4128,16 +4173,32 @@ hr {
 }
 .sh-discover-card:hover { box-shadow: var(--sh-shadow-md); border-color: var(--sh-primary); }
 
-/* Join landing + join requests */
+/* Join landing + join requests — pinned-card welcome with a tape
+ * accent so the celebratory moment shares the household OS aesthetic
+ * (no plain white sheet). */
 .sh-join-landing {
+  position: relative;
   max-width: 560px;
   margin: var(--sh-space-2xl) auto;
   padding: var(--sh-space-xl);
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-xl);
   text-align: center;
-  box-shadow: var(--sh-shadow-lg);
+  box-shadow: var(--sh-shadow-pinned);
+}
+.sh-join-landing::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  width: 80px;
+  height: 16px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: translateX(-50%) rotate(-3deg);
+  pointer-events: none;
 }
 .sh-join-info {
   display: flex;
@@ -4166,29 +4227,59 @@ hr {
   align-items: center;
 }
 
-/* Member list */
+/* Member list — wrapped in a tape-card surface to match the household
+ * pinned-card aesthetic (cream paper, washi-tape ::before, pinned-wall
+ * shadow). Rows separate with dashed dividers; each row carries a
+ * role-coloured 3px left edge that doubles as the role indicator.
+ * Generously tighter than the household feed cards: this is a list
+ * surface, not individual posts, so the tape decoration sits once on
+ * the whole card. */
 .sh-member-list {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0;
-  background: var(--sh-bg);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
-  overflow: hidden;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  box-shadow: var(--sh-shadow-pinned);
+  margin-top: 12px;
+}
+.sh-member-list::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(-4deg);
+  pointer-events: none;
 }
 .sh-member-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sh-space-md);
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  border-bottom: 1px solid var(--sh-border);
+  padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
+  border-bottom: 1px dashed var(--sh-border);
+  /* Role-coloured edge accent — set per-row by .sh-member-row--owner /
+   * --admin / --member / --subscriber below. Default falls back to a
+   * neutral hairline so unknown roles still align cleanly. */
+  border-left: 3px solid transparent;
+  border-radius: var(--sh-radius-sm);
 }
 .sh-member-row:last-child { border-bottom: none; }
-.sh-member-row--banned { opacity: 0.5; background: color-mix(in srgb, var(--sh-danger) 4%, transparent); }
+.sh-member-row--owner      { border-left-color: var(--sh-primary); }
+.sh-member-row--admin      { border-left-color: var(--sh-warning); }
+.sh-member-row--member     { border-left-color: var(--sh-success); }
+.sh-member-row--subscriber { border-left-color: var(--sh-text-muted); }
+.sh-member-row--banned     { opacity: 0.5; background: color-mix(in srgb, var(--sh-danger) 4%, transparent); border-left-color: var(--sh-danger); }
 .sh-member-row--me {
-  background: var(--sh-primary-soft);
-  border-radius: var(--sh-radius-md);
-  border-bottom-color: transparent;
+  background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
 }
 .sh-member-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .sh-member-name { font-weight: 600; }
@@ -4342,20 +4433,34 @@ hr {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 18%, transparent);
 }
 
+/* "You" card above the regular member list. Keep the warm cream
+ * surface used by the main list but swap the dashed-row look for a
+ * solid border so it reads as a hero card, not a row. */
 .sh-member-me-card {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sh-space-md);
   padding: var(--sh-space-md);
-  background: linear-gradient(
-    135deg,
-    var(--sh-primary-soft),
-    color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg))
-  );
-  border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, transparent);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-left: 4px solid var(--sh-primary);
   border-radius: var(--sh-radius-lg);
   margin-bottom: var(--sh-space-md);
-  box-shadow: var(--sh-shadow-xs);
+  box-shadow: var(--sh-shadow-pinned);
+}
+.sh-member-me-card::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  right: 24px;
+  width: 56px;
+  height: 14px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(7deg);
+  pointer-events: none;
 }
 .sh-member-me-card-body {
   flex: 1;
@@ -5366,23 +5471,30 @@ hr {
 .sh-space-links-strip__link {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   padding: 4px 12px;
-  background: var(--sh-surface-2);
+  background: var(--sh-bg);
   color: var(--sh-text);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-full);
-  font-size: var(--sh-font-size-sm);
+  border-radius: var(--sh-radius-md);
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   text-decoration: none;
-  transition: background var(--sh-transition-fast);
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
 }
 .sh-space-links-strip__link::before {
   content: '↗';
   font-size: 0.9em;
   opacity: 0.65;
+  text-transform: none;
 }
 .sh-space-links-strip__link:hover {
-  background: var(--sh-surface-3);
+  background: var(--sh-bg-tertiary);
+  border-color: var(--sh-primary);
+  color: var(--sh-primary);
   text-decoration: none;
 }
 
@@ -8181,20 +8293,54 @@ hr {
   text-align: center;
 }
 
-/* Card — the repeating unit across all three tabs */
+/* Card — repeating unit across all three browser tabs. Picks up the
+ * same warm pinned-card aesthetic as ``.sh-space-card`` (cream paper,
+ * tape ::before, scope-color left edge) but stays grid-friendly with
+ * a smaller tape and no rotation, since browse-spaces lays the cards
+ * out in a multi-column grid where rotation reads as misalignment. */
 .sh-browser-card {
+  position: relative;
   display: flex; flex-direction: column; gap: var(--sh-space-sm);
   padding: var(--sh-space-md);
-  background: var(--sh-surface);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
+  border-left: 4px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
-  box-shadow: var(--sh-shadow-sm);
-  transition: transform 120ms, box-shadow 120ms;
+  box-shadow: var(--sh-shadow-pinned);
+  transition: transform var(--sh-transition-fast),
+              box-shadow var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+}
+.sh-browser-card::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  right: 22px;
+  width: 48px;
+  height: 12px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transform: rotate(6deg);
+  pointer-events: none;
+}
+.sh-browser-card:nth-child(odd)::before {
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
+}
+.sh-browser-card:nth-child(even)::before {
+  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
 }
 .sh-browser-card:hover {
   transform: translateY(-2px);
-  box-shadow: var(--sh-shadow-md);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 28px 60px -28px rgba(26, 24, 20, 0.55);
+  border-color: var(--sh-border-strong);
 }
+.sh-browser-card--private    { border-left-color: var(--sh-primary); }
+.sh-browser-card--household  { border-left-color: var(--sh-success); }
+.sh-browser-card--public,
+.sh-browser-card--global     { border-left-color: var(--sh-warning); }
 .sh-browser-card__hd {
   display: flex; align-items: center; gap: var(--sh-space-sm);
 }

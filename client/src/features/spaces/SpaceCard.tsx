@@ -118,7 +118,7 @@ export function SpaceCard({ entry, onAction, subscribeBusy = false }: SpaceCardP
         : null
 
   return (
-    <article class="sh-browser-card">
+    <article class={`sh-browser-card sh-browser-card--${entry.scope}`}>
       <div class="sh-browser-card__hd">
         <span class="sh-space-emoji" aria-hidden="true">{entry.emoji || '🗂'}</span>
         <div class="sh-browser-card__title">

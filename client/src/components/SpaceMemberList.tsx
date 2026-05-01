@@ -144,8 +144,14 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
           const r = resolveName(m)
           const isMe = m.user_id === me
           return (
-            <div key={m.user_id}
-                 class={`sh-member-row ${isMe ? 'sh-member-row--me' : ''}`}>
+            <div
+              key={m.user_id}
+              class={[
+                'sh-member-row',
+                `sh-member-row--${m.role}`,
+                isMe ? 'sh-member-row--me' : '',
+              ].filter(Boolean).join(' ')}
+            >
               <Avatar name={r.name} src={m.picture_url ?? null} size={32} />
               <div class="sh-member-info">
                 <span class="sh-member-name">{r.name}</span>
