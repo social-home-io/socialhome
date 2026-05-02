@@ -251,6 +251,12 @@ async def test_add_and_list_members(client):
     )
     members = await resp.json()
     assert len(members) == 2
+    # Online-status fields ride on every row so the SPA can render the
+    # green/amber dot without an extra round-trip.
+    for member in members:
+        assert "is_online" in member
+        assert "is_idle" in member
+        assert "last_seen_at" in member
 
 
 async def test_remove_member(client):

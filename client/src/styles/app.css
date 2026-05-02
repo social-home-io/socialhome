@@ -806,6 +806,23 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-avatar--clickable { cursor: pointer; transition: transform var(--sh-transition-fast); }
 .sh-avatar--clickable:hover { transform: scale(1.05); }
 
+/* Online-status indicator. Sits in the bottom-right corner of the
+ * avatar, ringed in the page background so it pops against any avatar
+ * tint. Offline = no dot (the absence is the signal). */
+.sh-avatar-wrap { position: relative; display: inline-block; line-height: 0; }
+.sh-avatar-status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--sh-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+.sh-avatar-status-dot--online { background: #22c55e; }
+.sh-avatar-status-dot--idle   { background: #fbbf24; }
+
 /* ───── 4. Utility classes ───────────────────────────────────────────── */
 
 .sh-muted { color: var(--sh-text-muted); }
@@ -1469,6 +1486,65 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-post-time { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
 .sh-post-edited { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); font-style: italic; }
+
+/* Online-status pill — sits in the byline next to the author. Cream
+ * tape-card surface, hairline ring, no shadow (the dot already pulls
+ * the eye). The leading edge picks up the terracotta accent on the
+ * online variant; idle uses warm amber so colour-blind readers can
+ * still tell them apart by the dot.
+ *
+ * Compact form drops the label and zone, leaving just the dot — used
+ * in space settings sub-rows and other tight spots. */
+.sh-online-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  padding: 2px var(--sh-space-xs);
+  border-radius: var(--sh-radius-full);
+  border: 1px solid var(--sh-border);
+  background: var(--sh-bg-tertiary);
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text);
+  line-height: 1.4;
+  /* Pulls left a touch so the pill nestles next to the author name
+   * without breaking the byline rhythm. */
+  margin-left: var(--sh-space-xs);
+  white-space: nowrap;
+}
+.sh-online-pill--online {
+  border-left: 3px solid #22c55e;
+  padding-left: calc(var(--sh-space-xs) - 2px);
+}
+.sh-online-pill--idle {
+  border-left: 3px solid #fbbf24;
+  padding-left: calc(var(--sh-space-xs) - 2px);
+  color: var(--sh-text-muted);
+}
+.sh-online-pill--compact {
+  padding: 0;
+  border: none;
+  background: transparent;
+  margin-left: 4px;
+}
+.sh-online-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6);
+}
+.sh-online-pill-dot--online { background: #22c55e; }
+.sh-online-pill-dot--idle   { background: #fbbf24; }
+.sh-online-pill-label { font-weight: 500; }
+.sh-online-pill-sep   { color: var(--sh-text-muted); }
+.sh-online-pill-zone  { color: var(--sh-text-muted); font-style: italic; }
+
+/* PresencePage byline — keeps the existing layout but lets us style
+ * the offline "Last seen X" line distinctly from the state row. */
+.sh-presence-online {
+  margin-left: var(--sh-space-xs);
+  font-size: var(--sh-font-size-xs);
+}
 
 /* Bot-bridge posts — visual distinction from user posts so members can
    tell "an automation posted this" at a glance without reading the

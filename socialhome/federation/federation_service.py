@@ -139,6 +139,7 @@ class FederationService:
         "_dm_routing_service",
         "_transport",
         "_presence_service",
+        "_online_status_service",
         "_space_sync_service",
         "_space_sync_receiver",
         "_encoder",
@@ -188,6 +189,7 @@ class FederationService:
         self._dm_routing_service = None
         self._transport = None
         self._presence_service = None
+        self._online_status_service = None
         self._space_sync_service = None
         self._space_sync_receiver = None
         self._gfs_connection_service = None
@@ -325,6 +327,20 @@ class FederationService:
             FederationEventType.PRESENCE_UPDATED,
             self._handle_presence_updated,
         )
+
+    def attach_online_status_service(self, online_status_service) -> None:
+        """Attach :class:`OnlineStatusService` so cross-instance USER_ONLINE
+        / USER_IDLE / USER_OFFLINE events land in the remote-state cache."""
+        self._online_status_service = online_status_service
+        for event_type in (
+            FederationEventType.USER_ONLINE,
+            FederationEventType.USER_IDLE,
+            FederationEventType.USER_OFFLINE,
+        ):
+            self._event_registry.register(
+                event_type,
+                self._handle_user_online_changed,
+            )
 
     def attach_space_sync(self, *, service, receiver) -> None:
         """Attach :class:`SpaceSyncService` + :class:`SpaceSyncReceiver`
@@ -828,6 +844,20 @@ class FederationService:
                 "PRESENCE_UPDATED from %s dropped — no service attached",
                 event.from_instance,
             )
+
+    async def _handle_user_online_changed(self, event: FederationEvent) -> None:
+        if self._online_status_service is None:
+            log.debug(
+                "%s from %s dropped — no online-status service attached",
+                event.event_type.value,
+                event.from_instance,
+            )
+            return
+        await self._online_status_service.apply_remote(
+            from_instance=event.from_instance,
+            event_type=event.event_type,
+            payload=event.payload,
+        )
 
     async def _handle_transport_event(self, event: FederationEvent) -> None:
         """Dispatch P2P federation RTC events to the transport."""

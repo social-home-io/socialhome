@@ -194,6 +194,7 @@ from .services.alias_service import AliasResolver, AliasService
 from .services.household_features_service import HouseholdFeaturesService
 from .services.page_conflict_service import PageConflictService
 from .services.poll_service import PollService
+from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
@@ -365,6 +366,7 @@ def _wire_federation_stack(
     dm_routing_service,
     dm_routing_repo,
     presence_service,
+    online_status_service,
     report_service,
     pairing_relay_repo,
     space_zone_repo,
@@ -439,6 +441,16 @@ def _wire_federation_stack(
     )
     federation_service.attach_dm_routing(dm_routing_service)
     federation_service.attach_presence_service(presence_service)
+    # Online status (session presence) — federation hooks both ways:
+    # outbound transitions fan to confirmed peers; inbound USER_ONLINE /
+    # USER_IDLE / USER_OFFLINE events update the remote-state cache so
+    # household members on a paired instance get their dot.
+    federation_service.attach_online_status_service(online_status_service)
+    online_status_service.attach_federation(
+        federation_service=federation_service,
+        federation_repo=federation_repo,
+        own_instance_id=identity.instance_id,
+    )
 
     inbound_service = FederationInboundService(
         bus=bus,
@@ -1068,6 +1080,13 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Presence service (local + remote) ──────────────────────────────
     presence_service = PresenceService(repos.presence, bus)
 
+    # ── Online status (session presence) ───────────────────────────────
+    online_status_service = OnlineStatusService(
+        ws_manager=ws_manager,
+        user_repo=repos.user,
+        bus=bus,
+    )
+
     # ── Per-space zone catalogue (§23.8.7) ─────────────────────────────
     space_zone_service = SpaceZoneService(
         repos.space_zone,
@@ -1274,6 +1293,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.page_repo_key] = page_repo
     app[K.page_conflict_service_key] = page_conflict_service
     app[K.presence_service_key] = presence_service
+    app[K.online_status_service_key] = online_status_service
     app[K.space_zone_service_key] = space_zone_service
     app[K.space_zone_repo_key] = repos.space_zone
     app[K.poll_service_key] = poll_service
@@ -1411,6 +1431,7 @@ def create_app(config: Config | None = None) -> web.Application:
             dm_routing_service=dm_routing_service,
             dm_routing_repo=repos.dm_routing,
             presence_service=presence_service,
+            online_status_service=online_status_service,
             report_service=report_service,
             pairing_relay_repo=repos.pairing_relay,
             space_zone_repo=repos.space_zone,
@@ -1530,6 +1551,10 @@ def create_app(config: Config | None = None) -> web.Application:
         replay_cache_scheduler = ReplayCachePruneScheduler(federation_repo)
         await replay_cache_scheduler.start()
 
+        # Online-status idle scanner — promotes online → idle after 5
+        # minutes of WS-frame silence and back to online on activity.
+        await online_status_service.start()
+
         # Pairing-relay retention (§11.9) — drops approved/declined
         # rows after a week and pending rows after a month so the
         # admin queue table stays bounded.
@@ -1619,6 +1644,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        await online_status_service.stop()
         if pairing_relay_scheduler is not None:
             await pairing_relay_scheduler.stop()
         if dm_gc_scheduler is not None:

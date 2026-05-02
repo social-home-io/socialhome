@@ -9,6 +9,7 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { ws } from '@/ws'
 import { Avatar } from './Avatar'
 import { Spinner } from './Spinner'
 import { Button } from './Button'
@@ -31,6 +32,11 @@ interface Member {
   personal_alias?: string | null
   picture_url?: string | null
   picture_hash?: string | null
+  /** Session presence (§ online status). Patched live by user.online /
+   *  user.idle / user.offline WS frames. */
+  is_online?: boolean
+  is_idle?: boolean
+  last_seen_at?: string | null
 }
 
 interface Ban {
@@ -71,6 +77,40 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
 
   useEffect(() => {
     reload()
+    // Live patch session-presence on the visible roster — saves a full
+    // /api/spaces/{id}/members refetch on every connect / disconnect.
+    const patch = (
+      user_id: string,
+      next: { is_online: boolean; is_idle: boolean; last_seen_at?: string | null },
+    ) => {
+      members.value = members.value.map(m =>
+        m.user_id === user_id
+          ? {
+              ...m,
+              is_online: next.is_online,
+              is_idle: next.is_idle,
+              ...(next.last_seen_at !== undefined ? { last_seen_at: next.last_seen_at } : {}),
+            }
+          : m,
+      )
+    }
+    const offOnline = ws.on('user.online', (e) => {
+      const d = e.data as { user_id?: string }
+      if (d.user_id) patch(d.user_id, { is_online: true, is_idle: false })
+    })
+    const offIdle = ws.on('user.idle', (e) => {
+      const d = e.data as { user_id?: string }
+      if (d.user_id) patch(d.user_id, { is_online: true, is_idle: true })
+    })
+    const offOffline = ws.on('user.offline', (e) => {
+      const d = e.data as { user_id?: string; last_seen_at?: string | null }
+      if (d.user_id) patch(d.user_id, {
+        is_online: false,
+        is_idle: false,
+        last_seen_at: d.last_seen_at ?? null,
+      })
+    })
+    return () => { offOnline(); offIdle(); offOffline() }
   }, [spaceId, viewerRole])
 
   if (loading.value) return <Spinner />
@@ -152,7 +192,12 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 isMe ? 'sh-member-row--me' : '',
               ].filter(Boolean).join(' ')}
             >
-              <Avatar name={r.name} src={m.picture_url ?? null} size={32} />
+              <Avatar
+                name={r.name}
+                src={m.picture_url ?? null}
+                size={32}
+                online={m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
+              />
               <div class="sh-member-info">
                 <span class="sh-member-name">{r.name}</span>
                 {r.source === 'space' && r.name !== m.display_name && (

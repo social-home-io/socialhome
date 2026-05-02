@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import presence_service_key
+from ..app_keys import (
+    online_status_service_key,
+    presence_service_key,
+    user_repo_key,
+)
 from ..domain.presence import LocationUpdate, PresenceState
 from ..security import error_response
 from .base import BaseView
@@ -30,13 +34,36 @@ def _derive_state(zone_name: str | None) -> PresenceState:
 
 
 class PresenceCollectionView(BaseView):
-    """``GET /api/presence`` — return household presence list."""
+    """``GET /api/presence`` — return household presence list.
+
+    Each row carries both *physical* presence (``state`` / ``zone_name``
+    / GPS) and *session* presence (``is_online`` / ``is_idle`` /
+    ``last_seen_at``). The two signals are orthogonal and the frontend
+    surfaces them independently.
+    """
 
     async def get(self) -> web.Response:
         self.user
         entries = await self.svc(presence_service_key).list_presence()
-        return self._json(
-            [
+        online_svc = self.request.app.get(online_status_service_key)
+        # ``user_repo.list_by_ids`` is the source for offline users'
+        # ``last_seen_at`` (online users get the live timestamp from the
+        # service, which is more recent than the persisted column).
+        user_repo = self.request.app.get(user_repo_key)
+        persisted: dict[str, str | None] = {}
+        if user_repo is not None and entries:
+            users = await user_repo.list_by_ids({p.user_id for p in entries})
+            persisted = {u.user_id: u.last_seen_at for u in users}
+        rows: list[dict] = []
+        for p in entries:
+            is_online = bool(online_svc and online_svc.is_online(p.user_id))
+            is_idle = bool(online_svc and online_svc.is_idle(p.user_id))
+            if is_online and online_svc is not None:
+                last_dt = online_svc.last_seen(p.user_id)
+                last_seen = last_dt.isoformat() if last_dt is not None else None
+            else:
+                last_seen = persisted.get(p.user_id)
+            rows.append(
                 {
                     "username": p.username,
                     "user_id": p.user_id,
@@ -46,10 +73,12 @@ class PresenceCollectionView(BaseView):
                     "latitude": p.latitude,
                     "longitude": p.longitude,
                     "gps_accuracy_m": p.gps_accuracy_m,
+                    "is_online": is_online,
+                    "is_idle": is_idle,
+                    "last_seen_at": last_seen,
                 }
-                for p in entries
-            ]
-        )
+            )
+        return self._json(rows)
 
 
 class PresenceLocationView(BaseView):

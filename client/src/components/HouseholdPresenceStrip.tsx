@@ -29,6 +29,11 @@ interface PresenceRow extends PresenceEntry {
   display_name: string
 }
 
+function onlineState(row: PresenceRow): 'online' | 'idle' | null {
+  if (!row.is_online) return null
+  return row.is_idle ? 'idle' : 'online'
+}
+
 const rows = signal<PresenceRow[]>([])
 const loaded = signal(false)
 
@@ -98,7 +103,12 @@ export function HouseholdPresenceStrip() {
               aria-label={`${row.display_name} — ${statusLabel(row)}`}
             >
               <span class="sh-presence-pin-tape" aria-hidden="true" />
-              <Avatar name={row.display_name} src={userPic} size={48} />
+              <Avatar
+                name={row.display_name}
+                src={userPic}
+                size={48}
+                online={onlineState(row)}
+              />
               <span class="sh-presence-pin-name">{row.display_name}</span>
               <span class="sh-presence-pin-status">
                 <span class={`sh-presence-pin-dot sh-presence-pin-dot--${row.state || 'unknown'}`} aria-hidden="true" />

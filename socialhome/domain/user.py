@@ -111,6 +111,12 @@ class User:
     # Bookkeeping
     created_at: str | None = None  # ISO-8601 UTC
 
+    # Last time this user had an active WS session — populated by
+    # :class:`OnlineStatusService` on disconnect so "Last seen 2 h ago"
+    # survives a server restart. ``None`` means "never seen", which is
+    # the default for new accounts.
+    last_seen_at: str | None = None  # ISO-8601 UTC
+
     # Provisioning source: 'manual' (standalone or explicit admin) vs 'ha'
     # (mirrored from a Home Assistant person.* entity). Admins manage 'ha'
     # rows via the HA Users admin panel.

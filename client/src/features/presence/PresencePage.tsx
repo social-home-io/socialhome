@@ -19,7 +19,23 @@ interface PresenceEntry {
   longitude?: number | null
   gps_accuracy_m?: number | null
   last_seen_at?: string | null
+  is_online?: boolean
+  is_idle?: boolean
   dnd?: boolean
+}
+
+/** Compact "5 min ago" / "2 h ago" / "3 d ago" rendering for the
+ *  ``last_seen_at`` line. Returns ``null`` when the input is missing
+ *  or in the future (clock skew). */
+function humanizeAgo(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return null
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (sec < 60)        return 'just now'
+  if (sec < 60 * 60)   return `${Math.floor(sec / 60)} min ago`
+  if (sec < 86400)     return `${Math.floor(sec / 3600)} h ago`
+  return `${Math.floor(sec / 86400)} d ago`
 }
 
 type ExpiryDuration = '30m' | '1h' | '4h' | 'today' | 'none'
@@ -173,20 +189,34 @@ export default function PresencePage() {
       </div>
 
       <h2>Members</h2>
-      {presenceList.value.map(p => (
-        <div key={p.username}
-             class={`sh-presence-card sh-presence-card--${p.state}`}>
-          <span class={presenceDot(p.state)} />
-          <Avatar name={p.display_name} src={p.picture_url} />
-          <div>
-            <strong>{p.display_name}</strong>
-            {p.dnd && <span class="sh-badge sh-badge--dnd">DND</span>}
-            <span class={`sh-presence-state sh-presence-state--${p.state}`}>
-              {p.zone_name || presenceLabel(p.state)}
-            </span>
+      {presenceList.value.map(p => {
+        const online = p.is_online ? (p.is_idle ? 'idle' : 'online') : null
+        const lastSeen = humanizeAgo(p.last_seen_at)
+        return (
+          <div key={p.username}
+               class={`sh-presence-card sh-presence-card--${p.state}`}>
+            <span class={presenceDot(p.state)} />
+            <Avatar
+              name={p.display_name}
+              src={p.picture_url}
+              online={online}
+            />
+            <div>
+              <strong>{p.display_name}</strong>
+              {p.dnd && <span class="sh-badge sh-badge--dnd">DND</span>}
+              <span class={`sh-presence-state sh-presence-state--${p.state}`}>
+                {p.zone_name || presenceLabel(p.state)}
+              </span>
+              <span class="sh-presence-online sh-muted">
+                {online === 'online' && '· Online'}
+                {online === 'idle'   && '· Idle'}
+                {!online && lastSeen && `· Last seen ${lastSeen}`}
+                {!online && !lastSeen && '· Offline'}
+              </span>
+            </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
