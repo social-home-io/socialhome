@@ -157,7 +157,7 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
       const xhr = new XMLHttpRequest()
       xhr.open('POST', `/api/gallery/albums/${album.id}/items`, true)
       xhr.withCredentials = true
-      const tok = localStorage.getItem('auth.token')
+      const tok = localStorage.getItem('sh_token')
       if (tok) xhr.setRequestHeader('Authorization', `Bearer ${tok}`)
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) setUploadPct((e.loaded / e.total) * 100)
