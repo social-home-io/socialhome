@@ -28,6 +28,10 @@ interface ThreadMember {
 }
 
 const threadMembers = signal<ThreadMember[]>([])
+/** WhatsApp-style reply target. When set, the composer shows a chip
+ *  with the parent message preview and the next send carries
+ *  ``reply_to_id``. Cleared after send or by the chip's "×" button. */
+const replyTo = signal<Message | null>(null)
 
 /** WhatsApp-style "Last seen 12 min ago" formatter — same shape as the
  *  presence-page helper but inline so this page doesn't grow a util
@@ -255,9 +259,14 @@ export default function DmThreadPage() {
     const form = e.target as HTMLFormElement
     const content = new FormData(form).get('content') as string
     if (!content.trim()) return
+    const reply_to_id = replyTo.value?.id ?? null
     try {
-      await api.post(`/api/conversations/${convId}/messages`, { content })
+      await api.post(`/api/conversations/${convId}/messages`, {
+        content,
+        ...(reply_to_id ? { reply_to_id } : {}),
+      })
       form.reset()
+      replyTo.value = null
       const data = await api.get(`/api/conversations/${convId}/messages`)
       messages.value = data.reverse()
     } catch (err: unknown) {
@@ -266,6 +275,32 @@ export default function DmThreadPage() {
         'error',
       )
     }
+  }
+
+  /** Resolve sender display name from the roster — falls back to the raw
+   *  user_id (which the rest of the thread also surfaces today). */
+  const senderName = (user_id: string): string => {
+    const m = threadMembers.value.find(x => x.user_id === user_id)
+    return m?.display_name ?? m?.username ?? user_id
+  }
+
+  /** One-line preview of a message's content for the quoted-reply card.
+   *  Strips newlines and truncates to keep the bubble compact. */
+  const quotePreview = (m: Message): string => {
+    if (m.deleted) return '(message deleted)'
+    if (!m.content) return m.media_url ? '📎 Attachment' : ''
+    const flat = m.content.replace(/\s+/g, ' ').trim()
+    return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat
+  }
+
+  /** Scroll the original message into view + flash it briefly so the
+   *  reply quote is genuinely useful as a navigation handle. */
+  const scrollToMessage = (id: string) => {
+    const el = document.querySelector<HTMLElement>(`[data-msg-id="${id}"]`)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('sh-message--flash')
+    setTimeout(() => el.classList.remove('sh-message--flash'), 1200)
   }
 
   const startCall = async (callType: 'audio' | 'video') => {
@@ -320,12 +355,36 @@ export default function DmThreadPage() {
             return <CallEventRow key={m.id} m={m} onCallBack={startCall} />
           }
           const mine = m.sender_user_id === myUserId
+          // Look up the parent message for inline rendering of the
+          // quoted-reply card. Missing parents (loaded out of window or
+          // soft-deleted) fall through to a small placeholder.
+          const parent = m.reply_to_id
+            ? messages.value.find(x => x.id === m.reply_to_id)
+            : null
           return (
             <div
               key={m.id}
+              data-msg-id={m.id}
               class={`sh-message ${mine ? 'sh-message--mine' : ''} ${m.deleted ? 'sh-message--deleted' : ''}`}
             >
-              {!mine && <strong>{m.sender_user_id}</strong>}
+              {!mine && <strong>{senderName(m.sender_user_id)}</strong>}
+              {m.reply_to_id && (
+                <button
+                  type="button"
+                  class="sh-message-quote"
+                  onClick={() => parent && scrollToMessage(parent.id)}
+                  aria-label={parent
+                    ? `Reply to ${senderName(parent.sender_user_id)}: ${quotePreview(parent)}`
+                    : 'Reply to a message'}
+                >
+                  <span class="sh-message-quote-author">
+                    {parent ? senderName(parent.sender_user_id) : 'Unknown'}
+                  </span>
+                  <span class="sh-message-quote-body">
+                    {parent ? quotePreview(parent) : '(message unavailable)'}
+                  </span>
+                </button>
+              )}
               <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
                 {m.deleted ? '(message deleted)' : m.content}
               </p>
@@ -343,11 +402,40 @@ export default function DmThreadPage() {
                   />
                 )}
               </div>
+              {!m.deleted && (
+                <button
+                  type="button"
+                  class="sh-message-reply-btn"
+                  title="Reply"
+                  aria-label={`Reply to ${senderName(m.sender_user_id)}`}
+                  onClick={() => { replyTo.value = m }}
+                >
+                  ↩
+                </button>
+              )}
             </div>
           )
         })}
       </div>
       <TypingIndicator scope={convId} />
+      {replyTo.value && (
+        <div class="sh-composer-reply" role="status" aria-live="polite">
+          <div class="sh-composer-reply-body">
+            <span class="sh-composer-reply-author">
+              Replying to {senderName(replyTo.value.sender_user_id)}
+            </span>
+            <span class="sh-composer-reply-preview">
+              {quotePreview(replyTo.value)}
+            </span>
+          </div>
+          <button
+            type="button"
+            class="sh-composer-reply-clear"
+            aria-label="Cancel reply"
+            onClick={() => { replyTo.value = null }}
+          >×</button>
+        </div>
+      )}
       <form class="sh-composer" onSubmit={handleSend}>
         <input name="content" placeholder="Type a message..." autocomplete="off"
           onInput={handleInput} />

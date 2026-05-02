@@ -2464,6 +2464,146 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-message--mine .sh-message-meta { color: rgba(255,255,255,0.75); justify-content: flex-end; }
 
+/* WhatsApp-style quoted reply — sits above the body inside the bubble.
+ * Cream sidebar accent (terracotta on incoming, paper-tinted on
+ * outgoing), one-line preview, full-bubble click target so tapping the
+ * quote scrolls to the original message. */
+.sh-message {
+  position: relative;
+}
+.sh-message-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: none;
+  background: color-mix(in srgb, var(--sh-bg) 70%, var(--sh-bg-tertiary));
+  border-left: 3px solid var(--sh-primary);
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  font-size: var(--sh-font-size-xs);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  color: var(--sh-text);
+  transition: background var(--sh-transition-fast);
+}
+.sh-message-quote:hover {
+  background: color-mix(in srgb, var(--sh-bg) 50%, var(--sh-bg-tertiary));
+}
+.sh-message-quote-author {
+  font-weight: 600;
+  color: var(--sh-primary);
+  font-size: calc(var(--sh-font-size-xs) - 1px);
+}
+.sh-message-quote-body {
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sh-message--mine .sh-message-quote {
+  background: rgba(255, 255, 255, 0.18);
+  border-left-color: rgba(255, 255, 255, 0.6);
+}
+.sh-message--mine .sh-message-quote-author { color: rgba(255, 255, 255, 0.95); }
+.sh-message--mine .sh-message-quote-body   { color: rgba(255, 255, 255, 0.8); }
+
+/* Reply button — small, hover-revealed glyph that sits just outside
+ * the bubble. Shifts to the inside opposite the meta on mine messages.
+ * On touch devices we keep it always-visible (focus-within is the
+ * accessible alternative to hover). */
+.sh-message-reply-btn {
+  position: absolute;
+  top: 4px;
+  right: -28px;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--sh-border);
+  border-radius: 50%;
+  background: var(--sh-bg);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--sh-transition-fast),
+              background var(--sh-transition-fast),
+              color var(--sh-transition-fast);
+  box-shadow: var(--sh-shadow-xs);
+}
+.sh-message:hover .sh-message-reply-btn,
+.sh-message:focus-within .sh-message-reply-btn,
+.sh-message-reply-btn:focus { opacity: 1; }
+.sh-message-reply-btn:hover {
+  background: var(--sh-primary);
+  color: var(--sh-bg);
+  border-color: var(--sh-primary);
+}
+.sh-message--mine .sh-message-reply-btn { right: auto; left: -28px; }
+@media (hover: none) {
+  .sh-message-reply-btn { opacity: 0.6; }
+}
+
+/* Brief flash when scrollToMessage() lands — helps the reader find the
+ * original message after tapping a reply quote. */
+@keyframes sh-message-flash {
+  0%, 100% { box-shadow: var(--sh-shadow-xs); }
+  50%      { box-shadow: 0 0 0 3px var(--sh-primary); }
+}
+.sh-message--flash {
+  animation: sh-message-flash 1.2s ease-in-out;
+}
+
+/* Composer reply chip — pinned just above the input, mirrors the same
+ * cream + terracotta accent shape the quoted card uses. Has its own
+ * dismiss "×" button so the user doesn't have to hunt the reply target. */
+.sh-composer-reply {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  background: color-mix(in srgb, var(--sh-bg) 85%, var(--sh-bg-tertiary));
+  border-left: 3px solid var(--sh-primary);
+  border-top: 1px solid var(--sh-border);
+  border-bottom: 1px solid var(--sh-border);
+  padding: var(--sh-space-xs) var(--sh-space-md);
+}
+.sh-composer-reply-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--sh-font-size-xs);
+}
+.sh-composer-reply-author {
+  font-weight: 600;
+  color: var(--sh-primary);
+}
+.sh-composer-reply-preview {
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sh-composer-reply-clear {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-md);
+  cursor: pointer;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sh-composer-reply-clear:hover {
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text);
+}
+
 /* Read receipts */
 .sh-receipt {
   font-size: 0.85em;
