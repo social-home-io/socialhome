@@ -201,6 +201,10 @@ class FederationInboundService:
                 sender_display_name=str(p.get("sender_display_name") or sender_user_id),
                 recipient_user_ids=tuple(str(r) for r in recipients),
                 content=content,
+                message_type=msg_type,
+                media_url=p.get("media_url"),
+                reply_to_id=p.get("reply_to_id"),
+                occurred_at=msg.created_at,
             )
         )
 

@@ -171,6 +171,10 @@ class BotBridgeService:
                 sender_display_name="Home Assistant",
                 recipient_user_ids=recipient_user_ids,
                 content=saved.content,
+                message_type=saved.type,
+                media_url=saved.media_url,
+                reply_to_id=saved.reply_to_id,
+                occurred_at=saved.created_at,
             )
         )
         log.info(

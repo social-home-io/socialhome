@@ -457,7 +457,7 @@ Bearer auth (the integration holds the auto-provisioned token).
 
 | Path | Purpose |
 |---|---|
-| `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; JSON `{"type":"typing","conversation_id":"..."}`. |
+| `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; client `{"type":"typing","conversation_id":"..."}`; server fans out `conversation.user_typing` (typing dots), `dm.message` (full Message object — appended without re-fetch), `dm.conversation.created` (inbox refresh trigger), `dm.read`. |
 | `GET /api/stt/stream` | Streaming speech-to-text (binary audio frames → `{"type":"final","text":"..."}`). |
 
 > Speech-to-text and AI data generation are HA-adapter-only in v1 — the
