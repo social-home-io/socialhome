@@ -2714,6 +2714,27 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Owner-name byline that surfaces only when 2+ calendars are
+ * overlaid. Pairs with the per-event ``--cal-hue`` left edge so
+ * ownership is communicated by both colour AND text — important for
+ * colour-blind family members and just generally clearer at a
+ * glance. Tinted by the event's calendar hue so the chip and the
+ * left edge read as one identity. */
+.sh-event-header .sh-event-owner {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: var(--sh-radius-full);
+  background: color-mix(in srgb, var(--cal-hue, var(--sh-primary)) 14%, transparent);
+  color: var(--cal-hue, var(--sh-primary));
+  font: 600 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .sh-event-detail {
   margin-top: var(--sh-space-sm);
   padding: var(--sh-space-sm) 0 0 var(--sh-space-sm);

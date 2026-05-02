@@ -5,7 +5,11 @@ import { useTitle } from '@/store/pageTitle'
 import type { CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
-import { CalendarEventDialog, openEventDialog } from '@/components/CalendarEventDialog'
+import {
+  CalendarEventDialog,
+  openEventDialog,
+  openEditEventDialog,
+} from '@/components/CalendarEventDialog'
 import { CapacityStrip } from '@/components/CapacityStrip'
 import { HostApprovalQueue } from '@/components/HostApprovalQueue'
 import { ReminderPicker } from '@/components/ReminderPicker'
@@ -39,18 +43,28 @@ const currentDate = signal(new Date())
 const selectedEvent = signal<CalendarEvent | null>(null)
 const rsvpPending = signal<string | null>(null)
 
-/** Deterministic colour per calendar id — picks one of 8 hand-tuned
- *  earth-tone hues so two members never collide visually. The same
- *  id always lands on the same colour across reloads / sessions. */
+/** Deterministic colour per calendar id — picks one of 16 hand-tuned
+ *  earth-tone hues so two members rarely collide visually. The same
+ *  id always lands on the same colour across reloads / sessions.
+ *  16 is enough for any realistic household; if a household ever has
+ *  17+ calendars the chip names still disambiguate. */
 const _CAL_HUES = [
-  'var(--sh-primary)',                               // terracotta
-  'var(--sh-success)',                               // moss
-  'var(--sh-warning)',                               // honey
-  'var(--sh-danger)',                                // brick
-  '#7B5BA8',                                         // plum
-  '#3F7B8C',                                         // dusty teal
-  '#A89344',                                         // ochre
-  '#5C7B5A',                                         // sage
+  'var(--sh-primary)',  // terracotta
+  'var(--sh-success)',  // moss
+  'var(--sh-warning)',  // honey
+  'var(--sh-danger)',   // brick
+  '#7B5BA8',            // plum
+  '#3F7B8C',            // dusty teal
+  '#A89344',            // ochre
+  '#5C7B5A',            // sage
+  '#9B5B3F',            // cinnamon
+  '#34688D',            // navy
+  '#7C9D5F',            // olive
+  '#B57E47',            // amber
+  '#5B8E8E',            // slate teal
+  '#8C5777',            // rose-plum
+  '#46735A',            // pine
+  '#BC6C68',            // brick rose
 ] as const
 function calendarHue(calId: string): string {
   // Tiny string-hash → pick a hue. djb2-flavoured.
@@ -225,22 +239,27 @@ export default function CalendarPage() {
     }
   }
 
-  const handleEdit = async (evt: CalendarEvent) => {
-    const newSummary = prompt('Edit event title:', evt.summary)
-    if (newSummary == null) return
-    const trimmed = newSummary.trim()
-    if (!trimmed) {
-      showToast('Title cannot be empty', 'error')
-      return
-    }
-    try {
-      await api.patch(`/api/calendars/events/${evt.id}`, { summary: trimmed })
-      showToast('Event updated', 'success')
-      selectedEvent.value = null
-      await loadEvents()
-    } catch (err: unknown) {
-      showToast(`Update failed: ${(err as Error).message ?? err}`, 'error')
-    }
+  const handleEdit = (evt: CalendarEvent) => {
+    // Open the full event dialog in edit mode rather than the
+    // single-field ``prompt()`` it used to be — every field becomes
+    // editable, including attendees, the RSVP toggle, and the "For:"
+    // target calendar (so an event can be moved between members'
+    // calendars without delete-and-recreate).
+    selectedEvent.value = null
+    openEditEventDialog(
+      {
+        id: evt.id,
+        calendar_id: evt.calendar_id,
+        summary: evt.summary,
+        description: evt.description,
+        start: evt.start,
+        end: evt.end,
+        all_day: evt.all_day,
+        attendees: evt.attendees,
+        rsvp_enabled: evt.rsvp_enabled,
+      },
+      calendars.value,
+    )
   }
 
   if (loading.value) return <Spinner />
@@ -330,12 +349,42 @@ export default function CalendarPage() {
       {dayKeys.map(dayKey => (
         <div key={dayKey} class="sh-calendar-day-group">
           <h3 class="sh-calendar-day-heading">{dayKey}</h3>
-          {grouped[dayKey].map(e => (
+          {grouped[dayKey].map(e => {
+            // Owner byline — only meaningful when overlay is on; with
+            // a single calendar visible the bylines are all the same
+            // and just add noise. When overlay is on, also surfaces
+            // ownership in text so colour-blind family members can
+            // tell whose event is whose without relying on the
+            // edge colour alone.
+            let ownerByline: string | null = null
+            if (visibleCalendarIds.value.size > 1) {
+              const cal = calendars.value.find(c => c.id === e.calendar_id)
+              if (cal) {
+                const me = currentUser.value?.username
+                if (cal.owner_username === me) {
+                  ownerByline = 'You'
+                } else {
+                  ownerByline = cal.owner_username
+                  for (const u of householdUsers.value.values()) {
+                    if (u.username === cal.owner_username) {
+                      ownerByline = u.display_name || u.username
+                      break
+                    }
+                  }
+                }
+              }
+            }
+            return (
             <div key={e.id} class="sh-event"
                  style={{ '--cal-hue': calendarHue(e.calendar_id) } as Record<string, string>}
                  onClick={() => { selectedEvent.value = selectedEvent.value?.id === e.id ? null : e }}>
               <div class="sh-event-header">
                 <strong>{e.summary}</strong>
+                {ownerByline && (
+                  <span class="sh-event-owner" aria-label={`On ${ownerByline}'s calendar`}>
+                    {ownerByline}
+                  </span>
+                )}
                 <time>{new Date(e.start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time>
                 {e.all_day && <span class="sh-badge">All day</span>}
               </div>
@@ -431,7 +480,7 @@ export default function CalendarPage() {
                 )
               })()}
             </div>
-          ))}
+          )})}
         </div>
       ))}
 
