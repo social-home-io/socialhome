@@ -378,6 +378,7 @@ export default function SpaceFeedPage() {
                 onComment={() => handleToggleComments(post.id)}
                 onDelete={() => handleDelete(post.id)}
                 showSpaceBadge={spaceId}
+                surface="space"
               />
               {expandedComments.value[post.id] && (
                 <CommentThread

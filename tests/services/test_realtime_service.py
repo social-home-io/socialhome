@@ -453,6 +453,42 @@ async def test_presence_updated_fans_to_household(env):
     assert any("presence.updated" in m for m in sock.sent)
 
 
+async def test_user_came_online_suppresses_self_frame(env):
+    from datetime import datetime, timezone
+    from socialhome.domain.events import (
+        UserCameOnline,
+        UserWentIdle,
+        UserWentOffline,
+    )
+
+    svc, bus, ws = env
+    self_sock = _FakeWS()
+    other_sock = _FakeWS()
+    await ws.register("u1", self_sock)
+    await ws.register("u2", other_sock)
+
+    await bus.publish(UserCameOnline(user_id="u1"))
+    # Other household member sees the frame, the subject does not.
+    assert any('"user.online"' in m for m in other_sock.sent)
+    assert not any('"user.online"' in m for m in self_sock.sent)
+
+    other_sock.sent.clear()
+    self_sock.sent.clear()
+    await bus.publish(
+        UserWentIdle(user_id="u1", last_active_at=datetime.now(timezone.utc)),
+    )
+    assert any('"user.idle"' in m for m in other_sock.sent)
+    assert not any('"user.idle"' in m for m in self_sock.sent)
+
+    other_sock.sent.clear()
+    self_sock.sent.clear()
+    await bus.publish(
+        UserWentOffline(user_id="u1", last_seen_at=datetime.now(timezone.utc)),
+    )
+    assert any('"user.offline"' in m for m in other_sock.sent)
+    assert not any('"user.offline"' in m for m in self_sock.sent)
+
+
 async def test_notification_new_targets_one_user(env):
     from socialhome.domain.events import NotificationCreated
 

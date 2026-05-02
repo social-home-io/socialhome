@@ -42,6 +42,13 @@ class WebSocketView(BaseView):
         await ws.prepare(self.request)
         manager = self.svc(K.ws_manager_key)
         await manager.register(ctx.user_id, ws)
+        ws_id = id(ws)
+        # Online-status side-channel: tells the OnlineStatusService a
+        # session is open so it can fire UserCameOnline / publish the
+        # green dot to other household members.
+        online_svc = self.request.app.get(K.online_status_service_key)
+        if online_svc is not None:
+            await online_svc.user_session_opened(ctx.user_id, ws_id)
         log.info(
             "ws connected: user=%s total=%d",
             ctx.user_id,
@@ -51,6 +58,11 @@ class WebSocketView(BaseView):
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
+                    # Any inbound frame counts as activity — keeps the
+                    # "idle" threshold honest without a separate
+                    # heartbeat protocol.
+                    if online_svc is not None:
+                        await online_svc.touch(ctx.user_id, ws_id)
                     if msg.data == "ping":
                         await ws.send_str("pong")
                     else:
@@ -64,6 +76,8 @@ class WebSocketView(BaseView):
             log.warning("ws loop error for %s: %s", ctx.user_id, exc)
         finally:
             await manager.unregister(ctx.user_id, ws)
+            if online_svc is not None:
+                await online_svc.user_session_closed(ctx.user_id, ws_id)
             log.info(
                 "ws disconnected: user=%s total=%d",
                 ctx.user_id,

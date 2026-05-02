@@ -34,6 +34,7 @@ class AbstractUserRepo(Protocol):
     async def list_all(self) -> list[User]: ...
     async def list_by_ids(self, user_ids: set[str]) -> list[User]: ...
     async def set_admin(self, username: str, is_admin: bool) -> None: ...
+    async def set_last_seen(self, user_id: str, at: str) -> None: ...
     async def soft_delete(self, username: str, grace_days: int = 30) -> None: ...
 
     # Remote users --------------------------------------------------------
@@ -213,6 +214,13 @@ class SqliteUserRepo:
         await self._db.enqueue(
             "UPDATE users SET is_admin=? WHERE username=?",
             (int(is_admin), username),
+        )
+
+    async def set_last_seen(self, user_id: str, at: str) -> None:
+        """Persist the user's most recent active-session timestamp."""
+        await self._db.enqueue(
+            "UPDATE users SET last_seen_at=? WHERE user_id=?",
+            (at, user_id),
         )
 
     async def soft_delete(self, username: str, grace_days: int = 30) -> None:
@@ -467,6 +475,7 @@ def _row_to_user(row: dict | None) -> User | None:
         child_protection_enabled=bool_col(row.get("child_protection_enabled", 0)),
         preferences_json=row.get("preferences_json", "{}"),
         created_at=row.get("created_at"),
+        last_seen_at=row.get("last_seen_at"),
         source=row.get("source", "manual"),
     )
 

@@ -13,7 +13,8 @@ flicker or location update produces one envelope per paired peer.
 ## Event types
 
 `PRESENCE_UPDATED`, `USER_UPDATED`, `USER_REMOVED`,
-`USER_STATUS_UPDATED`, `USERS_SYNC`.
+`USER_STATUS_UPDATED`, `USERS_SYNC`, `USER_ONLINE`, `USER_IDLE`,
+`USER_OFFLINE`.
 
 ## Flow — status change
 
@@ -137,6 +138,80 @@ new pairing is confirmed.
 - `socialhome/routes/space_zones.py` — REST CRUD.
 - `socialhome/routes/spaces.py` —
   `PATCH /api/spaces/{id}/members/me/location-sharing` (§23.8.8).
+
+## Online status (session presence)
+
+Two presence signals coexist and stay independent: the **physical**
+state above (`home`/`away`/`zone`/`not_home`) tracks where the user
+*is*, and **session presence** below tracks whether the user has the
+app *open* on any device. A user can be `home + offline` (HA reports
+them at the house but the SH tab is closed) or `away + online`
+(commuting, browsing on a phone). The frontend renders the two cues
+side-by-side — never collapsed into a single field.
+
+Mechanics:
+
+- `WebSocketManager.register()` / `unregister()` track open WS
+  sessions per user (the manager doesn't know what they mean — that's
+  this layer's job).
+- `OnlineStatusService` watches first/last-session transitions and
+  publishes the four events:
+  - `UserCameOnline` — first session opened.
+  - `UserResumedActive` — was idle, became active again.
+  - `UserWentIdle` — every session has been silent ≥ 5 minutes.
+  - `UserWentOffline` — last session closed.
+- Activity is reset on **any** inbound WS frame (typing, ping, etc.)
+  — protocol-level heartbeats don't reach the message loop and
+  therefore don't update the timer.
+- Idle is computed across **all** sessions: a user with one active
+  tab + one idle tab is *online*, not *idle*.
+- `users.last_seen_at` is persisted on the *last* session closing,
+  debounced to one write per 30 s per user — so a flaky-Wi-Fi
+  reconnect storm doesn't turn into a write storm.
+
+WS frames (sit in the `user.*` namespace, deliberately *not* `presence.*`,
+so clients can't accidentally lump session presence and physical
+presence into the same handler):
+
+```json
+{ "type": "user.online" | "user.idle" | "user.offline",
+  "user_id": "u-anna",
+  "last_seen_at": "ISO-8601 | null" }
+```
+
+`last_seen_at` is non-null only on `user.offline`. The fan-out targets
+every other household member except the subject themselves
+(self-frame suppression — the user's own UI hydrates `is_online: true`
+from the `/api/presence` payload that loads on page mount).
+
+Federation: every transition fans out to every confirmed peer as a
+`USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE` event. Encrypted payload
+carries `{user_id, last_seen_at?}` (encryption-first per §25.8.21 —
+only `event_type` and routing fields ride in plaintext). Peers apply
+inbound events to an in-memory remote-state cache and republish a
+local `UserCameOnline` / `UserWentIdle` / `UserWentOffline` so
+`RealtimeService` fans the change to local viewers' WS sessions in
+the same render tick a household-local change would land. The cache
+is ephemeral on purpose — a peer restart re-emits the full set on
+their side, so we never need to persist remote online state.
+
+Implementation pointers:
+
+- `socialhome/services/online_status_service.py` — first/last-session
+  gate, idle scheduler, persistence debounce.
+- `socialhome/services/realtime_service.py` — `_on_user_came_online`,
+  `_on_user_resumed_active`, `_on_user_went_idle`,
+  `_on_user_went_offline` translate domain events to WS frames.
+- `socialhome/routes/ws.py` — `user_session_opened` /
+  `user_session_closed` / `touch` hooks on the WS message loop.
+- `socialhome/routes/presence.py` — `is_online` / `is_idle` /
+  `last_seen_at` ride on every `GET /api/presence` row.
+- `socialhome/routes/spaces.py` — same triple on every
+  `GET /api/spaces/{id}/members` row.
+- `client/src/components/Avatar.tsx` — `online` prop renders the
+  green / amber dot.
+- `client/src/store/presence.ts` — extends `PresenceEntry` and wires
+  the three new WS handlers.
 
 ## Spec references
 

@@ -17,6 +17,55 @@ const readMessageIds = signal<Set<string>>(new Set())
 const deliveredMessageIds = signal<Set<string>>(new Set())
 const memberCount = signal<number>(0)
 
+interface ThreadMember {
+  user_id: string
+  username: string
+  display_name: string
+  is_self: boolean
+  is_online: boolean
+  is_idle: boolean
+  last_seen_at: string | null
+}
+
+const threadMembers = signal<ThreadMember[]>([])
+/** WhatsApp-style reply target. When set, the composer shows a chip
+ *  with the parent message preview and the next send carries
+ *  ``reply_to_id``. Cleared after send or by the chip's "×" button. */
+const replyTo = signal<Message | null>(null)
+
+/** WhatsApp-style "Last seen 12 min ago" formatter — same shape as the
+ *  presence-page helper but inline so this page doesn't grow a util
+ *  module just for one consumer. */
+function humanizeAgo(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return null
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (sec < 60)      return 'just now'
+  if (sec < 3600)    return `${Math.floor(sec / 60)} min ago`
+  if (sec < 86400)   return `${Math.floor(sec / 3600)} h ago`
+  return `${Math.floor(sec / 86400)} d ago`
+}
+
+/** Build the WhatsApp-style status line for the thread header.
+ *  • 1:1 DM → peer's online state, or "last seen X" when offline.
+ *  • Group DM → "<n> online" when ≥ 1 peer is online; otherwise null
+ *    (group threads don't surface a per-peer last-seen line — too noisy). */
+function statusLine(members: ThreadMember[]): string | null {
+  const peers = members.filter(m => !m.is_self)
+  if (peers.length === 0) return null
+  if (peers.length === 1) {
+    const p = peers[0]
+    if (p.is_online && p.is_idle) return 'Idle'
+    if (p.is_online)              return 'Online'
+    const ago = humanizeAgo(p.last_seen_at)
+    return ago ? `Last seen ${ago}` : 'Offline'
+  }
+  const onlineCount = peers.filter(p => p.is_online).length
+  if (onlineCount === 0) return null
+  return `${onlineCount} online`
+}
+
 interface DeliveryState {
   message_id: string
   user_id: string
@@ -120,10 +169,17 @@ export default function DmThreadPage() {
         },
       ).catch(() => { gaps.value = [] })
     })
-    // Member count drives the call-button visibility.
-    api.get(`/api/conversations/${convId}`).then((c: { member_count?: number }) => {
-      memberCount.value = c?.member_count ?? 2
-    }).catch(() => { memberCount.value = 2 })
+    // Roster fetch — drives the call-button visibility (member_count) AND
+    // the WhatsApp-style "Online" / "Last seen 2 h ago" status line in the
+    // thread header. Live-patched below by the user.online/idle/offline
+    // WS frames so the header stays current without polling.
+    api.get(`/api/conversations/${convId}/members`).then((rows: ThreadMember[]) => {
+      threadMembers.value = rows
+      memberCount.value = rows.length || 2
+    }).catch(() => {
+      threadMembers.value = []
+      memberCount.value = 2
+    })
 
     const offRead = ws.on('dm.read', (evt) => {
       const data = evt.data as { conversation_id?: string; message_ids?: string[] }
@@ -151,7 +207,43 @@ export default function DmThreadPage() {
         }
       }
     })
-    return () => { offRead(); offNewMsg() }
+    // Live-patch the thread-member roster on session-presence frames so
+    // the header status line stays current.
+    const patchMember = (
+      user_id: string,
+      next: { is_online: boolean; is_idle: boolean; last_seen_at?: string | null },
+    ) => {
+      threadMembers.value = threadMembers.value.map(m =>
+        m.user_id === user_id
+          ? {
+              ...m,
+              is_online: next.is_online,
+              is_idle: next.is_idle,
+              ...(next.last_seen_at !== undefined ? { last_seen_at: next.last_seen_at } : {}),
+            }
+          : m,
+      )
+    }
+    const offUserOnline = ws.on('user.online', (e) => {
+      const d = e.data as { user_id?: string }
+      if (d.user_id) patchMember(d.user_id, { is_online: true, is_idle: false })
+    })
+    const offUserIdle = ws.on('user.idle', (e) => {
+      const d = e.data as { user_id?: string }
+      if (d.user_id) patchMember(d.user_id, { is_online: true, is_idle: true })
+    })
+    const offUserOffline = ws.on('user.offline', (e) => {
+      const d = e.data as { user_id?: string; last_seen_at?: string | null }
+      if (d.user_id) patchMember(d.user_id, {
+        is_online: false,
+        is_idle: false,
+        last_seen_at: d.last_seen_at ?? null,
+      })
+    })
+    return () => {
+      offRead(); offNewMsg()
+      offUserOnline(); offUserIdle(); offUserOffline()
+    }
   }, [convId])
 
   let typingTimer: ReturnType<typeof setTimeout> | null = null
@@ -167,9 +259,14 @@ export default function DmThreadPage() {
     const form = e.target as HTMLFormElement
     const content = new FormData(form).get('content') as string
     if (!content.trim()) return
+    const reply_to_id = replyTo.value?.id ?? null
     try {
-      await api.post(`/api/conversations/${convId}/messages`, { content })
+      await api.post(`/api/conversations/${convId}/messages`, {
+        content,
+        ...(reply_to_id ? { reply_to_id } : {}),
+      })
       form.reset()
+      replyTo.value = null
       const data = await api.get(`/api/conversations/${convId}/messages`)
       messages.value = data.reverse()
     } catch (err: unknown) {
@@ -178,6 +275,32 @@ export default function DmThreadPage() {
         'error',
       )
     }
+  }
+
+  /** Resolve sender display name from the roster — falls back to the raw
+   *  user_id (which the rest of the thread also surfaces today). */
+  const senderName = (user_id: string): string => {
+    const m = threadMembers.value.find(x => x.user_id === user_id)
+    return m?.display_name ?? m?.username ?? user_id
+  }
+
+  /** One-line preview of a message's content for the quoted-reply card.
+   *  Strips newlines and truncates to keep the bubble compact. */
+  const quotePreview = (m: Message): string => {
+    if (m.deleted) return '(message deleted)'
+    if (!m.content) return m.media_url ? '📎 Attachment' : ''
+    const flat = m.content.replace(/\s+/g, ' ').trim()
+    return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat
+  }
+
+  /** Scroll the original message into view + flash it briefly so the
+   *  reply quote is genuinely useful as a navigation handle. */
+  const scrollToMessage = (id: string) => {
+    const el = document.querySelector<HTMLElement>(`[data-msg-id="${id}"]`)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('sh-message--flash')
+    setTimeout(() => el.classList.remove('sh-message--flash'), 1200)
   }
 
   const startCall = async (callType: 'audio' | 'video') => {
@@ -194,9 +317,24 @@ export default function DmThreadPage() {
   if (loading.value) return <Spinner />
   const myUserId = currentUser.value?.user_id
 
+  const status = statusLine(threadMembers.value)
+  // Compact status modifier for the dot in the header: 'online' → green,
+  // 'idle' → amber, anything else → no dot.
+  const peers = threadMembers.value.filter(m => !m.is_self)
+  const headerDot: 'online' | 'idle' | null = peers.length === 1
+    ? (peers[0].is_online ? (peers[0].is_idle ? 'idle' : 'online') : null)
+    : (peers.some(p => p.is_online) ? 'online' : null)
+
   return (
     <div class="sh-thread">
       <div class="sh-thread-header">
+        <div class="sh-thread-header-status" aria-live="polite">
+          {headerDot && (
+            <span class={`sh-thread-header-dot sh-thread-header-dot--${headerDot}`}
+                  aria-hidden="true" />
+          )}
+          {status && <span class="sh-thread-header-status-line">{status}</span>}
+        </div>
         <CallButtons convId={convId} onStart={startCall} />
         <a class="sh-link" href={`/dms/${convId}/calls`}>History</a>
       </div>
@@ -217,12 +355,36 @@ export default function DmThreadPage() {
             return <CallEventRow key={m.id} m={m} onCallBack={startCall} />
           }
           const mine = m.sender_user_id === myUserId
+          // Look up the parent message for inline rendering of the
+          // quoted-reply card. Missing parents (loaded out of window or
+          // soft-deleted) fall through to a small placeholder.
+          const parent = m.reply_to_id
+            ? messages.value.find(x => x.id === m.reply_to_id)
+            : null
           return (
             <div
               key={m.id}
+              data-msg-id={m.id}
               class={`sh-message ${mine ? 'sh-message--mine' : ''} ${m.deleted ? 'sh-message--deleted' : ''}`}
             >
-              {!mine && <strong>{m.sender_user_id}</strong>}
+              {!mine && <strong>{senderName(m.sender_user_id)}</strong>}
+              {m.reply_to_id && (
+                <button
+                  type="button"
+                  class="sh-message-quote"
+                  onClick={() => parent && scrollToMessage(parent.id)}
+                  aria-label={parent
+                    ? `Reply to ${senderName(parent.sender_user_id)}: ${quotePreview(parent)}`
+                    : 'Reply to a message'}
+                >
+                  <span class="sh-message-quote-author">
+                    {parent ? senderName(parent.sender_user_id) : 'Unknown'}
+                  </span>
+                  <span class="sh-message-quote-body">
+                    {parent ? quotePreview(parent) : '(message unavailable)'}
+                  </span>
+                </button>
+              )}
               <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
                 {m.deleted ? '(message deleted)' : m.content}
               </p>
@@ -240,11 +402,40 @@ export default function DmThreadPage() {
                   />
                 )}
               </div>
+              {!m.deleted && (
+                <button
+                  type="button"
+                  class="sh-message-reply-btn"
+                  title="Reply"
+                  aria-label={`Reply to ${senderName(m.sender_user_id)}`}
+                  onClick={() => { replyTo.value = m }}
+                >
+                  ↩
+                </button>
+              )}
             </div>
           )
         })}
       </div>
       <TypingIndicator scope={convId} />
+      {replyTo.value && (
+        <div class="sh-composer-reply" role="status" aria-live="polite">
+          <div class="sh-composer-reply-body">
+            <span class="sh-composer-reply-author">
+              Replying to {senderName(replyTo.value.sender_user_id)}
+            </span>
+            <span class="sh-composer-reply-preview">
+              {quotePreview(replyTo.value)}
+            </span>
+          </div>
+          <button
+            type="button"
+            class="sh-composer-reply-clear"
+            aria-label="Cancel reply"
+            onClick={() => { replyTo.value = null }}
+          >×</button>
+        </div>
+      )}
       <form class="sh-composer" onSubmit={handleSend}>
         <input name="content" placeholder="Type a message..." autocomplete="off"
           onInput={handleInput} />

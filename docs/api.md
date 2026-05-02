@@ -324,9 +324,11 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST / DELETE | `/api/presence` | Own presence. |
+| GET / POST / DELETE | `/api/presence` | Own presence. `GET` rows now also carry session-presence fields `is_online`, `is_idle`, `last_seen_at` so the UI can render the green / amber dot without a separate fetch. |
 | POST | `/api/presence/location` | Location update (rate-limited 10/min). |
 | GET | `/api/spaces/{id}/presence` | Presence visible in this space. Carries GPS only — `zone_name` is stripped at the household boundary (§23.8.6). |
+| GET | `/api/spaces/{id}/members` | Roster for this space. Each row carries `is_online`, `is_idle`, `last_seen_at` alongside the member metadata so the SPA renders the same dot on space pages. |
+| GET | `/api/conversations/{id}/members` | Roster for one DM / group DM. Each row carries `user_id`, `username`, `display_name`, `is_self`, `is_online`, `is_idle`, `last_seen_at` so the thread header can render a WhatsApp-style "Online" / "Last seen 2 h ago" line without a follow-up fetch. |
 | GET / POST | `/api/spaces/{id}/zones` | List or create a per-space display zone (§23.8.7). `GET` open to space members; `POST` admin/owner only. Body: `{name, latitude, longitude, radius_m, color?}`. |
 | PATCH / DELETE | `/api/spaces/{id}/zones/{zone_id}` | Update or delete a per-space zone. Admin/owner only. Partial update; `color: null` clears, omitting fields leaves them. |
 | PATCH | `/api/spaces/{id}/members/me/location-sharing` | Member-self-service opt in or out of GPS sharing for this space (§23.8.8). Body: `{enabled: bool}`. Returns `{location_share_enabled: bool}`. |
@@ -457,7 +459,7 @@ Bearer auth (the integration holds the auto-provisioned token).
 
 | Path | Purpose |
 |---|---|
-| `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; client `{"type":"typing","conversation_id":"..."}`; server fans out `conversation.user_typing` (typing dots), `dm.message` (full Message object — appended without re-fetch), `dm.conversation.created` (inbox refresh trigger), `dm.read`. |
+| `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; client `{"type":"typing","conversation_id":"..."}`. Server fans out `presence.updated` (physical state), `conversation.user_typing` (typing dots), `dm.message` (full Message object — appended without re-fetch), `dm.conversation.created` (inbox refresh trigger), `dm.read`, and `user.online` / `user.idle` / `user.offline` (session-presence dot — payload `{user_id, last_seen_at}`; the subject is excluded from the fan-out). |
 | `GET /api/stt/stream` | Streaming speech-to-text (binary audio frames → `{"type":"final","text":"..."}`). |
 
 > Speech-to-text and AI data generation are HA-adapter-only in v1 — the

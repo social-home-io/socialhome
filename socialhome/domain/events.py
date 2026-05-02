@@ -455,6 +455,52 @@ class UserDeprovisioned(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+# ─── Online status (session presence) ─────────────────────────────────────
+#
+# Orthogonal to physical :class:`PresenceUpdated`: a user can be ``home``
+# but offline (no WS session) or ``away`` but online (using the app on the
+# go). These events are local-only — never federated — and drive the green
+# / amber dot on member avatars.
+
+
+@dataclass(slots=True, frozen=True)
+class UserCameOnline(DomainEvent):
+    """First WS session for ``user_id`` opened (was offline → online)."""
+
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class UserWentIdle(DomainEvent):
+    """Every open session has been idle ≥ ``IDLE_AFTER`` (online → idle)."""
+
+    user_id: str
+    last_active_at: datetime
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class UserResumedActive(DomainEvent):
+    """At least one session became active again (idle → online)."""
+
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class UserWentOffline(DomainEvent):
+    """Last WS session for ``user_id`` closed (online/idle → offline).
+
+    ``last_seen_at`` is the timestamp persisted to ``users.last_seen_at``
+    so the UI can render "Last seen 2 h ago" after a server restart.
+    """
+
+    user_id: str
+    last_seen_at: datetime
+    occurred_at: datetime = field(default_factory=_now)
+
+
 @dataclass(slots=True, frozen=True)
 class UserProfileUpdated(DomainEvent):
     """Display-name / bio / picture edit on a local user (§23 profile).

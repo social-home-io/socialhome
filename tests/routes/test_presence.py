@@ -18,6 +18,22 @@ async def test_list_presence(client):
     assert isinstance(body, list)
 
 
+async def test_list_presence_includes_online_status_fields(client):
+    """Each row must carry the session-presence triple so the SPA can
+    render the green/amber dot without an extra round-trip."""
+    r = await client.get("/api/presence", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    if not body:  # household with no presence rows yet — still a valid response
+        return
+    row = body[0]
+    assert "is_online" in row
+    assert "is_idle" in row
+    assert "last_seen_at" in row
+    assert isinstance(row["is_online"], bool)
+    assert isinstance(row["is_idle"], bool)
+
+
 async def test_update_location_spec_compliant_payload_returns_204(client):
     """Spec §23.8.5: POST with latitude/longitude/accuracy_m/zone_name → 204.
 

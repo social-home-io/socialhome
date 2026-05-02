@@ -16,6 +16,7 @@ from ..app_keys import (
     federation_repo_key,
     media_signer_key,
     notification_repo_key,
+    online_status_service_key,
     presence_service_key,
     profile_picture_repo_key,
     space_bot_repo_key,
@@ -199,6 +200,9 @@ def _member_to_dict(
     *,
     display_name: str | None = None,
     personal_alias: str | None = None,
+    is_online: bool = False,
+    is_idle: bool = False,
+    last_seen_at: str | None = None,
 ) -> dict:
     picture_url = (
         f"/api/spaces/{space_id}/members/{m.user_id}/picture?v={m.picture_hash}"
@@ -217,6 +221,10 @@ def _member_to_dict(
         "personal_alias": personal_alias,
         "picture_hash": m.picture_hash,
         "picture_url": picture_url,
+        # Session-presence indicators (orthogonal to physical presence).
+        "is_online": is_online,
+        "is_idle": is_idle,
+        "last_seen_at": last_seen_at,
     }
 
 
@@ -227,6 +235,9 @@ def _member_to_dict_signed(
     *,
     display_name: str | None = None,
     personal_alias: str | None = None,
+    is_online: bool = False,
+    is_idle: bool = False,
+    last_seen_at: str | None = None,
 ) -> dict:
     """:func:`_member_to_dict` + sign ``picture_url`` for the SPA."""
     payload = _member_to_dict(
@@ -234,6 +245,9 @@ def _member_to_dict_signed(
         space_id,
         display_name=display_name,
         personal_alias=personal_alias,
+        is_online=is_online,
+        is_idle=is_idle,
+        last_seen_at=last_seen_at,
     )
     signer = request.app.get(media_signer_key)
     if signer is not None:
@@ -250,11 +264,16 @@ class SpaceMembersView(BaseView):
         # Resolve global display_name + viewer's personal alias for each
         # member in two bulk calls (no N+1).
         user_repo = self.svc(user_repo_key)
-        display_names: dict[str, str] = {}
+        member_ids = {m.user_id for m in members}
+        local_users = await user_repo.list_by_ids(member_ids) if member_ids else []
+        display_names: dict[str, str] = {u.user_id: u.display_name for u in local_users}
+        last_seen_persisted: dict[str, str | None] = {
+            u.user_id: u.last_seen_at for u in local_users
+        }
+        # Remote members fall back to one-by-one — list_by_ids only
+        # reads ``users``, not ``remote_users``.
         for m in members:
-            local = await user_repo.get_by_user_id(m.user_id)
-            if local is not None:
-                display_names[m.user_id] = local.display_name
+            if m.user_id in display_names:
                 continue
             remote = await user_repo.get_remote(m.user_id)
             if remote is not None:
@@ -265,6 +284,10 @@ class SpaceMembersView(BaseView):
             viewer_id,
             [m.user_id for m in members],
         )
+        # Session-presence snapshot — single call, applied per-row below.
+        online_svc = self.request.app.get(online_status_service_key)
+        online_ids = online_svc.online_user_ids() if online_svc else set()
+        idle_ids = online_svc.idle_user_ids() if online_svc else set()
         return web.json_response(
             [
                 _member_to_dict_signed(
@@ -273,6 +296,15 @@ class SpaceMembersView(BaseView):
                     space_id,
                     display_name=display_names.get(m.user_id),
                     personal_alias=aliases.get(m.user_id),
+                    is_online=m.user_id in online_ids,
+                    is_idle=m.user_id in idle_ids,
+                    last_seen_at=(
+                        online_svc.last_seen(m.user_id).isoformat()
+                        if online_svc
+                        and m.user_id in online_ids
+                        and online_svc.last_seen(m.user_id) is not None
+                        else last_seen_persisted.get(m.user_id)
+                    ),
                 )
                 for m in members
             ],

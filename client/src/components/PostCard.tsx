@@ -5,6 +5,7 @@
 import { useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Avatar } from './Avatar'
+import { OnlinePill } from './OnlinePill'
 import { openLightbox } from './ImageLightbox'
 import { BazaarPostBody } from './BazaarPostBody'
 import { BotAvatar } from './BotAvatar'
@@ -40,9 +41,14 @@ interface PostCardProps {
   onDelete?: () => void
   onEdit?: () => void
   showSpaceBadge?: string
+  /** Render context. ``'household'`` (default) shows the author's
+   *  zone alongside their online pill — HA zones are household-private.
+   *  ``'space'`` suppresses zone names so they never leak across the
+   *  household boundary. */
+  surface?: 'household' | 'space'
 }
 
-export function PostCard({ post, onReact, onComment, onDelete, onEdit, showSpaceBadge }: PostCardProps) {
+export function PostCard({ post, onReact, onComment, onDelete, onEdit, showSpaceBadge, surface }: PostCardProps) {
   const timeAgo = formatRelative(post.created_at)
 
   if (post.pinned) {
@@ -51,7 +57,7 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, showSpace
         <div class="sh-post-pin-badge">📌 Pinned</div>
         <PostContent post={post} timeAgo={timeAgo} onReact={onReact}
           onComment={onComment} onDelete={onDelete} onEdit={onEdit}
-          showSpaceBadge={showSpaceBadge} />
+          showSpaceBadge={showSpaceBadge} surface={surface} />
       </article>
     )
   }
@@ -60,12 +66,12 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, showSpace
     <article class={`sh-post ${post.content === null ? 'sh-post--deleted' : ''}`}>
       <PostContent post={post} timeAgo={timeAgo} onReact={onReact}
         onComment={onComment} onDelete={onDelete} onEdit={onEdit}
-        showSpaceBadge={showSpaceBadge} />
+        showSpaceBadge={showSpaceBadge} surface={surface} />
     </article>
   )
 }
 
-function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, showSpaceBadge }: PostCardProps & { timeAgo: string }) {
+function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, showSpaceBadge, surface }: PostCardProps & { timeAgo: string }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const closeMenu = () => setMenuOpen(false)
 
@@ -102,6 +108,16 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, show
         )}
         <div class="sh-post-meta">
           <span class="sh-post-author">{authorName}</span>
+          {/* Online-status pill — bots and system posts skip it. Zone
+              name appears only on the household feed (showZone=true);
+              space feeds suppress HA zones via showZone=false on the
+              caller surface. */}
+          {!isBotPost(post) && (
+            <OnlinePill
+              user_id={post.author}
+              showZone={surface !== 'space' && !showSpaceBadge}
+            />
+          )}
           {botAttribution && (
             <span class="sh-post-bot-attribution">{botAttribution}</span>
           )}

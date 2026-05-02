@@ -38,7 +38,11 @@ from ..domain.events import (
     PairingConfirmed,
     PairingIntroReceived,
     SpaceMemberProfileUpdated,
+    UserCameOnline,
     UserProfileUpdated,
+    UserResumedActive,
+    UserWentIdle,
+    UserWentOffline,
     CpBlockAdded,
     CpBlockRemoved,
     CpGuardianAdded,
@@ -235,6 +239,12 @@ class RealtimeService:
         self._bus.subscribe(CalendarEventDeleted, self._on_calendar_deleted)
         self._bus.subscribe(UserStatusChanged, self._on_user_status)
         self._bus.subscribe(PresenceUpdated, self._on_presence_updated)
+        # Online status (session presence) — orthogonal to physical
+        # ``presence.updated``. Drives the green/amber dot on avatars.
+        self._bus.subscribe(UserCameOnline, self._on_user_came_online)
+        self._bus.subscribe(UserResumedActive, self._on_user_resumed_active)
+        self._bus.subscribe(UserWentIdle, self._on_user_went_idle)
+        self._bus.subscribe(UserWentOffline, self._on_user_went_offline)
         self._bus.subscribe(ShoppingItemAdded, self._on_shopping_added)
         self._bus.subscribe(ShoppingItemToggled, self._on_shopping_toggled)
         self._bus.subscribe(ShoppingItemRemoved, self._on_shopping_removed)
@@ -1153,6 +1163,60 @@ class RealtimeService:
                 "longitude": event.longitude,
             }
         )
+
+    # ─── Online status (session presence) ─────────────────────────────────
+    #
+    # Frame names sit in the ``user.*`` namespace, not ``presence.*``, to
+    # keep them visibly distinct from physical presence — the two signals
+    # are orthogonal and clients should react to them independently.
+
+    async def _on_user_came_online(self, event: UserCameOnline) -> None:
+        await self._broadcast_user_status(
+            user_id=event.user_id,
+            frame_type="user.online",
+            last_seen_at=None,
+        )
+
+    async def _on_user_resumed_active(self, event: UserResumedActive) -> None:
+        await self._broadcast_user_status(
+            user_id=event.user_id,
+            frame_type="user.online",
+            last_seen_at=None,
+        )
+
+    async def _on_user_went_idle(self, event: UserWentIdle) -> None:
+        await self._broadcast_user_status(
+            user_id=event.user_id,
+            frame_type="user.idle",
+            last_seen_at=event.last_active_at.isoformat(),
+        )
+
+    async def _on_user_went_offline(self, event: UserWentOffline) -> None:
+        await self._broadcast_user_status(
+            user_id=event.user_id,
+            frame_type="user.offline",
+            last_seen_at=event.last_seen_at.isoformat(),
+        )
+
+    async def _broadcast_user_status(
+        self,
+        *,
+        user_id: str,
+        frame_type: str,
+        last_seen_at: str | None,
+    ) -> None:
+        """Fan a session-presence frame to every household member except
+        the subject themselves (self-frame suppression — the user's own
+        UI hydrates from ``/api/presence`` on mount)."""
+        payload = {
+            "type": frame_type,
+            "user_id": user_id,
+            "last_seen_at": last_seen_at,
+        }
+        users = await self._user_repo.list_active()
+        recipients = [u.user_id for u in users if u.user_id != user_id]
+        if recipients:
+            await self._ws.broadcast_to_users(recipients, payload)
 
     # ─── Notifications (§21) ─────────────────────────────────────────────
 

@@ -29,7 +29,7 @@ anything below contradicts the file, the file wins.
 |---|---|
 | `instance_identity` | Single-row table (`id='self'`) with the HFS's long-term Ed25519 keypair, optional ML-DSA-65 PQ key, household lat/lon, and routing secret. |
 | `instance_config` | Generic key/value store for instance-level settings the platform adapter or services need to persist. |
-| `users` | Local household users — username, display name, profile picture hash, admin flag, theme, status, locale, child-protection fields, soft-delete state, and `source` (`manual` vs `ha`). |
+| `users` | Local household users — username, display name, profile picture hash, admin flag, theme, status, locale, child-protection fields, soft-delete state, `last_seen_at` (most recent WS disconnect — drives "Last seen X" rendering after a server restart, see `docs/protocol/presence.md` § Online status), and `source` (`manual` vs `ha`). |
 | `user_profile_pictures` | WebP bytes for household-level profile pictures, keyed by `user_id`. Separate table so `SELECT * FROM users` stays cheap. |
 | `remote_users` | Users on paired remote instances. Carries display name, alias, picture hash, public key, `deprovisioned_at`, and `synced_at`. Same `user_id` namespace as `users`. |
 | `api_tokens` | Per-user API tokens (HA mode and integrations). Stores `token_hash` only — the plaintext is shown to the user once. |

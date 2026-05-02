@@ -174,6 +174,12 @@ class FederationEventType(str, enum.Enum):
 
     # ── Presence ──
     PRESENCE_UPDATED = "presence_updated"
+    # Session presence (online/idle/offline) — orthogonal to physical
+    # PRESENCE_UPDATED. Fans out to every confirmed peer so cross-
+    # instance household members can show the green/amber dot too.
+    USER_ONLINE = "user_online"
+    USER_IDLE = "user_idle"
+    USER_OFFLINE = "user_offline"
 
     # ── WebRTC / calls ──
     CALL_OFFER = "call_offer"

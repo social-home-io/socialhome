@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS users (
     deleted_at                 TEXT,
     grace_until                TEXT,
     created_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Last time the user had an active WS session — populated by
+    -- OnlineStatusService on disconnect so "Last seen 2 h ago" survives
+    -- a server restart. NULL means "never seen" (new accounts).
+    last_seen_at               TEXT,
     -- Where the row came from: manually provisioned vs synced from the
     -- Home Assistant person.* registry. Admins manage 'ha' rows via the
     -- HA Users admin panel; 'manual' rows come from standalone mode or
