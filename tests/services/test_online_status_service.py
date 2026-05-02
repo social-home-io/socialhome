@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from socialhome.domain.events import (
     UserCameOnline,
     UserResumedActive,

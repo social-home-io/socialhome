@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
+    DomainEvent,
     UserCameOnline,
     UserResumedActive,
     UserWentIdle,
@@ -336,7 +337,7 @@ class OnlineStatusService:
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("set_last_seen failed for %s: %s", user_id, exc)
 
-    async def _publish(self, event: object) -> None:
+    async def _publish(self, event: DomainEvent) -> None:
         if self._bus is None:
             return
         try:
