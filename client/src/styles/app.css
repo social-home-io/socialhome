@@ -918,6 +918,203 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-modal-close:hover { color: var(--sh-text); }
 
+/* ───── Comment overlay (Facebook-style) ───────────────────────────────
+ *
+ * A focused sheet that opens when a viewer taps "Comment" on a post.
+ * Two layouts:
+ *   • Desktop (≥641 px): centred dialog, 640 px wide, max 82 vh tall.
+ *     Same backdrop blur the regular modal uses.
+ *   • Mobile (≤640 px): slides up from the bottom, fills 92 vh, drag-
+ *     handle at the top so it reads as a dismissible sheet. The
+ *     scrollable comment region pushes against the sticky composer at
+ *     the bottom — keyboard, composer, and most-recent comments all
+ *     stay in thumb-reach.
+ *
+ * Composer stickiness is pure CSS — the existing CommentThread emits a
+ * ``.sh-comment-new`` row at the end of its DOM tree; the overlay
+ * scopes it with ``.sh-comment-overlay-body`` and pins it to the
+ * bottom of the scroll container. */
+.sh-comment-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--sh-modal-backdrop);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--sh-z-modal, 100);
+  animation: sh-fade-in 160ms ease;
+}
+@keyframes sh-fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+.sh-comment-overlay {
+  /* Desktop card: centred paper, washi-tape accent, pinned-wall lift. */
+  width: min(640px, 100%);
+  max-height: 82vh;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-pinned);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  outline: none;
+  position: relative;
+  animation: sh-card-rise 200ms var(--sh-ease-spring);
+}
+@keyframes sh-card-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+.sh-comment-overlay::before {
+  /* Decorative tape strip — same washi-tape language the feed cards
+   * use, so the overlay reads as a continuation of the wall. */
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%) rotate(-1.5deg);
+  width: 96px;
+  height: 18px;
+  background: var(--sh-tape-1, color-mix(in srgb, var(--sh-primary) 35%, transparent));
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  pointer-events: none;
+}
+
+.sh-comment-overlay-handle {
+  /* Visible only on mobile — sized to be a comfortable thumb target. */
+  display: none;
+  border: none;
+  background: transparent;
+  width: 100%;
+  padding: 10px 0 6px;
+  cursor: pointer;
+}
+.sh-comment-overlay-handle::after {
+  content: '';
+  display: block;
+  width: 40px;
+  height: 4px;
+  margin: 0 auto;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sh-text-muted) 50%, transparent);
+}
+
+.sh-comment-overlay-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-md);
+  border-bottom: 1px solid var(--sh-border);
+  flex-shrink: 0;
+}
+.sh-comment-overlay-header-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sh-comment-overlay-header-name {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-comment-overlay-header-name strong { color: var(--sh-text); font-weight: 600; }
+.sh-comment-overlay-header-preview {
+  margin: 0;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sh-comment-overlay-close {
+  border: none;
+  background: transparent;
+  font-size: 1.5rem;
+  color: var(--sh-text-muted);
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sh-comment-overlay-close:hover {
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text);
+}
+
+.sh-comment-overlay-count {
+  padding: var(--sh-space-xs) var(--sh-space-md);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  color: var(--sh-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px dashed var(--sh-border);
+  flex-shrink: 0;
+}
+
+.sh-comment-overlay-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--sh-space-md);
+  /* Pin the trailing composer to the bottom of the scrollable region.
+   * The CommentThread emits .sh-comment-new last; we keep it in the
+   * normal flow but let it stick — keyboards on mobile + small
+   * comment lists both work without extra layout machinery. */
+  display: flex;
+  flex-direction: column;
+}
+.sh-comment-overlay-body .sh-comments {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.sh-comment-overlay-body .sh-comment-new {
+  position: sticky;
+  bottom: 0;
+  background: var(--sh-bg);
+  margin: 0 calc(-1 * var(--sh-space-md));
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-top: 1px solid var(--sh-border);
+  z-index: 1;
+}
+
+.sh-comment-overlay-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: var(--sh-space-xl) 0;
+}
+
+@media (max-width: 640px) {
+  .sh-comment-overlay-backdrop {
+    align-items: flex-end;       /* dock to the bottom of the viewport */
+  }
+  .sh-comment-overlay {
+    width: 100%;
+    max-width: 100%;
+    height: 92vh;
+    max-height: 92vh;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-top-left-radius: var(--sh-radius-lg);
+    border-top-right-radius: var(--sh-radius-lg);
+    animation: sh-sheet-up 220ms var(--sh-ease-spring);
+  }
+  .sh-comment-overlay::before { display: none; }
+  .sh-comment-overlay-handle { display: block; }
+}
+@keyframes sh-sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
 /* Toasts */
 .sh-toast-container {
   position: fixed;
