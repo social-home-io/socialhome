@@ -2,6 +2,7 @@ import { useEffect } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { ws } from '@/ws'
 import type { Conversation } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
@@ -11,13 +12,20 @@ import { Avatar } from '@/components/Avatar'
 const conversations = signal<Conversation[]>([])
 const loading = signal(true)
 
+const reload = () =>
+  api.get('/api/conversations').then(data => {
+    conversations.value = data
+  }).catch(() => { /* noop — keep current list on transient failures */ })
+
 export default function DmInboxPage() {
   useTitle('Messages')
   useEffect(() => {
-    api.get('/api/conversations').then(data => {
-      conversations.value = data
-      loading.value = false
-    }).catch(() => { loading.value = false })
+    void reload().finally(() => { loading.value = false })
+    // Refresh on any DM frame the server fans out — new conversations
+    // and new messages both bump ``last_message_at`` ordering.
+    const offMsg  = ws.on('dm.message',              () => { void reload() })
+    const offConv = ws.on('dm.conversation.created', () => { void reload() })
+    return () => { offMsg(); offConv() }
   }, [])
 
   if (loading.value) return <Spinner />

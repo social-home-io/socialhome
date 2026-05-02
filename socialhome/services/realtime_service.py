@@ -46,6 +46,7 @@ from ..domain.events import (
     CpProtectionDisabled,
     CpProtectionEnabled,
     CpSpaceAgeGateChanged,
+    DmConversationCreated,
     DmMessageCreated,
     HouseholdConfigChanged,
     NotificationCreated,
@@ -273,6 +274,10 @@ class RealtimeService:
             self._on_bazaar_bid_withdrawn,
         )
         self._bus.subscribe(DmMessageCreated, self._on_dm_message_created)
+        self._bus.subscribe(
+            DmConversationCreated,
+            self._on_dm_conversation_created,
+        )
         self._bus.subscribe(
             HouseholdConfigChanged,
             self._on_household_config_changed,
@@ -1281,17 +1286,56 @@ class RealtimeService:
         §25.3: content is included on the in-process bus and intra-device
         WS (trusted transport). Push notifications separately apply the
         title-only redaction rule via :class:`NotificationService`.
+
+        The frame ships a fully-formed ``message`` object (matching the
+        REST :py:meth:`/api/conversations/{id}/messages` shape) so the
+        client can append it directly to the thread without a follow-up
+        fetch — the sender, recipient *and* every other open session land
+        on the same row in the same render tick.
         """
         payload = {
             "type": "dm.message",
             "conversation_id": event.conversation_id,
-            "message_id": event.message_id,
-            "sender_user_id": event.sender_user_id,
             "sender_display": event.sender_display_name,
-            "content": event.content,
-            "occurred_at": event.occurred_at.isoformat(),
+            "message": {
+                "id": event.message_id,
+                "sender_user_id": event.sender_user_id,
+                "content": event.content,
+                "type": event.message_type,
+                "media_url": event.media_url,
+                "reply_to_id": event.reply_to_id,
+                "deleted": False,
+                "created_at": event.occurred_at.isoformat(),
+                "edited_at": None,
+            },
         }
-        for user_id in event.recipient_user_ids:
+        # Sender's own sessions get the frame too — open thread tabs
+        # show the sent message without the round-trip GET that
+        # ``handleSend`` used to do.
+        seen: set[str] = set()
+        for user_id in (event.sender_user_id, *event.recipient_user_ids):
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            await self._ws.broadcast_to_user(user_id, payload)
+
+    async def _on_dm_conversation_created(
+        self,
+        event: DmConversationCreated,
+    ) -> None:
+        """Tell every member's open inbox to refresh.
+
+        The frame stays minimal — the inbox does a fresh GET so
+        ordering, last-message stamps, and badge counts come from a
+        single source of truth (the REST list endpoint).
+        """
+        payload = {
+            "type": "dm.conversation.created",
+            "conversation_id": event.conversation_id,
+            "conversation_type": event.conversation_type,
+            "name": event.name,
+        }
+        for user_id in event.member_user_ids:
             await self._ws.broadcast_to_user(user_id, payload)
 
 
