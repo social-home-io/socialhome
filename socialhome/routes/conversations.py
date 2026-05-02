@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import dm_service_key, media_signer_key
+from ..app_keys import (
+    conversation_repo_key,
+    dm_service_key,
+    media_signer_key,
+    online_status_service_key,
+    user_repo_key,
+)
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import sanitise_for_api
 from .base import BaseView
@@ -111,6 +117,52 @@ class ConversationMessageView(BaseView):
             reply_to_id=body.get("reply_to_id"),
         )
         return web.json_response({"id": msg.id}, status=201)
+
+
+class ConversationMembersView(BaseView):
+    """``GET /api/conversations/{id}/members`` — roster for one DM.
+
+    Each row carries ``user_id``, ``username``, ``display_name``,
+    plus the same session-presence triple as ``GET /api/presence``
+    (``is_online`` / ``is_idle`` / ``last_seen_at``) so the DM thread
+    header can render a WhatsApp-style "Online" / "Last seen 2 h ago"
+    status without a follow-up fetch.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        conv_id = self.match("id")
+        repo = self.svc(conversation_repo_key)
+        members = await repo.list_members(conv_id)
+        # Member rows hold ``username``; the user_repo lookup gives us
+        # display_name + user_id (and the persisted last_seen_at fallback
+        # for offline users).
+        user_repo = self.svc(user_repo_key)
+        online_svc = self.request.app.get(online_status_service_key)
+        rows: list[dict] = []
+        for m in members:
+            u = await user_repo.get(m.username)
+            if u is None:
+                continue
+            is_online = bool(online_svc and online_svc.is_online(u.user_id))
+            is_idle = bool(online_svc and online_svc.is_idle(u.user_id))
+            if is_online and online_svc is not None:
+                last_dt = online_svc.last_seen(u.user_id)
+                last_seen = last_dt.isoformat() if last_dt is not None else None
+            else:
+                last_seen = u.last_seen_at
+            rows.append(
+                {
+                    "user_id": u.user_id,
+                    "username": u.username,
+                    "display_name": u.display_name,
+                    "is_self": ctx is not None and ctx.user_id == u.user_id,
+                    "is_online": is_online,
+                    "is_idle": is_idle,
+                    "last_seen_at": last_seen,
+                }
+            )
+        return self._json(rows)
 
 
 class ConversationReadView(BaseView):

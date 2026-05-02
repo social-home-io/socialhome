@@ -2344,6 +2344,35 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-thread-call-buttons { display: flex; gap: var(--sh-space-xs); }
 
+/* Online-status line in the DM thread header — WhatsApp-style. Sits
+ * to the left of the call buttons; small dot + muted label. The line
+ * goes blank entirely when a 1:1 peer never had a session and we have
+ * no last_seen_at to show — better than rendering "Offline" on every
+ * brand-new conversation. */
+.sh-thread-header-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  flex: 1;
+  min-width: 0;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-thread-header-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--sh-bg);
+}
+.sh-thread-header-dot--online { background: #22c55e; }
+.sh-thread-header-dot--idle   { background: #fbbf24; }
+.sh-thread-header-status-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* §12.5 missing-message banner in the DM thread. */
 .sh-dm-gap-banner {
   display: flex;
