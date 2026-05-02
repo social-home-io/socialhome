@@ -458,7 +458,7 @@ Bearer auth (the integration holds the auto-provisioned token).
 
 | Path | Purpose |
 |---|---|
-| `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; client `{"type":"typing","conversation_id":"..."}`. Server fans out `presence.updated` (physical state), `user.online` / `user.idle` / `user.offline` (session-presence dot — payload `{user_id, last_seen_at}`; the subject is excluded from the fan-out), and the DM frames documented in `docs/protocol/dm.md`. |
+| `GET /api/ws` | Realtime event stream — posts, comments, presence, typing, calls, notifications. Auth via `Authorization: Bearer` or `?token=`. Frames: `"ping"` → `"pong"`; client `{"type":"typing","conversation_id":"..."}`. Server fans out `presence.updated` (physical state), `conversation.user_typing` (typing dots), `dm.message` (full Message object — appended without re-fetch), `dm.conversation.created` (inbox refresh trigger), `dm.read`, and `user.online` / `user.idle` / `user.offline` (session-presence dot — payload `{user_id, last_seen_at}`; the subject is excluded from the fan-out). |
 | `GET /api/stt/stream` | Streaming speech-to-text (binary audio frames → `{"type":"final","text":"..."}`). |
 
 > Speech-to-text and AI data generation are HA-adapter-only in v1 — the

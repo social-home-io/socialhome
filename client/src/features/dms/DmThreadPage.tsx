@@ -125,12 +125,6 @@ export default function DmThreadPage() {
       memberCount.value = c?.member_count ?? 2
     }).catch(() => { memberCount.value = 2 })
 
-    const offTyping = ws.on('dm.typing', (evt) => {
-      const data = evt.data as { conversation_id?: string; user_id?: string }
-      if (data.conversation_id === convId) {
-        ws.send('typing', { user_id: data.user_id })
-      }
-    })
     const offRead = ws.on('dm.read', (evt) => {
       const data = evt.data as { conversation_id?: string; message_ids?: string[] }
       if (data.conversation_id === convId && data.message_ids) {
@@ -157,7 +151,7 @@ export default function DmThreadPage() {
         }
       }
     })
-    return () => { offTyping(); offRead(); offNewMsg() }
+    return () => { offRead(); offNewMsg() }
   }, [convId])
 
   let typingTimer: ReturnType<typeof setTimeout> | null = null

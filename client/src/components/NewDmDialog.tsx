@@ -1,7 +1,11 @@
 /**
  * NewDmDialog — start a new DM conversation (§23.47b).
+ *
+ * On successful create, navigates straight into the new thread —
+ * "create" and "open" should feel like one action, not two.
  */
 import { signal, computed } from '@preact/signals'
+import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
 import { Modal } from './Modal'
@@ -28,6 +32,7 @@ export function openNewDm() {
 }
 
 export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => void }) {
+  const location = useLocation()
   const handleCreate = async () => {
     if (!selected.value || loading.value) return
     loading.value = true
@@ -35,7 +40,11 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
       const conv = await api.post('/api/conversations/dm', { username: selected.value })
       showToast('Conversation started', 'success')
       open.value = false
-      onCreated?.(conv.id)
+      if (onCreated) {
+        onCreated(conv.id)
+      } else {
+        location.route(`/dms/${conv.id}`)
+      }
     } catch (e: any) {
       showToast(e.message || 'Failed to start conversation', 'error')
     } finally {

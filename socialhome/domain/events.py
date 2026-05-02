@@ -998,6 +998,30 @@ class DmMessageCreated(DomainEvent):
     sender_display_name: str
     recipient_user_ids: tuple[str, ...]
     content: str = ""
+    message_type: str = "text"
+    media_url: str | None = None
+    reply_to_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class DmConversationCreated(DomainEvent):
+    """A new DM / group DM was created.
+
+    Drives WS fan-out so every participant's open inbox tab refreshes
+    immediately — without it, a brand-new DM stays invisible to the
+    recipient until they reload the page.
+
+    ``member_user_ids`` covers everyone, *including* the creator: their
+    other open sessions need the frame too (mobile + desktop on the
+    same account is a routine pattern in the household OS).
+    """
+
+    conversation_id: str
+    conversation_type: str  # "dm" | "group_dm"
+    name: str | None
+    creator_user_id: str
+    member_user_ids: tuple[str, ...]
     occurred_at: datetime = field(default_factory=_now)
 
 

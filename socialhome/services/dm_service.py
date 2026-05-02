@@ -30,7 +30,7 @@ from ..domain.conversation import (
     ConversationType,
     MESSAGE_TYPES,
 )
-from ..domain.events import DmMessageCreated
+from ..domain.events import DmConversationCreated, DmMessageCreated
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
@@ -137,6 +137,11 @@ class DmService:
                 conversation_id=conv.id, username=other.username, joined_at=now
             )
         )
+        await self._publish_conversation_created(
+            conv,
+            creator_user_id=creator.user_id,
+            member_usernames=(creator.username, other.username),
+        )
         return conv
 
     async def create_group_dm(
@@ -168,7 +173,45 @@ class DmService:
                     conversation_id=conv.id, username=uname, joined_at=now
                 )
             )
+        await self._publish_conversation_created(
+            conv,
+            creator_user_id=creator.user_id,
+            member_usernames=tuple(sorted(all_names)),
+        )
         return conv
+
+    async def _publish_conversation_created(
+        self,
+        conv: Conversation,
+        *,
+        creator_user_id: str,
+        member_usernames: tuple[str, ...],
+    ) -> None:
+        """Emit ``DmConversationCreated`` for the WS fan-out path.
+
+        Resolves usernames → user_ids inline (the realtime service keys
+        WS sessions on user_id, not username). Failures during lookup
+        skip the missing member rather than blocking conversation
+        creation — the recipient will still see the new DM on their
+        next page load.
+        """
+        member_ids: list[str] = []
+        for uname in member_usernames:
+            try:
+                u = await self._users.get(uname)
+            except Exception:  # pragma: no cover - defensive
+                u = None
+            if u is not None:
+                member_ids.append(u.user_id)
+        await self._bus.publish(
+            DmConversationCreated(
+                conversation_id=conv.id,
+                conversation_type=conv.type.value,
+                name=conv.name,
+                creator_user_id=creator_user_id,
+                member_user_ids=tuple(member_ids),
+            )
+        )
 
     async def add_group_member(
         self,
@@ -254,6 +297,10 @@ class DmService:
                 sender_display_name=sender.display_name,
                 recipient_user_ids=tuple(recipients),
                 content=content,
+                message_type=type,
+                media_url=media_url,
+                reply_to_id=reply_to_id,
+                occurred_at=msg.created_at,
             )
         )
         # Stamp a monotonic sender_seq on the envelope when the
