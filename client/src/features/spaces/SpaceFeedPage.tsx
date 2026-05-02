@@ -11,7 +11,7 @@ import {
   advanceDate, dateRangeForMode, formatRangeHeading, groupEventsByDay,
   type CalendarViewMode,
 } from '@/utils/calendar'
-import type { Comment, FeedPost, CalendarEvent } from '@/types'
+import type { FeedPost, CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { JoinRequestList } from '@/components/JoinRequestList'
@@ -22,7 +22,7 @@ import { Gallery } from '@/components/Gallery'
 import { Button } from '@/components/Button'
 import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
-import { CommentThread } from '@/components/CommentThread'
+import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { SpaceTasksTab, resetSpaceTasks } from './SpaceTasksTab'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
@@ -56,7 +56,6 @@ const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<
   'owner' | 'admin' | 'member' | 'subscriber' | undefined
 >(undefined)
-const expandedComments = signal<Record<string, Comment[]>>({})
 const spaceDetail = signal<SpaceDetail | null>(null)
 const memberCount = signal<number | null>(null)
 
@@ -126,7 +125,6 @@ export default function SpaceFeedPage() {
     activeTab.value = 'feed'
     loading.value = true
     viewerRole.value = undefined
-    expandedComments.value = {}
     spaceDetail.value = null
     memberCount.value = null
     resetSpaceTasks()
@@ -160,34 +158,11 @@ export default function SpaceFeedPage() {
         .catch(() => { viewerRole.value = undefined })
     }
 
-    const refreshIfExpanded = (postId: string) => {
-      if (!expandedComments.value[postId]) return
-      void api.get(
-        `/api/spaces/${spaceId}/posts/${postId}/comments`,
-      ).then((rows) => {
-        expandedComments.value = {
-          ...expandedComments.value,
-          [postId]: rows as Comment[],
-        }
-      })
-    }
-    const off1 = ws.on('comment.added', (e) => {
-      const d = e.data as { post_id: string; space_id?: string | null }
-      if (d.space_id === spaceId) refreshIfExpanded(d.post_id)
-    })
-    const off2 = ws.on('comment.updated', (e) => {
-      const d = e.data as { post_id: string; space_id?: string | null }
-      if (d.space_id === spaceId) refreshIfExpanded(d.post_id)
-    })
-    const off3 = ws.on('comment.deleted', (e) => {
-      const d = e.data as { post_id: string; space_id?: string | null }
-      if (d.space_id === spaceId) refreshIfExpanded(d.post_id)
-    })
     const off4 = ws.on('space.post.created', (e) => {
       const d = e.data as { space_id?: string | null }
       if (d.space_id === spaceId) void loadSpaceFeed(spaceId)
     })
-    return () => { off1(); off2(); off3(); off4() }
+    return () => { off4() }
   }, [spaceId])
 
   const loadTabData = (tab: SpaceTab) => {
@@ -237,63 +212,6 @@ export default function SpaceFeedPage() {
     await api.delete(`/api/spaces/${spaceId}/posts/${postId}`)
     showToast('Post deleted', 'info')
     void loadSpaceFeed(spaceId)
-  }
-
-  const refreshComments = async (postId: string) => {
-    const rows = await api.get(
-      `/api/spaces/${spaceId}/posts/${postId}/comments`,
-    ) as Comment[]
-    expandedComments.value = {
-      ...expandedComments.value, [postId]: rows,
-    }
-  }
-
-  const handleToggleComments = async (postId: string) => {
-    if (expandedComments.value[postId]) {
-      const { [postId]: _dropped, ...rest } = expandedComments.value
-      expandedComments.value = rest
-    } else {
-      await refreshComments(postId)
-    }
-  }
-
-  const handleReply = async (
-    postId: string, parentId: string | null, content: string,
-  ) => {
-    await api.post(
-      `/api/spaces/${spaceId}/posts/${postId}/comments`,
-      { content, parent_id: parentId },
-    )
-    await refreshComments(postId)
-    void loadSpaceFeed(spaceId)
-  }
-
-  const handleCommentEdit = async (
-    postId: string, commentId: string, content: string,
-  ) => {
-    try {
-      await api.patch(
-        `/api/spaces/${spaceId}/posts/${postId}/comments/${commentId}`,
-        { content },
-      )
-      await refreshComments(postId)
-      showToast('Comment updated', 'success')
-    } catch (err: unknown) {
-      showToast(`Edit failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
-
-  const handleCommentDelete = async (postId: string, commentId: string) => {
-    try {
-      await api.delete(
-        `/api/spaces/${spaceId}/posts/${postId}/comments/${commentId}`,
-      )
-      await refreshComments(postId)
-      void loadSpaceFeed(spaceId)
-      showToast('Comment deleted', 'info')
-    } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message ?? err}`, 'error')
-    }
   }
 
   if (loading.value) return <Spinner />
@@ -375,23 +293,11 @@ export default function SpaceFeedPage() {
               <PostCard
                 post={post}
                 onReact={(emoji) => handleReact(post.id, emoji)}
-                onComment={() => handleToggleComments(post.id)}
+                onComment={() => openCommentOverlay(post, spaceId)}
                 onDelete={() => handleDelete(post.id)}
                 showSpaceBadge={spaceId}
                 surface="space"
               />
-              {expandedComments.value[post.id] && (
-                <CommentThread
-                  comments={expandedComments.value[post.id]}
-                  spaceId={spaceId}
-                  onReply={(parentId, content) =>
-                    handleReply(post.id, parentId, content)}
-                  onEdit={(commentId, content) =>
-                    handleCommentEdit(post.id, commentId, content)}
-                  onDelete={(commentId) =>
-                    handleCommentDelete(post.id, commentId)}
-                />
-              )}
             </div>
           ))}
         </div>
