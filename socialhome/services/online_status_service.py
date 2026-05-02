@@ -284,7 +284,7 @@ class OnlineStatusService:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -389,7 +389,9 @@ class OnlineStatusService:
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 log.debug(
-                    "online-status fan-out to %s failed: %s", inst_id, exc,
+                    "online-status fan-out to %s failed: %s",
+                    inst_id,
+                    exc,
                 )
 
     async def apply_remote(

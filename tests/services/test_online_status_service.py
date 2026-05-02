@@ -6,6 +6,7 @@ the scheduler tick. The service has zero direct WebSocket I/O — events
 are published on the bus and :class:`RealtimeService` does the
 translation; we assert events here, frames in the realtime tests.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -40,8 +41,10 @@ def _make() -> tuple[OnlineStatusService, EventBus, _FakeUserRepo, list]:
     svc = OnlineStatusService(WebSocketManager(), repo, bus)
     captured: list = []
     for evt_cls in (UserCameOnline, UserResumedActive, UserWentIdle, UserWentOffline):
+
         async def _h(e, _cap=captured):
             _cap.append(e)
+
         bus.subscribe(evt_cls, _h)
     return svc, bus, repo, captured
 

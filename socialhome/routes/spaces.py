@@ -265,12 +265,8 @@ class SpaceMembersView(BaseView):
         # member in two bulk calls (no N+1).
         user_repo = self.svc(user_repo_key)
         member_ids = {m.user_id for m in members}
-        local_users = (
-            await user_repo.list_by_ids(member_ids) if member_ids else []
-        )
-        display_names: dict[str, str] = {
-            u.user_id: u.display_name for u in local_users
-        }
+        local_users = await user_repo.list_by_ids(member_ids) if member_ids else []
+        display_names: dict[str, str] = {u.user_id: u.display_name for u in local_users}
         last_seen_persisted: dict[str, str | None] = {
             u.user_id: u.last_seen_at for u in local_users
         }
