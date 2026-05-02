@@ -2557,19 +2557,57 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   font-size: var(--sh-font-size-base);
   font-variant-numeric: tabular-nums;
 }
-/* Picker that lets the user switch between members' calendars in the
- * household. Only renders when there are 2+ calendars. */
+/* Multi-select calendar overlay picker — one chip per household
+ * calendar. Each chip carries a deterministic ``--cal-hue`` (set
+ * inline by the page) so the colored dot, border-when-on, and the
+ * matching event left-edge all read as one identity. Pressing a chip
+ * toggles its calendar's events on or off. The chip itself acts as
+ * the legend — no separate "key" UI needed.
+ *
+ * Visible chips wear a tinted background + their hue as the border
+ * so the user can see at a glance which calendars are overlaid on
+ * the current view. Hidden chips are dimmer with just the dot
+ * carrying colour. */
 .sh-calendar-picker {
   display: inline-flex;
   align-items: center;
   gap: var(--sh-space-xs);
-  font-size: var(--sh-font-size-sm);
+  flex-wrap: wrap;
 }
-.sh-calendar-picker > select {
-  padding: 4px 8px;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
+.sh-calendar-picker__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 8px;
+  border-radius: var(--sh-radius-full);
+  border: 1px solid var(--sh-border-strong);
   background: var(--sh-bg);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  cursor: pointer;
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast),
+              color var(--sh-transition-fast);
+}
+.sh-calendar-picker__chip:hover {
+  background: var(--sh-bg-tertiary);
+}
+.sh-calendar-picker__chip--on {
+  background: color-mix(in srgb, var(--cal-hue) 14%, transparent);
+  border-color: var(--cal-hue);
+  color: var(--sh-text);
+  font-weight: 600;
+}
+.sh-calendar-picker__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--sh-radius-full);
+  background: var(--cal-hue);
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.sh-calendar-picker__chip:not(.sh-calendar-picker__chip--on) .sh-calendar-picker__dot {
+  opacity: 0.4;
 }
 
 /* Attendee picker on the household event dialog — household-member
@@ -2645,8 +2683,8 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   left: 0; top: 8px; bottom: 8px;
   width: 3px;
   border-radius: 2px;
-  background: var(--sh-primary);
-  opacity: 0.55;
+  background: var(--cal-hue, var(--sh-primary));
+  opacity: 0.7;
   transition: opacity var(--sh-transition-fast);
 }
 .sh-event:hover {

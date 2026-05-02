@@ -45,6 +45,14 @@ class CalendarEvent:
     #: per occurrence; further requests become ``REQUESTED`` (pending
     #: approval) or ``WAITLIST``.
     capacity: int | None = None
+    #: Whether the event invites a yes/no/maybe response from the
+    #: ``attendees``. The host calendar (a personal household
+    #: calendar) sets this when the event represents an obligation
+    #: that needs confirmation; defaults to ``False`` so an event
+    #: created on someone else's calendar is just "this is on your
+    #: calendar" — no RSVP buttons surfaced. Space events that set
+    #: ``capacity`` always behave as if RSVP is enabled (§Phase C).
+    rsvp_enabled: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -58,6 +66,7 @@ class CalendarEventCreate:
     description: str | None = None
     attendees: tuple[str, ...] = field(default_factory=tuple)
     rrule: str | None = None
+    rsvp_enabled: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,6 +83,7 @@ class CalendarEventUpdate:
     all_day: bool | None = None
     attendees: tuple[str, ...] | None = None
     rrule: str | None = None
+    rsvp_enabled: bool | None = None
 
 
 class RSVPStatus:

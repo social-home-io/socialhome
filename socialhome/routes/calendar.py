@@ -39,6 +39,7 @@ def _event_dict(event) -> dict:
         "created_by": event.created_by,
         "rrule": event.rrule,
         "capacity": getattr(event, "capacity", None),
+        "rsvp_enabled": getattr(event, "rsvp_enabled", False),
     }
 
 
@@ -107,6 +108,7 @@ class CalendarEventsView(BaseView):
             description=body.get("description"),
             attendees=body.get("attendees"),
             rrule=body.get("rrule"),
+            rsvp_enabled=bool(body.get("rsvp_enabled", False)),
         )
         return web.json_response(_event_dict(event), status=201)
 
@@ -136,6 +138,7 @@ class CalendarEventDeleteView(BaseView):
             description=body.get("description"),
             attendees=body.get("attendees"),
             rrule=body.get("rrule"),
+            rsvp_enabled=body.get("rsvp_enabled"),
         )
         return web.json_response(_event_dict(event))
 

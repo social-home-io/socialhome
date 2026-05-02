@@ -30,26 +30,22 @@ export const events = signal<CalendarEvent[]>([])
 /** Map of event_id → live RSVP counts (backfilled by calendar.rsvp_updated). */
 export const rsvpCounts = signal<Record<string, RsvpCounts>>({})
 
-/** Calendar id the household-calendar page is currently viewing. WS
- *  handlers below short-circuit when an inbound frame's
- *  ``calendar_id`` doesn't match — without this gate, events created
- *  in a per-space calendar (which broadcast on the same household
- *  channel) would pollute the household ``events`` signal and surface
- *  on the next visit to the household calendar until reload. The page
- *  owns this signal: set on mount + on calendar-picker change, clear
- *  on unmount. */
-export const activeCalendarScope = signal<string | null>(null)
+/** Set of calendar ids the household-calendar page is currently
+ *  viewing. WS handlers below short-circuit when an inbound frame's
+ *  ``calendar_id`` isn't in the active set — without this gate, events
+ *  created in an unrelated calendar would pollute the household
+ *  ``events`` signal and surface on the next visit until reload.
+ *
+ *  The page owns this signal: set on mount + on picker change
+ *  (multi-select), clear on unmount. ``null`` means "no active
+ *  household-calendar surface — drop everything". */
+export const activeCalendarScope = signal<Set<string> | null>(null)
 
 /** Returns true when an inbound WS frame's calendar_id matches the
- *  current household-calendar scope. ``null`` scope means no active
- *  household-calendar surface — drop the frame so background events
- *  don't accrete into a stale ``events`` cache. */
+ *  current household-calendar scope. */
 function _scopedToActive(calendarId: string | null | undefined): boolean {
-  return (
-    activeCalendarScope.value !== null
-    && !!calendarId
-    && calendarId === activeCalendarScope.value
-  )
+  const scope = activeCalendarScope.value
+  return scope !== null && !!calendarId && scope.has(calendarId)
 }
 
 /** Map of event_id → current user's RSVP status for the next occurrence,
