@@ -65,6 +65,35 @@ async def client(tmp_dir):
         yield tc
 
 
+async def test_list_dm_members_carries_online_status(client):
+    """GET /api/conversations/{id}/members returns rows with the
+    session-presence triple — needed for the WhatsApp-style status line
+    in the thread header."""
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    resp = await client.get(
+        f"/api/conversations/{conv_id}/members",
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200
+    rows = await resp.json()
+    assert len(rows) == 2
+    for m in rows:
+        assert "user_id" in m
+        assert "username" in m
+        assert "display_name" in m
+        assert "is_self" in m
+        assert "is_online" in m
+        assert "is_idle" in m
+        assert "last_seen_at" in m
+    # Exactly one row should be is_self=True (the caller).
+    assert sum(1 for m in rows if m["is_self"]) == 1
+
+
 async def test_create_dm(client):
     """POST /api/conversations/dm creates a DM and returns 201."""
     resp = await client.post(

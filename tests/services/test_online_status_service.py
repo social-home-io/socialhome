@@ -276,3 +276,136 @@ async def test_remote_user_offline_clears_online_state():
     )
     assert not svc.is_online("u-bob")
     assert any(isinstance(e, UserWentOffline) for e in captured)
+
+
+async def test_remote_offline_last_seen_surfaces():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, _bus, _repo, _captured = _make()
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_OFFLINE,
+        payload={"user_id": "u-bob", "last_seen_at": "2026-05-02T10:00:00+00:00"},
+    )
+    last = svc.last_seen("u-bob")
+    assert last is not None and last.year == 2026
+
+
+async def test_remote_invalid_payload_dropped():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, _bus, _repo, captured = _make()
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_ONLINE,
+        payload={"user_id": ""},  # empty
+    )
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_ONLINE,
+        payload={"user_id": "u-bob", "last_seen_at": "not-a-date"},
+    )
+    assert captured  # second call still fires the event despite bad ISO
+    assert svc.is_online("u-bob")
+    assert svc.last_seen("u-bob") is None  # bad ISO → null
+
+
+async def test_remote_idle_then_resume_publishes_transitions():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, _bus, _repo, captured = _make()
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_ONLINE,
+        payload={"user_id": "u-bob"},
+    )
+    captured.clear()
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_IDLE,
+        payload={"user_id": "u-bob"},
+    )
+    assert any(isinstance(e, UserWentIdle) for e in captured)
+    captured.clear()
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_ONLINE,
+        payload={"user_id": "u-bob"},
+    )
+    assert any(isinstance(e, UserResumedActive) for e in captured)
+
+
+async def test_fan_to_peers_skips_own_instance():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, _bus, _repo, _captured = _make()
+    fed = _FakeFederationService()
+    fed_repo = _FakeFederationRepo([_peer("inst-self"), _peer("inst-A")])
+    svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        own_instance_id="inst-self",
+    )
+    await svc.user_session_opened("alice", ws_id=1)
+    targets = {tid for tid, _t, _p in fed.sent}
+    assert targets == {"inst-A"}  # own instance never receives
+    assert FederationEventType.USER_ONLINE in {t for _id, t, _p in fed.sent}
+
+
+async def test_fan_to_peers_offline_carries_last_seen():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, _bus, _repo, _captured = _make()
+    fed = _FakeFederationService()
+    fed_repo = _FakeFederationRepo([_peer("inst-A")])
+    svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        own_instance_id="inst-self",
+    )
+    await svc.user_session_opened("alice", ws_id=1)
+    fed.sent.clear()
+    await svc.user_session_closed("alice", ws_id=1)
+    offline_calls = [(tid, ev, p) for (tid, ev, p) in fed.sent
+                     if ev is FederationEventType.USER_OFFLINE]
+    assert len(offline_calls) == 1
+    _, _, payload = offline_calls[0]
+    assert payload["user_id"] == "alice"
+    assert "last_seen_at" in payload
+
+
+async def test_publish_without_bus_is_safe():
+    """Service constructed without a bus must not raise on transitions."""
+    svc = OnlineStatusService(WebSocketManager(), _FakeUserRepo(), bus=None)
+    await svc.user_session_opened("alice", ws_id=1)  # no crash
+    assert svc.is_online("alice")
+    await svc.user_session_closed("alice", ws_id=1)
+    assert not svc.is_online("alice")
+
+
+async def test_attach_event_bus_late_binding():
+    """attach_event_bus accepts a post-construction bus reference."""
+    svc = OnlineStatusService(WebSocketManager(), _FakeUserRepo(), bus=None)
+    bus = EventBus()
+    svc.attach_event_bus(bus)
+    captured: list = []
+
+    async def _h(e):
+        captured.append(e)
+
+    bus.subscribe(UserCameOnline, _h)
+    await svc.user_session_opened("alice", ws_id=1)
+    assert any(isinstance(e, UserCameOnline) for e in captured)
+
+
+async def test_idle_remote_user_surfaces_in_idle_user_ids():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, _bus, _repo, _captured = _make()
+    await svc.apply_remote(
+        from_instance="inst-peer",
+        event_type=FederationEventType.USER_IDLE,
+        payload={"user_id": "u-bob"},
+    )
+    assert "u-bob" in svc.idle_user_ids()
+    assert svc.is_idle("u-bob")
