@@ -366,8 +366,11 @@ async def test_fan_to_peers_offline_carries_last_seen():
     await svc.user_session_opened("alice", ws_id=1)
     fed.sent.clear()
     await svc.user_session_closed("alice", ws_id=1)
-    offline_calls = [(tid, ev, p) for (tid, ev, p) in fed.sent
-                     if ev is FederationEventType.USER_OFFLINE]
+    offline_calls = [
+        (tid, ev, p)
+        for (tid, ev, p) in fed.sent
+        if ev is FederationEventType.USER_OFFLINE
+    ]
     assert len(offline_calls) == 1
     _, _, payload = offline_calls[0]
     assert payload["user_id"] == "alice"
