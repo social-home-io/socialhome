@@ -221,6 +221,12 @@ export interface CalendarEvent {
    *  cap (open RSVP); integer = host approval required for "going",
    *  overflow lands on waitlist. */
   capacity?: number | null
+  /** Whether this event invites a yes/no/maybe response from
+   *  ``attendees``. Household events default to ``false`` — they're
+   *  just placed on the assigned member's calendar. The host opts in
+   *  via the dialog's "Ask invitees to respond" checkbox. Space
+   *  events with ``capacity`` set behave as if RSVP is enabled. */
+  rsvp_enabled?: boolean
 }
 
 /** Per-event reminder configured by a user (Phase D). */

@@ -120,6 +120,7 @@ class CalendarService:
         description: str | None = None,
         attendees: list[str] | None = None,
         rrule: str | None = None,
+        rsvp_enabled: bool = False,
     ) -> CalendarEvent:
         await self._require_calendar_enabled()
         summary = summary.strip()
@@ -153,6 +154,7 @@ class CalendarService:
             description=description,
             attendees=tuple(attendees or []),
             rrule=rrule,
+            rsvp_enabled=rsvp_enabled,
         )
         saved = await self._repo.save_event(event)
         if self._bus is not None:
@@ -203,6 +205,7 @@ class CalendarService:
         description: str | None = None,
         attendees: list[str] | None = None,
         rrule: str | None = None,
+        rsvp_enabled: bool | None = None,
     ) -> CalendarEvent:
         """Partial-update an existing event. Only fields the caller
         supplies are overwritten; the rest retain their current values.
@@ -228,6 +231,9 @@ class CalendarService:
             else existing.description,
             attendees=tuple(attendees) if attendees is not None else existing.attendees,
             rrule=rrule if rrule is not None else existing.rrule,
+            rsvp_enabled=(
+                rsvp_enabled if rsvp_enabled is not None else existing.rsvp_enabled
+            ),
         )
         await self._repo.save_event(updated)
         if self._bus is not None:

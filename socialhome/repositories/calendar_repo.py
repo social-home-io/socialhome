@@ -181,8 +181,8 @@ class SqliteCalendarRepo:
             INSERT INTO calendar_events(
                 id, calendar_id, summary, description, start_dt, end_dt,
                 all_day, attendees_json, mirrored_from, rrule,
-                created_by, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,
+                rsvp_enabled, created_by, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
@@ -194,6 +194,7 @@ class SqliteCalendarRepo:
                 attendees_json=excluded.attendees_json,
                 mirrored_from=excluded.mirrored_from,
                 rrule=excluded.rrule,
+                rsvp_enabled=excluded.rsvp_enabled,
                 updated_at=datetime('now')
             """,
             (
@@ -207,6 +208,7 @@ class SqliteCalendarRepo:
                 dump_json(list(event.attendees)),
                 event.mirrored_from,
                 event.rrule,
+                int(event.rsvp_enabled),
                 event.created_by,
                 None,
                 None,
@@ -889,6 +891,7 @@ def _row_to_event(row: dict | None) -> CalendarEvent | None:
         attendees=tuple(load_json(row.get("attendees_json"), [])),
         mirrored_from=row.get("mirrored_from"),
         rrule=row.get("rrule"),
+        rsvp_enabled=bool_col(row.get("rsvp_enabled", 0)),
     )
 
 

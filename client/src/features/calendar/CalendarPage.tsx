@@ -5,7 +5,11 @@ import { useTitle } from '@/store/pageTitle'
 import type { CalendarEvent } from '@/types'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
-import { CalendarEventDialog, openEventDialog } from '@/components/CalendarEventDialog'
+import {
+  CalendarEventDialog,
+  openEventDialog,
+  openEditEventDialog,
+} from '@/components/CalendarEventDialog'
 import { CapacityStrip } from '@/components/CapacityStrip'
 import { HostApprovalQueue } from '@/components/HostApprovalQueue'
 import { ReminderPicker } from '@/components/ReminderPicker'
@@ -27,21 +31,65 @@ interface CalendarSummary {
 
 const loading = signal(true)
 const viewMode = signal<CalendarViewMode>('month')
-const calendarId = signal<string>('')
+/** Calendar id used as the "write target" — the calendar the +New-
+ *  event dialog writes to. Always the caller's own calendar; doesn't
+ *  change when they overlay another member's calendar. */
+const writeCalendarId = signal<string>('')
+/** Set of calendar ids currently overlaid in the view. Members can
+ *  toggle each other's calendars on/off via the picker chips. */
+const visibleCalendarIds = signal<Set<string>>(new Set())
 const calendars = signal<CalendarSummary[]>([])
 const currentDate = signal(new Date())
 const selectedEvent = signal<CalendarEvent | null>(null)
 const rsvpPending = signal<string | null>(null)
 
+/** Deterministic colour per calendar id — picks one of 16 hand-tuned
+ *  earth-tone hues so two members rarely collide visually. The same
+ *  id always lands on the same colour across reloads / sessions.
+ *  16 is enough for any realistic household; if a household ever has
+ *  17+ calendars the chip names still disambiguate. */
+const _CAL_HUES = [
+  'var(--sh-primary)',  // terracotta
+  'var(--sh-success)',  // moss
+  'var(--sh-warning)',  // honey
+  'var(--sh-danger)',   // brick
+  '#7B5BA8',            // plum
+  '#3F7B8C',            // dusty teal
+  '#A89344',            // ochre
+  '#5C7B5A',            // sage
+  '#9B5B3F',            // cinnamon
+  '#34688D',            // navy
+  '#7C9D5F',            // olive
+  '#B57E47',            // amber
+  '#5B8E8E',            // slate teal
+  '#8C5777',            // rose-plum
+  '#46735A',            // pine
+  '#BC6C68',            // brick rose
+] as const
+function calendarHue(calId: string): string {
+  // Tiny string-hash → pick a hue. djb2-flavoured.
+  let h = 5381
+  for (let i = 0; i < calId.length; i++) {
+    h = ((h << 5) + h + calId.charCodeAt(i)) | 0
+  }
+  return _CAL_HUES[Math.abs(h) % _CAL_HUES.length]
+}
+
 async function loadEvents() {
-  if (!calendarId.value) return
+  const ids = Array.from(visibleCalendarIds.value)
+  if (ids.length === 0) {
+    events.value = []
+    loading.value = false
+    return
+  }
   loading.value = true
   const { start, end } = dateRangeForMode(currentDate.value, viewMode.value)
   try {
-    const rows = await api.get(
-      `/api/calendars/${calendarId.value}/events`, { start, end },
-    ) as CalendarEvent[]
-    events.value = rows
+    const responses = await Promise.all(ids.map(id =>
+      api.get(`/api/calendars/${id}/events`, { start, end })
+        .catch(() => [] as CalendarEvent[]) as Promise<CalendarEvent[]>,
+    ))
+    events.value = responses.flat()
   } catch {
     events.value = []
   }
@@ -52,26 +100,39 @@ function navigateDate(direction: number) {
   currentDate.value = advanceDate(currentDate.value, direction, viewMode.value)
 }
 
-/** Lazily ensure a default household calendar exists.
- *
- * A fresh household starts with zero calendars and the SPA has no
- * "create calendar" surface — so until this PR, the "+ New event"
- * button hid until something else (a backend bootstrap, an admin
- * action) seeded one. Now we just create one on demand the first
- * time the user clicks New event. Returns the calendar id, caches
- * it in the module-level signal. */
+/** Lazily ensure a default household calendar exists for the caller.
+ *  A fresh user starts with zero personal calendars and the SPA has
+ *  no "create calendar" surface — without this, the "+ New event"
+ *  button would have nowhere to write. Returns the caller's calendar
+ *  id, caches it in ``writeCalendarId``. */
 async function ensureHouseholdCalendar(): Promise<string> {
-  if (calendarId.value) return calendarId.value
+  if (writeCalendarId.value) return writeCalendarId.value
   const cal = await api.post('/api/calendars', { name: 'Calendar' }) as
     CalendarSummary
-  calendarId.value = cal.id
-  activeCalendarScope.value = cal.id
-  // Splice the freshly-created calendar into the picker list so the
-  // dropdown reflects it without a full re-fetch.
+  writeCalendarId.value = cal.id
+  // Splice the freshly-created calendar into the picker list and the
+  // visible set so the new event lands on screen immediately.
   if (!calendars.value.some(c => c.id === cal.id)) {
     calendars.value = [...calendars.value, cal]
   }
+  const next = new Set(visibleCalendarIds.value)
+  next.add(cal.id)
+  visibleCalendarIds.value = next
+  activeCalendarScope.value = next
   return cal.id
+}
+
+function toggleCalendarVisible(calId: string) {
+  const next = new Set(visibleCalendarIds.value)
+  if (next.has(calId)) {
+    if (next.size === 1) return  // never let the user hide everything
+    next.delete(calId)
+  } else {
+    next.add(calId)
+  }
+  visibleCalendarIds.value = next
+  activeCalendarScope.value = next
+  void loadEvents()
 }
 
 export default function CalendarPage() {
@@ -88,13 +149,20 @@ export default function CalendarPage() {
           loading.value = false
           return
         }
-        // Default to the caller's first calendar if they have one;
-        // otherwise the first household calendar.
+        // Default visibility: the caller's own calendar(s) only.
+        // Other members' calendars start hidden — the user opts in
+        // by clicking their picker chip.
         const me = currentUser.value?.username
-        const mine = me ? cals.find(c => c.owner_username === me) : null
-        const pick = mine ?? cals[0]
-        calendarId.value = pick.id
-        activeCalendarScope.value = pick.id
+        const myCals = me ? cals.filter(c => c.owner_username === me) : []
+        const initial = new Set(
+          myCals.length > 0 ? myCals.map(c => c.id) : [cals[0].id],
+        )
+        // First own-calendar (alphabetical by name from the server)
+        // is the write target for + New event.
+        const writeTarget = myCals[0] ?? cals[0]
+        writeCalendarId.value = writeTarget.id
+        visibleCalendarIds.value = initial
+        activeCalendarScope.value = initial
         await loadEvents()
         loading.value = false
       })
@@ -109,16 +177,20 @@ export default function CalendarPage() {
   }, [])
 
   useEffect(() => {
-    if (calendarId.value) {
-      activeCalendarScope.value = calendarId.value
+    if (visibleCalendarIds.value.size > 0) {
+      activeCalendarScope.value = visibleCalendarIds.value
       loadEvents()
     }
-  }, [viewMode.value, currentDate.value, calendarId.value])
+  }, [viewMode.value, currentDate.value])
 
   const handleNewEvent = async () => {
     try {
       const id = await ensureHouseholdCalendar()
-      openEventDialog(id)
+      // Pass the full household-calendar list so the dialog can show
+      // a "For:" selector and let the caller redirect the event onto
+      // someone else's calendar (e.g. Maria can put a doctor's
+      // appointment directly on Pascal's calendar).
+      openEventDialog(id, calendars.value)
     } catch (e) {
       showToast(`Couldn't open new-event dialog: ${(e as Error).message}`, 'error')
     }
@@ -167,22 +239,27 @@ export default function CalendarPage() {
     }
   }
 
-  const handleEdit = async (evt: CalendarEvent) => {
-    const newSummary = prompt('Edit event title:', evt.summary)
-    if (newSummary == null) return
-    const trimmed = newSummary.trim()
-    if (!trimmed) {
-      showToast('Title cannot be empty', 'error')
-      return
-    }
-    try {
-      await api.patch(`/api/calendars/events/${evt.id}`, { summary: trimmed })
-      showToast('Event updated', 'success')
-      selectedEvent.value = null
-      await loadEvents()
-    } catch (err: unknown) {
-      showToast(`Update failed: ${(err as Error).message ?? err}`, 'error')
-    }
+  const handleEdit = (evt: CalendarEvent) => {
+    // Open the full event dialog in edit mode rather than the
+    // single-field ``prompt()`` it used to be — every field becomes
+    // editable, including attendees, the RSVP toggle, and the "For:"
+    // target calendar (so an event can be moved between members'
+    // calendars without delete-and-recreate).
+    selectedEvent.value = null
+    openEditEventDialog(
+      {
+        id: evt.id,
+        calendar_id: evt.calendar_id,
+        summary: evt.summary,
+        description: evt.description,
+        start: evt.start,
+        end: evt.end,
+        all_day: evt.all_day,
+        attendees: evt.attendees,
+        rsvp_enabled: evt.rsvp_enabled,
+      },
+      calendars.value,
+    )
   }
 
   if (loading.value) return <Spinner />
@@ -208,35 +285,42 @@ export default function CalendarPage() {
           <Button variant="secondary" onClick={() => { currentDate.value = new Date() }}>Today</Button>
         </div>
         {calendars.value.length > 1 && (
-          <label class="sh-calendar-picker">
-            <span class="sh-muted">Calendar</span>
-            <select
-              value={calendarId.value}
-              onChange={(ev) => {
-                const id = (ev.target as HTMLSelectElement).value
-                calendarId.value = id
-                activeCalendarScope.value = id
-              }}
-            >
-              {calendars.value.map(c => {
-                // householdUsers is keyed by user_id; the calendar
-                // carries the owner's username, so iterate to map back.
-                let ownerLabel = c.owner_username
-                for (const u of householdUsers.value.values()) {
-                  if (u.username === c.owner_username) {
-                    ownerLabel = u.display_name || u.username
-                    break
-                  }
+          <div class="sh-calendar-picker"
+               role="group"
+               aria-label="Visible calendars">
+            {calendars.value.map(c => {
+              // householdUsers is keyed by user_id; the calendar
+              // carries the owner's username, so iterate to map back.
+              let ownerLabel = c.owner_username
+              for (const u of householdUsers.value.values()) {
+                if (u.username === c.owner_username) {
+                  ownerLabel = u.display_name || u.username
+                  break
                 }
-                const mine = c.owner_username === currentUser.value?.username
-                return (
-                  <option key={c.id} value={c.id}>
-                    {mine ? c.name : `${ownerLabel} · ${c.name}`}
-                  </option>
-                )
-              })}
-            </select>
-          </label>
+              }
+              const mine = c.owner_username === currentUser.value?.username
+              const checked = visibleCalendarIds.value.has(c.id)
+              const hue = calendarHue(c.id)
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  class={
+                    checked
+                      ? 'sh-calendar-picker__chip sh-calendar-picker__chip--on'
+                      : 'sh-calendar-picker__chip'
+                  }
+                  aria-pressed={checked}
+                  aria-label={`${mine ? c.name : `${ownerLabel} · ${c.name}`}: ${checked ? 'visible' : 'hidden'}`}
+                  style={{ '--cal-hue': hue } as Record<string, string>}
+                  onClick={() => toggleCalendarVisible(c.id)}
+                >
+                  <span class="sh-calendar-picker__dot" aria-hidden="true" />
+                  <span>{mine ? 'You' : ownerLabel}</span>
+                </button>
+              )
+            })}
+          </div>
         )}
         <div class="sh-calendar-views" role="tablist">
           {(['month', 'week', 'day'] as CalendarViewMode[]).map(mode => (
@@ -265,14 +349,60 @@ export default function CalendarPage() {
       {dayKeys.map(dayKey => (
         <div key={dayKey} class="sh-calendar-day-group">
           <h3 class="sh-calendar-day-heading">{dayKey}</h3>
-          {grouped[dayKey].map(e => (
-            <div key={e.id} class="sh-event" onClick={() => { selectedEvent.value = selectedEvent.value?.id === e.id ? null : e }}>
+          {grouped[dayKey].map(e => {
+            // Owner byline — only meaningful when overlay is on; with
+            // a single calendar visible the bylines are all the same
+            // and just add noise. When overlay is on, also surfaces
+            // ownership in text so colour-blind family members can
+            // tell whose event is whose without relying on the
+            // edge colour alone.
+            let ownerByline: string | null = null
+            if (visibleCalendarIds.value.size > 1) {
+              const cal = calendars.value.find(c => c.id === e.calendar_id)
+              if (cal) {
+                const me = currentUser.value?.username
+                if (cal.owner_username === me) {
+                  ownerByline = 'You'
+                } else {
+                  ownerByline = cal.owner_username
+                  for (const u of householdUsers.value.values()) {
+                    if (u.username === cal.owner_username) {
+                      ownerByline = u.display_name || u.username
+                      break
+                    }
+                  }
+                }
+              }
+            }
+            return (
+            <div key={e.id} class="sh-event"
+                 style={{ '--cal-hue': calendarHue(e.calendar_id) } as Record<string, string>}
+                 onClick={() => { selectedEvent.value = selectedEvent.value?.id === e.id ? null : e }}>
               <div class="sh-event-header">
                 <strong>{e.summary}</strong>
+                {ownerByline && (
+                  <span class="sh-event-owner" aria-label={`On ${ownerByline}'s calendar`}>
+                    {ownerByline}
+                  </span>
+                )}
                 <time>{new Date(e.start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time>
                 {e.all_day && <span class="sh-badge">All day</span>}
               </div>
-              {selectedEvent.value?.id === e.id && (
+              {selectedEvent.value?.id === e.id && (() => {
+                // RSVP visibility: only when explicitly enabled
+                // (``rsvp_enabled``) OR when there's a capacity cap
+                // (the legacy Phase C signal that an event needs
+                // confirmation). And even then, hide the buttons for
+                // the creator viewing their own one-attendee event —
+                // there's nobody to ask.
+                const myUid = currentUser.value?.user_id
+                const others = (e.attendees ?? []).filter(uid => uid !== myUid)
+                const hasOthers = others.length > 0
+                const isCapped = e.capacity != null
+                const showRsvp = (e.rsvp_enabled || isCapped)
+                  && hasOthers
+                  && (e.attendees ?? []).includes(myUid ?? '__none__')
+                return (
                 <div class="sh-event-detail">
                   {e.description && <p>{e.description}</p>}
                   <div class="sh-event-times">
@@ -280,37 +410,40 @@ export default function CalendarPage() {
                     <span>{t('event.ends')} {new Date(e.end).toLocaleString()}</span>
                   </div>
 
-                  <CapacityStrip
-                    counts={rsvpCounts.value[e.id]}
-                    capacity={e.capacity}
-                    myStatus={
-                      (myRsvpStatus.value[e.id] ?? null) as
-                        | 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist' | null
-                    }
-                  />
+                  {showRsvp && (
+                    <CapacityStrip
+                      counts={rsvpCounts.value[e.id]}
+                      capacity={e.capacity}
+                      myStatus={
+                        (myRsvpStatus.value[e.id] ?? null) as
+                          | 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist' | null
+                      }
+                    />
+                  )}
 
-                  <div class="sh-event-rsvp" role="group" aria-label={t('event.rsvp.aria')}>
-                    {(['going', 'maybe', 'declined'] as const).map((status) => {
-                      const ended = isEventEnded(e)
-                      const isCapped = e.capacity != null
-                      const labelKey = isCapped && status === 'going'
-                        ? 'event.rsvp.request_to_join'
-                        : `event.rsvp.${status}`
-                      const ariaTip = ended ? t('event.has_ended_tooltip') : ''
-                      return (
-                        <Button
-                          key={status}
-                          variant={status === 'going' ? 'primary' : 'secondary'}
-                          loading={rsvpPending.value === `${e.id}:${status}`}
-                          disabled={ended}
-                          title={ariaTip || undefined}
-                          onClick={() => handleRsvp(e, status)}
-                        >
-                          {t(labelKey)}
-                        </Button>
-                      )
-                    })}
-                  </div>
+                  {showRsvp && (
+                    <div class="sh-event-rsvp" role="group" aria-label={t('event.rsvp.aria')}>
+                      {(['going', 'maybe', 'declined'] as const).map((status) => {
+                        const ended = isEventEnded(e)
+                        const labelKey = isCapped && status === 'going'
+                          ? 'event.rsvp.request_to_join'
+                          : `event.rsvp.${status}`
+                        const ariaTip = ended ? t('event.has_ended_tooltip') : ''
+                        return (
+                          <Button
+                            key={status}
+                            variant={status === 'going' ? 'primary' : 'secondary'}
+                            loading={rsvpPending.value === `${e.id}:${status}`}
+                            disabled={ended}
+                            title={ariaTip || undefined}
+                            onClick={() => handleRsvp(e, status)}
+                          >
+                            {t(labelKey)}
+                          </Button>
+                        )
+                      })}
+                    </div>
+                  )}
 
                   <ReminderPicker
                     eventId={e.id}
@@ -344,13 +477,27 @@ export default function CalendarPage() {
                     </Button>
                   </div>
                 </div>
-              )}
+                )
+              })()}
             </div>
-          ))}
+          )})}
         </div>
       ))}
 
-      <CalendarEventDialog onCreated={() => loadEvents()} />
+      <CalendarEventDialog onCreated={(targetId) => {
+        // If the user created the event on a calendar that isn't
+        // currently overlaid (typically: "For: Pascal" while only
+        // Maria's chip was on), auto-toggle that calendar visible so
+        // the new event lands on screen instead of seemingly
+        // disappearing.
+        if (targetId && !visibleCalendarIds.value.has(targetId)) {
+          const next = new Set(visibleCalendarIds.value)
+          next.add(targetId)
+          visibleCalendarIds.value = next
+          activeCalendarScope.value = next
+        }
+        void loadEvents()
+      }} />
     </div>
   )
 }

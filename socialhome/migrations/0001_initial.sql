@@ -1105,6 +1105,11 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     attendees_json  TEXT NOT NULL DEFAULT '[]',
     mirrored_from   TEXT,
     rrule           TEXT,                   -- RFC 5545 recurrence rule (§17.2)
+    -- Whether the event invites a yes/no/maybe response from the
+    -- ``attendees`` list. ``0`` (default) means "this event is just
+    -- on your calendar — no buttons to confirm". The household-event
+    -- dialog flips this when the host explicitly wants confirmations.
+    rsvp_enabled    INTEGER NOT NULL DEFAULT 0,
     created_by      TEXT NOT NULL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
