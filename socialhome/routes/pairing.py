@@ -89,6 +89,14 @@ def _instance_dict(
         "reachable": reachable,
         "transport": transport_state,
         "paired_at": getattr(inst, "paired_at", None),
+        # Reachability *timestamps*, not just the ``reachable`` boolean.
+        # "Not connected" is the single most common federation support
+        # question, and the boolean alone can't distinguish "dropped a
+        # minute ago" from "hasn't worked for three weeks" — which is the
+        # difference between waiting and re-pairing. Both are plain UTC
+        # timestamps already on the row; the SPA renders them locally.
+        "last_reachable_at": getattr(inst, "last_reachable_at", None),
+        "unreachable_since": getattr(inst, "unreachable_since", None),
         "source": (inst.source.value if hasattr(inst.source, "value") else inst.source),
         # Monotonic protocol version the peer last advertised via
         # INSTANCE_CAPABILITIES_UPDATED. Useful for an admin "is this

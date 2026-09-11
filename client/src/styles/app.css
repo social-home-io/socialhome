@@ -11951,6 +11951,31 @@ a.sh-welcome-card:hover {
    rather than push the section wider than the viewport. */
 .sh-external-url-section code { overflow-wrap: anywhere; }
 
+/* ── Diagnostics download (admin) ───────────────────────────────────────
+   Link-weight, not a button: reached for once when asked, so it should not
+   read as a primary action. */
+.sh-diagnostics-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  margin: var(--sh-space-xs) 0 0;
+  font-size: var(--sh-font-size-xs);
+}
+.sh-diagnostics-link {
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  background: none;
+  border: 0;
+  padding: var(--sh-space-xs) 0;
+  color: var(--sh-primary);
+  cursor: pointer;
+  text-decoration: underline;
+  min-height: 36px;   /* tap-target floor */
+}
+.sh-diagnostics-link:disabled { color: var(--sh-text-muted); cursor: default; }
+.sh-diagnostics-note { flex: 1 1 18ch; min-width: 0; }
+
 /* ── Connection-servers disclosure (admin diagnostics) ──────────────────
    Collapsed by default and styled down: an operator needs this about once,
    when federation won't connect, so it must not compete with the rest of

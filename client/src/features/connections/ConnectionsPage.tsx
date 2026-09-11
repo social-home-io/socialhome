@@ -296,6 +296,67 @@ interface IceOverview {
 }
 
 /**
+ * DiagnosticsDownload — one file to attach to a bug report.
+ *
+ * Sits under the connection-servers panel as a plain link-weight action
+ * rather than a button: an operator reaches for it once, when asked to,
+ * and it should not look like something to click casually.
+ *
+ * Fetched through the ``api`` client (so it carries auth and respects the
+ * ingress base) and saved via a Blob, because a bare ``<a download>``
+ * pointing at the endpoint would be an unauthenticated navigation.
+ *
+ * The copy states plainly what is in it, because "diagnostics" invites
+ * the reasonable worry that it might contain messages or keys.
+ */
+function DiagnosticsDownload() {
+  const busy = useSignal(false)
+
+  const download = async () => {
+    busy.value = true
+    try {
+      const data = await api.get('/api/admin/diagnostics')
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      a.download = `socialhome-diagnostics-${stamp}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      // Revoke on the next tick — revoking synchronously can cancel the
+      // download in some browsers before it has read the blob.
+      setTimeout(() => URL.revokeObjectURL(url), 0)
+    } catch {
+      showToast('Could not build the diagnostics file.', 'error')
+    } finally {
+      busy.value = false
+    }
+  }
+
+  return (
+    <p class="sh-diagnostics-row sh-muted">
+      <button
+        type="button"
+        class="sh-diagnostics-link"
+        disabled={busy.value}
+        onClick={() => void download()}
+      >
+        {busy.value ? 'Preparing…' : 'Download diagnostics'}
+      </button>
+      <span class="sh-diagnostics-note">
+        Connection state, peer reachability times and delivery backlog —
+        no messages, names, keys or locations. Safe to attach to a bug
+        report.
+      </span>
+    </p>
+  )
+}
+
+/**
  * IceServersPanel — what the federation transport uses to punch through
  * NAT, secrets stripped.
  *
@@ -546,6 +607,7 @@ function ExternalUrlSection() {
         </p>
       )}
       <IceServersPanel />
+      <DiagnosticsDownload />
     </section>
   )
 }

@@ -22,6 +22,13 @@ interface Connection {
   instance_id: string; display_name: string; status: string
   inbox_url: string; intro_relay_enabled: boolean
   unreachable_since: string | null; paired_at: string | null
+  /** Last moment an outbound envelope to this peer was accepted
+   *  (``remote_instances.last_reachable_at``). ``null`` when it has never
+   *  been reached. "Not connected" is the most common federation support
+   *  question and the status chip alone can't answer it: a peer that
+   *  dropped a minute ago and one that has been dead for three weeks look
+   *  identical, yet one means wait and the other means investigate. */
+  last_reachable_at?: string | null
   /** Whether our household's home pin is shared with this peer (§23.90).
    *  Defaults to true when absent (old API responses pre-dating the field). */
   share_home?: boolean
@@ -259,8 +266,30 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
               <><dt>Missing features</dt><dd>{compat.lacking_features.join(', ')}</dd></>
             )
           )}
+          {/* Absolute timestamp AND a relative hint: the absolute one is
+              what you quote in a bug report, the relative one is what
+              tells you at a glance whether this is a blip or weeks of
+              silence. */}
+          <dt>Last connected</dt>
+          <dd>
+            {conn.last_reachable_at ? (
+              <>
+                {new Date(conn.last_reachable_at).toLocaleString()}
+                <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
+                  ({relativeDocsTime(conn.last_reachable_at)})
+                </span>
+              </>
+            ) : (
+              <span class="sh-muted">never</span>
+            )}
+          </dd>
           {conn.unreachable_since && (
-            <><dt>Unreachable since</dt><dd class="sh-text-warning">{new Date(conn.unreachable_since).toLocaleString()}</dd></>
+            <><dt>Unreachable since</dt><dd class="sh-text-warning">
+              {new Date(conn.unreachable_since).toLocaleString()}
+              <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
+                ({relativeDocsTime(conn.unreachable_since)})
+              </span>
+            </dd></>
           )}
           {conn.transport === 'rtc' && (
             <><dt>Transport</dt><dd>

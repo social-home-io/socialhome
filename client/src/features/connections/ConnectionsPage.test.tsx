@@ -777,3 +777,93 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     })
   })
 })
+
+describe('ConnectionsPage — diagnostics download', () => {
+  async function renderAdmin() {
+    const { api } = await import('@/api')
+    const { instanceConfig } = await import('@/store/instance')
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'admin', display_name: 'Admin', is_admin: true,
+      picture_url: null, bio: null, is_new_member: false,
+    }
+    instanceConfig.value = {
+      mode: 'standalone', instance_name: 'T', instance_id: 'iid',
+      capabilities: [], setup_required: false,
+    }
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/admin/diagnostics') {
+        return Promise.resolve({ schema: 1, peers: [], build: { version: '1' } })
+      }
+      if (url === '/api/admin/federation/external-url') {
+        return Promise.resolve({ base: null, effective: null, source: null })
+      }
+      return Promise.resolve([])
+    })
+    const { default: ConnectionsPage } = await import('./ConnectionsPage')
+    const r = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(r.container.querySelector('.sh-diagnostics-link')).not.toBeNull()
+    })
+    return r
+  }
+
+  it('says what the file contains, so it is obviously safe to share', async () => {
+    const { container } = await renderAdmin()
+    const text = container.textContent ?? ''
+    expect(text).toContain('no messages, names, keys or locations')
+    expect(text).toContain('Safe to attach to a bug report')
+  })
+
+  it('fetches through the api client and saves a timestamped file', async () => {
+    const { fireEvent } = await import('@testing-library/preact')
+    const { api } = await import('@/api')
+
+    // jsdom has no Blob URL plumbing; record what the component does.
+    const created: unknown[] = []
+    const origCreate = URL.createObjectURL
+    const origRevoke = URL.revokeObjectURL
+    URL.createObjectURL = ((b: unknown) => {
+      created.push(b)
+      return 'blob:fake'
+    }) as typeof URL.createObjectURL
+    URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL
+    const clicks: string[] = []
+    const origClick = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      clicks.push(this.download)
+    }
+    try {
+      const { container } = await renderAdmin()
+      fireEvent.click(container.querySelector('.sh-diagnostics-link')!)
+      await waitFor(() => {
+        expect(clicks.length).toBe(1)
+      })
+      // Auth + ingress base come from the api client, so it must not be a
+      // bare <a href> navigation to the endpoint.
+      expect(api.get).toHaveBeenCalledWith('/api/admin/diagnostics')
+      expect(created).toHaveLength(1)
+      expect(clicks[0]).toMatch(/^socialhome-diagnostics-.*\.json$/)
+    } finally {
+      URL.createObjectURL = origCreate
+      URL.revokeObjectURL = origRevoke
+      HTMLAnchorElement.prototype.click = origClick
+    }
+  })
+
+  it('is not offered to non-admins', async () => {
+    const { instanceConfig } = await import('@/store/instance')
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'bob', display_name: 'Bob', is_admin: false,
+      picture_url: null, bio: null, is_new_member: false,
+    }
+    instanceConfig.value = {
+      mode: 'standalone', instance_name: 'T', instance_id: 'iid',
+      capabilities: [], setup_required: false,
+    }
+    const { default: ConnectionsPage } = await import('./ConnectionsPage')
+    const { container } = render(<ConnectionsPage />)
+    expect(container.querySelector('.sh-diagnostics-link')).toBeNull()
+  })
+})
