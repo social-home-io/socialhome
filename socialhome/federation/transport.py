@@ -45,6 +45,7 @@ from aiohttp import ClientTimeout
 from . import app_framing
 from . import media_framing
 from ..domain.events import PeerTransportChanged
+from ..exception_text import describe_exception
 from ..domain.federation import DeliveryResult, FederationEventType, RemoteInstance
 
 if TYPE_CHECKING:
@@ -126,10 +127,14 @@ class HttpsInboxTransport:
                 status = resp.status
                 return 200 <= status < 300, status
         except Exception as exc:
+            # ``describe_exception``, not ``exc``: the common failures here
+            # (ClientOSError, ClientConnectionError, ServerTimeoutError) all
+            # render as an empty string, so this line used to name the peer
+            # and then say nothing about what went wrong.
             log.warning(
                 "HTTPS-inbox send to %s failed: %s",
                 instance.id,
-                exc,
+                describe_exception(exc),
             )
             return False, None
 

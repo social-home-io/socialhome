@@ -54,6 +54,24 @@ BACKOFF_SECONDS: tuple[int, ...] = (
     14400,
 )
 
+#: Attempts a 404 ``No instance found`` is treated as *transient* for.
+#:
+#: 404 on the inbox path means the peer could not resolve the ``inbox_id``
+#: we POSTed to: either it holds no row for it, or the row it holds is
+#: still provisional (empty ``remote_identity_pk``, written by
+#: ``AutoPairCoordinator.request_via`` before the relay ack lands). The
+#: second case is a genuine race and clears in seconds, which is why 404
+#: is retried at all.
+#:
+#: But it was retried for the *full* ladder, so a peer that will never
+#: recognise us cost 13 attempts spanning ~8 hours per envelope — and each
+#: attempt rebuilds a PeerConnection, so a real deployment showed ~4,400
+#: STUN bindings churning through a stuck 54-envelope backlog. Four
+#: attempts covers 5+10+20+40 s of elapsed retry, which is generous for a
+#: handshake race, after which the envelope is dropped with a message that
+#: says what an operator should check.
+PAIR_WINDOW_404_ATTEMPTS: int = 4
+
 #: How far to perturb the base delay — ±30%.
 JITTER_RATIO: float = 0.30
 

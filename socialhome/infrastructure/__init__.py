@@ -6,6 +6,7 @@ from .key_manager import KeyManager, KeyManagerError
 from .outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
+    PAIR_WINDOW_404_ATTEMPTS,
     NEVER_DROP,
     DeliveryOutcome,
     OutboxProcessor,
@@ -32,6 +33,7 @@ __all__ = [
     "KeyManager",
     "KeyManagerError",
     "MAX_ATTEMPTS",
+    "PAIR_WINDOW_404_ATTEMPTS",
     "NEVER_DROP",
     "OutboxProcessor",
     "P1_SECURITY",
