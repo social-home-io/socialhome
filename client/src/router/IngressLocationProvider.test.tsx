@@ -111,6 +111,37 @@ describe('IngressLocationProvider (no-prefix, JSDOM default)', () => {
     pushSpy.mockRestore()
   })
 
+/**
+ * Swallow the browser's native link follow-through for one test.
+ *
+ * These "skips interception" cases dispatch clicks the provider is
+ * *supposed* to ignore, so nothing calls ``preventDefault`` and jsdom
+ * proceeds to its default anchor activation — which it cannot implement,
+ * logging "Not implemented: navigation to another Document" through its
+ * virtual console, asynchronously.
+ *
+ * That noise is not harmless. When one of those lands after the test file
+ * has finished, vitest attributes it to nothing and reports it as an
+ * unhandled error, failing the whole run with every test passing — a
+ * genuine CI flake that cost a re-run on #658 (1221 passed, "Errors 1
+ * error", exit 1).
+ *
+ * Suppressing it does not weaken what these tests assert: the assertion is
+ * that OUR handler did not route (``history.pushState`` untouched). What
+ * the browser would then do natively is the browser's business, and jsdom
+ * has no implementation of it either way. Deliberately NOT installed
+ * globally — the sibling "intercepts internal <a> clicks" test asserts
+ * ``evt.defaultPrevented``, and a blanket suppressor would keep that green
+ * even if the provider stopped preventing the default itself.
+ */
+function suppressNativeLinkNavigation(): () => void {
+  const stop = (ev: Event) => ev.preventDefault()
+  // Bubble phase on ``window``, same as the provider's own listener. It
+  // never reads ``defaultPrevented``, so this cannot change its decisions.
+  window.addEventListener('click', stop)
+  return () => window.removeEventListener('click', stop)
+}
+
   it.each([
     ['ctrlKey', { ctrlKey: true }],
     ['metaKey', { metaKey: true }],
@@ -124,6 +155,7 @@ describe('IngressLocationProvider (no-prefix, JSDOM default)', () => {
       </IngressLocationProvider>,
     )
     const pushSpy = vi.spyOn(history, 'pushState')
+    const restoreNav = suppressNativeLinkNavigation()
     const evt = new MouseEvent('click', {
       bubbles: true,
       cancelable: true,
@@ -132,6 +164,7 @@ describe('IngressLocationProvider (no-prefix, JSDOM default)', () => {
     })
     getByTestId('feed').dispatchEvent(evt)
     expect(pushSpy).not.toHaveBeenCalled()
+    restoreNav()
     pushSpy.mockRestore()
   })
 
@@ -142,11 +175,13 @@ describe('IngressLocationProvider (no-prefix, JSDOM default)', () => {
       </IngressLocationProvider>,
     )
     const pushSpy = vi.spyOn(history, 'pushState')
+    const restoreNav = suppressNativeLinkNavigation()
     for (const id of ['blank', 'hash', 'mail', 'dl', 'cross']) {
       const evt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
       getByTestId(id).dispatchEvent(evt)
     }
     expect(pushSpy).not.toHaveBeenCalled()
+    restoreNav()
     pushSpy.mockRestore()
   })
 

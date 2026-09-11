@@ -15,7 +15,16 @@ describe('renderHashtagged', () => {
   })
 
   it('linkifies a hashtag and lowercases the slug', () => {
-    const onClick = vi.fn()
+    // Mirror what real callers do — ``MomentumInboxTab`` /
+    // ``MomentumDetailPage`` both ``preventDefault()`` and route in-app.
+    // ``renderHashtagged`` deliberately leaves that to the caller, so a
+    // bare ``vi.fn()`` let the click reach jsdom's native anchor
+    // activation, which it cannot implement: it logs "Not implemented:
+    // navigation to another Document" asynchronously through its virtual
+    // console. Landing after the file finished, that surfaced as a
+    // vitest unhandled error and failed the whole run with every test
+    // green — a flake that cost a CI re-run on #658.
+    const onClick = vi.fn((_tag: string, ev: MouseEvent) => ev.preventDefault())
     const out = renderHashtagged('Trip to #Berlin tomorrow', onClick)
     const { container } = render(<>{out}</>)
     const link = container.querySelector('a.sh-hashtag') as HTMLAnchorElement
