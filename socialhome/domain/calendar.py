@@ -111,6 +111,21 @@ class CalendarEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class CalendarEventCopy:
+    """One sibling row of a household fan-out, resolved by
+    ``client_event_uuid``.
+
+    Server-authoritative: the SPA must NOT reconstruct this from
+    whichever calendars happen to be visible in the agenda — that was
+    the bug this type exists to close.
+    """
+
+    event_id: str
+    calendar_id: str
+    owner_username: str
+
+
+@dataclass(slots=True, frozen=True)
 class CalendarEventCreate:
     """Input payload for ``POST /api/calendars/{id}/events``."""
 

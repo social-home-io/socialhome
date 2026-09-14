@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,10 @@ import pytest
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from socialhome.domain.events import (
+    CalendarEventCreated,
+    CalendarEventUpdated,
+)
 from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
@@ -1893,3 +1898,383 @@ async def test_create_event_default_is_none(env):
         created_by="u-xena",
     )
     assert ev.client_event_uuid is None
+
+
+# ── Server-authoritative fan-out copies (#660 follow-up) ───────────────────
+
+
+class _CopyRecordingBus:
+    """Bus stub that records every published domain event."""
+
+    def __init__(self):
+        self.events = []
+
+    def subscribe(self, *a, **kw):
+        pass
+
+    async def publish(self, event):
+        self.events.append(event)
+
+
+async def test_list_event_copies_batches_distinct_uuids(env):
+    """``list_event_copies`` asks the repo ONCE for the distinct set of
+    non-None ``client_event_uuid``s — never one call per event."""
+    calls: list[list[str]] = []
+    real = env.cal_repo.list_copies_for_client_event_uuids
+
+    async def _spy(uuids):
+        calls.append(list(uuids))
+        return await real(uuids)
+
+    env.cal_repo.list_copies_for_client_event_uuids = _spy  # type: ignore[method-assign]
+
+    await _seed_user(env.db, "copyowner")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="copyowner")
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Shared",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-copyowner",
+        client_event_uuid=grp,
+    )
+    plain = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Solo",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-copyowner",
+    )
+
+    groups = await env.cal_svc.list_event_copies([ev, ev, plain])
+    assert calls == [[grp]], calls
+    assert set(groups) == {grp}
+    assert [c.event_id for c in groups[grp]] == [ev.id]
+    assert groups[grp][0].owner_username == "copyowner"
+    assert isinstance(groups[grp], tuple)
+
+
+async def test_list_event_copies_empty_input_skips_repo(env):
+    """No events / no uuids → ``{}`` without touching the repo."""
+    calls: list[list[str]] = []
+
+    async def _spy(uuids):
+        calls.append(list(uuids))
+        return {}
+
+    env.cal_repo.list_copies_for_client_event_uuids = _spy  # type: ignore[method-assign]
+
+    await _seed_user(env.db, "emptyowner")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="emptyowner")
+    now = datetime.now(timezone.utc)
+    plain = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Solo",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-emptyowner",
+    )
+    assert await env.cal_svc.list_event_copies([]) == {}
+    assert await env.cal_svc.list_event_copies([plain]) == {}
+    assert calls == []
+
+
+async def test_create_event_twice_with_same_uuid_updates_in_place(env):
+    """REGRESSION: a repeated POST of the same shared event (same
+    ``(calendar_id, client_event_uuid)``) resolves to an UPDATE of the
+    existing row instead of minting a duplicate copy."""
+    await _seed_user(env.db, "dup")
+    bus = _CopyRecordingBus()
+    svc = CalendarService(env.cal_repo, bus=bus)
+    cal = await svc.create_calendar(name="C", owner_username="dup")
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    first = await svc.create_event(
+        calendar_id=cal.id,
+        summary="Picnic",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-dup",
+        client_event_uuid=grp,
+    )
+    bus.events.clear()
+    second = await svc.create_event(
+        calendar_id=cal.id,
+        summary="Picnic — moved",
+        start=(now + timedelta(hours=2)).isoformat(),
+        end=(now + timedelta(hours=3)).isoformat(),
+        created_by="uid-someone-else",
+        client_event_uuid=grp,
+        description="bring plates",
+        location="The park",
+    )
+
+    assert second.id == first.id
+    assert second.created_by == first.created_by == "uid-dup"
+    assert second.summary == "Picnic — moved"
+    assert second.description == "bring plates"
+    assert second.location == "The park"
+    assert second.client_event_uuid == grp
+
+    rows = await env.db.fetchall(
+        "SELECT id FROM calendar_events WHERE client_event_uuid=?", (grp,)
+    )
+    assert len(rows) == 1
+
+    assert any(isinstance(e, CalendarEventUpdated) for e in bus.events)
+    assert not any(isinstance(e, CalendarEventCreated) for e in bus.events)
+
+
+async def test_create_event_resolve_to_update_federates_updated(federated_cal_env):
+    """The resolve-to-update path federates
+    ``PERSONAL_CALENDAR_EVENT_UPDATED``, not ``_CREATED``."""
+    e = federated_cal_env
+    cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
+    await _seed_paired(e.db, instance_id="i_smith")
+    await _seed_remote(
+        e.db,
+        instance_id="i_smith",
+        user_id="u-bob",
+        username="bob",
+        display_name="Bob",
+    )
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    await e.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Picnic",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-anna",
+        attendees=["u-bob"],
+        client_event_uuid=grp,
+    )
+    e.sent.clear()
+    await e.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Picnic — moved",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-anna",
+        attendees=["u-bob"],
+        client_event_uuid=grp,
+    )
+    kinds = [str(row[1]).upper() for row in e.sent]
+    assert any("PERSONAL_CALENDAR_EVENT_UPDATED" in k for k in kinds), kinds
+    assert not any("PERSONAL_CALENDAR_EVENT_CREATED" in k for k in kinds), kinds
+
+
+async def test_create_event_resolve_to_update_applies_resolved_tz(federated_cal_env):
+    """The second create re-resolves the create-time tz chain (explicit →
+    users.tz → household → UTC) rather than silently keeping the old tz."""
+    env = federated_cal_env
+    await env.db.enqueue(
+        "UPDATE users SET tz=? WHERE username=?", ("Europe/Berlin", "anna")
+    )
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="anna")
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    first = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="A",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-anna",
+        client_event_uuid=grp,
+        tz="America/New_York",
+    )
+    assert first.tz == "America/New_York"
+    # No explicit tz on the retry → the chain resolves to the owner's tz,
+    # not "keep whatever the row had".
+    second = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="A",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-anna",
+        client_event_uuid=grp,
+    )
+    assert second.id == first.id
+    assert second.tz == "Europe/Berlin"
+
+
+async def test_create_event_different_uuid_still_creates_second_row(env):
+    """A different ``client_event_uuid`` (or none at all) keeps the
+    legacy insert behaviour."""
+    await _seed_user(env.db, "multi")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="multi")
+    now = datetime.now(timezone.utc)
+    a = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="A",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-multi",
+        client_event_uuid=uuid.uuid4().hex,
+    )
+    b = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="B",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-multi",
+        client_event_uuid=uuid.uuid4().hex,
+    )
+    c = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="C",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-multi",
+    )
+    d = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="D",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-multi",
+    )
+    assert len({a.id, b.id, c.id, d.id}) == 4
+
+
+async def test_create_event_integrity_error_retries_as_update(env):
+    """A racing double-submit that trips ``ux_calendar_events_fanout``
+    between the lookup and the INSERT surfaces as an update, not a 500."""
+    await _seed_user(env.db, "racer")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="racer")
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    first = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="First",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-racer",
+        client_event_uuid=grp,
+    )
+
+    real_find = env.cal_repo.find_by_client_event_uuid
+    state = {"first": True}
+
+    async def _racy_find(calendar_id, client_event_uuid):
+        # Simulate the concurrent writer landing *after* our lookup:
+        # the pre-insert probe sees nothing, the INSERT then collides.
+        if state["first"]:
+            state["first"] = False
+            return None
+        return await real_find(calendar_id, client_event_uuid)
+
+    env.cal_repo.find_by_client_event_uuid = _racy_find  # type: ignore[method-assign]
+
+    real_save = env.cal_repo.save_event
+    saves = {"n": 0}
+
+    async def _colliding_save(event):
+        saves["n"] += 1
+        if saves["n"] == 1:
+            raise sqlite3.IntegrityError(
+                "UNIQUE constraint failed: index 'ux_calendar_events_fanout'"
+            )
+        return await real_save(event)
+
+    env.cal_repo.save_event = _colliding_save  # type: ignore[method-assign]
+
+    second = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Retried",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-racer",
+        client_event_uuid=grp,
+    )
+    assert second.id == first.id
+    assert second.summary == "Retried"
+
+
+async def test_update_event_rejects_uuid_already_used_on_calendar(env):
+    """Stamping a ``client_event_uuid`` that another local row on the SAME
+    calendar already occupies violates ``ux_calendar_events_fanout``.
+
+    Two indistinguishable copies of one shared event on one calendar is a
+    client error, so it surfaces as ``ValueError`` (→ 422), never a raw
+    ``sqlite3.IntegrityError`` (→ 500).
+    """
+    await _seed_user(env.db, "clash")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="clash")
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    taken = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Taken",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-clash",
+        client_event_uuid=grp,
+    )
+    legacy = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Legacy",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-clash",
+    )
+    with pytest.raises(ValueError):
+        await env.cal_svc.update_event(legacy.id, client_event_uuid=grp)
+    # Neither row moved.
+    assert (await env.cal_svc.get_event(legacy.id)).client_event_uuid is None
+    assert (await env.cal_svc.get_event(taken.id)).client_event_uuid == grp
+
+
+async def test_update_event_keeps_own_uuid_without_clashing(env):
+    """Re-stamping an event with the uuid it already has is a no-op, not
+    a self-collision against ``ux_calendar_events_fanout``."""
+    await _seed_user(env.db, "selfsame")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="selfsame")
+    now = datetime.now(timezone.utc)
+    grp = uuid.uuid4().hex
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Mine",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-selfsame",
+        client_event_uuid=grp,
+    )
+    updated = await env.cal_svc.update_event(
+        ev.id, summary="Mine, edited", client_event_uuid=grp
+    )
+    assert updated.client_event_uuid == grp
+    assert updated.summary == "Mine, edited"
+
+
+async def test_update_event_reraises_unrelated_integrity_error(env):
+    """Only ``ux_calendar_events_fanout`` maps to a 422.
+
+    ``update_event`` relabels an ``IntegrityError`` as a ``ValueError``
+    so a fan-out uuid collision surfaces as a 422 instead of a 500.
+    That relabelling is index-specific: a future CHECK or FK violation
+    on the same statement is a genuine server-side fault and must reach
+    the caller unchanged, not be blamed on the client's uuid.
+    """
+    await _seed_user(env.db, "otherint")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="otherint")
+    now = datetime.now(timezone.utc)
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Mine",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-otherint",
+    )
+
+    async def _other_violation(event):
+        raise sqlite3.IntegrityError(
+            "CHECK constraint failed: ck_calendar_events_origin"
+        )
+
+    env.cal_repo.save_event = _other_violation  # type: ignore[method-assign]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await env.cal_svc.update_event(ev.id, summary="Edited")

@@ -12,7 +12,9 @@ Raises the usual domain exceptions:
 from __future__ import annotations
 
 import logging
+import sqlite3
 import uuid
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -20,6 +22,7 @@ from typing import TYPE_CHECKING
 from ..domain.calendar import (
     Calendar,
     CalendarEvent,
+    CalendarEventCopy,
     CalendarRSVP,
     EventReminder,
     RSVPStatus,
@@ -53,6 +56,21 @@ log = logging.getLogger(__name__)
 # value at the wire level — cover_url's clear-vs-keep ambiguity
 # needs the extra signal.
 _UNSET: object = object()
+
+#: Signature of a ``ux_calendar_events_fanout`` violation
+#: (``0047_calendar_fanout_dedupe.sql`` — one local fan-out copy per
+#: ``(calendar_id, client_event_uuid)``) inside an ``IntegrityError``
+#: message. SQLite names the INDEXED COLUMNS, not the index, in a
+#: UNIQUE-constraint message ("UNIQUE constraint failed: t.a, t.b"),
+#: so the column pair is the only discriminator available — and it is
+#: exact, since no other index on ``calendar_events`` covers that pair.
+#: ``update_event`` uses it to tell a client-caused uuid collision
+#: (→ 422) from any other integrity failure on the same statement
+#: (→ propagate unchanged, 500).
+_FANOUT_UNIQUE_VIOLATION = (
+    "UNIQUE constraint failed: "
+    "calendar_events.calendar_id, calendar_events.client_event_uuid"
+)
 
 
 # Public alias for routes that need to express "leave the cover_url
@@ -501,13 +519,12 @@ class CalendarService(BusPublisherMixin):
             tz, owner_username=cal.owner_username
         )
 
-        event = CalendarEvent(
-            id=uuid.uuid4().hex,
-            calendar_id=calendar_id,
+        group_uuid = _clean_client_event_uuid(client_event_uuid)
+
+        fields = dict(
             summary=summary,
             start=start_dt,
             end=end_dt,
-            created_by=created_by,
             all_day=all_day,
             description=description,
             attendees=attendee_tuple,
@@ -516,9 +533,55 @@ class CalendarService(BusPublisherMixin):
             cover_url=_clean_cover_url(cover_url),
             location=_clean_location(location),
             tz=event_tz,
-            client_event_uuid=_clean_client_event_uuid(client_event_uuid),
         )
-        saved = await self._repo.save_event(event)
+
+        # Idempotent fan-out: the SPA mints one ``client_event_uuid`` per
+        # shared event and POSTs once per target calendar. A re-POST of
+        # the same ``(calendar_id, client_event_uuid)`` pair — a retried
+        # request, or an edit the SPA sent as a create — must update the
+        # existing row rather than mint a second copy of the same event
+        # on the same calendar (``ux_calendar_events_fanout``).
+        if group_uuid is not None:
+            prior = await self._repo.find_by_client_event_uuid(
+                calendar_id,
+                group_uuid,
+            )
+            if prior is not None:
+                return await self._apply_create_as_update(
+                    prior=prior,
+                    calendar=cal,
+                    instance_for_user=instance_for_user,
+                    fields=fields,
+                )
+
+        event = CalendarEvent(
+            id=uuid.uuid4().hex,
+            calendar_id=calendar_id,
+            created_by=created_by,
+            client_event_uuid=group_uuid,
+            **fields,  # type: ignore[arg-type]
+        )
+        try:
+            saved = await self._repo.save_event(event)
+        except sqlite3.IntegrityError:
+            # The lookup above and this INSERT are not atomic, so a
+            # genuinely concurrent double-submit can land the sibling row
+            # in between and trip ``ux_calendar_events_fanout``. Retry
+            # once down the resolve-to-update path so the loser of the
+            # race still sees its edit applied instead of a 500.
+            prior = (
+                await self._repo.find_by_client_event_uuid(calendar_id, group_uuid)
+                if group_uuid is not None
+                else None
+            )
+            if prior is None:
+                raise
+            return await self._apply_create_as_update(
+                prior=prior,
+                calendar=cal,
+                instance_for_user=instance_for_user,
+                fields=fields,
+            )
         await self._emit(CalendarEventCreated(event=saved))
         await self._publish_federation_event(
             event=saved,
@@ -527,6 +590,66 @@ class CalendarService(BusPublisherMixin):
             event_type=FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
         )
         return saved
+
+    async def _apply_create_as_update(
+        self,
+        *,
+        prior: CalendarEvent,
+        calendar: Calendar,
+        instance_for_user: dict[str, str],
+        fields: dict,
+    ) -> CalendarEvent:
+        """Apply a create payload onto an existing fan-out sibling.
+
+        Identity and provenance stay with the stored row (``id``,
+        ``created_by``, ``origin``, ``mirrored_from``, ``remote_*``,
+        ``client_event_uuid``); everything the caller supplied is
+        overwritten verbatim.
+
+        This deliberately does NOT delegate to :meth:`update_event`:
+        that method reads ``None`` as "no change", so a create that
+        omits ``description`` / ``rrule`` (meaning "this event has
+        none") would silently inherit the stored value instead of
+        clearing it. Create semantics are full-replacement — hence the
+        inline ``replace(...)`` tail.
+        """
+        updated = replace(prior, **fields)
+        await self._repo.save_event(updated)
+        await self._emit(CalendarEventUpdated(event=updated))
+        await self._publish_federation_event(
+            event=updated,
+            calendar=calendar,
+            instance_for_user=instance_for_user,
+            event_type=FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED,
+        )
+        return updated
+
+    async def list_event_copies(
+        self,
+        events: Sequence[CalendarEvent],
+    ) -> dict[str, tuple[CalendarEventCopy, ...]]:
+        """Resolve the authoritative sibling set of each shared event.
+
+        A household event shared with N members is one row per member's
+        personal calendar, all carrying the same client-minted
+        ``client_event_uuid``. Callers must never infer that set from
+        whichever calendars they happen to have loaded — the server
+        owns it, and the answer is independent of the caller's
+        visibility.
+
+        Returns ``uuid -> copies``. Events without a
+        ``client_event_uuid`` (legacy / ICS-imported rows) contribute
+        nothing, and an input with no uuids at all short-circuits
+        without touching the repo. The distinct uuids go out in ONE
+        batched repo call — never one call per event.
+        """
+        uuids = list(
+            dict.fromkeys(e.client_event_uuid for e in events if e.client_event_uuid),
+        )
+        if not uuids:
+            return {}
+        groups = await self._repo.list_copies_for_client_event_uuids(uuids)
+        return {key: tuple(copies) for key, copies in groups.items()}
 
     async def get_event(self, event_id: str) -> CalendarEvent:
         result = await self._repo.get_event(event_id)
@@ -597,6 +720,11 @@ class CalendarService(BusPublisherMixin):
 
         ``client_event_uuid`` promotes a legacy event into a shared
         group; never clears an existing group id (``None`` = no change).
+        Promoting into a group that another local row on the *same*
+        calendar already occupies raises :class:`ValueError` (→ 422):
+        ``ux_calendar_events_fanout`` allows one local copy per
+        ``(calendar_id, client_event_uuid)``, and two indistinguishable
+        copies of one shared event on one calendar is a client error.
 
         ``cover_url`` and ``location`` use the ``_UNSET`` sentinel for
         "no change" so an explicit ``None`` from the client still clears
@@ -670,7 +798,31 @@ class CalendarService(BusPublisherMixin):
                 or existing.client_event_uuid
             ),
         )
-        await self._repo.save_event(updated)
+        try:
+            await self._repo.save_event(updated)
+        except sqlite3.IntegrityError as exc:
+            # ``ux_calendar_events_fanout`` (0047) keeps at most one local
+            # row per ``(calendar_id, client_event_uuid)``. Landing there
+            # means the caller tried to promote this event into a group
+            # another row on the same calendar already occupies — the two
+            # would be indistinguishable copies of one shared event on one
+            # calendar, which is a client-side race or a stale retry, not
+            # something to paper over. Surface it as a validation error
+            # (422) rather than a 500; a silent no-op would leave the
+            # client believing the promotion stuck.
+            #
+            # Match the specific violation rather than relabelling every
+            # integrity failure on this statement. That index is the only
+            # one reachable here today, but a future CHECK or FK on
+            # ``calendar_events`` would be a genuine server-side fault,
+            # and reporting it to the client as "your uuid is taken"
+            # (422) would send them chasing a field they never sent.
+            if _FANOUT_UNIQUE_VIOLATION not in str(exc):
+                raise
+            raise ValueError(
+                "client_event_uuid is already used by another event on this "
+                "calendar (ux_calendar_events_fanout)",
+            ) from exc
         await self._emit(CalendarEventUpdated(event=updated))
         cal = await self._repo.get_calendar(updated.calendar_id)
         if cal is not None:

@@ -12,6 +12,7 @@ import { Modal } from './Modal'
 import { Button } from './Button'
 import { Avatar } from './Avatar'
 import { showToast } from './Toast'
+import { confirmDialog } from './confirm'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { householdUsers } from '@/store/householdUsers'
@@ -58,17 +59,41 @@ const spaceId = signal<string | null>(null)
  *  POSTing a new event. ``null`` for the create flow. */
 const editingEventId = signal<string | null>(null)
 /** Edit-mode full-sync state: the CURRENT copies of the event being
- *  edited, keyed ``calendar_id → event_id``. Built from the agenda's
- *  ``_grouped_*`` arrays (falling back to a single-entry map for an
- *  ungrouped event). On submit, ticked calendars already in the map
- *  are PATCHed, newly-ticked ones are POSTed, and map entries no
- *  longer ticked are DELETEd — keeping every member's copy in sync. */
+ *  edited, keyed ``calendar_id → event_id``. Built from the server's
+ *  authoritative ``copies`` field (falling back to the agenda's
+ *  visibility-scoped ``_grouped_*`` arrays, then to a single-entry
+ *  map for an ungrouped event). On submit, ticked calendars already
+ *  in the map are PATCHed, newly-ticked ones are POSTed, and map
+ *  entries no longer ticked are DELETEd — keeping every member's
+ *  copy in sync. */
 const editGroup = signal<Map<string, string>>(new Map())
 /** The shared ``client_event_uuid`` of the group under edit, or
  *  ``null`` for a legacy single event. When a legacy event is fanned
  *  out across >1 calendar a uuid is minted on submit and stamped on
  *  every copy so the agenda groups them. */
 const editGroupUuid = signal<string | null>(null)
+/** The ``rrule`` of the event under edit (``null`` for a one-off).
+ *  Carried so full-sync can POST a newly-ticked member into the
+ *  SERIES rather than a one-off on whichever occurrence the user
+ *  happened to open, and so the series-move guard below knows the
+ *  event repeats. */
+const editingRrule = signal<string | null>(null)
+/** The date / time / all-day values ``openEditEventDialog`` seeded the
+ *  form with. Submit compares against them and OMITS ``start`` /
+ *  ``end`` from the PATCH when nothing moved, so an untouched date
+ *  input can never clobber the stored value.
+ *
+ *  This is what keeps a recurring event safe: the agenda hands us an
+ *  expanded ``{stored_id}@{occurrence_iso}`` occurrence whose
+ *  ``start`` is the OCCURRENCE's, while ``copies`` carries the STORED
+ *  row ids. PATCHing those rows with the occurrence date would drag
+ *  the whole series forward and drop every earlier occurrence —
+ *  silently, with a success toast. */
+const seededStartDate = signal('')
+const seededStartTime = signal('')
+const seededEndDate = signal('')
+const seededEndTime = signal('')
+const seededAllDay = signal(false)
 const summary = signal('')
 const startDate = signal('')
 const startTime = signal('')
@@ -157,6 +182,11 @@ interface EditableEvent {
   rsvp_enabled?: boolean
   cover_url?: string | null
   location?: string | null
+  /** Recurrence rule (``FREQ=WEEKLY`` …) or ``null`` / absent for a
+   *  one-off. Needed on the edit path so a newly-ticked member joins
+   *  the series, and so the dialog can warn before a date change
+   *  moves every occurrence. */
+  rrule?: string | null
   /** IANA timezone the event was authored in. Used to pre-fill the
    *  date / time inputs in the same wall clock the host saw at
    *  create time — without this the inputs render in the viewer's
@@ -169,13 +199,44 @@ interface EditableEvent {
    *  absent for a legacy single event — full-sync mints one when the
    *  edit fans the event out across >1 calendar. */
   client_event_uuid?: string | null
-  /** Parallel arrays (same order) carrying the underlying copies of a
-   *  grouped event: ``grouped_calendar_ids[i]`` holds the event whose
-   *  id is ``grouped_event_ids[i]``. Sourced from the agenda's
-   *  ``_grouped_*`` fields. Absent for an ungrouped event — full-sync
-   *  falls back to the single ``{calendar_id: id}`` pair. */
+  /** Authoritative, visibility-independent copy set of the event —
+   *  every row sharing its ``client_event_uuid``, oldest first. The
+   *  server builds it, so it covers members whose calendars the SPA
+   *  never loaded. At most one entry per ``calendar_id``. This is
+   *  what full-sync seeds from; ``[]`` (a legacy / ICS row with no
+   *  uuid) falls through to the arrays below. */
+  copies?: { event_id: string; calendar_id: string; owner_username: string }[]
+  /** LEGACY FALLBACK. Parallel arrays (same order) carrying the
+   *  underlying copies of a grouped event: ``grouped_calendar_ids[i]``
+   *  holds the event whose id is ``grouped_event_ids[i]``. Sourced
+   *  from the agenda's ``_grouped_*`` fields, which only cover the
+   *  VISIBLE calendars — used only when ``copies`` is absent/empty.
+   *  Absent for an ungrouped event — full-sync then falls back to the
+   *  single ``{calendar_id: id}`` pair. */
   grouped_calendar_ids?: string[]
   grouped_event_ids?: string[]
+}
+
+/** True when ``id`` is an expanded recurrence occurrence rather than a
+ *  stored row.
+ *
+ *  ``SqliteCalendarRepo._expand_window`` synthesises one id per
+ *  occurrence as ``"{stored_id}@{occurrence_iso}"``. Stored ids are
+ *  bare hex uuids, so the ``@`` is an unambiguous marker. Resolving
+ *  such an id back to its stored row is exactly what makes a date edit
+ *  dangerous — see ``seededStartDate`` — so the dialog needs to know
+ *  which of the two it is holding. Exported for unit tests. */
+export function isOccurrenceId(id: string): boolean {
+  return id.includes('@')
+}
+
+/** True when the dialog is editing an EXPANDED OCCURRENCE of a
+ *  recurring event — i.e. the user opened one card of a series. There
+ *  is no per-occurrence override in this codebase, so any date change
+ *  from here rewrites the whole series. Exported for unit tests. */
+export function isEditingSeriesOccurrence(): boolean {
+  const id = editingEventId.value
+  return !!id && !!editingRrule.value && isOccurrenceId(id)
 }
 
 /** IANA tz the dialog uses for the date / time inputs. Defaulted to
@@ -204,14 +265,33 @@ export function openEditEventDialog(
   reset()
   editingEventId.value = ev.id
   calendarId.value = ev.calendar_id
-  // Build the current-copies map from the agenda's parallel arrays
-  // (same order, from ``groupSharedEvents``). When they're absent the
-  // event is ungrouped — fall back to its single ``{calendar_id: id}``
-  // pair so the picker still seeds with exactly the one copy.
+  // Build the current-copies map, in precedence order:
+  //
+  //  1. ``ev.copies`` — the server's authoritative, visibility-
+  //     independent set.
+  //  2. the agenda's parallel ``grouped_*`` arrays — visibility-
+  //     scoped, so only a fallback.
+  //  3. the event's own ``{calendar_id: id}`` pair.
+  //
+  // An EMPTY ``copies`` array MUST fall through to (2)/(3): the
+  // server legitimately returns ``[]`` for a uuid-less legacy / ICS
+  // row, which still depends on the content-key grouping the agenda
+  // computed.
   const group = new Map<string, string>()
   const calIds = ev.grouped_calendar_ids
   const evIds = ev.grouped_event_ids
-  if (calIds && evIds && calIds.length === evIds.length && calIds.length > 0) {
+  if (ev.copies && ev.copies.length > 0) {
+    // One entry per calendar, first (= oldest) wins. The server
+    // already guarantees at most one local copy per calendar via the
+    // ``ux_calendar_events_fanout`` partial unique index (migration
+    // 0047); first-wins is belt-and-braces for a DB restored from a
+    // pre-0047 backup whose migrations haven't run yet.
+    for (const c of ev.copies) {
+      if (!group.has(c.calendar_id)) group.set(c.calendar_id, c.event_id)
+    }
+  } else if (
+    calIds && evIds && calIds.length === evIds.length && calIds.length > 0
+  ) {
     for (let i = 0; i < calIds.length; i++) group.set(calIds[i], evIds[i])
   } else {
     group.set(ev.calendar_id, ev.id)
@@ -239,6 +319,14 @@ export function openEditEventDialog(
   endDate.value = endParts.date
   endTime.value = endParts.time
   allDay.value = ev.all_day
+  // Remember exactly what we seeded so submit can tell "the user moved
+  // the event" from "the user never touched the date inputs".
+  seededStartDate.value = startParts.date
+  seededStartTime.value = startParts.time
+  seededEndDate.value = endParts.date
+  seededEndTime.value = endParts.time
+  seededAllDay.value = ev.all_day
+  editingRrule.value = ev.rrule ?? null
   attendees.value = new Set(ev.attendees ?? [])
   rsvpEnabled.value = !!ev.rsvp_enabled
   coverUrl.value = ev.cover_url ?? ''
@@ -254,6 +342,12 @@ function reset() {
   editingEventId.value = null
   editGroup.value = new Map()
   editGroupUuid.value = null
+  editingRrule.value = null
+  seededStartDate.value = ''
+  seededStartTime.value = ''
+  seededEndDate.value = ''
+  seededEndTime.value = ''
+  seededAllDay.value = false
   summary.value = ''
   description.value = ''
   location.value = ''
@@ -286,13 +380,19 @@ function reset() {
 }
 
 export function CalendarEventDialog({ onCreated }: {
-  /** Fired after a successful create. The caller receives the
-   *  calendar id the event landed on (``null`` for space events) so
-   *  the household calendar page can auto-toggle that calendar's
-   *  visibility — important when the user picked "For: Pascal" and
-   *  Pascal's chip wasn't already on, so the event would otherwise
-   *  appear to vanish. */
-  onCreated?: (calendarId: string | null) => void
+  /** Fired after a successful create OR edit with the calendars that
+   *  received a BRAND-NEW copy — every target on a create, only the
+   *  newly-POSTed ones on an edit (``null`` for space events, which
+   *  have no household visibility to manage). The page reveals and
+   *  persists exactly these, so an event that lands on a calendar the
+   *  user has hidden doesn't appear to vanish.
+   *
+   *  An empty array means "nothing was added" and MUST leave
+   *  visibility untouched: reporting every target used to un-hide —
+   *  and save — a calendar the user had deliberately switched off,
+   *  merely because they re-saved a shared event that included that
+   *  member. */
+  onCreated?: (calendarIds: string[] | null) => void
 }) {
   const isSpace = spaceId.value !== null
 
@@ -321,10 +421,37 @@ export function CalendarEventDialog({ onCreated }: {
       const end = allDay.value
         ? localPartsToUtcIso(endDate.value, '23:59', tz)
         : localPartsToUtcIso(endDate.value, endTime.value, tz)
+      // Did the user actually touch the date / time inputs? Compared
+      // against what ``openEditEventDialog`` seeded, NOT against the
+      // stored row — an expanded occurrence seeds the OCCURRENCE's
+      // date, so "unchanged" here means "leave the stored value
+      // alone", which is the only safe thing to do to a series.
+      const datesChanged
+        = startDate.value !== seededStartDate.value
+        || startTime.value !== seededStartTime.value
+        || endDate.value !== seededEndDate.value
+        || endTime.value !== seededEndTime.value
+        || allDay.value !== seededAllDay.value
+      // A create always carries the dates; an edit only when they moved.
+      const sendDates = !editingEventId.value || datesChanged
+      // There is no per-occurrence override in this codebase: a PATCH
+      // to a recurring row's start rewrites the series' anchor, so
+      // every occurrence — past ones included — shifts with it. Name
+      // that consequence before writing anything. Cancel = no writes.
+      if (isEditingSeriesOccurrence() && datesChanged) {
+        const ok = await confirmDialog(
+          'This repeats. Changing the date moves the whole series, '
+          + 'including past occurrences.',
+          {
+            title: 'Move the whole series?',
+            confirmLabel: 'Move the series',
+            destructive: true,
+          },
+        )
+        if (!ok) return
+      }
       const body: Record<string, unknown> = {
         summary: summary.value,
-        start,
-        end,
         // IANA tz the form was anchored to. The backend stamps this
         // onto the event so a viewer in a different zone still sees
         // the host's intended wall clock with a "≈ HH:MM your time"
@@ -332,6 +459,10 @@ export function CalendarEventDialog({ onCreated }: {
         tz,
         all_day: allDay.value,
         description: description.value || undefined,
+      }
+      if (sendDates) {
+        body.start = start
+        body.end = end
       }
       // Cover field is tri-state on edit (omit = leave alone, null =
       // clear, string = set). Create only sends a value when the
@@ -375,6 +506,9 @@ export function CalendarEventDialog({ onCreated }: {
           body.rsvp_enabled = true
         }
       }
+      // Calendars that received a BRAND-NEW copy. Only these are
+      // reported to ``onCreated`` — see the prop's doc comment.
+      let newCopyCalendarIds: string[] = []
       if (editingEventId.value && !isSpace) {
         // Full sync: PATCH every still-ticked copy with the edited
         // details, POST a copy for newly-ticked members, DELETE the
@@ -387,17 +521,24 @@ export function CalendarEventDialog({ onCreated }: {
         // edit spans >1 calendar and there's no uuid yet.
         if (!uuid && selected.size > 1) uuid = _mintEventUuid()
         const withUuid = uuid ? { ...body, client_event_uuid: uuid } : body
+        // A newly-ticked member gets a CREATE, which always needs the
+        // dates (the PATCH body may legitimately omit them) and the
+        // ``rrule`` — without it the new member lands a one-off on
+        // whichever occurrence the editor happened to open while
+        // everyone else keeps the series.
+        const createBody: Record<string, unknown> = { ...withUuid, start, end }
+        if (editingRrule.value) createBody.rrule = editingRrule.value
 
         const ops: Promise<unknown>[] = []
-        let added = 0
+        const addedIds: string[] = []
         let removed = 0
         for (const calId of selected) {
           const existingId = group.get(calId)
           if (existingId) {
             ops.push(api.patch(`/api/calendars/events/${existingId}`, withUuid))
           } else {
-            ops.push(api.post(`/api/calendars/${calId}/events`, withUuid))
-            added++
+            ops.push(api.post(`/api/calendars/${calId}/events`, createBody))
+            addedIds.push(calId)
           }
         }
         for (const [calId, evId] of group) {
@@ -421,10 +562,11 @@ export function CalendarEventDialog({ onCreated }: {
             t('event.dialog.updated_partial', { count: String(failed) }),
             'error',
           )
-        } else if (added > 0 || removed > 0) {
+        } else if (addedIds.length > 0 || removed > 0) {
           let msg = t('event.dialog.updated')
-          if (added > 0) {
-            msg += t('event.dialog.added_suffix', { count: String(added) })
+          if (addedIds.length > 0) {
+            msg += t('event.dialog.added_suffix',
+              { count: String(addedIds.length) })
           }
           if (removed > 0) {
             msg += t('event.dialog.removed_suffix', { count: String(removed) })
@@ -433,6 +575,7 @@ export function CalendarEventDialog({ onCreated }: {
         } else {
           showToast(t('event.dialog.updated'), 'success')
         }
+        newCopyCalendarIds = addedIds
       } else if (isSpace && editingEventId.value) {
         // Space-event edit: PATCH the space-scoped route so the
         // ``SpaceCalendarService.update_event`` path runs (membership
@@ -498,21 +641,17 @@ export function CalendarEventDialog({ onCreated }: {
         } else {
           showToast(t('event.dialog.created'), 'success')
         }
+        // Every target of a create is, by definition, a new copy.
+        newCopyCalendarIds = targets
       }
       open.value = false
-      // Pass the target calendar id so the page can ensure it's
-      // visible — without this, an event Maria creates for Pascal
-      // doesn't appear on her view (his chip is still off) and the
-      // create feels like it didn't take. For the multi-target case
-      // we pass the first picked id; the page also reloads events so
-      // anything that landed on a currently-hidden calendar will
-      // still be visible after the auto-toggle on this one.
-      const reportId = isSpace
-        ? null
-        : (targetCalendarIds.value.size > 0
-            ? Array.from(targetCalendarIds.value)[0]
-            : calendarId.value)
-      onCreated?.(reportId)
+      // Report ONLY the calendars that gained a new copy, so the page
+      // reveals (and persists) exactly those. Reporting every target
+      // un-hid a calendar the user had deliberately switched off,
+      // merely because a shared event they re-saved happened to
+      // include that member — a visibility change nobody asked for,
+      // written straight to their saved prefs.
+      onCreated?.(isSpace ? null : newCopyCalendarIds)
     } catch (e) {
       const msg = (e as Error)?.message || t('event.dialog.failed')
       showToast(msg, 'error')

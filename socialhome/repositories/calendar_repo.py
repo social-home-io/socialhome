@@ -11,6 +11,7 @@ Exposed as two repo classes to mirror the table split; helpers are shared.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from datetime import date, datetime, timezone
 from typing import Protocol, runtime_checkable
 
@@ -21,6 +22,7 @@ from ..db import AsyncDatabase
 from ..domain.calendar import (
     Calendar,
     CalendarEvent,
+    CalendarEventCopy,
     CalendarRSVP,
     EventReminder,
     RSVPStatus,
@@ -90,6 +92,22 @@ def _parse(value: str | None) -> datetime | None:
         return None
 
 
+#: SQLite's default ``SQLITE_MAX_VARIABLE_NUMBER`` is 999 host
+#: parameters per statement; 500 leaves headroom for any extra bound
+#: values a caller adds around the ``IN`` list.
+_MAX_SQL_PARAMS = 500
+
+
+def _chunks(items: Sequence[str], size: int = _MAX_SQL_PARAMS) -> Iterator[list[str]]:
+    """Yield ``items`` in slices of at most ``size`` elements.
+
+    Used to keep an ``IN (...)`` placeholder list under SQLite's
+    host-parameter ceiling without degrading into an N+1 query.
+    """
+    for start in range(0, len(items), size):
+        yield list(items[start : start + size])
+
+
 # ─── Personal calendars ───────────────────────────────────────────────────
 
 
@@ -149,6 +167,18 @@ class AbstractCalendarRepo(Protocol):
         self,
         source_event_id: str,
     ) -> list[CalendarEvent]: ...
+    # Resolve the full sibling set of a household fan-out by its
+    # client-minted ``client_event_uuid`` — the server is the authority
+    # on which rows belong to a shared event.
+    async def list_copies_for_client_event_uuids(
+        self,
+        uuids: Sequence[str],
+    ) -> dict[str, list[CalendarEventCopy]]: ...
+    async def find_by_client_event_uuid(
+        self,
+        calendar_id: str,
+        client_event_uuid: str,
+    ) -> CalendarEvent | None: ...
 
 
 class SqliteCalendarRepo:
@@ -434,6 +464,118 @@ class SqliteCalendarRepo:
             (source_event_id,),
         )
         return [e for e in (_row_to_event(d) for d in rows_to_dicts(rows)) if e]
+
+    async def list_copies_for_client_event_uuids(
+        self,
+        uuids: Sequence[str],
+    ) -> dict[str, list[CalendarEventCopy]]:
+        """Resolve every local sibling row of a household fan-out.
+
+        A household event shared with N members is stored as one
+        ``calendar_events`` row per member's personal calendar, all
+        stamped with the same client-minted ``client_event_uuid``. The
+        server is the authority on that set — a caller must never
+        reconstruct it from whichever calendars happen to be visible.
+
+        The ``origin='local' AND mirrored_from IS NULL AND
+        c.calendar_type='personal'`` filter is required, not defensive:
+        :mod:`socialhome.services.federation_inbound.personal_calendar`
+        persists inbound peer events carrying the *peer's*
+        ``client_event_uuid`` with ``origin='remote_invite'``. Those
+        rows are not ours to edit or delete, and neither are mirrors of
+        a source event (``mirrored_from``) or space-calendar rows.
+
+        This reader is DELIBERATELY NARROWER than the shared
+        ``client_event_uuid IS NOT NULL AND origin='local' AND
+        mirrored_from IS NULL`` predicate that scopes 0047's de-dup,
+        the ``ux_calendar_events_fanout`` index and
+        :meth:`find_by_client_event_uuid`: it adds
+        ``c.calendar_type='personal'`` on the JOINed ``calendars`` row.
+        That is not a lock-step violation — narrower is the safe
+        direction. A partial index cannot carry a predicate on another
+        table, so the constraint could not express it even if we wanted
+        it to; and a "copy" is a household personal-calendar fan-out by
+        definition, so a row on a non-personal calendar is not one and
+        must never be offered to the SPA as a PATCH target. The
+        dangerous direction is the opposite one — a row the DB
+        constrains but no reader can see — and that stays impossible.
+
+        Rows are ordered by ``created_at, id`` so the fan-out's copy
+        list is deterministic. There is at most one local copy per
+        calendar — that invariant is enforced in the schema by the
+        partial unique index ``ux_calendar_events_fanout``
+        (``0047_calendar_fanout_dedupe.sql``), not by this ordering.
+
+        Queries are chunked at :data:`_MAX_SQL_PARAMS` uuids per
+        statement (SQLite host-parameter ceiling); one statement per
+        chunk, never one per uuid.
+        """
+        wanted = list(dict.fromkeys(u.strip() for u in uuids if u and u.strip()))
+        if not wanted:
+            return {}
+        out: dict[str, list[CalendarEventCopy]] = {}
+        for chunk in _chunks(wanted):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = await self._db.fetchall(
+                f"""
+                SELECT e.id, e.calendar_id, e.client_event_uuid, c.owner_username
+                  FROM calendar_events e
+                  JOIN calendars c ON c.id = e.calendar_id
+                 WHERE e.client_event_uuid IN ({placeholders})
+                   AND e.origin = 'local'
+                   AND e.mirrored_from IS NULL
+                   AND c.calendar_type = 'personal'
+                 ORDER BY e.created_at, e.id
+                """,
+                tuple(chunk),
+            )
+            for row in rows_to_dicts(rows):
+                out.setdefault(row["client_event_uuid"], []).append(
+                    CalendarEventCopy(
+                        event_id=row["id"],
+                        calendar_id=row["calendar_id"],
+                        owner_username=row["owner_username"],
+                    )
+                )
+        return out
+
+    async def find_by_client_event_uuid(
+        self,
+        calendar_id: str,
+        client_event_uuid: str,
+    ) -> CalendarEvent | None:
+        """Find the local row on ``calendar_id`` for a fan-out uuid.
+
+        At most one such row exists: the partial unique index
+        ``ux_calendar_events_fanout``
+        (``0047_calendar_fanout_dedupe.sql``) enforces one local copy
+        per ``(calendar_id, client_event_uuid)``. The
+        ``ORDER BY created_at, id LIMIT 1`` costs nothing and keeps the
+        answer deterministic should that guard ever be absent (e.g. a
+        restored pre-0047 backup). ``remote_invite`` rows are excluded:
+        they carry the *peer's* uuid and are not ours to edit. So are
+        ``mirrored_from``-bearing rows — the personal mirror of a space
+        event (``SpaceRsvpMirrorBridge``) is ``origin='local'`` but is
+        not a fan-out copy, and a PATCH can stamp a uuid onto it.
+
+        The predicate here, the ``ux_calendar_events_fanout`` index
+        predicate and 0047's de-dup scope are deliberately identical
+        (``client_event_uuid IS NOT NULL AND origin='local' AND
+        mirrored_from IS NULL``) and must stay in lock-step — see the
+        header of ``0047_calendar_fanout_dedupe.sql``.
+        :meth:`list_copies_for_client_event_uuids` is the one
+        deliberate exception: it adds ``calendar_type='personal'`` on
+        the joined calendar row, which is narrower — see its docstring
+        for why that direction is safe.
+        """
+        row = await self._db.fetchone(
+            "SELECT * FROM calendar_events "
+            "WHERE calendar_id=? AND client_event_uuid=? AND origin='local' "
+            "AND mirrored_from IS NULL "
+            "ORDER BY created_at, id LIMIT 1",
+            (calendar_id, client_event_uuid),
+        )
+        return _row_to_event(row_to_dict(row))
 
 
 # ─── Space calendars ──────────────────────────────────────────────────────

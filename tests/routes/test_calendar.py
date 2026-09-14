@@ -1,5 +1,6 @@
 """Tests for socialhome.routes.calendar."""
 
+import uuid as _uuid
 from datetime import datetime, timezone, timedelta
 from .conftest import _auth
 
@@ -909,3 +910,363 @@ async def test_space_event_in_feed_when_announced(client):
     assert r.status == 201, await r.text()
     feed = await (await client.get(f"/api/spaces/{sid}/feed", headers=h)).json()
     assert any(p["type"] == "event" for p in feed), feed
+
+
+# ─── Server-authoritative fan-out copies ────────────────────────────────
+
+
+async def _seed_member_calendar(client, *, username, cal_id):
+    """Add a household member plus a personal calendar they own."""
+    await client._db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (username, f"uid-{username}", username.title()),
+    )
+    await client._db.enqueue(
+        "INSERT INTO calendars(id, name, color, owner_username, calendar_type) "
+        "VALUES(?,?,?,?,'personal')",
+        (cal_id, username.title(), "#4a90e2", username),
+    )
+    return cal_id
+
+
+async def test_event_copies_are_visibility_independent(client):
+    """REGRESSION: an event fanned out to three member calendars reports
+    ALL three copies even when only one calendar was queried.
+
+    The SPA used to infer the sibling set from whichever calendars were
+    visible in the agenda, so editing a shared event POSTed duplicates.
+    The server is the authority now — querying calendar A alone still
+    yields B's and C's copies.
+    """
+    cal_a = await _seed_member_calendar(client, username="anna", cal_id="cal-a")
+    cal_b = await _seed_member_calendar(client, username="lina", cal_id="cal-b")
+    cal_c = await _seed_member_calendar(client, username="max", cal_id="cal-c")
+    now = datetime.now(timezone.utc)
+    grp = _uuid.uuid4().hex
+    for cid in (cal_a, cal_b, cal_c):
+        r = await client.post(
+            f"/api/calendars/{cid}/events",
+            json={
+                "summary": "Family dinner",
+                "start": now.isoformat(),
+                "end": (now + timedelta(hours=1)).isoformat(),
+                "client_event_uuid": grp,
+            },
+            headers=_auth(client._tok),
+        )
+        assert r.status == 201
+        assert {c["calendar_id"] for c in (await r.json())["copies"]} <= {
+            cal_a,
+            cal_b,
+            cal_c,
+        }
+
+    start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat() + "Z"
+    r = await client.get(
+        f"/api/calendars/{cal_a}/events?start={start_q}&end={end_q}",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    events = await r.json()
+    assert len(events) == 1
+    copies = events[0]["copies"]
+    assert {c["calendar_id"] for c in copies} == {cal_a, cal_b, cal_c}
+    assert {c["owner_username"] for c in copies} == {"anna", "lina", "max"}
+    assert all(c["event_id"] for c in copies)
+
+    # Single-event reads carry the same authoritative set.
+    eid = events[0]["id"]
+    r = await client.get(f"/api/calendars/events/{eid}", headers=_auth(client._tok))
+    assert r.status == 200
+    assert {c["calendar_id"] for c in (await r.json())["copies"]} == {
+        cal_a,
+        cal_b,
+        cal_c,
+    }
+    r = await client.patch(
+        f"/api/calendars/events/{eid}",
+        json={"summary": "Family dinner — 7pm"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert {c["calendar_id"] for c in (await r.json())["copies"]} == {
+        cal_a,
+        cal_b,
+        cal_c,
+    }
+
+
+async def test_recurring_event_copies_carry_stored_ids(client):
+    """A recurring event expands into synthetic ``{id}@{iso}`` occurrence
+    ids, but ``copies`` must carry the STORED row ids — the SPA PATCHes
+    those, and an ``@``-suffixed id 404s."""
+    cal_a = await _seed_member_calendar(client, username="rita", cal_id="cal-r1")
+    cal_b = await _seed_member_calendar(client, username="rudi", cal_id="cal-r2")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    grp = _uuid.uuid4().hex
+    stored_ids = set()
+    for cid in (cal_a, cal_b):
+        r = await client.post(
+            f"/api/calendars/{cid}/events",
+            json={
+                "summary": "Weekly sync",
+                "start": now.isoformat(),
+                "end": (now + timedelta(hours=1)).isoformat(),
+                "rrule": "FREQ=DAILY;COUNT=5",
+                "client_event_uuid": grp,
+            },
+            headers=_auth(client._tok),
+        )
+        assert r.status == 201
+        stored_ids.add((await r.json())["id"])
+
+    start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(days=3)).replace(tzinfo=None).isoformat() + "Z"
+    r = await client.get(
+        f"/api/calendars/{cal_a}/events?start={start_q}&end={end_q}",
+        headers=_auth(client._tok),
+    )
+    events = await r.json()
+    assert len(events) > 1, "expected expanded occurrences"
+    # At least one returned row is a synthetic occurrence...
+    assert any("@" in e["id"] for e in events)
+    # ...but every copy id is a stored row id, never a synthetic one.
+    for e in events:
+        ids = {c["event_id"] for c in e["copies"]}
+        assert ids == stored_ids, (e["id"], ids)
+        assert not any("@" in i for i in ids)
+
+
+async def test_remote_invite_mirror_never_appears_in_copies(client):
+    """A ``remote_invite`` row carrying the peer's ``client_event_uuid``
+    is not ours to edit — it must stay out of ``copies``."""
+    cal_a = await _seed_member_calendar(client, username="nina", cal_id="cal-n1")
+    now = datetime.now(timezone.utc)
+    grp = _uuid.uuid4().hex
+    r = await client.post(
+        f"/api/calendars/{cal_a}/events",
+        json={
+            "summary": "Ours",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "client_event_uuid": grp,
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    local_id = (await r.json())["id"]
+
+    cal_m = await _seed_member_calendar(client, username="nolan", cal_id="cal-n2")
+    await client._db.enqueue(
+        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt,"
+        " end_dt, created_by, origin, client_event_uuid, tz)"
+        " VALUES(?,?,?,?,?,?,'remote_invite',?,'UTC')",
+        (
+            "mirror-1",
+            cal_m,
+            "Theirs",
+            now.isoformat(),
+            (now + timedelta(hours=1)).isoformat(),
+            "uid-nolan",
+            grp,
+        ),
+    )
+
+    start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat() + "Z"
+    # Guard the fixture itself: the mirror row really is there and really
+    # carries the same group uuid, so the assertion below is meaningful.
+    r = await client.get(
+        f"/api/calendars/{cal_m}/events?start={start_q}&end={end_q}",
+        headers=_auth(client._tok),
+    )
+    mirrors = await r.json()
+    assert [e["id"] for e in mirrors] == ["mirror-1"]
+    assert mirrors[0]["client_event_uuid"] == grp
+    # The mirror row reports NO copies of its own — see
+    # ``test_remote_invite_mirror_reports_no_copies``.
+    assert mirrors[0]["copies"] == []
+
+    r = await client.get(
+        f"/api/calendars/{cal_a}/events?start={start_q}&end={end_q}",
+        headers=_auth(client._tok),
+    )
+    events = await r.json()
+    assert [c["event_id"] for c in events[0]["copies"]] == [local_id]
+
+
+async def test_remote_invite_mirror_reports_no_copies(client):
+    """A ``remote_invite`` mirror never gets a copies lookup.
+
+    ``federation_inbound.personal_calendar`` stores the PEER's
+    ``client_event_uuid`` verbatim — unvalidated and unbounded. On a
+    collision with one of our own group uuids the mirror would render
+    our household members' chips and seed the edit dialog with OUR
+    rows, so a save would rewrite events the peer has no business
+    touching. Only ``origin='local'`` rows get a copies lookup.
+    """
+    cal_a = await _seed_member_calendar(client, username="orin", cal_id="cal-o1")
+    now = datetime.now(timezone.utc)
+    grp = _uuid.uuid4().hex
+    r = await client.post(
+        f"/api/calendars/{cal_a}/events",
+        json={
+            "summary": "Ours",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "client_event_uuid": grp,
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+
+    cal_m = await _seed_member_calendar(client, username="opal", cal_id="cal-o2")
+    # The collision: the peer's row carries the SAME uuid as our group.
+    await client._db.enqueue(
+        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt,"
+        " end_dt, created_by, origin, client_event_uuid, tz)"
+        " VALUES(?,?,?,?,?,?,'remote_invite',?,'UTC')",
+        (
+            "mirror-o",
+            cal_m,
+            "Theirs",
+            now.isoformat(),
+            (now + timedelta(hours=1)).isoformat(),
+            "uid-opal",
+            grp,
+        ),
+    )
+
+    start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat() + "Z"
+    r = await client.get(
+        f"/api/calendars/{cal_m}/events?start={start_q}&end={end_q}",
+        headers=_auth(client._tok),
+    )
+    mirrors = await r.json()
+    assert [e["id"] for e in mirrors] == ["mirror-o"]
+    # Fixture guard: the collision really is set up.
+    assert mirrors[0]["client_event_uuid"] == grp
+    assert mirrors[0]["copies"] == []
+
+
+async def test_event_without_client_event_uuid_has_empty_copies(client):
+    """Legacy / ICS-imported rows carry no group uuid → ``copies: []``."""
+    cal = await _seed_member_calendar(client, username="olga", cal_id="cal-o1")
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        f"/api/calendars/{cal}/events",
+        json={
+            "summary": "Solo",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["copies"] == []
+    r = await client.get(
+        f"/api/calendars/events/{body['id']}", headers=_auth(client._tok)
+    )
+    assert (await r.json())["copies"] == []
+
+
+async def test_space_event_payload_has_empty_copies(client):
+    """Space events live in ``space_calendar_events`` and have no
+    household fan-out — ``copies`` is always empty for them."""
+    await _seed_space(client)
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Stand-up",
+            "start": now.isoformat(),
+            "end": (now + timedelta(minutes=30)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["copies"] == []
+    r = await client.get(
+        f"/api/calendars/events/{body['id']}", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert (await r.json())["copies"] == []
+
+
+async def test_post_twice_with_same_client_event_uuid_yields_one_row(client):
+    """REGRESSION (endpoint level): re-POSTing a shared event to the same
+    calendar with the same ``client_event_uuid`` updates the existing row
+    (still ``201``) instead of minting a duplicate."""
+    cal = await _seed_member_calendar(client, username="petra", cal_id="cal-p1")
+    now = datetime.now(timezone.utc)
+    grp = _uuid.uuid4().hex
+    payload = {
+        "summary": "Book club",
+        "start": now.isoformat(),
+        "end": (now + timedelta(hours=1)).isoformat(),
+        "client_event_uuid": grp,
+    }
+    r1 = await client.post(
+        f"/api/calendars/{cal}/events", json=payload, headers=_auth(client._tok)
+    )
+    assert r1.status == 201
+    first = await r1.json()
+    r2 = await client.post(
+        f"/api/calendars/{cal}/events",
+        json={**payload, "summary": "Book club — moved"},
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 201
+    second = await r2.json()
+    assert second["id"] == first["id"]
+    assert second["summary"] == "Book club — moved"
+
+    start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat() + "Z"
+    r = await client.get(
+        f"/api/calendars/{cal}/events?start={start_q}&end={end_q}",
+        headers=_auth(client._tok),
+    )
+    assert len(await r.json()) == 1
+
+
+async def test_patch_with_uuid_taken_on_same_calendar_is_422(client):
+    """PATCHing a ``client_event_uuid`` that another local row on the same
+    calendar already holds violates ``ux_calendar_events_fanout`` — the
+    endpoint answers 422, never a 500 with a stack trace."""
+    cal = await _seed_member_calendar(client, username="quinn", cal_id="cal-q1")
+    now = datetime.now(timezone.utc)
+    grp = _uuid.uuid4().hex
+    r = await client.post(
+        f"/api/calendars/{cal}/events",
+        json={
+            "summary": "Taken",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "client_event_uuid": grp,
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    r = await client.post(
+        f"/api/calendars/{cal}/events",
+        json={
+            "summary": "Legacy",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    legacy_id = (await r.json())["id"]
+
+    r = await client.patch(
+        f"/api/calendars/events/{legacy_id}",
+        json={"client_event_uuid": grp},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()

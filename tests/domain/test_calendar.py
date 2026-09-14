@@ -9,6 +9,7 @@ import pytest
 from socialhome.domain.calendar import (
     Calendar,
     CalendarEvent,
+    CalendarEventCopy,
     CalendarEventCreate,
     CalendarEventUpdate,
     CalendarRSVP,
@@ -145,3 +146,26 @@ def test_calendar_rsvp_construction():
     )
     assert rsvp.event_id == "evt-1"
     assert rsvp.status == "going"
+
+
+def test_calendar_event_copy_construction():
+    """CalendarEventCopy carries the sibling row identity triple."""
+    copy = CalendarEventCopy(
+        event_id="evt-1",
+        calendar_id="cal-1",
+        owner_username="alice",
+    )
+    assert copy.event_id == "evt-1"
+    assert copy.calendar_id == "cal-1"
+    assert copy.owner_username == "alice"
+
+
+def test_calendar_event_copy_is_frozen():
+    """CalendarEventCopy is immutable like every other domain type."""
+    copy = CalendarEventCopy(
+        event_id="evt-1",
+        calendar_id="cal-1",
+        owner_username="alice",
+    )
+    with pytest.raises((AttributeError, TypeError)):
+        copy.event_id = "evt-2"  # type: ignore[misc]
