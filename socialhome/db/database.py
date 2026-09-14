@@ -104,6 +104,22 @@ class AsyncDatabase:
             conn.execute("PRAGMA mmap_size=134217728")
             conn.execute("PRAGMA foreign_keys=ON")
             run_migrations(conn, directory=self._migrations_dir)
+            # A migration may legitimately disable FK enforcement to rebuild
+            # a table (0046 does), and ``PRAGMA foreign_keys`` is a silent
+            # no-op inside a transaction — so the migration's own restore can
+            # fail without a sound (it does exactly that on a connection left
+            # in legacy implicit-transaction mode). Re-assert on the way out
+            # and verify: this connection is the process's long-lived writer,
+            # and leaving it with enforcement off would make every runtime
+            # ON DELETE CASCADE inert for the whole boot.
+            conn.execute("PRAGMA foreign_keys=ON")
+            if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+                raise RuntimeError(
+                    "Refusing to serve with foreign-key enforcement disabled: "
+                    "PRAGMA foreign_keys=ON did not take effect after "
+                    "migrations (most likely a transaction is still open). "
+                    "Every ON DELETE CASCADE would be inert for this process."
+                )
             return conn
 
         self._conn = await loop.run_in_executor(None, _open)

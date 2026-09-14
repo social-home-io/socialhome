@@ -300,13 +300,26 @@ export default function CalendarPage() {
         // Without ``cover_url`` the edit form would open with a blank
         // cover and full-sync would propagate the blank to every copy.
         cover_url: evt.cover_url,
+        // Recurrence rule. Without it a newly-ticked member would get
+        // a one-off on whichever occurrence was open instead of the
+        // series, and the dialog couldn't warn that changing the date
+        // of an expanded occurrence moves every occurrence.
+        rrule: evt.rrule,
         // Anchor the form's date / time inputs to the event's tz.
         tz: evt.tz,
-        // Group identity + the parallel arrays of underlying copies
-        // (from ``groupSharedEvents``) so the picker pre-ticks every
-        // member who already holds a copy and full-sync can PATCH /
-        // POST / DELETE the right rows.
+        // Group identity + the underlying copies, so the picker
+        // pre-ticks every member who already holds one and full-sync
+        // can PATCH / POST / DELETE the right rows.
+        //
+        // ``copies`` is the AUTHORITATIVE set: the server computes it
+        // per event, independent of which calendars the viewer has
+        // overlaid. The parallel ``_grouped_*`` arrays are a
+        // render-time artifact of ``groupSharedEvents`` over the
+        // VISIBLE calendars only — kept as the fallback for uuid-less
+        // legacy / ICS rows, where the server returns ``copies: []``
+        // and the agenda's content-key grouping is all we have.
         client_event_uuid: evt.client_event_uuid,
+        copies: evt.copies,
         grouped_calendar_ids: evt._grouped_calendar_ids,
         grouped_event_ids: evt._grouped_event_ids,
       },
@@ -421,44 +434,70 @@ export default function CalendarPage() {
             // token (no ``:``) so it reads well in ``aria-controls``.
             const isOpen = selectedRow.value === rowKey
             const detailId = `sh-event-detail-${dayKey}-${e.id}`
-            // Owner byline / chips. Single attendee → one "You" /
-            // "Bob" chip (the legacy shape). Multiple attendees (the
-            // composer fanned the event out across N calendars) →
-            // one chip per owner, so a household dinner reads as one
-            // row with "YOU · BOB" instead of two stacked rows. Only
-            // surfaced when the multi-calendar overlay is on; with
-            // a single calendar visible the byline is redundant.
-            // Each chip carries its OWN calendar's hue so a shared
-            // event reads as ``YOU (terracotta) · BOB (moss)`` rather
-            // than two same-coloured pills. Without the per-chip
-            // colour, all chips inherited ``--cal-hue`` from the
-            // primary row (the creator's calendar) and the "shared
-            // with" signal was visually flat.
-            const groupedCalIds = e._grouped_calendar_ids ?? [e.calendar_id]
+            // Owner byline / chips — one chip per DISTINCT owner of a
+            // copy, so a household dinner reads as one row "YOU · BOB"
+            // instead of two stacked rows. Each chip carries its OWN
+            // calendar's hue so the sharing reads as ``YOU
+            // (terracotta) · BOB (moss)`` rather than two
+            // same-coloured pills.
+            //
+            // The source is ``copies`` — the server's authoritative,
+            // visibility-INDEPENDENT copy set. It used to be the
+            // ``_grouped_*`` render artifact behind a "more than one
+            // calendar visible" gate, which meant a shared event was
+            // silently indistinguishable from a personal one whenever
+            // the viewer had only their own calendar on. That hidden
+            // sharing was half the "I tick the other members and
+            // nothing happens" bug. ``_grouped_*`` stays as the
+            // fallback for uuid-less legacy / ICS rows and space
+            // events, where the server sends ``copies: []``.
+            const groupedCalIds =
+              (e.copies?.length ? e.copies.map(c => c.calendar_id) : null)
+              ?? e._grouped_calendar_ids ?? [e.calendar_id]
+            // Owner carried on the copy itself — the defensive fallback
+            // for a calendar id missing from ``calendars`` (shouldn't
+            // happen: /api/calendars returns the whole household).
+            const copyOwners = new Map(
+              (e.copies ?? []).map(c => [c.calendar_id, c.owner_username]),
+            )
             const ownerChips: { name: string; color: string }[] = []
-            if (visibleCalendarIds.value.size > 1) {
-              const me = currentUser.value?.username
-              const seen = new Set<string>()
-              for (const calId of groupedCalIds) {
-                const cal = calendars.value.find(c => c.id === calId)
-                if (!cal) continue
-                if (seen.has(cal.owner_username)) continue
-                seen.add(cal.owner_username)
-                const color = resolveCalendarColor(cal)
-                if (cal.owner_username === me) {
-                  ownerChips.push({ name: 'You', color })
-                  continue
-                }
-                let name: string = cal.owner_username
-                for (const u of householdUsers.value.values()) {
-                  if (u.username === cal.owner_username) {
-                    name = u.display_name || u.username
-                    break
-                  }
-                }
-                ownerChips.push({ name, color })
+            const me = currentUser.value?.username
+            const seen = new Set<string>()
+            for (const calId of groupedCalIds) {
+              const cal = calendars.value.find(c => c.id === calId)
+              const owner = cal?.owner_username ?? copyOwners.get(calId)
+              if (!owner) continue
+              if (seen.has(owner)) continue
+              seen.add(owner)
+              // Neutral ink when the calendar row isn't on hand — a
+              // hashed hue would imply a colour the picker never shows.
+              const color = cal
+                ? resolveCalendarColor(cal)
+                : 'var(--sh-text-muted)'
+              if (owner === me) {
+                ownerChips.push({ name: 'You', color })
+                continue
               }
+              let name: string = owner
+              for (const u of householdUsers.value.values()) {
+                if (u.username === owner) {
+                  name = u.display_name || u.username
+                  break
+                }
+              }
+              ownerChips.push({ name, color })
             }
+            // Chips earn their place when they add information: more
+            // than one owner holds a copy (the event is shared), or
+            // more than one calendar is overlaid (the byline says whose
+            // row this is — hue alone is a thin accent, two household
+            // calendars can sit close together, and it's inaccessible
+            // to anyone who can't discriminate them). With a single
+            // owner AND a single calendar on screen the owner is
+            // implied, so a lone "You" would be noise.
+            const showOwnerChips =
+              ownerChips.length > 1 || visibleCalendarIds.value.size > 1
+            const shownChips = showOwnerChips ? ownerChips : []
             return (
             <div key={rowKey}
                  class={
@@ -488,16 +527,16 @@ export default function CalendarPage() {
                   />
                 )}
                 <strong>{e.summary}</strong>
-                {ownerChips.length > 0 && (
+                {shownChips.length > 0 && (
                   <span
                     class="sh-event-owner-chips"
                     aria-label={
-                      ownerChips.length === 1
-                        ? `On ${ownerChips[0].name}'s calendar`
-                        : `Shared with ${ownerChips.map(c => c.name).join(', ')}`
+                      shownChips.length === 1
+                        ? `On ${shownChips[0].name}'s calendar`
+                        : `Shared with ${shownChips.map(c => c.name).join(', ')}`
                     }
                   >
-                    {ownerChips.map(chip => (
+                    {shownChips.map(chip => (
                       <span
                         key={chip.name}
                         class="sh-event-owner"
@@ -625,17 +664,29 @@ export default function CalendarPage() {
         )
       })}
 
-      <CalendarEventDialog onCreated={(targetId) => {
-        // If the user created the event on a calendar that isn't
-        // currently overlaid (typically: "For: Pascal" while only
-        // Maria's chip was on), auto-toggle that calendar visible so
-        // the new event lands on screen instead of seemingly
-        // disappearing.
-        if (targetId && !visibleCalendarIds.value.has(targetId)) {
+      <CalendarEventDialog onCreated={(newCopyIds) => {
+        // The dialog reports only the calendars that received a NEW
+        // copy (``null`` for the space path, which has no household
+        // visibility to manage). Those get switched on, so the new
+        // copies land on screen instead of seemingly disappearing —
+        // and the reveal is persisted, since it used to be in-memory
+        // only and silently reverted on the next reload.
+        //
+        // Calendars that were merely PATCHed are deliberately NOT
+        // revealed: a user who hid Bob's calendar shouldn't get it
+        // switched back on — and saved — just because they re-saved a
+        // shared event that happens to include Bob. An empty array
+        // therefore leaves visibility (and the saved prefs) untouched.
+        if (newCopyIds && newCopyIds.length > 0) {
           const next = new Set(visibleCalendarIds.value)
-          next.add(targetId)
-          visibleCalendarIds.value = next
-          activeCalendarScope.value = next
+          const before = next.size
+          for (const id of newCopyIds) next.add(id)
+          if (next.size !== before) {
+            visibleCalendarIds.value = next
+            activeCalendarScope.value = next
+            const uid = currentUser.value?.user_id
+            if (uid) saveVisibilityPrefs(uid, next)
+          }
         }
         void loadEvents()
       }} />

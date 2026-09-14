@@ -354,3 +354,20 @@ async def test_concurrent_reads_do_not_misuse_connection(tmp_dir):
         assert all(r == 0 for r in results)
     finally:
         await db.shutdown()
+
+
+async def test_foreign_keys_enforced_after_full_migration_chain(tmp_dir):
+    """The long-lived writer must leave startup() with FK enforcement ON.
+
+    ``PRAGMA foreign_keys`` is a silent no-op inside a transaction, so a
+    migration that disables enforcement to rebuild a table (0046 does)
+    can fail to restore it — and ``_open()`` hands that same connection
+    to the whole process, making every runtime ``ON DELETE CASCADE``
+    inert for the rest of the boot.
+    """
+    db = AsyncDatabase(tmp_dir / "fk.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        assert await db.fetchval("PRAGMA foreign_keys") == 1
+    finally:
+        await db.shutdown()

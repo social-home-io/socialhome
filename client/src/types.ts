@@ -516,6 +516,19 @@ export interface CalendarEvent {
    *  heuristic for legacy / sub-version rows. ``null`` for
    *  single-target events and externally-imported rows. Issue #327. */
   client_event_uuid?: string | null
+  /** **Authoritative** copy set of a shared event — every row that
+   *  shares this event's ``client_event_uuid``, regardless of which
+   *  calendars the SPA happens to have loaded. Server-built and
+   *  ordered oldest-first (``created_at, id``), with at most one
+   *  entry per ``calendar_id`` — the ``ux_calendar_events_fanout``
+   *  partial unique index (migration 0047) makes a second local copy
+   *  on one calendar impossible. ``[]`` for an event with no
+   *  ``client_event_uuid`` (legacy / ICS-imported rows that still rely
+   *  on the content-key grouping) and for space events. Never carries
+   *  cross-household ``remote_invite`` mirrors. Anything that WRITES
+   *  (the edit dialog's full sync) must read this, never the
+   *  ``_grouped_*`` render artifacts below. */
+  copies?: { event_id: string; calendar_id: string; owner_username: string }[]
   /** SPA-only group key, set by :func:`groupSharedEvents`. The composer
    *  fans out a multi-attendee event as one ``POST`` per picked
    *  calendar, which lands as N rows in the DB with the same
@@ -524,7 +537,15 @@ export interface CalendarEvent {
    *  single rendered row whose ``_grouped_calendar_ids`` lists every
    *  underlying row's ``calendar_id`` and ``_grouped_event_ids`` lists
    *  the matching DB ids — used to render multi-owner chips on the
-   *  agenda. Never reaches the wire. */
+   *  agenda. Never reaches the wire.
+   *
+   *  **Render-time only.** These list the rows that were *loaded and
+   *  merged for this render* — i.e. the copies on the currently
+   *  VISIBLE calendars. They are NOT the authoritative copy set: a
+   *  shared event whose other holders' calendars are hidden merges
+   *  into a single-entry group. Use :attr:`copies` for anything that
+   *  drives writes; treating these as the copy set is what duplicated
+   *  shared events across every member's calendar on edit. */
   _grouped_calendar_ids?: string[]
   _grouped_event_ids?: string[]
 }

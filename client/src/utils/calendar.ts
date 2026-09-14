@@ -527,6 +527,11 @@ export function formatEventBounds(event: CalendarEvent): EventBounds {
  *  first row when no calendar matches). ``_grouped_calendar_ids`` /
  *  ``_grouped_event_ids`` carry the underlying ids for the chip
  *  render and click-routing.
+ *
+ *  Those two arrays are a RENDER artifact of the rows passed in (i.e.
+ *  the visible calendars only). The server-built ``copies`` field
+ *  rides along on the cloned primary untouched and supersedes them
+ *  for anything that drives writes — see ``CalendarEvent.copies``.
  */
 export function groupSharedEvents(
   evts: CalendarEvent[],

@@ -304,6 +304,27 @@ describe('groupSharedEvents', () => {
     expect(out[0]._grouped_event_ids).toEqual(['e-1', 'e-2'])
   })
 
+  it('carries the server-authoritative `copies` through onto the merged row', () => {
+    // ``copies`` is visibility-independent, so it can name calendars
+    // that were never loaded (cal-c here). The grouper must pass it
+    // through untouched — the edit dialog writes from it, while
+    // ``_grouped_*`` only ever reflects the rows just rendered.
+    const copies = [
+      { event_id: 'e-1', calendar_id: 'cal-a', owner_username: 'alice' },
+      { event_id: 'e-2', calendar_id: 'cal-b', owner_username: 'bob' },
+      { event_id: 'e-3', calendar_id: 'cal-c', owner_username: 'carol' },
+    ]
+    const onAlice = sharedEvt('e-1', { calendar_id: 'cal-a' }) as CalendarEvent
+    const onBob = sharedEvt('e-2', { calendar_id: 'cal-b' }) as CalendarEvent
+    onAlice.copies = copies
+    onBob.copies = copies
+    const out = groupSharedEvents([onAlice, onBob], cals)
+    expect(out).toHaveLength(1)
+    expect(out[0].copies).toEqual(copies)
+    // The render artifact only knows about the two rows it merged.
+    expect(out[0]._grouped_calendar_ids).toEqual(['cal-a', 'cal-b'])
+  })
+
   it('does not merge two rows with different client_event_uuids', () => {
     // Two genuinely different events that happen to share a content
     // key — the uuid disambiguates them and keeps them separate.

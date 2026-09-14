@@ -266,6 +266,19 @@ Row id is deterministic — `_mint_event_id(remote_instance,
 remote_event, recipient_user_id)` — so a redelivered envelope
 collapses onto the same row.
 
+A shared household event is fanned out as one `POST` per picked
+calendar, every row carrying the same client-minted
+`client_event_uuid`. Since migration `0047` that pair is unique per
+calendar (`ux_calendar_events_fanout`), so a **re-POST** of an
+existing `(calendar_id, client_event_uuid)` resolves to an update of
+the stored row rather than a second copy — and therefore emits
+`PERSONAL_CALENDAR_EVENT_UPDATED` where it previously emitted
+`PERSONAL_CALENDAR_EVENT_CREATED`. No wire shape changed and no
+capability bump is needed: `PersonalCalendarInboundHandlers.attach_to`
+registers the same handler for both event types and upserts on the
+deterministic row id above, so a peer that never saw the original
+create still materialises the mirror from the update.
+
 Validation rejects local user_ids (422 — household members
 coordinate via the calendar selector, not the invite picker), unknown
 user_ids, and remote user_ids whose home instance isn't a confirmed

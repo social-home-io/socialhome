@@ -15,6 +15,7 @@ from socialhome.domain.calendar import (
 from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
+    _chunks,
 )
 
 
@@ -768,3 +769,376 @@ async def test_feed_token_revoked_lookup_returns_none(env):
         space_id=sid,
     )
     assert await env.space_cal_repo.get_user_for_feed_token(raw) is None
+
+
+# ── Shared-event copies (client_event_uuid fan-out) ─────────────────────────
+
+
+async def _seed_user(env, username: str) -> None:
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (username, f"uid-{username}", username.title()),
+    )
+
+
+async def _seed_calendar(
+    env,
+    cal_id: str,
+    owner: str,
+    calendar_type: str = "personal",
+) -> None:
+    await env.cal_repo.save_calendar(
+        Calendar(
+            id=cal_id,
+            name=cal_id,
+            color="#abc",
+            owner_username=owner,
+            calendar_type=calendar_type,
+        )
+    )
+
+
+async def _insert_event(
+    env,
+    *,
+    event_id: str,
+    calendar_id: str,
+    client_event_uuid: str | None,
+    origin: str = "local",
+    mirrored_from: str | None = None,
+    created_at: str = "2025-01-01 10:00:00",
+) -> None:
+    """Insert a raw calendar_events row.
+
+    Raw SQL because ``CalendarEvent`` cannot express an explicit
+    ``created_at`` (``save_event`` always stamps ``datetime('now')``).
+    """
+    await env.db.enqueue(
+        """
+        INSERT INTO calendar_events(
+            id, calendar_id, summary, start_dt, end_dt, mirrored_from,
+            origin, created_by, client_event_uuid, created_at, updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            event_id,
+            calendar_id,
+            f"Summary {event_id}",
+            "2025-06-01T10:00:00+00:00",
+            "2025-06-01T11:00:00+00:00",
+            mirrored_from,
+            origin,
+            "uid-alice",
+            client_event_uuid,
+            created_at,
+            created_at,
+        ),
+    )
+
+
+async def test_list_copies_groups_siblings_by_uuid(env):
+    """Sibling rows across calendars come back grouped by uuid."""
+    await _seed_user(env, "bob")
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _seed_calendar(env, "cal-bob", "bob")
+    await _insert_event(
+        env, event_id="e1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+    await _insert_event(
+        env, event_id="e2", calendar_id="cal-bob", client_event_uuid="u1"
+    )
+    await _insert_event(
+        env, event_id="e3", calendar_id="cal-alice", client_event_uuid="u2"
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1", "u2"])
+
+    assert set(out) == {"u1", "u2"}
+    assert [(c.event_id, c.calendar_id, c.owner_username) for c in out["u1"]] == [
+        ("e1", "cal-alice", "alice"),
+        ("e2", "cal-bob", "bob"),
+    ]
+    assert [c.event_id for c in out["u2"]] == ["e3"]
+
+
+async def test_list_copies_excludes_remote_invite_rows(env):
+    """Inbound peer rows share the peer's uuid but are not ours to touch."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _insert_event(
+        env, event_id="local-1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+    await _insert_event(
+        env,
+        event_id="remote-1",
+        calendar_id="cal-alice",
+        client_event_uuid="u1",
+        origin="remote_invite",
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1"])
+
+    assert [c.event_id for c in out["u1"]] == ["local-1"]
+
+
+async def test_list_copies_excludes_mirrored_rows(env):
+    """A mirror of another event is not a fan-out sibling."""
+    await _seed_user(env, "bob")
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _seed_calendar(env, "cal-bob", "bob")
+    await _insert_event(
+        env, event_id="src", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+    await _insert_event(
+        env,
+        event_id="mirror",
+        calendar_id="cal-bob",
+        client_event_uuid="u1",
+        mirrored_from="src",
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1"])
+
+    assert [c.event_id for c in out["u1"]] == ["src"]
+
+
+async def test_list_copies_excludes_space_calendars(env):
+    """Rows on a space-type calendar are out of scope."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _seed_calendar(env, "cal-space", "alice", calendar_type="space")
+    await _insert_event(
+        env, event_id="p1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+    await _insert_event(
+        env, event_id="s1", calendar_id="cal-space", client_event_uuid="u1"
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1"])
+
+    assert [c.event_id for c in out["u1"]] == ["p1"]
+
+
+async def test_list_copies_orders_copies_by_created_at_then_id(env):
+    """Copies for one uuid come back in ``created_at, id`` order.
+
+    ``ux_calendar_events_fanout`` (migration 0047) means there is at
+    most one local copy per calendar, so the reachable shape is one row
+    per calendar; the ordering makes the fan-out's result deterministic
+    across them. ``id`` values are seeded in reverse alphabetical order
+    of their ``created_at`` so an accidental ``ORDER BY id`` would fail
+    this test.
+    """
+    await _seed_user(env, "bob")
+    await _seed_user(env, "carol")
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _seed_calendar(env, "cal-bob", "bob")
+    await _seed_calendar(env, "cal-carol", "carol")
+    await _insert_event(
+        env,
+        event_id="zzz-oldest",
+        calendar_id="cal-alice",
+        client_event_uuid="u1",
+        created_at="2025-01-01 08:00:00",
+    )
+    await _insert_event(
+        env,
+        event_id="mmm-middle",
+        calendar_id="cal-bob",
+        client_event_uuid="u1",
+        created_at="2025-01-01 09:00:00",
+    )
+    await _insert_event(
+        env,
+        event_id="aaa-newest",
+        calendar_id="cal-carol",
+        client_event_uuid="u1",
+        created_at="2025-01-01 10:00:00",
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1"])
+
+    assert [c.event_id for c in out["u1"]] == [
+        "zzz-oldest",
+        "mmm-middle",
+        "aaa-newest",
+    ]
+    assert [c.owner_username for c in out["u1"]] == ["alice", "bob", "carol"]
+
+
+async def test_list_copies_unknown_uuid_absent(env):
+    """An unknown uuid simply has no key in the result."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _insert_event(
+        env, event_id="e1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1", "nope"])
+
+    assert "nope" not in out
+    assert list(out) == ["u1"]
+
+
+async def test_list_copies_empty_input_touches_no_db(env, monkeypatch):
+    """Empty / blank input short-circuits before any query."""
+    calls: list[str] = []
+    original = env.db.fetchall
+
+    async def counting(sql, params=()):
+        calls.append(sql)
+        return await original(sql, params)
+
+    monkeypatch.setattr(env.db, "fetchall", counting)
+
+    assert await env.cal_repo.list_copies_for_client_event_uuids([]) == {}
+    assert await env.cal_repo.list_copies_for_client_event_uuids(["", "  "]) == {}
+    assert calls == []
+
+
+async def test_list_copies_chunks_large_uuid_lists(env, monkeypatch):
+    """1200 uuids issue three chunked statements and merge results."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    uuids = [f"u{i}" for i in range(1200)]
+    await _insert_event(
+        env, event_id="first", calendar_id="cal-alice", client_event_uuid="u0"
+    )
+    await _insert_event(
+        env, event_id="last", calendar_id="cal-alice", client_event_uuid="u1199"
+    )
+
+    calls: list[str] = []
+    original = env.db.fetchall
+
+    async def counting(sql, params=()):
+        calls.append(sql)
+        return await original(sql, params)
+
+    monkeypatch.setattr(env.db, "fetchall", counting)
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(uuids)
+
+    assert len(calls) == 3
+    assert [c.event_id for c in out["u0"]] == ["first"]
+    assert [c.event_id for c in out["u1199"]] == ["last"]
+
+
+async def test_find_by_client_event_uuid_finds_the_local_copy(env):
+    """The single local row on that calendar is returned.
+
+    ``ux_calendar_events_fanout`` (migration 0047) guarantees at most
+    one such row, so this is the whole reachable contract.
+    """
+    await _seed_user(env, "bob")
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _seed_calendar(env, "cal-bob", "bob")
+    await _insert_event(
+        env, event_id="on-alice", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+    await _insert_event(
+        env, event_id="on-bob", calendar_id="cal-bob", client_event_uuid="u1"
+    )
+
+    found = await env.cal_repo.find_by_client_event_uuid("cal-alice", "u1")
+
+    assert found is not None
+    assert found.id == "on-alice"
+    assert found.calendar_id == "cal-alice"
+
+
+async def test_find_by_client_event_uuid_scoped_to_calendar(env):
+    """A sibling on another calendar is not returned."""
+    await _seed_user(env, "bob")
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _seed_calendar(env, "cal-bob", "bob")
+    await _insert_event(
+        env, event_id="e1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+
+    assert await env.cal_repo.find_by_client_event_uuid("cal-bob", "u1") is None
+
+
+async def test_find_by_client_event_uuid_ignores_remote_invite(env):
+    """A remote_invite row never answers the lookup."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _insert_event(
+        env,
+        event_id="remote-1",
+        calendar_id="cal-alice",
+        client_event_uuid="u1",
+        origin="remote_invite",
+    )
+
+    assert await env.cal_repo.find_by_client_event_uuid("cal-alice", "u1") is None
+
+
+async def test_find_by_client_event_uuid_ignores_mirrored_rows(env):
+    """A space-calendar mirror is not a fan-out copy.
+
+    ``SpaceRsvpMirrorBridge`` writes the personal mirror of a space
+    event with ``origin='local'`` + ``mirrored_from=<source id>``, and
+    ``CalendarService.update_event`` can PATCH a ``client_event_uuid``
+    onto it. The reader, the ``ux_calendar_events_fanout`` index and
+    migration 0047's de-dup scope all carry ``mirrored_from IS NULL``
+    and must agree — otherwise the migration deletes a row no caller
+    ever claimed.
+    """
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _insert_event(
+        env,
+        event_id="mirror-1",
+        calendar_id="cal-alice",
+        client_event_uuid="u1",
+        mirrored_from="space-event-1",
+    )
+
+    assert await env.cal_repo.find_by_client_event_uuid("cal-alice", "u1") is None
+
+
+async def test_list_copies_strips_whitespace_around_uuids(env):
+    """A padded uuid must match — the filter strips, so the bind must too."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _insert_event(
+        env, event_id="e1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids([" u1 "])
+
+    assert [c.event_id for c in out["u1"]] == ["e1"]
+
+
+async def test_list_copies_dedupes_repeated_uuids(env, monkeypatch):
+    """The same uuid twice binds once and yields one copy list."""
+    await _seed_calendar(env, "cal-alice", "alice")
+    await _insert_event(
+        env, event_id="e1", calendar_id="cal-alice", client_event_uuid="u1"
+    )
+
+    bound: list[tuple] = []
+    original = env.db.fetchall
+
+    async def recording(sql, params=()):
+        bound.append(tuple(params))
+        return await original(sql, params)
+
+    monkeypatch.setattr(env.db, "fetchall", recording)
+
+    out = await env.cal_repo.list_copies_for_client_event_uuids(["u1", " u1 ", "u1"])
+
+    assert bound == [("u1",)]
+    assert [c.event_id for c in out["u1"]] == ["e1"]
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (0, []),
+        (1, [1]),
+        (499, [499]),
+        (500, [500]),
+        (501, [500, 1]),
+        (1001, [500, 500, 1]),
+    ],
+)
+def test_chunks_respects_the_host_parameter_ceiling(count, expected):
+    """500 uuids is one statement; 501 is two — SQLite caps host params."""
+    items = [f"u{i}" for i in range(count)]
+
+    assert [len(c) for c in _chunks(items)] == expected

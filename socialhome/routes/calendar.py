@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Sequence
 
 from aiohttp import web
 
@@ -13,6 +14,7 @@ from ..app_keys import (
     media_signer_key,
     user_repo_key,
 )
+from ..domain.calendar import CalendarEventCopy
 from ..domain.federation import PairingStatus
 from ..domain.space import SpaceRole
 from ..media_signer import sign_media_urls_in, strip_signature_query
@@ -44,7 +46,15 @@ def _cal_dict(cal) -> dict:
     }
 
 
-def _event_dict(event) -> dict:
+def _event_dict(event, *, copies: Sequence[CalendarEventCopy] = ()) -> dict:
+    """Serialise an event.
+
+    ``copies`` is the server-authoritative sibling set of a
+    household fan-out (see :meth:`CalendarService.list_event_copies`).
+    It defaults to empty so every space-calendar caller — space
+    events live in ``space_calendar_events`` and have no household
+    fan-out — keeps emitting ``[]`` without opting in.
+    """
     return {
         "id": event.id,
         "calendar_id": event.calendar_id,
@@ -70,7 +80,58 @@ def _event_dict(event) -> dict:
         "client_event_uuid": getattr(event, "client_event_uuid", None),
         # §23.15 — whether this event also mirrors to the space feed.
         "announce_in_feed": getattr(event, "announce_in_feed", False),
+        # Authoritative sibling rows of the household fan-out, resolved
+        # server-side from ``client_event_uuid``. Independent of which
+        # calendars the caller currently has visible — that independence
+        # is the whole point: the SPA used to infer the set from the
+        # loaded agenda and so POSTed duplicates when editing a shared
+        # event. ``[]`` for rows with no ``client_event_uuid`` (legacy /
+        # ICS-imported) and for space events. Never contains
+        # ``remote_invite`` mirrors — those carry the *peer's* uuid and
+        # are not ours to edit.
+        "copies": [
+            {
+                "event_id": c.event_id,
+                "calendar_id": c.calendar_id,
+                "owner_username": c.owner_username,
+            }
+            for c in copies
+        ],
     }
+
+
+async def _event_dicts_with_copies(svc, events) -> list[dict]:
+    """Serialise personal-calendar events with their fan-out copies.
+
+    One batched ``list_event_copies`` call for the whole list — never
+    one per event. Recurring events arrive here already expanded into
+    synthetic ``{id}@{iso}`` occurrences, but the copy ids come from the
+    repo and are always the STORED row ids, which is what the SPA has
+    to PATCH.
+
+    Only ``origin='local'`` rows get a lookup.
+    :mod:`socialhome.services.federation_inbound.personal_calendar`
+    stores an inbound peer's ``client_event_uuid`` verbatim — no
+    ``_clean_client_event_uuid``, no length bound — so a collision with
+    one of our own group uuids would make a ``remote_invite`` mirror
+    report OUR household's rows as its copies, chipping our members
+    into the dialog and seeding an edit that rewrites events the peer
+    never touched. The group side of the lookup already filters on
+    ``origin`` (``list_copies_for_client_event_uuids``); this is the
+    reader side of the same rule.
+    """
+    groups = await svc.list_event_copies(events)
+    return [
+        _event_dict(
+            e,
+            copies=(
+                groups.get(getattr(e, "client_event_uuid", None) or "", ())
+                if getattr(e, "origin", "local") == "local"
+                else ()
+            ),
+        )
+        for e in events
+    ]
 
 
 class CalendarInviteesView(BaseView):
@@ -181,7 +242,7 @@ class CalendarEventsView(BaseView):
         svc = self.svc(calendar_service_key)
         events = await svc.list_events_in_range(calendar_id, start=start, end=end)
         return web.json_response(
-            _sign_payload(self.request, [_event_dict(e) for e in events])
+            _sign_payload(self.request, await _event_dicts_with_copies(svc, events))
         )
 
     async def post(self) -> web.Response:
@@ -213,9 +274,8 @@ class CalendarEventsView(BaseView):
             # content-key fallback covers those rows.
             client_event_uuid=body.get("client_event_uuid"),
         )
-        return web.json_response(
-            _sign_payload(self.request, _event_dict(event)), status=201
-        )
+        payload = (await _event_dicts_with_copies(svc, [event]))[0]
+        return web.json_response(_sign_payload(self.request, payload), status=201)
 
 
 class CalendarEventDeleteView(BaseView):
@@ -250,6 +310,10 @@ class CalendarEventDeleteView(BaseView):
             if result is None:
                 return error_response(404, "NOT_FOUND", "Event not found.")
             _sid, event = result
+            # Space events live in ``space_calendar_events`` and have no
+            # household fan-out, so ``copies`` stays empty here (and in
+            # every other space-calendar view) by design — don't "fix"
+            # this by wiring ``_event_dicts_with_copies`` in.
             return web.json_response(
                 _sign_payload(self.request, _event_dict(event)),
             )
@@ -262,9 +326,8 @@ class CalendarEventDeleteView(BaseView):
             event = await svc.get_event(event_id)
         except KeyError:
             return error_response(404, "NOT_FOUND", "Event not found.")
-        return web.json_response(
-            _sign_payload(self.request, _event_dict(event)),
-        )
+        payload = (await _event_dicts_with_copies(svc, [event]))[0]
+        return web.json_response(_sign_payload(self.request, payload))
 
     async def delete(self) -> web.Response:
         self.user  # auth check
@@ -308,7 +371,8 @@ class CalendarEventDeleteView(BaseView):
             # absent / null leaves any existing group id untouched.
             client_event_uuid=body.get("client_event_uuid"),
         )
-        return web.json_response(_sign_payload(self.request, _event_dict(event)))
+        payload = (await _event_dicts_with_copies(svc, [event]))[0]
+        return web.json_response(_sign_payload(self.request, payload))
 
 
 async def _persist_imported_events(view, calendar_id, created_by, events):
