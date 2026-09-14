@@ -24,6 +24,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
 import { api } from '@/api'
+import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Modal } from './Modal'
@@ -265,6 +266,7 @@ function ZonesPreviewMap({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
+  const [tileError, setTileError] = useState(false)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -274,17 +276,27 @@ function ZonesPreviewMap({
       zoom: 4,
       scrollWheelZoom: 'center',
     })
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">'
-        + 'OpenStreetMap</a> contributors',
-    }).addTo(map)
+    // Tiles come from the backend proxy and land a tick later — don't
+    // touch a map the effect cleanup has already removed.
+    let cancelled = false
+    // Two failure surfaces: the config fetch (promise rejection) and
+    // the tiles themselves (``onError``, after a streak — a 401 past
+    // the signature TTL, a 429, or a dead upstream). Both land in the
+    // same "Map unavailable" state; a silent grey square is the bug
+    // this proxy exists to kill.
+    void addTileLayer(
+      map,
+      () => cancelled,
+      () => { if (!cancelled) setTileError(true) },
+    ).catch(() => {
+      if (!cancelled) setTileError(true)
+    })
     layerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
     const ro = new ResizeObserver(() => map.invalidateSize())
     ro.observe(containerRef.current)
     return () => {
+      cancelled = true
       ro.disconnect()
       map.remove()
       mapRef.current = null
@@ -350,8 +362,13 @@ function ZonesPreviewMap({
   }, [zones, draft])
 
   return (
-    <div class="sh-zones-admin__map">
+    <div class="sh-zones-admin__map sh-map-wrap">
       <div ref={containerRef} class="sh-zones-admin__canvas" data-testid="zones-map" />
+      {tileError && (
+        <div class="sh-map-error">
+          {TILE_ERROR_MESSAGE}
+        </div>
+      )}
     </div>
   )
 }
@@ -377,6 +394,7 @@ function ZoneEditDialog({
   const mapRef = useRef<L.Map | null>(null)
   const markerRef = useRef<L.Circle | null>(null)
   const ghostLayerRef = useRef<L.LayerGroup | null>(null)
+  const [tileError, setTileError] = useState(false)
   // Latch the latest draft in a ref so the click-handler closure
   // (registered once at mount) can read fresh radius / colour values.
   const draftRef = useRef(draft)
@@ -407,12 +425,21 @@ function ZoneEditDialog({
       zoom: initialZoom,
       scrollWheelZoom: 'center',
     })
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">'
-        + 'OpenStreetMap</a> contributors',
-    }).addTo(map)
+    // Tiles come from the backend proxy and land a tick later — don't
+    // touch a map the effect cleanup has already removed.
+    let cancelled = false
+    // Two failure surfaces: the config fetch (promise rejection) and
+    // the tiles themselves (``onError``, after a streak — a 401 past
+    // the signature TTL, a 429, or a dead upstream). Both land in the
+    // same "Map unavailable" state; a silent grey square is the bug
+    // this proxy exists to kill.
+    void addTileLayer(
+      map,
+      () => cancelled,
+      () => { if (!cancelled) setTileError(true) },
+    ).catch(() => {
+      if (!cancelled) setTileError(true)
+    })
     // Layer for the OTHER zones, drawn beneath the active draft so the
     // admin can see where existing zones sit and avoid placing the new
     // one on top of them. Refreshed in a dependent effect below.
@@ -430,6 +457,7 @@ function ZoneEditDialog({
     const ro = new ResizeObserver(() => map.invalidateSize())
     ro.observe(pickerRef.current)
     return () => {
+      cancelled = true
       ro.disconnect()
       map.remove()
       mapRef.current = null
@@ -565,7 +593,14 @@ function ZoneEditDialog({
             📍 Use my location
           </Button>
         </div>
-        <div ref={pickerRef} class="sh-zone-form__map" data-testid="zone-picker-map" />
+        <div class="sh-map-wrap">
+          <div ref={pickerRef} class="sh-zone-form__map" data-testid="zone-picker-map" />
+          {tileError && (
+            <div class="sh-map-error">
+              {TILE_ERROR_MESSAGE}
+            </div>
+          )}
+        </div>
 
         <div class="sh-zone-form__coords">
           <label>

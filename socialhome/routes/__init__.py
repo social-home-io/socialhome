@@ -146,6 +146,7 @@ from .apps import (
 from .app_bundle import AppBundleView, AppRuntimeView
 from .me_preferences import MePreferencesView
 from .me_space_location import MeSpaceLocationSharingView
+from .map_tiles import MapConfigView, MapTileView
 from .media import MediaServeView, MediaUploadView
 from .notifications import (
     NotificationCollectionView,
@@ -938,6 +939,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view("/api/bazaar/{id}/save", BazaarSaveView)
     app.router.add_view("/api/me/bazaar/saved", MySavedBazaarView)
+
+    # ── Map tiles ───────────────────────────────────────────────────────
+    app.router.add_view("/api/map/config", MapConfigView)
+    app.router.add_view("/api/map/tiles", MapTileView)
 
     # ── Media ───────────────────────────────────────────────────────────
     app.router.add_view("/api/media/upload", MediaUploadView)

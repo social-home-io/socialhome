@@ -14545,6 +14545,34 @@ a.sh-welcome-card:hover {
   pointer-events: none;
   font-size: var(--sh-font-size-sm);
 }
+/* Tile-config failure overlay. Same shape as the empty-state pane
+ * above, shared by every map surface (LocationMap, the zones admin
+ * preview + picker, FederationMap) so a dead tile proxy always reads
+ * the same way instead of leaving a silent grey square.
+ * ``.sh-map-wrap`` is the positioning context for surfaces whose own
+ * container isn't already relative. */
+.sh-map-wrap {
+  position: relative;
+  /* Same treatment as ``.sh-location-map`` above: confine Leaflet's
+   * internal z-indices (panes 200–700, controls 800–1000) to this
+   * container so they can't paint over sticky chrome or a modal. */
+  isolation: isolate;
+}
+.sh-map-error {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+  padding: var(--sh-space-sm);
+  background: color-mix(in srgb, var(--sh-surface) 92%, transparent);
+  pointer-events: none;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-muted);
+  /* Above Leaflet's own layers (zoom control sits at 1000), which
+   * would otherwise paint through this semi-transparent overlay. The
+   * isolated parent keeps this number local — it never competes with
+   * the app's ``--sh-z-*`` scale. */
+  z-index: 1100;
+}
 .sh-map-pin {
   width: 36px; height: 36px;
   border-radius: 50%;

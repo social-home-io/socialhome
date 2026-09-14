@@ -54,6 +54,7 @@ from .i18n import Catalog
 from .identity_bootstrap import ensure_instance_identity
 from .infrastructure.user_identity import ensure_user_identities
 from .media_signer import MediaUrlSigner, derive_signing_key
+from . import __version__
 from .infrastructure import (
     PAIR_WINDOW_404_ATTEMPTS,
     DeliveryOutcome,
@@ -285,6 +286,7 @@ from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
+from .services.map_tile_service import MapTileService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
 from .services.push_service import PushService, load_or_create_vapid
 from .services.recovery_kit_service import RecoveryKitService
@@ -1273,6 +1275,17 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             "/api/spaces/*/ban": (5, 60),  # moderation
             "/api/calls/*/decline": (10, 60),
             "/api/calls/*/hangup": (30, 60),
+            # Map tiles — *looser* than the default, and listed ahead of
+            # any broader prefix because ``_pick`` returns the first
+            # match in insertion order. Leaflet's ``<img>`` loads all
+            # authenticate as the constant ``SIGNED_URL_PRINCIPAL``, so
+            # one bucket is shared by every member of the household and
+            # every map on the page; a desktop viewport is ~20 tiles, so
+            # the 60/min default turned the map grey after one pan.
+            # 1200/min covers several members panning several maps while
+            # still capping what a leaked signed URL can drive upstream —
+            # unbounded traffic from the household IP risks an OSMF ban.
+            "/api/map/tiles": (1200, 60),
             # Sensitive surfaces — tighter than the 60/min default.
             "/api/me/tokens": (10, 60),  # API token create
             "/api/feed/posts": (30, 60),  # household posting
@@ -1544,6 +1557,17 @@ def create_app(config: Config | None = None) -> web.Application:
     public_space_discovery = PublicSpaceDiscoveryService(
         repos.public_space,
         gfs_connection_repo=repos.gfs_connection,
+    )
+
+    # ── Map tile proxy ───────────────────────────────────────────────────
+    # OSM returns 403 to browser-issued tile requests (a browser cannot set
+    # ``User-Agent``/``Referer``), so the backend fetches tiles instead with
+    # an identifying agent string. ``attach_session`` happens in startup.
+    map_tile_service = MapTileService(
+        config.map_tile_url,
+        user_agent=(
+            f"SocialHome/{__version__} (+https://github.com/social-home-io/socialhome)"
+        ),
     )
 
     # ── Background video-transcode scheduler ─────────────────────────────
@@ -1959,6 +1983,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.gfs_connection_service_key] = gfs_connection_service
     app[K.gfs_connection_repo_key] = repos.gfs_connection
     app[K.public_space_discovery_key] = public_space_discovery
+    app[K.map_tile_service_key] = map_tile_service
     app[K.peer_space_directory_repo_key] = repos.peer_space_directory
     app[K.gallery_service_key] = gallery_service
     app[K.gallery_repo_key] = gallery_repo
@@ -2066,6 +2091,7 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.http_session_key] = http_session
         gfs_connection_service.attach_session(http_session)
         public_space_discovery.attach_session(http_session)
+        map_tile_service.attach_session(http_session)
 
         # 1. KEK — encrypts identity_private_key at rest.
         key_manager = KeyManager.from_data_dir(config.data_dir)

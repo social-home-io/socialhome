@@ -180,3 +180,28 @@ def test_apps_path_data_dir_follows_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("SH_DATA_DIR", data_dir)
     cfg = Config.from_env()
     assert cfg.apps_path == f"{data_dir}/apps"
+
+
+def test_map_tile_url_default():
+    """map_tile_url defaults to the OSM raster tile server."""
+    cfg = Config.from_env()
+    assert cfg.map_tile_url == "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+
+def test_map_tile_url_from_toml(tmp_path, monkeypatch):
+    """Operators can point the proxy at their own tile server via TOML."""
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('map_tile_url = "https://tiles.example/{z}/{x}/{y}.png"\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    cfg = Config.from_env()
+    assert cfg.map_tile_url == "https://tiles.example/{z}/{x}/{y}.png"
+
+
+def test_map_tile_url_env_overrides_toml(tmp_path, monkeypatch):
+    """SH_MAP_TILE_URL wins over the TOML value."""
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('map_tile_url = "https://tiles.example/{z}/{x}/{y}.png"\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    monkeypatch.setenv("SH_MAP_TILE_URL", "https://other.example/{z}/{x}/{y}.png")
+    cfg = Config.from_env()
+    assert cfg.map_tile_url == "https://other.example/{z}/{x}/{y}.png"

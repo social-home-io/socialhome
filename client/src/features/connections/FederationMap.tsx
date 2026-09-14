@@ -14,16 +14,13 @@
  * Lazy-loaded by ConnectionsPage so the Leaflet bundle is never
  * downloaded when the user is on the List tab.
  */
-import { useEffect, useRef } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './FederationMap.css'
 import { connections, selfLat, selfLon } from '@/store/connections'
+import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
-
-const TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-const ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 
 function _initial(name: string | undefined): string {
   if (!name) return '?'
@@ -65,6 +62,7 @@ export default function FederationMap() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
+  const [tileError, setTileError] = useState(false)
 
   // Mount: create the Leaflet map once.
   useEffect(() => {
@@ -78,10 +76,21 @@ export default function FederationMap() {
       zoom: 2,
       scrollWheelZoom: 'center',
     })
-    L.tileLayer(TILE_URL, {
-      maxZoom: 18,
-      attribution: ATTRIBUTION,
-    }).addTo(map)
+    // Tiles come from the backend proxy; the config lands a tick
+    // later, so guard against the map being removed meanwhile.
+    let cancelled = false
+    // Two failure surfaces: the config fetch (promise rejection) and
+    // the tiles themselves (``onError``, after a streak — a 401 past
+    // the signature TTL, a 429, or a dead upstream). Both land in the
+    // same "Map unavailable" state; a silent grey square is the bug
+    // this proxy exists to kill.
+    void addTileLayer(
+      map,
+      () => cancelled,
+      () => { if (!cancelled) setTileError(true) },
+    ).catch(() => {
+      if (!cancelled) setTileError(true)
+    })
 
     layerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
@@ -90,6 +99,7 @@ export default function FederationMap() {
     ro.observe(containerRef.current!)
 
     return () => {
+      cancelled = true
       ro.disconnect()
       map.remove()
       mapRef.current = null
@@ -171,7 +181,14 @@ export default function FederationMap() {
 
   return (
     <div class="sh-federation-map" data-testid="sh-federation-map">
-      <div ref={containerRef} class="sh-federation-map__canvas" />
+      <div class="sh-map-wrap">
+        <div ref={containerRef} class="sh-federation-map__canvas" />
+        {tileError && (
+          <div class="sh-map-error">
+            {TILE_ERROR_MESSAGE}
+          </div>
+        )}
+      </div>
       {offMap.length > 0 && (
         <div class="sh-federation-map__footer">
           <h4 class="sh-federation-map__footer-heading">Not on map</h4>

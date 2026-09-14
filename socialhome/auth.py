@@ -316,8 +316,8 @@ class ChainedStrategy:
 
 
 # Sentinel user_id stamped onto :class:`AuthContext` instances minted by
-# :class:`SignedMediaStrategy`. The signed URL is a per-resource capability,
-# not a user session — anything that downstream tries to query users by
+# :class:`SignedMediaStrategy`. The signed URL is a capability, not a user
+# session — anything that downstream tries to query users by
 # ``user_id == "__signed_url__"`` should miss the user table cleanly. Routes
 # that serve signed media (the GET handlers under ``/api/media``,
 # ``/api/users/{id}/picture``, ``/api/spaces/{id}/members/{user_id}/picture``)
@@ -328,12 +328,22 @@ SIGNED_URL_PRINCIPAL: str = "__signed_url__"
 # the canonical resource path only — query string is ignored. Any path that
 # matches AND carries valid ``?exp=&sig=`` query params is authorised by
 # :class:`SignedMediaStrategy`.
+#
+# Every media pattern below is a *per-resource* capability: the signature
+# covers the full path, so a leaked URL exposes exactly one file.
+# ``/api/map/tiles`` is deliberately broader — its coordinates live in the
+# query string, which the HMAC does not cover, so one signature authorises
+# every tile. That is the only workable shape (Leaflet substitutes
+# ``{z}/{x}/{y}`` client-side and can never request a per-tile signature)
+# and it is safe: the capability is "fetch public map tiles through this
+# instance", which exposes no user data whatsoever.
 _SIGNED_PATH_PATTERNS: tuple[str, ...] = (
     r"^/api/media/[^/]+$",
     r"^/api/users/[^/]+/picture$",
     r"^/api/spaces/[^/]+/members/[^/]+/picture$",
     r"^/api/spaces/[^/]+/cover$",
     r"^/api/spaces/[^/]+/icon$",
+    r"^/api/map/tiles$",
 )
 
 

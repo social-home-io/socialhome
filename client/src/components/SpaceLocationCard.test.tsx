@@ -64,6 +64,13 @@ vi.mock('leaflet', () => {
 })
 vi.mock('leaflet/dist/leaflet.css', () => ({}))
 
+// LocationMap pulls its tile layer from the backend proxy through the
+// shared helper — stub it out so no ``/api/map/config`` call happens.
+vi.mock('@/utils/mapTiles', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/utils/mapTiles')>()),
+  addTileLayer: vi.fn(async () => {}),
+}))
+
 const mockApi = {
   get: vi.fn(),
   post: vi.fn(),

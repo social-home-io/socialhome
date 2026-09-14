@@ -9,12 +9,13 @@
  * the caller never has to compute zoom/centre.
  *
  * Leaflet CSS is imported lazily with the first mount so unrelated
- * pages don't pay the style cost. No API key — we point at the
- * OpenStreetMap public tile server and attribute it in-map.
+ * pages don't pay the style cost. Tiles come from the backend proxy
+ * via the shared ``addTileLayer`` helper — never a hard-coded URL.
  */
-import { useEffect, useRef } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
 
 export interface LocationMarker {
   /** Stable id for the marker (used as the React key). */
@@ -112,6 +113,7 @@ export function LocationMap({
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
   const zoneLayerRef = useRef<L.LayerGroup | null>(null)
+  const [tileError, setTileError] = useState(false)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -127,12 +129,21 @@ export function LocationMap({
       // disorienting. Ctrl+scroll still zooms.
       scrollWheelZoom: 'center',
     })
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">'
-        + 'OpenStreetMap</a> contributors',
-    }).addTo(map)
+    // Tiles arrive a tick later (the config is fetched once per page
+    // load); ``cancelled`` keeps us off a map that unmounted first.
+    let cancelled = false
+    // Two failure surfaces: the config fetch (promise rejection) and
+    // the tiles themselves (``onError``, after a streak — a 401 past
+    // the signature TTL, a 429, or a dead upstream). Both land in the
+    // same "Map unavailable" state; a silent grey square is the bug
+    // this proxy exists to kill.
+    void addTileLayer(
+      map,
+      () => cancelled,
+      () => { if (!cancelled) setTileError(true) },
+    ).catch(() => {
+      if (!cancelled) setTileError(true)
+    })
     // Zones go below the marker layer so pins always sit on top of
     // their containing zone overlay.
     zoneLayerRef.current = L.layerGroup().addTo(map)
@@ -146,6 +157,7 @@ export function LocationMap({
     ro.observe(containerRef.current)
 
     return () => {
+      cancelled = true
       ro.disconnect()
       map.remove()
       mapRef.current = null
@@ -257,7 +269,11 @@ export function LocationMap({
   return (
     <div class="sh-location-map" style={`height: ${height}px`}>
       <div ref={containerRef} class="sh-location-map__canvas" />
-      {!hasMarkers && (
+      {tileError ? (
+        <div class="sh-map-error">
+          {TILE_ERROR_MESSAGE}
+        </div>
+      ) : !hasMarkers && (
         <div class="sh-location-map__empty sh-muted">
           {emptyLabel}
         </div>

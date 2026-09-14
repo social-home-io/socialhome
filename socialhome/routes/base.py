@@ -69,6 +69,7 @@ from ..services.highlight_publication_service import (
     HighlightNotFoundError as HighlightPublicationNotFoundError,
 )
 from ..services.highlight_publication_service import HighlightPublicationError
+from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
 from ..services.highlight_service import (
     HighlightFrameLimitError,
     HighlightNotFoundError,
@@ -187,6 +188,19 @@ class BaseView(web.View):
             AppNotFoundError,
         ) as exc:
             return error_response(404, "NOT_FOUND", str(exc))
+        except TileCoordinateError as exc:
+            # Subclasses ValueError — must precede the generic ValueError
+            # clause below, and the coordinates are client-supplied, so
+            # this is a 400 rather than the blanket 422.
+            return error_response(400, "BAD_REQUEST", str(exc))
+        except TileUnavailableError as exc:
+            # We are the gateway to the upstream tile server.
+            log.warning("map tile unavailable: %s", exc)
+            return error_response(
+                502,
+                "TILE_UNAVAILABLE",
+                "Map tiles are temporarily unavailable.",
+            )
         except AppAlreadyInstalledError as exc:
             return error_response(409, "CONFLICT", str(exc))
         except AppIntegrityError as exc:

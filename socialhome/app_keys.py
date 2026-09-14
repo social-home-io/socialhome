@@ -6,11 +6,16 @@ Using :class:`aiohttp.web.AppKey` instead of bare string keys eliminates
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import aiohttp
 from aiohttp.web import AppKey
 
 from .config import Config
 from .db import AsyncDatabase
+
+if TYPE_CHECKING:  # circular at runtime: services → … → auth → app_keys
+    from .services.map_tile_service import MapTileService
 
 # ── Core ─────────────────────────────────────────────────────────────────
 config_key: AppKey[Config] = AppKey("config")
@@ -96,6 +101,9 @@ instance_keywrap_sig_key: AppKey[str] = AppKey("instance_keywrap_sig")
 #: in ``_on_startup`` once ``identity_seed`` is available; route
 #: handlers and the auth strategy read it via ``request.app[…]``.
 media_signer_key: AppKey = AppKey("media_signer")
+#: Map tile proxy (§map). Fetches OSM raster tiles with an identifying
+#: ``User-Agent`` the browser cannot send, so the SPA's maps render.
+map_tile_service_key: AppKey[MapTileService] = AppKey("map_tile_service")
 ha_bridge_service_key: AppKey = AppKey("ha_bridge_service")
 url_update_outbound_key: AppKey = AppKey("url_update_outbound")
 capabilities_outbound_key: AppKey = AppKey("capabilities_outbound")
