@@ -8,7 +8,7 @@
  * via ``LocationMap.test.tsx``.
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
-import { render, fireEvent, waitFor } from '@testing-library/preact'
+import { render, fireEvent, waitFor, act } from '@testing-library/preact'
 
 // jsdom doesn't ship ResizeObserver; the admin UI uses it to keep
 // Leaflet's preview map sized correctly inside the modal.
@@ -64,6 +64,20 @@ vi.mock('@/api', () => ({
   get api() { return mockApi },
 }))
 
+// Map tiles come from the backend proxy via the shared helper — stub
+// it so the admin UI test needs no ``/api/map/config`` round trip.
+const addTileLayer = vi.fn<
+  (
+    map: unknown,
+    isCancelled?: () => boolean,
+    onError?: () => void,
+  ) => Promise<void>
+>()
+vi.mock('@/utils/mapTiles', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/utils/mapTiles')>()),
+  get addTileLayer() { return addTileLayer },
+}))
+
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/i18n/i18n', () => ({
   t: (k: string) => k,
@@ -93,6 +107,8 @@ describe('SpaceZonesAdmin', () => {
     mockApi.post.mockReset()
     mockApi.patch.mockReset()
     mockApi.delete.mockReset()
+    addTileLayer.mockReset()
+    addTileLayer.mockResolvedValue(undefined)
   })
 
   it('renders the existing zones from /zones', async () => {
@@ -196,5 +212,26 @@ describe('SpaceZonesAdmin', () => {
     await findByText('Zone 0')
     const button = getByText('+ Add zone') as HTMLButtonElement
     expect(button.disabled).toBe(true)
+  })
+
+  it('shows a tiles-unavailable message on the preview map when the tile config fails', async () => {
+    addTileLayer.mockRejectedValue(new Error('API 502: /api/map/config'))
+    mockApi.get.mockResolvedValue({ zones: [] })
+    const { findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText(/Map unavailable/)
+  })
+  it('surfaces a tile-load failure on the preview map too', async () => {
+    let report: (() => void) | undefined
+    addTileLayer.mockImplementation((_map, _cancelled, onError) => {
+      report = onError
+      return Promise.resolve()
+    })
+    mockApi.get.mockResolvedValue({ zones: [] })
+    const { findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+
+    await waitFor(() => { expect(report).toBeTypeOf('function') })
+    act(() => { report!() })
+
+    await findByText(/Map unavailable/)
   })
 })

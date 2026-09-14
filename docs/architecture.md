@@ -562,6 +562,46 @@ See [`protocol/apps.md`](./protocol/apps.md) for the wire protocol and
 sequence diagram, and [`docs/crypto.md`](./crypto.md) for the `fed-app-v1`
 AEAD suite details.
 
+## Map tiles
+
+Every map surface (location pins, space zones, the Federation map) renders
+raster tiles through the backend, never straight from the browser.
+
+The reason is a hard constraint, not a preference. The OpenStreetMap
+Foundation's tile usage policy requires each request to identify itself via
+`User-Agent` or `Referer`, and a browser can supply neither — both are
+forbidden header names, so a page cannot set them, and OSM rejects
+referer-less browser requests with HTTP 403. Pointing `L.tileLayer` at
+`tile.openstreetmap.org` therefore produces a grey map. Home Assistant Core
+reached the same conclusion and added its own tile proxy for the same reason.
+
+How it works:
+
+- `MapTileService` (`socialhome/services/map_tile_service.py`) fetches
+  upstream with an identifying `User-Agent`, validates the coordinates,
+  bounds the response size and the number of concurrent fetches, and keeps a
+  byte-capped in-memory LRU cache. The cache is memory-only on purpose —
+  hosts commonly run from SD cards. A stale entry is never dropped for age:
+  while upstream is unreachable an old tile is what keeps the map readable.
+- `GET /api/map/config` hands the SPA a **relative**, already-signed tile
+  template (`api/map/tiles?z={z}&x={x}&y={y}&exp=…&sig=…`). Relative because
+  the document base under HA Supervisor ingress is
+  `/api/hassio_ingress/<token>/`; an origin-anchored URL breaks haos.
+- `GET /api/map/tiles` is authorised by the existing `MediaUrlSigner`
+  (`SignedMediaStrategy`). Leaflet loads tiles with an `<img>`, which cannot
+  carry `Authorization: Bearer`, and under ingress the SPA holds no token at
+  all — a signed URL is the only mechanism that works in all three modes.
+  The coordinates ride in the unsigned query string, so one signature
+  authorises the whole tile endpoint; unlike the per-resource media
+  signatures this capability is deliberately broad, and it exposes no user
+  data.
+- `map_tile_url` / `SH_MAP_TILE_URL` lets an operator point at their own
+  tile server. Its query string is treated as a secret (third-party
+  providers put API keys there) and is scrubbed from logs and error text.
+
+Do not "simplify" this back into a direct tile URL in the SPA — that is the
+bug this replaced.
+
 ## Where things live
 
 | Concern | Path |

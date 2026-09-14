@@ -7,7 +7,7 @@
  * calls.
  */
 import { describe, test, expect, beforeEach, vi, beforeAll } from 'vitest'
-import { render, screen } from '@testing-library/preact'
+import { render, screen, waitFor, act } from '@testing-library/preact'
 
 // ResizeObserver is used by FederationMap to handle hidden-tab reflow.
 beforeAll(() => {
@@ -54,6 +54,20 @@ vi.mock('leaflet', () => {
   }
 })
 
+// Tiles come from the backend proxy (``/api/map/config``) through the
+// shared helper; stub it so the test needs no fetch.
+const addTileLayer = vi.fn<
+  (
+    map: unknown,
+    isCancelled?: () => boolean,
+    onError?: () => void,
+  ) => Promise<void>
+>()
+vi.mock('@/utils/mapTiles', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/utils/mapTiles')>()),
+  get addTileLayer() { return addTileLayer },
+}))
+
 import { connections, selfLat, selfLon } from '@/store/connections'
 import FederationMap from './FederationMap'
 
@@ -62,6 +76,8 @@ describe('FederationMap', () => {
     selfLat.value = null
     selfLon.value = null
     connections.value = []
+    addTileLayer.mockReset()
+    addTileLayer.mockResolvedValue(undefined)
   })
 
   test('renders the map container element', () => {
@@ -155,5 +171,28 @@ describe('FederationMap', () => {
     ]
     render(<FederationMap />)
     expect(screen.getByText('some-uuid')).toBeDefined()
+  })
+
+  test('shows a tiles-unavailable message when the tile config fails', async () => {
+    addTileLayer.mockRejectedValue(new Error('API 502: /api/map/config'))
+    render(<FederationMap />)
+    await waitFor(() => {
+      expect(screen.getByText(/Map unavailable/)).toBeDefined()
+    })
+  })
+  test('surfaces a tile-load failure the same way as a config failure', async () => {
+    let report: (() => void) | undefined
+    addTileLayer.mockImplementation((_map, _cancelled, onError) => {
+      report = onError
+      return Promise.resolve()
+    })
+    render(<FederationMap />)
+
+    await waitFor(() => { expect(report).toBeTypeOf('function') })
+    act(() => { report!() })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Map unavailable/)).toBeDefined()
+    })
   })
 })

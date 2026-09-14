@@ -6,6 +6,13 @@
 # Every setting can also be set via SH_* environment variable.
 # Environment variables take precedence over this file.
 
+# Upstream raster map tiles. The backend proxies these on the SPA's
+# behalf with an identifying User-Agent — browsers cannot send one, and
+# OpenStreetMap answers them with 403. Point this at your own tile
+# server (or a commercial provider) if you'd rather not hit the OSM
+# community servers. Top-level key — must stay above the first section.
+# map_tile_url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
 [server]
 # mode = "standalone"                   # "ha" | "standalone"
 # listen_host = "0.0.0.0"

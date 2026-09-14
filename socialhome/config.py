@@ -181,6 +181,13 @@ class Config:
         "/releases/latest/download/catalog.json"
     )
 
+    #: Upstream template for the map tile proxy. Operators can point this
+    #: at their own tile server (or a commercial provider) — the backend
+    #: fetches tiles on the SPA's behalf with an identifying ``User-Agent``
+    #: because a browser cannot send one. ``{z}``/``{x}``/``{y}`` are
+    #: substituted per request.
+    map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
     #: Set ``True`` in TLS (HTTPS) deployments to mark session cookies
     #: and the app-bundle path-scoped cookie as ``Secure`` so they are
     #: never transmitted over plain HTTP.  Defaults to ``False`` so that
@@ -390,6 +397,11 @@ class Config:
                     "https://github.com/social-home-io/socialhome-apps"
                     "/releases/latest/download/catalog.json"
                 ),
+            ),
+            map_tile_url=_str_opt(
+                "map_tile_url",
+                "SH_MAP_TILE_URL",
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
             ),
             db_write_batch_max=_int_opt(
                 "db_write_batch_max",

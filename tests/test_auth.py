@@ -295,3 +295,63 @@ def test_auth_context_from_user():
     assert ctx.is_admin
     assert ctx.auth_method == "session"
     assert ctx.metadata == {"k": "v"}
+
+
+class _FakeSignedRequest:
+    """Minimal request for :class:`SignedMediaStrategy` (path + query + app)."""
+
+    def __init__(self, path: str, query: dict, app: dict):
+        self.path = path
+        self.query = query
+        self.app = app
+
+
+def _signed_env(path: str, *, ttl: int = 3600):
+    """Return a (strategy, request) pair for a freshly signed ``path``."""
+    from socialhome.app_keys import media_signer_key
+    from socialhome.auth import SignedMediaStrategy
+    from socialhome.media_signer import MediaUrlSigner
+
+    signer = MediaUrlSigner(key=b"k" * 32)
+    signed = signer.sign(path, ttl=ttl)
+    query = dict(
+        pair.split("=", 1) for pair in signed.split("?", 1)[1].split("&") if "=" in pair
+    )
+    app = {media_signer_key: signer}
+    return SignedMediaStrategy(), _FakeSignedRequest(path, query, app)
+
+
+async def test_signed_strategy_authorises_map_tiles():
+    """Map tiles are reachable via a signed URL.
+
+    Leaflet loads tiles through ``<img>``, which carries no
+    ``Authorization`` header — and under HA ingress the SPA has no token
+    at all — so the signature is the only auth that can work here.
+    """
+    from socialhome.auth import SIGNED_URL_PRINCIPAL
+
+    strategy, request = _signed_env("/api/map/tiles")
+    # Leaflet substitutes the coordinates into the query string; they sit
+    # outside the signed envelope, so one signature covers every tile.
+    request.query.update({"z": "3", "x": "4", "y": "5"})
+
+    ctx = await strategy.authenticate(request)
+    assert ctx is not None
+    assert ctx.user_id == SIGNED_URL_PRINCIPAL
+    assert ctx.auth_method == "signed_url"
+    assert not ctx.is_admin
+
+
+async def test_signed_strategy_rejects_tile_signature_from_other_path():
+    """A signature minted for another resource does not authorise tiles."""
+    strategy, request = _signed_env("/api/media/photo.png")
+    request.path = "/api/map/tiles"
+    request.query.update({"z": "3", "x": "4", "y": "5"})
+
+    assert await strategy.authenticate(request) is None
+
+
+async def test_signed_strategy_declines_unlisted_path():
+    """Paths outside the allow-list are never signed-URL authorised."""
+    strategy, request = _signed_env("/api/map/config")
+    assert await strategy.authenticate(request) is None
