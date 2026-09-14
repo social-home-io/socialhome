@@ -312,6 +312,19 @@ from .services.call_service import CallSignalingService, StaleCallCleanupSchedul
 
 log = logging.getLogger(__name__)
 
+#: ``User-Agent`` sent with every upstream map-tile fetch.
+#:
+#: The OSMF tile usage policy requires a request to identify the
+#: application AND give the operators a way to reach whoever is running
+#: it — a browser can send neither header, which is the whole reason the
+#: tiles are proxied here. Keep the contact address reachable: it is what
+#: OSM uses before blocking traffic, and losing it turns every map grey
+#: again. (Home Assistant Core's ``map_tiles`` integration publishes
+#: ``abuse@home-assistant.io`` for the same reason.)
+MAP_TILE_USER_AGENT: str = (
+    f"SocialHome/{__version__} (+https://social-home.io; abuse@social-home.io)"
+)
+
 
 async def _download_bytes(url: str) -> bytes:
     """GET *url* and return the raw response body.
@@ -1565,9 +1578,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # an identifying agent string. ``attach_session`` happens in startup.
     map_tile_service = MapTileService(
         config.map_tile_url,
-        user_agent=(
-            f"SocialHome/{__version__} (+https://github.com/social-home-io/socialhome)"
-        ),
+        user_agent=MAP_TILE_USER_AGENT,
     )
 
     # ── Background video-transcode scheduler ─────────────────────────────

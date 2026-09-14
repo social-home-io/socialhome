@@ -9,7 +9,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.app import create_app
+from socialhome._version import __version__
+from socialhome.app import MAP_TILE_USER_AGENT, create_app
 from socialhome.config import Config
 from socialhome.services.app_federation_service import AppFederationService
 
@@ -192,3 +193,17 @@ async def test_federation_service_ice_servers_carry_hmac_credentials(tmp_dir):
     assert turn, "no TURN entry in the federation service's ICE list"
     assert turn[0].get("username"), "TURN entry has no HMAC username"
     assert turn[0].get("credential"), "TURN entry has no HMAC credential"
+
+
+def test_map_tile_user_agent_identifies_the_app_and_a_contact():
+    """The tile ``User-Agent`` must name the app AND a reachable contact.
+
+    This string is the entire reason the tile proxy exists: the OSMF
+    policy blocks requests that don't identify themselves, and a browser
+    cannot send the header at all. Strip the contact and OSM can start
+    403ing us again — which looks like "every map went grey", the bug
+    this whole path was built to fix. So it is pinned here rather than
+    left as an incidental f-string.
+    """
+    assert MAP_TILE_USER_AGENT.startswith(f"SocialHome/{__version__} ")
+    assert "@social-home.io" in MAP_TILE_USER_AGENT
