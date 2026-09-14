@@ -606,6 +606,30 @@ function ExternalUrlSection() {
           configuration.
         </p>
       )}
+    </section>
+  )
+}
+
+/**
+ * TroubleshootingSection — the two admin tools you reach for when
+ * federation won't connect.
+ *
+ * Deliberately its own section rather than a tail of
+ * ExternalUrlSection, where both used to live. That section is gated
+ * ``!isSupervisorAddon()`` because the HA integration owns the external
+ * URL under the add-on, and these two silently inherited the gate — so
+ * they were missing on haos, the one mode that pulls ICE servers from
+ * HA and the one whose users most need a diagnostics file to attach to
+ * a bug report. Neither tool has anything to do with the external URL.
+ */
+function TroubleshootingSection() {
+  return (
+    <section class="sh-connections-section">
+      <div class="sh-section-header">
+        <div class="sh-section-header__title">
+          <h2>Troubleshooting</h2>
+        </div>
+      </div>
       <IceServersPanel />
       <DiagnosticsDownload />
     </section>
@@ -732,6 +756,9 @@ export default function ConnectionsPage() {
 
       {/* ── External URL (admin-only; the integration owns it on haos) ── */}
       {isAdmin && !isSupervisorAddon() && <ExternalUrlSection />}
+
+      {/* ── Troubleshooting (admin-only in EVERY mode — haos included) ── */}
+      {isAdmin && <TroubleshootingSection />}
 
       {/* ── Households ─────────────────────────────────────────────── */}
       <section class="sh-connections-section">

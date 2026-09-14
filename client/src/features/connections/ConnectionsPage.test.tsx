@@ -867,3 +867,78 @@ describe('ConnectionsPage — diagnostics download', () => {
     expect(container.querySelector('.sh-diagnostics-link')).toBeNull()
   })
 })
+
+describe('ConnectionsPage — admin panels under the Supervisor add-on (haos)', () => {
+  /**
+   * The connection-servers panel and the diagnostics download were
+   * written as children of ExternalUrlSection, which is gated
+   * ``!isSupervisorAddon()`` because the HA integration owns the
+   * external URL there. They inherited that gate and vanished on haos —
+   * the one mode where both matter most: haos is the only mode that
+   * pulls ICE servers from HA (an empty reply used to wipe the
+   * operator's STUN/TURN outright), and the diagnostics file is what an
+   * add-on user attaches to a bug report.
+   *
+   * Every pre-existing test for both panels renders ``standalone``,
+   * which is why nothing caught it. These pin the mode explicitly.
+   */
+  async function renderHaos(opts: { admin?: boolean } = {}) {
+    const { api } = await import('@/api')
+    const { instanceConfig } = await import('@/store/instance')
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'admin', display_name: 'Admin',
+      is_admin: opts.admin ?? true, picture_url: null, bio: null,
+      is_new_member: false,
+    }
+    instanceConfig.value = {
+      mode: 'haos', instance_name: 'T', instance_id: 'iid',
+      capabilities: [], setup_required: false,
+    }
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/admin/federation/ice-servers') {
+        return Promise.resolve({ servers: [], has_turn: false, turn_usable: false })
+      }
+      if (url === '/api/admin/federation/external-url') {
+        return Promise.resolve({ base: null, effective: null, source: null })
+      }
+      return Promise.resolve([])
+    })
+    const { default: ConnectionsPage } = await import('./ConnectionsPage')
+    return render(<ConnectionsPage />)
+  }
+
+  it('haos admin can still reach the connection-servers panel', async () => {
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+  })
+
+  it('haos admin can still download diagnostics', async () => {
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-diagnostics-link')).not.toBeNull()
+    })
+    expect(container.textContent).toContain('Download diagnostics')
+  })
+
+  it('haos still hides the External URL field', async () => {
+    // Guard against over-correcting: only the URL field is haos-gated.
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+    expect(container.querySelector('.sh-external-url-section')).toBeNull()
+    expect(container.querySelector('#sh-external-url')).toBeNull()
+  })
+
+  it('non-admins on haos see neither panel', async () => {
+    const { container } = await renderHaos({ admin: false })
+    await waitFor(() => {
+      expect(document.body.textContent).toBeTruthy()
+    })
+    expect(container.querySelector('.sh-ice-panel__toggle')).toBeNull()
+    expect(container.querySelector('.sh-diagnostics-link')).toBeNull()
+  })
+})
