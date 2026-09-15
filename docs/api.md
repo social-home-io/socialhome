@@ -339,7 +339,7 @@ migration `0048`), and every store-scoped lookup resolves `COLLATE NOCASE`:
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/shopping/stores` | Add a store without assigning it to an item. Body `{"name": "Bakery"}` → `201` `{name, sort_order}`. Idempotent case-insensitively: an existing store comes back unchanged (same casing, same `sort_order`), never a conflict. Blank name → 422. |
+| POST | `/api/shopping/stores` | Add a store without assigning it to an item. Body `{"name": "Bakery"}` → `201` `{name, sort_order}`. Idempotent case-insensitively: an existing store comes back unchanged (same casing, same `sort_order`), never a conflict. Blank name → 422, as is `.` or `..`: the store routes carry the name in the URL path and a dot segment is normalised away before routing, so such a row could never be renamed or deleted. |
 | PATCH | `/api/shopping/stores/{name}` | Rename — **or merge**. If another store already holds the new name (case-insensitively), the old store's items fold onto it and the old row is dropped; the survivor keeps its own `sort_order`. Returns `{old_name, new_name, merged, moved_items}`. `new_name` is the spelling that *survived*, which on a merge is the target's existing casing, not the casing sent. Unknown store → 404. (There is no 409; collapsing a duplicate is a household's only way out of a pre-`0048` case fork.) |
 | DELETE | `/api/shopping/stores/{name}` | Remove the row and clear `store` on every item that referenced it (matched `COLLATE NOCASE`). Returns `{name, cleared}`; a missing row is `200` with `cleared: 0`, not a 4xx. |
 
