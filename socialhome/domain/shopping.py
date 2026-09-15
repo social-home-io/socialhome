@@ -39,3 +39,26 @@ class ShoppingStore:
 
     name: str
     sort_order: int
+
+
+@dataclass(slots=True, frozen=True)
+class StoreRenameResult:
+    """Outcome of renaming a shopping-store catalogue row.
+
+    A rename that lands on a name another store already holds
+    (case-insensitively — the ``ux_shopping_stores_name_nocase`` guard
+    from migration 0048) is a **merge**, not an error: the old store's
+    items fold onto the survivor's exact spelling and the old catalogue
+    row goes away. That is a household's only way to collapse a
+    duplicate, so the route reports it rather than 409-ing.
+
+    ``new_name`` is the spelling that SURVIVED — on a merge that is the
+    target's existing casing, not the casing the caller typed.
+    ``moved_items`` counts the items whose ``store`` column was
+    rewritten, so the SPA can toast "moved 3 items".
+    """
+
+    old_name: str
+    new_name: str
+    merged: bool
+    moved_items: int

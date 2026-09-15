@@ -81,9 +81,10 @@ async def test_shopping_store_rename_missing_returns_404(client):
     assert r.status == 404
 
 
-async def test_shopping_store_rename_collision_returns_409(client):
-    """Renaming Aldi to Migros while both exist would silently lose
-    items at one of them — surface as a 409 so the SPA can toast."""
+async def test_shopping_store_rename_collision_merges(client):
+    """Renaming Aldi onto Migros while both exist folds Aldi's items
+    into Migros rather than 409-ing — that is the household's only way
+    to collapse a duplicate."""
     h = _auth(client._tok)
     await client.post(
         "/api/shopping",
@@ -100,7 +101,10 @@ async def test_shopping_store_rename_collision_returns_409(client):
         json={"name": "Migros"},
         headers=h,
     )
-    assert r.status == 409
+    assert r.status == 200
+    body = await r.json()
+    assert body["merged"] is True
+    assert body["moved_items"] == 1
 
 
 async def test_shopping_store_delete_clears_items_and_returns_count(client):

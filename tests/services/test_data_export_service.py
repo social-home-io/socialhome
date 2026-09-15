@@ -144,3 +144,23 @@ def test_exportable_queries_cover_user_facing_surfaces():
         "push_subscriptions",
     ):
         assert required in names
+
+
+# ─── Shopping list items ────────────────────────────────────────────────
+
+
+async def test_export_includes_shopping_items_created_by_user(env):
+    """Shopping items are linked to a user by ``created_by`` (not added_by)."""
+    db, svc = env
+    await db.enqueue(
+        "INSERT INTO shopping_list_items(id, text, created_by, store)"
+        " VALUES('i1', 'bread', 'alice-id', 'Bakery')",
+    )
+    await db.enqueue(
+        "INSERT INTO shopping_list_items(id, text, created_by)"
+        " VALUES('i2', 'milk', 'bob-id')",
+    )
+    out = await svc.export_for_user("alice-id")
+    assert "shopping_list_items" in out.tables
+    items = out.tables["shopping_list_items"]
+    assert [i["id"] for i in items] == ["i1"]

@@ -204,3 +204,50 @@ async def test_restore_rejects_schema_mismatch(tmp_dir):
             blob.getvalue()
         )
     await db.shutdown()
+
+
+# ─── Shopping store catalogue (trip order) ───────────────────────────────
+
+
+async def test_restore_round_trips_shopping_store_order(tmp_dir):
+    """A backup/restore keeps the household's drag-defined trip order."""
+    src = AsyncDatabase(tmp_dir / "src.db", batch_timeout_ms=10)
+    await src.startup()
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await src.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES(?,?,?,?)",
+        (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
+    )
+    await src.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('alice', 'a', 'Alice')",
+    )
+    for name, order in (("Bakery", 30), ("Aldi", 10), ("Pharmacy", 20)):
+        await src.enqueue(
+            "INSERT INTO shopping_stores(name, sort_order) VALUES(?,?)",
+            (name, order),
+        )
+    await src.enqueue(
+        "INSERT INTO shopping_list_items(id, text, created_by, store)"
+        " VALUES('i1', 'bread', 'a', 'Bakery')",
+    )
+    media_src = tmp_dir / "media-src2"
+    media_src.mkdir()
+    blob = await BackupService(src, media_src).export_to_bytes()
+    await src.shutdown()
+
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        assert "tables/shopping_stores.json" in tar.getnames()
+
+    tgt = AsyncDatabase(tmp_dir / "tgt2.db", batch_timeout_ms=10)
+    await tgt.startup()
+    await BackupService(tgt, tmp_dir / "media-tgt2").restore_from_bytes(blob)
+    rows = await tgt.fetchall(
+        "SELECT name, sort_order FROM shopping_stores ORDER BY sort_order"
+    )
+    assert [r["name"] for r in rows] == ["Aldi", "Pharmacy", "Bakery"]
+    assert [r["sort_order"] for r in rows] == [10, 20, 30]
+    items = await tgt.fetchall("SELECT id, store FROM shopping_list_items")
+    assert [(i["id"], i["store"]) for i in items] == [("i1", "Bakery")]
+    await tgt.shutdown()

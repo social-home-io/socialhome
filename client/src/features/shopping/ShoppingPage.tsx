@@ -12,8 +12,7 @@ import {
   deleteItem,
   clearCompleted,
   reorderStores,
-  renameStore,
-  deleteStore,
+  sameName,
 } from '@/store/shopping'
 import type { ShoppingItem } from '@/types'
 import { Spinner } from '@/components/Spinner'
@@ -27,6 +26,7 @@ import {
 import { confirmDialog } from '@/components/confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { parseItemInput } from '@/utils/shoppingParse'
+import { StoreManagerDialog } from './StoreManagerDialog'
 
 const loading = signal(true)
 
@@ -88,6 +88,8 @@ export default function ShoppingPage() {
   const [caretPos, setCaretPos] = useState(0)
   const [groupPref, setGroupPref] = useState<GroupPref>(readGroupPref())
   const [editingId, setEditingId] = useState<string | null>(null)
+  /** Whether the store-catalogue manager dialog is open. */
+  const [storesOpen, setStoresOpen] = useState(false)
   /** Currently-dragged store name (header drag), or ``null``. */
   const [dragStore, setDragStore] = useState<string | null>(null)
   /** Currently-dragged item id (row drag), or ``null``. ``null`` and
@@ -350,25 +352,45 @@ export default function ShoppingPage() {
         <span class="sh-muted">
           {active.length} to buy · {completed.length} done
         </span>
-        {(stores.value.length > 0 || distinctStores.size > 0) && (
-          <div class="sh-shopping-grouptoggle" role="group" aria-label="View mode">
-            <button
-              type="button"
-              class={'sh-chip ' + (grouped ? 'sh-chip--active' : '')}
-              onClick={() => setGroupedPref('on')}
-            >
-              Group by store
-            </button>
-            <button
-              type="button"
-              class={'sh-chip ' + (!grouped ? 'sh-chip--active' : '')}
-              onClick={() => setGroupedPref('off')}
-            >
-              Show as list
-            </button>
-          </div>
-        )}
+        <div class="sh-shopping-header__actions">
+          {(stores.value.length > 0 || distinctStores.size > 0) && (
+            <div class="sh-shopping-grouptoggle" role="group" aria-label="View mode">
+              <button
+                type="button"
+                class={'sh-chip ' + (grouped ? 'sh-chip--active' : '')}
+                onClick={() => setGroupedPref('on')}
+              >
+                Group by store
+              </button>
+              <button
+                type="button"
+                class={'sh-chip ' + (!grouped ? 'sh-chip--active' : '')}
+                onClick={() => setGroupedPref('off')}
+              >
+                Show as list
+              </button>
+            </div>
+          )}
+          {/* Always rendered — with zero items (or zero ACTIVE items)
+           *  there is no item row to hang store management off, and the
+           *  catalogue used to become unreachable entirely. */}
+          <button
+            type="button"
+            class="sh-chip sh-shopping-stores-btn"
+            aria-haspopup="dialog"
+            aria-expanded={storesOpen}
+            title="Rename, reorder or remove your stores"
+            onClick={() => setStoresOpen(true)}
+          >
+            <span aria-hidden="true">🏪</span> Stores
+          </button>
+        </div>
       </div>
+
+      <StoreManagerDialog
+        open={storesOpen}
+        onClose={() => setStoresOpen(false)}
+      />
 
       <form onSubmit={handleQuickAdd} class="sh-shopping-add">
         <input
@@ -487,8 +509,6 @@ export default function ShoppingPage() {
           onDelete={handleDelete}
           onClearCompleted={handleClearCompleted}
           onReassignStore={handleReassignStore}
-          onRenameStore={renameStore}
-          onDeleteStore={deleteStore}
           onDragStoreStart={setDragStore}
           onStoreHeaderDrop={handleStoreHeaderDrop}
           dragStore={dragStore}
@@ -513,8 +533,6 @@ export default function ShoppingPage() {
           onDelete={handleDelete}
           onClearCompleted={handleClearCompleted}
           onReassignStore={handleReassignStore}
-          onRenameStore={renameStore}
-          onDeleteStore={deleteStore}
           userNameById={userNameById}
           storeNames={storeNames}
         />
@@ -536,11 +554,6 @@ interface ViewProps {
   onDelete: (id: string) => void
   onClearCompleted: () => void
   onReassignStore: (id: string, nextStore: string | null) => void
-  /** Rename a catalogue store across the whole household. Threaded
-   *  to every ItemRow → StorePicker; the picker surfaces it through
-   *  the per-row ⋯ → Rename affordance. */
-  onRenameStore: (oldName: string, newName: string) => Promise<void>
-  onDeleteStore: (name: string) => Promise<void>
   userNameById: (uid: string) => string
   storeNames: string[]
 }
@@ -558,8 +571,6 @@ function FlatView(props: ViewProps) {
       onToggle={() => props.onToggle(item.id, item.completed)}
       onDelete={() => props.onDelete(item.id)}
       onReassignStore={(s) => props.onReassignStore(item.id, s)}
-      onRenameStore={done ? undefined : props.onRenameStore}
-      onDeleteStore={done ? undefined : props.onDeleteStore}
       userNameById={props.userNameById}
       storeNames={props.storeNames}
       draggable={false}
@@ -625,7 +636,14 @@ function GroupedView(props: GroupedProps) {
         const itemsHere = props.active.filter((i) =>
           section.key === NO_STORE_KEY
             ? !i.store
-            : i.store === section.key,
+            // Fold the same way the server does. The DB is canonical
+            // since 0048 and every write path stores a server-returned
+            // spelling, so an exact compare works today — but an item
+            // that slips out of step with its catalogue row renders in
+            // NO section (it isn't in the "No store" bucket either),
+            // and that silent disappearance is the bug this whole
+            // change exists to fix. Cheap insurance.
+            : sameName(i.store, section.key),
         )
         // Hide a section when no ACTIVE items are at this store and
         // no item drag is in flight. Completed items don't count any
@@ -764,8 +782,6 @@ function GroupedView(props: GroupedProps) {
                     onToggle={() => props.onToggle(item.id, item.completed)}
                     onDelete={() => props.onDelete(item.id)}
                     onReassignStore={(s) => props.onReassignStore(item.id, s)}
-                    onRenameStore={props.onRenameStore}
-                    onDeleteStore={props.onDeleteStore}
                     compact={true}
                     userNameById={props.userNameById}
                     storeNames={props.storeNames}
@@ -837,14 +853,10 @@ interface RowProps {
   onToggle: () => void
   onDelete: () => void
   onReassignStore: (nextStore: string | null) => void
-  /** Optional — only the active-row (not the done trailer) wires
-   *  these through so the picker shows the manage affordance. */
-  onRenameStore?: (oldName: string, newName: string) => Promise<void>
-  onDeleteStore?: (name: string) => Promise<void>
   /** When ``true`` the store pill renders icon-only (no store name) —
    *  used in the grouped view, where the section header already names
    *  the store, so repeating it on every row is redundant noise. The
-   *  icon still opens the picker (assign / reassign / manage), so touch
+   *  icon still opens the picker (assign / reassign), so touch
    *  users keep a tap target even though drag is desktop-only. The flat
    *  view leaves it ``false`` so the row shows which store it's in. */
   compact?: boolean
@@ -928,8 +940,6 @@ function ItemRow(props: RowProps) {
           storeNames={props.storeNames}
           compact={props.compact}
           onPick={props.onReassignStore}
-          onRenameStore={props.onRenameStore}
-          onDeleteStore={props.onDeleteStore}
         />
       )}
       <div
@@ -1016,17 +1026,6 @@ interface StorePickerProps {
    *  popover swaps to a focused text input instead). */
   storeNames: string[]
   onPick: (next: string | null) => void
-  /** Rename a store across the whole household catalogue. The
-   *  picker shows a per-row ⋯ → Rename affordance; the callback
-   *  fires with ``(oldName, newName)``. Optional — the picker
-   *  hides the manage affordance when both rename / delete are
-   *  omitted, so the same component still works in
-   *  ``manage = false`` contexts. */
-  onRenameStore?: (oldName: string, newName: string) => Promise<void>
-  /** Delete a store from the catalogue. Items at that store are
-   *  cleared to "No store" (handled server-side + optimistically
-   *  by the caller's store helper). */
-  onDeleteStore?: (name: string) => Promise<void>
   /** Icon-only pill (no store-name label) — used in the grouped view
    *  where the section header already names the store. */
   compact?: boolean
@@ -1055,24 +1054,20 @@ function StorePicker({
   currentStore,
   storeNames,
   onPick,
-  onRenameStore,
-  onDeleteStore,
   compact,
 }: StorePickerProps) {
-  const canManage = !!onRenameStore && !!onDeleteStore
   const [open, setOpen] = useState(false)
   /** Sub-view inside the popover.
    *  - ``list`` is the default;
-   *  - ``new`` swaps to the inline name-entry input;
-   *  - ``manage`` lets the user rename or delete the store named
-   *    in :state:`manageStore`. */
-  const [mode, setMode] = useState<'list' | 'new' | 'manage'>('list')
+   *  - ``new`` swaps to the inline name-entry input.
+   *
+   *  Rename / delete deliberately do NOT live here — they're in the
+   *  header's Stores dialog (``StoreManagerDialog``), the one place
+   *  that stays reachable on an empty list. */
+  const [mode, setMode] = useState<'list' | 'new'>('list')
   const [newName, setNewName] = useState('')
-  const [manageStore, setManageStore] = useState<string | null>(null)
-  const [renameDraft, setRenameDraft] = useState('')
   const ref = useRef<HTMLDivElement | null>(null)
   const newInputRef = useRef<HTMLInputElement | null>(null)
-  const renameInputRef = useRef<HTMLInputElement | null>(null)
 
   // Click-outside closes the menu. ``useLayoutEffect`` would be
   // overkill — the menu is small enough that one async paint frame
@@ -1085,17 +1080,12 @@ function StorePicker({
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        // Escape unwinds one step at a time: from ``new`` /
-        // ``manage`` back to ``list``, from ``list`` to closed.
-        // Mirrors the way a native iOS / Android picker handles
-        // the back button.
+        // Escape unwinds one step at a time: from ``new`` back to
+        // ``list``, from ``list`` to closed. Mirrors the way a
+        // native iOS / Android picker handles the back button.
         if (mode === 'new') {
           setMode('list')
           setNewName('')
-        } else if (mode === 'manage') {
-          setMode('list')
-          setManageStore(null)
-          setRenameDraft('')
         } else {
           setOpen(false)
         }
@@ -1116,8 +1106,6 @@ function StorePicker({
     if (!open) {
       setMode('list')
       setNewName('')
-      setManageStore(null)
-      setRenameDraft('')
     }
   }, [open])
 
@@ -1126,9 +1114,6 @@ function StorePicker({
   useEffect(() => {
     if (mode === 'new') {
       newInputRef.current?.focus()
-    } else if (mode === 'manage') {
-      renameInputRef.current?.focus()
-      renameInputRef.current?.select()
     }
   }, [mode])
 
@@ -1142,46 +1127,6 @@ function StorePicker({
     if (!trimmed) return
     onPick(trimmed)
     setOpen(false)
-  }
-
-  const startManage = (name: string) => {
-    setManageStore(name)
-    setRenameDraft(name)
-    setMode('manage')
-  }
-
-  const saveRename = async () => {
-    const trimmed = renameDraft.trim()
-    if (!trimmed || !manageStore || !onRenameStore) return
-    if (trimmed === manageStore) {
-      // No-op rename; just go back.
-      setMode('list')
-      setManageStore(null)
-      setRenameDraft('')
-      return
-    }
-    try {
-      await onRenameStore(manageStore, trimmed)
-      setOpen(false)
-    } catch (err: unknown) {
-      // Surface via toast at the page level; the optimistic patch
-      // already rolled back so the user sees the original name.
-      showToast(`Rename failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
-
-  const confirmDelete = async () => {
-    if (!manageStore || !onDeleteStore) return
-    if (!await confirmDialog(
-      `Delete the "${manageStore}" store? Items in it will move to "No store".`,
-      { destructive: true },
-    )) return
-    try {
-      await onDeleteStore(manageStore)
-      setOpen(false)
-    } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message ?? err}`, 'error')
-    }
   }
 
   const label = currentStore || 'Set store'
@@ -1237,17 +1182,6 @@ function StorePicker({
                   <span aria-hidden="true" class="sh-shopping-store-picker__check">✓</span>
                 )}
               </button>
-              {canManage && (
-                <button
-                  type="button"
-                  class="sh-shopping-store-picker__manage"
-                  aria-label={`Manage ${name}`}
-                  title={`Rename or delete ${name}`}
-                  onClick={(e) => { e.stopPropagation(); startManage(name) }}
-                >
-                  ⋯
-                </button>
-              )}
             </li>
           ))}
           <li role="separator" class="sh-shopping-store-picker__sep" />
@@ -1310,59 +1244,6 @@ function StorePicker({
           >
             Save
           </Button>
-        </div>
-      )}
-      {open && mode === 'manage' && manageStore && (
-        <div
-          class="sh-shopping-store-picker__menu sh-shopping-store-picker__manage-view"
-          role="dialog"
-          aria-label={`Manage store ${manageStore}`}
-        >
-          <button
-            type="button"
-            class="sh-shopping-store-picker__back"
-            onClick={() => {
-              setMode('list')
-              setManageStore(null)
-              setRenameDraft('')
-            }}
-          >
-            ‹ Back
-          </button>
-          <label class="sh-shopping-store-picker__manage-label">
-            Rename
-            <input
-              ref={renameInputRef}
-              type="text"
-              class="sh-shopping-store-picker__new-input"
-              value={renameDraft}
-              aria-label="New store name"
-              onInput={(e) => setRenameDraft((e.target as HTMLInputElement).value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  void saveRename()
-                }
-              }}
-            />
-          </label>
-          <div class="sh-shopping-store-picker__manage-actions">
-            <Button
-              type="button"
-              onClick={() => void saveRename()}
-              disabled={!renameDraft.trim() || renameDraft.trim() === manageStore}
-            >
-              Save
-            </Button>
-            <button
-              type="button"
-              class="sh-shopping-store-picker__delete"
-              onClick={() => void confirmDelete()}
-              aria-label={`Delete the ${manageStore} store`}
-            >
-              Delete store
-            </button>
-          </div>
         </div>
       )}
     </div>

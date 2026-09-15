@@ -110,13 +110,32 @@ class ShoppingClearCompletedView(BaseView):
 
 class ShoppingStoresView(BaseView):
     """``GET /api/shopping/stores`` — return the household catalogue
-    in canonical ``sort_order``."""
+    in canonical ``sort_order``.
+
+    ``POST /api/shopping/stores`` — add a store without having to
+    assign it to an item first. Body ``{"name": "Bakery"}``. Idempotent
+    case-insensitively: a store that already exists comes back as-is
+    (same casing, same ``sort_order``) with a 201, so the SPA's
+    "+ Add store" action never has to reconcile a conflict.
+    """
 
     async def get(self) -> web.Response:
         self.user
         stores = await self.svc(shopping_service_key).list_stores()
         return self._json(
             [{"name": s.name, "sort_order": s.sort_order} for s in stores]
+        )
+
+    async def post(self) -> web.Response:
+        self.user
+        body = await self.body()
+        name = body.get("name")
+        store = await self.svc(shopping_service_key).create_store(
+            name if isinstance(name, str) else "",
+        )
+        return self._json(
+            {"name": store.name, "sort_order": store.sort_order},
+            status=201,
         )
 
 
@@ -159,6 +178,13 @@ class ShoppingStoreDetailView(BaseView):
     Both are idempotent on a missing row — PATCH returns 404, DELETE
     returns 200 with ``{cleared: 0}`` so an operator double-clicking
     the trash icon doesn't see an alarming error.
+
+    A PATCH onto a name another store already holds is a MERGE, not a
+    409: the old store's items fold onto the survivor. The response
+    says so via ``merged`` + ``moved_items`` so the SPA can toast
+    "merged into Migros — 3 items moved" rather than a bare rename.
+    ``old_name`` / ``new_name`` carry the catalogue's own spellings
+    (the lookup is case-insensitive), not the casing the caller typed.
     """
 
     async def patch(self) -> web.Response:
@@ -172,16 +198,20 @@ class ShoppingStoreDetailView(BaseView):
                 "UNPROCESSABLE",
                 "`name` (new store name) is required.",
             )
-        try:
-            ok = await self.svc(shopping_service_key).rename_store(
-                old_name,
-                new_name,
-            )
-        except ValueError as exc:
-            return error_response(409, "CONFLICT", str(exc))
-        if not ok:
+        result = await self.svc(shopping_service_key).rename_store(
+            old_name,
+            new_name,
+        )
+        if result is None:
             return error_response(404, "NOT_FOUND", f"No store named {old_name!r}.")
-        return self._json({"old_name": old_name, "new_name": new_name.strip()})
+        return self._json(
+            {
+                "old_name": result.old_name,
+                "new_name": result.new_name,
+                "merged": result.merged,
+                "moved_items": result.moved_items,
+            }
+        )
 
     async def delete(self) -> web.Response:
         self.user

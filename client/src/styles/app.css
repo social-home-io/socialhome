@@ -7411,10 +7411,10 @@ body.sh-dm-thread-open .sh-messages {
   text-decoration: underline;
 }
 
-/* Per-store ⋯ button (sits to the right of the picker option row).
- * Opens the manage view for that store — rename + delete in one
- * place. Quiet at rest so the picker still scans as a list of
- * choices, not a list of edit actions. */
+/* Picker option row. Rename / delete used to hang off a per-row ⋯
+ * button here; they live in the header's Stores dialog now (the one
+ * surface that survives an empty list), so the picker is assign-only
+ * and the row is just a full-width option. */
 .sh-shopping-store-picker__row {
   display: flex;
   align-items: stretch;
@@ -7422,62 +7422,6 @@ body.sh-dm-thread-open .sh-messages {
 .sh-shopping-store-picker__row .sh-shopping-store-picker__opt {
   flex: 1;
   min-width: 0;
-}
-.sh-shopping-store-picker__manage {
-  border: none;
-  background: transparent;
-  color: var(--sh-text-muted);
-  cursor: pointer;
-  padding: 0 12px;
-  font-size: 14px;
-  letter-spacing: 0.04em;
-  line-height: 1;
-}
-.sh-shopping-store-picker__manage:hover,
-.sh-shopping-store-picker__manage:focus-visible {
-  color: var(--sh-primary);
-  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
-  outline: none;
-}
-
-/* Manage view — rename input + delete button stacked. Same surface
- * + back-button pattern as ``__new`` so the two typed-modes feel
- * like siblings to the user. */
-.sh-shopping-store-picker__manage-view {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-sm);
-  padding: 12px 16px;
-}
-.sh-shopping-store-picker__manage-label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.sh-shopping-store-picker__manage-label .sh-shopping-store-picker__new-input {
-  width: 100%;
-}
-.sh-shopping-store-picker__manage-actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--sh-space-sm);
-}
-.sh-shopping-store-picker__delete {
-  background: transparent;
-  border: 1px solid color-mix(in srgb, var(--sh-danger, #ef4444) 30%, transparent);
-  color: var(--sh-danger, #ef4444);
-  padding: 6px 12px;
-  border-radius: var(--sh-radius-md);
-  font-size: var(--sh-font-size-sm);
-  cursor: pointer;
-}
-.sh-shopping-store-picker__delete:hover {
-  background: color-mix(in srgb, var(--sh-danger, #ef4444) 10%, transparent);
 }
 
 /* Drag-drop visual feedback for the new item-between-stores flow.
@@ -7534,6 +7478,175 @@ body.sh-dm-thread-open .sh-messages {
   cursor: pointer;
 }
 .sh-item--done .sh-shopping-item__text { cursor: default; }
+
+/* ── Store catalogue manager (header "Stores" dialog) ────────────────
+ * The single place a household renames / reorders / deletes / adds a
+ * shop. Lives in a Modal, so it stays reachable with an empty list —
+ * the old per-item-row ⋯ popover disappeared along with the rows. */
+.sh-shopping-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-shopping-stores-btn {
+  /* Coarse-pointer tap target (§23.21) — chips are otherwise sized
+   * for the mouse. */
+  min-height: 36px;
+}
+.sh-store-manager__hint {
+  margin: 0 0 var(--sh-space-sm);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-store-manager {
+  list-style: none;
+  margin: 0 0 var(--sh-space-md);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-store-manager__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  /* Long store names wrap onto a second line rather than pushing the
+   * action buttons off a 360px-wide sheet. */
+  flex-wrap: wrap;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+.sh-store-manager__row--dragging { opacity: 0.6; }
+.sh-store-manager__drag {
+  color: var(--sh-text-muted);
+  font: 600 14px/1 ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: -2px;
+  cursor: grab;
+  padding: 0 2px;
+}
+.sh-store-manager__drag:active { cursor: grabbing; }
+.sh-store-manager__nudge {
+  display: inline-flex;
+  gap: 2px;
+}
+.sh-store-manager__nudge-btn {
+  background: transparent;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-sm);
+  min-width: 32px;
+  min-height: 32px;
+  padding: 2px 8px;
+  cursor: pointer;
+  color: var(--sh-text-muted);
+  font-size: 11px;
+  line-height: 1;
+}
+.sh-store-manager__nudge-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+  color: var(--sh-primary);
+}
+.sh-store-manager__nudge-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.sh-store-manager__name {
+  flex: 1 1 100px;
+  min-width: 0;
+  /* Never let a long shop name push the row into a horizontal
+   * scroll — it wraps inside its own column instead. */
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.sh-store-manager__count {
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
+        ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+.sh-store-manager__actions {
+  display: inline-flex;
+  gap: var(--sh-space-xs);
+  margin-left: auto;
+}
+.sh-store-manager__action {
+  background: transparent;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted);
+  min-height: 36px;
+  padding: 4px 10px;
+  font-size: var(--sh-font-size-sm);
+  cursor: pointer;
+}
+.sh-store-manager__action:hover {
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+  color: var(--sh-primary);
+  border-color: var(--sh-primary);
+}
+.sh-store-manager__action--danger {
+  color: var(--sh-danger, #ef4444);
+  border-color: color-mix(in srgb, var(--sh-danger, #ef4444) 30%, transparent);
+}
+.sh-store-manager__action--danger:hover {
+  background: color-mix(in srgb, var(--sh-danger, #ef4444) 10%, transparent);
+  color: var(--sh-danger, #ef4444);
+  border-color: var(--sh-danger, #ef4444);
+}
+.sh-store-manager__edit,
+.sh-store-manager__add {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  flex: 1 1 200px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.sh-store-manager__input,
+.sh-store-manager__add-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  min-height: 36px;
+}
+.sh-store-manager__cancel { flex-shrink: 0; }
+.sh-store-manager__empty {
+  /* The page-level empty state is deliberately roomy; inside a
+   * 360px-wide bottom sheet that padding eats the whole viewport. */
+  margin-bottom: var(--sh-space-md);
+  padding: var(--sh-space-lg) var(--sh-space-md);
+}
+/* Rename / add inputs and the action buttons stack full-width on a
+ * phone so nothing is squeezed below a comfortable tap target. */
+@media (max-width: 420px) {
+  .sh-store-manager__actions { margin-left: 0; width: 100%; }
+  .sh-store-manager__action { flex: 1; }
+  .sh-store-manager__edit,
+  .sh-store-manager__add { width: 100%; }
+  /* The add button is the primary action on an empty catalogue; a
+   * small left-aligned chip under a full-width empty card reads as an
+   * afterthought on a phone. */
+  .sh-store-manager__addbtn { width: 100%; }
+}
+
+/* Touch targets. The reorder nudges are the KEYBOARD/tap path for
+ * reordering (the ⋮⋮ handle is pointer-drag only), and Cancel is the
+ * one-tap way out of a rename or an add — so both have to be
+ * comfortably hittable, not just visible. 32px and a bare text link
+ * respectively were under the 36px floor. Scoped to a coarse pointer
+ * so the desktop layout keeps its tighter rhythm. */
+@media (pointer: coarse) {
+  .sh-store-manager__nudge-btn {
+    min-width: 36px;
+    min-height: 36px;
+  }
+  .sh-store-manager__cancel {
+    min-height: 36px;
+    padding-inline: var(--sh-space-sm);
+  }
+}
 
 /* Pages — Markdown toolbar */
 .sh-md-toolbar {

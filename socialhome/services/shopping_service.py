@@ -27,7 +27,7 @@ from ..domain.events import (
     ShoppingStoreRenamed,
     ShoppingStoresReordered,
 )
-from ..domain.shopping import ShoppingStore
+from ..domain.shopping import ShoppingStore, StoreRenameResult
 from ..infrastructure.event_bus import EventBus
 from ..repositories.shopping_repo import (
     AbstractShoppingRepo,
@@ -43,18 +43,34 @@ from .bus_publisher import BusPublisherMixin
 _STORE_MAX = 80
 
 
+#: Names that can never be addressed by the store endpoints. The store
+#: routes take the name in the URL path (``/api/shopping/stores/{name}``)
+#: and ``.`` / ``..`` are dot segments: yarl normalises them away before
+#: aiohttp routes the request, so a DELETE or PATCH aimed at such a row
+#: resolves to a different path entirely and 405s — even percent-encoded
+#: as ``%2E``. A store nobody can rename or delete is exactly the
+#: unaddressable junk row migration 0048 exists to purge, so refuse to
+#: mint one in the first place.
+_UNADDRESSABLE_STORES = frozenset({".", ".."})
+
+
 def _clean_store(value: str | None) -> str | None:
     """Normalise a store name from the wire.
 
     Trims surrounding whitespace, collapses an empty / whitespace-only
-    string to ``None`` (so blank input clears the field), and clamps
-    to :data:`_STORE_MAX` so a hostile or sloppy caller can't push a
-    paragraph into the column.
+    string to ``None`` (so blank input clears the field), rejects the
+    unaddressable dot segments (see :data:`_UNADDRESSABLE_STORES`), and
+    clamps to :data:`_STORE_MAX` so a hostile or sloppy caller can't
+    push a paragraph into the column.
+
+    Returning ``None`` for a dot segment means an *item* assigned one
+    simply lands in "No store", while ``create_store`` / ``rename_store``
+    — which reject a ``None`` name — answer 422.
     """
     if value is None:
         return None
     trimmed = value.strip()
-    if not trimmed:
+    if not trimmed or trimmed in _UNADDRESSABLE_STORES:
         return None
     return trimmed[:_STORE_MAX]
 
@@ -205,23 +221,48 @@ class ShoppingService(BusPublisherMixin):
         )
         return result
 
-    async def rename_store(self, old_name: str, new_name: str) -> bool:
-        """Rename a catalogue row + cascade to items. Returns ``False``
-        when the old store didn't exist (route layer maps to a 404);
-        raises ``ValueError`` when the new name collides with an
-        existing store (route layer maps to a 409). Broadcasts
-        :class:`ShoppingStoreRenamed` on success so paired tabs patch
-        their local catalogue and items' ``store`` field.
+    async def create_store(self, name: str) -> ShoppingStore:
+        """Add a store to the catalogue without attaching an item to it.
+
+        Cleans the name the same way every other store input is cleaned
+        (trim + clamp to :data:`_STORE_MAX`) and rejects a blank one so
+        the route can answer 422. Idempotent case-insensitively — a
+        store that already exists comes back unchanged, casing and
+        ``sort_order`` intact, so re-tapping "+ Add store" is harmless.
         """
-        ok = await self._repo.rename_store(old_name, new_name)
-        if ok and self._bus is not None and old_name.strip() != new_name.strip():
-            await self._bus.publish(
+        clean = _clean_store(name)
+        if clean is None:
+            raise ValueError("store name must not be empty")
+        return await self._repo.create_store(clean)
+
+    async def rename_store(
+        self,
+        old_name: str,
+        new_name: str,
+    ) -> StoreRenameResult | None:
+        """Rename a catalogue row + cascade to items. Returns ``None``
+        when no store matches ``old_name`` (route layer maps to a 404);
+        raises ``ValueError`` when ``new_name`` is blank (→ 422).
+
+        A ``new_name`` another store already holds is a MERGE, not a
+        conflict — see :meth:`AbstractShoppingRepo.rename_store`. Either
+        way :class:`ShoppingStoreRenamed` is broadcast (carrying the
+        surviving spelling) so paired tabs patch their local catalogue
+        and items' ``store`` field; a merge simply collapses two entries
+        into one on receipt. No event fires when the name is unchanged.
+        """
+        clean_new = _clean_store(new_name)
+        if clean_new is None:
+            raise ValueError("store name must not be empty")
+        result = await self._repo.rename_store(old_name, clean_new)
+        if result is not None and result.old_name != result.new_name:
+            await self._emit(
                 ShoppingStoreRenamed(
-                    old_name=old_name.strip(),
-                    new_name=new_name.strip(),
+                    old_name=result.old_name,
+                    new_name=result.new_name,
                 )
             )
-        return ok
+        return result
 
     async def delete_store(self, name: str) -> int:
         """Remove a catalogue row + clear it from every item that

@@ -24,12 +24,17 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..db.unit_of_work import UnitOfWork
 from .base import bool_col, row_to_dict, rows_to_dicts
 
 
 # Domain dataclasses live in ``socialhome/domain/shopping.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.shopping import ShoppingItem, ShoppingStore  # noqa: F401,E402
+from ..domain.shopping import (  # noqa: F401,E402
+    ShoppingItem,
+    ShoppingStore,
+    StoreRenameResult,
+)
 
 
 # The repo has a method named ``list`` which shadows the builtin
@@ -71,9 +76,14 @@ class AbstractShoppingRepo(Protocol):
     async def delete(self, item_id: str) -> None: ...
     async def clear_completed(self) -> int: ...
     async def list_stores(self) -> _list[ShoppingStore]: ...
+    async def create_store(self, name: str) -> ShoppingStore: ...
     async def touch_store(self, name: str) -> None: ...
     async def reorder_stores(self, ordered_names: _list[str]) -> None: ...
-    async def rename_store(self, old_name: str, new_name: str) -> bool: ...
+    async def rename_store(
+        self,
+        old_name: str,
+        new_name: str,
+    ) -> StoreRenameResult | None: ...
     async def delete_store(self, name: str) -> int: ...
 
 
@@ -254,6 +264,44 @@ class SqliteShoppingRepo:
             for d in rows_to_dicts(rows)
         ]
 
+    async def _find_store(self, name: str) -> ShoppingStore | None:
+        """Look a catalogue row up case-insensitively.
+
+        The ``ux_shopping_stores_name_nocase`` guard (migration 0048)
+        makes at most one row match, so every store-scoped operation
+        can resolve the caller's spelling to the catalogue's own.
+        """
+        row = await self._db.fetchone(
+            "SELECT name, sort_order FROM shopping_stores "
+            "WHERE name = ? COLLATE NOCASE",
+            (name,),
+        )
+        found = row_to_dict(row)
+        if not found:
+            return None
+        return ShoppingStore(name=found["name"], sort_order=int(found["sort_order"]))
+
+    async def create_store(self, name: str) -> ShoppingStore:
+        """Add a catalogue row directly, without an item to hang it on.
+
+        Idempotent case-insensitively: when a store already matches,
+        the EXISTING row comes back untouched — same casing, same
+        ``sort_order`` — so the SPA's "+ Add store" action is safe to
+        replay and can never re-spell a store the household curated.
+        A genuinely new store appends past the current max, exactly
+        like :meth:`touch_store`.
+        """
+        name = name.strip()
+        if not name:
+            raise ValueError("store name must not be empty")
+        existing = await self._find_store(name)
+        if existing is not None:
+            return existing
+        await self.touch_store(name)
+        created = await self._find_store(name)
+        assert created is not None  # touch_store just wrote it
+        return created
+
     async def touch_store(self, name: str) -> None:
         """Ensure ``name`` exists in the catalogue, appending it past
         the current max if new. Idempotent — a second call with the
@@ -303,53 +351,105 @@ class SqliteShoppingRepo:
                 (idx, name),
             )
 
-    async def rename_store(self, old_name: str, new_name: str) -> bool:
+    async def rename_store(
+        self,
+        old_name: str,
+        new_name: str,
+    ) -> StoreRenameResult | None:
         """Rename a catalogue row + cascade to every item that
-        references it. Returns ``True`` when the old row existed and
-        was renamed, ``False`` when it didn't exist (caller can map
-        to a 404).
+        references it. Returns ``None`` when no store matches
+        ``old_name`` (caller maps it to a 404).
 
-        Cascade rule: ``shopping_list_items.store`` is a free-text
-        column (no FK), so we update both rows in a single write
-        batch. The catalogue's ``ON CONFLICT(name)`` would fire if
-        ``new_name`` is already taken — surface that as a domain
-        error rather than silently dropping rows.
+        Both names resolve case-insensitively, in step with the
+        ``ux_shopping_stores_name_nocase`` guard from migration 0048:
+
+        * a DIFFERENT store already holding ``new_name`` → **merge**.
+          The old store's items move onto the survivor's exact
+          spelling, the old catalogue row goes, and the survivor keeps
+          its own ``sort_order`` — the place in the trip order the
+          household dragged it to. Collapsing a duplicate is the only
+          way out of a pre-0048 case fork, so this is a success, not a
+          conflict.
+        * the only match being the old row itself (a pure case change,
+          ``"migros"`` → ``"Migros"``) → rename in place, ``sort_order``
+          untouched.
+
+        Cascade rule: ``shopping_list_items.store`` is free text with no
+        FK, so the items are re-pointed by an explicit UPDATE — matched
+        ``COLLATE NOCASE`` so a legacy item whose casing diverged from
+        the catalogue is carried along rather than left behind pointing
+        at a store that no longer exists.
         """
         old_name = old_name.strip()
         new_name = new_name.strip()
         if not old_name or not new_name:
             raise ValueError("store names must be non-empty")
-        if old_name == new_name:
-            return True
-        # ``old_name`` must exist; ``new_name`` must NOT — collisions
-        # would lose items. The route layer is welcome to first call
-        # ``list_stores`` to surface a friendlier error.
-        rows = await self._db.fetchall(
-            "SELECT name FROM shopping_stores WHERE name IN (?, ?)",
-            (old_name, new_name),
-        )
-        names = {r["name"] for r in rows_to_dicts(rows)}
-        if old_name not in names:
-            return False
-        if new_name in names:
-            raise ValueError(
-                f"another store is already named {new_name!r}",
+
+        old = await self._find_store(old_name)
+        if old is None:
+            return None
+        target = await self._find_store(new_name)
+
+        if target is not None and target.name != old.name:
+            survivor, merged = target.name, True
+        elif old.name == new_name:
+            # Exact no-op — nothing to write, nothing moved.
+            return StoreRenameResult(
+                old_name=old.name,
+                new_name=old.name,
+                merged=False,
+                moved_items=0,
             )
-        await self._db.enqueue(
-            "UPDATE shopping_stores SET name=? WHERE name=?",
-            (new_name, old_name),
+        else:
+            survivor, merged = new_name, False
+
+        moved = int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM shopping_list_items "
+                "WHERE store = ? COLLATE NOCASE",
+                (old.name,),
+                default=0,
+            )
         )
-        await self._db.enqueue(
-            "UPDATE shopping_list_items SET store=? WHERE store=?",
-            (new_name, old_name),
+        # Both writes go in ONE transaction. ``enqueue`` commits per
+        # statement, so a crash between them would leave items pointing
+        # at a catalogue row that no longer exists — and an item whose
+        # store has no catalogue row renders in no section at all, which
+        # is the exact bug this whole change exists to fix. All-or-
+        # nothing instead.
+        async with UnitOfWork(self._db) as uow:
+            if merged:
+                await uow.exec(
+                    "DELETE FROM shopping_stores WHERE name = ? COLLATE NOCASE",
+                    (old.name,),
+                )
+            else:
+                await uow.exec(
+                    "UPDATE shopping_stores SET name=? WHERE name=?",
+                    (survivor, old.name),
+                )
+            await uow.exec(
+                "UPDATE shopping_list_items SET store=? WHERE store = ? COLLATE NOCASE",
+                (survivor, old.name),
+            )
+        return StoreRenameResult(
+            old_name=old.name,
+            new_name=survivor,
+            merged=merged,
+            moved_items=moved,
         )
-        return True
 
     async def delete_store(self, name: str) -> int:
         """Remove a store from the catalogue + clear it from every
         item that currently references it. Returns the count of
         items whose ``store`` was set to NULL (zero is fine — the
         store may have had nothing on it).
+
+        Every match is ``COLLATE NOCASE``, in step with the 0048
+        guard: an item whose casing diverged from the catalogue would
+        otherwise keep pointing at a store that no longer exists, and
+        the SPA's grouped view renders such an item in NO section at
+        all — invisible, not merely misfiled.
 
         Catalogue row may not exist (already-deleted from another
         tab). That's a no-op return-zero, not a 4xx — operators
@@ -359,16 +459,16 @@ class SqliteShoppingRepo:
         if not name:
             return 0
         affected = await self._db.fetchval(
-            "SELECT COUNT(*) FROM shopping_list_items WHERE store=?",
+            "SELECT COUNT(*) FROM shopping_list_items WHERE store = ? COLLATE NOCASE",
             (name,),
             default=0,
         )
         await self._db.enqueue(
-            "UPDATE shopping_list_items SET store=NULL WHERE store=?",
+            "UPDATE shopping_list_items SET store=NULL WHERE store = ? COLLATE NOCASE",
             (name,),
         )
         await self._db.enqueue(
-            "DELETE FROM shopping_stores WHERE name=?",
+            "DELETE FROM shopping_stores WHERE name = ? COLLATE NOCASE",
             (name,),
         )
         return int(affected)

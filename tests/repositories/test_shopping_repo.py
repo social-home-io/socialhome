@@ -278,9 +278,9 @@ async def test_rename_store_updates_catalogue_and_items(env):
     await env.repo.add("Eggs", created_by="u1", store="Aldi")
     await env.repo.add("Bread", created_by="u1", store="Bakery")
 
-    ok = await env.repo.rename_store("Aldi", "Coop")
+    result = await env.repo.rename_store("Aldi", "Coop")
 
-    assert ok is True
+    assert result is not None
     stores = await env.repo.list_stores()
     assert "Aldi" not in [s.name for s in stores]
     assert "Coop" in [s.name for s in stores]
@@ -291,31 +291,14 @@ async def test_rename_store_updates_catalogue_and_items(env):
     assert by_text["Bread"].store == "Bakery"
 
 
-async def test_rename_store_missing_returns_false(env):
-    """No-op rename on a non-existent store name — let the route layer map to 404."""
-    await env.repo.touch_store("Aldi")
-    ok = await env.repo.rename_store("Migrso", "Migros")
-    assert ok is False
-
-
-async def test_rename_store_collision_raises(env):
-    """Renaming to an already-taken catalogue name would lose
-    items — surface as a ValueError so the route can map to 409."""
-    await env.repo.touch_store("Aldi")
-    await env.repo.touch_store("Migros")
-
-    import pytest
-
-    with pytest.raises(ValueError):
-        await env.repo.rename_store("Aldi", "Migros")
-
-
 async def test_rename_store_same_name_is_noop(env):
     """Renaming a store to its current name shortcuts without
-    touching the DB. Returns True (the store exists)."""
+    touching the DB. Reports no move and no merge."""
     await env.repo.touch_store("Aldi")
-    ok = await env.repo.rename_store("Aldi", "Aldi")
-    assert ok is True
+    result = await env.repo.rename_store("Aldi", "Aldi")
+    assert result is not None
+    assert result.merged is False
+    assert result.moved_items == 0
     stores = await env.repo.list_stores()
     assert [s.name for s in stores] == ["Aldi"]
 
@@ -347,3 +330,145 @@ async def test_delete_store_missing_is_zero(env):
     assert cleared == 0
     stores = await env.repo.list_stores()
     assert [s.name for s in stores] == ["Aldi"]
+
+
+# ─── Case-insensitive store catalogue (§0048 NOCASE guard) ───────────────
+
+
+async def test_touch_store_case_variant_does_not_fork_or_raise(env):
+    """The 0048 NOCASE unique index makes a differently-cased
+    ``touch_store`` a no-op rather than an IntegrityError — the
+    ``ON CONFLICT ... DO NOTHING`` clause covers any uniqueness
+    violation on the row, not just the BINARY primary key."""
+    await env.repo.touch_store("Migros")
+    await env.repo.touch_store("migros")
+
+    stores = await env.repo.list_stores()
+    assert [s.name for s in stores] == ["Migros"]
+
+
+async def test_rename_store_resolves_old_name_case_insensitively(env):
+    """``rename_store`` finds the catalogue row regardless of the
+    casing the caller typed."""
+    await env.repo.add("Milk", created_by="u1", store="Aldi")
+
+    result = await env.repo.rename_store("aLdI", "Coop")
+
+    assert result is not None
+    assert result.old_name == "Aldi"
+    assert result.new_name == "Coop"
+    assert result.merged is False
+    assert result.moved_items == 1
+    assert [s.name for s in await env.repo.list_stores()] == ["Coop"]
+
+
+async def test_rename_store_onto_existing_store_merges(env):
+    """A collision is a MERGE: items fold onto the target's exact
+    spelling, the old catalogue row goes, and the target keeps its
+    own ``sort_order``."""
+    await env.repo.add("Milk", created_by="u1", store="Aldi")
+    await env.repo.add("Eggs", created_by="u1", store="Aldi")
+    await env.repo.add("Bread", created_by="u1", store="Migros")
+    await env.repo.reorder_stores(["Migros", "Aldi"])
+    before = {s.name: s.sort_order for s in await env.repo.list_stores()}
+
+    result = await env.repo.rename_store("Aldi", "migros")
+
+    assert result is not None
+    assert result.merged is True
+    assert result.moved_items == 2
+    assert result.old_name == "Aldi"
+    assert result.new_name == "Migros"
+    stores = await env.repo.list_stores()
+    assert [s.name for s in stores] == ["Migros"]
+    assert stores[0].sort_order == before["Migros"]
+    items = await env.repo.list()
+    assert {i.text: i.store for i in items} == {
+        "Milk": "Migros",
+        "Eggs": "Migros",
+        "Bread": "Migros",
+    }
+
+
+async def test_rename_store_pure_case_change_keeps_sort_order(env):
+    """``"migros"`` → ``"Migros"`` is a rename in place, not a merge —
+    the row keeps its position in the trip order."""
+    await env.repo.touch_store("Aldi")
+    await env.repo.add("Bread", created_by="u1", store="migros")
+
+    result = await env.repo.rename_store("migros", "Migros")
+
+    assert result is not None
+    assert result.merged is False
+    assert result.new_name == "Migros"
+    stores = await env.repo.list_stores()
+    assert [(s.name, s.sort_order) for s in stores] == [("Aldi", 0), ("Migros", 1)]
+    items = await env.repo.list()
+    assert items[0].store == "Migros"
+
+
+async def test_rename_store_moves_items_whose_casing_diverged(env):
+    """A legacy item whose ``store`` casing diverged from the catalogue
+    is carried along by the rename (NOCASE item match)."""
+    await env.repo.touch_store("Aldi")
+    await env.repo.add("Milk", created_by="u1", store="Aldi")
+    await env.db.enqueue(
+        "UPDATE shopping_list_items SET store='aldi' WHERE text='Milk'",
+    )
+
+    result = await env.repo.rename_store("Aldi", "Coop")
+
+    assert result is not None
+    assert result.moved_items == 1
+    items = await env.repo.list()
+    assert items[0].store == "Coop"
+
+
+async def test_rename_store_missing_returns_none(env):
+    """Unknown old name → ``None`` so the route can map to a 404."""
+    await env.repo.touch_store("Aldi")
+    assert await env.repo.rename_store("Migrso", "Migros") is None
+
+
+async def test_delete_store_clears_items_whose_casing_diverged(env):
+    """``delete_store`` matches items case-insensitively, so a legacy
+    row with divergent casing is not stranded pointing at a store that
+    no longer exists."""
+    await env.repo.touch_store("Aldi")
+    await env.repo.add("Milk", created_by="u1", store="Aldi")
+    await env.db.enqueue(
+        "UPDATE shopping_list_items SET store='ALDI' WHERE text='Milk'",
+    )
+
+    cleared = await env.repo.delete_store("aldi")
+
+    assert cleared == 1
+    assert [s.name for s in await env.repo.list_stores()] == []
+    items = await env.repo.list()
+    assert items[0].store is None
+
+
+async def test_create_store_appends_past_max_sort_order(env):
+    """``create_store`` puts a brand-new store at the end of the trip
+    order, exactly like ``touch_store``."""
+    await env.repo.touch_store("Aldi")
+
+    store = await env.repo.create_store("Bakery")
+
+    assert store.name == "Bakery"
+    assert store.sort_order == 1
+    assert [s.name for s in await env.repo.list_stores()] == ["Aldi", "Bakery"]
+
+
+async def test_create_store_is_idempotent_case_insensitively(env):
+    """Creating a store that already exists under different casing
+    returns the EXISTING row — same spelling, same ``sort_order``."""
+    await env.repo.touch_store("Aldi")
+    await env.repo.touch_store("Migros")
+    await env.repo.reorder_stores(["Migros", "Aldi"])
+
+    store = await env.repo.create_store("aldi")
+
+    assert store.name == "Aldi"
+    assert store.sort_order == 1
+    assert [s.name for s in await env.repo.list_stores()] == ["Migros", "Aldi"]

@@ -451,7 +451,7 @@ describe('ShoppingPage', () => {
     expect(trailerDone!.textContent).toContain('Old mozzarella')
   })
 
-  it('per-store ⋯ menu → Rename calls PATCH /api/shopping/stores/{name}', async () => {
+  it('the header carries a Stores button that opens the store manager', async () => {
     wireApi({
       items: [{
         id: 'i1', text: 'Eggs', store: 'Aldi', completed: false,
@@ -464,46 +464,52 @@ describe('ShoppingPage', () => {
     })
     const { render, waitFor, fireEvent } = await import('@testing-library/preact')
     const mod = await import('./ShoppingPage')
-    const { container } = render(<mod.default />)
+    const { container, getByRole } = render(<mod.default />)
     await waitFor(() => {
-      expect(container.querySelector('.sh-shopping-store-pill')).not.toBeNull()
+      expect(container.querySelector('.sh-shopping-stores-btn')).not.toBeNull()
     })
+    // Closed at rest.
+    expect(container.querySelector('.sh-store-manager')).toBeNull()
 
-    // Open picker.
-    fireEvent.click(container.querySelector('.sh-shopping-store-pill') as HTMLElement)
+    fireEvent.click(getByRole('button', { name: /stores/i }))
     await waitFor(() => {
-      expect(container.querySelector('.sh-shopping-store-picker__manage')).not.toBeNull()
+      expect(document.querySelector('.sh-store-manager')).not.toBeNull()
     })
+    // The whole catalogue is manageable from here — both stores are
+    // listed, regardless of which one any item sits at.
+    const rows = Array.from(
+      document.querySelectorAll('.sh-store-manager__row'),
+    ).map(r => r.textContent)
+    expect(rows.join(' ')).toContain('Aldi')
+    expect(rows.join(' ')).toContain('Migros')
+  })
 
-    // Tap the manage ⋯ button next to "Aldi" (the row this item
-    // is currently on).
-    const aldiRow = Array.from(container.querySelectorAll('.sh-shopping-store-picker__row'))
-      .find(li => li.textContent?.includes('Aldi')) as HTMLElement
-    const manageBtn = aldiRow.querySelector('.sh-shopping-store-picker__manage') as HTMLElement
-    fireEvent.click(manageBtn)
-
-    // Manage view appears with the rename input.
-    await waitFor(() => {
-      expect(container.querySelector('.sh-shopping-store-picker__manage-view')).not.toBeNull()
+  it('offers the Stores button even when the list has no items at all', async () => {
+    // Regression: store management used to live ONLY inside an item
+    // row's 📍 popover, so an empty list (or a list with no active
+    // items) left the household with no way to rename, reorder or
+    // delete a store at all.
+    wireApi({
+      items: [],
+      stores: [{ name: 'Aldi', sort_order: 0 }],
     })
-
-    const input = container.querySelector(
-      '.sh-shopping-store-picker__manage-view input',
-    ) as HTMLInputElement
-    fireEvent.input(input, { target: { value: 'Coop' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-
+    const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+    const mod = await import('./ShoppingPage')
+    const { container, getByRole } = render(<mod.default />)
     await waitFor(() => {
-      expect(apiPatch).toHaveBeenCalledWith(
-        '/api/shopping/stores/Aldi',
-        { name: 'Coop' },
-      )
+      expect(container.querySelector('.sh-empty-state')).not.toBeNull()
+    })
+    const btn = getByRole('button', { name: /stores/i })
+    expect(btn).toBeTruthy()
+    fireEvent.click(btn)
+    await waitFor(() => {
+      expect(document.querySelector('.sh-store-manager__row')).not.toBeNull()
     })
   })
 
-  it('per-store ⋯ menu → Delete calls DELETE /api/shopping/stores/{name}', async () => {
-    const { confirmDialog } = await import('@/components/confirm')
-    vi.mocked(confirmDialog).mockResolvedValue(true)
+  it('the item store picker no longer carries a manage affordance', async () => {
+    // Rename / delete now live in exactly one place (the Stores
+    // dialog); the row popover is assign-only.
     wireApi({
       items: [{
         id: 'i1', text: 'Eggs', store: 'Aldi', completed: false,
@@ -520,24 +526,17 @@ describe('ShoppingPage', () => {
     await waitFor(() => {
       expect(container.querySelector('.sh-shopping-store-pill')).not.toBeNull()
     })
-
     fireEvent.click(container.querySelector('.sh-shopping-store-pill') as HTMLElement)
     await waitFor(() => {
-      expect(container.querySelector('.sh-shopping-store-picker__manage')).not.toBeNull()
+      expect(container.querySelector('.sh-shopping-store-picker__menu')).not.toBeNull()
     })
-    const aldiRow = Array.from(container.querySelectorAll('.sh-shopping-store-picker__row'))
-      .find(li => li.textContent?.includes('Aldi')) as HTMLElement
-    fireEvent.click(aldiRow.querySelector('.sh-shopping-store-picker__manage') as HTMLElement)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-shopping-store-picker__delete')).not.toBeNull()
-    })
-    const del = container.querySelector('.sh-shopping-store-picker__delete') as HTMLElement
-    fireEvent.click(del)
-
-    await waitFor(() => {
-      const deletes = apiDelete.mock.calls.map(c => c[0])
-      expect(deletes).toContain('/api/shopping/stores/Aldi')
-    })
+    expect(container.querySelector('.sh-shopping-store-picker__manage')).toBeNull()
+    // Assign-only behaviour survives: existing stores, "No store"
+    // and "+ New store…".
+    const menu = container.querySelector('.sh-shopping-store-picker__menu')!
+    expect(menu.textContent).toContain('Aldi')
+    expect(menu.textContent).toContain('No store')
+    expect(menu.textContent).toContain('New store')
   })
 
   it('typing "Milk @" in the quick-add input pops the store autocomplete', async () => {
