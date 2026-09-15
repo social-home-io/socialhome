@@ -67,7 +67,6 @@ class _ScriptedChannel:
 def _peer(media_inbound=None) -> _RtcPeer:
     return _RtcPeer(
         instance_id="peer-1",
-        ice_servers=None,
         signaling=_noop_signaling,
         inbound=_noop_inbound,
         media_inbound=media_inbound,

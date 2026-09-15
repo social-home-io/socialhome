@@ -103,7 +103,6 @@ async def test_peer_start_offer_signals_offer_sdp():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -122,7 +121,7 @@ async def test_peer_accept_offer_signals_answer_sdp():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=[{"urls": "stun:x"}],
+        ice_provider=lambda: [{"urls": "stun:x"}],
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -140,7 +139,6 @@ async def test_peer_apply_answer_mismatch_returns_false():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -156,7 +154,6 @@ async def test_peer_apply_answer_match_returns_true():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -174,7 +171,6 @@ async def test_peer_apply_answer_when_pc_missing_is_safe():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -188,7 +184,6 @@ async def test_peer_add_ice_candidate_empty_is_noop():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -202,7 +197,6 @@ async def test_peer_add_ice_candidate_real():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -231,7 +225,6 @@ async def test_peer_add_ice_candidate_no_pc_is_safe(monkeypatch):
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -255,7 +248,6 @@ async def test_peer_add_ice_candidate_buffers_until_remote_description():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -295,7 +287,6 @@ async def test_peer_apply_answer_releases_buffered_ice():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -350,7 +341,6 @@ async def test_peer_add_ice_candidate_after_close_is_silent(monkeypatch):
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -365,7 +355,6 @@ async def test_peer_send_on_closed_channel_returns_false():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -377,7 +366,6 @@ async def test_peer_send_when_ready_writes_frame():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -404,7 +392,6 @@ async def test_peer_send_drops_frame_when_over_hwm():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -430,7 +417,6 @@ async def test_peer_send_returns_false_on_rtc_error():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -451,7 +437,6 @@ async def test_peer_close_cancels_tasks_and_clears_state():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -469,7 +454,6 @@ async def test_peer_drain_channel_marks_open_then_closed():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -512,7 +496,6 @@ async def test_peer_drain_channel_handles_wait_open_failure():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -535,7 +518,6 @@ async def test_peer_drain_channel_parses_inbound_messages():
 
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=lambda *a, **kw: None,  # unused here
         inbound=_capture,
     )
@@ -571,7 +553,6 @@ async def test_peer_drain_channel_skips_malformed_frame():
 
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=lambda *a, **kw: None,
         inbound=_capture,
     )
@@ -605,7 +586,6 @@ async def test_peer_drain_ice_handles_rtc_errors():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )
@@ -627,7 +607,6 @@ async def test_peer_drain_incoming_channel_ignores_wrong_label():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=signaling,
         inbound=_noop_inbound,
     )

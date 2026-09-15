@@ -630,8 +630,13 @@ class FederationService:
         """Update the WebRTC ICE-server config served to peers.
 
         Propagates the new list to the attached transport so future
-        DataChannel handshakes pick it up. Existing peers keep their
-        current config — renegotiation is out of scope.
+        DataChannel handshakes pick it up. Already-connected peers are
+        left alone — their DataChannel works, and renegotiating it buys
+        nothing. Peers that never managed to connect are retired and
+        rebuilt on their next send, so a late-arriving TURN list (the
+        haos case, where the Cloudflare credentials land after the boot
+        outbox drain has already built those peers STUN-only) does reach
+        them.
 
         Re-runs the TURN diagnostics on the incoming list. The boot-time
         checks in ``create_app`` only ever saw the config-derived list, so a
@@ -644,6 +649,24 @@ class FederationService:
         warn_if_turn_unusable(self._ice_servers)
         if self._transport is not None and hasattr(self._transport, "set_ice_servers"):
             self._transport.set_ice_servers(self._ice_servers)
+
+    def mark_ice_primed(self) -> None:
+        """Release the transport's first-handshake ICE gate.
+
+        The transport holds its first offerer handshake for a short window
+        so a platform that supplies ICE servers asynchronously (the HA pull
+        of ``web_rtc/ice_servers``) gets its TURN credentials in before the
+        boot-time outbox drain builds STUN-only peers that can never relay.
+
+        :meth:`set_ice_servers` already releases the gate on every push, so
+        this exists for the platforms that will never push one — standalone,
+        and an HA deployment whose first fetch came back empty or failed.
+        Without the explicit call those deployments pay the full prime
+        timeout on their first outbound send, waiting for a list that is
+        never coming.
+        """
+        if self._transport is not None and hasattr(self._transport, "mark_ice_primed"):
+            self._transport.mark_ice_primed()
 
     @property
     def own_instance_id(self) -> str:

@@ -31,6 +31,7 @@ from ..app_keys import (
     federation_repo_key,
     federation_service_key,
     federation_transport_key,
+    outbox_repo_key,
     pairing_relay_queue_key,
     peer_home_sharing_service_key,
     peer_user_visibility_repo_key,
@@ -46,7 +47,11 @@ log = logging.getLogger(__name__)
 
 
 def _instance_dict(
-    inst, *, transport_state: Literal["rtc", "https"] | None = None
+    inst,
+    *,
+    transport_state: Literal["rtc", "https"] | None = None,
+    queued_envelopes: int,
+    dropped_envelopes: int,
 ) -> dict:
     """Public-shape view of a :class:`RemoteInstance`.
 
@@ -59,6 +64,21 @@ def _instance_dict(
     inbox fallback), or ``None`` (unreachable / pending — caller
     short-circuits when reachability is False or status is not
     confirmed).
+
+    ``queued_envelopes`` is the peer's pending federation-outbox backlog
+    (``AbstractOutboxRepo.count_pending_for``) — envelopes still waiting
+    to go out. ``dropped_envelopes`` is the count permanently given up on
+    (``count_failed_for``): a PERMANENT rejection or an exhausted retry
+    budget, never retried. The two are reported separately because
+    conflating them renders data loss as a reassuring "queued for
+    delivery".
+
+    Both are required keyword arguments and, like ``transport_state``, are
+    computed by the caller — this helper stays I/O-free. No default: a
+    placeholder ``0`` on the single-instance responses (confirm, PATCH)
+    would describe a healthy-looking peer that in fact has a backlog, and
+    nothing in the shape would signal the number was made up. One extra
+    indexed ``COUNT(*)`` on a mutation path is cheaper than that trap.
     """
     status = (
         inst.status.value if isinstance(inst.status, PairingStatus) else inst.status
@@ -88,6 +108,14 @@ def _instance_dict(
         "status": status,
         "reachable": reachable,
         "transport": transport_state,
+        # Undelivered envelopes still queued for this peer. A peer that
+        # has been offline for months piles these up; the count is what
+        # distinguishes "dropped a minute ago" from "gone since spring".
+        "queued_envelopes": queued_envelopes,
+        # Envelopes permanently given up on (terminal ``failed``). These
+        # will NOT be retried — surfacing them beside the queue is the
+        # difference between "still going out" and "silently lost".
+        "dropped_envelopes": dropped_envelopes,
         "paired_at": getattr(inst, "paired_at", None),
         # Reachability *timestamps*, not just the ``reachable`` boolean.
         # "Not connected" is the single most common federation support
@@ -173,7 +201,14 @@ class PairingConfirmView(BaseView):
                 "token and verification_code are required.",
             )
         instance = await self.svc(federation_service_key).confirm_pairing(token, code)
-        return web.json_response(_instance_dict(instance))
+        outbox = self.svc(outbox_repo_key)
+        return web.json_response(
+            _instance_dict(
+                instance,
+                queued_envelopes=await outbox.count_pending_for(instance.id),
+                dropped_envelopes=await outbox.count_failed_for(instance.id),
+            )
+        )
 
 
 class PairingIntroduceView(BaseView):
@@ -237,6 +272,7 @@ class PairingConnectionCollectionView(BaseView):
         self.user  # auth check
         instances = await self.svc(federation_repo_key).list_instances()
         transport = self.request.app.get(federation_transport_key)
+        outbox = self.svc(outbox_repo_key)
         rows = []
         for inst in instances:
             ts: Literal["rtc", "https"] | None = None
@@ -245,7 +281,16 @@ class PairingConnectionCollectionView(BaseView):
                     ts = "rtc"
                 else:
                     ts = "https"
-            rows.append(_instance_dict(inst, transport_state=ts))
+            queued = await outbox.count_pending_for(inst.id)
+            dropped = await outbox.count_failed_for(inst.id)
+            rows.append(
+                _instance_dict(
+                    inst,
+                    transport_state=ts,
+                    queued_envelopes=queued,
+                    dropped_envelopes=dropped,
+                )
+            )
         return web.json_response(rows)
 
 
@@ -428,7 +473,14 @@ class PairingConnectionDetailView(BaseView):
         inst = await self.svc(federation_repo_key).get_instance(instance_id)
         if inst is None:
             return error_response(404, "NOT_FOUND", "Peer not found.")
-        return web.json_response(_instance_dict(inst))
+        outbox = self.svc(outbox_repo_key)
+        return web.json_response(
+            _instance_dict(
+                inst,
+                queued_envelopes=await outbox.count_pending_for(instance_id),
+                dropped_envelopes=await outbox.count_failed_for(instance_id),
+            )
+        )
 
     async def delete(self) -> web.Response:
         self.user  # auth check

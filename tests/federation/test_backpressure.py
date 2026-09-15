@@ -54,7 +54,6 @@ class _Channel:
 async def test_fed_peer_send_respects_hwm(buffered: int, expect_send: bool):
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=_noop_signal,
         inbound=_noop_inbound,
     )
@@ -72,7 +71,6 @@ async def test_fed_peer_send_hwm_is_configurable():
     """The HWM is a constructor parameter — lets ops tune it per deployment."""
     peer = _RtcPeer(
         instance_id="p",
-        ice_servers=None,
         signaling=_noop_signal,
         inbound=_noop_inbound,
         send_hwm=128,

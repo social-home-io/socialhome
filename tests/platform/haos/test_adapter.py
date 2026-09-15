@@ -336,3 +336,90 @@ async def test_fetch_entity_picture_bytes_walks_via_user_id():
 async def test_get_extra_services_empty_before_startup():
     adapter = _build_haos_adapter()
     assert adapter.get_extra_services() == {}
+
+
+# ─── ICE-prime gate ─────────────────────────────────────────────────────────
+
+
+def test_provides_ice_servers_is_true():
+    """haos pulls HA Core's ``web_rtc/ice_servers`` after startup, so the
+    federation transport should hold its first handshake briefly rather
+    than building a STUN-only peer that can never relay."""
+    assert _build_haos_adapter().provides_ice_servers is True
+
+
+class _IceHaClient(_FakeHaClient):
+    """Adds the ``web_rtc/ice_servers`` WS reply the sync needs."""
+
+    def __init__(self, result: list | None = None) -> None:
+        super().__init__(config_response={})
+        self._ice_result = [] if result is None else result
+
+    async def ws_command(self, type_: str, **fields):  # noqa: ARG002
+        return {"result": self._ice_result}
+
+
+class _PrimingFederation:
+    def __init__(self) -> None:
+        self.applied: list[list[dict]] = []
+        self.primed = 0
+
+    def set_ice_servers(self, servers: list[dict]) -> None:
+        self.applied.append(servers)
+
+    def mark_ice_primed(self) -> None:
+        self.primed += 1
+
+
+async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
+    tmp_path,
+    monkeypatch,
+):
+    """HA returning nothing usable is an ordinary deployment (no cloud
+    subscription). The gate must still open, or the first outbound
+    federation send stalls for the full ICE-prime timeout."""
+    import asyncio
+
+    import aiohttp
+    from aiohttp import web
+
+    from socialhome.app_keys import (
+        db_key,
+        event_bus_key,
+        federation_service_key,
+        http_session_key,
+    )
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.infrastructure.event_bus import EventBus
+    from socialhome.platform.haos import adapter as haos_adapter_mod
+
+    class _NoopBootstrap:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run(self):
+            return None
+
+    monkeypatch.setattr(haos_adapter_mod, "HaBootstrap", _NoopBootstrap)
+
+    db = AsyncDatabase(str(tmp_path / "t.db"))
+    await db.startup()
+    async with aiohttp.ClientSession() as session:
+        app = web.Application()
+        app[db_key] = db
+        app[event_bus_key] = EventBus()
+        app[http_session_key] = session
+        fed = _PrimingFederation()
+        app[federation_service_key] = fed
+        adapter = _build_haos_adapter(ha_client=_IceHaClient(result=[]))
+        await adapter.on_startup(app)
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.005)
+                if fed.primed:
+                    break
+            assert fed.primed == 1, "mark_ice_primed never reached the fed service"
+            assert fed.applied == []
+        finally:
+            await adapter.on_cleanup(app)
+    await db.shutdown()

@@ -310,6 +310,9 @@ class InMemoryOutboxRepo:
     async def count_pending_for(self, instance_id: str) -> int:
         return 0
 
+    async def count_failed_for(self, instance_id: str) -> int:
+        return 0
+
     async def evict_oldest_droppable(self, instance_id: str) -> bool:
         return False
 

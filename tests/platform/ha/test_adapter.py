@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import AsyncIterable
 
+import asyncio
 import json
 import aiohttp
 import pytest
@@ -1024,5 +1025,54 @@ async def test_empty_ha_reply_leaves_federation_untouched(tmp_path):
         try:
             assert await adapter._ice_sync.fetch_and_apply_once() is True
             assert fed.applied == [], "an empty HA list reached set_ice_servers"
+        finally:
+            await adapter.on_cleanup(app)
+
+
+# ── ICE-prime gate ────────────────────────────────────────────────────────
+
+
+def test_provides_ice_servers_is_true():
+    """ha mode pulls HA Core's ``web_rtc/ice_servers`` after startup, so the
+    federation transport should hold its first handshake briefly."""
+    adapter = HomeAssistantAdapter(
+        ha_url="http://ha.local:8123",
+        ha_token="",
+        data_dir="/tmp",
+    )
+    assert adapter.provides_ice_servers is True
+
+
+class _PrimingFederation(_RecordingFederation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.primed = 0
+
+    def mark_ice_primed(self) -> None:
+        self.primed += 1
+
+
+async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(tmp_path):
+    """Even when HA has nothing usable to offer, the first fetch attempt must
+    release the transport's ICE gate — otherwise every haos/ha boot pays the
+    full prime timeout on its first outbound federation send."""
+    async with aiohttp.ClientSession() as session:
+        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        fed = _PrimingFederation()
+        app[federation_service_key] = fed
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local:8123",
+            ha_token="",
+            data_dir=str(tmp_path),
+            ha_client=_IceHaClient(result=[]),
+        )
+        await adapter.on_startup(app)
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.005)
+                if fed.primed:
+                    break
+            assert fed.primed == 1, "mark_ice_primed never reached the fed service"
+            assert fed.applied == []
         finally:
             await adapter.on_cleanup(app)

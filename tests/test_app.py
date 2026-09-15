@@ -195,6 +195,31 @@ async def test_federation_service_ice_servers_carry_hmac_credentials(tmp_dir):
     assert turn[0].get("credential"), "TURN entry has no HMAC credential"
 
 
+async def test_standalone_boot_releases_the_ice_prime_gate(tmp_dir):
+    """Standalone never pushes an ICE-server list, so ``create_app`` must
+    release the transport's first-handshake gate at wiring time. Left closed,
+    the first outbound federation send waits out the full prime timeout for
+    a list that is never coming.
+    """
+    from socialhome.app_keys import federation_transport_key
+
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        resp = await tc.get("/healthz")
+        assert resp.status == 200
+        transport = app[federation_transport_key]
+        assert transport._ice_primed.is_set(), (  # noqa: SLF001 — asserting wiring
+            "standalone boot left the ICE-prime gate closed"
+        )
+
+
 def test_map_tile_user_agent_identifies_the_app_and_a_contact():
     """The tile ``User-Agent`` must name the app AND a reachable contact.
 

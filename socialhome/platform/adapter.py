@@ -449,6 +449,27 @@ class PlatformAdapter(abc.ABC):
     def supports_bearer_token_auth(self) -> bool:
         return Capability.PASSWORD_AUTH in self.capabilities
 
+    @property
+    def provides_ice_servers(self) -> bool:
+        """``True`` when this platform pushes an ICE-server list
+        asynchronously after startup, so the federation transport should
+        wait briefly before its first handshake.
+
+        The HA-backed adapters pull HA Core's ``web_rtc/ice_servers``
+        (Nabu Casa Cloud TURN credentials among them) over the HA
+        WebSocket once the app is up — after the boot-time outbox drain
+        has already started building peers. A peer built STUN-only in
+        that window can never relay, so the transport holds its first
+        offerer handshake until the list lands.
+
+        Deliberately NOT a :class:`Capability`: that set is serialised to
+        the SPA by ``GET /api/instance/config``, and this is a backend
+        startup-ordering fact with nothing for the UI to render.
+        Platforms that will never push a list leave this ``False``, and
+        ``create_app`` releases the gate immediately on their behalf.
+        """
+        return False
+
 
 # ── Back-compat alias ────────────────────────────────────────────────────────
 

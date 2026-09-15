@@ -9,7 +9,9 @@ from socialhome.app_keys import (
     db_key as _db_key,
     dm_routing_service_key,
     federation_repo_key,
+    federation_service_key,
     federation_transport_key,
+    outbox_repo_key,
     peer_home_sharing_service_key,
 )
 from socialhome.config import Config
@@ -18,6 +20,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.domain.federation import (
+    FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
@@ -981,3 +984,178 @@ async def test_get_connections_includes_share_home(client):
     row = next(x for x in rows if x["instance_id"] == "peer-sh-list-1")
     # Default value is True — RemoteInstance.share_home defaults to True.
     assert row["share_home"] is True
+
+
+# ─── GET /api/connections includes queued_envelopes ────────────────────────
+
+
+async def test_get_connections_reports_zero_queued_envelopes(client):
+    """A peer with an empty outbox reports queued_envelopes=0.
+
+    The field is always present so the SPA can branch on the number
+    rather than on ``undefined``.
+    """
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-q-empty"))
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    assert r.status == 200
+    rows = await r.json()
+    row = next(x for x in rows if x["instance_id"] == "peer-q-empty")
+    assert row["queued_envelopes"] == 0
+
+
+async def test_get_connections_counts_pending_outbox_envelopes(client):
+    """queued_envelopes reflects the peer's own pending outbox backlog.
+
+    A household that has been offline for weeks piles up undelivered
+    envelopes; the count is what tells an admin the difference between a
+    blip and a peer that has been gone since spring.
+    """
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-q-backlog"))
+    await fed_repo.save_instance(_fake_instance("peer-q-other"))
+
+    outbox = client.app[outbox_repo_key]
+    for _ in range(3):
+        await outbox.enqueue(
+            instance_id="peer-q-backlog",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+        )
+    await outbox.enqueue(
+        instance_id="peer-q-other",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    assert r.status == 200
+    rows = await r.json()
+    backlog = next(x for x in rows if x["instance_id"] == "peer-q-backlog")
+    other = next(x for x in rows if x["instance_id"] == "peer-q-other")
+    assert backlog["queued_envelopes"] == 3
+    assert other["queued_envelopes"] == 1
+
+
+async def test_delivered_envelopes_are_not_counted_as_queued(client):
+    """Only ``pending`` rows count — delivered ones are not a backlog."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-q-delivered"))
+
+    outbox = client.app[outbox_repo_key]
+    entry_id = await outbox.enqueue(
+        instance_id="peer-q-delivered",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    await outbox.mark_delivered(entry_id)
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    rows = await r.json()
+    row = next(x for x in rows if x["instance_id"] == "peer-q-delivered")
+    assert row["queued_envelopes"] == 0
+
+
+# ─── dropped (permanently failed) envelopes ────────────────────────────────
+
+
+async def _seed_backlog(client, iid: str, *, pending: int, failed: int) -> None:
+    """Give ``iid`` a real outbox backlog: ``pending`` waiting, ``failed`` dead."""
+    outbox = client.app[outbox_repo_key]
+    for i in range(pending):
+        await outbox.enqueue(
+            instance_id=iid,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id=f"{iid}-p{i}",
+        )
+    for i in range(failed):
+        eid = await outbox.enqueue(
+            instance_id=iid,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id=f"{iid}-f{i}",
+        )
+        await outbox.mark_failed(eid)
+
+
+async def test_get_connections_reports_dropped_envelopes(client):
+    """``failed`` rows are permanently given up on — reported separately.
+
+    The support case that motivated this: 263 failed + 56 pending. Showing
+    only the 56 renders data loss as a reassuring "queued for delivery".
+    """
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-dropped"))
+    await _seed_backlog(client, "peer-dropped", pending=2, failed=3)
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    assert r.status == 200
+    rows = await r.json()
+    row = next(x for x in rows if x["instance_id"] == "peer-dropped")
+    assert row["queued_envelopes"] == 2
+    assert row["dropped_envelopes"] == 3
+
+
+async def test_get_connections_reports_zero_dropped_envelopes(client):
+    """The field is always present so the SPA branches on a number."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-nodrop"))
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    rows = await r.json()
+    row = next(x for x in rows if x["instance_id"] == "peer-nodrop")
+    assert row["dropped_envelopes"] == 0
+
+
+async def test_patch_connection_reports_real_envelope_counts(client):
+    """PATCH returns the peer's real backlog, not a placeholder ``0``."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-patch-counts"))
+    await _seed_backlog(client, "peer-patch-counts", pending=2, failed=3)
+    client.app[peer_home_sharing_service_key] = _CapturingShareHomeSvc()
+
+    r = await client.patch(
+        "/api/pairing/connections/peer-patch-counts",
+        json={"share_home": False},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["queued_envelopes"] == 2
+    assert body["dropped_envelopes"] == 3
+
+
+class _StubConfirmSvc:
+    """Federation service stub whose confirm_pairing returns a known peer."""
+
+    def __init__(self, inst) -> None:
+        self._inst = inst
+
+    async def confirm_pairing(self, token: str, code: str):
+        return self._inst
+
+
+async def test_confirm_pairing_reports_real_envelope_counts(client):
+    """The confirm response carries the peer's real backlog, not ``0``.
+
+    A re-confirm of a household that has been dark is exactly when the
+    admin needs to see what piled up and what was dropped.
+    """
+    inst = _fake_instance("peer-confirm-counts")
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(inst)
+    await _seed_backlog(client, "peer-confirm-counts", pending=2, failed=3)
+    client.app[federation_service_key] = _StubConfirmSvc(inst)
+
+    r = await client.post(
+        "/api/pairing/confirm",
+        json={"token": "t", "verification_code": "123456"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["instance_id"] == "peer-confirm-counts"
+    assert body["queued_envelopes"] == 2
+    assert body["dropped_envelopes"] == 3
