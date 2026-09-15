@@ -279,3 +279,136 @@ async def test_non_empty_list_is_still_applied():
     )
     assert await sync.fetch_and_apply_once() is True
     assert applied == [[{"urls": ["stun:stun.example:3478"]}]]
+
+
+# ── on_first_attempt: the federation transport's ICE gate ─────────────────
+
+
+async def _wait_for(pred, tries: int = 200) -> None:
+    for _ in range(tries):
+        await asyncio.sleep(0.005)
+        if pred():
+            return
+
+
+async def test_on_first_attempt_fires_after_a_successful_fetch():
+    applied: list = []
+    fired: list[int] = []
+
+    async def _apply(servers):
+        applied.append(servers)
+
+    async def _first():
+        fired.append(1)
+
+    sync = HaIceServerSync(
+        client=_client_returning([{"urls": "stun:ok.example"}]),
+        apply_callback=_apply,
+        interval_s=1000.0,
+        error_retry_s=1000.0,
+        on_first_attempt=_first,
+    )
+    await sync.start()
+    await _wait_for(lambda: fired)
+    await sync.stop()
+    assert applied
+    assert fired == [1]
+
+
+async def test_on_first_attempt_fires_when_ha_has_nothing_usable():
+    """The outage case: HA answers with an empty list, ``set_ice_servers``
+    is (correctly) never called, and without this hook the gate would stay
+    closed for the whole prime timeout."""
+    fired: list[int] = []
+
+    async def _apply(_servers):  # pragma: no cover — must not be reached
+        raise AssertionError("empty list was applied")
+
+    async def _first():
+        fired.append(1)
+
+    sync = HaIceServerSync(
+        client=_client_returning([]),
+        apply_callback=_apply,
+        interval_s=1000.0,
+        error_retry_s=1000.0,
+        on_first_attempt=_first,
+    )
+    await sync.start()
+    await _wait_for(lambda: fired)
+    await sync.stop()
+    assert fired == [1]
+
+
+async def test_on_first_attempt_fires_when_the_fetch_fails():
+    """A transport/auth failure returns ``False`` and never applies — the
+    gate must open anyway so the first send isn't held hostage to HA."""
+    client = AsyncMock()
+    client.ws_command.return_value = None
+    fired: list[int] = []
+
+    async def _first():
+        fired.append(1)
+
+    sync = HaIceServerSync(
+        client=client,
+        apply_callback=AsyncMock(),
+        interval_s=1000.0,
+        error_retry_s=1000.0,
+        on_first_attempt=_first,
+    )
+    await sync.start()
+    await _wait_for(lambda: fired)
+    await sync.stop()
+    assert fired == [1]
+
+
+async def test_on_first_attempt_does_not_fire_again_on_later_ticks():
+    """Exactly once — a later tick must not re-run the hook."""
+    fired: list[int] = []
+
+    async def _first():
+        fired.append(1)
+
+    sync = HaIceServerSync(
+        client=_client_returning([{"urls": "stun:ok.example"}]),
+        apply_callback=AsyncMock(),
+        interval_s=0.01,  # tick fast so several cycles run
+        error_retry_s=0.01,
+        on_first_attempt=_first,
+    )
+    await sync.start()
+    await _wait_for(lambda: fired)
+    for _ in range(20):
+        await asyncio.sleep(0.005)
+    await sync.stop()
+    assert fired == [1], f"hook fired {len(fired)} times"
+
+
+async def test_raising_on_first_attempt_does_not_kill_the_loop(caplog):
+    """A broken hook must not take the daily ICE refresh down with it."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="socialhome.platform.ha.ice_servers_sync")
+    applied: list = []
+
+    async def _apply(servers):
+        applied.append(servers)
+
+    async def _first():
+        raise RuntimeError("boom")
+
+    sync = HaIceServerSync(
+        client=_client_returning([{"urls": "stun:ok.example"}]),
+        apply_callback=_apply,
+        interval_s=0.01,
+        error_retry_s=0.01,
+        on_first_attempt=_first,
+    )
+    await sync.start()
+    await _wait_for(lambda: len(applied) >= 2)
+    task = sync._task
+    assert task is not None and not task.done(), "the loop died on a raising hook"
+    await sync.stop()
+    assert len(applied) >= 2
+    assert any("boom" in rec.message for rec in caplog.records)

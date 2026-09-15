@@ -4,7 +4,7 @@
 import { signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
-import { relativeDocsTime } from '@/utils/relativeTime'
+import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -40,6 +40,18 @@ interface Connection {
    *  When non-null, ``display_name`` already reflects this value
    *  (the backend pre-resolves the effective name). */
   local_alias?: string | null
+  /** Undelivered federation envelopes still queued for this peer.
+   *  Rendered only when non-zero, next to "Unreachable since": a peer
+   *  that has been dark for months is sitting on a visible backlog, and
+   *  seeing it is the difference between "wait" and "re-pair". Absent on
+   *  older API responses. */
+  queued_envelopes?: number
+  /** Envelopes permanently given up on for this peer — a PERMANENT
+   *  rejection or an exhausted retry budget. Never retried, so they are
+   *  rendered as their own line: folding them into the queued count
+   *  would present data loss as "queued for delivery". Absent on older
+   *  API responses. */
+  dropped_envelopes?: number
   /** Active federation transport for this peer. Shown read-only
    *  in the detail panel so the admin can see whether WebRTC is up. */
   transport?: 'rtc' | 'https' | null
@@ -274,7 +286,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
           <dd>
             {conn.last_reachable_at ? (
               <>
-                {new Date(conn.last_reachable_at).toLocaleString()}
+                {new Date(normaliseTimestamp(conn.last_reachable_at)).toLocaleString()}
                 <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                   ({relativeDocsTime(conn.last_reachable_at)})
                 </span>
@@ -285,9 +297,29 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
           </dd>
           {conn.unreachable_since && (
             <><dt>Unreachable since</dt><dd class="sh-text-warning">
-              {new Date(conn.unreachable_since).toLocaleString()}
+              {new Date(normaliseTimestamp(conn.unreachable_since)).toLocaleString()}
               <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                 ({relativeDocsTime(conn.unreachable_since)})
+              </span>
+            </dd></>
+          )}
+          {(conn.queued_envelopes ?? 0) > 0 && (
+            <><dt>Waiting to send</dt><dd>
+              {conn.queued_envelopes === 1
+                ? '1 message queued for delivery'
+                : `${conn.queued_envelopes} messages queued for delivery`}
+              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
+                They'll be sent automatically once this household is reachable again.
+              </span>
+            </dd></>
+          )}
+          {(conn.dropped_envelopes ?? 0) > 0 && (
+            <><dt>Undelivered</dt><dd class="sh-text-warning">
+              {conn.dropped_envelopes === 1
+                ? '1 message could not be delivered and was dropped.'
+                : `${conn.dropped_envelopes} messages could not be delivered and were dropped.`}
+              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
+                These will not be retried.
               </span>
             </dd></>
           )}

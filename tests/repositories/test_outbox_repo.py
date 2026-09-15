@@ -552,3 +552,72 @@ async def test_enqueue_at_cap_with_ordinary_evicts_ordinary_for_never_drop(
     pending = await _pending_ids(env, "peer")
     assert "o0" not in pending  # oldest ordinary evicted
     assert nid in pending
+
+
+# ─── count_failed_for ──────────────────────────────────────────────────────
+
+
+async def test_count_failed_for_is_zero_when_empty(env):
+    """No rows at all ⇒ 0, not None."""
+    assert await env.outbox_repo.count_failed_for("peer") == 0
+
+
+async def test_count_failed_for_counts_only_failed_rows(env):
+    """Only ``status='failed'`` rows count — pending is a different number.
+
+    ``failed`` means permanently given up on (PERMANENT rejection or
+    MAX_ATTEMPTS exhausted); those envelopes are never retried, which is
+    exactly why the admin surface reports them apart from the backlog.
+    """
+    for i in range(3):
+        await env.outbox_repo.enqueue(
+            instance_id="peer",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id=f"f{i}",
+        )
+    await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+        msg_id="p0",
+    )
+    for i in range(3):
+        await env.outbox_repo.mark_failed(f"f{i}")
+
+    assert await env.outbox_repo.count_failed_for("peer") == 3
+    assert await env.outbox_repo.count_pending_for("peer") == 1
+
+
+async def test_count_failed_for_is_per_instance(env):
+    """Another peer's failures are not this peer's."""
+    for iid in ("peer-a", "peer-b"):
+        eid = await env.outbox_repo.enqueue(
+            instance_id=iid,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id=f"{iid}-1",
+        )
+        await env.outbox_repo.mark_failed(eid)
+    await env.outbox_repo.mark_failed(
+        await env.outbox_repo.enqueue(
+            instance_id="peer-a",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id="peer-a-2",
+        )
+    )
+
+    assert await env.outbox_repo.count_failed_for("peer-a") == 2
+    assert await env.outbox_repo.count_failed_for("peer-b") == 1
+
+
+async def test_count_failed_for_ignores_delivered_rows(env):
+    """A delivered row is DELETEd, so it can never inflate the failed count."""
+    eid = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    await env.outbox_repo.mark_delivered(eid)
+    assert await env.outbox_repo.count_failed_for("peer") == 0

@@ -6,8 +6,10 @@ import pytest
 
 from socialhome.platform import build_platform_adapter
 from socialhome.platform.adapter import (
+    Capability,
     ExternalUser,
     InstanceConfig,
+    PlatformAdapter,
     _extract_bearer,
 )
 
@@ -176,3 +178,48 @@ def test_build_platform_adapter_unknown_mode():
     cfg = Config(mode="unknown")
     with pytest.raises(ValueError, match="Unknown platform mode"):
         build_platform_adapter("unknown", db=None, config=cfg)
+
+
+# ── provides_ice_servers (ABC default) ───────────────────────────────────────
+
+
+class _MinimalAdapter(PlatformAdapter):
+    """Smallest concrete adapter — nothing but the abstract surface, so
+    whatever it reports for :attr:`provides_ice_servers` is the ABC default."""
+
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        return frozenset()
+
+    async def get_instance_config(self) -> InstanceConfig:  # pragma: no cover
+        raise NotImplementedError
+
+    async def get_federation_base(self) -> str | None:  # pragma: no cover
+        return None
+
+    async def update_location(  # pragma: no cover
+        self,
+        latitude: float,
+        longitude: float,
+        location_name: str,
+    ) -> InstanceConfig:
+        raise NotImplementedError
+
+    async def on_startup(self, app) -> None:  # pragma: no cover
+        return None
+
+    async def on_cleanup(self, app) -> None:  # pragma: no cover
+        return None
+
+
+def test_provides_ice_servers_defaults_to_false():
+    """A platform that says nothing pushes no ICE list — so the federation
+    transport must not sit on its first-handshake gate waiting for one."""
+    assert _MinimalAdapter().provides_ice_servers is False
+
+
+def test_provides_ice_servers_is_not_a_spa_capability():
+    """It is a backend-only fact; ``GET /api/instance/config`` serialises
+    ``adapter.capabilities``, so leaking it there would publish an internal
+    startup detail on a public API surface."""
+    assert not any("ice" in str(c).lower() for c in Capability)

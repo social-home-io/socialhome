@@ -73,6 +73,7 @@ class AbstractOutboxRepo(Protocol):
         self, cutoff_iso: str, *, limit: int = PURGE_BATCH
     ) -> int: ...
     async def count_pending_for(self, instance_id: str) -> int: ...
+    async def count_failed_for(self, instance_id: str) -> int: ...
     async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
 
 
@@ -255,6 +256,27 @@ class SqliteOutboxRepo:
             await self._db.fetchval(
                 "SELECT COUNT(*) FROM federation_outbox "
                 "WHERE instance_id=? AND status='pending'",
+                (instance_id,),
+                default=0,
+            )
+        )
+
+    async def count_failed_for(self, instance_id: str) -> int:
+        """Count envelopes permanently given up on for ``instance_id``.
+
+        ``status='failed'`` is terminal — a PERMANENT 4xx rejection or an
+        exhausted ``MAX_ATTEMPTS`` (see
+        :mod:`infrastructure.outbox_processor`) — and is never retried; the
+        rows are purged 24 h after going terminal. Reported next to
+        :meth:`count_pending_for` so the admin surface can say "these were
+        dropped" rather than implying the whole backlog is still in flight.
+        Served by the same ``idx_federation_outbox_instance(instance_id,
+        status)`` index as the pending count.
+        """
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM federation_outbox "
+                "WHERE instance_id=? AND status='failed'",
                 (instance_id,),
                 default=0,
             )

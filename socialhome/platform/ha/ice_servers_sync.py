@@ -62,6 +62,11 @@ ERROR_RETRY_INTERVAL_S: float = 60.0
 #: tests pass a recording stub.
 ApplyCallback = Callable[[list[dict]], Awaitable[None]]
 
+#: Callable signature for the one-shot "the first fetch attempt is
+#: done" hook. In production this releases the federation transport's
+#: first-handshake ICE gate; tests pass a recording stub.
+FirstAttemptCallback = Callable[[], Awaitable[None]]
+
 
 class HaIceServerSync:
     """Background task that mirrors HA Core's ICE-server list onto SH.
@@ -75,6 +80,8 @@ class HaIceServerSync:
     __slots__ = (
         "_client",
         "_apply",
+        "_on_first_attempt",
+        "_first_attempt_done",
         "_interval_s",
         "_error_retry_s",
         "_task",
@@ -88,9 +95,18 @@ class HaIceServerSync:
         apply_callback: ApplyCallback,
         interval_s: float = DEFAULT_REFRESH_INTERVAL_S,
         error_retry_s: float = ERROR_RETRY_INTERVAL_S,
+        on_first_attempt: FirstAttemptCallback | None = None,
     ) -> None:
         self._client = client
         self._apply = apply_callback
+        #: Fired exactly once, after the first ``fetch_and_apply_once``
+        #: returns — whatever its outcome. Two of the three outcomes
+        #: (HA answered with nothing usable; the fetch failed outright)
+        #: never reach ``apply_callback``, so a hook hung off the apply
+        #: path would never run on an ordinary HA install without a
+        #: cloud subscription.
+        self._on_first_attempt = on_first_attempt
+        self._first_attempt_done = False
         self._interval_s = interval_s
         self._error_retry_s = error_retry_s
         self._task: asyncio.Task | None = None
@@ -212,6 +228,10 @@ class HaIceServerSync:
         Core booting after SH (rare but happens on shared hardware)
         gets a chance to come up without an operator waiting 24 h
         for the next regular tick.
+
+        ``on_first_attempt`` fires once here, after the first cycle
+        returns, whatever its outcome — the only place that sees all
+        three (applied / nothing usable / fetch failed).
         """
         while not self._stop.is_set():
             success = False
@@ -222,8 +242,28 @@ class HaIceServerSync:
                     "ha-ice-servers-sync: fetch raised: %s",
                     exc,
                 )
+            if not self._first_attempt_done:
+                self._first_attempt_done = True
+                await self._fire_first_attempt()
             wait = self._interval_s if success else self._error_retry_s
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 continue
+
+    async def _fire_first_attempt(self) -> None:
+        """Run the one-shot post-first-attempt hook, fail-soft.
+
+        Mirrors the ``_apply`` guard: a raising callback logs at WARNING
+        and the loop carries on, so a broken consumer can't take the
+        daily ICE refresh down with it.
+        """
+        if self._on_first_attempt is None:
+            return
+        try:
+            await self._on_first_attempt()
+        except Exception as exc:
+            log.warning(
+                "ha-ice-servers-sync: on_first_attempt callback raised: %s",
+                exc,
+            )

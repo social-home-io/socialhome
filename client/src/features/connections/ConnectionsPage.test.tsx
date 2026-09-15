@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 // Mock the API module before importing the page
 vi.mock('@/api', () => ({
@@ -48,8 +48,18 @@ vi.mock('@/components/AutoPairDialog', () => ({
   openAutoPair: vi.fn(),
 }))
 
+// ConnectionDetail renders nothing, but records the ``conn`` prop it was
+// handed so tests can assert which API fields actually reach the modal —
+// the prop literal in ConnectionsPage is an explicit field list, so a
+// field the API returns can silently never arrive.
+const { detailConns } = vi.hoisted(() => ({
+  detailConns: [] as Array<Record<string, unknown>>,
+}))
 vi.mock('@/components/ConnectionDetail', () => ({
-  ConnectionDetail: () => null,
+  ConnectionDetail: ({ conn }: { conn: Record<string, unknown> }) => {
+    detailConns.push(conn)
+    return null
+  },
 }))
 
 // Federation-compat store — back it with real signals so the page can read
@@ -978,5 +988,47 @@ describe('ConnectionsPage — admin panels under the Supervisor add-on (haos)', 
     })
     expect(container.querySelector('.sh-ice-panel__toggle')).toBeNull()
     expect(container.querySelector('.sh-diagnostics-link')).toBeNull()
+  })
+})
+
+
+describe('ConnectionDetail prop plumbing', () => {
+  beforeEach(() => {
+    detailConns.length = 0
+  })
+
+  async function openManage(conn: Record<string, unknown>) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') return Promise.resolve([conn])
+      return Promise.resolve([])
+    })
+    const { container } = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    const manage = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Manage',
+    )!
+    expect(manage).toBeTruthy()
+    fireEvent.click(manage)
+    await waitFor(() => expect(detailConns.length).toBeGreaterThan(0))
+    return detailConns[detailConns.length - 1]
+  }
+
+  it('passes last_reachable_at through so "Last connected" is not always "never"', async () => {
+    const conn = await openManage(
+      makeConnection({ reachable: false, last_reachable_at: '2026-06-04 08:12:33' }),
+    )
+    expect(conn.last_reachable_at).toBe('2026-06-04 08:12:33')
+  })
+
+  it('passes queued_envelopes through to the modal', async () => {
+    const conn = await openManage(makeConnection({ queued_envelopes: 56 }))
+    expect(conn.queued_envelopes).toBe(56)
+  })
+
+  it('passes dropped_envelopes through to the modal', async () => {
+    const conn = await openManage(makeConnection({ dropped_envelopes: 263 }))
+    expect(conn.dropped_envelopes).toBe(263)
   })
 })

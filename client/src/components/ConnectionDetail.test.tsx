@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, screen, cleanup, waitFor } from '@testing-library/preact'
 
 const apiGet = vi.fn()
@@ -425,5 +425,184 @@ describe('DM path row', () => {
     // The Transport row should still render — proves the panel didn't crash:
     expect(screen.getByText(/HTTPS inbox \(fallback\)/i)).toBeTruthy()
     expect(screen.queryByText(/Last DM took the relay path/i)).toBeNull()
+  })
+})
+
+describe('Waiting to send — queued envelope backlog', () => {
+  it('renders the backlog line when envelopes are queued', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ queued_envelopes: 56 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText('Waiting to send')).toBeTruthy()
+    expect(screen.getByText('56 messages queued for delivery')).toBeTruthy()
+  })
+
+  it('uses the singular for exactly one queued envelope', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ queued_envelopes: 1 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText('1 message queued for delivery')).toBeTruthy()
+  })
+
+  it('is absent when nothing is queued', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ queued_envelopes: 0 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.queryByText('Waiting to send')).toBeNull()
+  })
+
+  it('is absent when the field is missing entirely (older API)', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn() as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.queryByText('Waiting to send')).toBeNull()
+  })
+})
+
+describe('ConnectionDetail — naive-UTC timestamps render in the viewer\'s zone', () => {
+  // ``last_reachable_at`` / ``unreachable_since`` come from SQLite
+  // ``datetime('now')`` as the naive shape "YYYY-MM-DD HH:MM:SS" — a UTC
+  // value with no zone designator, which ``new Date()`` parses as LOCAL
+  // time. Rendering it raw skewed the absolute stamp by the viewer's UTC
+  // offset (2 h for a CEST household). These assert the component routes
+  // both through ``normaliseTimestamp`` first. The suite otherwise runs
+  // under TZ=UTC, where the bug is invisible — so pin a positive offset.
+  const realTz = process.env.TZ
+
+  beforeEach(() => { process.env.TZ = 'Europe/Zurich' })
+  afterEach(() => {
+    if (realTz === undefined) delete process.env.TZ
+    else process.env.TZ = realTz
+  })
+
+  const utcStamp = (naive: string) =>
+    new Date(naive.replace(' ', 'T') + 'Z').toLocaleString()
+
+  it('renders last_reachable_at as UTC, not as local wall-clock', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ last_reachable_at: '2026-06-04 11:26:45' }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    // 11:26:45Z is 13:26:45 in Zurich — the naive misparse would show 11:26:45.
+    expect(screen.getByText(utcStamp('2026-06-04 11:26:45'), { exact: false })).toBeTruthy()
+    expect(screen.queryByText(/11:26:45/)).toBeNull()
+  })
+
+  it('renders unreachable_since as UTC, not as local wall-clock', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ unreachable_since: '2026-06-04 11:43:24' }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText(utcStamp('2026-06-04 11:43:24'), { exact: false })).toBeTruthy()
+    expect(screen.queryByText(/11:43:24/)).toBeNull()
+  })
+})
+
+describe('Undelivered — dropped envelope count', () => {
+  it('renders the dropped line when envelopes were given up on', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ queued_envelopes: 56, dropped_envelopes: 263 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText('Undelivered')).toBeTruthy()
+    expect(
+      screen.getByText('263 messages could not be delivered and were dropped.'),
+    ).toBeTruthy()
+  })
+
+  it('uses the singular for exactly one dropped envelope', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ dropped_envelopes: 1 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(
+      screen.getByText('1 message could not be delivered and was dropped.'),
+    ).toBeTruthy()
+  })
+
+  it('is absent when nothing was dropped', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ dropped_envelopes: 0 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.queryByText('Undelivered')).toBeNull()
+  })
+
+  it('is absent when the field is missing entirely (older API)', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn() as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.queryByText('Undelivered')).toBeNull()
+  })
+
+  it('renders without the queued line when only envelopes were dropped', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ queued_envelopes: 0, dropped_envelopes: 4 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText('Undelivered')).toBeTruthy()
+    expect(screen.queryByText('Waiting to send')).toBeNull()
+  })
+
+  it('leaves the queued line alone when nothing was dropped', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ queued_envelopes: 7, dropped_envelopes: 0 }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText('Waiting to send')).toBeTruthy()
+    expect(screen.queryByText('Undelivered')).toBeNull()
   })
 })

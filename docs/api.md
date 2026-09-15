@@ -489,8 +489,8 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | POST | `/api/pairing/introduce` | Introduce self to an intermediary. |
 | POST | `/api/pairing/auto-pair-via` | Ask a mutual peer to relay. |
 | GET / POST | `/api/pairing/auto-pair-requests[/{id}/{approve\|decline}]` | Auto-pair queue. |
-| GET | `/api/pairing/connections` | Paired peers (admin/ops view). Now also carries `home_lat` / `home_lon` per row (4dp-truncated, `null` when unset) so the SPA can render a household map without a follow-up fetch. Each row carries `instance_id`, `display_name`, `status`, `reachable`, **`transport`** (`"rtc"` when the WebRTC DataChannel is open, `"https"` when running on the HTTPS-inbox fallback, `null` when the peer is unreachable or pending), and **`share_home`** (`true` / `false` — whether this household's home coordinates are shared with the peer; defaults to `true`). Whitelisted fields only. |
-| GET | `/api/connections` | Alias of the above. Returns the same shape including `share_home` and `local_alias` per row. |
+| GET | `/api/pairing/connections` | Paired peers (admin/ops view). Now also carries `home_lat` / `home_lon` per row (4dp-truncated, `null` when unset) so the SPA can render a household map without a follow-up fetch. Each row carries `instance_id`, `display_name`, `status`, `reachable`, **`transport`** (`"rtc"` when the WebRTC DataChannel is open, `"https"` when running on the HTTPS-inbox fallback, `null` when the peer is unreachable or pending), **`share_home`** (`true` / `false` — whether this household's home coordinates are shared with the peer; defaults to `true`), **`queued_envelopes`** (integer — federation envelopes still `pending` in the outbox for that peer, i.e. waiting to be sent and retried automatically once the peer is reachable; `0` when there is no backlog, which is what tells an admin a long-dark household apart from a momentary drop), and **`dropped_envelopes`** (integer — envelopes in the terminal `failed` state: a PERMANENT rejection or an exhausted retry budget. These are **not** retried and are purged 24 h after going terminal, so a non-zero value is delivery loss, not a queue). The two counts are deliberately separate: reporting only the pending one renders dropped messages as "queued for delivery". Whitelisted fields only. |
+| GET | `/api/connections` | Alias of the above. Returns the same shape including `share_home`, `queued_envelopes`, `dropped_envelopes` and `local_alias` per row. |
 | GET / DELETE | `/api/pairing/connections/{instance_id}` | Read / unpair. |
 | GET | `/api/pairing/connections/{instance_id}/transport-detail` | Admin-only. Returns `{"last_relay": {"via": <iid>, "ts": <iso>} \| null}` — the most recent DM that relayed via a third household within the last 24h. Powers the SPA's Manage detail panel. |
 | PATCH | `/api/pairing/connections/{instance_id}` | Admin-only. Accepts `{"share_home": bool}` — flip whether this household's home coordinates are shared with the peer. Setting `false` immediately fires a one-shot `LOCAL_HOME_LOCATION_CHANGED` with null coords to revoke the peer's pin; setting `true` fires the current coords to restore it. Idempotent. |
@@ -641,12 +641,25 @@ reloads — so a freshly-rotated Nabu Casa Cloud TURN credential could stay
 invisible for hours — and because a failed push left no record on the Social
 Home side.
 
-Two consequences worth knowing:
+Consequences worth knowing:
 
 * The pulled list **replaces** the config-derived one
   (`webrtc_stun_url` / `webrtc_turn_url` / …) for the federation transport. A
   reply with nothing usable in it is ignored rather than applied, so HA without
   the WebRTC integration cannot blank out an operator's servers.
+* The **first fetch attempt** releases the federation transport's
+  first-handshake gate, whatever its outcome — list applied, nothing usable,
+  or the fetch failed outright. The transport holds its first outbound
+  handshake for up to `ICE_PRIME_TIMEOUT_S` (15 s) waiting for that signal, so
+  the boot-time outbox drain doesn't build every peer STUN-only just before the
+  TURN credentials land; the bound is what stops an unreachable HA Core from
+  stalling federation. Platforms that never pull (standalone) release the gate
+  at startup instead — `PlatformAdapter.provides_ice_servers`.
+* A list arriving **after** peers were built still reaches them. A content
+  change bumps the transport's ICE generation, and any peer that has not yet
+  opened its DataChannel is retired and rebuilt under the new list on its next
+  send. Connected peers are untouched. Every push also clears the per-peer RTC
+  retry suppressions, changed or not.
 * It reaches the **federation** transport only. The SPA's own
   `/api/webrtc/ice_servers` and the public highlight/moment signalling paths
   still serve the config-derived list, so under HA those can differ.

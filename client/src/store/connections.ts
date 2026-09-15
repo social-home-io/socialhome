@@ -29,6 +29,22 @@ export interface Connection {
   inbox_url?: string
   intro_relay_enabled?: boolean
   unreachable_since?: string | null
+  /** Last moment an outbound envelope to this peer was accepted
+   *  (``remote_instances.last_reachable_at``); ``null`` when it has never
+   *  been reached. Distinct from ``last_seen_at`` (inbound activity) —
+   *  ``ConnectionDetail`` renders it as "Last connected". */
+  last_reachable_at?: string | null
+  /** Undelivered federation envelopes still queued for this peer. A peer
+   *  that has been offline for weeks piles these up; the count is what
+   *  separates a blip from a household that has been gone for months.
+   *  Absent on older API responses. */
+  queued_envelopes?: number
+  /** Federation envelopes permanently given up on for this peer (terminal
+   *  ``failed``): a PERMANENT rejection or an exhausted retry budget.
+   *  These are NOT retried — reported apart from ``queued_envelopes`` so
+   *  the UI never renders dropped messages as still-in-flight. Absent on
+   *  older API responses. */
+  dropped_envelopes?: number
   transport?: 'rtc' | 'https' | null
   /** Monotonic federation protocol version the peer last advertised via
    *  INSTANCE_CAPABILITIES_UPDATED. Defaults to 1 server-side when the peer

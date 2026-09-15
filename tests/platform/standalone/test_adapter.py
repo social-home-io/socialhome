@@ -301,6 +301,14 @@ async def test_supports_stt_is_false(adapter):
     assert adapter.supports_stt is False
 
 
+async def test_provides_ice_servers_is_false(adapter):
+    """Nothing ever calls ``set_ice_servers`` in standalone mode, so the
+    adapter must report ``False`` — otherwise ``create_app`` leaves the
+    federation transport's first-handshake gate closed and the first
+    outbound send stalls for the full ICE-prime timeout."""
+    assert adapter.provides_ice_servers is False
+
+
 async def test_stream_transcribe_audio_raises(adapter):
     """Streaming STT raises NotImplementedError on standalone."""
 

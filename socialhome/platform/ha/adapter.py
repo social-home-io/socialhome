@@ -126,6 +126,15 @@ class HaAdapter(PlatformAdapter):
             caps.add(Capability.STT)
         return frozenset(caps)
 
+    @property
+    def provides_ice_servers(self) -> bool:
+        """``True`` — :class:`HaIceServerSync` pulls HA Core's
+        ``web_rtc/ice_servers`` (Nabu Casa Cloud TURN credentials
+        included) shortly after startup, so the federation transport
+        holds its first handshake until that list lands rather than
+        building a STUN-only peer that can never relay."""
+        return True
+
     # ── Local credential surface (mirrors StandaloneAdapter) ─────────────
 
     async def issue_bearer_token(
@@ -284,6 +293,36 @@ class HaAdapter(PlatformAdapter):
                 ha_url=self._ha_url,
                 ha_token=self._ha_token,
             )
+        # WebRTC ICE-server sync — pull HA's ``web_rtc/ice_servers`` list
+        # over the HA Core WS and push to FederationService. Replaces
+        # the old HA-integration push endpoint.
+        #
+        # Started FIRST, before the bridge / timezone / home-location work
+        # below: it needs nothing but the HaClient just built and the
+        # federation service already in ``app``, and the federation
+        # transport holds its first handshake until this pull reports in.
+        # Every await it sat behind was pure added latency before TURN
+        # credentials could reach a boot-time outbox drain.
+        federation_service = app.get(K.federation_service_key)
+        if federation_service is not None:
+
+            async def _apply(servers: list[dict]) -> None:
+                federation_service.set_ice_servers(servers)
+
+            async def _first_attempt() -> None:
+                # Release the federation transport's first-handshake ICE
+                # gate once we know the outcome — including the outcomes
+                # that never call ``set_ice_servers`` (HA returned nothing
+                # usable; the fetch failed). Otherwise the first outbound
+                # send waits out the full prime timeout.
+                federation_service.mark_ice_primed()
+
+            self._ice_sync = HaIceServerSync(
+                client=self._ha_client,
+                apply_callback=_apply,
+                on_first_attempt=_first_attempt,
+            )
+            await self._ice_sync.start()
         self._ha_bridge = HaBridgeService(app[K.event_bus_key], self)
         self._ha_bridge.wire()
         # Mirror HA Core's ``time_zone`` into preferences.tz
@@ -313,20 +352,6 @@ class HaAdapter(PlatformAdapter):
             latitude=instance_cfg.latitude,
             longitude=instance_cfg.longitude,
         )
-        # WebRTC ICE-server sync — pull HA's ``web_rtc/ice_servers`` list
-        # over the HA Core WS and push to FederationService. Replaces
-        # the old HA-integration push endpoint.
-        federation_service = app.get(K.federation_service_key)
-        if federation_service is not None:
-
-            async def _apply(servers: list[dict]) -> None:
-                federation_service.set_ice_servers(servers)
-
-            self._ice_sync = HaIceServerSync(
-                client=self._ha_client,
-                apply_callback=_apply,
-            )
-            await self._ice_sync.start()
 
     async def on_cleanup(self, app: "web.Application") -> None:  # noqa: ARG002
         """Stop the ICE-server sync loop."""

@@ -170,3 +170,31 @@ async def test_broadcast_to_peers_explicit_list_unknown(env):
     )
     assert result.attempted == 2
     assert result.failed == 2
+
+
+async def test_mark_ice_primed_reaches_the_transport(env):
+    """Standalone never pushes an ICE list, so something has to release the
+    transport's first-handshake gate explicitly — this is that passthrough."""
+    svc, _, _, _, _ = env
+
+    class _T:
+        def __init__(self) -> None:
+            self.primed = 0
+
+        def mark_ice_primed(self) -> None:
+            self.primed += 1
+
+    transport = _T()
+    svc._transport = transport
+    svc.mark_ice_primed()
+    assert transport.primed == 1
+
+
+async def test_mark_ice_primed_without_a_transport_is_a_noop(env):
+    """Called before ``attach_transport`` (or on a stub transport that has
+    no such method) it must not raise."""
+    svc, _, _, _, _ = env
+    svc._transport = None
+    svc.mark_ice_primed()
+    svc._transport = object()
+    svc.mark_ice_primed()

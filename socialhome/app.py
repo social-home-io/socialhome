@@ -2582,6 +2582,13 @@ def create_app(config: Config | None = None) -> web.Application:
             bus=bus,
         )
         federation_service.attach_transport(fed_transport)
+        # Platforms that push an ICE-server list after startup (the HA
+        # adapters' ``web_rtc/ice_servers`` pull) release the transport's
+        # first-handshake gate themselves when that list lands. Everyone
+        # else has to say so up front, or the first outbound send waits
+        # out the prime timeout for a list that is never coming.
+        if not platform_adapter.provides_ice_servers:
+            fed_transport.mark_ice_primed()
         app[K.federation_transport_key] = fed_transport
 
         # SH's HA platform adapter (HaAdapter / HaosAdapter) pulls HA

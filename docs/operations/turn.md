@@ -109,10 +109,15 @@ SocialHome derives these credentials on demand:
   authenticated user's id; credentials are issued via
   `GET /api/calls/ice-servers` (auth-required).
 * **Federation transport** (server-to-server) — `user_id` is the
-  local instance's `instance_id`. Credentials are derived once at
-  startup and refreshed on subsequent transport rebuilds (after a
-  FAILED PC, or when a new ICE-server list is applied — see
-  "Home Assistant deployments" below).
+  local instance's `instance_id`. The list is derived once, at process
+  startup. A rebuilt PeerConnection (after a FAILED PC, or after a peer
+  is retired because the ICE list moved on) re-reads the list the
+  transport currently holds — it does not re-derive a fresh credential.
+  Only an applied ICE-server list replaces it (see "Home Assistant
+  deployments" below). So on a long-running process, federation keeps
+  presenting the credential minted at boot: pick a
+  `webrtc_turn_ttl_seconds` that outlasts your uptime between restarts,
+  and restart Social Home after changing `webrtc_turn_secret`.
 
 Both surfaces use the same shared secret (`webrtc_turn_secret`).
 You do **not** need separate secrets per instance — the
@@ -140,14 +145,70 @@ What this means for the settings above:
 * Every applied list is re-checked by the same diagnostics as boot, so a
   pulled list with no TURN — or TURN without credentials — is reported in the
   log rather than failing silently.
+* The first federation handshake after boot waits up to **15 s** for that
+  first pull to land, so the boot-time outbox drain doesn't build every peer
+  STUN-only moments before the TURN credentials arrive. The wait is paid at
+  most once per process (by whichever peer handshakes first), and the sync
+  releases it after its first fetch *attempt* whatever the outcome — an HA
+  Core that is slow, unreachable, or has nothing to offer costs that bound
+  once, never a stalled transport.
+* A list that lands *after* peers were already built still reaches them —
+  see "When TURN arrives late" below.
 
 Self-hosted and standalone deployments never pull; the TOML settings are the
-steady state there.
+steady state there, and they never pay the 15 s wait.
 
 If you'd rather use static long-lived credentials (e.g. a hosted
 TURN provider that only supports username/password), set
 `webrtc_turn_user` / `webrtc_turn_cred` instead. The HMAC path
 wins when both are configured.
+
+## When TURN arrives late, and when a failed peer retries
+
+Two behaviours matter when you deploy or change TURN on a running system.
+
+**Peers that never connected are rebuilt under the new list.** Applying an
+ICE-server list whose content actually changed bumps an internal
+*generation* counter. Every peer records the generation it was built under,
+and a peer that has not managed to open its DataChannel while sitting behind
+the current generation is torn down and rebuilt — with the new servers — on
+the next envelope addressed to it. Already-connected peers are left alone:
+their channel works, and renegotiating it buys nothing. This is what fixes
+the symptom where peers built during the boot outbox drain, before the TURN
+credentials landed, stayed STUN-only for the entire life of the process.
+
+**A failed handshake backs off, but no longer for a day.** When a
+PeerConnection reaches `failed`, the transport suppresses rebuilding that
+peer for a while — without it, every queued envelope would rebuild and
+re-fail, and the outbox polls every 5 s. The window grows with the peer's
+consecutive failure count, capped at 6 h and jittered by ±20 % so a
+household whose peers all failed together doesn't retry them in lockstep:
+
+| Consecutive failure | Suppressed for (before jitter) |
+|---|---|
+| 1st | 60 s |
+| 2nd | 4 min |
+| 3rd | 16 min |
+| 4th | ~64 min |
+| 5th | ~4.3 h |
+| 6th and later | 6 h (cap) |
+
+The 60 s floor is the anti-hammer guarantee: even at full outbox cadence a
+failing peer costs at most one handshake per minute. A genuinely unreachable
+peer reaches the 6 h ceiling after roughly 1.5 h and settles at a handful of
+attempts per day. The payoff is the other end of the scale — a *transient*
+failure now recovers in about a minute, where the flat 24 h rule this
+replaced cost a full day of HTTPS-only federation for that peer. The count
+resets as soon as the peer's DataChannel opens.
+
+**Applying an ICE-server list is the "try again now" lever.** Every applied
+list — content changed or not — clears all current suppressions *and* every
+accumulated failure count, so the next outbound envelope retries each failed
+peer immediately, and a fresh failure starts again from the 60 s base rather
+than from whatever ceiling it had climbed to. It is the only thing that
+clears a suppression early. Under Home Assistant the daily pull does this
+for you; elsewhere, restarting Social Home has the same effect (a restart
+also re-derives the HMAC credentials — see above).
 
 ## Testing
 
