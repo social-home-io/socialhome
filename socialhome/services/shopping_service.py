@@ -43,18 +43,34 @@ from .bus_publisher import BusPublisherMixin
 _STORE_MAX = 80
 
 
+#: Names that can never be addressed by the store endpoints. The store
+#: routes take the name in the URL path (``/api/shopping/stores/{name}``)
+#: and ``.`` / ``..`` are dot segments: yarl normalises them away before
+#: aiohttp routes the request, so a DELETE or PATCH aimed at such a row
+#: resolves to a different path entirely and 405s — even percent-encoded
+#: as ``%2E``. A store nobody can rename or delete is exactly the
+#: unaddressable junk row migration 0048 exists to purge, so refuse to
+#: mint one in the first place.
+_UNADDRESSABLE_STORES = frozenset({".", ".."})
+
+
 def _clean_store(value: str | None) -> str | None:
     """Normalise a store name from the wire.
 
     Trims surrounding whitespace, collapses an empty / whitespace-only
-    string to ``None`` (so blank input clears the field), and clamps
-    to :data:`_STORE_MAX` so a hostile or sloppy caller can't push a
-    paragraph into the column.
+    string to ``None`` (so blank input clears the field), rejects the
+    unaddressable dot segments (see :data:`_UNADDRESSABLE_STORES`), and
+    clamps to :data:`_STORE_MAX` so a hostile or sloppy caller can't
+    push a paragraph into the column.
+
+    Returning ``None`` for a dot segment means an *item* assigned one
+    simply lands in "No store", while ``create_store`` / ``rename_store``
+    — which reject a ``None`` name — answer 422.
     """
     if value is None:
         return None
     trimmed = value.strip()
-    if not trimmed:
+    if not trimmed or trimmed in _UNADDRESSABLE_STORES:
         return None
     return trimmed[:_STORE_MAX]
 

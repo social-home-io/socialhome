@@ -18,19 +18,30 @@ export interface StoreRenameResult {
   moved_items: number
 }
 
-/** Case-insensitive store-name compare.
+/** Case-insensitive store-name compare, folding **exactly** what the
+ *  server folds.
  *
- *  Store names are unique case-insensitively server-side; every
- *  store-scoped lookup resolves ``COLLATE NOCASE``. SQLite's NOCASE is
- *  ASCII-only while JS ``toLowerCase()`` folds more (``"Ä"`` → ``"ä"``),
- *  so we can occasionally call two names equal where the server would
- *  not. That asymmetry is harmless in this direction: it only makes us
- *  slightly more eager to reuse an existing local row instead of
- *  appending a duplicate — never the reverse. Don't "fix" it into an
- *  ASCII-only fold; a mismatched pair here would mean a ghost row. */
-function sameName(a: string | null | undefined, b: string | null | undefined): boolean {
+ *  Store names are unique case-insensitively server-side, but SQLite's
+ *  ``NOCASE`` (and its ``lower()``, and migration 0048's repair) fold
+ *  **ASCII only** — ``"Müller"`` and ``"MÜLLER"`` are two legitimate,
+ *  distinct stores. JS ``toLowerCase()`` folds the full Unicode range
+ *  and would call them equal, which is NOT a harmless over-eagerness:
+ *  :func:`applyStoreRename` would collapse both catalogue rows into
+ *  one name, leaving two entries with an identical ``key`` and items
+ *  shown under a store the server never moved them to. So fold ASCII
+ *  and nothing else — all four layers (migration, index, repo,
+ *  client) then draw the line in the same place. */
+export function sameName(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
   if (!a || !b) return false
-  return a.toLowerCase() === b.toLowerCase()
+  return asciiFold(a) === asciiFold(b)
+}
+
+/** ASCII-only lowercase — the JS equivalent of SQLite ``NOCASE``. */
+function asciiFold(value: string): string {
+  return value.replace(/[A-Z]/g, (c) => c.toLowerCase())
 }
 
 /** Apply a (possibly merging) store rename to the local signals.

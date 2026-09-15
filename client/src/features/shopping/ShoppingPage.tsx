@@ -12,6 +12,7 @@ import {
   deleteItem,
   clearCompleted,
   reorderStores,
+  sameName,
 } from '@/store/shopping'
 import type { ShoppingItem } from '@/types'
 import { Spinner } from '@/components/Spinner'
@@ -377,6 +378,7 @@ export default function ShoppingPage() {
             type="button"
             class="sh-chip sh-shopping-stores-btn"
             aria-haspopup="dialog"
+            aria-expanded={storesOpen}
             title="Rename, reorder or remove your stores"
             onClick={() => setStoresOpen(true)}
           >
@@ -634,7 +636,14 @@ function GroupedView(props: GroupedProps) {
         const itemsHere = props.active.filter((i) =>
           section.key === NO_STORE_KEY
             ? !i.store
-            : i.store === section.key,
+            // Fold the same way the server does. The DB is canonical
+            // since 0048 and every write path stores a server-returned
+            // spelling, so an exact compare works today — but an item
+            // that slips out of step with its catalogue row renders in
+            // NO section (it isn't in the "No store" bucket either),
+            // and that silent disappearance is the bug this whole
+            // change exists to fix. Cheap insurance.
+            : sameName(i.store, section.key),
         )
         // Hide a section when no ACTIVE items are at this store and
         // no item drag is in flight. Completed items don't count any

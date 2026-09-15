@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..db.unit_of_work import UnitOfWork
 from .base import bool_col, row_to_dict, rows_to_dicts
 
 
@@ -410,20 +411,27 @@ class SqliteShoppingRepo:
                 default=0,
             )
         )
-        if merged:
-            await self._db.enqueue(
-                "DELETE FROM shopping_stores WHERE name = ? COLLATE NOCASE",
-                (old.name,),
-            )
-        else:
-            await self._db.enqueue(
-                "UPDATE shopping_stores SET name=? WHERE name=?",
+        # Both writes go in ONE transaction. ``enqueue`` commits per
+        # statement, so a crash between them would leave items pointing
+        # at a catalogue row that no longer exists — and an item whose
+        # store has no catalogue row renders in no section at all, which
+        # is the exact bug this whole change exists to fix. All-or-
+        # nothing instead.
+        async with UnitOfWork(self._db) as uow:
+            if merged:
+                await uow.exec(
+                    "DELETE FROM shopping_stores WHERE name = ? COLLATE NOCASE",
+                    (old.name,),
+                )
+            else:
+                await uow.exec(
+                    "UPDATE shopping_stores SET name=? WHERE name=?",
+                    (survivor, old.name),
+                )
+            await uow.exec(
+                "UPDATE shopping_list_items SET store=? WHERE store = ? COLLATE NOCASE",
                 (survivor, old.name),
             )
-        await self._db.enqueue(
-            "UPDATE shopping_list_items SET store=? WHERE store = ? COLLATE NOCASE",
-            (survivor, old.name),
-        )
         return StoreRenameResult(
             old_name=old.name,
             new_name=survivor,

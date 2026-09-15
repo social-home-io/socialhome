@@ -47,6 +47,7 @@ import {
   createStore,
   renameStore,
   deleteStore,
+  sameName,
   wireShoppingWs,
 } from './shopping'
 import type { ShoppingItem } from '@/types'
@@ -232,5 +233,25 @@ describe('shopping_list.store_renamed frame (sibling tab)', () => {
 
     expect(stores.value).toEqual([{ name: 'Lidl', sort_order: 0 }])
     expect(items.value[0].store).toBe('Lidl')
+  })
+})
+
+describe('sameName', () => {
+  it('folds ASCII case, exactly like SQLite NOCASE', () => {
+    expect(sameName('Migros', 'migros')).toBe(true)
+    expect(sameName('MIGROS', 'migros')).toBe(true)
+  })
+
+  it('does NOT fold non-ASCII — the server keeps those as distinct stores', () => {
+    // SQLite NOCASE (and migration 0048) are ASCII-only, so "Müller"
+    // and "MÜLLER" are two legitimate rows. Folding them here would
+    // collapse both catalogue entries into one name on a merge and
+    // show items under a store the server never moved them to.
+    // Verified against SQLite: 'Müller' = 'MÜLLER' COLLATE NOCASE is
+    // FALSE (the Ü is untouched), while 'Müller' = 'müller' is TRUE
+    // because only the ASCII M differs. The fold has to agree on both.
+    expect(sameName('Müller', 'MÜLLER')).toBe(false)
+    expect(sameName('Müller', 'müller')).toBe(true)
+    expect(sameName('ÜBER', 'über')).toBe(false)
   })
 })

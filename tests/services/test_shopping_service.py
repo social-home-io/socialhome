@@ -303,7 +303,6 @@ async def test_shopping_rename_store_missing_returns_none(env):
 
 async def test_shopping_rename_store_blank_new_name_rejected(env):
     """A blank new name is a 422, not a silent no-op."""
-    import pytest
 
     await env.shopping_svc.add_item("Milk", created_by="u1", store="Aldi")
     with pytest.raises(ValueError):
@@ -327,7 +326,6 @@ async def test_shopping_create_store_creates_and_is_idempotent(env):
 
 async def test_shopping_create_store_blank_rejected(env):
     """A blank store name raises ValueError (route → 422)."""
-    import pytest
 
     with pytest.raises(ValueError):
         await env.shopping_svc.create_store("   ")
@@ -425,3 +423,25 @@ async def test_sticky_space_scoped(env):
     await env.sticky_repo.delete(space_sticky.id)
     assert await env.sticky_repo.get(household.id) is None
     assert await env.sticky_repo.get(space_sticky.id) is None
+
+
+async def test_shopping_dot_segment_store_names_are_rejected(env):
+    """``.`` / ``..`` can never be addressed by the store routes.
+
+    The store endpoints take the name in the URL path, and yarl
+    normalises a dot segment away before aiohttp routes the request —
+    so such a row could be created but never renamed or deleted, which
+    is precisely the unaddressable junk migration 0048 purges.
+    """
+    svc = env.shopping_svc
+    for bad in (".", "..", "  ..  "):
+        with pytest.raises(ValueError):
+            await svc.create_store(bad)
+
+
+async def test_shopping_dot_segment_store_on_an_item_means_no_store(env):
+    """An item assigned ``.`` lands in "No store" rather than minting one."""
+    svc = env.shopping_svc
+    item = await svc.add_item("Milk", created_by="u1", store="..")
+    assert item.store is None
+    assert await svc.list_stores() == []
