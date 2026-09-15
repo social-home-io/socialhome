@@ -6,6 +6,69 @@ import type { ShoppingItem, ShoppingStore } from '@/types'
 export const items = signal<ShoppingItem[]>([])
 export const stores = signal<ShoppingStore[]>([])
 
+/** What ``PATCH /api/shopping/stores/{name}`` answers. A rename onto a
+ *  name another store already holds is a MERGE, not a conflict — the
+ *  old store's items fold onto the survivor and ``new_name`` carries
+ *  the spelling that SURVIVED (the target's existing casing, not the
+ *  casing the caller typed). */
+export interface StoreRenameResult {
+  old_name: string
+  new_name: string
+  merged: boolean
+  moved_items: number
+}
+
+/** Case-insensitive store-name compare.
+ *
+ *  Store names are unique case-insensitively server-side; every
+ *  store-scoped lookup resolves ``COLLATE NOCASE``. SQLite's NOCASE is
+ *  ASCII-only while JS ``toLowerCase()`` folds more (``"Ä"`` → ``"ä"``),
+ *  so we can occasionally call two names equal where the server would
+ *  not. That asymmetry is harmless in this direction: it only makes us
+ *  slightly more eager to reuse an existing local row instead of
+ *  appending a duplicate — never the reverse. Don't "fix" it into an
+ *  ASCII-only fold; a mismatched pair here would mean a ghost row. */
+function sameName(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  return a.toLowerCase() === b.toLowerCase()
+}
+
+/** Apply a (possibly merging) store rename to the local signals.
+ *
+ *  Shared by the tab that issued the PATCH and by the sibling tab that
+ *  only sees the ``store_renamed`` WS frame, so both converge on the
+ *  same state: exactly one catalogue row named ``newName`` carrying the
+ *  SURVIVOR's ``sort_order``, and every item that pointed at either
+ *  spelling now pointing at ``newName``. Idempotent — re-applying with
+ *  a different casing just reconciles the spelling. */
+function _applyStoreRename(oldName: string, newName: string): void {
+  if (sameName(oldName, newName)) {
+    // Pure case change — the server renames the row in place, so there
+    // is nothing to collapse, only a spelling to adopt.
+    stores.value = stores.value.map(s =>
+      sameName(s.name, oldName) ? { ...s, name: newName } : s,
+    )
+  } else {
+    const survivor = stores.value.find(s => sameName(s.name, newName))
+    if (survivor) {
+      // Merge: the target row wins (its ``sort_order`` is where the
+      // household dragged it); the old row disappears.
+      stores.value = stores.value
+        .filter(s => !sameName(s.name, oldName))
+        .map(s => (sameName(s.name, newName) ? { ...s, name: newName } : s))
+    } else {
+      stores.value = stores.value.map(s =>
+        sameName(s.name, oldName) ? { ...s, name: newName } : s,
+      )
+    }
+  }
+  items.value = items.value.map(i =>
+    sameName(i.store, oldName) || sameName(i.store, newName)
+      ? { ...i, store: newName }
+      : i,
+  )
+}
+
 export async function loadShopping() {
   // Include completed so the "Re-add recent" suggestion chips have
   // something to show. The component sorts by `completed` for render.
@@ -32,7 +95,7 @@ export async function addItem(text: string, store: string | null = null) {
   // the fresh list so the new section appears immediately on the page
   // that added it (the WS fan-out doesn't carry a "new store" frame —
   // adding a new store is unambiguous from ``item.store``).
-  if (store && !stores.value.some(s => s.name === store)) {
+  if (store && !stores.value.some(s => sameName(s.name, store))) {
     await reloadStores()
   }
 }
@@ -49,7 +112,7 @@ export async function updateItem(
   try {
     const fresh = await api.patch(`/api/shopping/${id}`, patch)
     _upsert(fresh as ShoppingItem)
-    if (patch.store && !stores.value.some(s => s.name === patch.store)) {
+    if (patch.store && !stores.value.some(s => sameName(s.name, patch.store))) {
       await reloadStores()
     }
   } catch (err) {
@@ -96,29 +159,63 @@ export async function clearCompleted() {
   }
 }
 
-export async function renameStore(oldName: string, newName: string): Promise<void> {
+export async function createStore(name: string): Promise<ShoppingStore> {
+  const trimmed = name.trim()
+  if (!trimmed) {
+    throw new Error('store name must be non-empty')
+  }
+  // The endpoint is idempotent case-insensitively: an existing store
+  // comes back unchanged (same casing, same ``sort_order``) rather
+  // than conflicting, so reconcile by name instead of appending
+  // blindly — otherwise "bakery" would fork a second "Bakery" row.
+  const store = (await api.post('/api/shopping/stores', {
+    name: trimmed,
+  })) as ShoppingStore
+  const existing = stores.value.findIndex(s => sameName(s.name, store.name))
+  if (existing >= 0) {
+    stores.value = stores.value.map((s, i) => (i === existing ? store : s))
+  } else {
+    stores.value = [...stores.value, store]
+  }
+  return store
+}
+
+export async function renameStore(
+  oldName: string,
+  newName: string,
+): Promise<StoreRenameResult> {
   const trimmedOld = oldName.trim()
   const trimmedNew = newName.trim()
   if (!trimmedOld || !trimmedNew) {
     throw new Error('store names must be non-empty')
   }
-  if (trimmedOld === trimmedNew) return
+  // Only an EXACT match is a no-op: a pure case change ("migros" →
+  // "Migros") is real work, since the server renames the row in place.
+  if (trimmedOld === trimmedNew) {
+    return {
+      old_name: trimmedOld,
+      new_name: trimmedNew,
+      merged: false,
+      moved_items: 0,
+    }
+  }
   const prevStores = stores.value
   const prevItems = items.value
-  // Optimistic — rename the catalogue row + every item that
-  // referenced the old name. The WS frame the server sends back
-  // will be a no-op on the local state since we already did it.
-  stores.value = prevStores.map(s =>
-    s.name === trimmedOld ? { ...s, name: trimmedNew } : s,
-  )
-  items.value = prevItems.map(i =>
-    i.store === trimmedOld ? { ...i, store: trimmedNew } : i,
-  )
+  // Optimistic — rename (and, when the target already exists, merge
+  // onto) the catalogue row plus every item that referenced either
+  // spelling. The WS frame the server sends back is then a no-op.
+  _applyStoreRename(trimmedOld, trimmedNew)
   try {
-    await api.patch(
+    const result = (await api.patch(
       `/api/shopping/stores/${encodeURIComponent(trimmedOld)}`,
       { name: trimmedNew },
-    )
+    )) as StoreRenameResult
+    // The survivor's spelling may differ from what the caller typed
+    // (renaming "Aldi" → "migros" when "Migros" exists keeps
+    // "Migros"). Re-apply with the server's names so the catalogue and
+    // every affected item carry the canonical casing.
+    _applyStoreRename(result.old_name, result.new_name)
+    return result
   } catch (err) {
     stores.value = prevStores
     items.value = prevItems
@@ -133,9 +230,9 @@ export async function deleteStore(name: string): Promise<void> {
   const prevItems = items.value
   // Optimistic — drop the catalogue row + clear ``store`` on every
   // item that referenced it (rows fall into the "No store" bucket).
-  stores.value = prevStores.filter(s => s.name !== trimmed)
+  stores.value = prevStores.filter(s => !sameName(s.name, trimmed))
   items.value = prevItems.map(i =>
-    i.store === trimmed ? { ...i, store: null } : i,
+    sameName(i.store, trimmed) ? { ...i, store: null } : i,
   )
   try {
     await api.delete(`/api/shopping/stores/${encodeURIComponent(trimmed)}`)
@@ -206,7 +303,7 @@ export function wireShoppingWs() {
     // A new store name from a sibling tab → refresh the catalogue
     // (the server-side ``touch_store`` already wrote the row; we
     // just don't have it yet on the read side).
-    if (item.store && !stores.value.some(s => s.name === item.store)) {
+    if (item.store && !stores.value.some(s => sameName(s.name, item.store))) {
       void reloadStores()
     }
   })
@@ -215,7 +312,7 @@ export function wireShoppingWs() {
     items.value = items.value.map((i) =>
       i.id === patch.id ? { ...i, ...patch } : i,
     )
-    if (patch.store && !stores.value.some(s => s.name === patch.store)) {
+    if (patch.store && !stores.value.some(s => sameName(s.name, patch.store))) {
       void reloadStores()
     }
   })
@@ -239,19 +336,16 @@ export function wireShoppingWs() {
       new_name: string
     }
     if (!old_name || !new_name || old_name === new_name) return
-    stores.value = stores.value.map(s =>
-      s.name === old_name ? { ...s, name: new_name } : s,
-    )
-    items.value = items.value.map(i =>
-      i.store === old_name ? { ...i, store: new_name } : i,
-    )
+    // May be a merge — ``new_name`` can already be in the catalogue.
+    // Collapse to one row rather than leaving two identical entries.
+    _applyStoreRename(old_name, new_name)
   })
   ws.on('shopping_list.store_deleted', (e) => {
     const { name } = e.data as { name: string }
     if (!name) return
-    stores.value = stores.value.filter(s => s.name !== name)
+    stores.value = stores.value.filter(s => !sameName(s.name, name))
     items.value = items.value.map(i =>
-      i.store === name ? { ...i, store: null } : i,
+      sameName(i.store, name) ? { ...i, store: null } : i,
     )
   })
 }
