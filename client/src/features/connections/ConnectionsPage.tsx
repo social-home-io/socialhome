@@ -380,18 +380,31 @@ function IceServersPanel() {
   const data = iceServers.value
   const panelId = 'sh-ice-servers-panel'
 
-  const loadIceServers = async () => {
-    iceLoaded.value = false
-    try {
-      iceServers.value = await api.get(
-        '/api/admin/federation/ice-servers',
-      ) as IceOverview
-    } catch {
-      iceServers.value = null
-    } finally {
-      iceLoaded.value = true
-    }
-  }
+  // Fetched on mount, not on open: the badge is the whole point — an
+  // operator who doesn't know their TURN got wiped has no reason to
+  // click a collapsed row, so the warning has to be visible before they
+  // do. One small admin-only request per page view. Reopening after
+  // navigating away remounts and refetches, which is what the per-mount
+  // state above is for.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const overview = await api.get(
+          '/api/admin/federation/ice-servers',
+        ) as IceOverview
+        if (!cancelled) iceServers.value = overview
+      } catch {
+        if (!cancelled) iceServers.value = null
+      } finally {
+        if (!cancelled) iceLoaded.value = true
+      }
+    })()
+    return () => { cancelled = true }
+    // ``useSignal`` returns the same object every render, so listing the
+    // signals is honest and still runs this exactly once per mount — no
+    // lint suppression needed.
+  }, [iceLoaded, iceServers])
 
   const summary = !iceLoaded.value
     ? ''
@@ -410,10 +423,7 @@ function IceServersPanel() {
         class="sh-ice-panel__toggle"
         aria-expanded={iceOpen.value}
         aria-controls={panelId}
-        onClick={() => {
-          iceOpen.value = !iceOpen.value
-          if (iceOpen.value) void loadIceServers()
-        }}
+        onClick={() => { iceOpen.value = !iceOpen.value }}
       >
         <span class="sh-ice-panel__caret" aria-hidden="true">
           {iceOpen.value ? '▾' : '▸'}
@@ -627,7 +637,7 @@ function TroubleshootingSection() {
     <section class="sh-connections-section">
       <div class="sh-section-header">
         <div class="sh-section-header__title">
-          <h2>Troubleshooting</h2>
+          <h2>{t('connections.troubleshooting')}</h2>
         </div>
       </div>
       <IceServersPanel />
@@ -756,9 +766,6 @@ export default function ConnectionsPage() {
 
       {/* ── External URL (admin-only; the integration owns it on haos) ── */}
       {isAdmin && !isSupervisorAddon() && <ExternalUrlSection />}
-
-      {/* ── Troubleshooting (admin-only in EVERY mode — haos included) ── */}
-      {isAdmin && <TroubleshootingSection />}
 
       {/* ── Households ─────────────────────────────────────────────── */}
       <section class="sh-connections-section">
@@ -899,6 +906,11 @@ export default function ConnectionsPage() {
           </div>
         )}
       </section>
+
+      {/* ── Troubleshooting (admin-only in EVERY mode — haos included) ──
+           Last on the page on purpose: it is a once-in-a-while tool, and
+           the households list is what people come here for. */}
+      {isAdmin && <TroubleshootingSection />}
       </>
       )}
 

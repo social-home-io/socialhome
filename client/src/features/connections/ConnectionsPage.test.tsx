@@ -703,7 +703,16 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     return r
   }
 
-  it('is collapsed and does not fetch until opened', async () => {
+  /**
+   * This used to assert the opposite — that nothing was fetched until the
+   * row was opened. That deferral defeated the feature: ``summary`` is
+   * '' until the data lands, so the badge was blank while collapsed, and
+   * an operator who doesn't know their TURN was wiped has no reason to
+   * click. The fetch now happens on mount so the warning is visible
+   * without one. The row is still collapsed by default; only the fetch
+   * timing changed.
+   */
+  it('is collapsed by default but fetches so the badge can warn first', async () => {
     const { api } = await import('@/api')
     const { container } = await renderWithIce({
       servers: [], has_turn: false, turn_usable: false,
@@ -712,7 +721,21 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     const toggle = container.querySelector('.sh-ice-panel__toggle')!
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(container.querySelector('.sh-ice-panel__body')).toBeNull()
-    expect(api.get).not.toHaveBeenCalledWith('/api/admin/federation/ice-servers')
+    expect(api.get).toHaveBeenCalledWith('/api/admin/federation/ice-servers')
+  })
+
+  it('shows the relay verdict on the collapsed row, before any click', async () => {
+    // The point of the badge: a bad TURN setup announces itself instead
+    // of hiding behind a disclosure nobody opens.
+    const { container } = await renderWithIce({
+      servers: [{ urls: ['turn:t.example:3478'], kinds: ['turn'], has_credentials: false }],
+      has_turn: true, turn_usable: false, pulls_from_home_assistant: false,
+    })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__badge')?.textContent)
+        .toBe('relay not usable')
+    })
+    expect(container.querySelector('.sh-ice-panel__body')).toBeNull()
   })
 
   it('opens, fetches, and names the relay state', async () => {
@@ -931,6 +954,21 @@ describe('ConnectionsPage — admin panels under the Supervisor add-on (haos)', 
     })
     expect(container.querySelector('.sh-external-url-section')).toBeNull()
     expect(container.querySelector('#sh-external-url')).toBeNull()
+  })
+
+  it('sits below the households list, not above it', async () => {
+    // Troubleshooting is a once-in-a-while tool; the households list is
+    // what people open this page for. Compare document order so a future
+    // re-shuffle has to be deliberate.
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+    const sections = Array.from(container.querySelectorAll('section'))
+    const households = sections.findIndex(s => s.querySelector('.sh-connection-list, .sh-empty-state'))
+    const trouble = sections.findIndex(s => s.querySelector('.sh-ice-panel'))
+    expect(households).toBeGreaterThanOrEqual(0)
+    expect(trouble).toBeGreaterThan(households)
   })
 
   it('non-admins on haos see neither panel', async () => {

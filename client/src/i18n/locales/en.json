@@ -302,6 +302,7 @@
   "connections.start_pairing": "Start pairing",
   "connections.households": "Households",
   "connections.global_servers": "Global Federation Servers",
+  "connections.troubleshooting": "Troubleshooting",
 
   "gfs.title": "Global Federation Servers",
   "gfs.modal_title": "Connect to a global server",
