@@ -246,9 +246,9 @@ async def test_shopping_rename_store_emits_event_and_cascades(env):
     await svc.add_item("Milk", created_by="u1", store="Aldi")
     await svc.add_item("Eggs", created_by="u1", store="Aldi")
 
-    ok = await svc.rename_store("Aldi", "Coop")
+    result = await svc.rename_store("Aldi", "Coop")
 
-    assert ok is True
+    assert result is not None
     assert len(captured) == 1
     assert captured[0].old_name == "Aldi"
     assert captured[0].new_name == "Coop"
@@ -256,10 +256,10 @@ async def test_shopping_rename_store_emits_event_and_cascades(env):
     assert {i.text: i.store for i in items} == {"Milk": "Coop", "Eggs": "Coop"}
 
 
-async def test_shopping_rename_store_collision_raises(env):
-    """Collision surfaces as a ValueError so the route can map to 409.
-    No event is published — the rename never happened."""
-    import pytest
+async def test_shopping_rename_store_collision_merges_and_emits(env):
+    """A collision is a merge, not an error: items fold onto the
+    surviving store and ``ShoppingStoreRenamed`` still fires so the SPA
+    can collapse the duplicate locally."""
     from socialhome.domain.events import ShoppingStoreRenamed
     from socialhome.infrastructure.event_bus import EventBus
 
@@ -271,9 +271,66 @@ async def test_shopping_rename_store_collision_raises(env):
     await svc.add_item("Milk", created_by="u1", store="Aldi")
     await svc.add_item("Bread", created_by="u1", store="Migros")
 
+    result = await svc.rename_store("Aldi", "Migros")
+
+    assert result is not None
+    assert result.merged is True
+    assert result.moved_items == 1
+    assert len(captured) == 1
+    assert captured[0].old_name == "Aldi"
+    assert captured[0].new_name == "Migros"
+    stores = await svc.list_stores()
+    assert [s.name for s in stores] == ["Migros"]
+
+
+async def test_shopping_rename_store_clamps_new_name(env):
+    """The new name goes through the same cleaning as every other
+    store input — trimmed and clamped to 80 chars."""
+    await env.shopping_svc.add_item("Milk", created_by="u1", store="Aldi")
+
+    result = await env.shopping_svc.rename_store("Aldi", "  " + "A" * 200 + "  ")
+
+    assert result is not None
+    assert result.new_name == "A" * 80
+    stores = await env.shopping_svc.list_stores()
+    assert [s.name for s in stores] == ["A" * 80]
+
+
+async def test_shopping_rename_store_missing_returns_none(env):
+    """Unknown old name → ``None`` so the route can map to a 404."""
+    assert await env.shopping_svc.rename_store("Ghost", "Coop") is None
+
+
+async def test_shopping_rename_store_blank_new_name_rejected(env):
+    """A blank new name is a 422, not a silent no-op."""
+    import pytest
+
+    await env.shopping_svc.add_item("Milk", created_by="u1", store="Aldi")
     with pytest.raises(ValueError):
-        await svc.rename_store("Aldi", "Migros")
-    assert captured == []
+        await env.shopping_svc.rename_store("Aldi", "   ")
+
+
+async def test_shopping_create_store_creates_and_is_idempotent(env):
+    """``create_store`` adds a catalogue row without an item, and a
+    second call with different casing returns the existing row
+    unchanged."""
+    first = await env.shopping_svc.create_store("  Bakery  ")
+    assert first.name == "Bakery"
+    assert first.sort_order == 0
+
+    again = await env.shopping_svc.create_store("bakery")
+    assert again.name == "Bakery"
+    assert again.sort_order == 0
+    stores = await env.shopping_svc.list_stores()
+    assert [s.name for s in stores] == ["Bakery"]
+
+
+async def test_shopping_create_store_blank_rejected(env):
+    """A blank store name raises ValueError (route → 422)."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        await env.shopping_svc.create_store("   ")
 
 
 async def test_shopping_delete_store_emits_event(env):

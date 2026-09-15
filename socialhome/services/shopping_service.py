@@ -27,7 +27,7 @@ from ..domain.events import (
     ShoppingStoreRenamed,
     ShoppingStoresReordered,
 )
-from ..domain.shopping import ShoppingStore
+from ..domain.shopping import ShoppingStore, StoreRenameResult
 from ..infrastructure.event_bus import EventBus
 from ..repositories.shopping_repo import (
     AbstractShoppingRepo,
@@ -205,23 +205,48 @@ class ShoppingService(BusPublisherMixin):
         )
         return result
 
-    async def rename_store(self, old_name: str, new_name: str) -> bool:
-        """Rename a catalogue row + cascade to items. Returns ``False``
-        when the old store didn't exist (route layer maps to a 404);
-        raises ``ValueError`` when the new name collides with an
-        existing store (route layer maps to a 409). Broadcasts
-        :class:`ShoppingStoreRenamed` on success so paired tabs patch
-        their local catalogue and items' ``store`` field.
+    async def create_store(self, name: str) -> ShoppingStore:
+        """Add a store to the catalogue without attaching an item to it.
+
+        Cleans the name the same way every other store input is cleaned
+        (trim + clamp to :data:`_STORE_MAX`) and rejects a blank one so
+        the route can answer 422. Idempotent case-insensitively — a
+        store that already exists comes back unchanged, casing and
+        ``sort_order`` intact, so re-tapping "+ Add store" is harmless.
         """
-        ok = await self._repo.rename_store(old_name, new_name)
-        if ok and self._bus is not None and old_name.strip() != new_name.strip():
-            await self._bus.publish(
+        clean = _clean_store(name)
+        if clean is None:
+            raise ValueError("store name must not be empty")
+        return await self._repo.create_store(clean)
+
+    async def rename_store(
+        self,
+        old_name: str,
+        new_name: str,
+    ) -> StoreRenameResult | None:
+        """Rename a catalogue row + cascade to items. Returns ``None``
+        when no store matches ``old_name`` (route layer maps to a 404);
+        raises ``ValueError`` when ``new_name`` is blank (→ 422).
+
+        A ``new_name`` another store already holds is a MERGE, not a
+        conflict — see :meth:`AbstractShoppingRepo.rename_store`. Either
+        way :class:`ShoppingStoreRenamed` is broadcast (carrying the
+        surviving spelling) so paired tabs patch their local catalogue
+        and items' ``store`` field; a merge simply collapses two entries
+        into one on receipt. No event fires when the name is unchanged.
+        """
+        clean_new = _clean_store(new_name)
+        if clean_new is None:
+            raise ValueError("store name must not be empty")
+        result = await self._repo.rename_store(old_name, clean_new)
+        if result is not None and result.old_name != result.new_name:
+            await self._emit(
                 ShoppingStoreRenamed(
-                    old_name=old_name.strip(),
-                    new_name=new_name.strip(),
+                    old_name=result.old_name,
+                    new_name=result.new_name,
                 )
             )
-        return ok
+        return result
 
     async def delete_store(self, name: str) -> int:
         """Remove a catalogue row + clear it from every item that

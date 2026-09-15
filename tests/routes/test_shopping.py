@@ -191,3 +191,92 @@ async def test_shopping_put_stores_order_non_array_rejected(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+async def test_shopping_post_store_creates_catalogue_row(client):
+    """POST /api/shopping/stores creates a store with no item attached."""
+    r = await client.post(
+        "/api/shopping/stores",
+        json={"name": "Bakery"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["name"] == "Bakery"
+    assert body["sort_order"] == 0
+
+    stores = await (
+        await client.get("/api/shopping/stores", headers=_auth(client._tok))
+    ).json()
+    assert [s["name"] for s in stores] == ["Bakery"]
+
+
+async def test_shopping_post_store_is_idempotent_case_insensitively(client):
+    """Re-POSTing a store under different casing returns the existing
+    row unchanged rather than 409-ing or forking the catalogue."""
+    h = _auth(client._tok)
+    await client.post("/api/shopping/stores", json={"name": "Aldi"}, headers=h)
+    r = await client.post("/api/shopping/stores", json={"name": "aldi"}, headers=h)
+    assert r.status == 201
+    body = await r.json()
+    assert body["name"] == "Aldi"
+    assert body["sort_order"] == 0
+
+    stores = await (await client.get("/api/shopping/stores", headers=h)).json()
+    assert [s["name"] for s in stores] == ["Aldi"]
+
+
+async def test_shopping_post_store_blank_name_rejected(client):
+    """A blank store name is a 422."""
+    r = await client.post(
+        "/api/shopping/stores",
+        json={"name": "   "},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_shopping_store_rename_onto_existing_merges(client):
+    """PATCH onto an existing store merges instead of 409-ing; the
+    response reports the merge and how many items moved."""
+    h = _auth(client._tok)
+    await client.post(
+        "/api/shopping", json={"text": "Milk", "store": "Aldi"}, headers=h
+    )
+    await client.post(
+        "/api/shopping", json={"text": "Bread", "store": "Migros"}, headers=h
+    )
+
+    r = await client.patch(
+        "/api/shopping/stores/Aldi", json={"name": "migros"}, headers=h
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["old_name"] == "Aldi"
+    assert body["new_name"] == "Migros"
+    assert body["merged"] is True
+    assert body["moved_items"] == 1
+
+    stores = await (await client.get("/api/shopping/stores", headers=h)).json()
+    assert [s["name"] for s in stores] == ["Migros"]
+    items = await (await client.get("/api/shopping", headers=h)).json()
+    assert {i["store"] for i in items} == {"Migros"}
+
+
+async def test_shopping_store_rename_case_insensitive_lookup(client):
+    """PATCH resolves the old store name case-insensitively and reports
+    a plain (non-merge) rename."""
+    h = _auth(client._tok)
+    await client.post(
+        "/api/shopping", json={"text": "Milk", "store": "Aldi"}, headers=h
+    )
+
+    r = await client.patch(
+        "/api/shopping/stores/aldi", json={"name": "Coop"}, headers=h
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["old_name"] == "Aldi"
+    assert body["new_name"] == "Coop"
+    assert body["merged"] is False
+    assert body["moved_items"] == 1
