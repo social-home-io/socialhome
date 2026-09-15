@@ -380,18 +380,31 @@ function IceServersPanel() {
   const data = iceServers.value
   const panelId = 'sh-ice-servers-panel'
 
-  const loadIceServers = async () => {
-    iceLoaded.value = false
-    try {
-      iceServers.value = await api.get(
-        '/api/admin/federation/ice-servers',
-      ) as IceOverview
-    } catch {
-      iceServers.value = null
-    } finally {
-      iceLoaded.value = true
-    }
-  }
+  // Fetched on mount, not on open: the badge is the whole point — an
+  // operator who doesn't know their TURN got wiped has no reason to
+  // click a collapsed row, so the warning has to be visible before they
+  // do. One small admin-only request per page view. Reopening after
+  // navigating away remounts and refetches, which is what the per-mount
+  // state above is for.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const overview = await api.get(
+          '/api/admin/federation/ice-servers',
+        ) as IceOverview
+        if (!cancelled) iceServers.value = overview
+      } catch {
+        if (!cancelled) iceServers.value = null
+      } finally {
+        if (!cancelled) iceLoaded.value = true
+      }
+    })()
+    return () => { cancelled = true }
+    // ``useSignal`` returns the same object every render, so listing the
+    // signals is honest and still runs this exactly once per mount — no
+    // lint suppression needed.
+  }, [iceLoaded, iceServers])
 
   const summary = !iceLoaded.value
     ? ''
@@ -410,10 +423,7 @@ function IceServersPanel() {
         class="sh-ice-panel__toggle"
         aria-expanded={iceOpen.value}
         aria-controls={panelId}
-        onClick={() => {
-          iceOpen.value = !iceOpen.value
-          if (iceOpen.value) void loadIceServers()
-        }}
+        onClick={() => { iceOpen.value = !iceOpen.value }}
       >
         <span class="sh-ice-panel__caret" aria-hidden="true">
           {iceOpen.value ? '▾' : '▸'}
@@ -606,6 +616,30 @@ function ExternalUrlSection() {
           configuration.
         </p>
       )}
+    </section>
+  )
+}
+
+/**
+ * TroubleshootingSection — the two admin tools you reach for when
+ * federation won't connect.
+ *
+ * Deliberately its own section rather than a tail of
+ * ExternalUrlSection, where both used to live. That section is gated
+ * ``!isSupervisorAddon()`` because the HA integration owns the external
+ * URL under the add-on, and these two silently inherited the gate — so
+ * they were missing on haos, the one mode that pulls ICE servers from
+ * HA and the one whose users most need a diagnostics file to attach to
+ * a bug report. Neither tool has anything to do with the external URL.
+ */
+function TroubleshootingSection() {
+  return (
+    <section class="sh-connections-section">
+      <div class="sh-section-header">
+        <div class="sh-section-header__title">
+          <h2>{t('connections.troubleshooting')}</h2>
+        </div>
+      </div>
       <IceServersPanel />
       <DiagnosticsDownload />
     </section>
@@ -872,6 +906,11 @@ export default function ConnectionsPage() {
           </div>
         )}
       </section>
+
+      {/* ── Troubleshooting (admin-only in EVERY mode — haos included) ──
+           Last on the page on purpose: it is a once-in-a-while tool, and
+           the households list is what people come here for. */}
+      {isAdmin && <TroubleshootingSection />}
       </>
       )}
 

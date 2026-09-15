@@ -703,7 +703,16 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     return r
   }
 
-  it('is collapsed and does not fetch until opened', async () => {
+  /**
+   * This used to assert the opposite — that nothing was fetched until the
+   * row was opened. That deferral defeated the feature: ``summary`` is
+   * '' until the data lands, so the badge was blank while collapsed, and
+   * an operator who doesn't know their TURN was wiped has no reason to
+   * click. The fetch now happens on mount so the warning is visible
+   * without one. The row is still collapsed by default; only the fetch
+   * timing changed.
+   */
+  it('is collapsed by default but fetches so the badge can warn first', async () => {
     const { api } = await import('@/api')
     const { container } = await renderWithIce({
       servers: [], has_turn: false, turn_usable: false,
@@ -712,7 +721,21 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     const toggle = container.querySelector('.sh-ice-panel__toggle')!
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(container.querySelector('.sh-ice-panel__body')).toBeNull()
-    expect(api.get).not.toHaveBeenCalledWith('/api/admin/federation/ice-servers')
+    expect(api.get).toHaveBeenCalledWith('/api/admin/federation/ice-servers')
+  })
+
+  it('shows the relay verdict on the collapsed row, before any click', async () => {
+    // The point of the badge: a bad TURN setup announces itself instead
+    // of hiding behind a disclosure nobody opens.
+    const { container } = await renderWithIce({
+      servers: [{ urls: ['turn:t.example:3478'], kinds: ['turn'], has_credentials: false }],
+      has_turn: true, turn_usable: false, pulls_from_home_assistant: false,
+    })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__badge')?.textContent)
+        .toBe('relay not usable')
+    })
+    expect(container.querySelector('.sh-ice-panel__body')).toBeNull()
   })
 
   it('opens, fetches, and names the relay state', async () => {
@@ -864,6 +887,96 @@ describe('ConnectionsPage — diagnostics download', () => {
     }
     const { default: ConnectionsPage } = await import('./ConnectionsPage')
     const { container } = render(<ConnectionsPage />)
+    expect(container.querySelector('.sh-diagnostics-link')).toBeNull()
+  })
+})
+
+describe('ConnectionsPage — admin panels under the Supervisor add-on (haos)', () => {
+  /**
+   * The connection-servers panel and the diagnostics download were
+   * written as children of ExternalUrlSection, which is gated
+   * ``!isSupervisorAddon()`` because the HA integration owns the
+   * external URL there. They inherited that gate and vanished on haos —
+   * the one mode where both matter most: haos is the only mode that
+   * pulls ICE servers from HA (an empty reply used to wipe the
+   * operator's STUN/TURN outright), and the diagnostics file is what an
+   * add-on user attaches to a bug report.
+   *
+   * Every pre-existing test for both panels renders ``standalone``,
+   * which is why nothing caught it. These pin the mode explicitly.
+   */
+  async function renderHaos(opts: { admin?: boolean } = {}) {
+    const { api } = await import('@/api')
+    const { instanceConfig } = await import('@/store/instance')
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'admin', display_name: 'Admin',
+      is_admin: opts.admin ?? true, picture_url: null, bio: null,
+      is_new_member: false,
+    }
+    instanceConfig.value = {
+      mode: 'haos', instance_name: 'T', instance_id: 'iid',
+      capabilities: [], setup_required: false,
+    }
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/admin/federation/ice-servers') {
+        return Promise.resolve({ servers: [], has_turn: false, turn_usable: false })
+      }
+      if (url === '/api/admin/federation/external-url') {
+        return Promise.resolve({ base: null, effective: null, source: null })
+      }
+      return Promise.resolve([])
+    })
+    const { default: ConnectionsPage } = await import('./ConnectionsPage')
+    return render(<ConnectionsPage />)
+  }
+
+  it('haos admin can still reach the connection-servers panel', async () => {
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+  })
+
+  it('haos admin can still download diagnostics', async () => {
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-diagnostics-link')).not.toBeNull()
+    })
+    expect(container.textContent).toContain('Download diagnostics')
+  })
+
+  it('haos still hides the External URL field', async () => {
+    // Guard against over-correcting: only the URL field is haos-gated.
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+    expect(container.querySelector('.sh-external-url-section')).toBeNull()
+    expect(container.querySelector('#sh-external-url')).toBeNull()
+  })
+
+  it('sits below the households list, not above it', async () => {
+    // Troubleshooting is a once-in-a-while tool; the households list is
+    // what people open this page for. Compare document order so a future
+    // re-shuffle has to be deliberate.
+    const { container } = await renderHaos()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+    const sections = Array.from(container.querySelectorAll('section'))
+    const households = sections.findIndex(s => s.querySelector('.sh-connection-list, .sh-empty-state'))
+    const trouble = sections.findIndex(s => s.querySelector('.sh-ice-panel'))
+    expect(households).toBeGreaterThanOrEqual(0)
+    expect(trouble).toBeGreaterThan(households)
+  })
+
+  it('non-admins on haos see neither panel', async () => {
+    const { container } = await renderHaos({ admin: false })
+    await waitFor(() => {
+      expect(document.body.textContent).toBeTruthy()
+    })
+    expect(container.querySelector('.sh-ice-panel__toggle')).toBeNull()
     expect(container.querySelector('.sh-diagnostics-link')).toBeNull()
   })
 })
