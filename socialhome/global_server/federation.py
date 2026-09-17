@@ -162,8 +162,10 @@ class GfsFederationService:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
         try:
+            # A malformed stored pubkey is unverifiable — fail closed as a
+            # 403 rather than escaping the handler as a 500.
+            raw_key = bytes.fromhex(inst.public_key)
             raw_sig = b64url_decode(signature)
         except (ValueError, TypeError) as exc:
             raise PermissionError("Invalid Ed25519 signature") from exc
@@ -291,6 +293,83 @@ class GfsFederationService:
         if not ok:
             raise PermissionError("invalid authority signature")
 
+    @staticmethod
+    def _assert_fresh_ts(ts: object) -> None:
+        """Raise ``PermissionError`` unless *ts* is a fresh timestamp.
+
+        Fresh means a tz-aware ISO 8601 string within ±300 s of now. A
+        missing, non-string, unparseable or naive value is untrusted and
+        rejected — a missing UTC offset can't be interpreted safely, so it
+        is treated exactly like a stale one.
+        """
+        if not isinstance(ts, str) or not ts:
+            raise PermissionError("Stale timestamp")
+        try:
+            parsed = datetime.fromisoformat(ts)
+        except (ValueError, TypeError) as exc:
+            raise PermissionError("Stale timestamp") from exc
+        if parsed.tzinfo is None:
+            raise PermissionError("Stale timestamp")
+        now = datetime.now(timezone.utc)
+        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
+            raise PermissionError("Stale timestamp")
+
+    async def _verify_signed_request(
+        self,
+        instance_id: str,
+        payload: dict[str, object],
+        *,
+        signature: str,
+    ) -> ClientInstance:
+        """Verify a self-signed, replay-guarded request from *instance_id*.
+
+        Shared by every ``{instance_id, ..., ts}``-shaped GFS request
+        (``update_instance``, ``subscribe``, ``unsubscribe``). The Ed25519
+        *signature* is checked over the canonical JSON of *payload* against
+        the instance's REGISTERED public key — because ``instance_id`` is
+        part of the signed payload, a caller can only act as **itself**.
+        The freshness check reads ``payload["ts"]`` — the very timestamp
+        the signature covers, so a caller can never have a signature
+        verified over one timestamp and freshness-checked against another.
+        The signed ``ts`` must be a fresh, tz-aware ISO 8601 timestamp
+        within ±300 s of now; unparseable / naive timestamps are rejected
+        (a missing offset is treated as untrusted).
+
+        Fails closed with :class:`PermissionError` on an unknown instance,
+        a missing / malformed / non-verifying signature, or a stale ``ts``.
+        Returns the looked-up :class:`ClientInstance` so callers can reuse
+        it without a second read.
+        """
+        inst = await self._repo.get_instance(instance_id)
+        if inst is None:
+            raise PermissionError(f"Unknown instance: {instance_id}")
+
+        # Signature is REQUIRED here (unlike publish_space's optional-sig
+        # branch): an empty or invalid signature is a hard PermissionError.
+        if not signature:
+            raise PermissionError("Invalid Ed25519 signature")
+        canonical = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        try:
+            # A malformed stored pubkey is just as unverifiable as a
+            # malformed signature — fail closed with the same
+            # PermissionError instead of escaping the handler as a 500.
+            raw_key = bytes.fromhex(inst.public_key)
+            raw_sig = b64url_decode(signature)
+        except (ValueError, TypeError) as exc:
+            raise PermissionError("Invalid Ed25519 signature") from exc
+        if not verify_ed25519(raw_key, canonical, raw_sig):
+            raise PermissionError("Invalid Ed25519 signature")
+
+        # ``.get`` (not ``[...]``): a future caller that forgets ``ts`` must
+        # fail closed as a 403, never escape the handler as a KeyError/500 —
+        # the freshness contract enforces itself.
+        self._assert_fresh_ts(payload.get("ts"))
+        return inst
+
     async def subscribe(
         self,
         instance_id: str,
@@ -301,9 +380,11 @@ class GfsFederationService:
         """Add *instance_id* as a subscriber of *space_id*.
 
         Authenticated the same way as :meth:`update_instance`: the request
-        is signed by *instance_id* over the canonical ``{instance_id,
-        space_id, ts}`` JSON and verified against the instance's registered
-        public key. Because the signature binds to the *instance_id* in the
+        is signed by *instance_id* over the canonical ``{action:
+        "subscribe", instance_id, space_id, ts}`` JSON and verified against
+        the instance's registered public key. The ``action`` discriminator
+        is part of the signed bytes (domain separation), so a captured
+        subscribe signature can never be replayed as an unsubscribe. Because the signature binds to the *instance_id* in the
         body, a caller can only subscribe **itself** — it can't sign as
         another household. The signed ``ts`` is replay-guarded (±300 s).
 
@@ -313,40 +394,16 @@ class GfsFederationService:
         an unauthenticated demand signal — a subscription must target a real
         published space).
         """
-        inst = await self._repo.get_instance(instance_id)
-        if inst is None:
-            raise PermissionError(f"Unknown instance: {instance_id}")
-
-        if not signature:
-            raise PermissionError("Invalid Ed25519 signature")
-        canonical = json.dumps(
+        inst = await self._verify_signed_request(
+            instance_id,
             {
+                "action": "subscribe",
                 "instance_id": instance_id,
                 "space_id": space_id,
                 "ts": ts,
             },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
-        try:
-            raw_sig = b64url_decode(signature)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Invalid Ed25519 signature") from exc
-        if not verify_ed25519(raw_key, canonical, raw_sig):
-            raise PermissionError("Invalid Ed25519 signature")
-
-        # Replay guard: same ±300 s tolerance / tz-aware ISO 8601 rule as
-        # update_instance.
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+            signature=signature,
+        )
 
         # A subscription must target a space the GFS already knows about.
         # Auto-minting a row from an (un)authenticated subscribe let any
@@ -447,15 +504,7 @@ class GfsFederationService:
         # Replay guard FIRST (cheap, and independent of the signature): a
         # fresh, tz-aware ISO 8601 ``ts`` within ±300 s of now. Naive /
         # unparseable timestamps are rejected (a missing offset is untrusted).
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+        self._assert_fresh_ts(ts)
 
         if not authority_sig:
             raise PermissionError("invalid authority signature")
@@ -479,8 +528,40 @@ class GfsFederationService:
 
         return await self._repo.list_subscribers_with_keys(space_id)
 
-    async def unsubscribe(self, instance_id: str, space_id: str) -> None:
-        """Remove *instance_id* from subscribers of *space_id*."""
+    async def unsubscribe(
+        self,
+        instance_id: str,
+        space_id: str,
+        ts: str,
+        signature: str,
+    ) -> None:
+        """Remove *instance_id* from the subscribers of *space_id*.
+
+        Authenticated exactly like :meth:`subscribe`: an Ed25519 signature
+        over the canonical ``{action: "unsubscribe", instance_id, space_id,
+        ts}`` JSON — the ``action`` is inside the signed bytes, so an
+        unsubscribe signature can't be replayed as a subscribe — verified
+        against the instance's registered public key and replay-guarded
+        (±300 s). The signature binds the request to *instance_id*, so a
+        caller can only unsubscribe **itself** — without this, any caller
+        could evict any household from any space's relay fan-out.
+
+        Fails closed (``PermissionError``) on an unknown instance, a
+        missing / malformed / invalid signature, or a stale / naive
+        timestamp. Unlike :meth:`subscribe` it deliberately does NOT
+        require the space to still exist: unsubscribing from an
+        already-removed space stays idempotent.
+        """
+        await self._verify_signed_request(
+            instance_id,
+            {
+                "action": "unsubscribe",
+                "instance_id": instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            signature=signature,
+        )
         await self._repo.remove_subscriber(
             space_id=space_id,
             instance_id=instance_id,
@@ -506,35 +587,60 @@ class GfsFederationService:
         the space row locally before subscribing."""
         return await self._repo.get_space(space_id)
 
-    async def hide_space(self, space_id: str) -> None:
-        """Mark a space as ``banned`` so it drops off ``GET /gfs/spaces``.
+    async def hide_space(
+        self,
+        space_id: str,
+        owning_instance: str,
+        ts: str,
+        signature: str,
+    ) -> None:
+        """Withdraw a space listing at its OWNER's signed request.
 
-        Used by ``DELETE /gfs/spaces/{id}/unpublish`` when the owning
-        HFS retracts the listing. We keep the row so the GFS admin's
-        audit trail survives; a later ``publish_space`` call from the
-        owner will flip the status back.
+        Drives ``POST|DELETE /gfs/spaces/{id}/unpublish``. Authenticated
+        exactly like :meth:`subscribe` / :meth:`unsubscribe`: an Ed25519
+        signature over the canonical ``{action: "unpublish", owning_instance,
+        space_id, ts}`` JSON, verified against *owning_instance*'s registered
+        public key and replay-guarded (±300 s). The ``action`` is inside the
+        signed bytes, so a captured subscribe/unsubscribe signature can never
+        be replayed as a delisting.
+
+        Authentication alone is not enough: a signature only proves WHICH
+        registered household is calling, so the caller must additionally BE
+        the space's ``owning_instance`` — otherwise any paired household that
+        learned a space id (they travel in discovery links) could delist
+        someone else's space.
+
+        Sets the reversible ``withdrawn`` flag and NEVER touches ``status``:
+        ``banned`` is the GFS moderator's verdict and is deliberately sticky
+        against re-publish, so writing it here permanently locked an owner out
+        of its own listing. The row itself survives (audit trail, subscriber
+        list, TOFU-pinned authority pubkey) and the owner's next signed
+        publish clears the flag. Withdrawal affects DISCOVERY only — the relay
+        and existing subscribers are untouched (``docs/protocol/discovery.md``).
+
+        Fails closed with :class:`PermissionError` on an unknown instance, a
+        missing / malformed / invalid signature, a stale ``ts``, or a caller
+        that is not the owner. An unknown space stays a silent no-op (the
+        unpublish fan-out must be idempotent) — but only AFTER the signature
+        verifies, so space existence is never leaked to an unsigned caller.
         """
+        await self._verify_signed_request(
+            owning_instance,
+            {
+                "action": "unpublish",
+                "owning_instance": owning_instance,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            signature=signature,
+        )
         existing = await self._repo.get_space(space_id)
         if existing is None:
             return
-        await self._repo.upsert_space(
-            GlobalSpace(
-                space_id=existing.space_id,
-                owning_instance=existing.owning_instance,
-                name=existing.name,
-                description=existing.description,
-                about_markdown=existing.about_markdown,
-                cover_url=existing.cover_url,
-                min_age=existing.min_age,
-                category=existing.category,
-                accent_color=existing.accent_color,
-                status="banned",
-                subscriber_count=existing.subscriber_count,
-                posts_per_week=existing.posts_per_week,
-                published_at=existing.published_at,
-                identity_public_key=existing.identity_public_key,
-            )
-        )
+        if existing.owning_instance != owning_instance:
+            raise PermissionError("not the owner of this space")
+        await self._repo.set_space_withdrawn(space_id, True)
+        log.info("GFS: owner %s withdrew space %s", owning_instance, space_id)
 
     async def publish_space(
         self,
@@ -552,6 +658,7 @@ class GfsFederationService:
         primary_color: str = "#D2542A",
         identity_public_key: str = "",
         signature: str = "",
+        ts: str = "",
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -562,6 +669,15 @@ class GfsFederationService:
         Auto-accepted clients land as ``status='active'`` (visible on
         ``GET /gfs/spaces``); pending clients stay pending until the
         GFS admin flips them.
+
+        ``ts`` is an OPTIONAL tz-aware ISO 8601 timestamp. When present it is
+        part of the signed canonical body and replay-guarded (±300 s), which
+        makes the publish a *fresh* statement of intent — only such a publish
+        may clear an owner's earlier ``withdrawn`` flag. A publish without
+        ``ts`` (an older household) still registers and refreshes metadata,
+        but CANNOT restore a withdrawn listing: its body is replayable
+        forever, so honouring it would let anyone holding one historical
+        publish body re-list a space its owner deliberately delisted.
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -573,31 +689,56 @@ class GfsFederationService:
         # a registered peer can't overwrite another household's space listing.
         if not signature:
             raise PermissionError("Invalid Ed25519 signature")
+        signed: dict[str, object] = {
+            "space_id": space_id,
+            "owning_instance": owning_instance,
+            "name": name,
+            "description": description or "",
+            "about_markdown": about_markdown or "",
+            "cover_url": cover_url or "",
+            "icon_url": icon_url or "",
+            "min_age": min_age,
+            "category": category,
+            "accent_color": accent_color,
+            "primary_color": primary_color,
+            "identity_public_key": identity_public_key or "",
+        }
+        # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
+        # subscribe/unsubscribe, ``publish_space`` has shipped production
+        # callers, so hard-requiring ``ts`` would 403 every older household
+        # against an upgraded GFS during a mixed-version window. This is the
+        # documented "first-revision payloads missing the field default to the
+        # single supported value" shape — with the security-relevant half
+        # (clearing ``withdrawn``) gated on the replay-guarded variant.
+        #
+        # MIGRATION TRIPWIRE: once every household ships ``ts`` (it has been
+        # sent by ``GfsConnectionService._build_publish_body`` since this
+        # revision), delete the no-``ts`` branch below and make ``ts``
+        # mandatory — verify it the way ``_verify_signed_request`` does.
+        has_ts = bool(ts)
+        if has_ts:
+            signed["ts"] = ts
         canonical = json.dumps(
-            {
-                "space_id": space_id,
-                "owning_instance": owning_instance,
-                "name": name,
-                "description": description or "",
-                "about_markdown": about_markdown or "",
-                "cover_url": cover_url or "",
-                "icon_url": icon_url or "",
-                "min_age": min_age,
-                "category": category,
-                "accent_color": accent_color,
-                "primary_color": primary_color,
-                "identity_public_key": identity_public_key or "",
-            },
+            signed,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
         try:
+            # A malformed stored pubkey is just as unverifiable as a malformed
+            # signature — fail closed with the same PermissionError instead of
+            # escaping the handler as a 500 (``register_instance`` never
+            # validates that ``public_key`` is hex).
+            raw_key = bytes.fromhex(inst.public_key)
             raw_sig = b64url_decode(signature)
         except (ValueError, TypeError) as exc:
             raise PermissionError("Invalid Ed25519 signature") from exc
         if not verify_ed25519(raw_key, canonical, raw_sig):
             raise PermissionError("Invalid Ed25519 signature")
+        if has_ts:
+            # Freshness is checked over the very ``ts`` the signature covers,
+            # so a captured publish body can't be replayed to un-do the
+            # owner's later withdrawal.
+            self._assert_fresh_ts(ts)
         # Bound the stored ``about_markdown`` (verified above against the
         # full value, so the signature still holds). The public page caps
         # rendering too; capping at storage avoids DB bloat from a paired
@@ -659,7 +800,21 @@ class GfsFederationService:
             posts_per_week=existing.posts_per_week if existing else 0.0,
             published_at=existing.published_at if existing else "",
             identity_public_key=pinned_pubkey,
+            # A FRESH signed publish from the owner (one carrying a signed,
+            # replay-guarded ``ts``) is the RECOVERY path for an earlier
+            # withdrawal — it restores discoverability. A legacy publish with
+            # no ``ts`` is replayable, so it preserves the current flag
+            # instead. A moderator ``banned`` status is handled above and
+            # stays sticky either way.
+            withdrawn=(existing.withdrawn if existing and not has_ts else False),
         )
+        if existing is not None and existing.withdrawn and not has_ts:
+            log.info(
+                "GFS: publish for withdrawn space %s carried no signed ts — "
+                "listing stays withdrawn (upgrade the household so its "
+                "publish body includes a timestamp)",
+                space_id,
+            )
         await self._repo.upsert_space(space)
         log.info(
             "GFS: published space %s (owner=%s, status=%s)",
@@ -681,43 +836,15 @@ class GfsFederationService:
         trust model as publish_space — a peer can't rename another
         household). Rejects unknown instances, bad signatures, and stale
         timestamps (replay guard)."""
-        inst = await self._repo.get_instance(instance_id)
-        if inst is None:
-            raise PermissionError(f"Unknown instance: {instance_id}")
-
-        # Signature is REQUIRED here (unlike publish_space's optional-sig
-        # branch): an empty or invalid signature is a hard PermissionError.
-        if not signature:
-            raise PermissionError("Invalid Ed25519 signature")
-        canonical = json.dumps(
+        await self._verify_signed_request(
+            instance_id,
             {
                 "instance_id": instance_id,
                 "display_name": display_name,
                 "ts": ts,
             },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
-        try:
-            raw_sig = b64url_decode(signature)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Invalid Ed25519 signature") from exc
-        if not verify_ed25519(raw_key, canonical, raw_sig):
-            raise PermissionError("Invalid Ed25519 signature")
-
-        # Replay guard: the signed ``ts`` must be a fresh, tz-aware ISO 8601
-        # timestamp within ±300 s of now. Unparseable / naive timestamps are
-        # rejected too (a missing offset is treated as untrusted).
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+            signature=signature,
+        )
 
         cleaned = display_name.strip()
         if not cleaned or len(cleaned) > MAX_DISPLAY_NAME_CHARS:

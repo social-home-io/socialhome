@@ -76,8 +76,15 @@ class GfsAdminService:
     async def overview(self) -> dict:
         clients_active = len(await self._fed_repo.list_instances(status="active"))
         clients_pending = len(await self._fed_repo.list_instances(status="pending"))
-        spaces_active = len(await self._fed_repo.list_spaces(status="active"))
-        spaces_pending = len(await self._fed_repo.list_spaces(status="pending"))
+        # ``include_withdrawn=True``: the moderator console counts a space an
+        # owner delisted — withdrawal hides it from discovery, not from
+        # moderation.
+        spaces_active = len(
+            await self._fed_repo.list_spaces(status="active", include_withdrawn=True)
+        )
+        spaces_pending = len(
+            await self._fed_repo.list_spaces(status="pending", include_withdrawn=True)
+        )
         open_reports = len(await self._admin_repo.list_fraud_reports(status="pending"))
         return {
             "clients": {"active": clients_active, "pending": clients_pending},
@@ -135,7 +142,13 @@ class GfsAdminService:
         *,
         status: str | None = None,
     ) -> list[dict]:
-        items = await self._fed_repo.list_spaces(status=status)
+        # Withdrawn rows stay in the moderator listing (and carry the
+        # ``withdrawn`` flag through ``asdict``) so an owner can't delist a
+        # reported space out of reach of a ban.
+        items = await self._fed_repo.list_spaces(
+            status=status,
+            include_withdrawn=True,
+        )
         return [asdict(s) for s in items]
 
     async def accept_space(self, space_id: str, *, admin_ip: str) -> None:

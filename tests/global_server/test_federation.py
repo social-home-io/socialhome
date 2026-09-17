@@ -164,7 +164,15 @@ async def test_subscribe_self_signed_known_space_succeeds(svc):
     )
     await _publish_known_space(svc, seed, owning_instance="inst-a", space_id="space-1")
     ts = _now_iso()
-    sig = _sign(seed, {"instance_id": "inst-a", "space_id": "space-1", "ts": ts})
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-a",
+            "space_id": "space-1",
+            "ts": ts,
+        },
+    )
     await svc.subscribe("inst-a", "space-1", ts, sig)
     subs = await svc._repo.list_subscribers("space-1")
     assert any(s.instance_id == "inst-a" for s in subs)
@@ -198,7 +206,15 @@ async def test_subscribe_signature_from_other_instance_rejected(svc):
     )
     ts = _now_iso()
     # Sign with the wrong key for inst-x's own id.
-    sig = _sign(other_seed, {"instance_id": "inst-x", "space_id": "space-x", "ts": ts})
+    sig = _sign(
+        other_seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-x",
+            "space_id": "space-x",
+            "ts": ts,
+        },
+    )
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.subscribe("inst-x", "space-x", ts, sig)
 
@@ -219,7 +235,15 @@ async def test_subscribe_cannot_sign_for_another_instance(svc):
     ts = _now_iso()
     # inst-a2 tries to subscribe inst-b2 (claims instance_id=inst-b2) — must
     # sign as inst-b2 to pass, which it can't.
-    sig = _sign(seed_a, {"instance_id": "inst-b2", "space_id": "space-ab", "ts": ts})
+    sig = _sign(
+        seed_a,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-b2",
+            "space_id": "space-ab",
+            "ts": ts,
+        },
+    )
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.subscribe("inst-b2", "space-ab", ts, sig)
 
@@ -235,7 +259,13 @@ async def test_subscribe_stale_timestamp_rejected(svc):
     )
     ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     sig = _sign(
-        seed, {"instance_id": "inst-stale-sub", "space_id": "space-stale", "ts": ts}
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-stale-sub",
+            "space_id": "space-stale",
+            "ts": ts,
+        },
     )
     with pytest.raises(PermissionError, match="Stale timestamp"):
         await svc.subscribe("inst-stale-sub", "space-stale", ts, sig)
@@ -247,7 +277,15 @@ async def test_subscribe_unknown_space_rejected(svc):
     seed, pk = _make_keypair()
     await svc.register_instance("inst-d", pk.hex(), "http://d.example.com/wh")
     ts = _now_iso()
-    sig = _sign(seed, {"instance_id": "inst-d", "space_id": "space-ghost", "ts": ts})
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-d",
+            "space_id": "space-ghost",
+            "ts": ts,
+        },
+    )
     with pytest.raises(PermissionError, match="not published"):
         await svc.subscribe("inst-d", "space-ghost", ts, sig)
     # And no row was minted.
@@ -264,11 +302,37 @@ async def test_subscribe_and_unsubscribe(svc):
         svc, seed, owning_instance="inst-b", space_id="space-unsub"
     )
     ts = _now_iso()
-    sig = _sign(seed, {"instance_id": "inst-b", "space_id": "space-unsub", "ts": ts})
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-b",
+            "space_id": "space-unsub",
+            "ts": ts,
+        },
+    )
     await svc.subscribe("inst-b", "space-unsub", ts, sig)
-    await svc.unsubscribe("inst-b", "space-unsub")
+    ts_u = _now_iso()
+    sig_u = _sign(
+        seed,
+        {
+            "action": "unsubscribe",
+            "instance_id": "inst-b",
+            "space_id": "space-unsub",
+            "ts": ts_u,
+        },
+    )
+    await svc.unsubscribe("inst-b", "space-unsub", ts_u, sig_u)
     ts2 = _now_iso()
-    sig2 = _sign(seed, {"instance_id": "inst-b", "space_id": "space-unsub", "ts": ts2})
+    sig2 = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-b",
+            "space_id": "space-unsub",
+            "ts": ts2,
+        },
+    )
     await svc.subscribe("inst-b", "space-unsub", ts2, sig2)
 
 
@@ -282,10 +346,26 @@ async def test_subscribe_idempotent(svc):
         svc, seed, owning_instance="inst-c", space_id="space-idem"
     )
     ts = _now_iso()
-    sig = _sign(seed, {"instance_id": "inst-c", "space_id": "space-idem", "ts": ts})
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-c",
+            "space_id": "space-idem",
+            "ts": ts,
+        },
+    )
     await svc.subscribe("inst-c", "space-idem", ts, sig)
     ts2 = _now_iso()
-    sig2 = _sign(seed, {"instance_id": "inst-c", "space_id": "space-idem", "ts": ts2})
+    sig2 = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-c",
+            "space_id": "space-idem",
+            "ts": ts2,
+        },
+    )
     await svc.subscribe("inst-c", "space-idem", ts2, sig2)
     subs = await svc._repo.list_subscribers("space-idem")
     assert sum(1 for s in subs if s.instance_id == "inst-c") == 1
@@ -717,6 +797,21 @@ def _sign_authority(space_seed: bytes, *, space_id: str, payload: dict) -> dict:
     )
 
 
+def _sign_authority_subscribers_query(
+    space_seed: bytes, *, space_id: str, ts: str
+) -> dict:
+    """Authority-sig wire fields for a subscribers-list query."""
+    from socialhome.authority_sig import AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY
+    from socialhome.services.space_crypto_service import sign_authority_event
+
+    return sign_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        space_id=space_id,
+        payload={"space_id": space_id, "ts": ts},
+        space_seed=space_seed,
+    )
+
+
 async def _setup_authority_relay(svc, *, space_id: str):
     """Owner publishes a space pinning a SPACE authority pubkey; a separate
     non-owner (delegated-admin) household registers + subscribes a third
@@ -743,7 +838,10 @@ async def _setup_authority_relay(svc, *, space_id: str):
         identity_public_key=space_pk.hex(),
     )
     ts = _now_iso()
-    sig = _sign(sub_seed, {"instance_id": "sub-a", "space_id": space_id, "ts": ts})
+    sig = _sign(
+        sub_seed,
+        {"action": "subscribe", "instance_id": "sub-a", "space_id": space_id, "ts": ts},
+    )
     await svc.subscribe("sub-a", space_id, ts, sig)
     return space_seed, admin_seed
 
@@ -910,7 +1008,13 @@ async def test_publish_event_owner_still_relays_without_authority_sig(gfs_db):
     )
     ts = _now_iso()
     sig = _sign(
-        sub_seed, {"instance_id": "sub-bc", "space_id": "sp-auth-owner", "ts": ts}
+        sub_seed,
+        {
+            "action": "subscribe",
+            "instance_id": "sub-bc",
+            "space_id": "sp-auth-owner",
+            "ts": ts,
+        },
     )
     await svc.subscribe("sub-bc", "sp-auth-owner", ts, sig)
     payload = {"ciphertext": "opaque-blob"}  # no authority_sig fields
@@ -974,6 +1078,85 @@ async def test_publish_event_null_pinned_pubkey_non_owner_rejected(svc):
             payload,
             "admin-null",
             transport_sig,
+        )
+
+
+async def test_publish_event_non_hex_pinned_pubkey_rejected(svc):
+    """A malformed pinned authority pubkey is unverifiable — fail closed as a
+    ``PermissionError`` (403), never a ``ValueError`` escaping as a 500.
+
+    ``identity_public_key`` is owner-supplied and never validated as hex at
+    publish time, so every ``bytes.fromhex`` over it must sit inside a guard.
+    """
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, _space_pk = _make_keypair()
+    admin_seed, admin_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-badhex",
+        owner_pk.hex(),
+        "http://owner-badhex.example.com/wh",
+        auto_accept=True,
+    )
+    await svc.register_instance(
+        "admin-badhex",
+        admin_pk.hex(),
+        "http://admin-badhex.example.com/wh",
+        auto_accept=True,
+    )
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-badhex",
+        space_id="sp-badhex",
+        identity_public_key="not-hex!!",
+    )
+    payload = {"ciphertext": "opaque-blob"}
+    payload.update(_sign_authority(space_seed, space_id="sp-badhex", payload=payload))
+    transport_sig = _sign(
+        admin_seed,
+        {
+            "space_id": "sp-badhex",
+            "event_type": "space_post_public",
+            "payload": payload,
+            "from_instance": "admin-badhex",
+        },
+    )
+    with pytest.raises(PermissionError, match="invalid authority key"):
+        await svc.publish_event(
+            "sp-badhex",
+            "space_post_public",
+            payload,
+            "admin-badhex",
+            transport_sig,
+        )
+
+
+async def test_list_subscribers_non_hex_pinned_pubkey_rejected(svc):
+    """Same guard on the subscriber-release path: an unusable pinned key is a
+    ``PermissionError``, so the route answers 403 rather than 500."""
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, _space_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-badhex2",
+        owner_pk.hex(),
+        "http://owner-badhex2.example.com/wh",
+        auto_accept=True,
+    )
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-badhex2",
+        space_id="sp-badhex2",
+        identity_public_key="not-hex!!",
+    )
+    ts = _now_iso()
+    fields = _sign_authority_subscribers_query(space_seed, space_id="sp-badhex2", ts=ts)
+    with pytest.raises(PermissionError, match="invalid authority key"):
+        await svc.list_subscribers_with_keys(
+            "sp-badhex2",
+            ts=ts,
+            authority_sig=fields["authority_sig"],
+            authority_sig_suite=fields["authority_sig_suite"],
         )
 
 
@@ -1067,7 +1250,10 @@ async def test_subscribe_notifies_owner_with_subscriber_keywrap(gfs_db):
         svc, owner_seed, owning_instance="owner-ns", space_id="sp-ns"
     )
     ts = _now_iso()
-    sig = _sign(sub_seed, {"instance_id": "sub-ns", "space_id": "sp-ns", "ts": ts})
+    sig = _sign(
+        sub_seed,
+        {"action": "subscribe", "instance_id": "sub-ns", "space_id": "sp-ns", "ts": ts},
+    )
     await svc.subscribe("sub-ns", "sp-ns", ts, sig)
 
     # Exactly one frame, to the owner, of type new_subscriber.
@@ -1110,7 +1296,15 @@ async def test_subscribe_owner_offline_no_crash(gfs_db):
         svc, owner_seed, owning_instance="owner-off", space_id="sp-off"
     )
     ts = _now_iso()
-    sig = _sign(sub_seed, {"instance_id": "sub-off", "space_id": "sp-off", "ts": ts})
+    sig = _sign(
+        sub_seed,
+        {
+            "action": "subscribe",
+            "instance_id": "sub-off",
+            "space_id": "sp-off",
+            "ts": ts,
+        },
+    )
     await svc.subscribe("sub-off", "sp-off", ts, sig)  # must not raise
     subs = await svc._repo.list_subscribers("sp-off")
     assert any(s.instance_id == "sub-off" for s in subs)
@@ -1126,7 +1320,15 @@ async def test_subscribe_no_ws_registry_no_crash(svc):
         svc, seed, owning_instance="inst-nows", space_id="sp-nows"
     )
     ts = _now_iso()
-    sig = _sign(seed, {"instance_id": "inst-nows", "space_id": "sp-nows", "ts": ts})
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-nows",
+            "space_id": "sp-nows",
+            "ts": ts,
+        },
+    )
     await svc.subscribe("inst-nows", "sp-nows", ts, sig)  # must not raise
 
 
@@ -1304,3 +1506,353 @@ async def test_update_instance_overlong_name_raises_value_error(svc):
     )
     with pytest.raises(ValueError, match="1-80"):
         await svc.update_instance("inst-long", name, ts, sig)
+
+
+# ── unsubscribe authentication (self-binding, replay-guarded) ─────────────────
+
+
+async def _subscribed(svc, space_id: str, instance_id: str) -> bool:
+    subs = await svc._repo.list_subscribers(space_id)
+    return any(s.instance_id == instance_id for s in subs)
+
+
+async def test_unsubscribe_signed_removes_subscriber(svc):
+    """A correctly-signed unsubscribe drops the subscription row."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-u1", pk.hex(), "http://u1.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-u1", space_id="space-u1"
+    )
+    ts = _now_iso()
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-u1",
+            "space_id": "space-u1",
+            "ts": ts,
+        },
+    )
+    await svc.subscribe("inst-u1", "space-u1", ts, sig)
+    assert await _subscribed(svc, "space-u1", "inst-u1")
+
+    ts2 = _now_iso()
+    sig2 = _sign(
+        seed,
+        {
+            "action": "unsubscribe",
+            "instance_id": "inst-u1",
+            "space_id": "space-u1",
+            "ts": ts2,
+        },
+    )
+    await svc.unsubscribe("inst-u1", "space-u1", ts2, sig2)
+    assert not await _subscribed(svc, "space-u1", "inst-u1")
+
+
+async def test_unsubscribe_unsigned_rejected_and_row_survives(svc):
+    """SECURITY: an unsigned unsubscribe cannot evict a subscriber."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-u2", pk.hex(), "http://u2.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-u2", space_id="space-u2"
+    )
+    ts = _now_iso()
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-u2",
+            "space_id": "space-u2",
+            "ts": ts,
+        },
+    )
+    await svc.subscribe("inst-u2", "space-u2", ts, sig)
+
+    with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
+        await svc.unsubscribe("inst-u2", "space-u2", _now_iso(), "")
+    assert await _subscribed(svc, "space-u2", "inst-u2")
+
+
+async def test_unsubscribe_cannot_sign_for_another_instance(svc):
+    """Signing with household B's key while naming household A is rejected."""
+    seed_a, pk_a = _make_keypair()
+    seed_b, pk_b = _make_keypair()
+    await svc.register_instance(
+        "inst-u3a", pk_a.hex(), "http://u3a.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance("inst-u3b", pk_b.hex(), "http://u3b.example.com/wh")
+    await _publish_known_space(
+        svc, seed_a, owning_instance="inst-u3a", space_id="space-u3"
+    )
+    ts = _now_iso()
+    sig = _sign(
+        seed_a,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-u3a",
+            "space_id": "space-u3",
+            "ts": ts,
+        },
+    )
+    await svc.subscribe("inst-u3a", "space-u3", ts, sig)
+
+    ts2 = _now_iso()
+    # inst-u3b signs a body naming inst-u3a — verified against u3a's key → fails.
+    forged = _sign(
+        seed_b,
+        {
+            "action": "unsubscribe",
+            "instance_id": "inst-u3a",
+            "space_id": "space-u3",
+            "ts": ts2,
+        },
+    )
+    with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
+        await svc.unsubscribe("inst-u3a", "space-u3", ts2, forged)
+    assert await _subscribed(svc, "space-u3", "inst-u3a")
+
+
+async def test_unsubscribe_stale_timestamp_rejected_and_row_survives(svc):
+    """A ts outside the ±300 s replay window is rejected — and the
+    existing subscription is left intact."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-u4", pk.hex(), "http://u4.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-u4", space_id="space-u4"
+    )
+    ts_ok = _now_iso()
+    await svc.subscribe(
+        "inst-u4",
+        "space-u4",
+        ts_ok,
+        _sign(
+            seed,
+            {
+                "action": "subscribe",
+                "instance_id": "inst-u4",
+                "space_id": "space-u4",
+                "ts": ts_ok,
+            },
+        ),
+    )
+
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    sig = _sign(
+        seed,
+        {
+            "action": "unsubscribe",
+            "instance_id": "inst-u4",
+            "space_id": "space-u4",
+            "ts": ts,
+        },
+    )
+    with pytest.raises(PermissionError, match="Stale timestamp"):
+        await svc.unsubscribe("inst-u4", "space-u4", ts, sig)
+    assert await _subscribed(svc, "space-u4", "inst-u4")
+
+
+async def test_unsubscribe_naive_timestamp_rejected_and_row_survives(svc):
+    """A tz-less timestamp is untrusted and rejected — the existing
+    subscription survives."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-u5", pk.hex(), "http://u5.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-u5", space_id="space-u5"
+    )
+    ts_ok = _now_iso()
+    await svc.subscribe(
+        "inst-u5",
+        "space-u5",
+        ts_ok,
+        _sign(
+            seed,
+            {
+                "action": "subscribe",
+                "instance_id": "inst-u5",
+                "space_id": "space-u5",
+                "ts": ts_ok,
+            },
+        ),
+    )
+
+    ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    sig = _sign(
+        seed,
+        {
+            "action": "unsubscribe",
+            "instance_id": "inst-u5",
+            "space_id": "space-u5",
+            "ts": ts,
+        },
+    )
+    with pytest.raises(PermissionError, match="Stale timestamp"):
+        await svc.unsubscribe("inst-u5", "space-u5", ts, sig)
+    assert await _subscribed(svc, "space-u5", "inst-u5")
+
+
+async def test_unsubscribe_unknown_instance_rejected(svc):
+    """An instance the GFS never registered cannot unsubscribe anybody."""
+    with pytest.raises(PermissionError, match="Unknown instance"):
+        await svc.unsubscribe("ghost-inst", "space-u6", _now_iso(), "AAAA")
+
+
+async def test_unsubscribe_unknown_space_still_succeeds(svc):
+    """Unsubscribing from a never-published space stays idempotent."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-u7", pk.hex(), "http://u7.example.com/wh", auto_accept=True
+    )
+    ts = _now_iso()
+    sig = _sign(
+        seed,
+        {
+            "action": "unsubscribe",
+            "instance_id": "inst-u7",
+            "space_id": "space-ghost-u7",
+            "ts": ts,
+        },
+    )
+    await svc.unsubscribe("inst-u7", "space-ghost-u7", ts, sig)
+
+
+# ── hide_space (owner withdrawal) ─────────────────────────────────────────────
+
+
+def _sign_unpublish(seed: bytes, *, owning_instance: str, space_id: str, ts: str):
+    return _sign(
+        seed,
+        {
+            "action": "unpublish",
+            "owning_instance": owning_instance,
+            "space_id": space_id,
+            "ts": ts,
+        },
+    )
+
+
+async def test_hide_space_signed_by_owner_withdraws_without_banning(svc):
+    """A signed owner withdrawal sets ``withdrawn`` and leaves ``status``
+    alone — a ban is the moderator's state, not the owner's."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h1", pk.hex(), "http://h1.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-h1", space_id="space-h1"
+    )
+    ts = _now_iso()
+    await svc.hide_space(
+        "space-h1",
+        "inst-h1",
+        ts,
+        _sign_unpublish(seed, owning_instance="inst-h1", space_id="space-h1", ts=ts),
+    )
+    sp = await svc.get_space("space-h1")
+    assert sp is not None
+    assert sp.withdrawn is True
+    assert sp.status == "active"
+    assert [s.space_id for s in await svc.list_spaces(status="active")] == []
+
+
+async def test_hide_space_unsigned_rejected_and_space_stays_listed(svc):
+    """SECURITY REGRESSION: unpublish used to be completely unauthenticated,
+    so any caller could delist any space."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h2", pk.hex(), "http://h2.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-h2", space_id="space-h2"
+    )
+    with pytest.raises(PermissionError, match="signature"):
+        await svc.hide_space("space-h2", "inst-h2", _now_iso(), "")
+    sp = await svc.get_space("space-h2")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_hide_space_by_registered_non_owner_rejected(svc):
+    """Authentication is not authorization: a valid signature from another
+    registered household must not delist someone else's space."""
+    owner_seed, owner_pk = _make_keypair()
+    other_seed, other_pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h3", owner_pk.hex(), "http://h3.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "inst-evil", other_pk.hex(), "http://evil.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="inst-h3", space_id="space-h3"
+    )
+    ts = _now_iso()
+    with pytest.raises(PermissionError, match="owner"):
+        await svc.hide_space(
+            "space-h3",
+            "inst-evil",
+            ts,
+            _sign_unpublish(
+                other_seed, owning_instance="inst-evil", space_id="space-h3", ts=ts
+            ),
+        )
+    sp = await svc.get_space("space-h3")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_hide_space_stale_timestamp_rejected(svc):
+    """The ±300 s replay guard applies to a captured withdrawal too."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h4", pk.hex(), "http://h4.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-h4", space_id="space-h4"
+    )
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    with pytest.raises(PermissionError, match="Stale timestamp"):
+        await svc.hide_space(
+            "space-h4",
+            "inst-h4",
+            ts,
+            _sign_unpublish(
+                seed, owning_instance="inst-h4", space_id="space-h4", ts=ts
+            ),
+        )
+    sp = await svc.get_space("space-h4")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_hide_space_unknown_instance_rejected(svc):
+    """An unregistered caller is rejected before anything else happens."""
+    with pytest.raises(PermissionError, match="Unknown instance"):
+        await svc.hide_space("space-h5", "ghost-inst", _now_iso(), "AAAA")
+
+
+async def test_hide_space_unknown_space_is_a_signed_noop(svc):
+    """An unknown space stays a silent no-op — but only AFTER the signature
+    verifies, so an unsigned caller can't probe for space existence."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h6", pk.hex(), "http://h6.example.com/wh", auto_accept=True
+    )
+    ts = _now_iso()
+    await svc.hide_space(
+        "space-ghost-h6",
+        "inst-h6",
+        ts,
+        _sign_unpublish(
+            seed, owning_instance="inst-h6", space_id="space-ghost-h6", ts=ts
+        ),
+    )
+    assert await svc.get_space("space-ghost-h6") is None

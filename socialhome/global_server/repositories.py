@@ -86,8 +86,14 @@ class AbstractGfsFederationRepo(Protocol):
         self,
         *,
         status: str | None = None,
+        include_withdrawn: bool = False,
     ) -> list[GlobalSpace]: ...
     async def set_space_status(self, space_id: str, status: str) -> None: ...
+    async def set_space_withdrawn(
+        self,
+        space_id: str,
+        withdrawn: bool,
+    ) -> None: ...
     async def delete_space(self, space_id: str) -> None: ...
     async def list_spaces_for_instance(
         self,
@@ -232,9 +238,9 @@ class SqliteGfsFederationRepo:
                 space_id, owning_instance, name, description, about_markdown,
                 cover_url, icon_url, min_age, category, accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
-                published_at, identity_public_key
+                published_at, identity_public_key, withdrawn
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     COALESCE(?, datetime('now')), ?)
+                     COALESCE(?, datetime('now')), ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -248,7 +254,17 @@ class SqliteGfsFederationRepo:
                 status = excluded.status,
                 subscriber_count = excluded.subscriber_count,
                 posts_per_week = excluded.posts_per_week,
-                identity_public_key = excluded.identity_public_key
+                -- The TOFU-pinned space authority key is immutable once
+                -- set (see the pin comment in ``federation.publish_space``).
+                -- Enforced here rather than trusting every caller: a write
+                -- carrying an empty pin (e.g. a cluster NODE_SYNC_SPACE
+                -- rebuilt from a partial wire shape) must not wipe it and
+                -- downgrade the space to owner-only relay.
+                identity_public_key = COALESCE(
+                    NULLIF(excluded.identity_public_key, ''),
+                    global_spaces.identity_public_key
+                ),
+                withdrawn = excluded.withdrawn
             """,
             (
                 space.space_id,
@@ -267,6 +283,7 @@ class SqliteGfsFederationRepo:
                 space.posts_per_week,
                 space.published_at or None,
                 space.identity_public_key or None,
+                1 if space.withdrawn else 0,
             ),
         )
 
@@ -281,14 +298,28 @@ class SqliteGfsFederationRepo:
         self,
         *,
         status: str | None = None,
+        include_withdrawn: bool = False,
     ) -> list[GlobalSpace]:
+        # ``withdrawn`` rows are excluded by default (and ONLY here + the
+        # public detail/SSR reads): this is the discovery listing.
+        # ``get_space`` deliberately still returns them — ``publish_space``
+        # needs the row for its owner-immutability and TOFU-pin checks, and
+        # hiding it would make a re-publish look like a first publish.
+        #
+        # ``include_withdrawn=True`` is the MODERATOR read (admin console +
+        # overview counts): withdrawal is discoverability-only, so an owner
+        # who delists a reported space must not thereby put it out of reach
+        # of a ban while the relay keeps fanning content to subscribers.
+        withdrawn_clause = "" if include_withdrawn else " AND withdrawn=0"
         if status is None:
             rows = await self._db.fetchall(
-                "SELECT * FROM global_spaces ORDER BY published_at DESC",
+                f"SELECT * FROM global_spaces WHERE 1=1{withdrawn_clause} "
+                "ORDER BY published_at DESC",
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM global_spaces WHERE status=? ORDER BY published_at DESC",
+                f"SELECT * FROM global_spaces WHERE status=?{withdrawn_clause} "
+                "ORDER BY published_at DESC",
                 (status,),
             )
         return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]
@@ -297,6 +328,18 @@ class SqliteGfsFederationRepo:
         await self._db.enqueue(
             "UPDATE global_spaces SET status=? WHERE space_id=?",
             (status, space_id),
+        )
+
+    async def set_space_withdrawn(self, space_id: str, withdrawn: bool) -> None:
+        """Flip the OWNER-withdrawal flag, touching no other column.
+
+        Targeted on purpose: the previous unpublish path round-tripped the
+        whole row through :meth:`upsert_space` and silently dropped every
+        field it forgot to copy (``icon_url`` / ``primary_color``).
+        """
+        await self._db.enqueue(
+            "UPDATE global_spaces SET withdrawn=? WHERE space_id=?",
+            (1 if withdrawn else 0, space_id),
         )
 
     async def delete_space(self, space_id: str) -> None:
@@ -1072,6 +1115,7 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         posts_per_week=float(row.get("posts_per_week") or 0.0),
         published_at=row.get("published_at", ""),
         identity_public_key=row.get("identity_public_key") or "",
+        withdrawn=bool(row.get("withdrawn") or 0),
     )
 
 

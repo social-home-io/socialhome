@@ -172,7 +172,12 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
         )
         sub_ts = _now_iso()
         sub_canonical = json.dumps(
-            {"instance_id": "peer.home", "space_id": "space-1", "ts": sub_ts},
+            {
+                "action": "subscribe",
+                "instance_id": "peer.home",
+                "space_id": "space-1",
+                "ts": sub_ts,
+            },
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")

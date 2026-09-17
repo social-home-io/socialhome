@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import aiohttp
 import pytest
 
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    b64url_decode,
+    derive_instance_id,
+    generate_identity_keypair,
+    verify_ed25519,
+)
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -161,6 +167,24 @@ async def _publishable_svc(env, session, gfs_id: str, *, space_id: str):
         own_signing_key=kp.private_key,
     )
     return svc
+
+
+def _signing_svc(repo, session) -> tuple[GfsConnectionService, bytes]:
+    """A service with only the signing identity wired (no space repo).
+
+    ``unpublish_space`` signs its body with the household identity key, so
+    every unpublish test needs an identity; the space metadata is irrelevant
+    there (the GFS looks the row up by id). Returns the service plus the
+    public key so a test can verify the signature it produced.
+    """
+    kp = generate_identity_keypair()
+    svc = GfsConnectionService(repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=kp.private_key,
+    )
+    return svc, kp.public_key
 
 
 # ─── Repo tests ─────────────────────────────────────────────────────────
@@ -421,7 +445,7 @@ async def test_unpublish_space_maps_timeout_to_gfs_error(env):
     _, repo = env
     await repo.save(_make_conn("up-to"))
     await repo.publish_space("space-uto", "up-to")
-    svc = GfsConnectionService(repo, http_client=_TimeoutSession())  # type: ignore[arg-type]
+    svc, _pk = _signing_svc(repo, _TimeoutSession())
     with pytest.raises(GfsConnectionError, match="reach GFS"):
         await svc.unpublish_space("space-uto", "up-to")
     rows = await repo.list_publications_for_space("space-uto")
@@ -491,9 +515,12 @@ async def test_unpublish_space_records_local(env):
     _, repo = env
     await repo.save(_make_conn("up-1"))
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc, _pk = _signing_svc(repo, session)
     await svc.unpublish_space("space-y", "up-1")
-    assert session.calls and session.calls[0][0] == "DELETE"
+    # POST, not DELETE: the GFS accepts both, and some proxies strip a
+    # DELETE body — which would turn the now-signed unpublish into a
+    # permanent 400.
+    assert session.calls and session.calls[0][0] == "POST"
 
 
 async def test_unpublish_space_404_treated_as_success(env):
@@ -503,7 +530,7 @@ async def test_unpublish_space_404_treated_as_success(env):
     await repo.save(_make_conn("up-404"))
     await repo.publish_space("space-z", "up-404")
     session = _StubSession(status=404)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc, _pk = _signing_svc(repo, session)
     await svc.unpublish_space("space-z", "up-404")
     assert await repo.list_publications_for_space("space-z") == []
 
@@ -513,7 +540,7 @@ async def test_unpublish_space_raises_on_500_and_keeps_local_row(env):
     await repo.save(_make_conn("up-500"))
     await repo.publish_space("space-k", "up-500")
     session = _StubSession(status=500)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc, _pk = _signing_svc(repo, session)
     with pytest.raises(GfsConnectionError, match="HTTP 500"):
         await svc.unpublish_space("space-k", "up-500")
     rows = await repo.list_publications_for_space("space-k")
@@ -843,7 +870,7 @@ async def test_unpublish_space_success(env):
     await repo.save(_make_conn("gfs-1"))
     await repo.publish_space("sp-1", "gfs-1")
     session = _StubSession(status=204)
-    svc = GfsConnectionService(repo, http_client=session)
+    svc, _pk = _signing_svc(repo, session)
     await svc.unpublish_space("sp-1", "gfs-1")
     pubs = await repo.list_publications("gfs-1")
     assert pubs == []
@@ -851,7 +878,7 @@ async def test_unpublish_space_success(env):
 
 async def test_unpublish_space_not_found(env):
     _, repo = env
-    svc = GfsConnectionService(repo, http_client=_StubSession())
+    svc, _pk = _signing_svc(repo, _StubSession())
     with pytest.raises(GfsConnectionError, match="not found"):
         await svc.unpublish_space("sp-1", "nonexistent")
 
@@ -976,10 +1003,6 @@ async def test_publish_body_carries_metadata_and_signature(env):
     """With ``attach_publish_context`` wired, the publish body includes
     the local space's name + description + signed canonical JSON the
     GFS verifies against ``ClientInstance.public_key``."""
-    from socialhome.crypto import (
-        b64url_decode,
-        verify_ed25519,
-    )
     from socialhome.domain.space import (
         JoinMode,
         Space,
@@ -1025,6 +1048,54 @@ async def test_publish_body_carries_metadata_and_signature(env):
     # Phase 5a: the publish body ships the space's Ed25519 authority verify key
     # so the GFS can TOFU-pin it for space-authority-signed relays.
     assert body["identity_public_key"] == "aa" * 32
+    sig_b64 = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))
+
+
+async def test_publish_body_carries_fresh_signed_ts(env):
+    """The publish body ships a tz-aware ``ts`` INSIDE the signed canonical
+    bytes, so the GFS can replay-guard it — only such a fresh publish may
+    restore a listing the owner previously withdrew."""
+    from socialhome.domain.space import (
+        JoinMode,
+        Space,
+        SpaceFeatures,
+        SpaceType,
+    )
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+    db, conn_repo = env
+    await conn_repo.save(_make_conn("gfs-ts", inbox_url="https://gfs.example"))
+    space_repo = SqliteSpaceRepo(db)
+    await space_repo.save(
+        Space(
+            id="sp-ts",
+            name="Timestamped",
+            owner_instance_id="alpha.home",
+            owner_username="alice",
+            identity_public_key="aa" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    kp = generate_identity_keypair()
+    session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
+    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=space_repo,
+        own_instance_id="alpha.home",
+        own_signing_key=kp.private_key,
+    )
+    await svc.publish_space("sp-ts", "gfs-ts")
+
+    body = session._last_body  # type: ignore[attr-defined]
+    parsed = datetime.fromisoformat(body["ts"])
+    assert parsed.tzinfo is not None, "ts must be tz-aware (a naive one is rejected)"
+    assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 60
+    # ``ts`` is covered by the signature, not bolted on beside it.
     sig_b64 = body.pop("signature")
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))
@@ -1102,8 +1173,6 @@ async def test_update_display_name_signs_and_posts_to_each_gfs(env):
     ``{instance_id, display_name, ts}`` JSON and POSTed to every active
     GFS's ``/gfs/instance``; the return value is the number of 200s and
     the signature verifies byte-for-byte against the GFS contract."""
-    from socialhome.crypto import b64url_decode, verify_ed25519
-
     _, repo = env
     await repo.save(_make_conn("g1", inbox_url="https://a.example"))
     await repo.save(_make_conn("g2", inbox_url="https://b.example"))
@@ -1209,8 +1278,6 @@ async def test_push_display_name_signs_and_posts_to_one_gfs(env):
     ``/gfs/instance`` and returns True on 200. The signature verifies
     byte-for-byte against the GFS contract — same shape as the
     fan-out variant, but to one connection."""
-    from socialhome.crypto import b64url_decode, verify_ed25519
-
     _, repo = env
     await repo.save(_make_conn("g1", inbox_url="https://a.example"))
     await repo.save(_make_conn("g2", inbox_url="https://b.example"))
@@ -1341,10 +1408,10 @@ async def test_publish_body_raises_when_space_missing(env):
 
 async def test_subscribe_to_gfs_space_signs_body(env):
     """``subscribe_to_gfs_space`` signs the canonical
-    ``{instance_id, space_id, ts}`` body with the household identity key
-    and POSTs it to the GFS ``/gfs/subscribe`` endpoint."""
-    from socialhome.crypto import b64url_decode, verify_ed25519
-
+    ``{action, instance_id, space_id, ts}`` body with the household
+    identity key and POSTs it to the GFS ``/gfs/subscribe`` endpoint.
+    The ``action`` rides inside the signed bytes (domain separation), so
+    the GFS can't have this signature replayed as an unsubscribe."""
     _, repo = env
     await repo.save(_make_conn("gfs-sub", inbox_url="https://gfs.example"))
     kp = generate_identity_keypair()
@@ -1360,16 +1427,71 @@ async def test_subscribe_to_gfs_space_signs_body(env):
         ("POST", "https://gfs.example/gfs/subscribe"),
     ]
     body = session._last_body  # type: ignore[attr-defined]
+    assert body["action"] == "subscribe"
     assert body["instance_id"] == "alpha.home"
     assert body["space_id"] == "sp-join"
     assert body["ts"]
     sig = body["signature"]
     canonical = json.dumps(
-        {"instance_id": "alpha.home", "space_id": "sp-join", "ts": body["ts"]},
+        {
+            "action": "subscribe",
+            "instance_id": "alpha.home",
+            "space_id": "sp-join",
+            "ts": body["ts"],
+        },
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig))
+
+
+async def test_unpublish_space_signs_canonical_body(env):
+    """SECURITY: ``unpublish`` is owner-authenticated on the GFS, so the HFS
+    must ship a signed ``{owning_instance, ts, signature}`` body — the
+    signature covering the canonical ``{action: "unpublish", owning_instance,
+    space_id, ts}`` bytes (``action`` inside, so a captured subscribe
+    signature can't be replayed as a delisting)."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-un", inbox_url="https://gfs.example"))
+    await repo.publish_space("sp-un", "gfs-un")
+    session = _StubSession(status=200)
+    svc, pubkey = _signing_svc(repo, session)
+    await svc.unpublish_space("sp-un", "gfs-un")
+
+    assert session.calls == [
+        ("POST", "https://gfs.example/gfs/spaces/sp-un/unpublish"),
+    ]
+    body = session._last_body  # type: ignore[attr-defined]
+    assert body is not None
+    assert body["owning_instance"] == "alpha.home"
+    assert body["ts"]
+    canonical = json.dumps(
+        {
+            "action": "unpublish",
+            "owning_instance": "alpha.home",
+            "space_id": "sp-un",
+            "ts": body["ts"],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    assert verify_ed25519(pubkey, canonical, b64url_decode(body["signature"]))
+    # Local publication row is cleared on the successful round-trip.
+    assert await repo.list_publications_for_space("sp-un") == []
+
+
+async def test_unpublish_space_raises_without_signing_key(env):
+    """No identity wired → fail closed rather than send a body the GFS
+    rejects (mirrors ``subscribe_to_gfs_space``); the local row survives."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-un2", inbox_url="https://gfs.example"))
+    await repo.publish_space("sp-un2", "gfs-un2")
+    session = _StubSession(status=200)
+    svc = GfsConnectionService(repo, http_client=session)
+    with pytest.raises(GfsConnectionError):
+        await svc.unpublish_space("sp-un2", "gfs-un2")
+    assert session.calls == []
+    assert len(await repo.list_publications_for_space("sp-un2")) == 1
 
 
 async def test_subscribe_to_gfs_space_raises_without_signing_key(env):
@@ -1424,8 +1546,6 @@ async def test_publish_space_event_signs_and_fans_to_each_published_gfs(env):
     """A relay event is POSTed to ``/gfs/publish`` on EVERY GFS the space
     is published to, carrying the verbatim envelope as ``payload`` and a
     valid household transport signature over the canonical body."""
-    from socialhome.crypto import b64url_decode, verify_ed25519
-
     session = _RecordingSession()
     svc, kp = await _publish_event_svc(
         env, session, space_id="sp-relay", gfs_ids=["g1", "g2"]

@@ -358,6 +358,9 @@ class GfsConnectionService:
         wired) or no local space row to describe MUST NOT send an
         unsigned / metadata-less body — it raises :class:`GfsConnectionError`
         instead. A signed body is the only thing the GFS will accept.
+
+        The body carries a signed ``ts`` so the GFS can replay-guard it — the
+        publish that restores an owner-withdrawn listing must be fresh.
         """
         if (
             self._space_repo is None
@@ -398,6 +401,14 @@ class GfsConnectionService:
             # delegated admin) without learning the space content. Inside the
             # already-signed canonical body — no new signing step.
             "identity_public_key": space.identity_public_key or "",
+            # A signed, tz-aware timestamp inside the canonical body: it makes
+            # this publish a FRESH statement of intent, replay-guarded ±300 s
+            # on the GFS side. Only a publish carrying one may clear an
+            # earlier owner withdrawal — without it a captured body could
+            # re-list a space its owner deliberately delisted. The GFS still
+            # accepts a body without ``ts`` (older households keep publishing
+            # and refreshing metadata); see ``GfsFederationService.publish_space``.
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
         canonical = json.dumps(
             body,
@@ -435,6 +446,14 @@ class GfsConnectionService:
     async def unpublish_space(self, space_id: str, gfs_id: str) -> None:
         """Unpublish a space from a GFS.
 
+        The GFS authenticates the withdrawal (it is the owner's retraction of
+        a public listing, not an anonymous delete), so this signs the
+        canonical ``{action: "unpublish", owning_instance, space_id, ts}``
+        body with the household identity key — ``action`` inside the signed
+        bytes, so the signature can't be replayed as a subscribe — and ships
+        ``{owning_instance, ts, signature}``. Fail-closed: with no signing
+        identity wired it raises rather than send a body the GFS rejects.
+
         Symmetric with :meth:`publish_space`: the local row is removed
         **only** on a successful GFS round-trip. A ``404`` is treated as
         success — the space was already absent on the GFS, so the delete
@@ -442,15 +461,40 @@ class GfsConnectionService:
         :class:`GfsConnectionError` and keeps the local row (the GFS
         still believes the space is published).
         """
+        if not self._own_instance_id or not self._own_signing_key:
+            raise GfsConnectionError(
+                "cannot unpublish a space without a wired signing identity",
+            )
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
+        ts = datetime.now(timezone.utc).isoformat()
+        canonical = json.dumps(
+            {
+                "action": "unpublish",
+                "owning_instance": self._own_instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "owning_instance": self._own_instance_id,
+            "ts": ts,
+            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
+        }
+
         client = self._client()
         unpublish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/unpublish"
         try:
-            async with client.delete(
+            # POST, not DELETE: the GFS route accepts both identically, and
+            # some proxies strip a DELETE request body — which would turn the
+            # signed unpublish into a permanent 400.
+            async with client.post(
                 unpublish_url,
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status not in (200, 204, 404):
@@ -468,7 +512,9 @@ class GfsConnectionService:
 
         The GFS mandates an Ed25519 signature on every subscribe (so a
         caller can only subscribe itself), so this signs the canonical
-        ``{instance_id, space_id, ts}`` body with the household identity
+        ``{action: "subscribe", instance_id, space_id, ts}`` body — the
+        ``action`` is inside the signed bytes so the GFS can't have the
+        signature replayed as an unsubscribe — with the household identity
         key and POSTs it to ``/gfs/subscribe``. Fail-closed: with no
         signing identity wired, it raises rather than sending an unsigned
         body the GFS would reject. Returns the GFS-reported status.
@@ -484,6 +530,7 @@ class GfsConnectionService:
         ts = datetime.now(timezone.utc).isoformat()
         canonical = json.dumps(
             {
+                "action": "subscribe",
                 "instance_id": self._own_instance_id,
                 "space_id": space_id,
                 "ts": ts,
@@ -492,6 +539,7 @@ class GfsConnectionService:
             sort_keys=True,
         ).encode("utf-8")
         body = {
+            "action": "subscribe",
             "instance_id": self._own_instance_id,
             "space_id": space_id,
             "ts": ts,

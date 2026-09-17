@@ -36,6 +36,24 @@ The Social Home ↔ GFS link is split by direction:
     empty / malformed / invalid signature is rejected with `403`, so a
     registered peer can never overwrite another household's listing or fan
     out under its name.
+  - `spaces/{id}/unpublish` is the **owner's withdrawal** of a listing and is
+    signed the same way (`{action: "unpublish", owning_instance, space_id, ts}`,
+    ±300 s replay guard). The signature proves *which* household is calling, so
+    the GFS additionally checks that the caller **is** the space's
+    `owning_instance` — a registered peer that learned a space id (they travel
+    in discovery links) cannot delist someone else's space. Withdrawal is a
+    **distinct, reversible state** from a moderator ban: it sets `withdrawn` and
+    never touches `status`, so the owner's next signed publish restores the
+    listing, while a GFS admin's `status='banned'` stays sticky against
+    re-publish. The restoring publish must be **fresh**: `publish` carries an
+    optional `ts` inside its signed canonical body, replay-guarded ±300 s, and
+    only a publish carrying one clears `withdrawn`. A publish without `ts` (an
+    older household, kept working on purpose so an upgraded GFS doesn't 403
+    the whole fleet) still refreshes metadata but leaves `withdrawn` as-is —
+    otherwise one captured publish body would re-list a delisted space forever.
+    Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
+    off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
+    the relay (`publish`) and existing subscribers are untouched.
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
     **TOFU-pins** it on the first publish and holds it immutable — a later
@@ -68,11 +86,14 @@ The Social Home ↔ GFS link is split by direction:
     by the post id** carried inside the payload, enforced by the HFS
     `space_public_inbound` consumer (the same way moments dedupe by
     `moment_id`).
-  - `subscribe` requires a signature over `{instance_id, space_id, ts}`
-    (replay-guarded ±300 s on `ts`). The signature binds the request to
-    `instance_id`, so a caller can only subscribe **itself**, and the
-    target space must already be published — the GFS no longer mints a
-    pending row from an (unauthenticated) subscribe.
+  - `subscribe` and `unsubscribe` each require a signature over
+    `{action, instance_id, space_id, ts}` (replay-guarded ±300 s on `ts`).
+    The `action` is inside the signed bytes (domain separation), so a
+    subscribe signature can't be replayed as an unsubscribe or vice versa.
+    The signature binds the request to `instance_id`, so a caller can only
+    (un)subscribe **itself**, and a subscribe's target space must already
+    be published — the GFS no longer mints a pending row from an
+    (unauthenticated) subscribe.
 - **GFS → SH** is a persistent WebSocket the SH opens to
   `wss://<gfs>/gfs/ws`. The first frame is a signed hello
   `{type:"hello", instance_id, ts, sig}`; once accepted the GFS pushes
