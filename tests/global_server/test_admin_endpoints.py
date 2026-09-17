@@ -874,3 +874,103 @@ async def test_admin_cluster_requires_auth(tmp_dir):
     async with TestClient(TestServer(app)) as tc:
         resp = await tc.get("/admin/api/cluster")
         assert resp.status == 401
+
+
+# ── Owner withdrawal vs. moderation (§24.9) ─────────────────────────────
+
+
+async def _seed_owner_and_space(client, *, instance_id: str, space_id: str):
+    """Register an owner household + one active space, returning the seed."""
+    app = client._app
+    fed_repo = app[gfs_fed_repo_key]
+    kp = generate_identity_keypair()
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id=instance_id,
+            display_name=instance_id,
+            public_key=kp.public_key.hex(),
+            inbox_url="http://owner.example/wh",
+            status="active",
+            auto_accept=True,
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id=space_id,
+            owning_instance=instance_id,
+            name="Withdrawn",
+            status="active",
+        )
+    )
+    return kp.private_key
+
+
+def _signed_publish(space_id: str, instance_id: str, seed: bytes) -> dict:
+    body = {
+        "space_id": space_id,
+        "owning_instance": instance_id,
+        "name": "Withdrawn",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "accent_color": "#D2542A",
+        "primary_color": "#D2542A",
+        "identity_public_key": "",
+    }
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return {**body, "signature": b64url_encode(sign_ed25519(seed, canonical))}
+
+
+async def test_withdrawn_space_stays_visible_in_the_admin_console(client):
+    """Withdrawal is discoverability-only: it hides a space from
+    ``GET /gfs/spaces`` but must NOT hide it from the moderator console,
+    and the flag has to be visible there."""
+    await _seed_owner_and_space(client, instance_id="w.home", space_id="w-space")
+    fed_repo = client._app[gfs_fed_repo_key]
+    await fed_repo.set_space_withdrawn("w-space", True)
+
+    # Public discovery drops it.
+    resp = await client.get("/gfs/spaces")
+    assert [s["space_id"] for s in (await resp.json())["spaces"]] == []
+
+    # The moderator still sees it — flagged as withdrawn.
+    resp = await client.get("/admin/api/spaces")
+    assert resp.status == 200
+    rows = {s["space_id"]: s for s in await resp.json()}
+    assert "w-space" in rows
+    assert rows["w-space"]["withdrawn"] is True
+
+    # ...and the overview still counts it.
+    resp = await client.get("/admin/api/overview")
+    assert (await resp.json())["spaces"]["active"] == 1
+
+
+async def test_moderator_can_ban_a_withdrawn_space_and_ban_sticks(client):
+    """Moderation-evasion regression: an owner who withdraws a reported
+    space must not escape a ban. The moderator can still ban it, and the
+    ban survives the owner's later re-publish."""
+    seed = await _seed_owner_and_space(
+        client, instance_id="evader.home", space_id="ev-space"
+    )
+    fed_repo = client._app[gfs_fed_repo_key]
+    await fed_repo.set_space_withdrawn("ev-space", True)
+
+    # The moderator finds it in the console and bans it.
+    resp = await client.get("/admin/api/spaces")
+    assert "ev-space" in {s["space_id"] for s in await resp.json()}
+    resp = await client.post("/admin/api/spaces/ev-space/ban", json={"reason": "abuse"})
+    assert resp.status == 200
+
+    # The owner re-publishes — ban stickiness holds, listing stays hidden.
+    resp = await client.post(
+        "/gfs/spaces/ev-space/publish",
+        json=_signed_publish("ev-space", "evader.home", seed),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["status"] == "banned"
+    assert (await fed_repo.get_space("ev-space")).status == "banned"
+    resp = await client.get("/gfs/spaces")
+    assert [s["space_id"] for s in (await resp.json())["spaces"]] == []

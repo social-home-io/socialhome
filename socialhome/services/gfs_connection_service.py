@@ -435,6 +435,14 @@ class GfsConnectionService:
     async def unpublish_space(self, space_id: str, gfs_id: str) -> None:
         """Unpublish a space from a GFS.
 
+        The GFS authenticates the withdrawal (it is the owner's retraction of
+        a public listing, not an anonymous delete), so this signs the
+        canonical ``{action: "unpublish", owning_instance, space_id, ts}``
+        body with the household identity key — ``action`` inside the signed
+        bytes, so the signature can't be replayed as a subscribe — and ships
+        ``{owning_instance, ts, signature}``. Fail-closed: with no signing
+        identity wired it raises rather than send a body the GFS rejects.
+
         Symmetric with :meth:`publish_space`: the local row is removed
         **only** on a successful GFS round-trip. A ``404`` is treated as
         success — the space was already absent on the GFS, so the delete
@@ -442,15 +450,40 @@ class GfsConnectionService:
         :class:`GfsConnectionError` and keeps the local row (the GFS
         still believes the space is published).
         """
+        if not self._own_instance_id or not self._own_signing_key:
+            raise GfsConnectionError(
+                "cannot unpublish a space without a wired signing identity",
+            )
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
+        ts = datetime.now(timezone.utc).isoformat()
+        canonical = json.dumps(
+            {
+                "action": "unpublish",
+                "owning_instance": self._own_instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "owning_instance": self._own_instance_id,
+            "ts": ts,
+            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
+        }
+
         client = self._client()
         unpublish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/unpublish"
         try:
-            async with client.delete(
+            # POST, not DELETE: the GFS route accepts both identically, and
+            # some proxies strip a DELETE request body — which would turn the
+            # signed unpublish into a permanent 400.
+            async with client.post(
                 unpublish_url,
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status not in (200, 204, 404):

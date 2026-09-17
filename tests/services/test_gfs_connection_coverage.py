@@ -322,6 +322,7 @@ async def test_publish_space_success(env):
 
 async def test_unpublish_space_unknown_gfs_raises(env):
     svc = GfsConnectionService(env, http_client=_StubSession())
+    _wire_publish_ctx(svc, "sp1")
     with pytest.raises(GfsConnectionError):
         await svc.unpublish_space("sp1", "gfs-missing")
 
@@ -330,8 +331,9 @@ async def test_unpublish_space_success(env):
     await env.save(_conn("g1"))
     session = _StubSession(status=204)
     svc = GfsConnectionService(env, http_client=session)
+    _wire_publish_ctx(svc, "sp1")
     await svc.unpublish_space("sp1", "g1")
-    assert session.calls[0][0] == "DELETE"
+    assert session.calls[0][0] == "POST"
 
 
 async def test_unpublish_space_http_error_raises(env):
@@ -339,6 +341,7 @@ async def test_unpublish_space_http_error_raises(env):
     await env.publish_space("sp1", "g1")
     session = _StubSession(status=500)
     svc = GfsConnectionService(env, http_client=session)
+    _wire_publish_ctx(svc, "sp1")
     with pytest.raises(GfsConnectionError):
         await svc.unpublish_space("sp1", "g1")
     # Local row preserved — the GFS still believes it's published.
@@ -348,6 +351,7 @@ async def test_unpublish_space_http_error_raises(env):
 async def test_unpublish_space_network_error_raises(env):
     await env.save(_conn("g1"))
     svc = GfsConnectionService(env, http_client=_RaisingSession())
+    _wire_publish_ctx(svc, "sp1")
     with pytest.raises(GfsConnectionError):
         await svc.unpublish_space("sp1", "g1")
 
@@ -357,6 +361,7 @@ async def test_unpublish_space_404_is_success(env):
     await env.publish_space("sp1", "g1")
     session = _StubSession(status=404)
     svc = GfsConnectionService(env, http_client=session)
+    _wire_publish_ctx(svc, "sp1")
     await svc.unpublish_space("sp1", "g1")
     assert await env.list_publications_for_space("sp1") == []
 
@@ -377,6 +382,7 @@ async def test_unpublish_space_from_all(env):
     await env.save(_conn("g1"))
     await env.save(_conn("g2"))
     svc = GfsConnectionService(env, http_client=_StubSession(status=204))
+    _wire_publish_ctx(svc, "sp1")
     n = await svc.unpublish_space_from_all("sp1")
     assert n == 2
 

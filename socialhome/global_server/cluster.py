@@ -3,8 +3,9 @@
 Symmetric peer-to-peer — no primary/leader. Every node runs the same
 code, shares ``client_instances`` + ``global_spaces`` registries via
 ``NODE_SYNC_*`` messages, and fan-outs post relays via ``NODE_RELAY``.
-State sync is last-write-wins with one exception: a ``banned`` record
-always wins over any subsequent non-ban upsert.
+State sync is last-write-wins with two exceptions: a ``banned`` record
+always wins over any subsequent non-ban upsert, and a locally-``withdrawn``
+space stays withdrawn against a peer's stale ``withdrawn=0`` row.
 
 Cluster mode is gated behind ``config.cluster_enabled``; single-node
 deployments skip the background heartbeat loop but the service stays
@@ -17,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -568,6 +570,11 @@ class ClusterService:
         existing = await self._fed_repo.get_space(space.space_id)
         if existing is not None and existing.status == "banned" and action != "ban":
             return
+        # Withdrawn-wins, mirroring ban-wins above: a peer gossiping a stale
+        # ``withdrawn=0`` row must not silently re-list a space its owner
+        # delisted here. Only the owner's own signed re-publish clears it.
+        if existing is not None and existing.withdrawn and not space.withdrawn:
+            space = replace(space, withdrawn=True)
         await self._fed_repo.upsert_space(space)
 
     async def apply_sync_report(self, report_dict: dict) -> None:
@@ -969,13 +976,25 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         "description": s.description,
         "about_markdown": s.about_markdown,
         "cover_url": s.cover_url,
+        "icon_url": s.icon_url,
         "min_age": s.min_age,
         "category": normalize_category(s.category),
         "accent_color": s.accent_color,
+        "primary_color": s.primary_color,
         "status": s.status,
         "subscriber_count": s.subscriber_count,
         "posts_per_week": s.posts_per_week,
         "published_at": s.published_at,
+        # The TOFU-pinned space authority key travels too. Omitting it made
+        # ``_wire_to_space`` rebuild the row with the dataclass default ("")
+        # and ``upsert_space`` clear the pin, so any authenticated cluster
+        # peer's NODE_SYNC_SPACE downgraded the space to owner-only relay.
+        # ``upsert_space`` now refuses to clear a pin in SQL as well.
+        "identity_public_key": s.identity_public_key,
+        # Owner withdrawal travels with the gossip: without it, the next
+        # peer sync would silently un-withdraw a space the owner delisted
+        # (the same reason ``status='banned'`` has its ban-wins rule).
+        "withdrawn": s.withdrawn,
     }
 
 
@@ -987,13 +1006,17 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         description=d.get("description"),
         about_markdown=d.get("about_markdown"),
         cover_url=d.get("cover_url"),
+        icon_url=d.get("icon_url"),
         min_age=int(d.get("min_age") or 0),
         category=normalize_category(d.get("category")),
         accent_color=str(d.get("accent_color") or "#6366f1"),
+        primary_color=str(d.get("primary_color") or "#6366f1"),
         status=str(d.get("status") or "pending"),
         subscriber_count=int(d.get("subscriber_count") or 0),
         posts_per_week=float(d.get("posts_per_week") or 0.0),
         published_at=str(d.get("published_at") or ""),
+        identity_public_key=str(d.get("identity_public_key") or ""),
+        withdrawn=bool(d.get("withdrawn") or False),
     )
 
 

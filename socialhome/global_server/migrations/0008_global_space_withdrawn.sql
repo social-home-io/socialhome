@@ -1,0 +1,32 @@
+-- Separate OWNER withdrawal from MODERATOR ban on a GFS-published space.
+--
+-- ``DELETE /gfs/spaces/{id}/unpublish`` used to flip ``status`` to
+-- ``'banned'`` — the same state a GFS admin's moderation ban uses, and one
+-- ``publish_space`` deliberately makes sticky against re-publish. An owner
+-- who withdrew its listing could therefore never restore it. The two states
+-- are now distinct: ``status='banned'`` stays the moderator's (sticky)
+-- action, ``withdrawn=1`` is the owner's (reversible — cleared by the next
+-- signed publish from the owner).
+--
+-- Audit per the CLAUDE.md "Before adding a SQL migration" rule:
+--
+-- 1. Existing code paths: ``global_spaces.status`` is written by
+--    ``repositories.upsert_space`` / ``set_space_status`` and read by
+--    ``federation.publish_space`` (ban stickiness), ``list_spaces`` (public
+--    discovery filter), the ``GET /gfs/spaces/{id}`` detail route, the public
+--    SSR pages, the admin portal (moderation), and cluster gossip (ban-wins
+--    LWW). Every one of those readers treats ``banned`` as a moderation
+--    verdict — overloading it with owner intent is what caused the bug.
+-- 2. Non-migration alternatives considered and rejected: (a) widen the
+--    ``status`` CHECK with a ``'withdrawn'`` value — SQLite cannot alter a
+--    CHECK constraint, so it needs a destructive table rebuild, and it would
+--    still lose the "banned AND withdrawn" combination; (b) derive withdrawal
+--    from the absence of a publication — the GFS has no such record, the
+--    owner-side publication row lives on the household; (c) delete the row —
+--    loses the audit trail, the subscriber list, and the TOFU-pinned
+--    authority pubkey.
+-- 3. Minimality: one additive ``ADD COLUMN`` with a NOT NULL default of 0.
+--    No backfill (every existing row is, correctly, not owner-withdrawn),
+--    no rewrite of existing rows, no table rebuild, no index.
+
+ALTER TABLE global_spaces ADD COLUMN withdrawn INTEGER NOT NULL DEFAULT 0;

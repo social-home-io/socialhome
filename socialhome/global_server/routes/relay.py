@@ -255,7 +255,9 @@ class SpaceDetailView(GfsBaseView):
         svc = self.svc(K.gfs_federation_key)
         space_id = self.request.match_info["space_id"]
         space = await svc.get_space(space_id)
-        if space is None or space.status != "active":
+        # ``withdrawn`` is the owner's own retraction — hidden from discovery
+        # just like a non-active status (see ``GfsFederationService.hide_space``).
+        if space is None or space.status != "active" or space.withdrawn:
             raise web.HTTPNotFound(reason="Space not found or not published")
         return web.json_response(asdict(space))
 
@@ -355,13 +357,22 @@ class SpacePublishView(GfsBaseView):
 
 
 class SpaceUnpublishView(GfsBaseView):
-    """``DELETE /gfs/spaces/{space_id}/unpublish`` — owning HFS removes
-    its global-space listing.
+    """``POST|DELETE /gfs/spaces/{space_id}/unpublish`` — the OWNING HFS
+    withdraws its global-space listing.
 
-    The implementation just flips the status to ``banned`` (so it
-    disappears from the public list) rather than deleting the row;
-    keeps the GFS admin's audit trail intact and lets re-publishes
-    pick up the same id.
+    Body: ``{owning_instance, ts, signature}`` — the Ed25519 signature covers
+    the canonical ``{action: "unpublish", owning_instance, space_id, ts}``
+    JSON and is verified against the registered ``ClientInstance.public_key``,
+    with the usual ±300 s replay guard. SECURITY: this endpoint used to take
+    no authentication at all, so any internet caller could permanently delist
+    any space. A missing body field is a ``400``; anything the service refuses
+    (unknown instance, bad/stale signature, a caller that isn't the owner) is
+    a ``403``.
+
+    The row is kept and only flagged ``withdrawn`` (so the GFS admin's audit
+    trail, the subscriber list and the pinned authority key survive) — the
+    owner's next publish restores the listing. Both verbs are accepted since
+    some HTTP clients struggle with DELETE bodies.
     """
 
     async def post(self) -> web.Response:
@@ -373,7 +384,22 @@ class SpaceUnpublishView(GfsBaseView):
     async def _handle(self) -> web.Response:
         svc = self.svc(K.gfs_federation_key)
         space_id = self.request.match_info["space_id"]
-        await svc.hide_space(space_id)
+        body = await self.body_or_400()
+        try:
+            owning_instance = body["owning_instance"]
+            ts = body["ts"]
+            signature = body["signature"]
+        except KeyError as exc:
+            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        try:
+            await svc.hide_space(
+                space_id,
+                str(owning_instance),
+                str(ts),
+                str(signature),
+            )
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
         return web.json_response({"status": "unpublished"})
 
 

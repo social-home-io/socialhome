@@ -36,6 +36,18 @@ The Social Home ↔ GFS link is split by direction:
     empty / malformed / invalid signature is rejected with `403`, so a
     registered peer can never overwrite another household's listing or fan
     out under its name.
+  - `spaces/{id}/unpublish` is the **owner's withdrawal** of a listing and is
+    signed the same way (`{action: "unpublish", owning_instance, space_id, ts}`,
+    ±300 s replay guard). The signature proves *which* household is calling, so
+    the GFS additionally checks that the caller **is** the space's
+    `owning_instance` — a registered peer that learned a space id (they travel
+    in discovery links) cannot delist someone else's space. Withdrawal is a
+    **distinct, reversible state** from a moderator ban: it sets `withdrawn` and
+    never touches `status`, so the owner's next signed publish restores the
+    listing, while a GFS admin's `status='banned'` stays sticky against
+    re-publish. Withdrawal affects **discoverability only** — the space drops
+    off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
+    the relay (`publish`) and existing subscribers are untouched.
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
     **TOFU-pins** it on the first publish and holds it immutable — a later

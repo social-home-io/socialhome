@@ -359,6 +359,75 @@ async def test_apply_sync_space_banned_wins_lww(started_app):
     assert (await fed.get_space("sp")).status == "banned"
 
 
+async def test_apply_sync_space_withdrawn_wins_lww(started_app):
+    """Withdrawn-wins, mirroring ban-wins: a peer gossiping a stale
+    ``withdrawn=0`` row must not silently re-list a space its owner
+    delisted here."""
+    svc: ClusterService = started_app[gfs_cluster_key]
+    fed = started_app[gfs_fed_repo_key]
+    await svc.apply_sync_client(
+        "upsert",
+        {
+            "instance_id": "o",
+            "public_key": "aa" * 32,
+            "inbox_url": "http://o",
+            "status": "active",
+        },
+    )
+    await svc.apply_sync_space(
+        "upsert",
+        {
+            "space_id": "wd",
+            "owning_instance": "o",
+            "status": "active",
+            "withdrawn": True,
+        },
+    )
+    await svc.apply_sync_space(
+        "upsert",
+        {
+            "space_id": "wd",
+            "owning_instance": "o",
+            "status": "active",
+            "withdrawn": False,
+        },
+    )
+    assert (await fed.get_space("wd")).withdrawn is True
+
+
+async def test_apply_sync_space_preserves_pin_icon_and_colour(started_app):
+    """A cluster sync round-trip keeps the TOFU-pinned authority key, the
+    icon and the primary colour — the wire shape used to drop all three,
+    so any authenticated peer's NODE_SYNC_SPACE wiped the pin."""
+    svc: ClusterService = started_app[gfs_cluster_key]
+    fed = started_app[gfs_fed_repo_key]
+    await svc.apply_sync_client(
+        "upsert",
+        {
+            "instance_id": "o",
+            "public_key": "aa" * 32,
+            "inbox_url": "http://o",
+            "status": "active",
+        },
+    )
+    seeded = GlobalSpace(
+        space_id="pin",
+        owning_instance="o",
+        name="Pinned",
+        icon_url="https://cdn.example/icon.png",
+        primary_color="#123456",
+        status="active",
+        identity_public_key="cc" * 32,
+    )
+    await fed.upsert_space(seeded)
+
+    await svc.apply_sync_space("upsert", cluster_mod._space_to_wire(seeded))
+    stored = await fed.get_space("pin")
+    assert stored.identity_public_key == "cc" * 32
+    assert stored.icon_url == "https://cdn.example/icon.png"
+    assert stored.primary_color == "#123456"
+
+
 async def test_apply_sync_report_with_bad_wire_is_silent(started_app):
     """Malformed wire shapes silently drop (``except (KeyError, ValueError)``)."""
     svc: ClusterService = started_app[gfs_cluster_key]
@@ -407,14 +476,21 @@ async def test_wire_helpers_roundtrip_client_space_report():
         description="D",
         about_markdown="M",
         cover_url="U",
+        icon_url="I",
         min_age=13,
         category="gaming",
         accent_color="#abcdef",
+        primary_color="#123456",
         status="active",
         subscriber_count=3,
         posts_per_week=1.5,
         published_at="2026-01-01T00:00:00",
+        identity_public_key="cc" * 32,
+        withdrawn=True,
     )
+    # Every field round-trips. ``identity_public_key`` in particular: it used
+    # to fall off the wire, so an inbound NODE_SYNC_SPACE rebuilt the row with
+    # an empty pin and wiped the TOFU-pinned space authority key.
     assert _wire_to_space(cluster_mod._space_to_wire(s)) == s
 
     r = GfsFraudReport(

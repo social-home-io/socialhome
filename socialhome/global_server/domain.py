@@ -67,6 +67,14 @@ class GlobalSpace:
     #: the space content. Empty when an older HFS published no pubkey → such a
     #: space can only be relayed by its owning instance.
     identity_public_key: str = ""
+    #: The OWNER withdrew this listing (``DELETE /gfs/spaces/{id}/unpublish``).
+    #: Reversible: the owner's next signed publish clears it. Deliberately
+    #: distinct from ``status='banned'``, which is a GFS MODERATOR action and
+    #: is sticky against re-publish — conflating the two let an owner
+    #: permanently lock itself out of its own listing. Withdrawal hides the
+    #: space from DISCOVERY only (listing, detail route, public pages);
+    #: existing subscribers and the relay keep working.
+    withdrawn: bool = False
 
 
 @dataclass(slots=True, frozen=True)

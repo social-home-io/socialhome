@@ -1628,3 +1628,137 @@ async def test_unsubscribe_unknown_space_still_succeeds(svc):
         },
     )
     await svc.unsubscribe("inst-u7", "space-ghost-u7", ts, sig)
+
+
+# ── hide_space (owner withdrawal) ─────────────────────────────────────────────
+
+
+def _sign_unpublish(seed: bytes, *, owning_instance: str, space_id: str, ts: str):
+    return _sign(
+        seed,
+        {
+            "action": "unpublish",
+            "owning_instance": owning_instance,
+            "space_id": space_id,
+            "ts": ts,
+        },
+    )
+
+
+async def test_hide_space_signed_by_owner_withdraws_without_banning(svc):
+    """A signed owner withdrawal sets ``withdrawn`` and leaves ``status``
+    alone — a ban is the moderator's state, not the owner's."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h1", pk.hex(), "http://h1.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-h1", space_id="space-h1"
+    )
+    ts = _now_iso()
+    await svc.hide_space(
+        "space-h1",
+        "inst-h1",
+        ts,
+        _sign_unpublish(seed, owning_instance="inst-h1", space_id="space-h1", ts=ts),
+    )
+    sp = await svc.get_space("space-h1")
+    assert sp is not None
+    assert sp.withdrawn is True
+    assert sp.status == "active"
+    assert [s.space_id for s in await svc.list_spaces(status="active")] == []
+
+
+async def test_hide_space_unsigned_rejected_and_space_stays_listed(svc):
+    """SECURITY REGRESSION: unpublish used to be completely unauthenticated,
+    so any caller could delist any space."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h2", pk.hex(), "http://h2.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-h2", space_id="space-h2"
+    )
+    with pytest.raises(PermissionError, match="signature"):
+        await svc.hide_space("space-h2", "inst-h2", _now_iso(), "")
+    sp = await svc.get_space("space-h2")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_hide_space_by_registered_non_owner_rejected(svc):
+    """Authentication is not authorization: a valid signature from another
+    registered household must not delist someone else's space."""
+    owner_seed, owner_pk = _make_keypair()
+    other_seed, other_pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h3", owner_pk.hex(), "http://h3.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "inst-evil", other_pk.hex(), "http://evil.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="inst-h3", space_id="space-h3"
+    )
+    ts = _now_iso()
+    with pytest.raises(PermissionError, match="owner"):
+        await svc.hide_space(
+            "space-h3",
+            "inst-evil",
+            ts,
+            _sign_unpublish(
+                other_seed, owning_instance="inst-evil", space_id="space-h3", ts=ts
+            ),
+        )
+    sp = await svc.get_space("space-h3")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_hide_space_stale_timestamp_rejected(svc):
+    """The ±300 s replay guard applies to a captured withdrawal too."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h4", pk.hex(), "http://h4.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, seed, owning_instance="inst-h4", space_id="space-h4"
+    )
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    with pytest.raises(PermissionError, match="Stale timestamp"):
+        await svc.hide_space(
+            "space-h4",
+            "inst-h4",
+            ts,
+            _sign_unpublish(
+                seed, owning_instance="inst-h4", space_id="space-h4", ts=ts
+            ),
+        )
+    sp = await svc.get_space("space-h4")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_hide_space_unknown_instance_rejected(svc):
+    """An unregistered caller is rejected before anything else happens."""
+    with pytest.raises(PermissionError, match="Unknown instance"):
+        await svc.hide_space("space-h5", "ghost-inst", _now_iso(), "AAAA")
+
+
+async def test_hide_space_unknown_space_is_a_signed_noop(svc):
+    """An unknown space stays a silent no-op — but only AFTER the signature
+    verifies, so an unsigned caller can't probe for space existence."""
+    seed, pk = _make_keypair()
+    await svc.register_instance(
+        "inst-h6", pk.hex(), "http://h6.example.com/wh", auto_accept=True
+    )
+    ts = _now_iso()
+    await svc.hide_space(
+        "space-ghost-h6",
+        "inst-h6",
+        ts,
+        _sign_unpublish(
+            seed, owning_instance="inst-h6", space_id="space-ghost-h6", ts=ts
+        ),
+    )
+    assert await svc.get_space("space-ghost-h6") is None

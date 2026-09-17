@@ -797,7 +797,9 @@ async def handle_space_page(request: web.Request) -> web.Response:
 
     slug = request.match_info["slug"]
     space = await fed_repo.get_space(slug)
-    if space is None or space.status != "active":
+    # Owner-withdrawn rows are hidden from the public page too — the same
+    # discovery surface the listing + detail route filter (``hide_space``).
+    if space is None or space.status != "active" or space.withdrawn:
         raise web.HTTPNotFound(reason="Space not found or not published")
 
     server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
@@ -837,7 +839,11 @@ async def handle_invite_page(request: web.Request) -> web.Response:
         expires_at = row["expires_at"]
         if expires_at is None or int(expires_at) > int(time.time()):
             space_row = await fed_repo.get_space(row["space_id"])
-            if space_row is not None and space_row.status == "active":
+            if (
+                space_row is not None
+                and space_row.status == "active"
+                and not space_row.withdrawn
+            ):
                 space = {
                     "name": space_row.name,
                     "accent_color": space_row.accent_color,

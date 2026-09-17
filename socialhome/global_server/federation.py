@@ -580,35 +580,60 @@ class GfsFederationService:
         the space row locally before subscribing."""
         return await self._repo.get_space(space_id)
 
-    async def hide_space(self, space_id: str) -> None:
-        """Mark a space as ``banned`` so it drops off ``GET /gfs/spaces``.
+    async def hide_space(
+        self,
+        space_id: str,
+        owning_instance: str,
+        ts: str,
+        signature: str,
+    ) -> None:
+        """Withdraw a space listing at its OWNER's signed request.
 
-        Used by ``DELETE /gfs/spaces/{id}/unpublish`` when the owning
-        HFS retracts the listing. We keep the row so the GFS admin's
-        audit trail survives; a later ``publish_space`` call from the
-        owner will flip the status back.
+        Drives ``POST|DELETE /gfs/spaces/{id}/unpublish``. Authenticated
+        exactly like :meth:`subscribe` / :meth:`unsubscribe`: an Ed25519
+        signature over the canonical ``{action: "unpublish", owning_instance,
+        space_id, ts}`` JSON, verified against *owning_instance*'s registered
+        public key and replay-guarded (±300 s). The ``action`` is inside the
+        signed bytes, so a captured subscribe/unsubscribe signature can never
+        be replayed as a delisting.
+
+        Authentication alone is not enough: a signature only proves WHICH
+        registered household is calling, so the caller must additionally BE
+        the space's ``owning_instance`` — otherwise any paired household that
+        learned a space id (they travel in discovery links) could delist
+        someone else's space.
+
+        Sets the reversible ``withdrawn`` flag and NEVER touches ``status``:
+        ``banned`` is the GFS moderator's verdict and is deliberately sticky
+        against re-publish, so writing it here permanently locked an owner out
+        of its own listing. The row itself survives (audit trail, subscriber
+        list, TOFU-pinned authority pubkey) and the owner's next signed
+        publish clears the flag. Withdrawal affects DISCOVERY only — the relay
+        and existing subscribers are untouched (``docs/protocol/discovery.md``).
+
+        Fails closed with :class:`PermissionError` on an unknown instance, a
+        missing / malformed / invalid signature, a stale ``ts``, or a caller
+        that is not the owner. An unknown space stays a silent no-op (the
+        unpublish fan-out must be idempotent) — but only AFTER the signature
+        verifies, so space existence is never leaked to an unsigned caller.
         """
+        await self._verify_signed_request(
+            owning_instance,
+            {
+                "action": "unpublish",
+                "owning_instance": owning_instance,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            signature=signature,
+        )
         existing = await self._repo.get_space(space_id)
         if existing is None:
             return
-        await self._repo.upsert_space(
-            GlobalSpace(
-                space_id=existing.space_id,
-                owning_instance=existing.owning_instance,
-                name=existing.name,
-                description=existing.description,
-                about_markdown=existing.about_markdown,
-                cover_url=existing.cover_url,
-                min_age=existing.min_age,
-                category=existing.category,
-                accent_color=existing.accent_color,
-                status="banned",
-                subscriber_count=existing.subscriber_count,
-                posts_per_week=existing.posts_per_week,
-                published_at=existing.published_at,
-                identity_public_key=existing.identity_public_key,
-            )
-        )
+        if existing.owning_instance != owning_instance:
+            raise PermissionError("not the owner of this space")
+        await self._repo.set_space_withdrawn(space_id, True)
+        log.info("GFS: owner %s withdrew space %s", owning_instance, space_id)
 
     async def publish_space(
         self,
@@ -733,6 +758,10 @@ class GfsFederationService:
             posts_per_week=existing.posts_per_week if existing else 0.0,
             published_at=existing.published_at if existing else "",
             identity_public_key=pinned_pubkey,
+            # A signed publish from the owner is the RECOVERY path for an
+            # earlier withdrawal — it restores discoverability. A moderator
+            # ``banned`` status is handled above and stays sticky.
+            withdrawn=False,
         )
         await self._repo.upsert_space(space)
         log.info(

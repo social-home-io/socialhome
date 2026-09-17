@@ -373,3 +373,126 @@ async def test_record_login_attempt_prunes_old_rows(admin, gfs_db):
     # The recent attempt still counts within a generous window.
     recent = int(time.time()) - 3600
     assert await admin.count_failed_attempts("1.2.3.4", since=recent) == 1
+
+
+async def _owner(fed, instance_id: str = "o") -> None:
+    """Insert the owning instance a ``global_spaces`` row FK-references."""
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id=instance_id,
+            display_name=instance_id,
+            public_key="aa" * 32,
+            inbox_url="http://o",
+            status="active",
+        )
+    )
+
+
+async def test_set_space_withdrawn_round_trips(fed):
+    """``withdrawn`` is owner withdrawal — a targeted setter that leaves every
+    other column (``status`` and the branding fields included) alone."""
+    await _owner(fed)
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="w1",
+            owning_instance="o",
+            name="Withdrawable",
+            status="active",
+            icon_url="data:image/webp;base64,AAAA",
+            primary_color="#654321",
+            identity_public_key="ee" * 32,
+        )
+    )
+    sp = await fed.get_space("w1")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+    await fed.set_space_withdrawn("w1", True)
+    sp = await fed.get_space("w1")
+    assert sp is not None
+    assert sp.withdrawn is True
+    assert sp.status == "active"
+    assert sp.icon_url == "data:image/webp;base64,AAAA"
+    assert sp.primary_color == "#654321"
+    assert sp.identity_public_key == "ee" * 32
+
+    await fed.set_space_withdrawn("w1", False)
+    sp = await fed.get_space("w1")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_list_spaces_excludes_withdrawn(fed):
+    """``list_spaces`` is the public discovery read — a withdrawn space drops
+    out of it (both with and without a status filter), while ``get_space``
+    still returns the row (``publish_space`` needs it for the owner /
+    TOFU-pin checks)."""
+    await _owner(fed)
+    await fed.upsert_space(
+        GlobalSpace(space_id="v1", owning_instance="o", status="active")
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="v2", owning_instance="o", status="active")
+    )
+    await fed.set_space_withdrawn("v2", True)
+
+    assert {s.space_id for s in await fed.list_spaces(status="active")} == {"v1"}
+    assert {s.space_id for s in await fed.list_spaces()} == {"v1"}
+    assert await fed.get_space("v2") is not None
+
+
+async def test_upsert_space_clears_withdrawn(fed):
+    """A full ``upsert_space`` (the owner re-publish path) carries the
+    ``withdrawn`` flag, so re-publishing restores visibility."""
+    await _owner(fed)
+    await fed.upsert_space(
+        GlobalSpace(space_id="v3", owning_instance="o", status="active")
+    )
+    await fed.set_space_withdrawn("v3", True)
+    await fed.upsert_space(
+        GlobalSpace(space_id="v3", owning_instance="o", status="active")
+    )
+    sp = await fed.get_space("v3")
+    assert sp is not None
+    assert sp.withdrawn is False
+
+
+async def test_list_spaces_include_withdrawn_opt_in(fed):
+    """``include_withdrawn=True`` is the moderator read — the admin console
+    must keep seeing a space an owner withdrew, at every status filter,
+    or a withdrawal would put the space out of reach of a ban."""
+    await _owner(fed)
+    await fed.upsert_space(
+        GlobalSpace(space_id="m1", owning_instance="o", status="active")
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="m2", owning_instance="o", status="active")
+    )
+    await fed.set_space_withdrawn("m2", True)
+
+    listed = await fed.list_spaces(include_withdrawn=True)
+    assert {s.space_id for s in listed} == {"m1", "m2"}
+    listed = await fed.list_spaces(status="active", include_withdrawn=True)
+    assert {s.space_id for s in listed} == {"m1", "m2"}
+
+
+async def test_upsert_space_never_clears_a_pinned_identity_key(fed):
+    """The TOFU-pinned space authority key is immutable once set, enforced
+    in SQL. A write carrying an empty ``identity_public_key`` (e.g. a
+    cluster ``NODE_SYNC_SPACE`` rebuilt from a partial wire shape) must
+    not wipe the pin and downgrade the space to owner-only relay."""
+    await _owner(fed)
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="p1",
+            owning_instance="o",
+            status="active",
+            identity_public_key="cc" * 32,
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="p1", owning_instance="o", status="active")
+    )
+    sp = await fed.get_space("p1")
+    assert sp is not None
+    assert sp.identity_public_key == "cc" * 32
