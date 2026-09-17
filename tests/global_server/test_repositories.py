@@ -496,3 +496,37 @@ async def test_upsert_space_never_clears_a_pinned_identity_key(fed):
     sp = await fed.get_space("p1")
     assert sp is not None
     assert sp.identity_public_key == "cc" * 32
+
+
+async def test_list_subscribed_spaces_returns_only_subscriptions(fed):
+    """``list_subscribed_spaces`` returns the spaces an instance SUBSCRIBES to
+    (Phase-5b-d reconnect notify), not the ones it owns."""
+    for iid in ("owner-x", "sub-x"):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=iid,
+                display_name=iid,
+                public_key="aa" * 32,
+                inbox_url=f"http://{iid}",
+                status="active",
+            )
+        )
+    await fed.upsert_space(
+        GlobalSpace(space_id="sx1", owning_instance="owner-x", status="active")
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="sx2", owning_instance="owner-x", status="active")
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="sx3", owning_instance="sub-x", status="active")
+    )
+    await fed.add_subscriber(space_id="sx1", instance_id="sub-x")
+    await fed.add_subscriber(space_id="sx2", instance_id="sub-x")
+
+    got = await fed.list_subscribed_spaces("sub-x")
+    assert {s.space_id for s in got} == {"sx1", "sx2"}
+    assert all(s.owning_instance == "owner-x" for s in got)
+
+
+async def test_list_subscribed_spaces_empty_for_unknown_instance(fed):
+    assert await fed.list_subscribed_spaces("nobody") == []

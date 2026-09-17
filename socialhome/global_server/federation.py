@@ -11,6 +11,7 @@ to the subscriber's inbox URL.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -54,6 +55,15 @@ MAX_DISPLAY_NAME_CHARS: int = 80
 #: same ±300 s tolerance the §24.11 inbound pipeline uses.
 INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
 
+#: Max ``new_subscriber`` re-notifies triggered by a SINGLE subscriber
+#: (re)connect (Phase 5b-d). A household subscribed to hundreds of spaces must
+#: not turn its own reconnect into an unbounded fan-out of owner notifies (each
+#: one makes a seed-holder re-seal a key). Spaces beyond the cap are simply not
+#: re-notified on this connect — the Phase-5b-c reconcile (run by every
+#: seed-holder on ITS reconnect) still backstops them, so the cap costs latency,
+#: never correctness.
+MAX_RECONNECT_NOTIFIES: int = 50
+
 
 class GfsFederationService:
     """Lightweight federation relay for the GFS process.
@@ -66,7 +76,7 @@ class GfsFederationService:
     * Listing all known global spaces.
     """
 
-    __slots__ = ("_repo", "_ws_registry")
+    __slots__ = ("_reconnect_tasks", "_repo", "_ws_registry")
 
     def __init__(
         self,
@@ -75,6 +85,9 @@ class GfsFederationService:
     ) -> None:
         self._repo = repo
         self._ws_registry = ws_registry
+        # Strong refs to in-flight reconnect-notify tasks — an asyncio task
+        # with no reference can be garbage-collected mid-await.
+        self._reconnect_tasks: set[asyncio.Task[None]] = set()
 
     async def register_instance(
         self,
@@ -467,6 +480,85 @@ class GfsFederationService:
                 owning_instance,
                 space_id,
                 exc,
+            )
+
+    def schedule_subscriber_connected(
+        self,
+        instance_id: str,
+    ) -> None:
+        """Fire-and-forget :meth:`on_subscriber_connected` for *instance_id*.
+
+        Called from the ``/gfs/ws`` handler AFTER the hello is authenticated
+        and the socket registered. Deliberately synchronous + detached: the
+        notify fan-out must never delay (or fail) the WebSocket handshake.
+        """
+        task = asyncio.create_task(self.on_subscriber_connected(instance_id))
+        self._reconnect_tasks.add(task)
+        task.add_done_callback(self._reconnect_tasks.discard)
+
+    async def on_subscriber_connected(self, instance_id: str) -> None:
+        """Re-emit the ``new_subscriber`` notify for every space *instance_id*
+        subscribes to (Phase 5b-d — subscriber-side reconnect repair).
+
+        The 5b-b handoff is relayed back to the subscriber over ITS OWN GFS
+        socket. If that socket was down when the seal was fanned out, the key
+        is simply lost: the HTTPS-inbox fallback cannot deliver a relay frame
+        to a household (wrong path shape + unsigned body — see ``_fan_out``),
+        nothing retries, and the 5b-c reconcile only fires when a SEED-HOLDER
+        reconnects, not the subscriber. So when the subscriber's own socket
+        comes up we ask each space owner to run the exact same verified
+        seal-and-relay again — this time with the socket up to receive it.
+
+        The GFS is content-blind: it never saw the sealed payload and cannot
+        store or replay it, so asking the owner to re-seal is the only repair
+        available here. It needs no new table, event type or key, and is
+        idempotent — the subscriber's ``apply_space_content_key_from_metadata``
+        import is per-epoch idempotent, so a duplicate handoff is a no-op.
+
+        Best-effort and **never raises**: this runs on a connect path, where a
+        missing instance, a repo error, an owner with no socket or a send
+        failure must be logged and skipped, never break the handshake.
+        """
+        if self._ws_registry is None:
+            return
+        try:
+            subscriber = await self._repo.get_instance(instance_id)
+            if subscriber is None:
+                return
+            spaces = await self._repo.list_subscribed_spaces(instance_id)
+        except Exception as exc:  # defensive — connect path, never raise
+            log.warning(
+                "GFS: reconnect notify lookup for %s failed: %s",
+                instance_id,
+                exc,
+            )
+            return
+
+        sent = 0
+        for space in spaces:
+            # An owner needs no handoff to itself.
+            if space.owning_instance == instance_id:
+                continue
+            if sent >= MAX_RECONNECT_NOTIFIES:
+                log.info(
+                    "GFS: reconnect notify for %s capped at %d spaces "
+                    "(the 5b-c reconcile covers the rest)",
+                    instance_id,
+                    MAX_RECONNECT_NOTIFIES,
+                )
+                break
+            # Already best-effort / never-raises (offline owner, send error).
+            await self._notify_owner_new_subscriber(
+                space.owning_instance,
+                space.space_id,
+                subscriber,
+            )
+            sent += 1
+        if sent:
+            log.debug(
+                "GFS: re-notified %d space owner(s) after %s connected",
+                sent,
+                instance_id,
             )
 
     async def list_subscribers_with_keys(
@@ -893,8 +985,21 @@ class GfsFederationService:
                         if resp.status < 400:
                             delivered.append(sub.instance_id)
                         else:
-                            log.warning(
-                                "GFS fan-out: %s returned HTTP %s",
+                            # DEBUG, not WARNING, on purpose: a household's
+                            # registered ``inbox_url`` is ``<base>/federation/
+                            # inbox`` while its actual route is
+                            # ``/federation/inbox/{inbox_id}``, and the body
+                            # posted here is a bare relay frame rather than a
+                            # signed §24.11 envelope — so this fallback is
+                            # STRUCTURALLY guaranteed to 401/404 for an offline
+                            # subscriber. Keeping it at WARNING spammed
+                            # operator logs with a non-actionable error on every
+                            # offline peer. The fallback itself stays (other
+                            # inbox shapes do accept it); fixing the URL /
+                            # envelope mismatch is a separate design change.
+                            log.debug(
+                                "GFS fan-out: %s returned HTTP %s "
+                                "(subscriber likely offline)",
                                 sub.inbox_url,
                                 resp.status,
                             )

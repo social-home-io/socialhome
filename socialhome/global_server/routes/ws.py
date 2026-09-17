@@ -67,6 +67,17 @@ class GfsWebSocketView(web.View):
         await registry.register(instance_id, ws)
         await fed_repo.upsert_rtc_connection(instance_id, transport="websocket")
 
+        # Phase 5b-d — now that this household's socket is up, ask the owner of
+        # every space it subscribes to to re-run the content-key handoff: a
+        # handoff fanned out while this socket was down was lost outright (the
+        # HTTPS-inbox fallback can't carry a relay frame). Strictly AFTER the
+        # hello verified and the socket registered — an unauthenticated caller
+        # must never be able to trigger a fan-out. Dispatched as a background
+        # task so the handshake never waits on it, and fail-soft throughout.
+        self.request.app[K.gfs_federation_key].schedule_subscriber_connected(
+            instance_id
+        )
+
         try:
             async for msg in ws:
                 # The SH does not send application frames; aiohttp handles

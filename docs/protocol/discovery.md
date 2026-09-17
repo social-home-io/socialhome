@@ -105,7 +105,8 @@ The Social Home ↔ GFS link is split by direction:
   kem_suite, keywrap_sig}}` frame to a space **owner** when a household
   subscribes, so a seed-holder can hand the new subscriber the content key
   (Phase 5b-b, below). This frame is best-effort — dropped if the owner has
-  no socket; the 5b-c reconcile backstops an offline owner.
+  no socket; the 5b-c reconcile backstops an offline owner, and the
+  subscriber's own (re)connect re-triggers the notify (Phase 5b-d).
 
 ### Subscriber-side on-ramp (local space mirror)
 
@@ -394,6 +395,40 @@ sequenceDiagram
         SUB->>SUB: re-verify + open_keywrap + import_key (idempotent)
     end
 ```
+
+### Subscriber-reconnect re-notify (Phase 5b-d)
+
+Both paths above assume the **subscriber's** GFS socket is up when the sealed
+handoff is fanned out. It is relayed back over that socket, and if it is down
+the key is simply **lost** — the subscriber stays keyless for the epoch and
+silently drops every relayed post. Nothing retries, and 5b-c does not cover it:
+that reconcile fires when a **seed-holder** reconnects, not the subscriber.
+
+The HTTPS-inbox fallback does **not** cover relay frames today. A household
+registers `inbox_url` as `<base>/federation/inbox`, but its actual route is
+`/federation/inbox/{inbox_id}` (no match), and the fallback posts a bare relay
+frame rather than a signed §24.11 envelope, which `FederationInboxView` would
+reject anyway. So a relay frame to an offline household is structurally
+undeliverable — the GFS logs it at DEBUG, not WARNING. Fixing the URL/envelope
+mismatch is a separate design change.
+
+Phase 5b-d closes the gap from the subscriber's side: when a household's
+`/gfs/ws` socket connects — **after** the hello is verified and the socket
+registered, never before — the GFS re-emits the **same** `new_subscriber` frame
+to the owner of every space that household subscribes to
+(`GfsFederationService.on_subscriber_connected`). The owner then runs the
+identical verified seal-and-relay as 5b-b, this time with the subscriber's
+socket up to receive it.
+
+No new table, event type, endpoint or key: the GFS is content-blind, so it
+never saw the sealed payload and cannot store or replay it — asking the owner
+to re-seal is the only content-blind repair. It is idempotent (the subscriber's
+`import_key` is per-epoch idempotent, so a duplicate handoff is a no-op),
+dispatched as a background task so the WebSocket handshake never waits on it,
+fail-soft at every step (missing space, owner with no socket, repo/send error →
+logged and skipped), skips a space the connecting instance itself owns, and is
+capped at `MAX_RECONNECT_NOTIFIES` (50) spaces per connect — beyond the cap the
+5b-c reconcile still backstops, so the cap costs latency, never correctness.
 
 WebRTC is **not** used for the SH↔GFS leg — the GFS is publicly
 reachable, so NAT traversal buys nothing while DTLS plus per-connection
