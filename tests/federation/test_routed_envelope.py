@@ -24,8 +24,10 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -45,9 +47,13 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.federation import routed_crypto
+from socialhome.federation.route_discovery import RouteDiscoveryService
 from socialhome.federation.routed_envelope import (
+    _MAX_PENDING_ROUTED,
+    _MAX_RETAINED_INNER_BYTES,
     _MAX_ROUTED_PATH_LEN,
     SpaceRoutedHandler,
+    _PendingRouted,
 )
 
 
@@ -1386,10 +1392,13 @@ async def test_route_stale_end_to_end_reaches_origin_stub(caplog):
     assert c_nacks[0]["payload"]["position"] == 2
     assert b_nacks[0]["payload"]["position"] == 1
     assert _stale_sends(a) == []
+    # The origin never sent this route_id (the envelope was crafted at the
+    # target), so the origin branch drops it as "not ours" — at DEBUG.
     assert any(
-        "reached origin" in r.message and route_id[:8] in r.message
+        "no pending routed send" in r.message and route_id[:8] in r.message
         for r in caplog.records
     )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
 async def test_route_stale_relay_forwards_toward_origin():
@@ -1619,9 +1628,11 @@ async def test_route_stale_relay_forward_failure_is_logged(caplog):
     )
 
 
-async def test_route_stale_at_origin_invokes_t3_stub_and_does_not_forward(caplog):
-    """``position - 1 == 0`` → we are the origin: the T3 stub is invoked
-    with the parsed fields and nothing is forwarded."""
+async def test_route_stale_at_origin_invokes_origin_branch_and_does_not_forward(
+    caplog,
+):
+    """``position - 1 == 0`` → we are the origin: the origin branch is
+    invoked with the parsed fields and nothing is forwarded."""
     a, b, c = _build_identity_chain(3)
     path = [a.instance_id, b.instance_id, c.instance_id]
     _dead_priv, dead_pub = routed_crypto.generate_ephemeral_keypair()
@@ -1642,7 +1653,8 @@ async def test_route_stale_at_origin_invokes_t3_stub_and_does_not_forward(caplog
     assert kw["stale_eph_pk"] == dead_pub
     assert kw["sig"] == nack["sig"]
     assert kw["sig_suite"] == routed_crypto.ROUTE_STALE_SIG_SUITE_ED25519
-    # The unpatched stub itself: debug log, no send, no raise.
+    # The unpatched branch on a route_id we never sent: debug log, no
+    # send, no raise.
     with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
         await a.handler._on_route_stale(
             _nack_event(
@@ -1653,6 +1665,688 @@ async def test_route_stale_at_origin_invokes_t3_stub_and_does_not_forward(caplog
         )
     assert a.fed.sent == []
     assert any(
-        "reached origin" in r.message and "r-origin-2"[:8] in r.message
+        "no pending routed send" in r.message and "r-origin-2"[:8] in r.message
         for r in caplog.records
     )
+
+
+# ── SPACE_ROUTE_STALE at the origin (T3: verify → invalidate → retransmit) ──
+
+
+class _FakeRouteService:
+    """Recording stand-in for the three ``RouteDiscoveryService`` calls the
+    origin branch makes: ``invalidate``, ``discover_route`` and the pure
+    ``cached_target_identity_pk`` read."""
+
+    def __init__(self, *, discovery: tuple[list[str], str] | None = None) -> None:
+        self.discovery = discovery
+        self.invalidated: list[str] = []
+        self.discover_calls: list[str] = []
+        self.pins: dict[str, str] = {}
+
+    async def invalidate(self, target_instance_id: str) -> None:
+        self.invalidated.append(target_instance_id)
+
+    async def discover_route(
+        self, target_instance_id: str
+    ) -> tuple[list[str], str] | None:
+        self.discover_calls.append(target_instance_id)
+        return self.discovery
+
+    def cached_target_identity_pk(self, target_instance_id: str) -> str | None:
+        return self.pins.get(target_instance_id)
+
+
+def _routed_sends(node: _Node) -> list[dict[str, Any]]:
+    return [
+        s for s in node.fed.sent if s["event_type"] is FederationEventType.SPACE_ROUTED
+    ]
+
+
+async def _settle(rounds: int = 40) -> None:
+    for _ in range(rounds):
+        await asyncio.sleep(0)
+
+
+def _origin_with_route_service(
+    *, discovery: tuple[list[str], str] | None = None
+) -> tuple[_Node, _Node, _Node, _FakeRouteService]:
+    """A 3-node identity chain whose origin holds a recording route service
+    pinning the target's identity pk (what ``send_with_mesh_fallback`` reads
+    from ``cached_target_identity_pk`` right after discovery)."""
+    a, b, c = _build_identity_chain(3)
+    rs = _FakeRouteService(discovery=discovery)
+    rs.pins[c.instance_id] = c.fed.own_identity_pk.hex()
+    a.handler.attach_route_service(rs)  # type: ignore[arg-type]
+    return a, b, c, rs
+
+
+async def _send_under_dead_key(
+    a: _Node,
+    path: list[str],
+    *,
+    payload: dict[str, Any] | None = None,
+    pin: str | None = None,
+    inner_event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED,
+) -> tuple[str, str, dict[str, Any]]:
+    """``send_routed`` along ``path`` under a target ephemeral nobody holds
+    the private half for. Returns ``(route_id, dead_pub, payload)``."""
+    _dead_priv, dead_pub = routed_crypto.generate_ephemeral_keypair()
+    payload = payload if payload is not None else {"post_id": "p1", "n": 1}
+    route_id = await a.handler.send_routed(
+        path=path,
+        target_eph_pk_b64=dead_pub,
+        inner_event_type=inner_event_type,
+        inner_payload=payload,
+        target_identity_pk=pin if pin is not None else "",
+    )
+    return route_id, dead_pub, payload
+
+
+def _origin_nack(
+    *,
+    target: _Node,
+    path: list[str],
+    route_id: str,
+    stale_pub: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A nack as it lands on the origin from ``path[1]`` (``position=1``)."""
+    return (
+        _signed_nack(
+            target=target, path=path, route_id=route_id, stale_pub=stale_pub, position=1
+        )
+        | overrides
+    )
+
+
+async def _deliver_to_origin(a: _Node, nack: dict[str, Any]) -> None:
+    await a.handler._on_route_stale(
+        _nack_event(nack, from_instance=nack["path"][1], to_instance=a.instance_id)
+    )
+
+
+_RETRANSMIT_MSG = "invalidated, rediscovered, retransmitted"
+
+
+async def test_route_stale_at_origin_verifies_invalidates_and_retransmits_once(
+    caplog,
+):
+    """End to end: origin seals under a stale target key → target nacks →
+    relay forwards → origin verifies against the pk it pinned at discovery,
+    invalidates, rediscovers, and re-ships the SAME inner event once. The
+    retransmit (sealed under the fresh key) unwraps at the target."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    fresh_pub = _mint_target_eph(c)
+    rs.discovery = (list(path), fresh_pub)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, payload = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+    assert rs.invalidated == [c.instance_id]
+    assert rs.discover_calls == [c.instance_id]
+    routed = _routed_sends(a)
+    assert len(routed) == 2, "expected the original + exactly one retransmit"
+    new_route_id = routed[1]["payload"]["route_id"]
+    assert new_route_id != route_id
+    assert routed[1]["payload"]["inner_event_type"] == "space_post_created"
+    assert routed[1]["payload"]["path"] == path
+    assert routed[1]["payload"]["sealed"]["target_eph_pk"] == fresh_pub
+    # The retransmit carried the identical inner event to the target.
+    assert [e.event_type for e in c.dispatched] == [
+        FederationEventType.SPACE_POST_CREATED
+    ]
+    assert c.dispatched[0].payload == payload
+    assert c.dispatched[0].from_instance == a.instance_id
+    assert c.dispatched[0].routed_route_id == new_route_id
+    # Bookkeeping: the nacked entry is gone, the retry is marked as such.
+    assert route_id not in a.handler._pending_routed
+    retry = a.handler._pending_routed[new_route_id]
+    assert retry.is_retry is True
+    assert retry.inner_payload == payload
+    assert retry.target_identity_pk == c.fed.own_identity_pk.hex()
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        _RETRANSMIT_MSG in r.message
+        and route_id[:8] in r.message
+        and new_route_id[:8] in r.message
+        and c.instance_id in r.message
+        and "space_post_created" in r.message
+        for r in infos
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_unknown_route_id_is_dropped(caplog):
+    """A nack for a route_id we never sent: no invalidate, no rediscover."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    _dead_priv, dead_pub = routed_crypto.generate_ephemeral_keypair()
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await _deliver_to_origin(
+            a, _origin_nack(target=c, path=path, route_id="r-never", stale_pub=dead_pub)
+        )
+    assert rs.invalidated == []
+    assert rs.discover_calls == []
+    assert a.fed.sent == []
+    assert any(
+        r.levelno == logging.DEBUG and "no pending routed send" in r.message
+        for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_expired_pending_is_dropped():
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    a.handler._pending_routed[route_id] = dataclasses.replace(
+        a.handler._pending_routed[route_id], expires_at=time.monotonic() - 1.0
+    )
+    await _deliver_to_origin(
+        a, _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    )
+    assert rs.invalidated == []
+    assert rs.discover_calls == []
+
+
+async def test_route_stale_at_origin_target_mismatch_is_dropped(caplog):
+    """Our route_id, but the nack names a different (self-consistent)
+    target at ``path[-1]`` — dropped before any key material is touched."""
+    nodes = _build_identity_chain(4)
+    a, b, c, d = nodes
+    rs = _FakeRouteService()
+    rs.pins[c.instance_id] = c.fed.own_identity_pk.hex()
+    a.handler.attach_route_service(rs)  # type: ignore[arg-type]
+    a.fed.peers.clear()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    # Signed by d, carrying d's pk, path ending at d: passes every relay
+    # structural check, but we sent this route_id to c.
+    other_path = [a.instance_id, b.instance_id, d.instance_id]
+    with (
+        patch.object(routed_crypto, "verify_route_stale") as verify,
+        caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
+    ):
+        await _deliver_to_origin(
+            a,
+            _origin_nack(
+                target=d, path=other_path, route_id=route_id, stale_pub=dead_pub
+            ),
+        )
+    verify.assert_not_called()
+    assert rs.invalidated == []
+    assert route_id in a.handler._pending_routed
+    assert any("different target" in r.message for r in caplog.records)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_pinned_pk_mismatch_drops_before_signature(
+    caplog,
+):
+    """The pk we pinned at discovery is the authority. A nack whose
+    ``target_identity_pk`` differs from the pin is dropped BEFORE the
+    signature is even checked (simulated by pinning a foreign key)."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    foreign = generate_identity_keypair()
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=foreign.public_key.hex()
+    )
+    genuine = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with (
+        patch.object(routed_crypto, "verify_route_stale") as verify,
+        caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
+    ):
+        await _deliver_to_origin(a, genuine)
+    verify.assert_not_called()
+    assert rs.invalidated == []
+    assert rs.discover_calls == []
+    assert route_id in a.handler._pending_routed
+    assert any("pinned" in r.message for r in caplog.records)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_empty_pin_falls_back_to_derive_binding(caplog):
+    """A legacy caller that passed no pin: the nack is still bound to the
+    target by ``derive_instance_id`` and the signature — an empty pin is
+    never acceptance on its own (a forged signature is still rejected)."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(a, path, pin=None)
+    attacker = generate_identity_keypair()
+    forged = _origin_nack(
+        target=c,
+        path=path,
+        route_id=route_id,
+        stale_pub=dead_pub,
+        sig=routed_crypto.sign_route_stale(
+            seed=attacker.private_key, route_id=route_id, stale_eph_pk_b64=dead_pub
+        ),
+    )
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await _deliver_to_origin(a, forged)
+    assert rs.invalidated == []
+    assert route_id in a.handler._pending_routed
+    # Genuine nack (delivered directly: the hop-level dedup already burned
+    # this route_id) is accepted, with the missing pin noted at DEBUG.
+    genuine = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await a.handler._on_route_stale_at_origin(
+            event=_nack_event(
+                genuine, from_instance=b.instance_id, to_instance=a.instance_id
+            ),
+            route_id=route_id,
+            path=path,
+            target_identity_pk=genuine["target_identity_pk"],
+            stale_eph_pk=dead_pub,
+            sig=genuine["sig"],
+            sig_suite=genuine["sig_suite"],
+        )
+    assert rs.invalidated == [c.instance_id]
+    assert any(
+        r.levelno == logging.DEBUG and "pin" in r.message and "unavailable" in r.message
+        for r in caplog.records
+    )
+
+
+async def test_route_stale_at_origin_forged_signature_is_dropped(caplog):
+    """Attacker key, target's pk carried verbatim (passes relay checks and
+    the pin check) → signature fails → no invalidate, pending kept."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    attacker = generate_identity_keypair()
+    forged = _origin_nack(
+        target=c,
+        path=path,
+        route_id=route_id,
+        stale_pub=dead_pub,
+        sig=routed_crypto.sign_route_stale(
+            seed=attacker.private_key, route_id=route_id, stale_eph_pk_b64=dead_pub
+        ),
+    )
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await _deliver_to_origin(a, forged)
+    assert rs.invalidated == []
+    assert rs.discover_calls == []
+    assert route_id in a.handler._pending_routed
+    assert any(
+        r.levelno == logging.INFO and "signature" in r.message for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_unknown_sig_suite_is_dropped(caplog):
+    """``UnsupportedRouteStaleSuite`` is raised inside and swallowed — no
+    default-algorithm fallback, no invalidate."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    nack = _origin_nack(
+        target=c,
+        path=path,
+        route_id=route_id,
+        stale_pub=dead_pub,
+        sig_suite="ed25519+mldsa65",
+    )
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await _deliver_to_origin(a, nack)
+    assert rs.invalidated == []
+    assert route_id in a.handler._pending_routed
+    assert any("sig_suite" in r.message for r in caplog.records)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_malformed_identity_hex_is_dropped():
+    """Defence in depth below the relay's hex check: a bad pk at the origin
+    branch itself is a drop, not a raise."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(a, path, pin=None)
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    await a.handler._on_route_stale_at_origin(
+        event=_nack_event(nack, from_instance=b.instance_id, to_instance=a.instance_id),
+        route_id=route_id,
+        path=path,
+        target_identity_pk="zz",
+        stale_eph_pk=dead_pub,
+        sig=nack["sig"],
+        sig_suite=nack["sig_suite"],
+    )
+    assert rs.invalidated == []
+    assert route_id in a.handler._pending_routed
+
+
+async def test_route_stale_at_origin_replay_is_a_noop():
+    """The pending entry is popped on the first valid nack — a replayed copy
+    (bypassing the hop-level dedup) finds nothing: one invalidate, one
+    rediscover, one retransmit."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    rs.discovery = (list(path), _mint_target_eph(c))
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    kwargs = dict(
+        event=_nack_event(nack, from_instance=b.instance_id, to_instance=a.instance_id),
+        route_id=route_id,
+        path=path,
+        target_identity_pk=nack["target_identity_pk"],
+        stale_eph_pk=dead_pub,
+        sig=nack["sig"],
+        sig_suite=nack["sig_suite"],
+    )
+    await a.handler._on_route_stale_at_origin(**kwargs)
+    await a.handler._on_route_stale_at_origin(**kwargs)
+    assert rs.invalidated == [c.instance_id]
+    assert rs.discover_calls == [c.instance_id]
+    assert len(_routed_sends(a)) == 2  # original + one retransmit
+    assert route_id not in a.handler._pending_routed
+
+
+async def test_route_stale_at_origin_nacked_retry_gives_up(caplog):
+    """Rediscovery hands back another dead key → the retransmit is nacked
+    too → invalidated again but no third send (≤ 2 attempts per original)."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    _dead2_priv, dead2_pub = routed_crypto.generate_ephemeral_keypair()
+    rs.discovery = (list(path), dead2_pub)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+    routed = _routed_sends(a)
+    assert len(routed) == 2
+    new_route_id = routed[1]["payload"]["route_id"]
+    assert rs.invalidated == [c.instance_id, c.instance_id]
+    assert rs.discover_calls == [c.instance_id]
+    assert new_route_id not in a.handler._pending_routed
+    assert c.dispatched == []
+    assert any(
+        r.levelno == logging.INFO
+        and "giving up" in r.message
+        and new_route_id[:8] in r.message
+        for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_oversized_inner_invalidates_without_retransmit(
+    caplog,
+):
+    """An inner over ``_MAX_RETAINED_INNER_BYTES`` is retained with
+    ``inner_payload=None`` — the nack still invalidates the route, but
+    nothing is retransmitted (the durable outbox re-sends media chunks)."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    rs.discovery = (list(path), _mint_target_eph(c))
+    big = {"chunk": "x" * (_MAX_RETAINED_INNER_BYTES + 1)}
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, payload=big, pin=c.fed.own_identity_pk.hex()
+        )
+        pending = a.handler._pending_routed[route_id]
+        assert pending.inner_payload is None
+        assert pending.target_instance_id == c.instance_id
+        await _settle()
+    assert rs.invalidated == [c.instance_id]
+    assert rs.discover_calls == []
+    assert len(_routed_sends(a)) == 1
+    assert route_id not in a.handler._pending_routed
+    assert any(
+        r.levelno == logging.INFO and "oversized" in r.message for r in caplog.records
+    )
+
+
+async def test_route_stale_at_origin_small_inner_is_retained_intact():
+    a, b, c, _rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    payload = {"k": "v", "n": [1, 2, 3]}
+    route_id, _dead, _ = await _send_under_dead_key(
+        a, path, payload=payload, pin=c.fed.own_identity_pk.hex()
+    )
+    pending = a.handler._pending_routed[route_id]
+    assert pending.inner_payload == payload
+    assert pending.inner_payload is not payload, "retain a copy, not the caller's dict"
+    assert pending.inner_event_type is FederationEventType.SPACE_POST_CREATED
+    assert pending.is_retry is False
+    assert pending.expires_at > time.monotonic()
+
+
+async def test_route_stale_at_origin_nack_storm_collapses_into_one_flood():
+    """Amplification bound: 20 valid nacks for 20 route_ids to one target,
+    concurrently → a REAL ``discover_route`` single-flights them into one
+    ``_flood_discover``; retransmits are one per original (20), never more."""
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    rs = RouteDiscoveryService(
+        federation_service=a.fed,  # type: ignore[arg-type]
+        federation_repo=a.repo,  # type: ignore[arg-type]
+    )
+    a.handler.attach_route_service(rs)
+    fresh_pub = _mint_target_eph(c)
+
+    async def _slow_flood(**_kw: Any) -> tuple[list[str], str]:
+        await asyncio.sleep(0.01)
+        return list(path), fresh_pub
+
+    flood = AsyncMock(side_effect=_slow_flood)
+    sent: list[tuple[str, str]] = []
+    for i in range(20):
+        route_id, dead_pub, _ = await _send_under_dead_key(
+            a,
+            path,
+            payload={"post_id": f"p{i}"},
+            pin=c.fed.own_identity_pk.hex(),
+        )
+        sent.append((route_id, dead_pub))
+    assert len(_routed_sends(a)) == 20
+
+    async def _nack(route_id: str, dead_pub: str) -> None:
+        nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+        await a.handler._on_route_stale_at_origin(
+            event=_nack_event(
+                nack, from_instance=b.instance_id, to_instance=a.instance_id
+            ),
+            route_id=route_id,
+            path=path,
+            target_identity_pk=nack["target_identity_pk"],
+            stale_eph_pk=dead_pub,
+            sig=nack["sig"],
+            sig_suite=nack["sig_suite"],
+        )
+
+    with patch.object(RouteDiscoveryService, "_flood_discover", flood):
+        await asyncio.gather(*(_nack(r, d) for r, d in sent))
+    assert flood.await_count == 1, "nack storm was not collapsed into one flood"
+    routed = _routed_sends(a)
+    assert len(routed) == 40  # 20 originals + exactly one retransmit each
+    retransmitted = sorted(
+        json.loads(
+            routed_crypto.unseal_inner_payload(
+                sealed=s["payload"]["sealed"],
+                target_eph_priv_b64=c.target_eph_store[fresh_pub],
+                route_id=s["payload"]["route_id"],
+                inner_event_type=s["payload"]["inner_event_type"],
+            )
+        )["post_id"]
+        for s in routed[20:]
+    )
+    assert retransmitted == sorted(f"p{i}" for i in range(20))
+    assert all(
+        a.handler._pending_routed[s["payload"]["route_id"]].is_retry
+        for s in routed[20:]
+    )
+
+
+async def test_route_stale_at_origin_no_route_on_rediscovery_gives_up(caplog):
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+    assert rs.invalidated == [c.instance_id]
+    assert rs.discover_calls == [c.instance_id]
+    assert len(_routed_sends(a)) == 1
+    assert route_id not in a.handler._pending_routed
+    assert any(
+        r.levelno == logging.INFO
+        and "no route" in r.message
+        and route_id[:8] in r.message
+        for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_without_route_service_logs_and_returns(caplog):
+    """Verified nack but ``attach_route_service`` never ran: the pending
+    entry is consumed, nothing is invalidated or re-sent, nothing raises."""
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+    assert len(_routed_sends(a)) == 1
+    assert route_id not in a.handler._pending_routed
+    assert any(
+        r.levelno == logging.INFO and "no route service" in r.message
+        for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_retransmit_failure_is_a_warning(caplog):
+    """A transport failure on the retransmit is the ONE warning-worthy
+    outcome — logged with the traceback, never raised into the dispatcher."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    rs.discovery = (list(path), _mint_target_eph(c))
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+
+    async def _boom(**_kw: Any) -> None:
+        raise RuntimeError("transport down")
+
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with (
+        patch.object(a.fed, "send_event", _boom),
+        caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
+    ):
+        await _deliver_to_origin(a, nack)
+    assert rs.invalidated == [c.instance_id]
+    assert any(
+        r.levelno == logging.WARNING
+        and "retransmit" in r.message
+        and r.exc_info is not None
+        for r in caplog.records
+    )
+
+
+def test_pending_routed_is_pruned_by_expiry_and_capped():
+    a, *_ = _build_identity_chain(1)
+    h = a.handler
+    now = time.monotonic()
+
+    def _entry(expires_at: float):
+        return dataclasses.replace(_pending_template(), expires_at=expires_at)
+
+    h._pending_routed["old"] = _entry(now - 1.0)
+    for i in range(_MAX_PENDING_ROUTED + 5):
+        h._pending_routed[f"r{i}"] = _entry(now + 10.0 + i)
+    h._prune_expired(now)
+    assert "old" not in h._pending_routed
+    assert len(h._pending_routed) == _MAX_PENDING_ROUTED
+    # Oldest-by-expiry evicted first: the 5 lowest indices are gone.
+    assert "r0" not in h._pending_routed and "r4" not in h._pending_routed
+    assert f"r{_MAX_PENDING_ROUTED + 4}" in h._pending_routed
+
+
+def _pending_template() -> _PendingRouted:
+    return _PendingRouted(
+        target_instance_id="t",
+        target_identity_pk="",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={},
+        is_retry=False,
+        expires_at=0.0,
+    )
+
+
+async def test_route_stale_at_origin_empty_pin_rejects_pk_deriving_elsewhere(caplog):
+    """Empty pin + a pk that derives to a different instance than the one we
+    sent to (direct call: the relay step would normally shed this via
+    ``path[-1]``) — the fallback derive binding is against OUR record."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(a, path, pin=None)
+    other = generate_identity_keypair()
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await a.handler._on_route_stale_at_origin(
+            event=_nack_event(
+                nack, from_instance=b.instance_id, to_instance=a.instance_id
+            ),
+            route_id=route_id,
+            path=path,
+            target_identity_pk=other.public_key.hex(),
+            stale_eph_pk=dead_pub,
+            sig=nack["sig"],
+            sig_suite=nack["sig_suite"],
+        )
+    assert rs.invalidated == []
+    assert route_id in a.handler._pending_routed
+    assert any("not our target" in r.message for r in caplog.records)
+
+
+async def test_route_stale_at_origin_matching_but_malformed_pin_is_dropped(caplog):
+    """Defensive: a pin that matches the carried pk but is not valid hex
+    cannot be verified — ``ValueError`` from decode is a drop, not a raise."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, dead_pub, _ = await _send_under_dead_key(a, path, pin="zz")
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await a.handler._on_route_stale_at_origin(
+            event=_nack_event(
+                nack, from_instance=b.instance_id, to_instance=a.instance_id
+            ),
+            route_id=route_id,
+            path=path,
+            target_identity_pk="zz",
+            stale_eph_pk=dead_pub,
+            sig=nack["sig"],
+            sig_suite=nack["sig_suite"],
+        )
+    assert rs.invalidated == []
+    assert route_id in a.handler._pending_routed
+    assert any("malformed target_identity_pk" in r.message for r in caplog.records)

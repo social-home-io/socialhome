@@ -506,6 +506,10 @@ class FederationService:
         """
         self._route_service = route_service
         self._routed_handler = routed_handler
+        # The handler needs the discovery service to honour a verified
+        # SPACE_ROUTE_STALE nack (invalidate + rediscover); this is the one
+        # place that holds both halves.
+        routed_handler.attach_route_service(route_service)
 
     def attach_gfs_connection_service(self, gfs_connection_service) -> None:
         """Attach :class:`GfsConnectionService` so spec §24.10.7 works.
@@ -1075,12 +1079,16 @@ class FederationService:
                 ok=False,
                 error="no_route",
             )
+        # The pk discovery just verified for this target rides along so a
+        # SPACE_ROUTE_STALE nack is checked against the key WE pinned.
+        pinned_pk = self._route_service.cached_target_identity_pk(to_instance_id) or ""
         try:
             await self._routed_handler.send_routed(
                 path=path,
                 target_eph_pk_b64=target_eph_pk,
                 inner_event_type=event_type,
                 inner_payload=payload,
+                target_identity_pk=pinned_pk,
             )
         except Exception as exc:
             # The cached path is the prime suspect — a relay that has since
@@ -1114,6 +1122,10 @@ class FederationService:
                     target_eph_pk_b64=retry_eph,
                     inner_event_type=event_type,
                     inner_payload=payload,
+                    target_identity_pk=(
+                        self._route_service.cached_target_identity_pk(to_instance_id)
+                        or ""
+                    ),
                 )
             except Exception as retry_exc:
                 log.warning(

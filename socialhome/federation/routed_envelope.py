@@ -56,6 +56,14 @@ verification; the origin is the enforcement point. Gated per hop on
 :data:`FederationCapability.MIN_FOR_ROUTE_STALE_NACK` so a pre-v_28
 peer sees exactly today's silent drop. Payload is routing/validation
 fields only — no content, per the encryption-first rule.
+
+At the origin (:meth:`SpaceRoutedHandler._on_route_stale_at_origin`)
+every ``send_routed`` leaves a :class:`_PendingRouted` record (target,
+the identity pk pinned at discovery, the inner event) for the ephemeral
+window. A nack is honoured only if it names a route_id we sent, ends at
+that record's target, carries the pinned identity pk, and verifies
+under it — then the route is invalidated, rediscovered, and the inner
+event retransmitted exactly once (a nacked retry gives up).
 """
 
 from __future__ import annotations
@@ -65,6 +73,7 @@ import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..crypto import derive_instance_id
@@ -76,6 +85,7 @@ from .route_discovery import cap_by_expiry
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from .federation_service import FederationService
+    from .route_discovery import RouteDiscoveryService
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +120,46 @@ _DEFAULT_EPH_TTL_S: float = 60.0
 #: gate already bound this, but a length cap closes the amplification tail.
 _MAX_ROUTED_PATH_LEN: int = 8
 
+#: Largest inner payload (compact JSON, bytes) the origin keeps around for a
+#: possible ``SPACE_ROUTE_STALE`` retransmit. Anything bigger is a media
+#: chunk: those ride the durable ``space_media_outbox``, which re-discovers
+#: the route on its own next retry, so retaining them here would only
+#: duplicate bytes in RAM. An oversized send still gets a pending record
+#: (with ``inner_payload=None``) so the nack can invalidate the route.
+_MAX_RETAINED_INNER_BYTES: int = 64 * 1024
+
+#: Ceiling on ``_pending_routed`` entries. Each is bounded by
+#: ``_MAX_RETAINED_INNER_BYTES``, so this caps the retained-inner memory at
+#: ~128 MiB worst case while comfortably covering the sends a household
+#: makes inside one ephemeral window (60 s). Eviction is oldest-expiry-first
+#: via :func:`cap_by_expiry`, same as every other dict in this handler.
+_MAX_PENDING_ROUTED: int = 2000
+
+
+@dataclass(slots=True, frozen=True)
+class _PendingRouted:
+    """Handler-local DTO — what the origin retains per ``send_routed`` so a
+    verified ``SPACE_ROUTE_STALE`` nack can invalidate + retransmit.
+
+    Lives here (not in ``domain/``) for the same reason
+    ``route_discovery._CachedRoute`` does: it is in-RAM bookkeeping that
+    never leaves :class:`SpaceRoutedHandler` — no wire shape, no row shape,
+    no consumer outside this module.
+    """
+
+    #: ``path[-1]`` of the send; a nack must end at this instance.
+    target_instance_id: str
+    #: Hex identity pk pinned at discovery (``""`` when the caller had
+    #: none) — the key a nack's ``target_identity_pk`` must equal.
+    target_identity_pk: str
+    inner_event_type: FederationEventType
+    #: Copy of the inner payload, or ``None`` when it exceeded
+    #: :data:`_MAX_RETAINED_INNER_BYTES` (invalidate-only, no retransmit).
+    inner_payload: dict | None
+    #: True when this send IS the one retransmit — a nack for it gives up.
+    is_retry: bool
+    expires_at: float
+
 
 class SpaceRoutedHandler:
     """Wraps + unwraps :data:`FederationEventType.SPACE_ROUTED`."""
@@ -125,6 +175,8 @@ class SpaceRoutedHandler:
         "_seen_nacks",
         "_origin_eph_state",
         "_reply_eph_state",
+        "_pending_routed",
+        "_route_service",
     )
 
     def __init__(
@@ -164,8 +216,22 @@ class SpaceRoutedHandler:
         #: so the target can seal the ACK back to the origin without a
         #: second discovery probe.
         self._reply_eph_state: dict[str, tuple[str, str, str, list[str], float]] = {}
+        #: Origin-side: ``route_id`` → what we need to honour a
+        #: ``SPACE_ROUTE_STALE`` nack for that send. TTL ``eph_ttl_s`` —
+        #: a nack has to arrive inside the ephemeral window anyway — and
+        #: capped at :data:`_MAX_PENDING_ROUTED`.
+        self._pending_routed: dict[str, _PendingRouted] = {}
+        #: Set by :meth:`attach_route_service` (called from
+        #: ``FederationService.attach_mesh``). ``None`` → a verified nack
+        #: is consumed but nothing is invalidated or retransmitted.
+        self._route_service: RouteDiscoveryService | None = None
 
     # ── Attach ─────────────────────────────────────────────────────────
+
+    def attach_route_service(self, route_service: "RouteDiscoveryService") -> None:
+        """Give the handler the discovery service so a verified
+        ``SPACE_ROUTE_STALE`` nack can invalidate + rediscover the route."""
+        self._route_service = route_service
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry  # noqa: SLF001
@@ -187,6 +253,8 @@ class SpaceRoutedHandler:
         target_eph_pk_b64: str,
         inner_event_type: FederationEventType,
         inner_payload: dict,
+        target_identity_pk: str = "",
+        is_retry: bool = False,
     ) -> str:
         """Ship ``inner_event_type`` along ``path`` (origin → … → target).
 
@@ -195,6 +263,15 @@ class SpaceRoutedHandler:
         ephemeral X25519 public key — obtained from
         :meth:`RouteDiscoveryService.discover_route` — under which the
         inner payload is sealed.
+
+        ``target_identity_pk`` is the hex identity pk the discovery
+        service pinned for ``path[-1]``
+        (:meth:`RouteDiscoveryService.cached_target_identity_pk`); a
+        ``SPACE_ROUTE_STALE`` nack for this send must carry exactly that
+        key. ``""`` (legacy callers) falls back to the ``derive_instance_id``
+        binding alone. ``is_retry`` marks the single retransmit the origin
+        makes after a nack, so a nack for the retransmit gives up instead
+        of looping.
 
         Returns the generated ``route_id`` so the caller can correlate
         the eventual reply (the reply arrives via the dispatcher with
@@ -232,6 +309,20 @@ class SpaceRoutedHandler:
             origin_priv_b64,
             origin_pub_b64,
             now + self._eph_ttl_s,
+        )
+        # Retain what a SPACE_ROUTE_STALE nack needs. Measured on the
+        # compact JSON already built for the seal (the same bytes that go
+        # on the wire); over the cap → invalidate-only record.
+        retained: dict | None = dict(inner_payload)
+        if len(inner_payload_json.encode()) > _MAX_RETAINED_INNER_BYTES:
+            retained = None
+        self._pending_routed[route_id] = _PendingRouted(
+            target_instance_id=path[-1],
+            target_identity_pk=target_identity_pk,
+            inner_event_type=inner_event_type,
+            inner_payload=retained,
+            is_retry=is_retry,
+            expires_at=now + self._eph_ttl_s,
         )
         # Origin-side dedup: if this same route_id loops back to us
         # (shouldn't happen with a valid path, but defensive), drop.
@@ -897,17 +988,192 @@ class SpaceRoutedHandler:
         sig: str,
         sig_suite: str,
     ) -> None:
-        """Origin-side handling of a ``SPACE_ROUTE_STALE`` nack.
+        """Origin-side handling of a ``SPACE_ROUTE_STALE`` nack — the
+        enforcement point.
 
-        # T3 — stub. T3 verifies ``sig`` against ``target_identity_pk``
-        # via :func:`routed_crypto.verify_route_stale` (rejecting unknown
-        # ``sig_suite``), then evicts the route-cache entry for
-        # ``path[-1]`` whose ``target_eph_pk == stale_eph_pk`` so the
-        # next send re-discovers. Until then: log and return.
+        :meth:`_on_route_stale` has already checked the structural
+        invariants (path cap, position, ``path[position] == sender``,
+        ``path[0] == self``, ``derive_instance_id(pk) == path[-1]``,
+        hop-level dedup). This method does the origin-only work, in
+        order, each step a fail-closed drop:
+
+        1. ``route_id`` names a live :class:`_PendingRouted` — bounds
+           replay to the ephemeral window; a nack for a send we never
+           made is a no-op.
+        2. ``path[-1]`` is that record's target.
+        3. ``target_identity_pk`` equals the pk *we* pinned at discovery
+           (second, independent binding — the relay check only proved
+           the carried pk derives to ``path[-1]``). An empty pin (legacy
+           caller) falls back to re-deriving against the record's target.
+        4. The Ed25519 signature verifies; an unknown ``sig_suite`` is a
+           hard reject, never a fallback.
+        5. Pop the record — one nack per envelope.
+        6. Invalidate the cached route.
+        7. Retransmit the retained inner once (never for a nacked retry,
+           never for an oversized inner, never without a fresh route).
+
+        Drops of expected attacker / replay input log at DEBUG or INFO;
+        WARNING is reserved for a send failure. Never raises.
         """
-        log.debug(
-            "SPACE_ROUTE_STALE route_id=%s reached origin (handling lands in T3)",
+        now = time.monotonic()
+        pending = self._pending_routed.get(route_id)
+        if pending is None or pending.expires_at <= now:
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s from %s: no pending routed send for"
+                " this route_id (not ours / too old); ignoring",
+                route_id[:8],
+                event.from_instance,
+            )
+            return
+        target = pending.target_instance_id
+        if path[-1] != target:
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: names a different target"
+                " (path[-1]=%s, we sent to %s); ignoring",
+                route_id[:8],
+                path[-1],
+                target,
+            )
+            return
+        if pending.target_identity_pk:
+            if target_identity_pk != pending.target_identity_pk:
+                log.debug(
+                    "SPACE_ROUTE_STALE route_id=%s: target_identity_pk differs from"
+                    " the key pinned at discovery for %s; ignoring",
+                    route_id[:8],
+                    target,
+                )
+                return
+        else:
+            # No pin available for this send (a caller predating the
+            # pin): the derive binding to OUR recorded target is the
+            # only key binding left — re-check it here rather than lean
+            # on the relay step alone. Never acceptance on its own; the
+            # signature check below still has to pass.
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: identity pin unavailable for"
+                " this send; relying on derive_instance_id + signature",
+                route_id[:8],
+            )
+            try:
+                derived = derive_instance_id(bytes.fromhex(target_identity_pk))
+            except ValueError:
+                log.debug(
+                    "SPACE_ROUTE_STALE route_id=%s: malformed target_identity_pk;"
+                    " ignoring",
+                    route_id[:8],
+                )
+                return
+            if derived != target:
+                log.debug(
+                    "SPACE_ROUTE_STALE route_id=%s: target_identity_pk derives to"
+                    " %s, not our target %s; ignoring",
+                    route_id[:8],
+                    derived,
+                    target,
+                )
+                return
+        try:
+            verified = routed_crypto.verify_route_stale(
+                identity_pk=bytes.fromhex(target_identity_pk),
+                route_id=route_id,
+                stale_eph_pk_b64=stale_eph_pk,
+                sig_b64=sig,
+                sig_suite=sig_suite,
+            )
+        except routed_crypto.UnsupportedRouteStaleSuite:
+            log.info(
+                "SPACE_ROUTE_STALE route_id=%s: unsupported sig_suite=%r;"
+                " ignoring (no fallback)",
+                route_id[:8],
+                sig_suite,
+            )
+            return
+        except ValueError:
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: malformed target_identity_pk; ignoring",
+                route_id[:8],
+            )
+            return
+        if not verified:
+            log.info(
+                "SPACE_ROUTE_STALE route_id=%s: signature does not verify under the"
+                " target identity for %s; ignoring",
+                route_id[:8],
+                target,
+            )
+            return
+        # Verified. One nack per envelope: consume the record before any
+        # await so a concurrent duplicate finds nothing.
+        self._pending_routed.pop(route_id, None)
+        route_service = self._route_service
+        if route_service is None:
+            log.info(
+                "SPACE_ROUTE_STALE route_id=%s: verified for %s but no route"
+                " service attached; route not invalidated",
+                route_id[:8],
+                target,
+            )
+            return
+        try:
+            await route_service.invalidate(target)
+            if pending.is_retry:
+                log.info(
+                    "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated; retry"
+                    " also nacked, giving up on %s",
+                    route_id[:8],
+                    target,
+                    pending.inner_event_type.value,
+                )
+                return
+            if pending.inner_payload is None:
+                log.info(
+                    "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated;"
+                    " oversized inner %s not retransmitted (durable outbox will"
+                    " retry)",
+                    route_id[:8],
+                    target,
+                    pending.inner_event_type.value,
+                )
+                return
+            # ``discover_route`` single-flights per target and honours the
+            # negative cooldown, so a burst of nacks for one target costs
+            # one flood.
+            discovery = await route_service.discover_route(target)
+            if discovery is None or len(discovery[0]) < 2:
+                log.info(
+                    "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated; no"
+                    " route on rediscovery, giving up on %s",
+                    route_id[:8],
+                    target,
+                    pending.inner_event_type.value,
+                )
+                return
+            new_path, new_eph = discovery
+            new_route_id = await self.send_routed(
+                path=new_path,
+                target_eph_pk_b64=new_eph,
+                inner_event_type=pending.inner_event_type,
+                inner_payload=pending.inner_payload,
+                target_identity_pk=route_service.cached_target_identity_pk(target)
+                or "",
+                is_retry=True,
+            )
+        except Exception:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: rediscover/retransmit to %s failed",
+                route_id[:8],
+                target,
+                exc_info=True,
+            )
+            return
+        log.info(
+            "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated, rediscovered,"
+            " retransmitted %s as route_id=%s",
             route_id[:8],
+            target,
+            pending.inner_event_type.value,
+            new_route_id[:8],
         )
 
     # ── Helpers ────────────────────────────────────────────────────────
@@ -939,4 +1205,10 @@ class SpaceRoutedHandler:
             self._reply_eph_state = cap_by_expiry(
                 {k: v for k, v in self._reply_eph_state.items() if v[4] > now},
                 key=lambda kv: kv[1][4],
+            )
+        if self._pending_routed:
+            self._pending_routed = cap_by_expiry(
+                {k: v for k, v in self._pending_routed.items() if v.expires_at > now},
+                key=lambda kv: kv[1].expires_at,
+                cap=_MAX_PENDING_ROUTED,
             )
