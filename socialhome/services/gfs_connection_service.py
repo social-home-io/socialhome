@@ -358,6 +358,9 @@ class GfsConnectionService:
         wired) or no local space row to describe MUST NOT send an
         unsigned / metadata-less body — it raises :class:`GfsConnectionError`
         instead. A signed body is the only thing the GFS will accept.
+
+        The body carries a signed ``ts`` so the GFS can replay-guard it — the
+        publish that restores an owner-withdrawn listing must be fresh.
         """
         if (
             self._space_repo is None
@@ -398,6 +401,14 @@ class GfsConnectionService:
             # delegated admin) without learning the space content. Inside the
             # already-signed canonical body — no new signing step.
             "identity_public_key": space.identity_public_key or "",
+            # A signed, tz-aware timestamp inside the canonical body: it makes
+            # this publish a FRESH statement of intent, replay-guarded ±300 s
+            # on the GFS side. Only a publish carrying one may clear an
+            # earlier owner withdrawal — without it a captured body could
+            # re-list a space its owner deliberately delisted. The GFS still
+            # accepts a body without ``ts`` (older households keep publishing
+            # and refreshing metadata); see ``GfsFederationService.publish_space``.
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
         canonical = json.dumps(
             body,

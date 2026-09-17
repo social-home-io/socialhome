@@ -45,7 +45,13 @@ The Social Home ↔ GFS link is split by direction:
     **distinct, reversible state** from a moderator ban: it sets `withdrawn` and
     never touches `status`, so the owner's next signed publish restores the
     listing, while a GFS admin's `status='banned'` stays sticky against
-    re-publish. Withdrawal affects **discoverability only** — the space drops
+    re-publish. The restoring publish must be **fresh**: `publish` carries an
+    optional `ts` inside its signed canonical body, replay-guarded ±300 s, and
+    only a publish carrying one clears `withdrawn`. A publish without `ts` (an
+    older household, kept working on purpose so an upgraded GFS doesn't 403
+    the whole fleet) still refreshes metadata but leaves `withdrawn` as-is —
+    otherwise one captured publish body would re-list a delisted space forever.
+    Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
     off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
     the relay (`publish`) and existing subscribers are untouched.
   - `spaces/{id}/publish` additionally carries the space's Ed25519

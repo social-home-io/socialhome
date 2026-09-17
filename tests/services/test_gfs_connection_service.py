@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import aiohttp
 import pytest
@@ -92,8 +93,6 @@ class _StubSession:
 
     def delete(self, url, **kw):
         self.calls.append(("DELETE", url))
-        if "json" in kw:
-            self._last_body = kw["json"]
         return self._resp("DELETE")
 
 
@@ -1049,6 +1048,54 @@ async def test_publish_body_carries_metadata_and_signature(env):
     # Phase 5a: the publish body ships the space's Ed25519 authority verify key
     # so the GFS can TOFU-pin it for space-authority-signed relays.
     assert body["identity_public_key"] == "aa" * 32
+    sig_b64 = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))
+
+
+async def test_publish_body_carries_fresh_signed_ts(env):
+    """The publish body ships a tz-aware ``ts`` INSIDE the signed canonical
+    bytes, so the GFS can replay-guard it — only such a fresh publish may
+    restore a listing the owner previously withdrew."""
+    from socialhome.domain.space import (
+        JoinMode,
+        Space,
+        SpaceFeatures,
+        SpaceType,
+    )
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+    db, conn_repo = env
+    await conn_repo.save(_make_conn("gfs-ts", inbox_url="https://gfs.example"))
+    space_repo = SqliteSpaceRepo(db)
+    await space_repo.save(
+        Space(
+            id="sp-ts",
+            name="Timestamped",
+            owner_instance_id="alpha.home",
+            owner_username="alice",
+            identity_public_key="aa" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    kp = generate_identity_keypair()
+    session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
+    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=space_repo,
+        own_instance_id="alpha.home",
+        own_signing_key=kp.private_key,
+    )
+    await svc.publish_space("sp-ts", "gfs-ts")
+
+    body = session._last_body  # type: ignore[attr-defined]
+    parsed = datetime.fromisoformat(body["ts"])
+    assert parsed.tzinfo is not None, "ts must be tz-aware (a naive one is rejected)"
+    assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 60
+    # ``ts`` is covered by the signature, not bolted on beside it.
     sig_b64 = body.pop("signature")
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))

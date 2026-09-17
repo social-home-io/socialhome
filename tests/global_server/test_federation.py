@@ -797,6 +797,21 @@ def _sign_authority(space_seed: bytes, *, space_id: str, payload: dict) -> dict:
     )
 
 
+def _sign_authority_subscribers_query(
+    space_seed: bytes, *, space_id: str, ts: str
+) -> dict:
+    """Authority-sig wire fields for a subscribers-list query."""
+    from socialhome.authority_sig import AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY
+    from socialhome.services.space_crypto_service import sign_authority_event
+
+    return sign_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
+        space_id=space_id,
+        payload={"space_id": space_id, "ts": ts},
+        space_seed=space_seed,
+    )
+
+
 async def _setup_authority_relay(svc, *, space_id: str):
     """Owner publishes a space pinning a SPACE authority pubkey; a separate
     non-owner (delegated-admin) household registers + subscribes a third
@@ -1063,6 +1078,85 @@ async def test_publish_event_null_pinned_pubkey_non_owner_rejected(svc):
             payload,
             "admin-null",
             transport_sig,
+        )
+
+
+async def test_publish_event_non_hex_pinned_pubkey_rejected(svc):
+    """A malformed pinned authority pubkey is unverifiable — fail closed as a
+    ``PermissionError`` (403), never a ``ValueError`` escaping as a 500.
+
+    ``identity_public_key`` is owner-supplied and never validated as hex at
+    publish time, so every ``bytes.fromhex`` over it must sit inside a guard.
+    """
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, _space_pk = _make_keypair()
+    admin_seed, admin_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-badhex",
+        owner_pk.hex(),
+        "http://owner-badhex.example.com/wh",
+        auto_accept=True,
+    )
+    await svc.register_instance(
+        "admin-badhex",
+        admin_pk.hex(),
+        "http://admin-badhex.example.com/wh",
+        auto_accept=True,
+    )
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-badhex",
+        space_id="sp-badhex",
+        identity_public_key="not-hex!!",
+    )
+    payload = {"ciphertext": "opaque-blob"}
+    payload.update(_sign_authority(space_seed, space_id="sp-badhex", payload=payload))
+    transport_sig = _sign(
+        admin_seed,
+        {
+            "space_id": "sp-badhex",
+            "event_type": "space_post_public",
+            "payload": payload,
+            "from_instance": "admin-badhex",
+        },
+    )
+    with pytest.raises(PermissionError, match="invalid authority key"):
+        await svc.publish_event(
+            "sp-badhex",
+            "space_post_public",
+            payload,
+            "admin-badhex",
+            transport_sig,
+        )
+
+
+async def test_list_subscribers_non_hex_pinned_pubkey_rejected(svc):
+    """Same guard on the subscriber-release path: an unusable pinned key is a
+    ``PermissionError``, so the route answers 403 rather than 500."""
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, _space_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-badhex2",
+        owner_pk.hex(),
+        "http://owner-badhex2.example.com/wh",
+        auto_accept=True,
+    )
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-badhex2",
+        space_id="sp-badhex2",
+        identity_public_key="not-hex!!",
+    )
+    ts = _now_iso()
+    fields = _sign_authority_subscribers_query(space_seed, space_id="sp-badhex2", ts=ts)
+    with pytest.raises(PermissionError, match="invalid authority key"):
+        await svc.list_subscribers_with_keys(
+            "sp-badhex2",
+            ts=ts,
+            authority_sig=fields["authority_sig"],
+            authority_sig_suite=fields["authority_sig_suite"],
         )
 
 

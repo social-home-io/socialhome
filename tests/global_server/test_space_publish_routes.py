@@ -63,17 +63,31 @@ async def _register_owner(
     return kp.private_key, kp.public_key
 
 
-def _sign_publish_body(body: dict, *, seed: bytes) -> dict:
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _now_iso_offset(*, minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def _sign_publish_body(body: dict, *, seed: bytes, ts: str | None = None) -> dict:
     """Compute the canonical signature the route verifier expects.
 
     Mirrors the body-shape ``GfsFederationService.publish_space``
     canonicalises before verifying — sorted keys, no whitespace,
     no ``signature`` field included in the signed bytes.
+
+    ``ts`` (optional) folds a signed, replay-guarded timestamp into the body —
+    the shape a current household sends, and the only one that can restore an
+    owner-withdrawn listing. Omitting it reproduces a legacy household.
     """
     # The service canonicalises ``identity_public_key`` (Phase 5a TOFU pin)
     # into the signed body, defaulting to "" when none is supplied; mirror that
     # here so the recomputed canonical matches.
     body = {"identity_public_key": "", **body}
+    if ts is not None:
+        body = {**body, "ts": ts}
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return {**body, "signature": b64url_encode(sign_ed25519(seed, canonical))}
 
@@ -544,27 +558,28 @@ async def test_unpublish_space_idempotent_on_missing(gfs_client):
     assert await resp.json() == {"status": "unpublished"}
 
 
+_BACK_META = {
+    "owning_instance": "owner.home",
+    "name": "Back Again",
+    "description": "",
+    "about_markdown": "",
+    "cover_url": "",
+    "min_age": 0,
+    "category": "general",
+    "accent_color": "#D2542A",
+    "icon_url": "",
+    "primary_color": "#D2542A",
+}
+
+
 async def test_republish_after_withdrawal_restores_listing(gfs_client):
-    """The recovery path: owner withdrawal is REVERSIBLE — a later publish
-    from the same owner puts the space back on the public list."""
+    """The recovery path: owner withdrawal is REVERSIBLE — a later FRESH
+    publish (one carrying a signed, replay-guarded ``ts``) from the same owner
+    puts the space back on the public list."""
     app = gfs_client.server.app
     seed, _pk = await _register_owner(app, auto_accept=True)
-    publish = _sign_publish_body(
-        {
-            "space_id": "sp-back",
-            "owning_instance": "owner.home",
-            "name": "Back Again",
-            "description": "",
-            "about_markdown": "",
-            "cover_url": "",
-            "min_age": 0,
-            "category": "general",
-            "accent_color": "#D2542A",
-            "icon_url": "",
-            "primary_color": "#D2542A",
-        },
-        seed=seed,
-    )
+    meta = {**_BACK_META, "space_id": "sp-back"}
+    publish = _sign_publish_body(meta, seed=seed, ts=_now_iso())
     assert (
         await gfs_client.post("/gfs/spaces/sp-back/publish", json=publish)
     ).status == 200
@@ -576,12 +591,117 @@ async def test_republish_after_withdrawal_restores_listing(gfs_client):
     ).status == 200
     assert not await _listed(gfs_client, "sp-back")
 
-    # Re-publish → visible again (a moderator ban would NOT come back).
+    # Re-publish, freshly signed → visible again (a ban would NOT come back).
+    republish = _sign_publish_body(meta, seed=seed, ts=_now_iso())
     assert (
-        await gfs_client.post("/gfs/spaces/sp-back/publish", json=publish)
+        await gfs_client.post("/gfs/spaces/sp-back/publish", json=republish)
     ).status == 200
     assert await _listed(gfs_client, "sp-back")
     assert (await gfs_client.get("/gfs/spaces/sp-back")).status == 200
+
+
+async def test_replayed_stale_publish_cannot_undo_withdrawal(gfs_client):
+    """SECURITY: a captured publish body is worthless once its signed ``ts``
+    goes stale — it is rejected outright and the space stays withdrawn.
+
+    Without the timestamp inside the signed bytes, anyone holding one
+    historical publish body could re-list a space its owner deliberately
+    delisted, repeatedly and indefinitely.
+    """
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, auto_accept=True)
+    fed_repo = app[gfs_fed_repo_key]
+    meta = {**_BACK_META, "space_id": "sp-replay", "name": "Replay"}
+    assert (
+        await gfs_client.post(
+            "/gfs/spaces/sp-replay/publish",
+            json=_sign_publish_body(meta, seed=seed, ts=_now_iso()),
+        )
+    ).status == 200
+    assert (
+        await gfs_client.delete(
+            "/gfs/spaces/sp-replay/unpublish",
+            json=_sign_unpublish("sp-replay", seed=seed),
+        )
+    ).status == 200
+
+    stale = _now_iso_offset(minutes=-30)
+    resp = await gfs_client.post(
+        "/gfs/spaces/sp-replay/publish",
+        json=_sign_publish_body(meta, seed=seed, ts=stale),
+    )
+    assert resp.status == 403
+    assert not await _listed(gfs_client, "sp-replay")
+    stored = await fed_repo.get_space("sp-replay")
+    assert stored is not None
+    assert stored.withdrawn is True
+
+
+async def test_legacy_publish_without_ts_updates_metadata_but_keeps_withdrawn(
+    gfs_client,
+):
+    """Backward compatibility: an older household sends no ``ts``. Its publish
+    still registers and refreshes metadata (so the core feature keeps working
+    during a mixed-version window), but its body is replayable forever, so it
+    must NOT restore an owner-withdrawn listing."""
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, auto_accept=True)
+    fed_repo = app[gfs_fed_repo_key]
+    meta = {**_BACK_META, "space_id": "sp-legacy", "name": "Legacy"}
+    assert (
+        await gfs_client.post(
+            "/gfs/spaces/sp-legacy/publish",
+            json=_sign_publish_body(meta, seed=seed),
+        )
+    ).status == 200
+    assert await _listed(gfs_client, "sp-legacy")
+    assert (
+        await gfs_client.delete(
+            "/gfs/spaces/sp-legacy/unpublish",
+            json=_sign_unpublish("sp-legacy", seed=seed),
+        )
+    ).status == 200
+
+    renamed = {**meta, "name": "Legacy Renamed"}
+    resp = await gfs_client.post(
+        "/gfs/spaces/sp-legacy/publish",
+        json=_sign_publish_body(renamed, seed=seed),
+    )
+    assert resp.status == 200
+    stored = await fed_repo.get_space("sp-legacy")
+    assert stored is not None
+    assert stored.name == "Legacy Renamed"  # metadata still refreshes
+    assert stored.withdrawn is True  # …but the listing stays withdrawn
+    assert not await _listed(gfs_client, "sp-legacy")
+
+
+async def test_legacy_publish_without_ts_still_publishes_fresh_space(gfs_client):
+    """A legacy (no-``ts``) publish of a space that was never withdrawn is
+    listed normally — the compatibility branch is not a silent downgrade."""
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, auto_accept=True)
+    meta = {**_BACK_META, "space_id": "sp-legacy-new", "name": "Legacy New"}
+    assert (
+        await gfs_client.post(
+            "/gfs/spaces/sp-legacy-new/publish",
+            json=_sign_publish_body(meta, seed=seed),
+        )
+    ).status == 200
+    assert await _listed(gfs_client, "sp-legacy-new")
+
+
+async def test_publish_with_naive_ts_is_403(gfs_client):
+    """A signed but timezone-naive ``ts`` is untrusted — rejected, not
+    silently treated as UTC."""
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, auto_accept=True)
+    meta = {**_BACK_META, "space_id": "sp-naive", "name": "Naive"}
+    naive = datetime.now().replace(tzinfo=None).isoformat()
+    resp = await gfs_client.post(
+        "/gfs/spaces/sp-naive/publish",
+        json=_sign_publish_body(meta, seed=seed, ts=naive),
+    )
+    assert resp.status == 403
 
 
 async def test_admin_ban_survives_withdrawal_and_republish(gfs_client):
@@ -641,6 +761,7 @@ async def test_unpublish_preserves_branding_fields(gfs_client):
             "primary_color": "#654321",
         },
         seed=seed,
+        ts=_now_iso(),
     )
     await gfs_client.post("/gfs/spaces/sp-brand/publish", json=publish)
     body = _sign_unpublish("sp-brand", seed=seed)

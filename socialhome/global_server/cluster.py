@@ -573,6 +573,14 @@ class ClusterService:
         # Withdrawn-wins, mirroring ban-wins above: a peer gossiping a stale
         # ``withdrawn=0`` row must not silently re-list a space its owner
         # delisted here. Only the owner's own signed re-publish clears it.
+        #
+        # TODO: ``sync_space`` has NO production sender today, so this guard is
+        # currently unreachable. Whoever wires cluster space gossip MUST mirror
+        # the ban-wins escape hatch above: have the publish path send
+        # ``action="publish"`` and guard this branch with
+        # ``and action != "publish"``. Without that, an owner's re-publish
+        # landing on node B is forced back to withdrawn by node A's gossip and
+        # the space is stuck invisible cluster-wide with no way out.
         if existing is not None and existing.withdrawn and not space.withdrawn:
             space = replace(space, withdrawn=True)
         await self._fed_repo.upsert_space(space)

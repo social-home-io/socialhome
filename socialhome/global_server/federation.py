@@ -293,6 +293,27 @@ class GfsFederationService:
         if not ok:
             raise PermissionError("invalid authority signature")
 
+    @staticmethod
+    def _assert_fresh_ts(ts: object) -> None:
+        """Raise ``PermissionError`` unless *ts* is a fresh timestamp.
+
+        Fresh means a tz-aware ISO 8601 string within ±300 s of now. A
+        missing, non-string, unparseable or naive value is untrusted and
+        rejected — a missing UTC offset can't be interpreted safely, so it
+        is treated exactly like a stale one.
+        """
+        if not isinstance(ts, str) or not ts:
+            raise PermissionError("Stale timestamp")
+        try:
+            parsed = datetime.fromisoformat(ts)
+        except (ValueError, TypeError) as exc:
+            raise PermissionError("Stale timestamp") from exc
+        if parsed.tzinfo is None:
+            raise PermissionError("Stale timestamp")
+        now = datetime.now(timezone.utc)
+        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
+            raise PermissionError("Stale timestamp")
+
     async def _verify_signed_request(
         self,
         instance_id: str,
@@ -343,16 +364,10 @@ class GfsFederationService:
         if not verify_ed25519(raw_key, canonical, raw_sig):
             raise PermissionError("Invalid Ed25519 signature")
 
-        ts = str(payload["ts"])
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+        # ``.get`` (not ``[...]``): a future caller that forgets ``ts`` must
+        # fail closed as a 403, never escape the handler as a KeyError/500 —
+        # the freshness contract enforces itself.
+        self._assert_fresh_ts(payload.get("ts"))
         return inst
 
     async def subscribe(
@@ -489,15 +504,7 @@ class GfsFederationService:
         # Replay guard FIRST (cheap, and independent of the signature): a
         # fresh, tz-aware ISO 8601 ``ts`` within ±300 s of now. Naive /
         # unparseable timestamps are rejected (a missing offset is untrusted).
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+        self._assert_fresh_ts(ts)
 
         if not authority_sig:
             raise PermissionError("invalid authority signature")
@@ -651,6 +658,7 @@ class GfsFederationService:
         primary_color: str = "#D2542A",
         identity_public_key: str = "",
         signature: str = "",
+        ts: str = "",
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -661,6 +669,15 @@ class GfsFederationService:
         Auto-accepted clients land as ``status='active'`` (visible on
         ``GET /gfs/spaces``); pending clients stay pending until the
         GFS admin flips them.
+
+        ``ts`` is an OPTIONAL tz-aware ISO 8601 timestamp. When present it is
+        part of the signed canonical body and replay-guarded (±300 s), which
+        makes the publish a *fresh* statement of intent — only such a publish
+        may clear an owner's earlier ``withdrawn`` flag. A publish without
+        ``ts`` (an older household) still registers and refreshes metadata,
+        but CANNOT restore a withdrawn listing: its body is replayable
+        forever, so honouring it would let anyone holding one historical
+        publish body re-list a space its owner deliberately delisted.
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -672,31 +689,56 @@ class GfsFederationService:
         # a registered peer can't overwrite another household's space listing.
         if not signature:
             raise PermissionError("Invalid Ed25519 signature")
+        signed: dict[str, object] = {
+            "space_id": space_id,
+            "owning_instance": owning_instance,
+            "name": name,
+            "description": description or "",
+            "about_markdown": about_markdown or "",
+            "cover_url": cover_url or "",
+            "icon_url": icon_url or "",
+            "min_age": min_age,
+            "category": category,
+            "accent_color": accent_color,
+            "primary_color": primary_color,
+            "identity_public_key": identity_public_key or "",
+        }
+        # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
+        # subscribe/unsubscribe, ``publish_space`` has shipped production
+        # callers, so hard-requiring ``ts`` would 403 every older household
+        # against an upgraded GFS during a mixed-version window. This is the
+        # documented "first-revision payloads missing the field default to the
+        # single supported value" shape — with the security-relevant half
+        # (clearing ``withdrawn``) gated on the replay-guarded variant.
+        #
+        # MIGRATION TRIPWIRE: once every household ships ``ts`` (it has been
+        # sent by ``GfsConnectionService._build_publish_body`` since this
+        # revision), delete the no-``ts`` branch below and make ``ts``
+        # mandatory — verify it the way ``_verify_signed_request`` does.
+        has_ts = bool(ts)
+        if has_ts:
+            signed["ts"] = ts
         canonical = json.dumps(
-            {
-                "space_id": space_id,
-                "owning_instance": owning_instance,
-                "name": name,
-                "description": description or "",
-                "about_markdown": about_markdown or "",
-                "cover_url": cover_url or "",
-                "icon_url": icon_url or "",
-                "min_age": min_age,
-                "category": category,
-                "accent_color": accent_color,
-                "primary_color": primary_color,
-                "identity_public_key": identity_public_key or "",
-            },
+            signed,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
         try:
+            # A malformed stored pubkey is just as unverifiable as a malformed
+            # signature — fail closed with the same PermissionError instead of
+            # escaping the handler as a 500 (``register_instance`` never
+            # validates that ``public_key`` is hex).
+            raw_key = bytes.fromhex(inst.public_key)
             raw_sig = b64url_decode(signature)
         except (ValueError, TypeError) as exc:
             raise PermissionError("Invalid Ed25519 signature") from exc
         if not verify_ed25519(raw_key, canonical, raw_sig):
             raise PermissionError("Invalid Ed25519 signature")
+        if has_ts:
+            # Freshness is checked over the very ``ts`` the signature covers,
+            # so a captured publish body can't be replayed to un-do the
+            # owner's later withdrawal.
+            self._assert_fresh_ts(ts)
         # Bound the stored ``about_markdown`` (verified above against the
         # full value, so the signature still holds). The public page caps
         # rendering too; capping at storage avoids DB bloat from a paired
@@ -758,11 +800,21 @@ class GfsFederationService:
             posts_per_week=existing.posts_per_week if existing else 0.0,
             published_at=existing.published_at if existing else "",
             identity_public_key=pinned_pubkey,
-            # A signed publish from the owner is the RECOVERY path for an
-            # earlier withdrawal — it restores discoverability. A moderator
-            # ``banned`` status is handled above and stays sticky.
-            withdrawn=False,
+            # A FRESH signed publish from the owner (one carrying a signed,
+            # replay-guarded ``ts``) is the RECOVERY path for an earlier
+            # withdrawal — it restores discoverability. A legacy publish with
+            # no ``ts`` is replayable, so it preserves the current flag
+            # instead. A moderator ``banned`` status is handled above and
+            # stays sticky either way.
+            withdrawn=(existing.withdrawn if existing and not has_ts else False),
         )
+        if existing is not None and existing.withdrawn and not has_ts:
+            log.info(
+                "GFS: publish for withdrawn space %s carried no signed ts — "
+                "listing stays withdrawn (upgrade the household so its "
+                "publish body includes a timestamp)",
+                space_id,
+            )
         await self._repo.upsert_space(space)
         log.info(
             "GFS: published space %s (owner=%s, status=%s)",

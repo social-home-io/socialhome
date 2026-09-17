@@ -315,10 +315,12 @@ class SpacePublishView(GfsBaseView):
     space metadata so this GFS can list it on ``/gfs/spaces``.
 
     Body: ``{owning_instance, name, description?, about_markdown?,
-    cover_url?, min_age?, category?, accent_color?, signature}``.
+    cover_url?, min_age?, category?, accent_color?, ts?, signature}``.
     The Ed25519 signature is verified against the registered
     ``ClientInstance.public_key`` (so a paired-but-malicious peer
-    can't masquerade as another household's space owner).
+    can't masquerade as another household's space owner). ``ts``, when
+    present, is inside the signed bytes and replay-guarded (±300 s); only a
+    publish carrying one can restore an owner-withdrawn listing.
     """
 
     async def post(self) -> web.Response:
@@ -345,6 +347,7 @@ class SpacePublishView(GfsBaseView):
                 primary_color=str(body.get("primary_color") or "#D2542A"),
                 identity_public_key=str(body.get("identity_public_key") or ""),
                 signature=str(body.get("signature") or ""),
+                ts=str(body.get("ts") or ""),
             )
         except PermissionError as exc:
             return web.json_response(

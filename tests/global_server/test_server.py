@@ -7,6 +7,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.global_server import create_gfs_app, server
+from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.global_server.domain import ClientInstance
 
 
 @pytest.fixture
@@ -471,8 +473,6 @@ async def test_unsubscribe_unsigned_is_403_and_row_survives(gfs_client):
         },
     )
     assert resp.status == 403
-    from socialhome.global_server.app_keys import gfs_fed_repo_key
-
     repo = gfs_client.server.app[gfs_fed_repo_key]
     subs = await repo.list_subscribers("space-uns")
     assert any(s.instance_id == "inst-unsub-ns" for s in subs)
@@ -482,8 +482,6 @@ async def test_unsubscribe_unsigned_is_403_and_row_survives(gfs_client):
 
 
 async def _subscriber_rows(gfs_client, space_id):
-    from socialhome.global_server.app_keys import gfs_fed_repo_key
-
     repo = gfs_client.server.app[gfs_fed_repo_key]
     return await repo.list_subscribers(space_id)
 
@@ -589,9 +587,6 @@ async def test_unsubscribe_signature_replayed_as_subscribe_is_403(gfs_client):
 
 async def test_subscribe_with_non_hex_public_key_is_403(gfs_client):
     """A malformed stored pubkey fails closed as 403, never a 500."""
-    from socialhome.global_server.app_keys import gfs_fed_repo_key
-    from socialhome.global_server.domain import ClientInstance
-
     repo = gfs_client.server.app[gfs_fed_repo_key]
     await repo.upsert_instance(
         ClientInstance(
@@ -610,6 +605,35 @@ async def test_subscribe_with_non_hex_public_key_is_403(gfs_client):
             "instance_id": "inst-badkey",
             "space_id": "space-badkey",
             "ts": ts,
+            "signature": "AAAA",
+        },
+    )
+    assert resp.status == 403
+
+
+async def test_publish_space_with_non_hex_public_key_is_403(gfs_client):
+    """A malformed stored pubkey fails closed on publish too, never a 500.
+
+    ``register_instance`` never validates that ``public_key`` is hex, so the
+    publish handler must treat an unusable stored key as an unverifiable
+    signature (403) rather than letting ``bytes.fromhex`` escape as a 500.
+    """
+    repo = gfs_client.server.app[gfs_fed_repo_key]
+    await repo.upsert_instance(
+        ClientInstance(
+            instance_id="inst-badkey-pub",
+            display_name="",
+            public_key="not-hex!!",
+            inbox_url="http://badkey.example/wh",
+            status="active",
+            auto_accept=True,
+        )
+    )
+    resp = await gfs_client.post(
+        "/gfs/spaces/space-badkey-pub/publish",
+        json={
+            "owning_instance": "inst-badkey-pub",
+            "name": "Bad Key",
             "signature": "AAAA",
         },
     )
