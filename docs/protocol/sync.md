@@ -131,11 +131,16 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
 
 - DataChannel opens → emit `SPACE_SYNC_DIRECT_READY` and start
   consuming chunks off the channel.
-- Timeout / channel never opens → emit `SPACE_SYNC_DIRECT_FAILED
-  {reason: "ice_timeout"}`. The provider's `_handle_space_sync_direct_failed`
-  calls `trigger_relay_sync`, which mints a fresh `SPACE_SYNC_BEGIN
-  {prefer_direct: false}` and the provider re-admits the session in
-  HTTPS mode.
+- Timeout / channel never opens → the requester's ICE watcher emits
+  `SPACE_SYNC_DIRECT_FAILED {reason: "ice_timeout"}` to the provider so it
+  releases its half-session (RTC handle + signaling node), and the
+  **requester** — not the provider — re-issues the BEGIN via
+  `trigger_relay_sync` (`SPACE_SYNC_BEGIN {prefer_direct: false}`). The
+  provider must not mint a BEGIN of its own here: a bounced BEGIN would land
+  back at the requester as an event it doesn't expect. Which side retries is
+  decided by the originating direction of DIRECT_FAILED (see
+  `_handle_space_sync_direct_failed`); the provider only owns the retry when
+  it was the one that sent DIRECT_FAILED (e.g. rate-limited).
 
 **Direct-only vs mesh-capable legs.** `SPACE_SYNC_OFFER`, `SPACE_SYNC_ANSWER`,
 `SPACE_SYNC_ICE` and `SPACE_SYNC_DIRECT_READY` only make sense on the direct
