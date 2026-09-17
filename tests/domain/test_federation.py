@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     BroadcastResult,
     DecryptedPayload,
     DeliveryResult,
@@ -22,6 +23,31 @@ def test_broadcast_result_all_ok():
     assert not r2.all_ok
     r3 = BroadcastResult(attempted=0, succeeded=0, failed=0)
     assert not r3.all_ok
+
+
+def test_delivery_error_queued_keeps_wire_value():
+    """The constant names the outbox-queued reason; the log/wire literal
+    stays ``"delivery_failed"`` so existing consumers keep matching."""
+    assert DELIVERY_ERROR_QUEUED == "delivery_failed"
+
+
+def test_broadcast_result_terminal_failures_excludes_queued():
+    """``terminal_failures`` is the mesh-path subset of ``ok=False``: an
+    outbox-queued direct-peer failure self-heals and is NOT a loss, while
+    ``failed`` still counts every ``ok=False`` result."""
+    queued = DeliveryResult(instance_id="direct", ok=False, error=DELIVERY_ERROR_QUEUED)
+    lost = DeliveryResult(instance_id="mesh", ok=False, error="no_route")
+    fine = DeliveryResult(instance_id="ok", ok=True)
+    r = BroadcastResult(
+        attempted=3, succeeded=1, failed=2, results=(queued, lost, fine)
+    )
+    assert r.failed == 2
+    assert r.terminal_failures == (lost,)
+    assert not r.all_ok
+
+    only_queued = BroadcastResult(attempted=1, succeeded=0, failed=1, results=(queued,))
+    assert only_queued.failed == 1
+    assert only_queued.terminal_failures == ()
 
 
 def test_delivery_result():

@@ -51,6 +51,8 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
+    DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_ROUTE_COOLDOWN,
     BroadcastResult,
     DeliveryResult,
     FederationEvent,
@@ -958,7 +960,7 @@ class FederationService:
             instance_id=to_instance_id,
             ok=False,
             status_code=status_code if isinstance(status_code, int) else None,
-            error="delivery_failed",
+            error=DELIVERY_ERROR_QUEUED,
         )
 
     def resign_for_redelivery(self, payload_json: str) -> str:
@@ -1044,6 +1046,20 @@ class FederationService:
                 instance_id=to_instance_id,
                 ok=False,
                 error="not_confirmed",
+            )
+        # A live negative cooldown means ``discover_route`` will return
+        # ``None`` immediately WITHOUT probing (anti-flood). Report that as a
+        # distinct, waitable reason instead of the generic "no_route" — a
+        # caller in a per-chunk loop otherwise spends its entire failure
+        # budget in milliseconds on a window that is about to lift, and
+        # abandons a stream the route would have carried seconds later.
+        cooldown_s = self._route_service.cooldown_remaining(to_instance_id)
+        if cooldown_s > 0.0:
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                error=DELIVERY_ERROR_ROUTE_COOLDOWN,
+                retry_after_s=cooldown_s,
             )
         discovery = await self._route_service.discover_route(to_instance_id)
         if discovery is None:
@@ -1546,6 +1562,15 @@ class FederationService:
         )
         results: list[DeliveryResult] = []
         for iid in instance_ids:
+            if iid == self._own_instance_id:
+                # ``create_space`` puts the host's OWN row in ``space_instances``,
+                # so the query returns the sender itself; sending to self has no
+                # ``remote_instances`` row → mesh branch → a wasted
+                # ``discover_route(self)`` flood + a false ``no_route`` failure
+                # (and a negative cooldown keyed on self) on EVERY broadcast.
+                # Skip at the loop — the repo's contract stays "all member
+                # households" — and keep self out of attempted/failed/results.
+                continue
             if min_proto_version is not None and not await self.peer_supports(
                 iid,
                 min_version=min_proto_version,
@@ -1560,12 +1585,44 @@ class FederationService:
             )
             results.append(result)
         succeeded = sum(1 for r in results if r.ok)
-        return BroadcastResult(
+        broadcast = BroadcastResult(
             attempted=len(results),
             succeeded=succeeded,
             failed=len(results) - succeeded,
             results=tuple(results),
         )
+        terminal = broadcast.terminal_failures
+        if terminal:
+            # Two kinds of ``ok=False`` come back from the per-peer send, and
+            # only one is a loss:
+            #
+            # * Direct path (CONFIRMED peer → :meth:`send_event`): the failed
+            #   envelope is enqueued to the durable ``federation_outbox``
+            #   BEFORE the result is returned, tagged
+            #   :data:`DELIVERY_ERROR_QUEUED`. The outbox redelivers when the
+            #   peer is back, so the event self-heals — a household that is
+            #   briefly unreachable (e.g. the pair-settle window) is NOT
+            #   "not reached". Those are deliberately excluded here; warning
+            #   for them was false and noisy.
+            # * Mesh path (``no_route`` / ``unknown_instance`` /
+            #   ``not_confirmed`` / ``routed_send_failed`` /
+            #   ``route_cooldown``): there is NO outbox, so a failed target is
+            #   a permanent, invisible loss, and for a mesh-only member that
+            #   is the ONLY delivery attempt the event ever gets. A durable
+            #   outbox for space gossip is a larger design change; until then
+            #   a WARNING naming the space, the event and each such peer is
+            #   the minimum bar, so the loss is diagnosable rather than
+            #   silent.
+            log.warning(
+                "broadcast_to_space_members: space=%s event=%s did not reach "
+                "%d/%d member household(s): %s",
+                space_id,
+                event_type.value,
+                len(terminal),
+                len(results),
+                ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
+            )
+        return broadcast
 
     # ─── Inbound ──────────────────────────────────────────────────────────
 

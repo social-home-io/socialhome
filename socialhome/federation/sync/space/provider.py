@@ -15,11 +15,16 @@ can cancel mid-stream if the peer gives up.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from typing import Any, TYPE_CHECKING
 
-from ....domain.federation import FederationEventType
+from ....domain.federation import (
+    DELIVERY_ERROR_ROUTE_COOLDOWN,
+    DeliveryResult,
+    FederationEventType,
+)
 from .exporter import ChunkBuilder, RESOURCE_ORDER, serialise_chunk
 
 if TYPE_CHECKING:
@@ -34,6 +39,20 @@ log = logging.getLogger(__name__)
 #: continuing to push into a broken path is pure cost — the requester's
 #: re-BEGIN is what recovers the stream (#648).
 MAX_CONSECUTIVE_CHUNK_FAILURES: int = 3
+
+#: Upper bound on a single wait for a route-discovery negative cooldown.
+#: ``RouteDiscoveryService.ROUTE_NEGATIVE_COOLDOWN_S`` is 30 s today; the cap
+#: is deliberately a local constant rather than an import of that value, so a
+#: wrong/huge ``retry_after_s`` (a future cooldown change, a mocked sender)
+#: can never park a provider task for an unbounded time.
+MAX_ROUTE_COOLDOWN_WAIT_S: float = 35.0
+
+#: How many cooldown windows ONE stream will wait out before a cooldown
+#: failure starts counting against :data:`MAX_CONSECUTIVE_CHUNK_FAILURES`
+#: like any other failure. Two waits ≈ a minute of patience for a route that
+#: is genuinely coming back (one lost discovery window, one retry); a
+#: household that is actually unreachable still terminates the stream.
+MAX_ROUTE_COOLDOWN_WAITS: int = 2
 
 
 class SpaceSyncService:
@@ -96,6 +115,7 @@ class SpaceSyncService:
         sync_id = session.sync_id
         space_id = session.space_id
         consecutive_failures = 0
+        cooldown_waits = 0
         try:
             for resource in RESOURCE_ORDER:
                 exporter = self._exporters.get(resource)
@@ -108,7 +128,12 @@ class SpaceSyncService:
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
                 ):
-                    if await self._send(session, envelope):
+                    sent, cooldown_waits = await self._send_chunk(
+                        session,
+                        envelope,
+                        cooldown_waits,
+                    )
+                    if sent:
                         consecutive_failures = 0
                         continue
                     consecutive_failures += 1
@@ -157,6 +182,65 @@ class SpaceSyncService:
             # Same reasoning as the abandon path above — a session whose
             # stream died is garbage, and holding it blocks the retry.
             self._close_session(sync_id)
+
+    async def _send_chunk(
+        self,
+        session,
+        envelope: dict[str, Any],
+        cooldown_waits: int,
+    ) -> tuple[bool, int]:
+        """Ship one chunk, waiting out mesh route-discovery cooldowns.
+
+        Returns ``(sent, cooldown_waits)`` — the caller carries
+        ``cooldown_waits`` across the whole stream so the patience budget is
+        per-stream, not per-chunk.
+
+        ``RouteDiscoveryService`` arms a 30 s negative cooldown after a flood
+        that found nothing, and while it is live ``discover_route`` returns
+        ``None`` *immediately, without probing*. The chunk loop has no delay
+        between chunks, so a single missed discovery window used to fail
+        :data:`MAX_CONSECUTIVE_CHUNK_FAILURES` chunks within milliseconds and
+        abandon the entire stream — converting a two-second race into a
+        permanent loss, exactly when the cache was about to warm from a
+        ROUTE_FOUND that missed the window. The cooldown itself is correct
+        anti-flood behaviour (we still flood at most once per cooldown period
+        per stream); what was wrong was counting a no-probe against the retry
+        budget. So: wait it out and retry the SAME chunk, bounded by
+        :data:`MAX_ROUTE_COOLDOWN_WAITS` so a genuinely unreachable household
+        still terminates the stream.
+        """
+        while True:
+            result = await self._send(session, envelope)
+            if result.ok:
+                return True, cooldown_waits
+            if result.error != DELIVERY_ERROR_ROUTE_COOLDOWN:
+                # Every other failure keeps its existing meaning: we probed
+                # (or the ship itself broke), so it counts a strike.
+                return False, cooldown_waits
+            if cooldown_waits >= MAX_ROUTE_COOLDOWN_WAITS:
+                log.warning(
+                    "sync %s: route to %s still in discovery cooldown after "
+                    "%d waits — counting it as a chunk failure",
+                    session.sync_id,
+                    session.requester_instance_id,
+                    cooldown_waits,
+                )
+                return False, cooldown_waits
+            cooldown_waits += 1
+            delay = min(
+                max(result.retry_after_s or 0.0, 0.0),
+                MAX_ROUTE_COOLDOWN_WAIT_S,
+            )
+            log.info(
+                "sync %s: route discovery for %s is in its negative cooldown "
+                "— waiting %.1fs and retrying the same chunk (wait %d/%d)",
+                session.sync_id,
+                session.requester_instance_id,
+                delay,
+                cooldown_waits,
+                MAX_ROUTE_COOLDOWN_WAITS,
+            )
+            await asyncio.sleep(delay)
 
     def _close_session(self, sync_id: str) -> None:
         """Best-effort teardown of a session whose stream is over."""
@@ -344,14 +428,17 @@ class SpaceSyncService:
                 resource,
             )
 
-    async def _send(self, session, envelope: dict[str, Any]) -> bool:
+    async def _send(self, session, envelope: dict[str, Any]) -> DeliveryResult:
         """Serialise and dispatch one envelope to the requester.
 
-        Returns ``True`` when the envelope was handed off successfully.
-        A ``False`` return means the requester will be missing this chunk;
-        callers count consecutive failures and abandon the stream rather
-        than spending a full BFS-plus-3-hop round per remaining chunk on a
-        path that is not working (#648).
+        Returns the :class:`DeliveryResult` of the ship (always ``ok=True``
+        on the RTC path, which raises rather than failing softly). A failed
+        result means the requester will be missing this chunk; callers count
+        consecutive failures and abandon the stream rather than spending a
+        full BFS-plus-3-hop round per remaining chunk on a path that is not
+        working (#648). The result's ``error`` matters as well as its ``ok``:
+        :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` is a waitable window rather
+        than a broken path — see :meth:`_send_chunk`.
 
         Picks the transport based on ``session.transport_mode``:
 
@@ -375,7 +462,10 @@ class SpaceSyncService:
                     f"SyncSessionRecord {session.sync_id} has no rtc handle",
                 )
             await rtc_session.send_chunk(serialise_chunk(envelope))
-            return True
+            return DeliveryResult(
+                instance_id=session.requester_instance_id,
+                ok=True,
+            )
         if mode == "https":
             if self._federation is None:
                 raise RuntimeError(
@@ -408,19 +498,25 @@ class SpaceSyncService:
             # Don't swallow a broken stream. Every chunk failing is what
             # left a mesh member with a space, a content key and media
             # bytes but no post rows, and nothing said so.
-            if result is not None and not getattr(result, "ok", True):
+            ok = result is None or bool(getattr(result, "ok", True))
+            # ``DeliveryResult`` carries ``error``; the original ``reason``
+            # spelling made this diagnostic always print ``None`` — for
+            # exactly the failure it exists to report.
+            error = None if ok else getattr(result, "error", None)
+            if not ok:
                 log.warning(
                     "sync %s: chunk ship to %s failed (%s) — the requester "
                     "will be missing metadata",
                     session.sync_id,
                     session.requester_instance_id,
-                    # ``DeliveryResult`` carries ``error``; the original
-                    # ``reason`` spelling made this diagnostic always print
-                    # ``None`` — for exactly the failure it exists to report.
-                    getattr(result, "error", None),
+                    error,
                 )
-                return False
-            return True
+            return DeliveryResult(
+                instance_id=session.requester_instance_id,
+                ok=ok,
+                error=error,
+                retry_after_s=getattr(result, "retry_after_s", None),
+            )
         raise ValueError(
             f"Unknown transport_mode {mode!r} on session {session.sync_id}",
         )
