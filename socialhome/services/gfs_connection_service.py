@@ -568,6 +568,72 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
         return str(data.get("status") or "subscribed")
 
+    async def unsubscribe_from_gfs_space(self, space_id: str, gfs_id: str) -> str:
+        """Unsubscribe this household from a GFS-listed space's relay fan-out.
+
+        Mirror of :meth:`subscribe_to_gfs_space`: the GFS mandates an
+        Ed25519 signature on every (un)subscribe (so a caller can only
+        unsubscribe **itself** — without it any household could evict any
+        other from a space's relay), so this signs the canonical
+        ``{action: "unsubscribe", instance_id, space_id, ts}`` body — the
+        ``action`` is inside the signed bytes so the signature can't be
+        replayed as a subscribe — and POSTs it to ``/gfs/subscribe``.
+        Fail-closed: with no signing identity wired it raises rather than
+        send an unsigned body the GFS would reject with a 403.
+
+        ``404`` counts as success alongside ``200``/``204`` — mirroring
+        :meth:`unpublish_space`, removing an already-absent subscription is
+        idempotent. Returns the GFS-reported status.
+        """
+        if not self._own_instance_id or not self._own_signing_key:
+            raise GfsConnectionError(
+                "cannot unsubscribe from a GFS space without a wired signing identity",
+            )
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+
+        ts = datetime.now(timezone.utc).isoformat()
+        canonical = json.dumps(
+            {
+                "action": "unsubscribe",
+                "instance_id": self._own_instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "action": "unsubscribe",
+            "instance_id": self._own_instance_id,
+            "space_id": space_id,
+            "ts": ts,
+            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
+        }
+        client = self._client()
+        url = f"{conn.inbox_url}/gfs/subscribe"
+        try:
+            async with client.post(
+                url,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status not in (200, 204, 404):
+                    detail = await resp.text()
+                    raise GfsConnectionError(
+                        f"GFS rejected unsubscribe (HTTP {resp.status}): {detail}",
+                    )
+                try:
+                    data = await resp.json()
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
+        return str(data.get("status") or "unsubscribed")
+
     async def publish_space_to_all(self, space_id: str) -> int:
         """Publish a space to every active GFS connection.
 

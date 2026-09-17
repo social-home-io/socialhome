@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -410,3 +411,113 @@ async def test_start_is_idempotent(env):
     await svc.start()
     assert svc._task is first_task
     await svc.stop()
+
+
+# ─── GFS directory contract (regression: wrong URL + wrong field names) ──
+
+
+def _global_space_item(space_id: str = "s1", **over) -> dict:
+    """A realistic ``asdict(GlobalSpace)`` row as the GFS actually emits it."""
+    item = {
+        "space_id": space_id,
+        "owning_instance": "inst-a",
+        "name": "N",
+        "description": "D",
+        "subscriber_count": 7,
+        "icon_url": "data:image/webp;base64,AA",
+        "identity_public_key": "ab" * 32,
+        "category": "tech",
+        "min_age": 13,
+        "status": "active",
+    }
+    item.update(over)
+    return item
+
+
+async def test_fetch_directory_hits_gfs_spaces_path(env):
+    """REGRESSION: the directory lives at ``/gfs/spaces`` on the GFS.
+
+    ``/api/public_spaces`` is *this household's own* API route, so polling
+    it 404'd forever and the Global tab never populated.
+    """
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    session = _StubSession(body={"spaces": []})
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=session,
+    )
+    await svc.poll_once()
+    assert session.calls == ["https://gfs.example.com/gfs/spaces"]
+
+
+async def test_poll_once_maps_global_space_shape(env):
+    """A ``GlobalSpace``-shaped row maps onto the cache columns."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={"spaces": [_global_space_item()]}),
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert len(out) == 1
+    got = out[0]
+    assert got.space_id == "s1"
+    assert got.instance_id == "inst-a"
+    assert got.member_count == 7
+    assert got.category == "tech"
+    assert got.min_age == 13
+    # The GFS directory is geo-less — never invent coordinates.
+    assert got.emoji is None
+    assert got.lat is None
+    assert got.lon is None
+    assert got.radius_km is None
+
+
+async def test_poll_once_clamps_min_age_without_losing_siblings(env):
+    """REGRESSION: a GFS row with a non-conforming ``min_age`` (e.g. 15)
+    violates the ``public_space_cache`` CHECK — before the clamp it raised
+    and aborted the whole tick, dropping every other listing too."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            _global_space_item("s-bad", min_age=15),
+            _global_space_item("s-good", min_age=18),
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    assert await svc.poll_once() == 2
+    out = {row.space_id: row for row in await repo.list_active()}
+    assert set(out) == {"s-bad", "s-good"}
+    assert out["s-bad"].min_age == 0
+    assert out["s-good"].min_age == 18
+
+
+async def test_fetch_directory_logs_non_200_above_debug(env, caplog):
+    """A 404/5xx from the GFS is visible at INFO — the debug-level silence
+    is exactly why the wrong-URL bug survived."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(status=404, body={}),
+    )
+    with caplog.at_level(
+        logging.INFO,
+        logger="socialhome.services.public_space_discovery_service",
+    ):
+        assert await svc.poll_once() == 0
+    records = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert records, "non-200 GFS directory response must log above debug"
+    joined = " ".join(r.getMessage() for r in records)
+    assert "404" in joined
+    assert "https://gfs.example.com/gfs/spaces" in joined

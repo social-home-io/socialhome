@@ -75,7 +75,6 @@ from ..domain.federation_capabilities import (
     space_features_missing_below,
 )
 from ..media.cleanup import unlink_media
-from .child_protection_service import _VALID_MIN_AGES
 from .space_purge import purge_space_and_media
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
@@ -106,6 +105,7 @@ from ..domain.space import (
     SpaceRole,
     SpaceType,
     normalize_category,
+    normalize_min_age,
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.base import row_to_dict
@@ -4458,17 +4458,10 @@ def _coerce_roster_sequence(meta: dict) -> int:
 def _coerce_min_age(value: object) -> int:
     """Clamp a federated ``min_age`` to the allowed set ({0,13,16,18}).
 
-    A non-conforming / malicious peer shipping e.g. ``15`` must not reach
-    the ``spaces.min_age`` CHECK (it would raise and abort the join) — fall
-    back to 0 (no restriction, the fail-soft default).
+    Thin alias for :func:`socialhome.domain.space.normalize_min_age`, kept
+    for the existing federation importers.
     """
-    if not isinstance(value, (int, str)):
-        return 0
-    try:
-        coerced = int(value)
-    except TypeError, ValueError:
-        return 0
-    return coerced if coerced in _VALID_MIN_AGES else 0
+    return normalize_min_age(value)
 
 
 async def can_seat_remote_stub(

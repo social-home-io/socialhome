@@ -54,6 +54,31 @@ def normalize_category(value: str | None) -> str:
     return value if value in SPACE_CATEGORIES else "general"
 
 
+# ─── Minimum-age gate (§23.50 / child protection) ─────────────────────────
+
+#: The only ``min_age`` values the schema accepts — every ``min_age`` column
+#: (``spaces``, ``public_space_cache``, ``installed_apps``) carries a
+#: ``CHECK(min_age IN (0, 13, 16, 18))``.
+VALID_MIN_AGES: frozenset[int] = frozenset({0, 13, 16, 18})
+
+
+def normalize_min_age(value: object) -> int:
+    """Map any stored/received min_age to an allowed value (default 0).
+
+    A non-conforming / malicious peer shipping e.g. ``15`` must not reach a
+    ``min_age`` CHECK (it would raise and abort the join / discovery tick) —
+    anything outside :data:`VALID_MIN_AGES` falls back to ``0`` (no
+    restriction, the fail-soft default).
+    """
+    if not isinstance(value, (int, str)) or isinstance(value, bool):
+        return 0
+    try:
+        coerced = int(value)
+    except TypeError, ValueError:
+        return 0
+    return coerced if coerced in VALID_MIN_AGES else 0
+
+
 # ─── Space membership roles (§4.2.3) ──────────────────────────────────────
 
 
