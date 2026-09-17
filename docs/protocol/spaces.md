@@ -1046,36 +1046,62 @@ it gets to see. The forward to the next hop is gated on
 already run. The origin then applies, in order, each a fail-closed drop:
 
 1. `route_id` names a live pending record — one is kept per
-   `send_routed` (target, pinned identity pk, inner event) for the
-   ephemeral window (60 s), so a nack for a send we never made, or one
-   that arrives too late, is a no-op;
+   `send_routed` (target, pinned identity pk, the ephemeral key sealed
+   under, the inner event) for the **route-cache window**
+   (`ROUTE_CACHE_TTL_S`, 270 s): the span during which the origin could
+   still be sealing under a stale key. Not the 60 s ephemeral window — a
+   relay's outbox retry ladder can deliver a stale-sealed envelope to a
+   rebooted target well after that, and its nack must still land on a
+   live record. A nack for a send we never made, or one past the window,
+   is a no-op;
 2. `path[-1]` is that record's target;
 3. `target_identity_pk` equals the identity pk the origin **pinned at
    discovery** (`RouteDiscoveryService.cached_target_identity_pk`) — a
    second, independent key binding on top of the relay-level derive
    check (a send that predates the pin falls back to re-deriving against
    the record's target; never to acceptance);
-4. the signature verifies under that key and under a suite in
+4. `stale_eph_pk` equals the ephemeral key the origin **sealed under for
+   this `route_id`**. Without this the target is a signing oracle: an
+   on-path relay could forward the envelope with a garbage
+   `target_eph_pk`, collect the target's genuine signature over it, and
+   tear down a live route on demand. A nack the target signed for any
+   other key is rejected here;
+5. the signature verifies under that key and under a suite in
    `SUPPORTED_ROUTE_STALE_SIG_SUITES` — unknown suite → hard reject;
-5. pop the pending record — one nack per envelope, consumed before the
+6. pop the pending record — one nack per envelope, consumed before the
    first `await` so a concurrent duplicate finds nothing;
-6. `RouteDiscoveryService.invalidate(target)`;
-7. rediscover (a fresh `SPACE_FIND_ROUTE`, which makes the target mint a
-   new ephemeral) and `send_routed` the retained inner event **once**,
-   flagged as a retry.
+7. `RouteDiscoveryService.invalidate_if_eph(target, stale_eph_pk)` — the
+   cached route is dropped only while it **still points at the stale
+   key**. After a reboot the nacks for every envelope sealed under the
+   old key trickle back one at a time; the first rebuilds the route, and
+   the rest must not evict it again (five envelopes, one flood, not five);
+8. rediscover (cache-first — a route already rebuilt by an earlier nack
+   is reused with no flood; otherwise a fresh `SPACE_FIND_ROUTE`, which
+   makes the target mint a new ephemeral) and `send_routed` the retained
+   inner event **once**, flagged as a retry.
 
-Step 7 is skipped — route invalidated, nothing resent — when the nacked
+Step 8 is skipped — route invalidated, nothing resent — when the nacked
 send was itself the retry (a target that nacks twice gets one `INFO`
-line, not a loop), when the inner exceeds 64 KiB (media chunks ride the
-durable `space_media_outbox`, which rediscovers on its own next attempt),
-or when rediscovery finds no route. Success logs
+line, not a loop) or when the inner exceeds 64 KiB (media chunks ride the
+durable `space_media_outbox`, which rediscovers on its own next attempt).
+When rediscovery finds **no route** the origin does not give up at once:
+the nack's own trigger is "the target just rebooted", and the two-second
+discovery window routinely closes before the target is back — its late
+`ROUTE_FOUND` is then cached but would otherwise resend nothing. So the
+origin defers **exactly one** more attempt until past the discovery
+negative cooldown (plus a 5 s margin); that attempt is cache-first, so a
+late answer that landed meanwhile costs no flood. A second miss gives
+up. The deferral is tracked apart from the pending record, which stays
+the sole authority on whether a nack refers to a live send — reusing the
+record would let a replayed nack match again. Success logs
 `SPACE_ROUTE_STALE route_id=…: route to <target> invalidated,
 rediscovered, retransmitted <event> as route_id=…` at `INFO`.
 
 **Amplification bounds.** Dedup per `route_id` at every hop (a nack
 visits each hop at most once; replays are no-ops); one retransmit per
 original send (the retry's pending record is flagged so its own nack
-cannot trigger another); a bounded pending table (2000 entries, oldest
+cannot trigger another) plus at most one deferred re-attempt; a
+bounded pending table (2000 entries, oldest
 expiry evicted first, ≤ 64 KiB retained inner each); and
 `discover_route` single-flights per target and honours the negative
 cooldown, so a burst of nacks for one target costs one flood.
