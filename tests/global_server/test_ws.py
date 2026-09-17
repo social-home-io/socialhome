@@ -25,6 +25,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.repositories import SqliteGfsFederationRepo
 from socialhome.global_server.server import create_gfs_app
 
 
@@ -300,3 +301,116 @@ async def test_ws_unregisters_on_clean_disconnect(ws_client):
     assert registry.is_connected("peer.home") is False
     assert row is not None
     assert row.transport == "https"
+
+
+# ── Subscriber reconnect → owner re-notify (Phase 5b-d) ───────────────────────
+
+
+async def _publish_and_subscribe_peer(
+    app, subscriber_seed: bytes, *, owner_id: str, owner_seed: bytes
+) -> None:
+    """Publish ``space-1`` under *owner_id* and subscribe ``peer.home`` — the
+    exact production shape whose 5b-b handoff is lost when the subscriber's own
+    socket is down at subscribe time."""
+    federation = app[gfs_federation_key]
+    pub_args = {
+        "space_id": "space-1",
+        "owning_instance": owner_id,
+        "name": "Space One",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "accent_color": "#D2542A",
+        "primary_color": "#D2542A",
+        "identity_public_key": "",
+    }
+    pub_canonical = json.dumps(pub_args, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    await federation.publish_space(
+        space_id="space-1",
+        owning_instance=owner_id,
+        name="Space One",
+        signature=b64url_encode(sign_ed25519(owner_seed, pub_canonical)),
+    )
+    sub_ts = _now_iso()
+    sub_canonical = json.dumps(
+        {
+            "action": "subscribe",
+            "instance_id": "peer.home",
+            "space_id": "space-1",
+            "ts": sub_ts,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    await federation.subscribe(
+        "peer.home",
+        "space-1",
+        sub_ts,
+        b64url_encode(sign_ed25519(subscriber_seed, sub_canonical)),
+    )
+
+
+async def test_ws_connect_renotifies_owner_of_existing_subscriptions(ws_client):
+    """REGRESSION: the subscriber subscribed while its socket was DOWN (the
+    5b-b handoff never reached it). When its socket connects, the owner gets
+    the ``new_subscriber`` frame again over the owner's live socket."""
+    app = ws_client._app
+    owner_seed, owner_pub = _gen_ed25519()
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id="owner.home",
+            display_name="Owner",
+            public_key=owner_pub,
+            inbox_url="http://owner.home/wh",
+            status="active",
+        )
+    )
+    await _publish_and_subscribe_peer(
+        app, ws_client._seed, owner_id="owner.home", owner_seed=owner_seed
+    )
+
+    async with ws_client.ws_connect("/gfs/ws") as owner_ws:
+        await owner_ws.send_json(_hello("owner.home", owner_seed))
+        registry = app[gfs_ws_registry_key]
+        for _ in range(100):
+            if registry.is_connected("owner.home"):
+                break
+            await asyncio.sleep(0.01)
+
+        sub_ws = await ws_client.ws_connect("/gfs/ws")
+        await sub_ws.send_json(_hello("peer.home", ws_client._seed))
+
+        msg = await asyncio.wait_for(owner_ws.receive(), timeout=5.0)
+        frame = json.loads(msg.data)
+        assert frame["type"] == "new_subscriber"
+        assert frame["space_id"] == "space-1"
+        assert frame["subscriber"]["instance_id"] == "peer.home"
+        await sub_ws.close()
+
+
+async def test_ws_connect_survives_reconnect_notify_failure(ws_client, monkeypatch):
+    """A repo failure in the reconnect notify must not break the handshake —
+    the socket still registers and the hello still succeeds."""
+
+    async def _boom(self, instance_id: str):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(
+        SqliteGfsFederationRepo,
+        "list_subscribed_spaces",
+        _boom,
+    )
+    async with ws_client.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(_hello("peer.home", ws_client._seed))
+        registry = ws_client._app[gfs_ws_registry_key]
+        for _ in range(100):
+            if registry.is_connected("peer.home"):
+                break
+            await asyncio.sleep(0.01)
+        assert registry.is_connected("peer.home")
+        assert not ws.closed

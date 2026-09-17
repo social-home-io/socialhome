@@ -99,6 +99,10 @@ class AbstractGfsFederationRepo(Protocol):
         self,
         instance_id: str,
     ) -> list[GlobalSpace]: ...
+    async def list_subscribed_spaces(
+        self,
+        instance_id: str,
+    ) -> list[GlobalSpace]: ...
 
     # Subscribers
     async def add_subscriber(
@@ -355,6 +359,28 @@ class SqliteGfsFederationRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM global_spaces WHERE owning_instance=? "
             "ORDER BY published_at DESC",
+            (instance_id,),
+        )
+        return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]
+
+    async def list_subscribed_spaces(
+        self,
+        instance_id: str,
+    ) -> list[GlobalSpace]:
+        """Spaces *instance_id* SUBSCRIBES to (not the ones it owns).
+
+        Drives the Phase-5b-d reconnect notify: when a subscriber's own GFS
+        socket comes up, the owner of each of these spaces is re-notified so it
+        can re-seal the content key. Hits ``idx_instance_spaces``.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT gs.*
+            FROM space_subscribers ss
+            JOIN global_spaces gs USING (space_id)
+            WHERE ss.instance_id = ?
+            ORDER BY gs.published_at DESC
+            """,
             (instance_id,),
         )
         return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]

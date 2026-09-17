@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from socialhome.global_server import federation as federation_mod
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
 
@@ -1856,3 +1858,233 @@ async def test_hide_space_unknown_space_is_a_signed_noop(svc):
         ),
     )
     assert await svc.get_space("space-ghost-h6") is None
+
+
+# ── subscriber (re)connect → owner ``new_subscriber`` re-notify (Phase 5b-d) ────
+
+
+async def _register_and_subscribe(
+    svc,
+    *,
+    owner: str,
+    subscriber: str,
+    space_id: str,
+    owner_seed: bytes,
+    sub_seed: bytes,
+) -> None:
+    """Publish *space_id* under *owner* and subscribe *subscriber* to it."""
+    await _publish_known_space(
+        svc, owner_seed, owning_instance=owner, space_id=space_id
+    )
+    ts = _now_iso()
+    sig = _sign(
+        sub_seed,
+        {
+            "action": "subscribe",
+            "instance_id": subscriber,
+            "space_id": space_id,
+            "ts": ts,
+        },
+    )
+    await svc.subscribe(subscriber, space_id, ts, sig)
+
+
+async def test_subscriber_reconnect_renotifies_owner(gfs_db):
+    """REGRESSION: a household that subscribed while its own socket was DOWN
+    gets the Phase-5b-b handoff re-triggered when its socket connects — the
+    owner receives the same ``new_subscriber`` frame ``subscribe`` emits."""
+
+    class _OfflineSubscriberWs:
+        """Everyone is offline (mirrors the lost-handoff production case)."""
+
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send(self, instance_id: str, frame: dict) -> bool:
+            self.sent.append((instance_id, frame))
+            return False
+
+    ws = _OfflineSubscriberWs()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    owner_seed, owner_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-rc", owner_pk.hex(), "http://owner-rc/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-rc",
+        sub_pk.hex(),
+        "http://sub-rc/wh",
+        auto_accept=True,
+        keywrap_public_key="cc" * 32,
+        kem_suite="x25519",
+        keywrap_sig="a2V5d3JhcHNpZw",
+    )
+    await _register_and_subscribe(
+        svc,
+        owner="owner-rc",
+        subscriber="sub-rc",
+        space_id="sp-rc",
+        owner_seed=owner_seed,
+        sub_seed=sub_seed,
+    )
+    subscribe_frame = ws.sent[-1]
+    ws.sent.clear()
+
+    # The subscriber's socket comes up.
+    await svc.on_subscriber_connected("sub-rc")
+
+    assert len(ws.sent) == 1
+    # Byte-identical to the frame ``subscribe`` emits — the owner's handler
+    # parses exactly one shape.
+    assert ws.sent[0] == subscribe_frame
+    inst, frame = ws.sent[0]
+    assert inst == "owner-rc"
+    assert frame["type"] == "new_subscriber"
+    assert frame["space_id"] == "sp-rc"
+    assert frame["subscriber"]["instance_id"] == "sub-rc"
+    assert frame["subscriber"]["keywrap_public_key"] == "cc" * 32
+
+
+async def test_subscriber_reconnect_without_subscriptions_notifies_nothing(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    _seed, pk = _make_keypair()
+    await svc.register_instance(
+        "lonely", pk.hex(), "http://lonely/wh", auto_accept=True
+    )
+    await svc.on_subscriber_connected("lonely")
+    assert ws.sent == []
+
+
+async def test_subscriber_reconnect_skips_self_owned_space(gfs_db):
+    """A space the connecting instance OWNS needs no handoff to itself."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed, pk = _make_keypair()
+    await svc.register_instance("solo", pk.hex(), "http://solo/wh", auto_accept=True)
+    await _register_and_subscribe(
+        svc,
+        owner="solo",
+        subscriber="solo",
+        space_id="sp-solo",
+        owner_seed=seed,
+        sub_seed=seed,
+    )
+    ws.sent.clear()
+    await svc.on_subscriber_connected("solo")
+    assert ws.sent == []
+
+
+async def test_subscriber_reconnect_owner_offline_is_fail_soft(gfs_db):
+    """An owner with no socket (send raises) is skipped without raising."""
+
+    class _RaisingWs:
+        async def send(self, instance_id: str, frame: dict) -> bool:
+            raise ConnectionResetError("no socket")
+
+    svc = GfsFederationService(
+        SqliteGfsFederationRepo(gfs_db), ws_registry=_RaisingWs()
+    )
+    owner_seed, owner_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-fs", owner_pk.hex(), "http://owner-fs/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-fs", sub_pk.hex(), "http://sub-fs/wh", auto_accept=True
+    )
+    await _register_and_subscribe(
+        svc,
+        owner="owner-fs",
+        subscriber="sub-fs",
+        space_id="sp-fs",
+        owner_seed=owner_seed,
+        sub_seed=sub_seed,
+    )
+    await svc.on_subscriber_connected("sub-fs")  # must not raise
+
+
+async def test_subscriber_reconnect_repo_failure_is_swallowed(gfs_db):
+    """A repo read failure on the connect path is logged, never raised."""
+
+    class _BoomRepo(SqliteGfsFederationRepo):
+        async def list_subscribed_spaces(self, instance_id: str):
+            raise RuntimeError("db gone")
+
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(_BoomRepo(gfs_db), ws_registry=ws)
+    _seed, pk = _make_keypair()
+    await svc.register_instance("boom", pk.hex(), "http://boom/wh", auto_accept=True)
+    await svc.on_subscriber_connected("boom")  # must not raise
+    assert ws.sent == []
+
+
+async def test_subscriber_reconnect_unknown_instance_is_noop(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    await svc.on_subscriber_connected("never-registered")
+    assert ws.sent == []
+
+
+async def test_subscriber_reconnect_without_ws_registry_is_noop(svc):
+    await svc.on_subscriber_connected("whoever")  # must not raise
+
+
+async def test_subscriber_reconnect_notifies_are_capped(gfs_db, monkeypatch):
+    """The per-connect notify count is bounded so a heavily-subscribed
+    household can't stall / flood on connect."""
+    monkeypatch.setattr(federation_mod, "MAX_RECONNECT_NOTIFIES", 2)
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    owner_seed, owner_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-cap", owner_pk.hex(), "http://owner-cap/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-cap", sub_pk.hex(), "http://sub-cap/wh", auto_accept=True
+    )
+    for n in range(4):
+        await _register_and_subscribe(
+            svc,
+            owner="owner-cap",
+            subscriber="sub-cap",
+            space_id=f"sp-cap-{n}",
+            owner_seed=owner_seed,
+            sub_seed=sub_seed,
+        )
+    ws.sent.clear()
+    await svc.on_subscriber_connected("sub-cap")
+    assert len(ws.sent) == 2
+
+
+async def test_schedule_subscriber_connected_runs_in_background(gfs_db):
+    """The connect hook is dispatched as a background task so the WS
+    handshake never blocks on the notify fan-out."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    owner_seed, owner_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-bg", owner_pk.hex(), "http://owner-bg/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-bg", sub_pk.hex(), "http://sub-bg/wh", auto_accept=True
+    )
+    await _register_and_subscribe(
+        svc,
+        owner="owner-bg",
+        subscriber="sub-bg",
+        space_id="sp-bg",
+        owner_seed=owner_seed,
+        sub_seed=sub_seed,
+    )
+    ws.sent.clear()
+    svc.schedule_subscriber_connected("sub-bg")  # returns immediately (sync)
+    assert ws.sent == []
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if ws.sent:
+            break
+    assert [inst for inst, _ in ws.sent] == ["owner-bg"]
