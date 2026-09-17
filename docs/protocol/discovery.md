@@ -338,6 +338,14 @@ delivers the key while the owner is offline**:
 
 1. **Trigger.** On each GFS-WS `(re)connect` (`gfs_ws_client` `on_connected`),
    the seed-holder runs `space_subscriber_key_outbound.reconcile(gfs_id)`.
+   A **content-key rotation** triggers it too, scoped to the rotated space:
+   after the forward-secrecy rekey a member removal / ban / §D1b kick mints
+   (`_rotate_and_distribute_space_key`), the member fan-out targets
+   `space_instances` — which subscribers are never in — so the rotation also
+   runs `reconcile_space_everywhere(space_id)` (per published GFS:
+   `reconcile_space(gfs_id, space_id)`, same guards, same seal path). Without
+   it a subscriber stays dark, silently dropping every relayed frame, until
+   its next reconnect. Fail-soft: a GFS that is down never fails the removal.
 2. **Enumerate "spaces I hold the seed for on this GFS."** It lists every space
    **published to that GFS** (`gfs_connection_repo.list_publications(gfs_id)`)
    and keeps those that are **PUBLIC/GLOBAL** *and* whose **seed this household
@@ -374,7 +382,7 @@ sequenceDiagram
     participant SUB as HFS subscriber
     participant G as GFS (content-blind)
     participant ADM as HFS seed-holder (delegated admin; owner offline)
-    Note over ADM: GFS-WS (re)connect → reconcile(gfs_id)
+    Note over ADM: GFS-WS (re)connect → reconcile(gfs_id)<br/>or key rotation → reconcile_space(gfs_id, space_id)
     ADM->>ADM: list published spaces I hold the seed for
     ADM->>G: GET /gfs/spaces/{id}/subscribers<br/>(authority-signed {space_id, ts})
     G->>G: verify authority sig vs pinned pubkey + ±300 s ts

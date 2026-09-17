@@ -805,6 +805,580 @@ def cmd_gfs_replay() -> None:
     print("gfs-replay: ok (publication survives owning-HFS downtime)")
 
 
+def _gfs_rows(sql: str, params: tuple = ()) -> list[tuple]:
+    """Run a read-only query against the GFS's own SQLite DB.
+
+    The GFS exposes ``subscriber_count`` on ``GET /gfs/spaces/{id}`` but
+    never the subscriber *identities* without a space-authority signature
+    (``GET /gfs/spaces/{id}/subscribers`` is seed-holder-gated on purpose).
+    The harness needs to assert "it is **d** that got registered", not just
+    "somebody did", so it reads the ``space_subscribers`` table directly.
+    Read-only, same contract as :func:`_rows`.
+    """
+    conn = sqlite3.connect(GFS_DIR / "gfs.db")
+    try:
+        return list(conn.execute(sql, params))
+    finally:
+        conn.close()
+
+
+def _wait_for_gfs_ws(instance_id: str, *, timeout: float = 60.0) -> None:
+    """Block until the GFS has registered ``instance_id``'s WebSocket.
+
+    ``GfsWebSocketSupervisor`` opens the socket from a background reconcile
+    loop, so a household that paired seconds ago may not be connected yet.
+    Every GFS→household push (relay frames, ``new_subscriber`` notifies,
+    sealed key handoffs) needs it, and the HTTPS-inbox fallback the GFS uses
+    when the socket is missing is not an authenticated path for relay frames
+    (it answers 401), so a frame sent too early is simply lost.
+    """
+    marker = f"gfs.ws.register: instance={instance_id}"
+    log_path = GFS_DIR / "log.txt"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if log_path.exists() and marker in log_path.read_text(errors="replace"):
+            return
+        time.sleep(1.0)
+    raise SystemExit(
+        f"gfs-space-subscribe: instance {instance_id} never opened its SH↔GFS "
+        f"WebSocket within {timeout:.0f}s (no {marker!r} in {log_path}) — "
+        "GFS pushes to it would be lost.",
+    )
+
+
+def cmd_gfs_space_subscribe() -> None:
+    """Discover Alpha's global space on Delta and subscribe to it over the GFS.
+
+    Prereqs (chain via ``up`` → ``gfs-up`` → ``gfs-pair`` → ``gfs-traffic``):
+    Alpha owns a published ``space_type=global`` space (state key
+    ``gfs.global_space_id``), and both Alpha and Delta are active GFS clients.
+
+    Topology matters: ``cmd_gfs_pair`` pairs **a** and **d** with the GFS, but
+    a and d are NOT QR-paired with each other (d only pairs with b). So every
+    byte d learns about a's space travelled through the GFS — there is no
+    HFS↔HFS shortcut that could mask a broken relay. **c** is paired with
+    neither and is the negative control in :func:`cmd_gfs_space_post`.
+
+    Sequence:
+    1. Force Delta's directory poll — ``POST /api/public_spaces/refresh``
+       (admin-only, 202) runs :meth:`PublicSpaceDiscoveryService.refresh_now`
+       inline instead of waiting for the scheduled tick.
+    2. Assert Alpha's space now shows on Delta's
+       ``GET /api/public_spaces`` with the right ``name`` and ``instance_id``.
+       This is the regression for the two discovery bugs: polling the wrong
+       GFS URL (nothing ever lands in ``public_space_cache``) and mapping the
+       listing's ``owning_instance`` onto the wrong local field (the row shows
+       up but points at nobody, so the join can never be routed).
+    3. Delta subscribes — ``POST /api/spaces/{id}/subscribe``.
+    4. Assert Delta now holds a local ``spaces`` row for the space whose
+       ``identity_public_key`` equals Alpha's own pin for the same space.
+       This is the regression for the missing-mirror bug: without the
+       :class:`GfsSpaceMirrorService` stub there is no pinned space-authority
+       key, so every relayed frame fails ``_verify_authority`` and is dropped
+       — silently, at WARNING, with the subscribe itself still returning 200.
+    5. Assert the GFS registered **d** as a subscriber (public
+       ``subscriber_count`` moved, and the ``space_subscribers`` row names
+       Delta's instance id). Without the GFS-side registration the relay fan-out
+       never targets Delta at all.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    if not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' first")
+    gfs = state.get("gfs") or {}
+    space_id = gfs.get("global_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-traffic' first — needs Alpha's global space")
+    pairings = gfs.get("pairings") or {}
+    if "d" not in pairings:
+        raise SystemExit("run 'gfs-pair' first — Delta must be a GFS client")
+
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
+
+    # 0. Wait for Delta's SH↔GFS WebSocket to be REGISTERED on the GFS side.
+    #    This is not cosmetic: the ``new_subscriber`` → sealed-content-key
+    #    handoff that ``POST /api/spaces/{id}/subscribe`` triggers is
+    #    fire-and-forget. If the subscriber's WS isn't up when the GFS fans
+    #    that frame out, the GFS falls back to the household's HTTPS
+    #    ``/federation/inbox`` — which rejects GFS relay frames with 401 — and
+    #    the subscriber is left permanently keyless for that epoch. In a real
+    #    deployment the WS has been up for hours; in the harness d pairs
+    #    seconds before it subscribes, and the supervisor's reconcile loop
+    #    can take ~30 s to open the socket. The GFS's own log is the
+    #    authoritative signal (``gfs.ws.register: instance=<d>``).
+    _wait_for_gfs_ws(d["instance_id"], timeout=60.0)
+    print("  d's SH↔GFS WebSocket is registered on the GFS ✓")
+
+    # Baseline the GFS's subscriber tally BEFORE d subscribes so step 5 can
+    # assert the delta rather than an absolute that a re-run would already
+    # satisfy.
+    s, detail = _request(f"{gfs_url}/gfs/spaces/{space_id}")
+    _must("gfs-space-subscribe: pre GET /gfs/spaces/{id}", s, detail)
+    subs_before = int(detail.get("subscriber_count") or 0)
+    space_name = detail.get("name")
+    print(f"  gfs detail: name={space_name!r} subscriber_count={subs_before}")
+
+    # 1. Force d's directory poll instead of waiting for the scheduled tick.
+    s, body = _request(
+        f"http://127.0.0.1:{d['port']}/api/public_spaces/refresh",
+        token=d["token"],
+        method="POST",
+    )
+    _must("d: POST /api/public_spaces/refresh", s, body, ok=(202,))
+    print("  d: forced a GFS directory refresh (202) ✓")
+
+    # Settle: ``refresh_now`` awaits the poll inline, but the cache write and
+    # the GFS's own response are both async — give the row a moment to land.
+    deadline = time.monotonic() + 20.0
+    listing: list[dict] = []
+    entry: dict | None = None
+    while time.monotonic() < deadline:
+        s, payload = _request(
+            f"http://127.0.0.1:{d['port']}/api/public_spaces",
+            token=d["token"],
+        )
+        if s == 200 and isinstance(payload, list):
+            listing = payload
+            entry = next(
+                (row for row in listing if row.get("space_id") == space_id),
+                None,
+            )
+            if entry is not None:
+                break
+        time.sleep(1.0)
+
+    # 2. The directory row must exist AND carry the right metadata.
+    if entry is None:
+        raise SystemExit(
+            f"gfs-space-subscribe: {space_id} never appeared on d's "
+            f"/api/public_spaces within 20 s — discovery poll is not reaching "
+            f"the GFS directory. Listing was {listing!r}",
+        )
+    if entry.get("name") != space_name:
+        raise SystemExit(
+            f"gfs-space-subscribe: d's directory row has name="
+            f"{entry.get('name')!r}, GFS published {space_name!r}",
+        )
+    if entry.get("instance_id") != a["instance_id"]:
+        raise SystemExit(
+            f"gfs-space-subscribe: d's directory row has instance_id="
+            f"{entry.get('instance_id')!r}, expected Alpha's "
+            f"{a['instance_id']!r} (owning_instance → instance_id mapping)",
+        )
+    print(f"  d discovers '{entry['name']}' hosted by {entry['instance_id'][:8]}… ✓")
+
+    # 3. Delta subscribes as a read-only member.
+    s, sub = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/subscribe",
+        token=d["token"],
+        method="POST",
+    )
+    _must("d: POST /api/spaces/{id}/subscribe", s, sub, ok=(200,))
+    if not sub.get("subscribed"):
+        raise SystemExit(f"gfs-space-subscribe: subscribe returned {sub!r}")
+    print("  d subscribed to the global space ✓")
+
+    # Settle: the mirror fetch + local stub write + the GFS-side subscriber
+    # registration all happen inside the request, but the GFS then pushes a
+    # ``new_subscriber`` frame to Alpha over the SH↔GFS WebSocket.
+    time.sleep(3)
+
+    # 4. d must hold a local ``spaces`` row pinned to Alpha's authority key.
+    d_rows = _rows(
+        "d",
+        "SELECT identity_public_key, name FROM spaces WHERE id = ?",
+        (space_id,),
+    )
+    if not d_rows:
+        raise SystemExit(
+            f"gfs-space-subscribe: d has no local 'spaces' row for {space_id} — "
+            "GfsSpaceMirrorService never seated the stub, so every relayed "
+            "frame will fail authority verification.",
+        )
+    d_pin, d_name = d_rows[0]
+    a_rows = _rows(
+        "a",
+        "SELECT identity_public_key FROM spaces WHERE id = ?",
+        (space_id,),
+    )
+    if not a_rows:
+        raise SystemExit(
+            f"gfs-space-subscribe: a has no 'spaces' row for {space_id} — "
+            "the owning household lost its own space?",
+        )
+    a_pin = a_rows[0][0]
+    if not d_pin:
+        raise SystemExit(
+            f"gfs-space-subscribe: d's mirrored row for {space_id} has an "
+            "empty identity_public_key — the pin was never seated.",
+        )
+    if d_pin != a_pin:
+        raise SystemExit(
+            f"gfs-space-subscribe: d pinned identity_public_key={d_pin!r} but "
+            f"a's own space authority key is {a_pin!r} — relayed frames will "
+            "never verify at d.",
+        )
+    print(f"  d mirrored the space (name={d_name!r}) pinned to a's key ✓")
+
+    # 5. The GFS must now count d as a subscriber, and the row must name d.
+    s, detail = _request(f"{gfs_url}/gfs/spaces/{space_id}")
+    _must("gfs-space-subscribe: post GET /gfs/spaces/{id}", s, detail)
+    subs_after = int(detail.get("subscriber_count") or 0)
+    if subs_after < 1:
+        raise SystemExit(
+            f"gfs-space-subscribe: GFS subscriber_count is {subs_after} after "
+            f"d subscribed (was {subs_before}) — the SH side never called "
+            "POST /gfs/spaces/{id}/subscribe.",
+        )
+    gfs_subs = _gfs_rows(
+        "SELECT instance_id FROM space_subscribers WHERE space_id = ?",
+        (space_id,),
+    )
+    registered = {row[0] for row in gfs_subs}
+    if d["instance_id"] not in registered:
+        raise SystemExit(
+            f"gfs-space-subscribe: GFS space_subscribers for {space_id} is "
+            f"{sorted(registered)} — Delta ({d['instance_id']}) is not in it.",
+        )
+    print(
+        f"  gfs registered d as a subscriber "
+        f"(subscriber_count {subs_before} → {subs_after}) ✓"
+    )
+
+    state["gfs_space_id"] = space_id
+    state["gfs_subscriber"] = "d"
+    _save(state)
+    print("gfs-space-subscribe: ok (discovery → mirror → GFS subscriber set)")
+
+
+def _seat_local_member(
+    state: dict,
+    label: str,
+    space_id: str,
+    *,
+    username: str,
+    password: str,
+    display_name: str | None = None,
+) -> tuple[str, str]:
+    """Provision a local user on ``label`` and seat them in ``space_id``.
+
+    Returns ``(user_id, bearer_token)``. Idempotent: an existing user / an
+    existing membership is reused, so the ``gfs-space-*`` steps can be re-run
+    against a live sandbox.
+
+    WHY the harness posts as a provisioned user rather than as the household's
+    setup admin — read before "simplifying" this away:
+
+    ``POST /api/setup/standalone`` seats the first admin through
+    ``StandaloneAdapter.provision_admin``, which assigns the literal
+    ``user_id = f"uid-{username}"``. ``UserService.provision`` (the path every
+    LATER user takes, including this helper) instead derives
+    ``derive_user_id(own_instance_pk, identity_anchor)``. The GFS public-space
+    relay fail-closes on a non-derivable author id: both the relaying
+    seed-holder and the subscriber run ``verify_signed_author_inner``, whose
+    self-cert check is ``derive_user_id(author_pk, anchor_or_username) ==
+    author_user_id``. So a post authored by the setup admin is dropped at the
+    subscriber with "author verification failed" — no matter how healthy the
+    rest of the relay is. That is a REAL production gap (it hits the first user
+    of every standalone household), tracked separately; authoring as a
+    provisioned user here keeps this step measuring the GFS content path rather
+    than re-failing on that one.
+    """
+    inst = state["instances"][label]
+    base = f"http://127.0.0.1:{inst['port']}"
+    s, created = _request(
+        f"{base}/api/admin/users",
+        token=inst["token"],
+        method="POST",
+        body={
+            "username": username,
+            "password": password,
+            "display_name": display_name or username.title(),
+        },
+    )
+    if s == 201:
+        user_id = created["user_id"]
+        print(f"  {label}: provisioned local user {username} ({user_id[:8]}…)")
+    elif s == 409:
+        s2, users = _request(f"{base}/api/users", token=inst["token"])
+        _must(f"{label}: GET /api/users", s2, users)
+        match = [u for u in users if u.get("username") == username]
+        if not match:
+            raise SystemExit(
+                f"{label}: {username} reported as taken but is not in the user "
+                f"list — got {users!r}",
+            )
+        user_id = match[0]["user_id"]
+        print(f"  {label}: reusing local user {username} ({user_id[:8]}…)")
+    else:
+        raise SystemExit(
+            f"{label}: POST /api/admin/users failed: HTTP {s} body={created!r}",
+        )
+
+    s, tok = _request(
+        f"{base}/api/auth/token",
+        method="POST",
+        body={"username": username, "password": password},
+    )
+    _must(f"{label}: login as {username}", s, tok, ok=(200,))
+    token = tok["token"]
+
+    s, members = _request(f"{base}/api/spaces/{space_id}/members", token=inst["token"])
+    _must(f"{label}: GET space members", s, members)
+    if any(m.get("user_id") == user_id for m in members):
+        print(f"  {label}: {username} is already a space member")
+        return user_id, token
+
+    s, inv = _request(
+        f"{base}/api/spaces/{space_id}/members",
+        token=inst["token"],
+        method="POST",
+        body={"user_id": user_id},
+    )
+    _must(f"{label}: invite {username}", s, inv, ok=(202,))
+    s, acc = _request(
+        f"{base}/api/local_invites/{inv['invitation_id']}/accept",
+        token=token,
+        method="POST",
+    )
+    _must(f"{label}: {username} accepts", s, acc, ok=(200,))
+    print(f"  {label}: {username} accepted the space invitation ✓")
+    return user_id, token
+
+
+def _await_space_post(state: dict, label: str, space_id: str, post_id: str) -> dict:
+    """Poll ``label``'s space feed until ``post_id`` shows up (or give up).
+
+    Returns the post dict. Raises :class:`SystemExit` naming the likely drop
+    reason — the two failure shapes both surface in the receiver's log as
+    ``space_public.inbound`` WARNINGs.
+    """
+    inst = state["instances"][label]
+    deadline = time.monotonic() + 40.0
+    feed: list[dict] = []
+    while time.monotonic() < deadline:
+        time.sleep(2.0)
+        s, body = _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/feed",
+            token=inst["token"],
+        )
+        if s != 200:
+            continue
+        feed = body if isinstance(body, list) else (body.get("posts") or [])
+        seen = next((p for p in feed if p.get("id") == post_id), None)
+        if seen is not None:
+            return seen
+    raise SystemExit(
+        f"{label} never saw post {post_id} in space {space_id} within 40 s. "
+        f"Feed was {feed!r}. Check {_instance_dir(label) / 'log.txt'} for "
+        "'space_public.inbound' WARNINGs — 'cannot decrypt … missing epoch N' "
+        "means the content-key handoff never landed; 'author verification "
+        "failed' means the self-cert / author signature didn't check out.",
+    )
+
+
+def cmd_gfs_space_post() -> None:
+    """Public space CONTENT over the GFS: a posts, d reads it, c never sees it.
+
+    Prereqs: ``gfs-space-subscribe`` (d is a GFS subscriber of a's global
+    space and holds the mirrored authority pin).
+
+    Sequence:
+    1. Seat a provisioned local author on Alpha (see :func:`_seat_local_member`
+       for why the setup admin can't be the author) and post in the global
+       space via ``POST /api/spaces/{id}/posts`` — the space endpoint, not the
+       household feed, which would land a non-federating household post.
+    2. Settle. The post has to be encrypted under the per-space content key,
+       signed by the author's household identity, authority-signed by the
+       space seed-holder, POSTed to the GFS relay, fanned out over the SH↔GFS
+       WebSocket to every registered subscriber — and the content key itself
+       has to have reached d through the ``new_subscriber`` → sealed
+       key-handoff path fired when d subscribed.
+    3. Assert d's ``GET /api/spaces/{id}/feed`` shows the post DECRYPTED, with
+       the right author user id and body. One assertion, six moving parts: a
+       break anywhere in relay, authority signature, ``new_subscriber`` notify,
+       sealed content-key handoff, per-author signature, or decrypt shows up
+       here and nowhere else.
+    4. Negative control: **c** — subscribed to nothing, GFS-paired with
+       nothing, QR-paired with a but not a member of this space — must NOT
+       hold the post. This is the §"non-member households MUST NOT see space
+       content" hard rule from CLAUDE.md, asserted on the real wire.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("gfs_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-space-subscribe' first")
+    a = state["instances"]["a"]
+    c = state["instances"]["c"]
+
+    # 1. A provisioned (derivable-user_id) author on Alpha, seated in the space.
+    author_id, author_token = _seat_local_member(
+        state,
+        "a",
+        space_id,
+        username="erin",
+        password="erin-pw-demo",
+        display_name="Erin",
+    )
+    state["gfs_space_author_user_id"] = author_id
+
+    # Marker keeps the step re-runnable against a live sandbox.
+    content = f"Global space post over the GFS — {time.time_ns()}"
+    s, post = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
+        token=author_token,
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    _must("a posts in the global space", s, post, ok=(201,))
+    post_id = post["id"]
+    print(f"  a posted in the global space → id={post_id}")
+
+    # 2./3. Settle: encrypt → author-sign → authority-sign → POST to the GFS
+    #       relay → GFS WS fan-out to subscribers → d verifies + decrypts +
+    #       persists. The content key reached d via the ``new_subscriber``
+    #       handoff at subscribe time.
+    seen = _await_space_post(state, "d", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(
+            f"gfs-space-post: d decrypted content={seen.get('content')!r}, "
+            f"expected {content!r}",
+        )
+    if seen.get("author") != author_id:
+        raise SystemExit(
+            f"gfs-space-post: d attributes the post to "
+            f"{seen.get('author')!r}, expected {author_id!r}",
+        )
+    print(f"  d sees the post decrypted, authored by {seen['author']} ✓")
+
+    # 4. Negative control — c is not a member, not a subscriber, not GFS-paired.
+    c_rows = _rows("c", "SELECT id FROM space_posts WHERE id = ?", (post_id,))
+    if c_rows:
+        raise SystemExit(
+            f"gfs-space-post: c holds space post {post_id} — a non-member "
+            "household received space content (§ hard rule violated).",
+        )
+    s, c_feed = _request(
+        f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/feed",
+        token=c["token"],
+    )
+    if s == 200:
+        rows = c_feed if isinstance(c_feed, list) else (c_feed.get("posts") or [])
+        if any(p.get("id") == post_id for p in rows):
+            raise SystemExit(
+                f"gfs-space-post: c's feed for {space_id} exposes {post_id}",
+            )
+    print("  c (non-member, non-subscriber) sees nothing ✓")
+
+    state["gfs_space_post_id"] = post_id
+    state["gfs_space_post_content"] = content
+    _save(state)
+    print("gfs-space-post: ok (relay + authority sig + key handoff + decrypt)")
+
+
+def cmd_gfs_space_rotate() -> None:
+    """A content-key epoch rotation must not cut GFS subscribers off.
+
+    Prereqs: ``gfs-space-post`` (d is a subscriber that has already read one
+    post, so a failure here is unambiguously about the rotation).
+
+    Removing a member rotates the per-space AES-256 content key (forward
+    secrecy — the removed member must not read future posts). Members are
+    re-keyed through the ``space_instances`` fan-out, but GFS subscribers hold
+    a read-only subscription and are never in ``space_instances``: they need
+    the separate :class:`SpaceSubscriberKeyOutbound` re-seal. Before that was
+    wired, every post after a rotation was dropped at the subscriber with
+    "no key for epoch N" — silently, until the subscriber's next GFS-WS
+    reconnect happened to re-trigger a handoff.
+
+    Sequence:
+    1. Seat a SECOND provisioned member on Alpha (``frank``) purely so there is
+       somebody to remove — the author from ``gfs-space-post`` (``erin``) has
+       to survive the rotation to write the post in step 4.
+    2. Alpha removes frank — ``DELETE /api/spaces/{id}/members/{user_id}`` —
+       which runs ``_rotate_and_distribute_space_key``.
+    3. Settle: the new epoch key has to be re-sealed to every GFS subscriber.
+    4. Erin posts again, under the NEW epoch.
+    5. Assert d can still read it. A drop here is the rotation regression.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("gfs_space_id")
+    if not space_id or not state.get("gfs_space_post_id"):
+        raise SystemExit("run 'gfs-space-post' first")
+    a = state["instances"]["a"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+
+    # 1. The sacrificial member. Distinct from the author so the post in
+    #    step 4 still has a derivable-user_id writer after the removal.
+    victim_id, _victim_token = _seat_local_member(
+        state,
+        "a",
+        space_id,
+        username="frank",
+        password="frank-pw-demo",
+        display_name="Frank",
+    )
+    author_id, author_token = _seat_local_member(
+        state,
+        "a",
+        space_id,
+        username="erin",
+        password="erin-pw-demo",
+        display_name="Erin",
+    )
+
+    # 2. Remove frank — this is what forces the epoch rotation.
+    s, removed = _request(
+        f"{a_base}/api/spaces/{space_id}/members/{victim_id}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("a: remove frank", s, removed, ok=(200,))
+    print("  a: removed frank → content-key epoch rotation ✓")
+
+    # 3. Settle: rotate_epoch → re-seal to members → re-seal to GFS
+    #    subscribers (SpaceSubscriberKeyOutbound) → d persists the new epoch.
+    time.sleep(10)
+
+    # 4. Post again, now under the new epoch.
+    content = f"Post after the epoch rotation — {time.time_ns()}"
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=author_token,
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    _must("a posts after rotation", s, post, ok=(201,))
+    post_id = post["id"]
+    print(f"  a posted under the new epoch → id={post_id}")
+
+    # 5. d must still be able to read it.
+    seen = _await_space_post(state, "d", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(
+            f"gfs-space-rotate: d decrypted {seen.get('content')!r}, expected "
+            f"{content!r}",
+        )
+    if seen.get("author") != author_id:
+        raise SystemExit(
+            f"gfs-space-rotate: d attributes the post to {seen.get('author')!r},"
+            f" expected {author_id!r}",
+        )
+    print("  d reads the post-rotation post — rotated key was re-sealed ✓")
+
+    state["gfs_space_rotated_post_id"] = post_id
+    state["gfs_space_rotated_post_content"] = content
+    _save(state)
+    print("gfs-space-rotate: ok (epoch rotation re-keys GFS subscribers)")
+
+
 def cmd_gfs_down() -> None:
     """Stop the GFS started by :func:`cmd_gfs_up` (idempotent)."""
     state = _load()
@@ -2260,7 +2834,104 @@ def cmd_verify() -> None:
             body={"hide_highlights": False},
         )
 
-    # 13. Log audit — scan each backend's stdout/stderr for unhandled
+    # 13. GFS public-space content — the opt-in ``gfs-*`` chain. Only
+    #    asserted when it actually ran; the chain is excluded from ``all``
+    #    because booting a GFS is heavyweight.
+    if "gfs_space_id" in state:
+        gfs_space_id = state["gfs_space_id"]
+        d = state["instances"]["d"]
+        c = state["instances"]["c"]
+
+        # 13a. d's mirrored authority pin still matches a's own. A pin that
+        #      drifts (or gets re-``save``d away by a later metadata refresh)
+        #      silently kills every relayed frame at the subscriber, because
+        #      ``SpacePublicInbound._verify_authority`` checks against exactly
+        #      this column.
+        d_pin_rows = _rows(
+            "d",
+            "SELECT identity_public_key FROM spaces WHERE id = ?",
+            (gfs_space_id,),
+        )
+        a_pin_rows = _rows(
+            "a",
+            "SELECT identity_public_key FROM spaces WHERE id = ?",
+            (gfs_space_id,),
+        )
+        if not d_pin_rows:
+            failures.append(
+                f"d: local 'spaces' mirror for GFS space {gfs_space_id} is gone",
+            )
+        elif not a_pin_rows:
+            failures.append(
+                f"a: lost its own 'spaces' row for {gfs_space_id}",
+            )
+        elif d_pin_rows[0][0] != a_pin_rows[0][0]:
+            failures.append(
+                f"d: mirrored identity_public_key for {gfs_space_id} no longer "
+                f"matches a's ({d_pin_rows[0][0]!r} != {a_pin_rows[0][0]!r})",
+            )
+        else:
+            print("  d's mirrored space-authority pin still matches a's ✓")
+
+        # 13b. d still sees every post relayed over the GFS — the pre-rotation
+        #      one AND (when ``gfs-space-rotate`` ran) the post-rotation one.
+        #      A regression that only re-keys ``space_instances`` members
+        #      leaves the second one missing while the first still reads.
+        expected_posts = {
+            k: state[k]
+            for k in ("gfs_space_post_id", "gfs_space_rotated_post_id")
+            if k in state
+        }
+        s, body = _request(
+            f"http://127.0.0.1:{d['port']}/api/spaces/{gfs_space_id}/feed",
+            token=d["token"],
+        )
+        if s != 200:
+            failures.append(
+                f"d: GET /api/spaces/{gfs_space_id}/feed failed: HTTP {s}",
+            )
+        else:
+            rows = body if isinstance(body, list) else (body.get("posts") or [])
+            have = {p.get("id") for p in rows}
+            for key, pid in expected_posts.items():
+                if pid in have:
+                    print(f"  d still sees {key}={pid[:8]}… ✓")
+                else:
+                    failures.append(
+                        f"d: GFS-relayed post {pid} ({key}) missing from the "
+                        f"space feed (got {sorted(have)})",
+                    )
+
+        # 13c. c is the negative control — never a member, never a subscriber,
+        #      never GFS-paired. It must hold NONE of the space content. This
+        #      is the §"non-member households MUST NOT see space content"
+        #      hard rule, re-asserted at the end of the run.
+        for key, pid in expected_posts.items():
+            if _rows("c", "SELECT id FROM space_posts WHERE id = ?", (pid,)):
+                failures.append(
+                    f"c: holds GFS space post {pid} ({key}) — non-member "
+                    "household received space content",
+                )
+            else:
+                print(f"  c still does not hold {key} ✓")
+        s, c_feed = _request(
+            f"http://127.0.0.1:{c['port']}/api/spaces/{gfs_space_id}/feed",
+            token=c["token"],
+        )
+        if s == 200:
+            rows = c_feed if isinstance(c_feed, list) else (c_feed.get("posts") or [])
+            leaked = {p.get("id") for p in rows} & set(expected_posts.values())
+            if leaked:
+                failures.append(
+                    f"c: space feed for {gfs_space_id} exposes {sorted(leaked)}",
+                )
+    else:
+        print(
+            "  GFS public-space content skipped — run 'gfs-space-subscribe' / "
+            "'gfs-space-post' / 'gfs-space-rotate' to exercise"
+        )
+
+    # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
     #    benign-noise allow-list) becomes a verify failure so the

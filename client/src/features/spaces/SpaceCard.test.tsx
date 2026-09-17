@@ -29,6 +29,53 @@ describe('SpaceCard', () => {
     expect(getByText(/Connect with/i)).toBeTruthy()
   })
 
+  // ── Host label (GFS-discovered spaces carry a raw instance id) ──────
+
+  // A space found through a Global Federation Server is usually hosted by
+  // an unpaired household, so the backend falls back to the raw 52-char
+  // base32 instance id for host_display_name. It has no break
+  // opportunities, so rendering it in full blew the CTA button out of the
+  // card (desktop) / off-screen (mobile).
+  const RAW_IID = 'ywee64sjb5g2ebsprbm6t7wy37jy7qdeywee64sjb5g2ebsp'
+
+  it('shortens a host label that is just the raw instance id', () => {
+    const { getByText, queryByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          host_is_paired: false,
+          host_instance_id: RAW_IID,
+          host_display_name: RAW_IID,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    // CTA carries the shortened id, never the full 52 chars.
+    const cta = getByText(/Connect with/i)
+    expect(cta.textContent).toBe('Connect with ywee64sj… first')
+    expect(cta.textContent).not.toContain(RAW_IID)
+    // "Hosted by" line too.
+    expect(getByText('ywee64sj…')).toBeTruthy()
+    expect(queryByText(RAW_IID)).toBeNull()
+  })
+
+  it('renders a real host display name in full', () => {
+    const { getByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          host_is_paired: false,
+          host_instance_id: RAW_IID,
+          host_display_name: 'Nabu Casa',
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(getByText(/Connect with/i).textContent)
+      .toBe('Connect with Nabu Casa first')
+    expect(getByText('Nabu Casa')).toBeTruthy()
+  })
+
   it('renders "Request pending" disabled when pending', () => {
     const { getByText } = render(
       <SpaceCard

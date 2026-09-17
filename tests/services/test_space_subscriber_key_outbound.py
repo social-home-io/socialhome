@@ -322,6 +322,16 @@ class _FakeConnRepo:
     async def list_publications(self, gfs_id: str) -> list[GfsSpacePublication]:
         return list(self._pubs.get(gfs_id, []))
 
+    async def list_publications_for_space(
+        self, space_id: str
+    ) -> list[GfsSpacePublication]:
+        return [
+            pub
+            for pubs in self._pubs.values()
+            for pub in pubs
+            if pub.space_id == space_id
+        ]
+
 
 class _FakeResp:
     def __init__(self, status: int, payload: dict) -> None:
@@ -519,4 +529,140 @@ async def test_reconcile_is_idempotent(recon_env):
 async def test_reconcile_unknown_gfs_no_crash(recon_env):
     await recon_env["svc"].reconcile("nope")
     assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+# ── Rotation-triggered per-space reconcile (GFS subscribers after a kick) ──
+
+
+def _program_one_subscriber(recon_env, space_id, gfs="gfs-1"):
+    """Publish *space_id* on *gfs* and program a single valid subscriber.
+    Returns ``(keywrap_keypair, url)``."""
+    recon_env["conn_repo"].add_conn(gfs)
+    recon_env["conn_repo"].publish(gfs, space_id)
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    url = f"https://{gfs}.example/gfs/spaces/{space_id}/subscribers"
+    recon_env["session"].program(
+        url,
+        200,
+        _subscribers_payload(
+            {
+                "instance_id": sub_iid,
+                "identity_public_key": id_kp.public_key.hex(),
+                "keywrap_public_key": kw_kp.public_key.hex(),
+                "keywrap_sig": keywrap_sig,
+            }
+        ),
+    )
+    return kw_kp, url
+
+
+async def test_reconcile_space_relays_rotated_epoch(recon_env):
+    """After a content-key rotation (the forward-secrecy rekey a member
+    removal triggers), a per-space reconcile re-seals the NEW epoch's key to
+    the GFS subscriber — otherwise every relayed frame it receives from now on
+    fails to decrypt until the next reconnect."""
+    await recon_env["make_space"]("sp-rot", SpaceType.PUBLIC, with_seed=True)
+    kw_kp, url = _program_one_subscriber(recon_env, "sp-rot")
+
+    new_epoch = await recon_env["crypto"].rotate_epoch("sp-rot")
+
+    await recon_env["svc"].reconcile_space("gfs-1", "sp-rot")
+
+    assert [u for u, _ in recon_env["session"].gets] == [url]
+    assert len(recon_env["gfs"].calls) == 1
+    envelope = recon_env["gfs"].calls[0]["payload"]
+    meta = json.loads(
+        open_keywrap(
+            recipient_keywrap_priv=kw_kp.private_key,
+            sealed=envelope["sealed"],
+        )
+    )
+    assert meta["space_content_key"]["epoch"] == new_epoch
+    expected = await recon_env["crypto"].export_current_key("sp-rot")
+    assert base64.b64decode(meta["space_content_key"]["key_base64"]) == expected[1]
+
+
+async def test_reconcile_space_skips_unpublished_space(recon_env):
+    """A space that isn't published to that GFS is never queried."""
+    await recon_env["make_space"]("sp-unpub", SpaceType.PUBLIC, with_seed=True)
+    recon_env["conn_repo"].add_conn("gfs-1")
+
+    await recon_env["svc"].reconcile_space("gfs-1", "sp-unpub")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+async def test_reconcile_space_skips_inactive_gfs(recon_env):
+    await recon_env["make_space"]("sp-inact", SpaceType.PUBLIC, with_seed=True)
+    recon_env["conn_repo"].add_conn("gfs-1", status="revoked")
+    recon_env["conn_repo"].publish("gfs-1", "sp-inact")
+
+    await recon_env["svc"].reconcile_space("gfs-1", "sp-inact")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+async def test_reconcile_space_private_space_never_leaves(recon_env):
+    """A private space's content key must NEVER travel via a GFS, even if a
+    stale publication row exists."""
+    await recon_env["make_space"]("sp-priv", SpaceType.PRIVATE, with_seed=True)
+    _program_one_subscriber(recon_env, "sp-priv")
+
+    await recon_env["svc"].reconcile_space("gfs-1", "sp-priv")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+async def test_reconcile_space_without_seed_no_query(recon_env):
+    """No seed → can't authority-sign the subscriber query → no query at all."""
+    await recon_env["make_space"]("sp-noseed", SpaceType.PUBLIC, with_seed=False)
+    _program_one_subscriber(recon_env, "sp-noseed")
+
+    await recon_env["svc"].reconcile_space("gfs-1", "sp-noseed")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+async def test_reconcile_space_everywhere_fans_to_each_published_gfs(recon_env):
+    await recon_env["make_space"]("sp-multi", SpaceType.GLOBAL, with_seed=True)
+    _program_one_subscriber(recon_env, "sp-multi", gfs="gfs-1")
+    _program_one_subscriber(recon_env, "sp-multi", gfs="gfs-2")
+
+    await recon_env["svc"].reconcile_space_everywhere("sp-multi")
+
+    assert sorted(u for u, _ in recon_env["session"].gets) == [
+        "https://gfs-1.example/gfs/spaces/sp-multi/subscribers",
+        "https://gfs-2.example/gfs/spaces/sp-multi/subscribers",
+    ]
+    assert len(recon_env["gfs"].calls) == 2
+
+
+async def test_reconcile_space_everywhere_unpublished_space_noop(recon_env):
+    await recon_env["make_space"]("sp-lonely", SpaceType.PUBLIC, with_seed=True)
+
+    await recon_env["svc"].reconcile_space_everywhere("sp-lonely")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+async def test_reconcile_space_everywhere_is_fail_soft(recon_env):
+    """An unreachable/raising GFS must not propagate out — the rotation that
+    triggered it already succeeded."""
+    await recon_env["make_space"]("sp-down", SpaceType.PUBLIC, with_seed=True)
+    _program_one_subscriber(recon_env, "sp-down")
+
+    def _boom(url, *, params=None, timeout=None):
+        raise RuntimeError("gfs down")
+
+    recon_env["session"].get = _boom
+
+    await recon_env["svc"].reconcile_space_everywhere("sp-down")
+    await recon_env["svc"].reconcile_space("gfs-1", "sp-down")
+
     assert recon_env["gfs"].calls == []

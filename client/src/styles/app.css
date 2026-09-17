@@ -14904,6 +14904,10 @@ a.sh-welcome-card:hover {
 .sh-browser-card {
   position: relative;
   display: flex; flex-direction: column; gap: var(--sh-space-sm);
+  /* Grid items default to ``min-width: auto`` — an unbreakable label
+     (a raw 52-char instance id in the "Connect with … first" CTA) would
+     otherwise push the card wider than its track and draw outside it. */
+  min-width: 0;
   padding: var(--sh-space-md);
   background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
@@ -15044,6 +15048,7 @@ a.sh-welcome-card:hover {
 .sh-browser-card--global     { border-left-color: var(--sh-warning); }
 .sh-browser-card__hd {
   display: flex; align-items: center; gap: var(--sh-space-sm);
+  min-width: 0;
 }
 .sh-browser-card__hd .sh-space-emoji {
   font-size: 1.75rem;
@@ -15074,6 +15079,19 @@ a.sh-welcome-card:hover {
   display: flex; gap: var(--sh-space-xs);
   align-items: center;
   flex-wrap: wrap;
+  min-width: 0;
+}
+/* ``.sh-btn`` is ``white-space: nowrap`` by design, but a card action can
+   carry a host household name of any length. Inside the card the button
+   wraps and breaks mid-token instead, so no label — however pathological
+   — can escape the card on a 360 px phone. */
+.sh-browser-card__actions > .sh-btn {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  line-height: 1.25;
 }
 
 /* Subscribe button — used on SpaceCard when the space is public/global
@@ -15330,6 +15348,8 @@ a.sh-welcome-card:hover {
 .sh-host-callout {
   margin: 0;
   font-size: var(--sh-font-size-xs);
+  /* Same reasoning as the CTA: the host label may be a raw instance id. */
+  overflow-wrap: anywhere;
 }
 
 /* Remote-invite inbox banner (§D1b) */

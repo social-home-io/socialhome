@@ -2281,6 +2281,98 @@ async def test_ban_rotates_and_distributes_key(stack):
     )
 
 
+async def test_remove_member_reseals_key_to_gfs_subscribers(stack):
+    """REGRESSION: a rotation must also reach GFS subscribers. They aren't
+    member households (never in ``space_instances``), so the
+    ``broadcast_to_space_members`` fan-out skips them and every relayed frame
+    they get stops decrypting until the next GFS reconnect. The rotation now
+    re-runs the per-space subscriber reconcile."""
+    from unittest.mock import AsyncMock
+
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=7)
+    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    subscriber_keys = AsyncMock()
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
+    stack.space_svc._federation = federation
+
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto.rotate_epoch.assert_awaited_once_with(space.id)
+    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
+
+
+async def test_rotation_reseal_failure_does_not_break_removal(stack):
+    """Fail-soft: a GFS that is down must not turn a successful kick into an
+    error — the member is still removed."""
+    from unittest.mock import AsyncMock
+
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=3)
+    space_crypto.export_current_key = AsyncMock(return_value=(3, bytes(range(32))))
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    subscriber_keys = AsyncMock()
+    subscriber_keys.reconcile_space_everywhere = AsyncMock(
+        side_effect=RuntimeError("gfs down")
+    )
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
+    stack.space_svc._federation = federation
+
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
+
+
+async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
+    """No GFS paired → nothing attached → rotation still completes."""
+    from unittest.mock import AsyncMock
+
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=2)
+    space_crypto.export_current_key = AsyncMock(return_value=(2, bytes(range(32))))
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc._federation = federation
+
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+
+
 async def test_remove_member_without_crypto_attached_is_noop(stack):
     """Without ``SpaceContentEncryption`` wired (early boot / unit
     test stacks), removal still succeeds — the rotation helper just
@@ -5350,3 +5442,138 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
 
     assert down.calls == [("remote-sp", "gfs-1")]
     assert await stack.space_repo.get("remote-sp") is None
+
+
+# ── Public-tier content key (epoch 0) at creation / tier change ────────
+
+
+def _attach_real_crypto(stack):
+    """Attach a REAL SpaceContentEncryption over the stack's SQLite db and
+    return it, so the tests below assert on persisted key rows rather than
+    on a mock's call log."""
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+    from socialhome.services.space_crypto_service import SpaceContentEncryption
+
+    crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db), stack.km, own_instance_id=stack.iid
+    )
+    stack.space_svc.attach_space_crypto_service(crypto)
+    return crypto
+
+
+async def test_create_global_space_mints_epoch_zero(stack):
+    """A GLOBAL space's audience may be GFS subscribers only — nobody is ever
+    invited cross-household, so the §D1b invite builder never runs. Without a
+    key minted at creation the public-relay producers can never relay."""
+    crypto = _attach_real_crypto(stack)
+    await stack.provision_user("anna")
+
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="World", space_type=SpaceType.GLOBAL
+    )
+
+    assert await crypto.get_current_epoch(space.id) == 0
+    exported = await crypto.export_current_key(space.id)
+    assert exported is not None
+    assert len(exported[1]) == 32  # AES-256
+
+
+async def test_create_public_space_mints_epoch_zero(stack):
+    """PUBLIC is in PUBLIC_SPACE_TIERS too — the relay producers gate on the
+    tier, not on the GLOBAL auto-publish boundary."""
+    crypto = _attach_real_crypto(stack)
+    await stack.provision_user("anna")
+
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Town", space_type=SpaceType.PUBLIC
+    )
+
+    assert await crypto.get_current_epoch(space.id) == 0
+
+
+@pytest.mark.parametrize("stype", [SpaceType.PRIVATE, SpaceType.HOUSEHOLD])
+async def test_create_non_public_space_does_not_mint_key(stack, stype):
+    """PRIVATE / HOUSEHOLD spaces never relay publicly; their key is minted
+    lazily on the §D1b invite path when someone is actually invited."""
+    crypto = _attach_real_crypto(stack)
+    await stack.provision_user("anna")
+
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Fam", space_type=stype
+    )
+
+    assert await crypto.get_current_epoch(space.id) is None
+
+
+async def test_type_change_into_public_tier_mints_key(stack):
+    """PRIVATE → GLOBAL must mint a key when none exists, otherwise a space
+    that becomes public later can still never relay."""
+    crypto = _attach_real_crypto(stack)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Fam", space_type=SpaceType.PRIVATE
+    )
+    assert await crypto.get_current_epoch(space.id) is None
+
+    await stack.space_svc.update_config(
+        space.id, actor_username="anna", space_type=SpaceType.GLOBAL
+    )
+
+    assert await crypto.get_current_epoch(space.id) == 0
+
+
+async def test_content_key_mint_is_idempotent_across_tier_change(stack):
+    """initialise_for_space is a no-op when a key exists — a later tier change
+    must NOT rotate away the epoch subscribers already hold."""
+    crypto = _attach_real_crypto(stack)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Town", space_type=SpaceType.PUBLIC
+    )
+    before = await crypto.export_current_key(space.id)
+    assert before is not None
+
+    await stack.space_svc.update_config(
+        space.id, actor_username="anna", space_type=SpaceType.GLOBAL
+    )
+
+    after = await crypto.export_current_key(space.id)
+    assert after == before  # same epoch, identical key bytes
+
+
+async def test_public_space_gets_key_without_any_gfs_paired(stack):
+    """The key must not depend on a GFS being wired — a space created before
+    any GFS is paired still needs epoch 0 for the later relay/handoff."""
+    crypto = _attach_real_crypto(stack)
+    assert stack.space_svc._gfs is None
+    await stack.provision_user("anna")
+
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="World", space_type=SpaceType.GLOBAL
+    )
+
+    assert await crypto.get_current_epoch(space.id) == 0
+
+
+async def test_create_space_survives_crypto_failure(stack):
+    """Key minting is fail-soft: an absent or broken crypto service must not
+    abort space creation."""
+    from unittest.mock import AsyncMock
+
+    await stack.provision_user("anna")
+    # (a) no crypto service attached at all.
+    assert stack.space_svc._space_crypto is None
+    a = await stack.space_svc.create_space(
+        owner_username="anna", name="A", space_type=SpaceType.GLOBAL
+    )
+    assert await stack.space_repo.get(a.id) is not None
+
+    # (b) crypto attached but raising.
+    boom = AsyncMock()
+    boom.initialise_for_space = AsyncMock(side_effect=RuntimeError("kek locked"))
+    stack.space_svc.attach_space_crypto_service(boom)
+    b = await stack.space_svc.create_space(
+        owner_username="anna", name="B", space_type=SpaceType.GLOBAL
+    )
+    assert await stack.space_repo.get(b.id) is not None
+    boom.initialise_for_space.assert_awaited_once_with(b.id)
