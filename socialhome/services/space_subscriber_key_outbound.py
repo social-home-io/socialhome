@@ -308,6 +308,62 @@ class SpaceSubscriberKeyOutbound:
                     gfs_id,
                 )
 
+    async def reconcile_space(self, gfs_id: str, space_id: str) -> None:
+        """Reconcile ONE space on ONE GFS. Never raises.
+
+        Narrow entry point for the forward-secrecy rekey path: after a member
+        removal rotates the space content key, the new epoch must reach the
+        GFS subscribers too (they are not member households, so the
+        ``space_instances`` fan-out skips them). Applies exactly the guards
+        :meth:`reconcile` applies — reconcile context wired, GFS known and
+        active, space actually published to it — and then defers to the shared
+        :meth:`_reconcile_space`, which enforces the PUBLIC/GLOBAL tier +
+        seed-holder gates.
+        """
+        if (
+            self._gfs_conn_repo is None
+            or self._http_session is None
+            or not self._own_instance_id
+        ):
+            return
+        try:
+            conn = await self._gfs_conn_repo.get(gfs_id)
+            if conn is None or conn.status != "active":
+                return
+            publications = await self._gfs_conn_repo.list_publications(gfs_id)
+            if not any(pub.space_id == space_id for pub in publications):
+                return
+            await self._reconcile_space(conn.inbox_url, space_id)
+        except Exception:
+            log.exception(
+                "space_subscriber_key.reconcile: space %s on gfs %s failed",
+                space_id,
+                gfs_id,
+            )
+
+    async def reconcile_space_everywhere(self, space_id: str) -> None:
+        """Re-seal one space's current content key to its subscribers on every
+        GFS it is published to. Never raises.
+
+        Called after a content-key rotation so a subscriber isn't dark until
+        the next GFS reconnect.
+        """
+        if self._gfs_conn_repo is None:
+            return
+        try:
+            publications = await self._gfs_conn_repo.list_publications_for_space(
+                space_id
+            )
+        except Exception:
+            log.exception(
+                "space_subscriber_key.reconcile: publication lookup failed for "
+                "space %s",
+                space_id,
+            )
+            return
+        for pub in publications:
+            await self.reconcile_space(pub.gfs_connection_id, space_id)
+
     async def _reconcile_space(self, gfs_base_url: str, space_id: str) -> None:
         """Pull + re-seal for one published space. Skips a space this household
         doesn't hold the seed for, or a non-PUBLIC/GLOBAL space (its key must

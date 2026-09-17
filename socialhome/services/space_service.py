@@ -187,6 +187,7 @@ class SpaceService(SpaceMemberGuardMixin):
         "_redeem_coordinator",
         "_space_crypto",
         "_gfs_mirror",
+        "_subscriber_keys",
         "_media_dir",
         "_gallery",
         "_bazaar",
@@ -216,6 +217,7 @@ class SpaceService(SpaceMemberGuardMixin):
         self._icons = None
         self._gfs = None
         self._gfs_mirror = None
+        self._subscriber_keys = None
         self._federation_repo = None
         self._federation = None
         self._remote_members = None
@@ -278,6 +280,15 @@ class SpaceService(SpaceMemberGuardMixin):
         did before, 404ing on an unknown space id.
         """
         self._gfs_mirror = mirror
+
+    def attach_subscriber_key_outbound(self, subscriber_key_outbound) -> None:
+        """Wire the Phase-5b subscriber content-key producer so a
+        forward-secrecy rekey also reaches GFS *subscribers*. They hold a
+        read-only subscription and are never in ``space_instances``, so the
+        member fan-out misses them entirely. Optional: absent when no GFS is
+        paired — rotation then behaves exactly as before.
+        """
+        self._subscriber_keys = subscriber_key_outbound
 
     def attach_federation(
         self,
@@ -2495,6 +2506,16 @@ class SpaceService(SpaceMemberGuardMixin):
         re-imports the new key in-place (a no-op for them since
         they're not in ``space_members`` anymore).
 
+        GFS *subscribers* are not member households — they hold a
+        read-only subscription and never appear in ``space_instances``
+        — so the broadcast above misses them and every relayed frame
+        they receive would stop decrypting until their next GFS
+        reconnect. For a PUBLIC/GLOBAL space published to a GFS, the
+        rotation therefore also re-runs the Phase-5b subscriber
+        reconcile, which re-seals the new epoch's key per subscriber
+        through the content-blind relay (same verified seal path; the
+        tier + seed-holder gates live there).
+
         Failures are logged and swallowed — a rotation that can't
         federate is still better than no rotation, and the kick
         itself succeeded. A subsequent member action retries
@@ -2577,6 +2598,17 @@ class SpaceService(SpaceMemberGuardMixin):
                 "rotate_and_distribute_space_key: rekey broadcast failed for %s",
                 space_id,
             )
+        # GFS subscribers (not member households — see the docstring). Never
+        # raises by contract, but stay defensive: the kick already succeeded.
+        if self._subscriber_keys is not None:
+            try:
+                await self._subscriber_keys.reconcile_space_everywhere(space_id)
+            except Exception:
+                log.exception(
+                    "rotate_and_distribute_space_key: GFS subscriber re-seal "
+                    "failed for %s",
+                    space_id,
+                )
 
     async def invite_remote_user(
         self,

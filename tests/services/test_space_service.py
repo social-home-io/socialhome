@@ -2281,6 +2281,98 @@ async def test_ban_rotates_and_distributes_key(stack):
     )
 
 
+async def test_remove_member_reseals_key_to_gfs_subscribers(stack):
+    """REGRESSION: a rotation must also reach GFS subscribers. They aren't
+    member households (never in ``space_instances``), so the
+    ``broadcast_to_space_members`` fan-out skips them and every relayed frame
+    they get stops decrypting until the next GFS reconnect. The rotation now
+    re-runs the per-space subscriber reconcile."""
+    from unittest.mock import AsyncMock
+
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=7)
+    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    subscriber_keys = AsyncMock()
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
+    stack.space_svc._federation = federation
+
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto.rotate_epoch.assert_awaited_once_with(space.id)
+    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
+
+
+async def test_rotation_reseal_failure_does_not_break_removal(stack):
+    """Fail-soft: a GFS that is down must not turn a successful kick into an
+    error — the member is still removed."""
+    from unittest.mock import AsyncMock
+
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=3)
+    space_crypto.export_current_key = AsyncMock(return_value=(3, bytes(range(32))))
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    subscriber_keys = AsyncMock()
+    subscriber_keys.reconcile_space_everywhere = AsyncMock(
+        side_effect=RuntimeError("gfs down")
+    )
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
+    stack.space_svc._federation = federation
+
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
+
+
+async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
+    """No GFS paired → nothing attached → rotation still completes."""
+    from unittest.mock import AsyncMock
+
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=2)
+    space_crypto.export_current_key = AsyncMock(return_value=(2, bytes(range(32))))
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc._federation = federation
+
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+
+
 async def test_remove_member_without_crypto_attached_is_noop(stack):
     """Without ``SpaceContentEncryption`` wired (early boot / unit
     test stacks), removal still succeeds — the rotation helper just

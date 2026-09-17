@@ -2350,6 +2350,10 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_conn_repo=repos.gfs_connection,
             http_session=http_session,
         )
+        # A forward-secrecy rekey (member removal / ban / §D1b kick) must reach
+        # GFS subscribers too — they're not member households, so the
+        # ``space_instances`` fan-out misses them entirely.
+        real_space_service.attach_subscriber_key_outbound(space_subscriber_key_outbound)
         space_subscriber_key_inbound = SpaceSubscriberKeyInbound(
             space_repo=space_repo,
             space_crypto=space_crypto,
