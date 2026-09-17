@@ -346,12 +346,22 @@ Phases added after the initial publish are documented inline in
   identical inner event once; d applies the role. All three are hard
   assertions: d's ``space_members.role == 'admin'`` (polled ≤ 90 s),
   d's log carries ``no cached target_eph_priv … nacked to``, and c's
-  log carries ``invalidated, rediscovered, retransmitted`` naming d's
-  instance id. A ``broadcast_to_space_members … did not reach`` WARNING
-  on c fails the step early — it means the cache was not warm and the
-  nack path was never exercised. (The step previously relied on the
-  respawn ``sync-https-fallback`` performs, but the respawned d BEGINs a
-  mesh catch-up sync and c re-discovers its route on admitting it, so
+  log carries ``rediscovered, retransmitted`` naming d's instance id —
+  preceded by ``invalidated`` (c's cache still held the dead key) or
+  ``already rebuilt`` (d's catch-up ``SPACE_SYNC_BEGIN`` had refreshed
+  it first); both are real recoveries and the step prints which fired.
+  The nack has to land inside c's 270 s pending-record window
+  (``routed_envelope._PENDING_ROUTED_TTL_S``), which outlasts b's whole
+  5/10/20/40 s outbox ladder; if c's one-shot rediscovery races d's boot
+  and finds no route, c logs ``deferring one retransmit`` and retries
+  exactly once past the discovery negative cooldown (the success line
+  then carries a ``(deferred attempt)`` suffix), and a second miss logs
+  ``still no route … giving up``. A ``broadcast_to_space_members … did
+  not reach`` WARNING on c fails the step early — it means the cache was
+  not warm and the nack path was never exercised. (The step previously
+  relied on the respawn ``sync-https-fallback`` performs, but the
+  respawned d BEGINs a mesh catch-up sync and c re-discovers its route
+  on admitting it, so
   whether c still held a stale route at PATCH time was a race — which
   is also why the step used to fail intermittently pre-v_28, when a
   stale seal was dropped in silence.) ``sync-https-fallback``'s own

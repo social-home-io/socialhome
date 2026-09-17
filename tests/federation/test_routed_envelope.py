@@ -1323,7 +1323,11 @@ async def test_missing_target_eph_priv_nacks_previous_hop(caplog):
     assert "sealed" not in payload
     assert "inner_event_type" not in payload
     route_recs = [r for r in caplog.records if route_id[:8] in r.message]
-    assert any(r.levelno == logging.INFO and "nacked" in r.message for r in route_recs)
+    # ``nacked to`` is the needle the federation-demo harness greps on the
+    # target (``admin-promote-kick``) — a rewording must fail here first.
+    assert any(
+        r.levelno == logging.INFO and "nacked to" in r.message for r in route_recs
+    )
     assert not any(r.levelno >= logging.WARNING for r in route_recs)
 
 
@@ -1828,6 +1832,11 @@ async def _deliver_to_origin(a: _Node, nack: dict[str, Any]) -> None:
 
 
 _RETRANSMIT_MSG = "invalidated, rediscovered, retransmitted"
+#: The variant-agnostic needle the federation-demo harness greps on the
+#: origin (``admin-promote-kick``): it must match both the ``invalidated``
+#: and the ``already rebuilt`` success lines, deferred or not.
+_HARNESS_RECOVERED_MSG = "rediscovered, retransmitted"
+_DEFERRED_SUFFIX = "(deferred attempt)"
 
 
 async def test_route_stale_at_origin_verifies_invalidates_and_retransmits_once(
@@ -2421,8 +2430,12 @@ async def test_deferred_retransmit_uses_a_late_route_found_with_zero_floods(capl
     assert a.handler._deferred_retransmits == {}
     infos = [r for r in caplog.records if r.levelno == logging.INFO]
     assert any(_DEFER_MSG in r.message and route_id[:8] in r.message for r in infos)
+    # Pin the exact substrings the demo harness greps: the variant-agnostic
+    # success core plus the deferred-attempt suffix.
     assert any(
         _RETRANSMIT_MSG in r.message
+        and _HARNESS_RECOVERED_MSG in r.message
+        and r.message.endswith(_DEFERRED_SUFFIX)
         and route_id[:8] in r.message
         and new_route_id[:8] in r.message
         for r in infos
@@ -2446,8 +2459,12 @@ async def test_deferred_retransmit_that_finds_no_route_gives_up_for_good(caplog)
     assert a.handler._deferred_retransmits == {}
     assert route_id not in a.handler._pending_routed
     infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    # ``still no route`` / ``on the deferred attempt; giving up`` are what
+    # the demo harness tells the operator to grep for.
     assert any(
         _GIVE_UP_MSG in r.message
+        and "still no route to" in r.message
+        and "on the deferred attempt; giving up" in r.message
         and route_id[:8] in r.message
         and "space_post_created" in r.message
         for r in infos
@@ -3033,3 +3050,38 @@ async def test_route_stale_relay_forward_not_delivered_is_a_warning(caplog):
         and a.instance_id in r.message
         for r in caplog.records
     )
+
+
+async def test_route_stale_at_origin_survives_a_raising_invalidate(caplog):
+    """``invalidate_if_eph`` raising inside the origin's ``try`` must land in
+    the fail-soft ``except`` branch — a WARNING with the traceback and one
+    deferred retransmit — never an ``UnboundLocalError`` because ``state``
+    was first bound *after* that await. Regression for the final review's
+    M-1: the docstring promises "never raises" and this is the one path
+    where that used to be untrue."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+
+    async def _boom(*_a: Any, **_kw: Any) -> bool:
+        raise RuntimeError("route service down")
+
+    rs.invalidate_if_eph = _boom  # type: ignore[method-assign]
+    try:
+        with _short_deferral(), caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+            route_id, _dead, _ = await _send_under_dead_key(
+                a, path, pin=c.fed.own_identity_pk.hex()
+            )
+            await _settle()
+        # The except branch ran (no UnboundLocalError), logged with traceback,
+        # and still scheduled the single deferred attempt.
+        assert any(
+            r.levelno == logging.WARNING
+            and route_id[:8] in r.message
+            and r.exc_info is not None
+            for r in caplog.records
+        ), [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert route_id in a.handler._deferred_retransmits
+        assert route_id not in a.handler._pending_routed  # popped before the await
+    finally:
+        for task in list(a.handler._deferred_retransmits.values()):
+            task.cancel()

@@ -1238,6 +1238,11 @@ class SpaceRoutedHandler:
                 target,
             )
             return
+        # ``state`` feeds both the success line and the ``except`` branch's
+        # deferral below. Bind it before the ``try`` so a raising
+        # ``invalidate_if_eph`` (a bad double, a future refactor) cannot turn
+        # the fail-soft branch into an UnboundLocalError.
+        state = "invalidated"
         try:
             # Conditional: only a cache entry still pointing at the nacked
             # key is stale. A sibling nack may already have rebuilt the

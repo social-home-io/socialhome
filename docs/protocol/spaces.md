@@ -1095,7 +1095,13 @@ up. The deferral is tracked apart from the pending record, which stays
 the sole authority on whether a nack refers to a live send — reusing the
 record would let a replayed nack match again. Success logs
 `SPACE_ROUTE_STALE route_id=…: route to <target> invalidated,
-rediscovered, retransmitted <event> as route_id=…` at `INFO`.
+rediscovered, retransmitted <event> as route_id=…` at `INFO` — with
+`already rebuilt` in place of `invalidated` when the conditional
+eviction found the cache no longer pointing at the nacked key (a sibling
+nack, or the rebooted target's own catch-up `SPACE_SYNC_BEGIN`, had
+already refreshed the route), so nothing was torn down and the retransmit
+rode the fresh route. The deferred attempt's success line carries the
+same core plus a `(deferred attempt)` suffix.
 
 **Amplification bounds.** Dedup per `route_id` at every hop (a nack
 visits each hop at most once; replays are no-ops); one retransmit per

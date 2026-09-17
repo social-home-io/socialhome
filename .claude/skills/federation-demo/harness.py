@@ -5391,7 +5391,12 @@ def cmd_admin_promote_kick() -> None:
     - d's post-respawn log carries the nack emission
       (``no cached target_eph_priv … nacked to <b>``).
     - c's log, from the PATCH on, carries the origin's recovery line
-      ``invalidated, rediscovered, retransmitted`` naming d's instance id.
+      ``rediscovered, retransmitted`` naming d's instance id. The word
+      before it is ``invalidated`` (c's cache still pointed at the dead
+      key and was dropped) or ``already rebuilt`` (``invalidate_if_eph``
+      found the route refreshed already — the respawned d's catch-up
+      ``SPACE_SYNC_BEGIN`` beat the nack to c). Both are real recoveries:
+      role applied, d nacked, c retransmitted.
 
     Why the previous ordering was not a proof: this step used to run
     straight after ``sync-https-fallback`` and lean on *that* step's
@@ -5405,9 +5410,14 @@ def cmd_admin_promote_kick() -> None:
     until the cache expired. Killing d *between* the warm-up and the
     PATCH removes the race. Routing the stale envelope through b's outbox
     also proves the outbox → nack → retransmit interplay: the nack has to
-    reach c inside its 60 s pending-record window
-    (``routed_envelope._DEFAULT_EPH_TTL_S``), which the first rungs of
-    the outbox ladder do; the 40 s rung (~75 s cumulative) would not.
+    reach c inside its 270 s pending-record window
+    (``routed_envelope._PENDING_ROUTED_TTL_S ==
+    route_discovery.ROUTE_CACHE_TTL_S``), which comfortably covers every
+    rung of b's 5/10/20/40 s outbox ladder (~75 s cumulative). If c's
+    one-shot rediscovery races d's boot and finds no route, c logs
+    ``no route on rediscovery; deferring one retransmit`` and retries
+    exactly once past the discovery negative cooldown; a second miss
+    logs ``still no route … on the deferred attempt; giving up``.
 
     The kick exercise (dave kicking someone via
     ``SPACE_REMOTE_ADMIN_KICK``) lives in
@@ -5523,9 +5533,13 @@ def cmd_admin_promote_kick() -> None:
     #   open (INFO "…; nacked to …" under v_28, WARNING "…; dropping"
     #   pre-v_28 / on a failed nack send).
     #   ``nack_recovered``: the stable substring of the origin's INFO
-    #   success line in ``routed_envelope._on_route_stale_at_origin``.
+    #   success line in ``routed_envelope._on_route_stale_at_origin`` (and
+    #   its ``(deferred attempt)`` sibling). Deliberately NOT anchored on
+    #   the word before it: ``invalidated`` and ``already rebuilt`` are
+    #   both legitimate outcomes (see the docstring), and the match is
+    #   further required to name d's instance id below.
     stale_at_target = "no cached target_eph_priv"
-    nack_recovered = "invalidated, rediscovered, retransmitted"
+    nack_recovered = "rediscovered, retransmitted"
     nacked = [
         line
         for line in _log_lines_matching("d", stale_at_target)
@@ -5560,13 +5574,17 @@ def cmd_admin_promote_kick() -> None:
         raise SystemExit(
             f"admin-promote-kick: dave's role on d is {rows[0][0]!r}, expected "
             "'admin' within 90 s — the stale-sealed SPACE_MEMBER_ROLE_CHANGED "
-            "was not recovered. c 'invalidated; no route on rediscovery, giving "
-            "up' → c verified the nack but its one-shot SPACE_FIND_ROUTE (2 s "
-            "window) raced d's boot and the retransmit was abandoned (a late "
-            "ROUTE_FOUND is cached, but nothing resends). d 'nacked to' + no c "
-            "line at all → the nack was dropped at a hop, rejected at the origin, "
-            "or arrived after c's 60 s pending-record window (b's outbox ladder "
-            "is 5/10/20/40 s). "
+            "was not recovered. c 'still no route … on the deferred attempt; "
+            "giving up' → c verified the nack, its one-shot SPACE_FIND_ROUTE "
+            "(2 s window) raced d's boot, and the single deferred retransmit "
+            "found no route either. c 'deferring one retransmit' with no later "
+            "'rediscovered, retransmitted' line → the deferred attempt is still "
+            "pending (negative cooldown + 5 s) or failed (WARNING 'deferred "
+            "retransmit … failed'). d 'nacked to' + no c line at all → the nack "
+            "was dropped at a hop or rejected at the origin — c's 270 s "
+            "pending-record window (routed_envelope._PENDING_ROUTED_TTL_S) "
+            "outlasts b's whole 5/10/20/40 s outbox ladder, so a late arrival is "
+            "not the cause. "
             "d '; dropping' → a hop is pre-v_28 or the nack send failed. No d "
             "line at all → b's outbox never redelivered the envelope. Grep "
             f"'SPACE_ROUTE_STALE' in {_log_path('c')} and {_log_path('d')}.",
@@ -5592,9 +5610,11 @@ def cmd_admin_promote_kick() -> None:
             "arrived by some other path than the verified nack + retransmit. "
             f"Inspect {_log_path('c')} for 'SPACE_ROUTE_STALE'.",
         )
+    variant = "already rebuilt" if "already rebuilt" in recovered[0] else "invalidated"
+    attempt = " (deferred attempt)" if "(deferred attempt)" in recovered[0] else ""
     print(
         "  c verified the nack against d's pinned identity key: route "
-        "invalidated, rediscovered, role change retransmitted ✓ (v_28)"
+        f"{variant}, rediscovered, role change retransmitted{attempt} ✓ (v_28)"
     )
     print(f"    c: {recovered[0].strip()[:220]}")
     state["admin_promote_kick_nack_proven"] = True

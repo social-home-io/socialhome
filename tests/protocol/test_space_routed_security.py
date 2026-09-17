@@ -461,12 +461,14 @@ async def test_forged_route_stale_at_origin_does_not_invalidate_the_route():
             seed=target.private_key, route_id=route_id, stale_eph_pk_b64=dead_pub
         ),
     )
-    await handler._on_route_stale(
-        _nack_event(genuine, from_instance=path[1], to_instance=path[0])
-    )
-    assert rs.invalidated == [path[-1]]
-    assert route_id not in handler._pending_routed
-    _cancel_deferred(handler)
+    try:
+        await handler._on_route_stale(
+            _nack_event(genuine, from_instance=path[1], to_instance=path[0])
+        )
+        assert rs.invalidated == [path[-1]]
+        assert route_id not in handler._pending_routed
+    finally:
+        _cancel_deferred(handler)
 
 
 async def test_forged_route_stale_never_creates_a_deferred_retransmit():
@@ -527,10 +529,14 @@ async def test_replayed_genuine_route_stale_after_pop_does_not_defer_again():
         _cancel_deferred(handler)
 
 
-async def test_route_stale_with_tampered_stale_eph_pk_fails_verification():
-    """The signature binds ``(route_id, stale_eph_pk)``. Swapping the eph
-    pk under a genuine signature must not verify — otherwise a relay could
-    re-point a real nack at a different key."""
+async def test_route_stale_naming_an_eph_never_sealed_under_is_rejected_before_signature_check():
+    """A nack that names an eph pk the origin never sealed this route under
+    is dropped at the eph-binding step, *before* ``verify_route_stale``
+    runs — so the handler-level assertions below prove the binding check,
+    not the signature. That the signature itself covers ``stale_eph_pk``
+    (swapping the pk under a genuine signature must not verify, or a relay
+    could re-point a real nack at a different key) is asserted directly
+    against ``verify_route_stale``."""
     handler, rs, target, path, route_id, dead_pub = await _origin_with_pending_send()
     _other_priv, other_pub = routed_crypto.generate_ephemeral_keypair()
     tampered = _nack_payload(
@@ -636,9 +642,11 @@ async def test_relay_substituted_eph_cannot_tear_down_a_live_route():
             seed=target.private_key, route_id=route_id, stale_eph_pk_b64=sealed_pub
         ),
     )
-    await handler._on_route_stale(
-        _nack_event(genuine, from_instance=path[1], to_instance=path[0])
-    )
-    assert rs.invalidated == [path[-1]]
-    assert route_id not in handler._pending_routed
-    _cancel_deferred(handler)
+    try:
+        await handler._on_route_stale(
+            _nack_event(genuine, from_instance=path[1], to_instance=path[0])
+        )
+        assert rs.invalidated == [path[-1]]
+        assert route_id not in handler._pending_routed
+    finally:
+        _cancel_deferred(handler)
