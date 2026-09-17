@@ -378,6 +378,29 @@ class SpaceService(SpaceMemberGuardMixin):
         else:
             await self._gfs.unpublish_space_from_all(space_id)
 
+    async def _ensure_content_key(self, space_id: str) -> None:
+        """Mint epoch 0 for a space that sits in a public tier.
+
+        A PUBLIC / GLOBAL space's audience may be GFS *subscribers* only —
+        nobody is ever invited cross-household, so the §D1b invite-metadata
+        builder (the only other caller of ``initialise_for_space``) never
+        runs. Without a key the public-relay producers log "no content key …
+        cannot relay" forever, and a new subscriber never receives one
+        either. Both of those can happen before the first post, so the key is
+        established the moment the space enters a public tier.
+
+        Idempotent (``initialise_for_space`` is a no-op when a key exists, so
+        an existing epoch is never rotated away) and fail-soft: the crypto
+        service is optional in several stacks, and a minting failure must not
+        abort space creation or a config change.
+        """
+        if self._space_crypto is None:
+            return
+        try:
+            await self._space_crypto.initialise_for_space(space_id)
+        except Exception:
+            log.exception("failed to mint content key for space=%s", space_id)
+
     async def set_cover(
         self,
         space_id: str,
@@ -586,6 +609,8 @@ class SpaceService(SpaceMemberGuardMixin):
             )
         )
         await self._spaces.add_space_instance(space.id, self._own_instance_id)
+        if stype in PUBLIC_SPACE_TIERS:
+            await self._ensure_content_key(space.id)
         await self._auto_publish_on_type(
             space.id,
             was_global=False,
@@ -1353,6 +1378,11 @@ class SpaceService(SpaceMemberGuardMixin):
                 sequence=sequence,
             )
         )
+        if new_fields.get("space_type") in PUBLIC_SPACE_TIERS:
+            # PRIVATE/HOUSEHOLD → PUBLIC/GLOBAL: the space becomes relayable,
+            # so it needs the content key the relay + subscriber-handoff paths
+            # encrypt under. No-op when it already has one.
+            await self._ensure_content_key(space_id)
         await self._auto_publish_on_type(
             space_id,
             was_global=was_global,

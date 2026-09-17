@@ -453,3 +453,41 @@ async def test_anchor_authored_post_carries_signed_anchor(env):
     assert derive_user_id(env["own_pk"], "carol") != anchored_user_id
     assert verify_signed_author_inner(inner) is True
     _ = skp
+
+
+async def test_space_service_created_global_space_can_relay(env):
+    """Regression (#gfs-space-key): a GLOBAL space created through
+    ``SpaceService.create_space`` — the real production path, with nobody ever
+    invited cross-household — must already hold a content key, so the producer
+    reaches the relay instead of the "no content key … cannot relay" branch.
+    """
+    from socialhome.domain.space import SpaceType as _SpaceType
+    from socialhome.infrastructure.event_bus import EventBus as _EventBus
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.repositories.user_repo import SqliteUserRepo as _UserRepo
+    from socialhome.services.space_service import SpaceService
+
+    db = env["db"]
+    svc = SpaceService(
+        env["space_repo"],
+        SqliteSpacePostRepo(db),
+        _UserRepo(db),
+        _EventBus(),
+        own_instance_id=env["own_iid"],
+    )
+    svc.attach_space_crypto_service(env["crypto"])
+    space = await svc.create_space(
+        owner_username="alice", name="World", space_type=_SpaceType.GLOBAL
+    )
+
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id=space.id)
+    )
+
+    assert len(env["gfs"].calls) == 1
+    envelope = env["gfs"].calls[0]["payload"]
+    assert envelope["space_id"] == space.id
+    pt = await env["crypto"].decrypt(
+        space.id, envelope["epoch"], envelope["encrypted_payload"]
+    )
+    assert json.loads(pt)["post_id"] == "post-1"
