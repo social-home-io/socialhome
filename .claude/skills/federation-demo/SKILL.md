@@ -307,9 +307,11 @@ invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → replay`` in that order.
-``gfs-up`` / ``gfs-pair`` / ``gfs-down`` stay opt-in (they spin up
-a separate GFS process and aren't required to validate the HFS↔HFS
-surface).
+The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
+/ ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
+``gfs-space-rotate`` / ``gfs-down``) stays opt-in — it spins up a
+separate GFS process and isn't required to validate the HFS↔HFS
+surface.
 
 Phases added after the initial publish are documented inline in
 ``harness.py`` (each ``cmd_*`` has its own docstring):
@@ -457,8 +459,21 @@ python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic
 python .claude/skills/federation-demo/harness.py gfs-replay
+python .claude/skills/federation-demo/harness.py gfs-space-subscribe
+python .claude/skills/federation-demo/harness.py gfs-space-post
+python .claude/skills/federation-demo/harness.py gfs-space-rotate
+python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
+
+``gfs-replay`` is optional in that chain (it restarts Alpha); the
+content steps only need ``gfs-traffic`` to have published the space.
+The topology is what makes the content steps meaningful: ``gfs-pair``
+pairs **a** and **d** with the GFS, and a and d are **not** QR-paired
+with each other (d pairs only with b; a↔d exists only after the
+separate ``relay-pair`` step, which is not part of this chain). So
+anything d receives from a's space can only have travelled through the
+GFS. **c** is paired with neither and is the negative control.
 
 ### ``gfs-up``
 
@@ -532,17 +547,125 @@ Failure modes this catches:
 - The publication mirror in ``gfs_publications`` gets wiped by a
   migration or a misfired ``unpublish_space_from_all`` on shutdown.
 
-### Cross-household post / bazaar / public moment over GFS (TODO)
+### ``gfs-space-subscribe`` — discovery → mirror → GFS subscriber set
+
+Delta finds Alpha's published global space in the GFS directory and
+subscribes to it. Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` +
+``gfs-traffic`` (Alpha owns the published ``space_type=global`` space).
+
+0. Waits until the GFS has REGISTERED Delta's SH↔GFS WebSocket
+   (``gfs.ws.register: instance=<d>`` in the GFS log). Not cosmetic: the
+   ``new_subscriber`` → sealed-key handoff triggered by the subscribe is
+   fire-and-forget, and if Delta's socket isn't up the GFS falls back to
+   Delta's HTTPS ``/federation/inbox``, which answers 401 for relay frames
+   — Delta then stays permanently keyless for that epoch. In production
+   the socket has been up for hours; in the harness Delta pairs seconds
+   earlier and the supervisor's reconcile loop can take ~30 s.
+1. ``POST /api/public_spaces/refresh`` on Delta (admin-only, 202) runs
+   ``PublicSpaceDiscoveryService.refresh_now`` inline instead of waiting
+   for the scheduled poll.
+2. Asserts Alpha's space now appears on Delta's ``GET /api/public_spaces``
+   with the published ``name`` and with ``instance_id`` equal to Alpha's
+   instance id.
+3. ``POST /api/spaces/{id}/subscribe`` on Delta.
+4. Asserts Delta now holds a local ``spaces`` row whose
+   ``identity_public_key`` is byte-identical to Alpha's own pin for the
+   same space (read straight out of both SQLite DBs).
+5. Asserts the GFS registered **Delta specifically**: ``subscriber_count``
+   on ``GET /gfs/spaces/{id}`` moved, and the GFS's own
+   ``space_subscribers`` table names Delta's instance id. (The
+   ``GET /gfs/spaces/{id}/subscribers`` endpoint would be the pure-REST
+   check but it is space-authority-signature gated by design, so the
+   harness reads the GFS DB read-only instead.)
+
+Failure modes this catches:
+
+- The discovery poll hits the wrong GFS URL — nothing ever lands in
+  ``public_space_cache`` and step 2 times out.
+- The listing's ``owning_instance`` is mapped onto the wrong local
+  field — the row appears but points at nobody, so a join can never be
+  routed. Step 2's ``instance_id`` assertion is the tripwire.
+- ``GfsSpaceMirrorService`` never seats the local stub — subscribe still
+  returns 200, but with no pinned space-authority key every relayed
+  frame is dropped at ``SpacePublicInbound._verify_authority``, at
+  WARNING, invisibly. Step 4 is the tripwire.
+- The SH side never calls ``POST /gfs/spaces/{id}/subscribe`` — the GFS
+  relay fan-out simply never targets this household. Step 5.
+
+### ``gfs-space-post`` — public space content actually crosses the GFS
+
+Prereqs: ``gfs-space-subscribe``. Alpha posts in the global space via
+``POST /api/spaces/{id}/posts`` (the space endpoint — the household feed
+endpoint ignores ``space_id`` and lands a non-federating household post),
+then the harness polls Delta's ``GET /api/spaces/{id}/feed``.
+
+The author is a **provisioned** local user (``erin``, seated by
+``_seat_local_member``), not Alpha's setup admin. That is deliberate and
+documented at the helper: ``POST /api/setup/standalone`` assigns the first
+admin the literal ``user_id = "uid-<username>"``, while every later user
+gets ``derive_user_id(own_instance_pk, identity_anchor)``. The relay
+fail-closes on a non-derivable author id (``verify_signed_author_inner``
+runs the self-cert on both the relaying seed-holder and the subscriber),
+so a setup-admin-authored post is dropped with "author verification
+failed" no matter how healthy the relay is.
+
+The single positive assertion — Delta sees the post **decrypted**, with
+Alpha's ``author`` user id and the exact body — covers six mechanisms at
+once: the GFS relay fan-out, the space-authority signature, the
+``new_subscriber`` notify fired when Delta subscribed, the sealed
+content-key handoff that notify triggers, the per-author household
+signature (``verify_signed_author_inner``), and the AES-GCM decrypt
+under the current epoch key.
+
+The negative control is **c**: not a space member, not a subscriber, not
+GFS-paired. The harness asserts c holds no ``space_posts`` row for the
+post and that c's space feed does not expose it — the
+§"non-member households MUST NOT see space content" hard rule, checked
+on the real wire rather than in a unit test.
+
+Failure modes this catches: a relay that drops the frame; an authority
+signature that no longer verifies against the mirrored pin; a
+``new_subscriber`` notify that never fires (Delta holds no content key
+and drops everything with "no key for epoch"); a broken author
+self-cert; and — on the c side — any regression that fans space content
+at non-member households.
+
+### ``gfs-space-rotate`` — a key rotation must not cut subscribers off
+
+Prereqs: ``gfs-space-post``. Removing a space member rotates the
+per-space AES-256 content key (forward secrecy — the removed member must
+not read future posts). Members are re-keyed through the
+``space_instances`` fan-out, but GFS subscribers hold a read-only
+subscription and are **never** in ``space_instances``: they need the
+separate ``SpaceSubscriberKeyOutbound`` re-seal.
+
+1. Seats a SECOND provisioned member on Alpha (``frank``) purely as the
+   one to remove — the author from ``gfs-space-post`` (``erin``) has to
+   survive the rotation to write the post in step 4. Re-run tolerant (an
+   existing user / existing membership is reused).
+2. ``DELETE /api/spaces/{id}/members/{user_id}`` on frank — which runs
+   ``_rotate_and_distribute_space_key``.
+3. Settles ~10 s for the new epoch key to be re-sealed to every GFS
+   subscriber.
+4. Erin posts again, now under the new epoch.
+5. Asserts Delta can still read the new post, with the right author.
+
+Failure mode this catches: the rotation re-keys ``space_instances``
+members only, so a GFS subscriber silently goes dark after the first
+rotation — everything it receives fails to decrypt until its next GFS-WS
+reconnect happens to re-trigger a handoff. Before the fix the first post
+still read fine and only the post-rotation one vanished, which is
+exactly what step 5 pins down.
+
+``verify`` re-asserts all three at the end of a run (gated on the
+``gfs_space_id`` state key, so it self-skips when the chain wasn't run):
+Delta still sees both posts, c still sees neither, and Delta's mirrored
+``identity_public_key`` still matches Alpha's.
+
+### Bazaar / public moment over GFS (TODO)
 
 Still to wire end-to-end:
 
-- A discovery-side mirror (subscriber fetches ``/gfs/spaces/{id}``
-  for full metadata, creates a stub ``spaces`` row) so
-  ``subscribe_to_space`` accepts the join.
-- ``POST /api/feed/posts`` against a global space federating as
-  ``SPACE_POST_CREATED`` via the GFS WebSocket relay (the
-  ``publish_event`` path already exists; just needs a subscriber
-  on the receiving side).
 - ``POST /api/bazaar/listings`` for the Bazaar test path.
 - ``POST /api/moments`` with ``is_public=true`` for the public-
   moment / GFS-following test path.
