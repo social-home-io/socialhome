@@ -107,8 +107,14 @@ central registry is involved.
   the user's immutable **`identity_anchor`**, with a null-byte separator
   (`derive_user_id(instance_pk, identity_anchor)`, v_26). The anchor is a
   uuid4 for users created on v_26+ (standalone) and the **frozen username**
-  for existing-and haos users — so `user_id` is bound to an opaque per-user
-  value, **not** the human name. This frees the human name for a later
+  for existing rows, for haos users, and for the first admin of a standalone
+  / ha household (all three re-mirror deterministically, so the derivation
+  input has to be stable) — so `user_id` is bound to an opaque per-user
+  value, **not** the human name. Every local minting path goes through the
+  one helper `identity_bootstrap.derive_local_user_id` (username-anchored) or
+  `UserService.provision` (uuid4-anchored); a `user_id` is **never**
+  synthesised from a string, and migration `0049` repairs the installs where
+  it once was. This frees the human name for a later
   mutable login + `@handle` without re-keying the user's federated identity
   (a rename leaves `user_id` stable). Globally unique, cryptographically
   bound to the home instance, and survives across spaces and DMs.

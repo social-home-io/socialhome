@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 import aiohttp
 
 from ... import app_keys as K
+from ...identity_bootstrap import derive_local_user_id
 from ..federation_base import INBOX_PATH, manual_federation_base
 from ..adapter import (
     Capability,
@@ -433,14 +434,18 @@ class StandaloneAdapter(PlatformAdapter):
             """,
             (username, display_name, pw_hash),
         )
-        user_id = f"uid-{username}"
+        # Derived, never synthetic: a ``uid-<username>`` id can't be
+        # self-certified by a remote household against our identity key, so
+        # every post this admin writes is dropped by the public-space relay.
+        user_id = await derive_local_user_id(self._db, username)
         await self._db.enqueue(
             """
-            INSERT INTO users(username, user_id, display_name, is_admin, handle)
-            VALUES(?, ?, ?, 1, ?)
+            INSERT INTO users(username, user_id, display_name, is_admin,
+                              identity_anchor, handle)
+            VALUES(?, ?, ?, 1, ?, ?)
             ON CONFLICT(username) DO UPDATE SET is_admin=1
             """,
-            (username, user_id, display_name, username),
+            (username, user_id, display_name, username, username),
         )
         return True
 

@@ -34,8 +34,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ...crypto import derive_user_id
 from ...db import AsyncDatabase
+from ...identity_bootstrap import derive_local_user_id
 from .supervisor import SupervisorClient
 
 if TYPE_CHECKING:
@@ -210,20 +210,14 @@ class HaBootstrap:
             )
             return
 
-        identity = await self._db.fetchone(
-            "SELECT identity_public_key FROM instance_identity WHERE id='self'",
-        )
-        if identity is None:
-            raise RuntimeError(
-                "ha_bootstrap: instance_identity not initialised before bootstrap"
-            )
-        pk_bytes = bytes.fromhex(identity["identity_public_key"])
         # HAOS owners are username-anchored (not uuid-anchored like
         # standalone users): the bootstrap re-mirrors HA persons on every
         # boot, so the derived user_id must stay deterministic + stable
         # across re-runs. identity_anchor == username keeps it legacy-style
-        # (works on all peers) and ensures the column is never NULL.
-        user_id = derive_user_id(pk_bytes, username)
+        # (works on all peers) and ensures the column is never NULL. Shared
+        # with the standalone / ha admin-mirror paths so there is exactly one
+        # id-minting rule for username-anchored local users.
+        user_id = await derive_local_user_id(self._db, username)
 
         await self._db.enqueue(
             """

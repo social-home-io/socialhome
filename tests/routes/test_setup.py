@@ -14,6 +14,7 @@ from socialhome.app_keys import (
 )
 from socialhome.app_keys import db_key as _db_key
 from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 from socialhome.platform.adapter import Capability, ExternalUser
 
 
@@ -303,6 +304,36 @@ async def test_ha_owner_setup_happy_path(aiohttp_client, tmp_dir):
     # The public ``@handle`` seeds from the username so the row is never
     # NULL-handle (the §public-handle editor pre-fills + lets the user save).
     assert user["handle"] == "alice"
+
+
+async def test_ha_owner_setup_derives_cryptographic_user_id(aiohttp_client, tmp_dir):
+    """The mirrored admin row gets a derived ``user_id``, not ``uid-<name>``.
+
+    Regression (#standalone-admin-user-id): a synthetic id can never satisfy
+    the public-space relay's per-author self-cert
+    (``derive_user_id(author_pk, anchor) == author_user_id``), so every post
+    the household admin wrote was dropped by subscribers.
+    """
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    _swap_to_ha(tc._app, [ExternalUser("alice", "Alice", None, is_admin=False)])
+    r = await tc.post(
+        "/api/setup/ha/owner",
+        json={"username": "alice", "password": "hunter22"},
+    )
+    assert r.status == 201, await r.text()
+    db = tc._app[_db_key]
+    user = await db.fetchone(
+        "SELECT user_id, identity_anchor FROM users WHERE username='alice'"
+    )
+    assert user is not None
+    identity = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    assert identity is not None
+    expected = derive_user_id(bytes.fromhex(identity["identity_public_key"]), "alice")
+    assert user["user_id"] != "uid-alice"
+    assert user["user_id"] == expected
+    assert user["identity_anchor"] == "alice"
 
 
 async def test_ha_owner_setup_requires_password(aiohttp_client, tmp_dir):

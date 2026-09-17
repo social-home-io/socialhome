@@ -41,6 +41,7 @@ from ..app_keys import (
     recovery_kit_service_key,
     setup_service_key,
 )
+from ..identity_bootstrap import derive_local_user_id
 from ..platform.adapter import Capability, ExternalUser
 from ..security import error_response
 from ..services.recovery_crypto import (
@@ -372,14 +373,17 @@ async def _mirror_admin_user(db, external: ExternalUser) -> None:
     username→id lookup. Re-runs of the wizard refresh the
     ``external_id`` to track HA-side rotations.
     """
-    user_id = f"uid-{external.username}"
+    # Derived, never synthetic: a ``uid-<username>`` id can't be
+    # self-certified by a remote household against our identity key, so every
+    # post this admin writes is dropped by the public-space relay.
+    user_id = await derive_local_user_id(db, external.username)
     has_external_id = external.external_id is not None
     source = "ha" if has_external_id else "manual"
     await db.enqueue(
         """
         INSERT INTO users(username, user_id, display_name, is_admin,
-                          source, external_id, handle)
-        VALUES(?, ?, ?, 1, ?, ?, ?)
+                          source, external_id, identity_anchor, handle)
+        VALUES(?, ?, ?, 1, ?, ?, ?, ?)
         ON CONFLICT(username) DO UPDATE SET
             is_admin=1,
             source=excluded.source,
@@ -391,6 +395,11 @@ async def _mirror_admin_user(db, external: ExternalUser) -> None:
             external.display_name or external.username,
             source,
             external.external_id,
+            # Username-anchored (see ``derive_local_user_id``) so the row keeps
+            # ``user_id == derive_user_id(pk, identity_anchor)`` and the column
+            # is never NULL. Insert-only — a re-run must not re-anchor a row
+            # whose user_id already derives from the stored value.
+            external.username,
             # Seed the public ``@handle`` from the username on first insert so
             # the row is never NULL-handle. Left untouched on conflict — a
             # re-run of the wizard must not clobber a handle the user has since
