@@ -12,12 +12,14 @@ from socialhome.domain.federation_capabilities import (
 )
 
 
-def test_ours_is_v27_with_identity_anchor_capability():
-    """v_26 introduces the identity_anchor field anchoring user_id derivation
-    (v_25 added per-user identity binding, v_24 added admin-authoritative offline
-    config edits, v_23 peer-replicated space roster gossip, v_22 the delegated-admin
-    signing-seed share, v_21 authenticated mesh route discovery, v_20 SPACE_SYNC_REJECTED)."""
-    assert OURS == 27
+def test_ours_is_v28_with_route_stale_nack_capability():
+    """v_28 introduces the mesh route-stale nack (v_27 the move-out link,
+    v_26 the identity_anchor field anchoring user_id derivation, v_25
+    per-user identity binding, v_24 admin-authoritative offline config edits,
+    v_23 peer-replicated space roster gossip, v_22 the delegated-admin
+    signing-seed share, v_21 authenticated mesh route discovery, v_20
+    SPACE_SYNC_REJECTED)."""
+    assert OURS == 28
     assert FederationCapability.MIN_FOR_INSTANCE_RESYNC == 19
     assert FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED == 20
     assert FederationCapability.MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY == 21
@@ -27,6 +29,7 @@ def test_ours_is_v27_with_identity_anchor_capability():
     assert FederationCapability.MIN_FOR_USER_IDENTITY_KEY == 25
     assert FederationCapability.MIN_FOR_IDENTITY_ANCHOR == 26
     assert FederationCapability.MIN_FOR_USER_MOVE == 27
+    assert FederationCapability.MIN_FOR_ROUTE_STALE_NACK == 28
     assert (
         FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS,
         "Admin authoritative config offline",
@@ -42,6 +45,10 @@ def test_ours_is_v27_with_identity_anchor_capability():
     assert (
         FederationCapability.MIN_FOR_USER_MOVE,
         "User move-out link",
+    ) in CAPABILITY_FEATURES
+    assert (
+        FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
+        "Mesh route-stale nack",
     ) in CAPABILITY_FEATURES
 
 
@@ -116,6 +123,7 @@ def test_space_features_missing_below_v13():
         "Space delegated admin authority",
         "Space roster gossip",
         "Admin authoritative config offline",
+        "Mesh route-stale nack",
     ]
 
 
@@ -128,6 +136,7 @@ def test_space_features_missing_below_v16():
         "Space delegated admin authority",
         "Space roster gossip",
         "Admin authoritative config offline",
+        "Mesh route-stale nack",
     ]
 
 
@@ -137,6 +146,7 @@ def test_space_features_missing_below_v22():
     assert space_features_missing_below(22) == [
         "Space roster gossip",
         "Admin authoritative config offline",
+        "Mesh route-stale nack",
     ]
 
 
@@ -144,13 +154,21 @@ def test_space_features_missing_below_v23():
     """A v23 member household still lacks admin authoritative config (v_24)."""
     assert space_features_missing_below(23) == [
         "Admin authoritative config offline",
+        "Mesh route-stale nack",
     ]
 
 
-def test_space_features_missing_below_v24_is_empty():
-    """Nothing space-scoped lives above v24 — a v24 member lacks none.
-    (v_26 identity_anchor is per-user, not space-scoped.)"""
-    assert space_features_missing_below(24) == []
+def test_space_features_missing_below_v24():
+    """A v24 member household still lacks the mesh route-stale nack (v_28).
+    v_25 / v_26 / v_27 are per-user surfaces, not space-scoped, so they do
+    not appear here even though a v24 member lacks them too."""
+    assert space_features_missing_below(24) == ["Mesh route-stale nack"]
+    assert space_features_missing_below(27) == ["Mesh route-stale nack"]
+
+
+def test_space_features_missing_below_v28_is_empty():
+    """Nothing space-scoped lives above v28 — a v28 member lacks none."""
+    assert space_features_missing_below(28) == []
 
 
 def test_space_scoped_min_versions_are_capability_constants():

@@ -6,13 +6,31 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 27
+    assert fc.OURS == 28
 
 
-def test_ours_is_27_and_identity_anchor_capability():
-    from socialhome.domain import federation_capabilities as fc
+def test_route_stale_nack_capability_threshold():
+    assert fc.FederationCapability.MIN_FOR_ROUTE_STALE_NACK == 28
+    assert fc.FederationCapability.MIN_FOR_ROUTE_STALE_NACK <= fc.OURS
 
-    assert fc.OURS == 27
+
+def test_route_stale_nack_feature_label():
+    labels = dict(fc.CAPABILITY_FEATURES).values()
+    assert "Mesh route-stale nack" in labels
+    assert "Mesh route-stale nack" in fc.features_missing_below(27)
+    assert "Mesh route-stale nack" not in fc.features_missing_below(28)
+    # Space-scoped: a behind hop stalls space content for the whole space
+    # (same class as authenticated route discovery), so the per-space
+    # compatibility banner warns about it.
+    assert fc.FederationCapability.MIN_FOR_ROUTE_STALE_NACK in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Mesh route-stale nack" in fc.space_features_missing_below(27)
+    assert "Mesh route-stale nack" not in fc.space_features_missing_below(28)
+
+
+def test_ours_is_at_least_27_and_identity_anchor_capability():
+    assert fc.OURS >= 27
     assert fc.FederationCapability.MIN_FOR_IDENTITY_ANCHOR == 26
 
 

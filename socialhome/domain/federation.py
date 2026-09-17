@@ -156,6 +156,11 @@ class FederationEventType(str, enum.Enum):
     # ``{request_id: caller_instance_id}`` (TTL ~60 s).
     SPACE_FIND_ROUTE = "space_find_route"
     SPACE_ROUTE_FOUND = "space_route_found"
+    # Route-stale nack — target signals "no cached eph priv for this
+    # pub" back along the reverse path so the origin invalidates its
+    # cached route and retransmits once, instead of sealing under a
+    # dead key until ``ROUTE_CACHE_TTL_S`` expires.
+    SPACE_ROUTE_STALE = "space_route_stale"
 
     # ── Space content ──
     SPACE_POST_CREATED = "space_post_created"

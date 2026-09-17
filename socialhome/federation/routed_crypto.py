@@ -103,6 +103,8 @@ from ..crypto import (
     b64url_decode,
     b64url_encode,
     generate_x25519_keypair,
+    sign_ed25519,
+    verify_ed25519,
     x25519_exchange,
 )
 
@@ -127,6 +129,25 @@ class UnsupportedKemSuite(ValueError):
     this build doesn't know. Receivers MUST reject rather than fall
     back to a weaker suite — otherwise a downgrade attack becomes
     possible once Phase-2 hybrid lands."""
+
+
+#: Signature suite for the ``SPACE_ROUTE_STALE`` nack — the target's
+#: Ed25519 identity key signs "this ephemeral pub is dead for route X".
+#: Mirrors ``Encoder.sig_suite`` on the envelope; Phase 2 of
+#: ``docs/crypto.md`` adds ``"ed25519+mldsa65"`` as a sibling constant
+#: with both signatures produced + verified in parallel. Same wire
+#: shape either way — the tag is what lets the algorithm swap.
+ROUTE_STALE_SIG_SUITE_ED25519: str = "ed25519"
+SUPPORTED_ROUTE_STALE_SIG_SUITES: frozenset[str] = frozenset(
+    {ROUTE_STALE_SIG_SUITE_ED25519}
+)
+
+
+class UnsupportedRouteStaleSuite(ValueError):
+    """Raised when an inbound ``SPACE_ROUTE_STALE`` advertises a
+    signature suite this build doesn't know. Receivers MUST reject
+    rather than verify under a default algorithm — otherwise a peer
+    stripping the tag downgrades the check once Phase-2 hybrid lands."""
 
 
 def _require_known_suite(sealed: dict[str, str]) -> None:
@@ -360,6 +381,63 @@ def unseal_reply_payload(
     ).decode("utf-8")
 
 
+def route_stale_signing_bytes(route_id: str, stale_eph_pk_b64: str) -> bytes:
+    """Canonical bytes the target signs to declare its ephemeral X25519
+    pub DEAD for THIS route.
+
+    Domain-separated (``space-route-stale:v1:``) and route-scoped so a
+    signature can't be lifted onto another ``route_id`` (replay) and
+    can't collide with any other Ed25519 signature this identity
+    produces — in particular NOT with the ``space-route-found:v1:``
+    bytes in :mod:`socialhome.federation.route_discovery`, which bind
+    the SAME pub as *live*. Without the distinct tag a captured
+    ROUTE_FOUND signature over ``(id, pub)`` would verify as a
+    route-stale nack and let a relay tear down a healthy route.
+    """
+    return (
+        b"space-route-stale:v1:" + route_id.encode() + b":" + stale_eph_pk_b64.encode()
+    )
+
+
+def sign_route_stale(*, seed: bytes, route_id: str, stale_eph_pk_b64: str) -> str:
+    """Target-side: sign :func:`route_stale_signing_bytes` with the
+    instance identity seed. Returns the b64url-encoded signature."""
+    sig = sign_ed25519(seed, route_stale_signing_bytes(route_id, stale_eph_pk_b64))
+    return b64url_encode(sig)
+
+
+def verify_route_stale(
+    *,
+    identity_pk: bytes,
+    route_id: str,
+    stale_eph_pk_b64: str,
+    sig_b64: str,
+    sig_suite: str,
+) -> bool:
+    """Origin-side: verify a ``SPACE_ROUTE_STALE`` nack signature.
+
+    Raises :class:`UnsupportedRouteStaleSuite` for any ``sig_suite``
+    outside :data:`SUPPORTED_ROUTE_STALE_SIG_SUITES` — never falls back
+    to a default algorithm. Returns ``False`` (never raises) for a
+    malformed, wrong-length, or non-verifying signature, matching
+    :func:`socialhome.crypto.verify_ed25519`'s posture.
+    """
+    if sig_suite not in SUPPORTED_ROUTE_STALE_SIG_SUITES:
+        raise UnsupportedRouteStaleSuite(
+            f"route-stale nack advertises unsupported sig_suite={sig_suite!r}; "
+            f"this build supports {sorted(SUPPORTED_ROUTE_STALE_SIG_SUITES)!r}",
+        )
+    try:
+        sig = b64url_decode(sig_b64)
+    except ValueError, TypeError:
+        return False
+    return verify_ed25519(
+        identity_pk,
+        route_stale_signing_bytes(route_id, stale_eph_pk_b64),
+        sig,
+    )
+
+
 def _fresh_nonce() -> bytes:
     """12-byte AES-GCM nonce drawn from the OS CSPRNG."""
     return os.urandom(12)
@@ -372,13 +450,19 @@ def expired(stored_at: float, ttl_s: float) -> bool:
 
 __all__ = [
     "DEFAULT_TARGET_EPH_TTL_S",
+    "ROUTE_STALE_SIG_SUITE_ED25519",
+    "SUPPORTED_ROUTE_STALE_SIG_SUITES",
+    "UnsupportedRouteStaleSuite",
     "derive_directional_keys",
     "expired",
     "generate_ephemeral_keypair",
+    "route_stale_signing_bytes",
     "seal_inner_payload",
     "seal_reply_payload",
+    "sign_route_stale",
     "unseal_inner_payload",
     "unseal_reply_payload",
+    "verify_route_stale",
 ]
 # ``X25519PrivateKey`` re-imported only so test fixtures that monkey-
 # patch this module's namespace (rare) can pull it through the public

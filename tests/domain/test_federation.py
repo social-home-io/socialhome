@@ -123,3 +123,16 @@ def test_space_sync_rejected_event_type_round_trip():
         == FederationEventType.SPACE_SYNC_REJECTED
     )
     assert FederationEventType.SPACE_SYNC_REJECTED == "space_sync_rejected"
+
+
+def test_space_route_stale_event_type_round_trip():
+    """SPACE_ROUTE_STALE wire value round-trips through the str enum.
+
+    Membership in the enum is what makes the §24.11 validator accept
+    the type — see ``tests/federation/test_inbound_validator.py``.
+    """
+    assert (
+        FederationEventType("space_route_stale")
+        == FederationEventType.SPACE_ROUTE_STALE
+    )
+    assert FederationEventType.SPACE_ROUTE_STALE == "space_route_stale"
