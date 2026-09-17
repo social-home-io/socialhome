@@ -286,6 +286,7 @@ from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
+from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.map_tile_service import MapTileService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
 from .services.push_service import PushService, load_or_create_vapid
@@ -1566,6 +1567,17 @@ def create_app(config: Config | None = None) -> web.Application:
     # auto-publishes / unpublishes to every active GFS (§D1).
     space_service.attach_gfs_connection_service(gfs_connection_service)
 
+    # Mirrors a GFS-discovered space onto a local ``spaces`` stub so
+    # ``subscribe_to_space`` can seat a subscriber for it (and register this
+    # household on the GFS relay). Optional in the same sense as the GFS
+    # connection service — inert when no GFS is paired.
+    gfs_space_mirror = GfsSpaceMirrorService(
+        space_repo=repos.space,
+        gfs_connection_repo=repos.gfs_connection,
+        gfs_connection_service=gfs_connection_service,
+    )
+    space_service.attach_gfs_space_mirror(gfs_space_mirror)
+
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(
         repos.public_space,
@@ -2101,6 +2113,7 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app[K.http_session_key] = http_session
         gfs_connection_service.attach_session(http_session)
+        gfs_space_mirror.attach_session(http_session)
         public_space_discovery.attach_session(http_session)
         map_tile_service.attach_session(http_session)
 
@@ -2249,6 +2262,7 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_gallery_repo(gallery_repo)
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
+        real_space_service.attach_gfs_space_mirror(gfs_space_mirror)
         # ``attach_federation`` is deferred until just after
         # ``_wire_federation_stack`` returns the live ``federation_service``
         # (see below). Calling it here would bind ``_federation`` to the

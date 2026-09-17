@@ -107,6 +107,43 @@ The Social Home ↔ GFS link is split by direction:
   (Phase 5b-b, below). This frame is best-effort — dropped if the owner has
   no socket; the 5b-c reconcile backstops an offline owner.
 
+### Subscriber-side on-ramp (local space mirror)
+
+Before a household can subscribe to a space it discovered through a GFS, it
+needs a **local `spaces` row** for it: `space_subscribers` fan-out only helps
+if the receiver has the space's Ed25519 authority pubkey to verify relayed
+frames against, and `SpaceService.subscribe_to_space` refuses an unknown
+space id.
+
+`services/gfs_space_mirror_service.py` closes that gap. On a subscribe to an
+id with no local row it walks the active GFS connections, fetches
+`GET {gfs}/gfs/spaces/{space_id}`, and seats a remote **stub** row via the
+shared `stub_space_from_metadata` helper (`space_type=global`,
+`join_mode=invite_only` — a mirror is not locally joinable; joining still
+goes through `POST /api/public_spaces/{id}/join-request`).
+
+- **Fail-closed validation.** The listing must be `status: "active"` and must
+  carry a well-formed 32-byte-hex `identity_public_key`; anything else is
+  skipped rather than mirrored. A stub with an unverifiable pin would accept
+  forged relay frames.
+- **The pin is TOFU at the household.** A space id is a `uuid4`, not derived
+  from the authority key, so the served pin cannot be self-certified. The
+  repository is what makes it stick: `SqliteSpaceRepo.save` excludes
+  `identity_public_key` from its upsert, so a later refresh — from this GFS or
+  another — can never move a pin. A hostile GFS can therefore fabricate a
+  space it controls the authority key for, but cannot hijack one already
+  pinned, and no other trust path (direct peers, §D1b invites) is affected.
+  `owning_instance` from the listing is *not* an authenticated envelope
+  sender, which is why every inbound relay verifies against the pinned key,
+  never the claimed owner.
+- **Ordering.** The GFS-side `subscribe` is sent only after every local
+  refusal (public-tier check, ban, §CP.F1 age gate) has passed, so a
+  locally-refused user is never registered on the relay.
+- **Teardown.** When the last local subscriber of a mirrored space leaves,
+  the household unsubscribes from every paired GFS (best-effort — a down GFS
+  never blocks the local leave) and purges the stub; the `spaces` cascade
+  takes `space_keys` with it, so the content key doesn't outlive the mirror.
+
 ### HFS producer + consumer for public space content (Phase 5a2)
 
 The GFS only *relays* — the HFS owns the encryption and authorship

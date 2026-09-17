@@ -186,6 +186,7 @@ class SpaceService(SpaceMemberGuardMixin):
         "_remote_members",
         "_redeem_coordinator",
         "_space_crypto",
+        "_gfs_mirror",
         "_media_dir",
         "_gallery",
         "_bazaar",
@@ -214,6 +215,7 @@ class SpaceService(SpaceMemberGuardMixin):
         self._covers = None
         self._icons = None
         self._gfs = None
+        self._gfs_mirror = None
         self._federation_repo = None
         self._federation = None
         self._remote_members = None
@@ -267,6 +269,15 @@ class SpaceService(SpaceMemberGuardMixin):
         no GFS is paired, GfsConnectionService may be absent entirely.
         """
         self._gfs = gfs_service
+
+    def attach_gfs_space_mirror(self, mirror) -> None:
+        """Wire the GFS-discovered-space on-ramp so ``subscribe_to_space``
+        can mirror a remote listing onto a local stub row (and register this
+        household on the GFS relay) before seating the subscriber. Optional:
+        absent when no GFS is paired — subscribe then behaves exactly as it
+        did before, 404ing on an unknown space id.
+        """
+        self._gfs_mirror = mirror
 
     def attach_federation(
         self,
@@ -3769,6 +3780,17 @@ class SpaceService(SpaceMemberGuardMixin):
     #   ``add_member``.
 
     async def subscribe_to_space(self, user_id: str, space_id: str) -> None:
+        # GFS on-ramp: a space discovered through a paired GFS has no local
+        # ``spaces`` row yet, so ``_require_space`` below would 404 it. Mirror
+        # the GFS listing onto a local stub FIRST (see
+        # :class:`GfsSpaceMirrorService` for the TOFU trust boundary). A
+        # mirror that returns ``None`` (no GFS knows it / unverifiable pin)
+        # falls through to the unchanged 404.
+        gfs_id: str | None = None
+        if self._gfs_mirror is not None and await self._spaces.get(space_id) is None:
+            mirrored = await self._gfs_mirror.ensure_mirror(space_id)
+            if mirrored is not None:
+                gfs_id = mirrored[1]
         space = await self._require_space(space_id)
         if space.space_type not in PUBLIC_SPACE_TIERS:
             raise SpacePermissionError(
@@ -3785,6 +3807,14 @@ class SpaceService(SpaceMemberGuardMixin):
             return
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        # ORDER MATTERS: the GFS-side subscriber registration happens only
+        # AFTER every local refusal (public-tier, ban, §CP.F1 age gate) has
+        # passed. A locally-refused user must never end up on the GFS's
+        # ``space_subscribers`` set — that would fan relayed space content at
+        # this household on their behalf. A failing GFS subscribe propagates:
+        # no local member row is seated for a relay we never registered for.
+        if gfs_id is not None and self._gfs_mirror is not None:
+            await self._gfs_mirror.subscribe_to_gfs(space_id, gfs_id)
         member = SpaceMember(
             space_id=space_id,
             user_id=user_id,
@@ -3829,6 +3859,46 @@ class SpaceService(SpaceMemberGuardMixin):
                 action="removed",
                 actor_id=user_id,
             )
+        await self._maybe_purge_gfs_mirror(space_id)
+
+    async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
+        """Drop a GFS-mirrored stub once its last local subscriber leaves.
+
+        Only ever touches a row that is unambiguously a mirror: it exists, it
+        is owned by another instance, we hold no space seed for it (so we are
+        not an authority for it), and no local member remains. Anything else
+        — an owned space, a §D1b stub where another user still participates —
+        is left alone.
+
+        The GFS-side unsubscribe is best-effort (a down GFS must not block the
+        local leave); the local purge then cascades from ``spaces``, which is
+        what drops the space's ``space_keys`` row — the content key goes with
+        the mirror rather than lingering for a space we can no longer read.
+        """
+        if self._gfs_mirror is None:
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id == self._own_instance_id:
+            return
+        try:
+            if await self._spaces.get_space_seed(space_id) is not None:
+                # We hold authority for this space — not a passive mirror.
+                return
+        except RuntimeError:
+            # No KEK wired (several test stacks) — treat as "no seed held".
+            pass
+        if await self._spaces.list_members(space_id):
+            # Another local user still subscribes — keep the mirror.
+            return
+        await self._gfs_mirror.unsubscribe(space_id)
+        await purge_space_and_media(
+            space_repo=self._spaces,
+            post_repo=self._posts,
+            gallery_repo=self._gallery,
+            bazaar_repo=self._bazaar,
+            media_dir=self._media_dir,
+            space_id=space_id,
+        )
 
     async def list_subscriptions(self, user_id: str) -> list[dict]:
         return await self._spaces.list_subscriptions_for_user(user_id)

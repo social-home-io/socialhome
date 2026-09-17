@@ -232,3 +232,27 @@ def test_map_tile_user_agent_identifies_the_app_and_a_contact():
     """
     assert MAP_TILE_USER_AGENT.startswith(f"SocialHome/{__version__} ")
     assert "@social-home.io" in MAP_TILE_USER_AGENT
+
+
+async def test_gfs_space_mirror_wired_into_space_service(tmp_dir):
+    """The GFS on-ramp is constructed, attached to the LIVE space service
+    (the real-instance one built during startup), and carries the shared
+    HTTP session — without all three, subscribing to a GFS-discovered space
+    404s."""
+    from socialhome.app_keys import gfs_connection_service_key, space_service_key
+    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
+
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        space_svc = app[space_service_key]
+        mirror = space_svc._gfs_mirror  # noqa: SLF001
+        assert isinstance(mirror, GfsSpaceMirrorService)
+        assert mirror._http_client is not None  # noqa: SLF001
+        assert mirror._gfs is app[gfs_connection_service_key]  # noqa: SLF001

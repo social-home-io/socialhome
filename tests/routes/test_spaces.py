@@ -1843,3 +1843,59 @@ async def test_my_join_requests_empty(client):
     r = await client.get("/api/me/join-requests", headers=_auth(client._bob_token))
     assert r.status == 200
     assert (await r.json())["pending_space_ids"] == []
+
+
+async def test_subscribe_maps_gfs_outage_to_502(client):
+    """A GFS-discovered space whose GFS is unreachable is a 502, not a 500.
+
+    ``GfsConnectionError`` escapes ``subscribe_to_space`` when the paired
+    global server refuses or times out. It is a domain exception, so
+    ``BaseView._iter`` maps it centrally — a handler-level try/except would
+    violate the routing convention. 502 + GFS_UNAVAILABLE matches the
+    HighlightPublicationError mapping: an upstream we depend on failed, not
+    a bad request from the caller.
+    """
+    from socialhome.app_keys import space_service_key
+    from socialhome.services.gfs_connection_service import GfsConnectionError
+    from socialhome.services.space_service import stub_space_from_metadata
+
+    svc = client.server.app[space_service_key]
+    # An id with NO local row — that is what makes subscribe consult the
+    # mirror at all (an already-local space skips it).
+    sid = "f" * 32
+
+    class _OutageMirror:
+        """Seats the local mirror, then the GFS subscribe fails."""
+
+        def __init__(self, space_service) -> None:
+            self._svc = space_service
+
+        async def ensure_mirror(self, space_id: str):
+            space = stub_space_from_metadata(
+                space_id,
+                host_instance_id="inst-remote",
+                meta={
+                    "name": "Outage Space",
+                    "space_type": "global",
+                    "join_mode": "invite_only",
+                    "identity_public_key": "ab" * 32,
+                    "owner_username": "",
+                },
+            )
+            await self._svc._spaces.save(space)
+            return (space, "gfs-1")
+
+        async def subscribe_to_gfs(self, space_id: str, gfs_id: str) -> None:
+            raise GfsConnectionError("global server unreachable")
+
+        async def unsubscribe(self, space_id: str) -> None:
+            return None
+
+    svc.attach_gfs_space_mirror(_OutageMirror(svc))
+
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 502, await r.text()
+    assert (await r.json())["error"]["code"] == "GFS_UNAVAILABLE"
