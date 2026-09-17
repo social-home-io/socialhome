@@ -102,6 +102,26 @@ function subscribableScope(entry: DirectoryEntry): boolean {
   )
 }
 
+/**
+ * Human-readable label for the host household.
+ *
+ * A space discovered through a Global Federation Server is usually hosted
+ * by a household we've never paired with, so the backend has no name for
+ * it and falls back to the raw instance id (``host_display_name = iid``,
+ * see ``routes/public_spaces.py``). Those ids are 52-char base32 strings
+ * with no break opportunities, so rendering one inline blows straight
+ * through the card. Shorten it to the same ``abcd1234…`` form the rest of
+ * the app uses for unknown instances (``RemoteInviteInboxBanner``,
+ * ``AutoPairDialog``); a real display name is shown in full.
+ */
+export function hostLabel(entry: DirectoryEntry): string {
+  const name = entry.host_display_name
+  if (!name || name === entry.host_instance_id) {
+    return `${entry.host_instance_id.slice(0, 8)}…`
+  }
+  return name
+}
+
 function primaryLabel(action: SpaceCardAction, entry: DirectoryEntry): string {
   switch (action.kind) {
     case 'open':        return 'Open space'
@@ -109,7 +129,7 @@ function primaryLabel(action: SpaceCardAction, entry: DirectoryEntry): string {
     case 'invite-only': return 'Invite required'
     case 'join':        return 'Join'
     case 'request':     return 'Request to join'
-    case 'pair-first':  return `Connect with ${entry.host_display_name} first`
+    case 'pair-first':  return `Connect with ${hostLabel(entry)} first`
     // Subscribe/unsubscribe never appear as the primary action.
     case 'subscribe':
     case 'unsubscribe': return ''
@@ -193,7 +213,7 @@ export function SpaceCard({
       </div>
       {entry.scope !== 'household' && (
         <p class="sh-host-callout sh-muted">
-          Hosted by <strong>{entry.host_display_name}</strong>
+          Hosted by <strong>{hostLabel(entry)}</strong>
           {!entry.host_is_paired && (
             <span class="sh-muted"> · not yet connected</span>
           )}
