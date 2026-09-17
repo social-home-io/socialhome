@@ -60,7 +60,9 @@ fields only — no content, per the encryption-first rule.
 At the origin (:meth:`SpaceRoutedHandler._on_route_stale_at_origin`)
 every ``send_routed`` leaves a :class:`_PendingRouted` record (target,
 the identity pk pinned at discovery, the eph we sealed under, the inner
-event's wire bytes) for the ephemeral window. A nack is honoured only if
+event's wire bytes) for the route-cache window
+(:data:`_PENDING_ROUTED_TTL_S` — NOT the shorter ephemeral TTL; see the
+constant). A nack is honoured only if
 it names a route_id we sent, ends at that record's target, carries the
 pinned identity pk, names exactly the eph we sealed under for that
 route_id, and verifies under the pinned key. The eph binding is what
@@ -70,11 +72,18 @@ perfectly genuine nack over a key we never used — inert here. The route
 is then invalidated only if the cache still points at the nacked key
 (:meth:`RouteDiscoveryService.invalidate_if_eph`; a sibling nack may
 already have rebuilt it), rediscovered (cache-first), and the inner
-event retransmitted exactly once (a nacked retry gives up).
+event retransmitted exactly once (a nacked retry gives up). If that
+rediscovery finds nothing — the nack's own trigger is "the target just
+rebooted", so its late ROUTE_FOUND routinely misses the flood window — the
+origin keeps the intent alive for ONE deferred re-attempt
+(:data:`_DEFERRED_RETRANSMIT_DELAY_S`), cache-first again so a late answer
+cached meanwhile costs zero floods; a second miss is terminal.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import secrets
@@ -87,7 +96,7 @@ from ..crypto import derive_instance_id
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
-from .route_discovery import cap_by_expiry
+from .route_discovery import ROUTE_CACHE_TTL_S, cap_by_expiry
 
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -117,6 +126,40 @@ TargetEphLookup = Callable[[str], str | None]
 #: doesn't accumulate state. Matches ``_seen_routes``.
 _DEFAULT_EPH_TTL_S: float = 60.0
 
+#: TTL on the origin's ``_pending_routed`` records — how long it remembers
+#: WHAT it sent so a ``SPACE_ROUTE_STALE`` nack can still be honoured. A
+#: different lifetime from :data:`_DEFAULT_EPH_TTL_S`, which bounds the
+#: origin's own ephemeral private half (needed only to decrypt the ACK). A
+#: stale-sealed envelope can reach the target far later than any ACK window:
+#: the relay hop's ``send_event`` to a down target lands in its durable
+#: outbox, whose ladder is 5/10/20/40 s ±30 %, so a target down past
+#: ~35–75 s has the redelivered envelope nacked onto a record that a 60 s
+#: window had already expired — silently ignored, today's stale-route
+#: behaviour back. The right window is the one during which the origin
+#: could still be sealing under a stale key: its route-cache TTL. Imported,
+#: never retyped, so the two move together — the same way
+#: ``ROUTE_CACHE_TTL_S`` is itself derived from the target eph TTL.
+_PENDING_ROUTED_TTL_S: float = ROUTE_CACHE_TTL_S
+
+#: TTL on ``_seen_nacks`` (per-hop nack dedup). Kept ≥ the pending window so
+#: the two stay coherent: a replay after the record was popped is a no-op
+#: anyway, but a dedup slot expiring while its record still lived would let
+#: a replayed nack reach the origin branch a second time.
+_SEEN_NACKS_TTL_S: float = _PENDING_ROUTED_TTL_S
+
+#: Margin before the ONE deferred retransmit after a nack's rediscovery
+#: found no route. The nack's trigger scenario is "the target just
+#: rebooted": the rediscovery flood (2 s window, 4 s hard cap) races the
+#: target's boot, and its late ROUTE_FOUND is cached by the discovery
+#: service only after the window closed — the message would be lost though
+#: a fresh route now exists. The deferred attempt runs
+#: ``cooldown_remaining(target)`` (the negative cooldown a failed flood arms;
+#: ``discover_route`` inside it returns ``None`` without probing) plus this
+#: margin later, cache-first: a late ROUTE_FOUND that landed meanwhile is
+#: used with zero floods, else exactly one more flood. Jitter-free on
+#: purpose — a single attempt per route_id has nothing to de-synchronise.
+_DEFERRED_RETRANSMIT_DELAY_S: float = 5.0
+
 #: Hard ceiling on the number of hops in a SPACE_ROUTED ``path``. Route
 #: discovery (``route_discovery.RouteDiscoveryService``) produces paths of at
 #: most ``max_hops`` (default 3) intermediate hops + the target, i.e. ≤ 4
@@ -137,8 +180,10 @@ _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
 
 #: Ceiling on ``_pending_routed`` entries. Each is bounded by
 #: ``_MAX_RETAINED_INNER_BYTES``, so this caps the retained-inner memory at
-#: ~128 MiB worst case while comfortably covering the sends a household
-#: makes inside one ephemeral window (60 s). Eviction is oldest-expiry-first
+#: ~128 MiB worst case (2000 × ≤ 64 KiB — the per-entry bound and the cap
+#: are what bound memory; the :data:`_PENDING_ROUTED_TTL_S` window only sets
+#: how long an entry lives) while comfortably covering the sends a household
+#: makes inside one pending window (270 s). Eviction is oldest-expiry-first
 #: via :func:`cap_by_expiry`, same as every other dict in this handler.
 _MAX_PENDING_ROUTED: int = 2000
 
@@ -191,6 +236,7 @@ class SpaceRoutedHandler:
         "_origin_eph_state",
         "_reply_eph_state",
         "_pending_routed",
+        "_deferred_retransmits",
         "_route_service",
     )
 
@@ -216,7 +262,8 @@ class SpaceRoutedHandler:
         self._seen_routes: dict[str, float] = {}
         #: ``route_id`` → wall-clock expiry for SPACE_ROUTE_STALE nacks
         #: we already forwarded / consumed. A nack visits each hop of
-        #: a path at most once; a replay is a no-op. Same TTL + cap as
+        #: a path at most once; a replay is a no-op. TTL
+        #: :data:`_SEEN_NACKS_TTL_S` (≥ the pending window), same cap as
         #: ``_seen_routes``.
         self._seen_nacks: dict[str, float] = {}
         #: Origin-side: ``route_id`` →
@@ -232,10 +279,20 @@ class SpaceRoutedHandler:
         #: second discovery probe.
         self._reply_eph_state: dict[str, tuple[str, str, str, list[str], float]] = {}
         #: Origin-side: ``route_id`` → what we need to honour a
-        #: ``SPACE_ROUTE_STALE`` nack for that send. TTL ``eph_ttl_s`` —
-        #: a nack has to arrive inside the ephemeral window anyway — and
-        #: capped at :data:`_MAX_PENDING_ROUTED`.
+        #: ``SPACE_ROUTE_STALE`` nack for that send. TTL
+        #: :data:`_PENDING_ROUTED_TTL_S` (the route-cache window, not the
+        #: eph TTL — see the constant) and capped at
+        #: :data:`_MAX_PENDING_ROUTED`.
         self._pending_routed: dict[str, _PendingRouted] = {}
+        #: Origin-side: original ``route_id`` → the task running its ONE
+        #: deferred retransmit (after a nack's rediscovery found no route).
+        #: The task object is both the strong ref (an unreferenced task can
+        #: be GC'd mid-flight) and the guard — a route_id present here never
+        #: gets a second deferral; it pops itself on completion. Bounded by
+        #: construction: each entry is a popped ``_pending_routed`` record
+        #: (≤ 64 KiB, at most the pending cap of them alive) living
+        #: ``cooldown + _DEFERRED_RETRANSMIT_DELAY_S`` (≤ ~35 s) longer.
+        self._deferred_retransmits: dict[str, asyncio.Task[None]] = {}
         #: Set by :meth:`attach_route_service` (called from
         #: ``FederationService.attach_mesh``). ``None`` → a verified nack
         #: is consumed but nothing is invalidated or retransmitted.
@@ -344,7 +401,7 @@ class SpaceRoutedHandler:
             inner_event_type=inner_event_type,
             inner_payload_json=retained,
             is_retry=is_retry,
-            expires_at=now + self._eph_ttl_s,
+            expires_at=now + _PENDING_ROUTED_TTL_S,
         )
         # Origin-side dedup: if this same route_id loops back to us
         # (shouldn't happen with a valid path, but defensive), drop.
@@ -962,7 +1019,7 @@ class SpaceRoutedHandler:
                 route_id[:8],
             )
             return
-        self._seen_nacks[route_id] = now + self._seen_ttl_s
+        self._seen_nacks[route_id] = now + _SEEN_NACKS_TTL_S
 
         if position - 1 == 0:
             await self._on_route_stale_at_origin(
@@ -1040,8 +1097,8 @@ class SpaceRoutedHandler:
         order, each step a fail-closed drop:
 
         1. ``route_id`` names a live :class:`_PendingRouted` — bounds
-           replay to the ephemeral window; a nack for a send we never
-           made is a no-op.
+           replay to the pending window (:data:`_PENDING_ROUTED_TTL_S`);
+           a nack for a send we never made is a no-op.
         2. ``path[-1]`` is that record's target.
         3. ``target_identity_pk`` equals the pk *we* pinned at discovery
            (second, independent binding — the relay check only proved
@@ -1064,6 +1121,12 @@ class SpaceRoutedHandler:
            never for an oversized inner, never without a fresh route).
            ``discover_route`` is cache-first, so a late nack after the
            rebuild retransmits over the fresh route with zero floods.
+        9. No route on rediscovery (or the retransmit raised) → NOT
+           terminal yet: :meth:`_schedule_deferred_retransmit` keeps the
+           intent alive for one bounded re-attempt. The pending record
+           stays popped, so a replayed nack still finds nothing; the
+           deferral table is a strong-ref + once-only guard, never an
+           acceptance path.
 
         Drops of expected attacker / replay input log at DEBUG or INFO;
         WARNING is reserved for a send failure. Never raises.
@@ -1211,24 +1274,22 @@ class SpaceRoutedHandler:
             # target costs at most one flood.
             discovery = await route_service.discover_route(target)
             if discovery is None or len(discovery[0]) < 2:
-                log.info(
-                    "SPACE_ROUTE_STALE route_id=%s: route to %s %s; no"
-                    " route on rediscovery, giving up on %s",
-                    route_id[:8],
-                    target,
-                    state,
-                    pending.inner_event_type.value,
+                # The target may simply not be up yet (its late
+                # ROUTE_FOUND gets cached after the flood window) — keep
+                # the intent alive for one deferred, cache-first attempt.
+                self._schedule_deferred_retransmit(
+                    route_id=route_id,
+                    pending=pending,
+                    route_service=route_service,
+                    state=state,
+                    reason="no route on rediscovery",
                 )
                 return
-            new_path, new_eph = discovery
-            new_route_id = await self.send_routed(
-                path=new_path,
-                target_eph_pk_b64=new_eph,
-                inner_event_type=pending.inner_event_type,
-                inner_payload=json.loads(pending.inner_payload_json),
-                target_identity_pk=route_service.cached_target_identity_pk(target)
-                or "",
-                is_retry=True,
+            new_route_id = await self._retransmit_pending(
+                pending=pending,
+                inner_payload_json=pending.inner_payload_json,
+                discovery=discovery,
+                route_service=route_service,
             )
         except Exception:
             log.warning(
@@ -1237,10 +1298,161 @@ class SpaceRoutedHandler:
                 target,
                 exc_info=True,
             )
+            # A transient transport / discovery failure gets the same one
+            # deferred attempt as an empty rediscovery; fail-soft either way.
+            self._schedule_deferred_retransmit(
+                route_id=route_id,
+                pending=pending,
+                route_service=route_service,
+                state=state,
+                reason="rediscover/retransmit failed",
+            )
             return
         log.info(
             "SPACE_ROUTE_STALE route_id=%s: route to %s %s, rediscovered,"
             " retransmitted %s as route_id=%s",
+            route_id[:8],
+            target,
+            state,
+            pending.inner_event_type.value,
+            new_route_id[:8],
+        )
+
+    # ── Deferred retransmit (GAP 1: rediscovery raced the target's boot) ─
+
+    async def _retransmit_pending(
+        self,
+        *,
+        pending: _PendingRouted,
+        inner_payload_json: str,
+        discovery: tuple[list[str], str],
+        route_service: "RouteDiscoveryService",
+    ) -> str:
+        """Re-ship ``pending``'s inner event over ``discovery`` as the
+        single ``is_retry`` retransmit; returns the new route_id. Shared by
+        the immediate and the deferred path so both seal the identical
+        retained wire bytes under the identity pk the cache pins now."""
+        new_path, new_eph = discovery
+        target = pending.target_instance_id
+        return await self.send_routed(
+            path=new_path,
+            target_eph_pk_b64=new_eph,
+            inner_event_type=pending.inner_event_type,
+            inner_payload=json.loads(inner_payload_json),
+            target_identity_pk=route_service.cached_target_identity_pk(target) or "",
+            is_retry=True,
+        )
+
+    def _deferred_retransmit_delay_s(self, target: str) -> float:
+        """Seconds until the deferred attempt may plausibly find a route:
+        whatever is left of the discovery service's negative cooldown for
+        ``target`` (inside it ``discover_route`` answers ``None`` without
+        probing) plus :data:`_DEFERRED_RETRANSMIT_DELAY_S`."""
+        cooldown = 0.0
+        if self._route_service is not None:
+            cooldown = max(self._route_service.cooldown_remaining(target), 0.0)
+        return cooldown + _DEFERRED_RETRANSMIT_DELAY_S
+
+    def _schedule_deferred_retransmit(
+        self,
+        *,
+        route_id: str,
+        pending: _PendingRouted,
+        route_service: "RouteDiscoveryService",
+        state: str = "invalidated",
+        reason: str = "no route on rediscovery",
+    ) -> None:
+        """Arm the ONE deferred retransmit for ``route_id`` (the original
+        send's id). Idempotent per route_id: a second call while the first
+        task is alive is a no-op. Only reached after the nack verified and
+        the pending record was popped — never an acceptance path."""
+        target = pending.target_instance_id
+        if route_id in self._deferred_retransmits:
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: deferred retransmit already"
+                " scheduled; not scheduling another",
+                route_id[:8],
+            )
+            return
+        if pending.inner_payload_json is None:
+            # Callers filter oversized inners before reaching here; keep
+            # the invariant local so the task never has to re-check.
+            return
+        delay_s = self._deferred_retransmit_delay_s(target)
+        task = asyncio.create_task(
+            self._run_deferred_retransmit(
+                route_id=route_id,
+                pending=pending,
+                inner_payload_json=pending.inner_payload_json,
+                route_service=route_service,
+                state=state,
+                delay_s=delay_s,
+            )
+        )
+        self._deferred_retransmits[route_id] = task
+        task.add_done_callback(functools.partial(self._discard_deferred, route_id))
+        log.info(
+            "SPACE_ROUTE_STALE route_id=%s: route to %s %s; %s; deferring one"
+            " retransmit of %s by %.1fs",
+            route_id[:8],
+            target,
+            state,
+            reason,
+            pending.inner_event_type.value,
+            delay_s,
+        )
+
+    def _discard_deferred(self, route_id: str, _task: asyncio.Task[None]) -> None:
+        """Done-callback: drop the finished task's strong ref + guard slot."""
+        self._deferred_retransmits.pop(route_id, None)
+
+    async def _run_deferred_retransmit(
+        self,
+        *,
+        route_id: str,
+        pending: _PendingRouted,
+        inner_payload_json: str,
+        route_service: "RouteDiscoveryService",
+        state: str,
+        delay_s: float,
+    ) -> None:
+        """Body of the deferred task: wait, rediscover (cache-first — a
+        late ROUTE_FOUND cached meanwhile costs zero floods), retransmit
+        once. A miss or a failure here is terminal; the retransmit itself
+        is ``is_retry`` so a nack for it never comes back through here.
+        Never raises out of the task."""
+        target = pending.target_instance_id
+        try:
+            await asyncio.sleep(delay_s)
+            discovery = await route_service.discover_route(target)
+            if discovery is None or len(discovery[0]) < 2:
+                log.info(
+                    "SPACE_ROUTE_STALE route_id=%s: still no route to %s on the"
+                    " deferred attempt; giving up on %s",
+                    route_id[:8],
+                    target,
+                    pending.inner_event_type.value,
+                )
+                return
+            new_route_id = await self._retransmit_pending(
+                pending=pending,
+                inner_payload_json=inner_payload_json,
+                discovery=discovery,
+                route_service=route_service,
+            )
+        except Exception:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: deferred retransmit to %s failed;"
+                " giving up on %s",
+                route_id[:8],
+                target,
+                pending.inner_event_type.value,
+                exc_info=True,
+            )
+            return
+        log.info(
+            "SPACE_ROUTE_STALE route_id=%s: route to %s %s, rediscovered,"
+            " retransmitted %s as route_id=%s (deferred attempt)",
             route_id[:8],
             target,
             state,

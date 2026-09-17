@@ -369,6 +369,16 @@ class _RecordingRouteService:
     def cached_target_identity_pk(self, target_instance_id: str) -> str | None:
         return None
 
+    def cooldown_remaining(self, target_instance_id: str) -> float:
+        return 0.0
+
+
+def _cancel_deferred(handler: SpaceRoutedHandler) -> None:
+    """Tear down any deferred-retransmit task the test provoked so it
+    doesn't outlive the test loop."""
+    for task in list(handler._deferred_retransmits.values()):
+        task.cancel()
+
 
 async def _origin_with_pending_send():
     """An origin that has just shipped one routed envelope to ``target``
@@ -456,6 +466,65 @@ async def test_forged_route_stale_at_origin_does_not_invalidate_the_route():
     )
     assert rs.invalidated == [path[-1]]
     assert route_id not in handler._pending_routed
+    _cancel_deferred(handler)
+
+
+async def test_forged_route_stale_never_creates_a_deferred_retransmit():
+    """The deferred re-attempt (GAP 1) sits strictly AFTER signature
+    verification and the pending pop: a relay forging a nack must not be
+    able to make the origin schedule a retransmit (a delayed flood + a
+    re-send it can trigger at will). Nothing is scheduled, nothing probed."""
+    handler, rs, target, path, route_id, dead_pub = await _origin_with_pending_send()
+    attacker = generate_identity_keypair()
+    forged = _nack_payload(
+        route_id=route_id,
+        path=path,
+        target_pk_hex=target.public_key.hex(),
+        stale_pub=dead_pub,
+        sig=routed_crypto.sign_route_stale(
+            seed=attacker.private_key, route_id=route_id, stale_eph_pk_b64=dead_pub
+        ),
+    )
+    await handler._on_route_stale(
+        _nack_event(forged, from_instance=path[1], to_instance=path[0])
+    )
+    assert handler._deferred_retransmits == {}
+    assert rs.discover_calls == []
+    assert route_id in handler._pending_routed
+
+
+async def test_replayed_genuine_route_stale_after_pop_does_not_defer_again():
+    """One nack, one deferred re-attempt. Replaying the very same genuine
+    nack after the pending record was consumed (even past the hop-level
+    dedup) must not schedule a second deferral or probe again — the
+    pending pop is the authority, not the deferral table."""
+    handler, rs, target, path, route_id, dead_pub = await _origin_with_pending_send()
+    genuine = _nack_payload(
+        route_id=route_id,
+        path=path,
+        target_pk_hex=target.public_key.hex(),
+        stale_pub=dead_pub,
+        sig=routed_crypto.sign_route_stale(
+            seed=target.private_key, route_id=route_id, stale_eph_pk_b64=dead_pub
+        ),
+    )
+    await handler._on_route_stale(
+        _nack_event(genuine, from_instance=path[1], to_instance=path[0])
+    )
+    try:
+        assert rs.discover_calls == [path[-1]]
+        assert list(handler._deferred_retransmits) == [route_id]
+        first = handler._deferred_retransmits[route_id]
+        assert route_id not in handler._pending_routed
+        handler._seen_nacks.clear()  # bypass hop-level dedup on purpose
+        await handler._on_route_stale(
+            _nack_event(genuine, from_instance=path[1], to_instance=path[0])
+        )
+        assert rs.discover_calls == [path[-1]], "replay must not probe again"
+        assert handler._deferred_retransmits == {route_id: first}
+        assert not first.done()
+    finally:
+        _cancel_deferred(handler)
 
 
 async def test_route_stale_with_tampered_stale_eph_pk_fails_verification():
@@ -572,3 +641,4 @@ async def test_relay_substituted_eph_cannot_tear_down_a_live_route():
     )
     assert rs.invalidated == [path[-1]]
     assert route_id not in handler._pending_routed
+    _cancel_deferred(handler)

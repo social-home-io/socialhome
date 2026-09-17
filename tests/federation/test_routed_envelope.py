@@ -48,11 +48,19 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.federation import routed_crypto
-from socialhome.federation.route_discovery import RouteDiscoveryService
+from socialhome.federation import routed_envelope as routed_envelope_mod
+from socialhome.federation.route_discovery import (
+    ROUTE_CACHE_TTL_S,
+    RouteDiscoveryService,
+)
 from socialhome.federation.routed_envelope import (
+    _DEFAULT_EPH_TTL_S,
+    _DEFERRED_RETRANSMIT_DELAY_S,
     _MAX_PENDING_ROUTED,
     _MAX_RETAINED_INNER_BYTES,
     _MAX_ROUTED_PATH_LEN,
+    _PENDING_ROUTED_TTL_S,
+    _SEEN_NACKS_TTL_S,
     SpaceRoutedHandler,
     _PendingRouted,
 )
@@ -1694,6 +1702,13 @@ class _FakeRouteService:
         self.discover_calls: list[str] = []
         self.pins: dict[str, str] = {}
         self.live_eph: str | None = None
+        #: What ``cooldown_remaining`` reports — the negative-cooldown
+        #: seconds left for every target (the real service arms 30 s
+        #: after a failed flood).
+        self.cooldown: float = 0.0
+
+    def cooldown_remaining(self, target_instance_id: str) -> float:
+        return self.cooldown
 
     async def invalidate_if_eph(
         self, target_instance_id: str, *, target_eph_pk: str
@@ -2254,7 +2269,35 @@ async def test_route_stale_at_origin_nack_storm_collapses_into_one_flood():
     )
 
 
-async def test_route_stale_at_origin_no_route_on_rediscovery_gives_up(caplog):
+_DEFER_MSG = "no route on rediscovery; deferring one retransmit of"
+_GIVE_UP_MSG = "giving up"
+
+
+def _short_deferral() -> Any:
+    """Shrink the deferred-retransmit wait so a test can await the task
+    without a real multi-second sleep."""
+    return patch.object(routed_envelope_mod, "_DEFERRED_RETRANSMIT_DELAY_S", 0.05)
+
+
+async def _await_deferred(a: _Node, route_id: str) -> None:
+    task = a.handler._deferred_retransmits[route_id]
+    await task
+    await _settle()
+
+
+def _cancel_deferred(*nodes: _Node) -> None:
+    for node in nodes:
+        for task in list(node.handler._deferred_retransmits.values()):
+            task.cancel()
+
+
+async def test_route_stale_at_origin_no_route_on_rediscovery_defers_one_retransmit(
+    caplog,
+):
+    """GAP 1 — rediscovery came back empty (the target is still booting).
+    The origin must NOT give up: it keeps the retransmit intent alive once
+    more, schedules a single bounded re-attempt, and says so at INFO. The
+    pending record stays popped — a replayed nack finds nothing."""
     a, b, c, rs = _origin_with_route_service(discovery=None)
     path = [a.instance_id, b.instance_id, c.instance_id]
     with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
@@ -2262,17 +2305,324 @@ async def test_route_stale_at_origin_no_route_on_rediscovery_gives_up(caplog):
             a, path, pin=c.fed.own_identity_pk.hex()
         )
         await _settle()
-    assert rs.invalidated == [c.instance_id]
-    assert rs.discover_calls == [c.instance_id]
-    assert len(_routed_sends(a)) == 1
-    assert route_id not in a.handler._pending_routed
+    try:
+        assert rs.invalidated == [c.instance_id]
+        assert rs.discover_calls == [c.instance_id]
+        assert len(_routed_sends(a)) == 1
+        assert route_id not in a.handler._pending_routed
+        assert route_id in a.handler._deferred_retransmits
+        assert not a.handler._deferred_retransmits[route_id].done()
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any(
+            _DEFER_MSG in r.message
+            and route_id[:8] in r.message
+            and "space_post_created" in r.message
+            and f"by {_DEFERRED_RETRANSMIT_DELAY_S:.1f}s" in r.message
+            for r in infos
+        )
+        assert not any(_GIVE_UP_MSG in r.message for r in infos)
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    finally:
+        _cancel_deferred(a)
+
+
+async def test_deferred_retransmit_waits_out_the_negative_cooldown():
+    """The re-attempt is scheduled past the discovery service's negative
+    cooldown (else ``discover_route`` would return ``None`` without even
+    probing) plus the fixed margin — never before."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    rs.cooldown = 12.5
+    route_id, _dead, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    await _settle()
+    try:
+        assert a.handler._deferred_retransmit_delay_s(c.instance_id) == (
+            12.5 + _DEFERRED_RETRANSMIT_DELAY_S
+        )
+        rs.cooldown = 0.0
+        assert a.handler._deferred_retransmit_delay_s(c.instance_id) == (
+            _DEFERRED_RETRANSMIT_DELAY_S
+        )
+        assert route_id in a.handler._deferred_retransmits
+    finally:
+        _cancel_deferred(a)
+
+
+async def test_deferred_retransmit_uses_a_late_route_found_with_zero_floods(caplog):
+    """GAP 1 regression, on the REAL discovery service: the rediscovery
+    flood finds nothing (target mid-boot), the target's late ROUTE_FOUND is
+    cached afterwards (the ``_origin_requests`` rescue path), and the
+    deferred attempt retransmits the identical inner as ``is_retry`` over
+    that cached route — one flood in total, none for the re-attempt."""
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    rs = RouteDiscoveryService(
+        federation_service=a.fed,  # type: ignore[arg-type]
+        federation_repo=a.repo,  # type: ignore[arg-type]
+    )
+    a.handler.attach_route_service(rs)
+    flood = AsyncMock(return_value=None)
+    with (
+        patch.object(RouteDiscoveryService, "_flood_discover", flood),
+        # The real service arms a 30 s negative cooldown after an empty
+        # flood; zero it so the deferred wait is the fixed margin alone.
+        patch("socialhome.federation.route_discovery.ROUTE_NEGATIVE_COOLDOWN_S", 0.0),
+        _short_deferral(),
+        caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
+    ):
+        # The origin's cache holds the route it sealed under (the key the
+        # target has since lost) — as in the field, so the nack invalidates.
+        _dead_priv, dead_pub = routed_crypto.generate_ephemeral_keypair()
+        rs._cache_route(
+            target_instance_id=c.instance_id,
+            path=list(path),
+            target_eph_pk=dead_pub,
+            target_identity_pk=c.fed.own_identity_pk.hex(),
+            anchored_at=time.monotonic(),
+        )
+        payload = {"post_id": "p1", "n": 1}
+        route_id = await a.handler.send_routed(
+            path=path,
+            target_eph_pk_b64=dead_pub,
+            inner_event_type=FederationEventType.SPACE_POST_CREATED,
+            inner_payload=payload,
+            target_identity_pk=c.fed.own_identity_pk.hex(),
+        )
+        await _settle()
+        assert flood.await_count == 1
+        assert rs.cached_target_identity_pk(c.instance_id) is None, "invalidated"
+        assert len(_routed_sends(a)) == 1
+        assert route_id in a.handler._deferred_retransmits
+        # Late ROUTE_FOUND lands while the deferral is pending.
+        fresh_pub = _mint_target_eph(c)
+        rs._cache_route(
+            target_instance_id=c.instance_id,
+            path=list(path),
+            target_eph_pk=fresh_pub,
+            target_identity_pk=c.fed.own_identity_pk.hex(),
+            anchored_at=time.monotonic(),
+        )
+        await _await_deferred(a, route_id)
+    assert flood.await_count == 1, "the deferred attempt must be a cache hit"
+    routed = _routed_sends(a)
+    assert len(routed) == 2, "expected the original + exactly one retransmit"
+    new_route_id = routed[1]["payload"]["route_id"]
+    assert new_route_id != route_id
+    assert routed[1]["payload"]["path"] == path
+    assert routed[1]["payload"]["sealed"]["target_eph_pk"] == fresh_pub
+    assert [e.payload for e in c.dispatched] == [payload]
+    assert c.dispatched[0].routed_route_id == new_route_id
+    retry = a.handler._pending_routed[new_route_id]
+    assert retry.is_retry is True
+    assert json.loads(retry.inner_payload_json) == payload
+    assert retry.target_identity_pk == c.fed.own_identity_pk.hex()
+    assert a.handler._deferred_retransmits == {}
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any(_DEFER_MSG in r.message and route_id[:8] in r.message for r in infos)
     assert any(
-        r.levelno == logging.INFO
-        and "no route" in r.message
+        _RETRANSMIT_MSG in r.message
         and route_id[:8] in r.message
-        for r in caplog.records
+        and new_route_id[:8] in r.message
+        for r in infos
     )
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_deferred_retransmit_that_finds_no_route_gives_up_for_good(caplog):
+    """The deferred attempt is the LAST one: no route on the second look →
+    INFO giving up, nothing sent, no third attempt scheduled."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with _short_deferral(), caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+        await _await_deferred(a, route_id)
+    assert rs.discover_calls == [c.instance_id, c.instance_id]
+    assert len(_routed_sends(a)) == 1
+    assert a.handler._deferred_retransmits == {}
+    assert route_id not in a.handler._pending_routed
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        _GIVE_UP_MSG in r.message
+        and route_id[:8] in r.message
+        and "space_post_created" in r.message
+        for r in infos
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_nack_for_the_deferred_retransmit_does_not_retransmit_again(caplog):
+    """The deferred retransmit is ``is_retry``: when IT is nacked too the
+    origin invalidates and stops — no third send, no second deferral."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with _short_deferral(), caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+        # A route appears — but under a key the target does not hold either,
+        # so the deferred retransmit gets nacked as well.
+        _priv2, dead_pub_2 = routed_crypto.generate_ephemeral_keypair()
+        rs.discovery = (list(path), dead_pub_2)
+        await _await_deferred(a, route_id)
+        await _settle()
+    routed = _routed_sends(a)
+    assert len(routed) == 2, "original + the one deferred retransmit, nothing more"
+    retry_route_id = routed[1]["payload"]["route_id"]
+    assert rs.discover_calls == [c.instance_id, c.instance_id]
+    assert rs.invalidate_eph_calls[-1] == (c.instance_id, dead_pub_2)
+    assert retry_route_id not in a.handler._pending_routed
+    assert a.handler._deferred_retransmits == {}
+    assert c.dispatched == []
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "retry also nacked" in r.message and retry_route_id[:8] in r.message
+        for r in infos
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_deferred_retransmit_is_scheduled_at_most_once_per_route_id():
+    """Guard: entering the deferral path twice for one original route_id
+    keeps the first task and schedules nothing new."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    route_id, _dead, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    pending = a.handler._pending_routed.pop(route_id)
+    try:
+        a.handler._schedule_deferred_retransmit(
+            route_id=route_id,
+            pending=pending,
+            route_service=rs,  # type: ignore[arg-type]
+        )
+        first = a.handler._deferred_retransmits[route_id]
+        a.handler._schedule_deferred_retransmit(
+            route_id=route_id,
+            pending=pending,
+            route_service=rs,  # type: ignore[arg-type]
+        )
+        assert list(a.handler._deferred_retransmits) == [route_id]
+        assert a.handler._deferred_retransmits[route_id] is first
+        assert not first.done()
+    finally:
+        _cancel_deferred(a)
+
+
+async def test_deferred_retransmit_failure_is_a_warning_not_a_crash(caplog):
+    """A transport failure inside the deferred task is logged (with the
+    traceback) and the task ends cleanly — never an unhandled exception."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with _short_deferral(), caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+        rs.discovery = (list(path), _mint_target_eph(c))
+
+        async def _boom(**_kw: Any) -> None:
+            raise RuntimeError("transport down")
+
+        with patch.object(a.fed, "send_event", _boom):
+            await _await_deferred(a, route_id)
+    assert a.handler._deferred_retransmits == {}
+    assert any(
+        r.levelno == logging.WARNING
+        and "deferred retransmit" in r.message
+        and route_id[:8] in r.message
+        and r.exc_info is not None
+        for r in caplog.records
+    )
+
+
+# ── GAP 2: the pending window is the route-cache window, not the eph TTL ──
+
+
+def test_pending_routed_ttl_tracks_the_route_cache_ttl():
+    """The origin can be sealing under a stale key for as long as its
+    route cache lives — so that is how long it must remember what it sent.
+    The nack dedup window must cover the whole pending window."""
+    assert _PENDING_ROUTED_TTL_S == ROUTE_CACHE_TTL_S
+    assert _PENDING_ROUTED_TTL_S > _DEFAULT_EPH_TTL_S
+    assert _SEEN_NACKS_TTL_S >= _PENDING_ROUTED_TTL_S
+
+
+async def test_route_stale_at_origin_honours_a_nack_long_after_the_eph_window(
+    caplog,
+):
+    """A target down for ~100 s has the relay's durable outbox redeliver
+    the stale-sealed envelope well past the 60 s eph TTL; its nack must
+    still find the pending record (inside the route-cache window) — while
+    the origin's own ephemeral state keeps its 60 s TTL."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    fresh_pub = _mint_target_eph(c)
+    rs.discovery = (list(path), fresh_pub)
+    t0 = time.monotonic()
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    pending = a.handler._pending_routed[route_id]
+    assert pending.expires_at == pytest.approx(t0 + _PENDING_ROUTED_TTL_S, abs=0.5)
+    assert a.handler._origin_eph_state[route_id][2] == pytest.approx(
+        t0 + _DEFAULT_EPH_TTL_S, abs=0.5
+    )
+    late = 100.0
+    assert _DEFAULT_EPH_TTL_S < late < _PENDING_ROUTED_TTL_S
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with (
+        patch.object(
+            routed_envelope_mod, "time", SimpleNamespace(monotonic=lambda: t0 + late)
+        ),
+        caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
+    ):
+        await _deliver_to_origin(a, nack)
+    assert rs.invalidated == [c.instance_id]
+    assert len(_routed_sends(a)) == 2
+    assert a.handler._seen_nacks[route_id] == pytest.approx(
+        t0 + late + _SEEN_NACKS_TTL_S, abs=0.5
+    )
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_route_stale_at_origin_nack_after_the_pending_window_is_dropped(
+    caplog,
+):
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    rs.discovery = (list(path), _mint_target_eph(c))
+    t0 = time.monotonic()
+    route_id, dead_pub, _ = await _send_under_dead_key(
+        a, path, pin=c.fed.own_identity_pk.hex()
+    )
+    nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
+    with (
+        patch.object(
+            routed_envelope_mod,
+            "time",
+            SimpleNamespace(monotonic=lambda: t0 + _PENDING_ROUTED_TTL_S + 1.0),
+        ),
+        caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
+    ):
+        await _deliver_to_origin(a, nack)
+    assert rs.invalidated == []
+    assert rs.discover_calls == []
+    assert len(_routed_sends(a)) == 1
+    assert a.handler._deferred_retransmits == {}
+    assert any(
+        r.levelno == logging.DEBUG and "no pending routed send" in r.message
+        for r in caplog.records
+    )
 
 
 async def test_route_stale_at_origin_without_route_service_logs_and_returns(caplog):
@@ -2314,13 +2664,25 @@ async def test_route_stale_at_origin_retransmit_failure_is_a_warning(caplog):
         caplog.at_level(logging.DEBUG, logger=_RS_LOGGER),
     ):
         await _deliver_to_origin(a, nack)
-    assert rs.invalidated == [c.instance_id]
-    assert any(
-        r.levelno == logging.WARNING
-        and "retransmit" in r.message
-        and r.exc_info is not None
-        for r in caplog.records
-    )
+    try:
+        assert rs.invalidated == [c.instance_id]
+        assert any(
+            r.levelno == logging.WARNING
+            and "retransmit" in r.message
+            and r.exc_info is not None
+            for r in caplog.records
+        )
+        # A transient failure earns the same single deferred attempt as an
+        # empty rediscovery — the intent is not dropped on the floor.
+        assert route_id in a.handler._deferred_retransmits
+        assert any(
+            r.levelno == logging.INFO
+            and "rediscover/retransmit failed; deferring one retransmit of" in r.message
+            and route_id[:8] in r.message
+            for r in caplog.records
+        )
+    finally:
+        _cancel_deferred(a)
 
 
 def test_pending_routed_is_pruned_by_expiry_and_capped():
