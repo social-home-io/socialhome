@@ -187,6 +187,48 @@ def _instance_dir(label: str) -> Path:
     return ROOT / label
 
 
+def _log_path(label: str) -> Path:
+    """``label``'s ``log.txt`` — the same file :func:`_audit_logs` scans."""
+    return _instance_dir(label) / "log.txt"
+
+
+def _log_size(label: str) -> int:
+    """Byte length of ``label``'s log right now (0 if absent).
+
+    A bookmark: take it before an action, hand it to
+    :func:`_log_lines_matching` / :func:`_log_contains` as ``offset``
+    afterwards, and the scan covers only what that action produced —
+    c's log spans the whole run, so an unscoped grep would happily
+    match evidence from an earlier step."""
+    try:
+        return _log_path(label).stat().st_size
+    except OSError:
+        return 0
+
+
+def _log_lines_matching(label: str, needle: str, *, offset: int = 0) -> list[str]:
+    """Lines of ``label``'s log containing ``needle``, from byte ``offset``.
+
+    Same file access as :func:`_audit_logs` (``errors="replace"``, a
+    missing or unreadable log is treated as empty). Sliced on bytes,
+    not decoded text, so ``offset`` from :func:`_log_size` lines up."""
+    path = _log_path(label)
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    text = raw[offset:].decode("utf-8", errors="replace")
+    return [line for line in text.splitlines() if needle in line]
+
+
+def _log_contains(label: str, needle: str, *, offset: int = 0) -> bool:
+    """``True`` when ``label``'s log has a line containing ``needle`` at or
+    after byte ``offset`` (default: anywhere in the file)."""
+    return bool(_log_lines_matching(label, needle, offset=offset))
+
+
 def _write_config(label: str, port: int, name: str) -> None:
     d = _instance_dir(label)
     d.mkdir(parents=True, exist_ok=True)
@@ -3016,6 +3058,37 @@ def cmd_verify() -> None:
             "'gfs-space-post' / 'gfs-space-rotate' to exercise"
         )
 
+    # 13b. admin-promote-kick durability — dave's promotion on d must
+    #    still read 'admin' after everything that ran since (app-session,
+    #    remote-invite-decline, replay's c restart). Gated because ``all``
+    #    runs ``verify`` before that step; a standalone ``verify`` after
+    #    it re-asserts the row.
+    if state.get("admin_promote_kick_ran"):
+        apk_space = state.get("remote_invite_routed_space_id")
+        apk_d = state["instances"]["d"]
+        try:
+            apk_rows = _rows(
+                "d",
+                "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+                (apk_space, apk_d["user_id"]),
+            )
+        except Exception as exc:
+            failures.append(f"d: admin-promote-kick role re-check failed: {exc!r}")
+        else:
+            if not apk_rows:
+                failures.append(
+                    f"d: dave's space_members row for {apk_space} is gone "
+                    "(admin-promote-kick seated him as admin)",
+                )
+            elif apk_rows[0][0] != "admin":
+                failures.append(
+                    f"d: dave's role for {apk_space} is {apk_rows[0][0]!r}, "
+                    "expected 'admin' — the admin-promote-kick promotion "
+                    "did not survive",
+                )
+            else:
+                print("  d still holds dave's admin role ✓")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -3824,8 +3897,12 @@ def cmd_sync_https_fallback() -> None:
 
     # 2. Restart dave forcing HTTPS-mode sync.
     d_log_path = _instance_dir("d") / "log.txt"
-    d_log_before = d_log_path.stat().st_size if d_log_path.exists() else 0
     new_pid = _spawn("d", d["port"], extra_env={"SH_FORCE_SYNC_HTTPS": "1"})
+    # ``_spawn`` opens log.txt with "wb" — the file is truncated, so the
+    # post-respawn scan in step 5 starts at 0. (Bookmarking the OLD file's
+    # size here, as this step once did, sliced the new, shorter log past
+    # its end and the tripwire read an empty string every run.)
+    d_log_before = 0
     state["instances"]["d"]["pid"] = new_pid
     # Persist the new pid IMMEDIATELY, not at the end of the step. The
     # trailing ``_save`` never runs when an assertion below fails, which left
@@ -3891,9 +3968,22 @@ def cmd_sync_https_fallback() -> None:
     #    target ephemeral. This is the exact warning the bug produced,
     #    and it is silent by design — no NACK, and the host's send
     #    already reported success — so the log is the only signal.
+    #
+    #    Since v_28 the target logs the same ``no cached target_eph_priv``
+    #    substring for an envelope it could NOT open but *nacked*
+    #    (``…; nacked to <prev hop>``, INFO): that is recovery — the
+    #    origin invalidates, rediscovers and retransmits — not the #648
+    #    symptom. Only the pre-v_28-style silent drop (``…; dropping``,
+    #    WARNING — still emitted when the previous hop is pre-v_28 or the
+    #    nack send itself failed) counts here, so a line is a drop iff it
+    #    carries the substring AND lacks ``nacked to``.
     if d_log_path.exists():
         d_log_after = d_log_path.read_text(errors="replace")[d_log_before:]
-        drops = d_log_after.count("no cached target_eph_priv")
+        drops = sum(
+            1
+            for line in d_log_after.splitlines()
+            if "no cached target_eph_priv" in line and "nacked to" not in line
+        )
         if drops:
             raise SystemExit(
                 f"sync-https-fallback: d dropped {drops} routed envelope(s) "
@@ -5254,32 +5344,78 @@ def cmd_space_sync_catchup_media() -> None:
 
 
 def cmd_admin_promote_kick() -> None:
-    """Cross-household admin promotion (#114 phase 1, v_8+).
+    """Cross-household admin promotion (#114 phase 1, v_8+) — sequenced so
+    it deterministically proves the v_28 ``SPACE_ROUTE_STALE`` nack.
 
-    Builds on ``cmd_remote_invite_routed`` which left dave (on d)
-    seated as a remote member of c's mesh-private space. Exercises:
+    Builds on ``cmd_remote_invite_routed`` which left dave (on d) seated
+    as a remote member of c's mesh-private space. c and d are not paired,
+    so everything c sends d rides ``SPACE_ROUTED`` via b.
 
-    1. **c promotes dave** via
-       ``PATCH /api/spaces/{id}/remote-members/{instance}/{user}``
-       with body ``{"role":"admin"}``. The backend updates
-       ``space_remote_members.role`` on c AND broadcasts
-       ``SPACE_MEMBER_ROLE_CHANGED`` to every member household.
-    2. **d receives** the role change. The local stub's
-       ``space_members.role`` for dave flips to ``'admin'``.
+    Sequence:
 
-    Assertions:
+    a. **Warm c→d.** c posts in the shared space and the post must land
+       on d (``_await_space_post``), so c's ``_route_cache`` entry for d
+       is live (< ``ROUTE_CACHE_TTL_S`` = 270 s) and sealed under the
+       ephemeral key d's *current* process holds.
+    b. **Kill d** (SIGTERM the process group, as ``sync-https-fallback``
+       does) and wait until it is gone. d's ephemeral private halves live
+       only in RAM, so the key c cached in (a) is now dead.
+    c. **While d is down, c promotes dave** via
+       ``PATCH /api/spaces/{id}/remote-members/{instance}/{user}`` with
+       ``{"role":"admin"}``. c updates ``space_remote_members.role`` and
+       broadcasts ``SPACE_MEMBER_ROLE_CHANGED``; for d that is a
+       route-cache HIT, so c seals under d's OLD key and ships
+       ``SPACE_ROUTED`` to b, which accepts — c reports ``ok``. b's hop to
+       d fails and the envelope lands in b's durable ``federation_outbox``.
+    d. **Respawn d** on the same data dir (with the ``SH_FORCE_SYNC_HTTPS=1``
+       env the fallback step left it running with) and wait for
+       ``/api/instance/config``.
+    e. b's outbox redelivers the stale-sealed envelope (5/10/20 s ladder)
+       → d holds no private half for that key → d signs and sends
+       ``SPACE_ROUTE_STALE`` to b → b walks it back to c → c verifies it
+       against the identity key it pinned at discovery, invalidates the
+       route, rediscovers (d mints a fresh key) and retransmits the
+       identical inner event once → d applies the role.
 
-    - c's PATCH returns 200 with the new role.
-    - After settle, d's ``space_members`` row for dave shows
-      role='admin'.
+    Assertions (all hard — this ordering exercises the nack
+    deterministically, so its absence is a failure, not a skip):
+
+    - c's PATCH returns 200 with the new role AND c logged no
+      ``broadcast_to_space_members … did not reach`` for d. That WARNING
+      would mean the cache was NOT warm (step a didn't take): c probed
+      for d while d was down, got ``no_route``, and the nack path was
+      never exercised. A real finding — reported, never papered over.
+    - d's ``space_members.role`` for dave flips to ``'admin'`` (polled up
+      to 90 s: outbox redelivery cadence + nack walk-back + fresh
+      ``SPACE_FIND_ROUTE`` + retransmit).
+    - d's post-respawn log carries the nack emission
+      (``no cached target_eph_priv … nacked to <b>``).
+    - c's log, from the PATCH on, carries the origin's recovery line
+      ``invalidated, rediscovered, retransmitted`` naming d's instance id.
+
+    Why the previous ordering was not a proof: this step used to run
+    straight after ``sync-https-fallback`` and lean on *that* step's
+    respawn of d to leave c's route stale. But the respawned d BEGINs a
+    mesh catch-up sync to c, and c's ``_handle_space_sync_begin``
+    invalidates and rediscovers its route to the requester (#648) — so by
+    the time c PATCHed it usually held a FRESH route, and the nack path
+    was hit only if the PATCH happened to beat d's BEGIN. Pre-v_28 that
+    same race is why the step failed intermittently: when the PATCH won,
+    d dropped the stale seal in silence and the role change was lost
+    until the cache expired. Killing d *between* the warm-up and the
+    PATCH removes the race. Routing the stale envelope through b's outbox
+    also proves the outbox → nack → retransmit interplay: the nack has to
+    reach c inside its 60 s pending-record window
+    (``routed_envelope._DEFAULT_EPH_TTL_S``), which the first rungs of
+    the outbox ladder do; the 40 s rung (~75 s cumulative) would not.
 
     The kick exercise (dave kicking someone via
     ``SPACE_REMOTE_ADMIN_KICK``) lives in
     ``tests/services/test_space_service_federation_coverage.py`` —
     end-to-end via the demo would require seating a *second* remote
-    member specifically to be the kick target, which would
-    duplicate the unit coverage without adding signal beyond the
-    role-propagation assertion above.
+    member specifically to be the kick target, which would duplicate the
+    unit coverage without adding signal beyond the role-propagation
+    assertion above.
     """
     state = _load()
     if not state:
@@ -5292,7 +5428,41 @@ def cmd_admin_promote_kick() -> None:
     c = state["instances"]["c"]
     d = state["instances"]["d"]
 
-    # 1. c promotes dave to admin.
+    # a. Warm c's route to d with a post d must receive.
+    warm_marker = f"route-warm-{time.time_ns()}"
+    s, post = _request(
+        f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/posts",
+        token=c["token"],
+        method="POST",
+        body={
+            "type": "text",
+            "content": f"[c] warming the mesh route to d {warm_marker}",
+        },
+    )
+    _must("c posts to warm the c→d route", s, post, ok=(201,))
+    _await_space_post(state, "d", space_id, post["id"])
+    print(f"  c→d route warmed: d received post {post['id']} ✓")
+
+    # b. Kill d so the ephemeral key c just sealed under dies with it.
+    print(f"  killing d (pid={d['pid']}) — its RAM-only ephemeral keys die with it")
+    try:
+        os.killpg(d["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _alive(d["pid"]):
+        time.sleep(0.2)
+    if _alive(d["pid"]):
+        try:
+            os.killpg(d["pid"], signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        time.sleep(0.5)
+
+    # c. While d is down, c promotes dave. Bookmark c's log first so the
+    #    evidence scan covers only this step — c's log spans the whole
+    #    run and the nack path may well have fired earlier.
+    c_log_mark = _log_size("c")
     s, body = _request(
         f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}"
         f"/remote-members/{d['instance_id']}/{d['user_id']}",
@@ -5305,36 +5475,129 @@ def cmd_admin_promote_kick() -> None:
         raise SystemExit(
             f"admin-promote-kick: PATCH returned unexpected role: {body!r}",
         )
-    print("  c promoted dave to admin ✓")
-
-    # 2. Wait for SPACE_MEMBER_ROLE_CHANGED to settle.
-    time.sleep(6)
-
-    # 3. d's space_members for dave should now read 'admin'.
-    import sqlite3
-
-    db_path = _instance_dir("d") / "socialhome.db"
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = list(
-            conn.execute(
-                "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
-                (space_id, d["user_id"]),
-            )
+    print("  c promoted dave to admin while d was down ✓")
+    # The broadcast to d must have been a route-cache HIT: c sealed under
+    # the dead key and b accepted the outer envelope, so c saw ``ok``. A
+    # MISS means c probed for d while d was down, got ``no_route`` and
+    # logged the mesh-loss WARNING — the nack path was never exercised.
+    lost = [
+        line
+        for line in _log_lines_matching("c", "did not reach", offset=c_log_mark)
+        if d["instance_id"] in line
+    ]
+    if lost:
+        for line in lost[:3]:
+            print(f"    c: {line.strip()[:220]}")
+        raise SystemExit(
+            "admin-promote-kick: c's SPACE_MEMBER_ROLE_CHANGED did NOT ride the "
+            "cached route to d (WARNING above) — the route cache was not warm "
+            "when c PATCHed, so the v_28 nack path was not exercised. Check that "
+            "the warm-up post in step (a) was mesh-routed to d and that "
+            "ROUTE_CACHE_TTL_S has not shrunk.",
         )
-    finally:
-        conn.close()
+
+    # d. Respawn d on the same data dir. ``_spawn`` truncates d's log.txt,
+    #    so the post-respawn scans below start at offset 0.
+    new_pid = _spawn("d", d["port"], extra_env={"SH_FORCE_SYNC_HTTPS": "1"})
+    state["instances"]["d"]["pid"] = new_pid
+    # Persist the pid IMMEDIATELY — see ``cmd_sync_https_fallback`` for how
+    # a stale pid in state.json poisons every later run.
+    _save(state)
+    _wait_ready(d["port"])
+    print(f"  d respawned: pid={new_pid}")
+
+    # e. Poll d's stub for the role flip: b's outbox redelivery (first
+    #    rungs 5 / 10 / 20 s, ±30 %) + nack walk-back + a fresh
+    #    SPACE_FIND_ROUTE flood + retransmit.
+    role_sql = "SELECT role FROM space_members WHERE space_id=? AND user_id=?"
+    deadline = time.monotonic() + 90.0
+    rows: list[tuple] = []
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        rows = _rows("d", role_sql, (space_id, d["user_id"]))
+        if rows and rows[0][0] == "admin":
+            break
+
+    # Evidence, gathered before deciding so a failure prints it.
+    #   ``stale_at_target``: what d logs for every SPACE_ROUTED it cannot
+    #   open (INFO "…; nacked to …" under v_28, WARNING "…; dropping"
+    #   pre-v_28 / on a failed nack send).
+    #   ``nack_recovered``: the stable substring of the origin's INFO
+    #   success line in ``routed_envelope._on_route_stale_at_origin``.
+    stale_at_target = "no cached target_eph_priv"
+    nack_recovered = "invalidated, rediscovered, retransmitted"
+    nacked = [
+        line
+        for line in _log_lines_matching("d", stale_at_target)
+        if "nacked to" in line
+    ]
+    dropped = [
+        line
+        for line in _log_lines_matching("d", stale_at_target)
+        if "nacked to" not in line
+    ]
+    recovered = [
+        line
+        for line in _log_lines_matching("c", nack_recovered, offset=c_log_mark)
+        if d["instance_id"] in line
+    ]
+
+    def _dump_evidence() -> None:
+        for line in (nacked + dropped)[:3]:
+            print(f"    d: {line.strip()[:220]}")
+        for line in _log_lines_matching("c", "SPACE_ROUTE_STALE", offset=c_log_mark)[
+            :5
+        ]:
+            print(f"    c: {line.strip()[:220]}")
+
     if not rows:
         raise SystemExit(
             f"admin-promote-kick: dave's space_members row missing on d "
             f"(space={space_id})",
         )
     if rows[0][0] != "admin":
+        _dump_evidence()
         raise SystemExit(
-            f"admin-promote-kick: dave's role on d is {rows[0][0]!r}, "
-            f"expected 'admin' — SPACE_MEMBER_ROLE_CHANGED didn't apply",
+            f"admin-promote-kick: dave's role on d is {rows[0][0]!r}, expected "
+            "'admin' within 90 s — the stale-sealed SPACE_MEMBER_ROLE_CHANGED "
+            "was not recovered. c 'invalidated; no route on rediscovery, giving "
+            "up' → c verified the nack but its one-shot SPACE_FIND_ROUTE (2 s "
+            "window) raced d's boot and the retransmit was abandoned (a late "
+            "ROUTE_FOUND is cached, but nothing resends). d 'nacked to' + no c "
+            "line at all → the nack was dropped at a hop, rejected at the origin, "
+            "or arrived after c's 60 s pending-record window (b's outbox ladder "
+            "is 5/10/20/40 s). "
+            "d '; dropping' → a hop is pre-v_28 or the nack send failed. No d "
+            "line at all → b's outbox never redelivered the envelope. Grep "
+            f"'SPACE_ROUTE_STALE' in {_log_path('c')} and {_log_path('d')}.",
         )
     print("  d's space_members.role for dave = 'admin' ✓")
+
+    if not nacked:
+        _dump_evidence()
+        raise SystemExit(
+            "admin-promote-kick: the role applied but d never emitted a "
+            "SPACE_ROUTE_STALE nack (no 'no cached target_eph_priv … nacked to' "
+            "line after the respawn) — the role change did not travel the "
+            "stale route this step set up, so nothing here proves the v_28 "
+            f"path. Inspect {_log_path('d')}.",
+        )
+    print("  d nacked the stale-sealed envelope ✓ (v_28)")
+    print(f"    d: {nacked[0].strip()[:220]}")
+    if not recovered:
+        _dump_evidence()
+        raise SystemExit(
+            "admin-promote-kick: d nacked, the role applied, but c never logged "
+            f"{nack_recovered!r} naming {d['instance_id'][:8]} — the role change "
+            "arrived by some other path than the verified nack + retransmit. "
+            f"Inspect {_log_path('c')} for 'SPACE_ROUTE_STALE'.",
+        )
+    print(
+        "  c verified the nack against d's pinned identity key: route "
+        "invalidated, rediscovered, role change retransmitted ✓ (v_28)"
+    )
+    print(f"    c: {recovered[0].strip()[:220]}")
+    state["admin_promote_kick_nack_proven"] = True
 
     state["admin_promote_kick_ran"] = True
     _save(state)
@@ -6204,12 +6467,15 @@ def main() -> None:
         # DataChannel, and dave's feed catches up.
         cmd_sync_https_fallback()
         # ``admin-promote-kick`` exercises the cross-household admin
-        # promotion path (#114, v_8+): c promotes dave to admin via
-        # the new PATCH /api/spaces/{id}/remote-members/{instance}/
-        # {user} endpoint, and after settle d's local stub reflects
-        # the new role. The kick half (SPACE_REMOTE_ADMIN_KICK, v_9+)
-        # is covered by unit tests; the demo focuses on the wire-level
-        # round-trip.
+        # promotion path (#114, v_8+) AND the v_28 SPACE_ROUTE_STALE
+        # nack: c warms its mesh route to d, d is killed, c promotes
+        # dave via PATCH /api/spaces/{id}/remote-members/{instance}/
+        # {user} while d is down (sealing under d's now-dead ephemeral
+        # key; b's outbox holds the envelope), d is respawned, and the
+        # redelivered stale envelope is nacked back to c, which
+        # rediscovers and retransmits — d's stub then reflects the new
+        # role. The kick half (SPACE_REMOTE_ADMIN_KICK, v_9+) is covered
+        # by unit tests; the demo focuses on the wire-level round-trip.
         cmd_admin_promote_kick()
         # ``app-session`` exercises the PR4 cross-household app
         # federation bridge: opens an APP_SESSION from a to b,

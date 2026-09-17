@@ -331,7 +331,32 @@ Phases added after the initial publish are documented inline in
   metadata sentinel; assertion proves both surfaces land on the
   joiner's media path.
 * ``admin-promote-kick`` — cross-household role promotion lands on
-  the affected member's household via SPACE_MEMBER_ROLE_CHANGED.
+  the affected member's household via SPACE_MEMBER_ROLE_CHANGED, **and
+  it is the live proof of the v_28 ``SPACE_ROUTE_STALE`` nack**. c and
+  d are not paired, so the role change rides ``SPACE_ROUTED`` via b. The
+  step warms c's mesh route to d (a post d must receive), then **kills
+  d** — d's ephemeral private halves live only in RAM, so the key c
+  just cached is dead — and has c PATCH dave's role *while d is down*:
+  cache hit, c seals under the dead key, b accepts the outer envelope
+  (c sees ``ok``) and b's durable outbox holds the hop to d. d is
+  respawned on the same data dir; b redelivers; d cannot open the
+  envelope and answers with a signed ``SPACE_ROUTE_STALE`` that b walks
+  back to c; c verifies it against the identity key it pinned at
+  discovery, invalidates the route, rediscovers and retransmits the
+  identical inner event once; d applies the role. All three are hard
+  assertions: d's ``space_members.role == 'admin'`` (polled ≤ 90 s),
+  d's log carries ``no cached target_eph_priv … nacked to``, and c's
+  log carries ``invalidated, rediscovered, retransmitted`` naming d's
+  instance id. A ``broadcast_to_space_members … did not reach`` WARNING
+  on c fails the step early — it means the cache was not warm and the
+  nack path was never exercised. (The step previously relied on the
+  respawn ``sync-https-fallback`` performs, but the respawned d BEGINs a
+  mesh catch-up sync and c re-discovers its route on admitting it, so
+  whether c still held a stale route at PATCH time was a race — which
+  is also why the step used to fail intermittently pre-v_28, when a
+  stale seal was dropped in silence.) ``sync-https-fallback``'s own
+  #648 tripwire counts only silent drops (``…; dropping``), not nacked
+  ones.
 * ``app-session`` — app-to-app federation (v_17+/v_18): opens an
   ``APP_SESSION`` from a to b via the legacy ``peer_instance_id``
   path, sends an ``APP_MESSAGE``, and asserts both REST calls return
