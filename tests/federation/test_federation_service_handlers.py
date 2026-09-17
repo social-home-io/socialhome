@@ -9,13 +9,14 @@ fields, etc.) is exercised.
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from socialhome.domain.events import PairingIntroRelayReceived
-from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation import FederationEventType, PairingStatus
 from socialhome.federation.federation_service import FederationService
 
 
@@ -59,7 +60,47 @@ def svc():
     s._own_instance_id = "self-iid"
     s._own_identity_seed = b"\x00" * 32
     s._ice_servers = []
+    # Paired by default: ``is_confirmed_peer`` / ``send_with_mesh_fallback``
+    # read ``remote_instances`` through this repo, so the requester-side
+    # sync helpers short-circuit into (the usually patched) ``send_event``
+    # exactly as they did before the mesh-aware conversion. Mesh tests
+    # flip ``get_instance`` to return ``None`` (no pairing row).
+    s._federation_repo = MagicMock()
+    s._federation_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(status=PairingStatus.CONFIRMED),
+    )
     return s
+
+
+def _unpair(svc) -> None:
+    """Make every counterpart look like a mesh-only household — no
+    ``remote_instances`` row at all (the shape that used to hit
+    ``send_event: unknown instance``)."""
+    svc._federation_repo.get_instance = AsyncMock(return_value=None)
+
+
+def _attach_mesh(svc, *, target: str):
+    """Wire a route service + routed handler so ``send_with_mesh_fallback``
+    takes the SPACE_ROUTED branch. Returns the ``send_routed`` mock."""
+    route_service = MagicMock()
+    route_service.cooldown_remaining = MagicMock(return_value=0.0)
+    route_service.discover_route = AsyncMock(
+        return_value=([svc._own_instance_id, "relay", target], "eph-pk"),
+    )
+    route_service.invalidate = AsyncMock()
+    routed_handler = MagicMock()
+    routed_handler.send_routed = AsyncMock(return_value="route-id")
+    svc._route_service = route_service
+    svc._routed_handler = routed_handler
+    return routed_handler.send_routed
+
+
+def _unknown_instance_warnings(caplog) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "unknown instance" in r.getMessage()
+    ]
 
 
 # ─── _handle_pairing_intro_relay ─────────────────────────────────────
@@ -857,6 +898,305 @@ async def test_offer_handler_ice_timeout_skips_relay_for_old_peer(svc):
     assert "space_sync_begin" not in sent_values
     svc._sync_manager.trigger_relay_sync.assert_not_awaited()
     svc._sync_manager.close_session.assert_called_once_with("s")
+
+
+# ─── Mesh-only requester: the sync helpers must not plain-send toward an
+# unpaired provider (no ``remote_instances`` row → ``send_event`` logs
+# "unknown instance" and drops the event with no outbox). ─────────────
+
+LOGGER = "socialhome.federation.federation_service"
+
+
+def _rtc_record(*, ready: bool):
+    rtc_session = SimpleNamespace(
+        wait_ready=AsyncMock(return_value=ready),
+        recv_chunk=AsyncMock(side_effect=ConnectionError("eof")),
+    )
+    return SimpleNamespace(
+        sync_id="s",
+        space_id="sp",
+        rtc=rtc_session,
+        rtc_watcher=None,
+        provider_instance_id="mesh-provider",
+        requester_instance_id="self-iid",
+    )
+
+
+async def test_offer_from_unpaired_provider_is_skipped_with_debug_log(svc, caplog):
+    """(b) — an OFFER from a provider we hold no pairing row for cannot be
+    answered: ANSWER/ICE ride direct ``send_event`` and the host never
+    offers a mesh requester anyway. Skip the whole dance at debug — no
+    RTC session, no ANSWER, and no ``unknown instance`` warning."""
+    _unpair(svc)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._handle_space_sync_offer(
+            _event(
+                "SPACE_SYNC_OFFER",
+                {"sync_id": "s", "sdp_offer": "x"},
+                from_instance="mesh-provider",
+                space_id="sp",
+            ),
+        )
+    svc._sync_manager.apply_offer.assert_not_awaited()
+    send_mock.assert_not_awaited()
+    assert _unknown_instance_warnings(caplog) == []
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("mesh" in r.getMessage() for r in debug)
+
+
+async def test_offer_from_confirmed_provider_answers_via_plain_send_event(svc):
+    """Paired peer: the ANSWER goes out over plain ``send_event`` with the
+    same payload as before — the (b) guard is invisible to it."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._handle_space_sync_offer(
+            _event(
+                "SPACE_SYNC_OFFER",
+                {"sync_id": "s", "sdp_offer": "x"},
+                from_instance="paired-provider",
+                space_id="sp",
+            ),
+        )
+    send_mock.assert_awaited_once_with(
+        to_instance_id="paired-provider",
+        event_type=FederationEventType.SPACE_SYNC_ANSWER,
+        payload={"sync_id": "s", "sdp_answer": "sdp-ans"},
+        space_id="sp",
+    )
+
+
+async def test_watcher_direct_ready_skipped_for_mesh_provider(svc, caplog):
+    """(b) — DIRECT_READY only means something on the direct path (an open
+    DataChannel); toward a mesh-only provider it is not sent at all."""
+    _unpair(svc)
+    send_routed = _attach_mesh(svc, target="mesh-provider")
+    record = _rtc_record(ready=True)
+    svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._watch_requester_rtc(record, "mesh-provider")
+    send_mock.assert_not_awaited()
+    send_routed.assert_not_awaited()
+    assert _unknown_instance_warnings(caplog) == []
+    assert any(
+        r.levelno == logging.DEBUG and "DIRECT_READY" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_watcher_ice_timeout_routes_failed_and_begin_via_mesh(svc, caplog):
+    """(a) — regression for the live four-household run: a mesh-only
+    requester whose ICE watcher timed out used to plain-``send_event``
+    DIRECT_FAILED and the relay BEGIN toward a provider it has no row
+    for, logging ``send_event: unknown instance`` and losing both. Both
+    legs now ride SPACE_ROUTED via ``send_with_mesh_fallback``."""
+    _unpair(svc)
+    send_routed = _attach_mesh(svc, target="mesh-provider")
+    record = _rtc_record(ready=False)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(
+            next_event=FederationEventType.SPACE_SYNC_BEGIN,
+            next_payload={
+                "sync_id": "s-new",
+                "space_id": "sp",
+                "prefer_direct": False,
+            },
+        ),
+    )
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    with patch.object(
+        FederationService,
+        "peer_supports",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        # Real ``send_event`` on purpose — with no row it is exactly the
+        # code path that logged the warning before the fix.
+        await svc._watch_requester_rtc(record, "mesh-provider")
+    assert _unknown_instance_warnings(caplog) == []
+    inner = [
+        (c.kwargs["inner_event_type"], c.kwargs["inner_payload"])
+        for c in send_routed.await_args_list
+    ]
+    assert inner == [
+        (
+            FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+            {"sync_id": "s", "reason": "ice_timeout"},
+        ),
+        (
+            FederationEventType.SPACE_SYNC_BEGIN,
+            {"sync_id": "s-new", "space_id": "sp", "prefer_direct": False},
+        ),
+    ]
+
+
+async def test_watcher_ice_timeout_confirmed_provider_uses_plain_send_event(svc):
+    """Paired peer: DIRECT_FAILED + relay BEGIN still go out over plain
+    ``send_event`` (the short-circuit) — the mesh is never touched."""
+    send_routed = _attach_mesh(svc, target="paired-provider")
+    record = _rtc_record(ready=False)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(
+            next_event=FederationEventType.SPACE_SYNC_BEGIN,
+            next_payload={
+                "sync_id": "s-new",
+                "space_id": "sp",
+                "prefer_direct": False,
+            },
+        ),
+    )
+    with (
+        patch.object(
+            FederationService,
+            "send_event",
+            new_callable=AsyncMock,
+        ) as send_mock,
+        patch.object(
+            FederationService,
+            "peer_supports",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        await svc._watch_requester_rtc(record, "paired-provider")
+    send_routed.assert_not_awaited()
+    svc._route_service.discover_route.assert_not_awaited()
+    assert [c.kwargs for c in send_mock.await_args_list] == [
+        {
+            "to_instance_id": "paired-provider",
+            "event_type": FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+            "payload": {"sync_id": "s", "reason": "ice_timeout"},
+            "space_id": "sp",
+        },
+        {
+            "to_instance_id": "paired-provider",
+            "event_type": FederationEventType.SPACE_SYNC_BEGIN,
+            "payload": {"sync_id": "s-new", "space_id": "sp", "prefer_direct": False},
+            "space_id": "sp",
+        },
+    ]
+
+
+async def test_maybe_trigger_relay_retry_routes_begin_via_mesh(svc, caplog):
+    """(a) — the re-BEGIN toward a mesh-only provider rides SPACE_ROUTED;
+    no ``unknown instance`` warning."""
+    _unpair(svc)
+    send_routed = _attach_mesh(svc, target="mesh-provider")
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(
+            next_event=FederationEventType.SPACE_SYNC_BEGIN,
+            next_payload={"sync_id": "s2", "space_id": "sp", "prefer_direct": False},
+        ),
+    )
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    with patch.object(
+        FederationService,
+        "peer_supports",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        await svc._maybe_trigger_relay_retry("s", "mesh-provider")
+    assert _unknown_instance_warnings(caplog) == []
+    send_routed.assert_awaited_once()
+    kwargs = send_routed.await_args.kwargs
+    assert kwargs["inner_event_type"] is FederationEventType.SPACE_SYNC_BEGIN
+    assert kwargs["inner_payload"] == {
+        "sync_id": "s2",
+        "space_id": "sp",
+        "prefer_direct": False,
+    }
+
+
+async def test_handle_direct_failed_requester_routes_begin_via_mesh(svc, caplog):
+    """(a) — a mesh-only requester told DIRECT_FAILED by its provider
+    re-issues the relay BEGIN over SPACE_ROUTED, not a doomed plain send."""
+    _unpair(svc)
+    send_routed = _attach_mesh(svc, target="mesh-provider")
+    session = SimpleNamespace(
+        sync_id="s1",
+        signaling_node=None,
+        provider_instance_id="mesh-provider",
+    )
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(
+            next_event=FederationEventType.SPACE_SYNC_BEGIN,
+            next_payload={"sync_id": "s1b", "space_id": "sp", "prefer_direct": False},
+        ),
+    )
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    await svc._handle_space_sync_direct_failed(
+        _event(
+            "SPACE_SYNC_DIRECT_FAILED",
+            {"sync_id": "s1"},
+            from_instance="mesh-provider",
+            space_id="sp",
+        ),
+    )
+    assert _unknown_instance_warnings(caplog) == []
+    send_routed.assert_awaited_once()
+    kwargs = send_routed.await_args.kwargs
+    assert kwargs["inner_event_type"] is FederationEventType.SPACE_SYNC_BEGIN
+    assert kwargs["inner_payload"]["sync_id"] == "s1b"
+
+
+async def test_handle_direct_failed_requester_confirmed_uses_plain_send_event(svc):
+    """Paired peer: same BEGIN, same payload, over plain ``send_event``."""
+    send_routed = _attach_mesh(svc, target="paired-provider")
+    session = SimpleNamespace(
+        sync_id="s1",
+        signaling_node=None,
+        provider_instance_id="paired-provider",
+    )
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(
+            next_event=FederationEventType.SPACE_SYNC_BEGIN,
+            next_payload={"sync_id": "s1b", "space_id": "sp", "prefer_direct": False},
+        ),
+    )
+    with patch.object(
+        FederationService,
+        "send_event",
+        new_callable=AsyncMock,
+    ) as send_mock:
+        await svc._handle_space_sync_direct_failed(
+            _event(
+                "SPACE_SYNC_DIRECT_FAILED",
+                {"sync_id": "s1"},
+                from_instance="paired-provider",
+                space_id="sp",
+            ),
+        )
+    send_routed.assert_not_awaited()
+    send_mock.assert_awaited_once_with(
+        to_instance_id="paired-provider",
+        event_type=FederationEventType.SPACE_SYNC_BEGIN,
+        payload={"sync_id": "s1b", "space_id": "sp", "prefer_direct": False},
+        space_id="sp",
+    )
 
 
 # ─── Part C: SPACE_SYNC_CHUNK inbound (HTTPS fallback) ─────────────

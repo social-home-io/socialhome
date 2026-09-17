@@ -2239,6 +2239,20 @@ class FederationService:
         space_id = event.space_id or ""
         if not sync_id or not sdp_offer:
             return
+        # The OFFER/ANSWER/ICE dance is direct-path only: ICE can't traverse
+        # a relay, and the host never offers a mesh-only requester (it forces
+        # HTTPS mode in ``_handle_space_sync_begin``). An OFFER from a
+        # provider we hold no CONFIRMED row for therefore has no answer we
+        # could deliver — a plain ``send_event`` would be an un-queued
+        # ``unknown_instance`` drop. Skip the whole handshake at debug.
+        if not await self.is_confirmed_peer(event.from_instance):
+            log.debug(
+                "sync %s: SPACE_SYNC_OFFER from mesh-only provider %s — "
+                "direct path unavailable, ignoring offer",
+                sync_id,
+                event.from_instance,
+            )
+            return
         sdp_answer = await self._sync_manager.apply_offer(
             sync_id=sync_id,
             sdp_offer=sdp_offer,
@@ -2287,8 +2301,13 @@ class FederationService:
                 "sync %s: DataChannel not ready in 15 s — sending DIRECT_FAILED",
                 record.sync_id,
             )
+            # The provider must hear this to release its half of the
+            # session (RTC handle + GFS signaling node). A mesh-only
+            # provider is not a CONFIRMED peer, so route through the mesh
+            # fallback — it short-circuits to ``send_event`` for a paired
+            # peer, so the direct path is unchanged.
             try:
-                await self.send_event(
+                await self.send_with_mesh_fallback(
                     to_instance_id=provider_instance_id,
                     event_type=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
                     payload={
@@ -2316,6 +2335,17 @@ class FederationService:
             )
             return
         # Channel open — tell the provider and start consuming chunks.
+        # DIRECT_READY only exists on the direct path (an open DataChannel);
+        # a mesh-only provider never sent the OFFER that could open one, so
+        # rather than plain-send into ``unknown_instance``, skip at debug.
+        if not await self.is_confirmed_peer(provider_instance_id):
+            log.debug(
+                "sync %s: DataChannel ready but provider %s is mesh-only — "
+                "not sending DIRECT_READY",
+                record.sync_id,
+                provider_instance_id,
+            )
+            return
         try:
             await self.send_event(
                 to_instance_id=provider_instance_id,
@@ -2446,7 +2476,11 @@ class FederationService:
                 return
         decision = await self._sync_manager.trigger_relay_sync(sync_id)
         if decision.next_event is not None:
-            await self.send_event(
+            # The relay BEGIN is the protocol step a mesh-relayed session
+            # needs most: a mesh-only requester has no row for its provider,
+            # so a plain ``send_event`` here is an un-queued drop. The
+            # fallback short-circuits to ``send_event`` for a CONFIRMED peer.
+            await self.send_with_mesh_fallback(
                 to_instance_id=event.from_instance,
                 event_type=decision.next_event,
                 payload=decision.next_payload or {},
@@ -2488,8 +2522,11 @@ class FederationService:
         decision = await self._sync_manager.trigger_relay_sync(sync_id)
         if decision.next_event is None:
             return
+        # Same reasoning as ``_handle_space_sync_direct_failed``: the
+        # re-BEGIN must reach a mesh-only provider too, and the fallback is
+        # a no-op wrapper for a CONFIRMED one.
         try:
-            await self.send_event(
+            await self.send_with_mesh_fallback(
                 to_instance_id=provider_instance_id,
                 event_type=decision.next_event,
                 payload=decision.next_payload or {},
