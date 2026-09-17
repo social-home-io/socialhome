@@ -51,6 +51,7 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
+    DELIVERY_ERROR_ROUTE_COOLDOWN,
     BroadcastResult,
     DeliveryResult,
     FederationEvent,
@@ -1045,6 +1046,20 @@ class FederationService:
                 ok=False,
                 error="not_confirmed",
             )
+        # A live negative cooldown means ``discover_route`` will return
+        # ``None`` immediately WITHOUT probing (anti-flood). Report that as a
+        # distinct, waitable reason instead of the generic "no_route" — a
+        # caller in a per-chunk loop otherwise spends its entire failure
+        # budget in milliseconds on a window that is about to lift, and
+        # abandons a stream the route would have carried seconds later.
+        cooldown_s = self._route_service.cooldown_remaining(to_instance_id)
+        if cooldown_s > 0.0:
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                error=DELIVERY_ERROR_ROUTE_COOLDOWN,
+                retry_after_s=cooldown_s,
+            )
         discovery = await self._route_service.discover_route(to_instance_id)
         if discovery is None:
             return DeliveryResult(
@@ -1560,6 +1575,24 @@ class FederationService:
             )
             results.append(result)
         succeeded = sum(1 for r in results if r.ok)
+        failed = [r for r in results if not r.ok]
+        if failed:
+            # DURABILITY GAP: unlike :meth:`send_event`, the mesh path has no
+            # outbox — a failed target here is a permanent, invisible loss,
+            # and for a mesh-only member that is the ONLY delivery attempt the
+            # event ever gets. A durable outbox for space gossip is a larger
+            # design change; until then a WARNING naming the space, the event
+            # and each failed peer is the minimum bar, so the loss is
+            # diagnosable rather than silent.
+            log.warning(
+                "broadcast_to_space_members: space=%s event=%s did not reach "
+                "%d/%d member household(s): %s",
+                space_id,
+                event_type.value,
+                len(failed),
+                len(results),
+                ", ".join(f"{r.instance_id}={r.error}" for r in failed),
+            )
         return BroadcastResult(
             attempted=len(results),
             succeeded=succeeded,

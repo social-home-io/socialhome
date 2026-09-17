@@ -12,6 +12,7 @@ import orjson
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.federation import DELIVERY_ERROR_ROUTE_COOLDOWN
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     ChunkBuilder,
@@ -640,3 +641,136 @@ async def test_successful_stream_leaves_the_session_alone(provider):
     await provider.stream_initial(session)
 
     federation.close_sync_session.assert_not_called()
+
+
+# ─── Route-discovery cooldown: a race must not abandon the stream ─────
+
+
+def _cooldown_result(retry_after_s: float = 0.01):
+    """A ``DeliveryResult``-shaped failure from the negative-cooldown branch."""
+    return SimpleNamespace(
+        ok=False,
+        error=DELIVERY_ERROR_ROUTE_COOLDOWN,
+        retry_after_s=retry_after_s,
+    )
+
+
+async def _baseline_send_count(provider) -> int:
+    """How many sends a fully-successful HTTPS stream makes."""
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession(sync_id="sync-baseline")
+    session.rtc = None
+    session.transport_mode = "https"
+    clean = AsyncMock()
+    clean.send_with_mesh_fallback = AsyncMock(
+        return_value=SimpleNamespace(ok=True, error=None, retry_after_s=None),
+    )
+    provider.attach_federation(clean)
+    await provider.stream_initial(session)
+    return clean.send_with_mesh_fallback.await_count
+
+
+async def test_route_cooldown_failure_waits_and_retries_the_same_chunk(provider):
+    """A chunk that failed *because discovery is in its negative cooldown*
+    must NOT burn a retry strike.
+
+    ``discover_route`` returns ``None`` immediately — without probing — for
+    ``ROUTE_NEGATIVE_COOLDOWN_S`` after a failed flood. The chunk loop has no
+    delay between chunks, so one missed discovery window used to fail three
+    chunks within milliseconds and abandon the entire stream, even though the
+    route was seconds from warming up. Wait the cooldown out and retry the
+    same chunk instead.
+    """
+    from unittest.mock import AsyncMock
+
+    expected = await _baseline_send_count(provider)
+    assert expected > 1
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    ok = SimpleNamespace(ok=True, error=None, retry_after_s=None)
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        side_effect=[_cooldown_result()] + [ok] * (expected + 2),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    # Budget of 1: if the cooldown failure counted a strike the stream would
+    # be abandoned after the very first chunk.
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        patch.object(provider_mod, "MAX_ROUTE_COOLDOWN_WAIT_S", 0.01),
+    ):
+        await provider.stream_initial(session)
+
+    federation.close_sync_session.assert_not_called()
+    # One extra send: the retried chunk.
+    assert federation.send_with_mesh_fallback.await_count == expected + 1
+
+
+async def test_route_cooldown_waits_are_bounded(provider):
+    """A genuinely unreachable peer still terminates the stream.
+
+    Waiting out a cooldown is bounded per stream — otherwise a household
+    that is simply gone parks the provider's task forever.
+    """
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        return_value=_cooldown_result(),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        patch.object(provider_mod, "MAX_ROUTE_COOLDOWN_WAITS", 2),
+        patch.object(provider_mod, "MAX_ROUTE_COOLDOWN_WAIT_S", 0.01),
+    ):
+        await provider.stream_initial(session)
+
+    # First attempt + two bounded waits, then the failure counts a strike
+    # and the budget of 1 abandons the stream.
+    assert federation.send_with_mesh_fallback.await_count == 3
+    federation.close_sync_session.assert_called_once_with(session.sync_id)
+
+
+async def test_non_cooldown_failure_still_counts_a_strike(provider):
+    """Only the cooldown reason buys a wait — every other failure keeps
+    today's behaviour exactly (fail fast, count a strike, abandon)."""
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        return_value=SimpleNamespace(
+            ok=False,
+            error="routed_send_failed",
+            retry_after_s=None,
+        ),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    sleep_mock = AsyncMock()
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        patch.object(provider_mod.asyncio, "sleep", sleep_mock),
+    ):
+        await provider.stream_initial(session)
+
+    assert federation.send_with_mesh_fallback.await_count == 1
+    federation.close_sync_session.assert_called_once_with(session.sync_id)
+    sleep_mock.assert_not_awaited()

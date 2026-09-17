@@ -2165,7 +2165,7 @@ class SpaceService(SpaceMemberGuardMixin):
                 sequence=space.config_sequence,
             )
         )
-        await self._federation.broadcast_to_space_members(
+        broadcast = await self._federation.broadcast_to_space_members(
             space_id,
             FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
             {
@@ -2175,6 +2175,31 @@ class SpaceService(SpaceMemberGuardMixin):
                 "role": role,
             },
         )
+        # DURABILITY GAP: the mesh fan-out has NO outbox (unlike send_event),
+        # so a member household we couldn't reach never gets this role change
+        # — and the v_23 roster gossip right below does NOT rescue it: it
+        # rides the same ``broadcast_to_space_members`` helper and fails for
+        # the same peers. The local write genuinely succeeded, so the request
+        # stays 200 rather than lying about it; a durable outbox for space
+        # gossip is deliberately out of scope here. Until there is one, a
+        # WARNING naming what did not propagate is the operator's only signal
+        # that a remote member's role is now stale on its own household.
+        if broadcast is not None and getattr(broadcast, "failed", 0):
+            log.warning(
+                "set_remote_member_role: space=%s role=%s for %s@%s did not "
+                "reach %d/%d member household(s): %s — those households keep "
+                "the old role until the next full sync (no outbox on the "
+                "mesh path)",
+                space_id,
+                role,
+                user_id,
+                instance_id,
+                broadcast.failed,
+                broadcast.attempted,
+                ", ".join(
+                    f"{r.instance_id}={r.error}" for r in broadcast.results if not r.ok
+                ),
+            )
         # v_23 — peer-replicate the role change as an authority-signed JOINED
         # gossip (doubles as the role upsert) so every member household's
         # roster converges, not just the witnesses of the legacy

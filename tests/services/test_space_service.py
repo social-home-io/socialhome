@@ -5577,3 +5577,95 @@ async def test_create_space_survives_crypto_failure(stack):
     )
     assert await stack.space_repo.get(b.id) is not None
     boom.initialise_for_space.assert_awaited_once_with(b.id)
+
+
+# ─── Mesh fan-out: a lost role change must be diagnosable ─────────────
+
+
+async def test_set_remote_member_role_warns_when_broadcast_fails(stack, caplog):
+    """The mesh fan-out has no outbox, so a role change that can't reach a
+    mesh-only member is permanently lost. The local write still succeeded
+    (and the HTTP status stays 200), but the loss MUST be visible in the
+    log rather than silent."""
+    import logging as _logging
+    from unittest.mock import AsyncMock
+
+    from socialhome.domain.federation import BroadcastResult, DeliveryResult
+    from socialhome.domain.space import SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    fed = _roster_gossip_fed()
+    fed.broadcast_to_space_members = AsyncMock(
+        return_value=BroadcastResult(
+            attempted=1,
+            succeeded=0,
+            failed=1,
+            results=(DeliveryResult(instance_id="peer-x", ok=False, error="no_route"),),
+        ),
+    )
+    stack.space_svc._federation = fed
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="R",
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="socialhome"):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="peer-x",
+            user_id="ru1",
+            role=SpaceRole.ADMIN,
+        )
+
+    # Local write still applied — failing the request would be wrong.
+    row = await remote.get(space.id, "peer-x", "ru1")
+    assert row.role == SpaceRole.ADMIN
+    assert "peer-x" in caplog.text
+    assert "no_route" in caplog.text
+
+
+async def test_set_remote_member_role_all_ok_logs_no_warning(stack, caplog):
+    """No warning spam when the fan-out reaches everyone."""
+    import logging as _logging
+    from unittest.mock import AsyncMock
+
+    from socialhome.domain.federation import BroadcastResult, DeliveryResult
+    from socialhome.domain.space import SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    fed = _roster_gossip_fed()
+    fed.broadcast_to_space_members = AsyncMock(
+        return_value=BroadcastResult(
+            attempted=1,
+            succeeded=1,
+            failed=0,
+            results=(DeliveryResult(instance_id="peer-x", ok=True),),
+        ),
+    )
+    stack.space_svc._federation = fed
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="R",
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="socialhome"):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="peer-x",
+            user_id="ru1",
+            role=SpaceRole.ADMIN,
+        )
+
+    assert caplog.text == ""

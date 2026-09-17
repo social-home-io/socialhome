@@ -6,6 +6,7 @@ All tests use in-memory stubs — no network, no real disk.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,7 @@ from socialhome.crypto import (
     generate_x25519_keypair,
 )
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_ROUTE_COOLDOWN,
     DeliveryResult,
     FederationEventType,
     PairingSession,
@@ -1186,6 +1188,10 @@ def _make_mesh_pair(
     send_routed = AsyncMock(return_value="route-id-mock")
     route_service = MagicMock()
     route_service.discover_route = discover_route
+    # ``cooldown_remaining`` is a *sync* read consulted before every probe
+    # (the negative-cooldown branch of ``send_with_mesh_fallback``); default
+    # to "no cooldown armed" so a plain mesh pair behaves like a warm one.
+    route_service.cooldown_remaining = MagicMock(return_value=0.0)
     # ``invalidate`` is awaited on the #648 paths (mesh BEGIN admission and
     # the retry after a failed routed ship), so it must be an AsyncMock —
     # a bare MagicMock attribute would return a non-awaitable.
@@ -2840,3 +2846,169 @@ async def test_routed_ship_failure_reports_no_route_when_rediscovery_fails():
     assert result.ok is False
     assert result.error == "no_route"
     assert send_routed.await_count == 1
+
+
+# ─── Mesh: cooldown reason + visible broadcast failures ───────────────
+
+
+@pytest.mark.asyncio
+async def test_send_with_mesh_fallback_reports_the_route_cooldown_distinctly():
+    """A send that failed *because route discovery is in its negative
+    cooldown* must be distinguishable from one that probed and found
+    nothing.
+
+    ``discover_route`` returns ``None`` for both, but only the first is a
+    transient race the caller can wait out — the chunk loop uses the
+    distinction to retry instead of burning its failure budget.
+    """
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    route_service, routed_handler, discover_route, send_routed = _make_mesh_pair(
+        route=None,
+    )
+    route_service.cooldown_remaining = MagicMock(return_value=12.5)
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id="mesh-only-peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"post_id": "p1"},
+    )
+
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_ROUTE_COOLDOWN
+    assert result.retry_after_s == 12.5
+    # The cooldown branch must not probe — that's the anti-flood property.
+    discover_route.assert_not_awaited()
+    send_routed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_with_mesh_fallback_no_route_when_not_in_cooldown():
+    """No cooldown → we actually probed, so the generic reason stands."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    route_service, routed_handler, discover_route, _send_routed = _make_mesh_pair(
+        route=None,
+    )
+    route_service.cooldown_remaining = MagicMock(return_value=0.0)
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id="mesh-only-peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"post_id": "p1"},
+    )
+
+    assert result.ok is False
+    assert result.error == "no_route"
+    discover_route.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_warns_about_failed_targets(caplog):
+    """The mesh fan-out has no outbox, so a failed target is a permanent,
+    invisible loss. The minimum bar is a diagnosable WARNING naming the
+    space, the event type, the instance and the reason."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    space_id = "space-warn"
+    fed_repo.add_space_member(space_id, "mesh-only-peer")
+    route_service, routed_handler, _discover, _send_routed = _make_mesh_pair(
+        route=None,
+    )
+    route_service.cooldown_remaining = MagicMock(return_value=0.0)
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            payload={"space_id": space_id, "role": "admin"},
+        )
+
+    assert result.failed == 1
+    assert "mesh-only-peer" in caplog.text
+    assert space_id in caplog.text
+    assert "no_route" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_all_ok_logs_no_warning(caplog):
+    """No warning spam on the happy path."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    space_id = "space-quiet"
+    fed_repo.add_space_member(space_id, "mesh-only-peer")
+    route_service, routed_handler, _discover, _send_routed = _make_mesh_pair(
+        route=[svc.own_instance_id, "hop", "mesh-only-peer"],
+    )
+    route_service.discover_route = AsyncMock(
+        return_value=([svc.own_instance_id, "hop", "mesh-only-peer"], "eph-pk"),
+    )
+    route_service.cooldown_remaining = MagicMock(return_value=0.0)
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            payload={"space_id": space_id, "role": "admin"},
+        )
+
+    assert result.all_ok is True
+    assert caplog.text == ""
+
+
+@pytest.mark.asyncio
+async def test_broadcast_reaches_a_member_with_no_remote_instances_row():
+    """A mesh-only member — seated via a routed invite, so it has a
+    ``space_instances`` row but NO ``remote_instances`` row at all — must
+    still receive space-content broadcasts over SPACE_ROUTED.
+
+    ``list_member_instance_ids`` deliberately omits the CONFIRMED join for
+    exactly this case; the regression this guards is the fan-out silently
+    skipping such a member (a role change that never lands, with a 200 at
+    the API).
+    """
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    space_id = "space-mesh-only"
+    mesh_only = "m" * 52
+    fed_repo.add_space_member(space_id, mesh_only)
+    # The defining property of the fixture: no pairing row whatsoever.
+    assert await fed_repo.get_instance(mesh_only) is None
+
+    path = [svc.own_instance_id, "relay-hop", mesh_only]
+    route_service, routed_handler, discover_route, send_routed = _make_mesh_pair(
+        route=(path, "target-eph-pk"),
+    )
+    route_service.cooldown_remaining = MagicMock(return_value=0.0)
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    payload = {
+        "space_id": space_id,
+        "user_id": "u-1",
+        "instance_id": mesh_only,
+        "role": "admin",
+    }
+    result = await svc.broadcast_to_space_members(
+        space_id=space_id,
+        event_type=FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        payload=payload,
+    )
+
+    assert result.attempted == 1
+    assert result.succeeded == 1
+    discover_route.assert_awaited_once_with(mesh_only)
+    send_routed.assert_awaited_once()
+    kwargs = send_routed.await_args.kwargs
+    assert kwargs["path"] == path
+    assert kwargs["target_eph_pk_b64"] == "target-eph-pk"
+    assert kwargs["inner_event_type"] is FederationEventType.SPACE_MEMBER_ROLE_CHANGED
+    assert kwargs["inner_payload"] == payload

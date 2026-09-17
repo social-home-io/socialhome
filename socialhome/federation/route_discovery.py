@@ -498,6 +498,24 @@ class RouteDiscoveryService:
         )
         self._negative_until.pop(target_instance_id, None)
 
+    def cooldown_remaining(self, target_instance_id: str) -> float:
+        """Seconds left on the negative cooldown for ``target_instance_id``.
+
+        ``0.0`` when no cooldown is armed (or it has already elapsed), so a
+        truthy value means "the next :meth:`discover_route` will return
+        ``None`` WITHOUT probing". Callers use this to tell a transient
+        anti-flood window apart from a genuine "we looked and found nothing",
+        and to size the wait before retrying — see
+        :meth:`FederationService.send_with_mesh_fallback`.
+
+        Pure read: it never arms, extends, or clears the cooldown, so the
+        anti-flood property is unaffected by anyone asking.
+        """
+        until = self._negative_until.get(target_instance_id)
+        if until is None:
+            return 0.0
+        return max(0.0, until - time.monotonic())
+
     async def invalidate(self, target_instance_id: str) -> None:
         """Drop the cached route for ``target_instance_id``.
 

@@ -642,6 +642,16 @@ class PairingSession:
 # ─── Broadcast / delivery results ─────────────────────────────────────────
 
 
+#: :attr:`DeliveryResult.error` value meaning "we never put a probe on the
+#: wire": mesh route discovery is inside its negative cooldown for this
+#: target, so the send failed WITHOUT testing whether the route works. It is
+#: deliberately distinct from the generic ``"no_route"`` (we probed, and the
+#: flood found nothing): the cooldown is a transient window a caller can wait
+#: out, and a caller that conflates the two burns its whole retry budget in
+#: milliseconds against a route that is seconds from warming up.
+DELIVERY_ERROR_ROUTE_COOLDOWN: str = "route_cooldown"
+
+
 @dataclass(slots=True, frozen=True)
 class DeliveryResult:
     """Result of sending a single federation message to a single peer."""
@@ -650,6 +660,10 @@ class DeliveryResult:
     ok: bool
     status_code: int | None = None
     error: str | None = None
+    #: Seconds the caller should wait before retrying, when the sender knows.
+    #: Set on the :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` path (the remaining
+    #: negative-cooldown window); ``None`` everywhere else.
+    retry_after_s: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

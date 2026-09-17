@@ -212,6 +212,22 @@ A host whose chunks keep failing gives up after
 metadata into a path that is not working — each mesh attempt costs a BFS
 plus a 3-hop signed round. The requester's next BEGIN is the recovery.
 
+One failure reason is exempt from that budget. After a route flood that
+found nothing, `RouteDiscoveryService` arms a `ROUTE_NEGATIVE_COOLDOWN_S`
+(30 s) negative cooldown during which `discover_route` returns "no route"
+*immediately, without probing* — anti-flood, so a per-chunk loop can't
+re-flood every mesh-capable peer once per chunk. The chunk loop has no
+delay between chunks, so a single missed discovery window used to fail
+`MAX_CONSECUTIVE_CHUNK_FAILURES` chunks within milliseconds and abandon
+the whole stream, turning a two-second race into a permanent loss.
+`send_with_mesh_fallback` therefore reports that case as the distinct
+`route_cooldown` delivery error (with the remaining window in
+`retry_after_s`), and the provider waits it out and retries the *same*
+chunk instead of spending a strike — bounded by `MAX_ROUTE_COOLDOWN_WAITS`
+per stream and `MAX_ROUTE_COOLDOWN_WAIT_S` per wait, so a household that
+is genuinely unreachable still terminates the stream. At most one flood
+per cooldown period per stream still reaches the wire.
+
 ## Round-robin signaling-node selection (cluster GFS)
 
 When a Social Home instance is connected to a multi-node GFS cluster,

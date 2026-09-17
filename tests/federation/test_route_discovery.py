@@ -41,7 +41,7 @@ from socialhome.domain.federation import (
     FederationEventType,
     PairingStatus,
 )
-from socialhome.federation import routed_crypto
+from socialhome.federation import route_discovery, routed_crypto
 from socialhome.federation.route_discovery import (
     ROUTE_CACHE_SAFETY_MARGIN_S,
     ROUTE_CACHE_TTL_S,
@@ -1612,3 +1612,49 @@ async def test_invalidate_if_older_than_lifts_the_cooldown_when_it_drops():
     minted_at = svc._route_cache[target].expires_at - svc._cache_ttl_s
     assert await svc.invalidate_if_older_than(target, cutoff=minted_at + 1.0) is True
     assert target not in svc._negative_until
+
+
+async def test_cooldown_remaining_exposes_the_negative_window():
+    """Callers need to tell "we didn't probe" apart from "we probed and
+    failed".
+
+    ``discover_route`` returns ``None`` for both, and a caller in a chunk
+    loop that treats the two the same burns its whole retry budget in
+    milliseconds against a cooldown that is about to lift (#664 follow-up).
+    ``cooldown_remaining`` is the accessor that makes the difference
+    visible — and asking for it must never arm or extend the cooldown.
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.01)
+    svc = nodes["a"].service
+    unknown = "z" * 52
+
+    assert svc.cooldown_remaining(unknown) == 0.0
+
+    assert await svc.discover_route(unknown) is None
+    remaining = svc.cooldown_remaining(unknown)
+    assert 0.0 < remaining <= route_discovery.ROUTE_NEGATIVE_COOLDOWN_S
+
+    # Reading it neither probes nor re-arms — the anti-flood property holds.
+    probes_before = len(
+        [
+            s
+            for s in nodes["a"].fed.sent
+            if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+        ]
+    )
+    assert svc.cooldown_remaining(unknown) <= remaining
+    assert await svc.discover_route(unknown) is None
+    assert (
+        len(
+            [
+                s
+                for s in nodes["a"].fed.sent
+                if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+            ]
+        )
+        == probes_before
+    )
+
+    # An expired window reads as zero.
+    svc._negative_until[unknown] = time.monotonic() - 1.0
+    assert svc.cooldown_remaining(unknown) == 0.0
