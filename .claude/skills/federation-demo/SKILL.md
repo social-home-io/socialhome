@@ -599,18 +599,25 @@ Prereqs: ``gfs-space-subscribe``. Alpha posts in the global space via
 endpoint ignores ``space_id`` and lands a non-federating household post),
 then the harness polls Delta's ``GET /api/spaces/{id}/feed``.
 
-The author is a **provisioned** local user (``erin``, seated by
-``_seat_local_member``), not Alpha's setup admin. That is deliberate and
-documented at the helper: ``POST /api/setup/standalone`` assigns the first
-admin the literal ``user_id = "uid-<username>"``, while every later user
-gets ``derive_user_id(own_instance_pk, identity_anchor)``. The relay
-fail-closes on a non-derivable author id (``verify_signed_author_inner``
-runs the self-cert on both the relaying seed-holder and the subscriber),
-so a setup-admin-authored post is dropped with "author verification
-failed" no matter how healthy the relay is.
+Alpha posts **twice**, deliberately covering both author-id shapes — the
+relay fail-closes on a non-derivable author id (``verify_signed_author_inner``
+runs the self-cert ``derive_user_id(author_pk, anchor_or_username) ==
+author_user_id`` on both the relaying seed-holder and the subscriber), and
+the two shapes are minted by different rules:
 
-The single positive assertion — Delta sees the post **decrypted**, with
-Alpha's ``author`` user id and the exact body — covers six mechanisms at
+* a **provisioned** local user (``erin``, seated by ``_seat_local_member``),
+  whose id is uuid4-anchored via ``UserService.provision``;
+* Alpha's **setup admin**, whose id is username-anchored via
+  ``identity_bootstrap.derive_local_user_id`` — the one minting rule now
+  shared by ``StandaloneAdapter.provision_admin`` and the ``/api/setup``
+  routes. Delta's copy must be attributed to Alpha's own admin ``user_id``,
+  so a regression back to the old synthetic ``uid-<username>`` shape (which
+  failed the self-cert and silently dropped every first-user post at the
+  subscriber; migration 0049 repairs already-deployed installs) fails loudly
+  here. ``verify`` re-checks this post separately.
+
+The positive assertion — Delta sees each post **decrypted**, with the right
+``author`` user id and the exact body — covers six mechanisms at
 once: the GFS relay fan-out, the space-authority signature, the
 ``new_subscriber`` notify fired when Delta subscribed, the sealed
 content-key handoff that notify triggers, the per-author household
@@ -618,8 +625,8 @@ signature (``verify_signed_author_inner``), and the AES-GCM decrypt
 under the current epoch key.
 
 The negative control is **c**: not a space member, not a subscriber, not
-GFS-paired. The harness asserts c holds no ``space_posts`` row for the
-post and that c's space feed does not expose it — the
+GFS-paired. The harness asserts c holds no ``space_posts`` row for either
+post and that c's space feed does not expose them — the
 §"non-member households MUST NOT see space content" hard rule, checked
 on the real wire rather than in a unit test.
 

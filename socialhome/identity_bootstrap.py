@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from .crypto import (
     b64url_encode,
     derive_instance_id,
+    derive_user_id,
     generate_identity_keypair,
     generate_routing_secret,
     generate_x25519_keypair,
@@ -302,3 +303,38 @@ async def _mint_keywrap_keypair(
             instance_id,
         )
     return keywrap.private_key, keywrap.public_key
+
+
+async def derive_local_user_id(db: AsyncDatabase, username: str) -> str:
+    """Return the cryptographic ``user_id`` for a *username-anchored* local user.
+
+    The ONE place the first-boot admin paths mint a ``user_id``. Every local
+    user id is a :func:`~socialhome.crypto.derive_user_id` of this household's
+    Ed25519 identity public key plus a derivation input, because that is
+    exactly what a remote household re-computes to self-certify an author
+    (``derive_user_id(author_pk, anchor) == author_user_id`` — see
+    :mod:`socialhome.services.space_public_author`). An id that is not derived
+    can never verify, so its author's content is dropped by every subscriber.
+
+    The derivation input here is the **username** (not a uuid4
+    ``identity_anchor`` like :meth:`UserService.provision`): the admin-mirror
+    paths are re-run on every boot / wizard replay and must stay deterministic,
+    and it matches both the migration-0041 backfill and the HAOS owner. Callers
+    therefore also store ``identity_anchor = username`` so the row keeps the
+    ``user_id == derive_user_id(pk, identity_anchor)`` invariant.
+
+    Raises :class:`RuntimeError` when the instance identity has not been
+    bootstrapped yet — deriving from a missing key is not something to paper
+    over. :func:`ensure_instance_identity` runs in ``_on_startup`` before the
+    platform adapter's own ``on_startup`` and before any request is served, so
+    every caller is safely downstream of it.
+    """
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'",
+    )
+    if row is None or not row["identity_public_key"]:
+        raise RuntimeError(
+            "derive_local_user_id: instance_identity not initialised — "
+            "ensure_instance_identity() must run before any user is minted"
+        )
+    return derive_user_id(bytes.fromhex(row["identity_public_key"]), username)

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from socialhome.crypto import b64url_decode, verify_ed25519
+from socialhome.crypto import b64url_decode, derive_user_id, verify_ed25519
 from socialhome.federation.keywrap_seal import open_keywrap, seal_to_keywrap
-from socialhome.identity_bootstrap import ensure_instance_identity
+from socialhome.identity_bootstrap import (
+    derive_local_user_id,
+    ensure_instance_identity,
+)
 from socialhome.infrastructure.key_manager import KeyManager
 
 
@@ -155,3 +158,32 @@ async def test_lazy_minted_keywrap_key_also_gets_a_sig(db, key_manager):
         mat.keywrap_public_key,
         b64url_decode(mat.keywrap_sig),
     )
+
+
+# ── derive_local_user_id ─────────────────────────────────────────────────────
+
+
+async def test_derive_local_user_id_matches_the_crypto_primitive(db, key_manager):
+    """The one minting rule for username-anchored local users.
+
+    A peer re-derives exactly this to self-certify an author, so any drift
+    between this helper and :func:`derive_user_id` silently drops the user's
+    federated content.
+    """
+    mat = await ensure_instance_identity(db, key_manager)
+    got = await derive_local_user_id(db, "alice")
+    assert got == derive_user_id(mat.identity_public_key, "alice")
+    assert not got.startswith("uid-")
+
+
+async def test_derive_local_user_id_is_stable_across_calls(db, key_manager):
+    await ensure_instance_identity(db, key_manager)
+    assert await derive_local_user_id(db, "alice") == await derive_local_user_id(
+        db, "alice"
+    )
+
+
+async def test_derive_local_user_id_without_identity_raises(db):
+    """Deriving from a missing key must fail loudly, never fall back."""
+    with pytest.raises(RuntimeError, match="instance_identity not initialised"):
+        await derive_local_user_id(db, "alice")

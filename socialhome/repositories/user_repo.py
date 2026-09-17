@@ -525,6 +525,16 @@ class SqliteUserRepo:
         # if they re-publish the profile, we trust they want the user
         # visible again (e.g. peer-user-visibility flipped from hidden
         # back to visible).
+        # Two conflict targets, not one. ``user_id`` is the PK, but
+        # ``(instance_id, remote_username)`` is UNIQUE too — and a peer's
+        # user_id can legitimately CHANGE under a stable natural key: that is
+        # exactly what migration 0049 does when it repairs a synthetic
+        # ``uid-<username>`` admin id to the derived one. With only
+        # ``ON CONFLICT(user_id)`` the re-broadcast hit the natural-key
+        # UNIQUE and raised forever, so the cached row could never learn the
+        # repaired id. The second clause rebinds the cached row onto the new
+        # id instead. SQLite applies at most one DO UPDATE per row, trying
+        # the clauses in order.
         # ``handle`` is unsigned display metadata mirrored from the peer's
         # USER_UPDATED — an older peer omits it, in which case ``remote.handle``
         # is None and we must NOT clobber a previously-cached handle. The
@@ -540,6 +550,19 @@ class SqliteUserRepo:
             ON CONFLICT(user_id) DO UPDATE SET
                 instance_id=excluded.instance_id,
                 remote_username=excluded.remote_username,
+                display_name=excluded.display_name,
+                alias=excluded.alias,
+                visible_to=excluded.visible_to,
+                picture_hash=excluded.picture_hash,
+                bio=excluded.bio,
+                status_json=excluded.status_json,
+                public_key=excluded.public_key,
+                public_key_version=excluded.public_key_version,
+                handle=COALESCE(excluded.handle, handle),
+                synced_at=excluded.synced_at,
+                deprovisioned_at=NULL
+            ON CONFLICT(instance_id, remote_username) DO UPDATE SET
+                user_id=excluded.user_id,
                 display_name=excluded.display_name,
                 alias=excluded.alias,
                 visible_to=excluded.visible_to,

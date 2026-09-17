@@ -1069,23 +1069,21 @@ def _seat_local_member(
     existing membership is reused, so the ``gfs-space-*`` steps can be re-run
     against a live sandbox.
 
-    WHY the harness posts as a provisioned user rather than as the household's
-    setup admin — read before "simplifying" this away:
+    WHY :func:`cmd_gfs_space_post` posts TWICE — once as the setup admin and
+    once as a user seated here — read before "simplifying" one away:
 
-    ``POST /api/setup/standalone`` seats the first admin through
-    ``StandaloneAdapter.provision_admin``, which assigns the literal
-    ``user_id = f"uid-{username}"``. ``UserService.provision`` (the path every
-    LATER user takes, including this helper) instead derives
-    ``derive_user_id(own_instance_pk, identity_anchor)``. The GFS public-space
-    relay fail-closes on a non-derivable author id: both the relaying
-    seed-holder and the subscriber run ``verify_signed_author_inner``, whose
-    self-cert check is ``derive_user_id(author_pk, anchor_or_username) ==
-    author_user_id``. So a post authored by the setup admin is dropped at the
-    subscriber with "author verification failed" — no matter how healthy the
-    rest of the relay is. That is a REAL production gap (it hits the first user
-    of every standalone household), tracked separately; authoring as a
-    provisioned user here keeps this step measuring the GFS content path rather
-    than re-failing on that one.
+    The two mint their ``user_id`` by different rules. The setup admin's is
+    username-anchored (``identity_bootstrap.derive_local_user_id``, the single
+    minting rule shared by ``StandaloneAdapter.provision_admin`` and the
+    ``/api/setup`` routes); a provisioned user's is anchored on a uuid4
+    identity anchor via ``UserService.provision``. The GFS public-space relay
+    fail-closes on a non-derivable author id — both the relaying seed-holder
+    and the subscriber run ``verify_signed_author_inner``, whose self-cert is
+    ``derive_user_id(author_pk, anchor_or_username) == author_user_id`` — so
+    the demo has to exercise both shapes to prove the check holds for both.
+    The old synthetic ``uid-<username>`` admin shape (which failed that
+    self-cert, silently dropping every setup-admin post at the subscriber) is
+    gone; migration 0049 re-derives it on already-deployed installs.
     """
     inst = state["instances"][label]
     base = f"http://127.0.0.1:{inst['port']}"
@@ -1187,9 +1185,8 @@ def cmd_gfs_space_post() -> None:
     space and holds the mirrored authority pin).
 
     Sequence:
-    1. Seat a provisioned local author on Alpha (see :func:`_seat_local_member`
-       for why the setup admin can't be the author) and post in the global
-       space via ``POST /api/spaces/{id}/posts`` — the space endpoint, not the
+    1. Seat a provisioned local author on Alpha and post in the global space
+       via ``POST /api/spaces/{id}/posts`` — the space endpoint, not the
        household feed, which would land a non-federating household post.
     2. Settle. The post has to be encrypted under the per-space content key,
        signed by the author's household identity, authority-signed by the
@@ -1202,10 +1199,16 @@ def cmd_gfs_space_post() -> None:
        break anywhere in relay, authority signature, ``new_subscriber`` notify,
        sealed content-key handoff, per-author signature, or decrypt shows up
        here and nowhere else.
-    4. Negative control: **c** — subscribed to nothing, GFS-paired with
+    4. Post AGAIN as Alpha's **setup admin** and assert d sees that one too,
+       attributed to the admin's own ``user_id``. The admin's id is
+       username-anchored while the provisioned author's is uuid4-anchored (see
+       :func:`_seat_local_member`), and the relay's per-author self-cert has to
+       hold for both shapes — a regression to a synthetic admin id fails the
+       attribution assertion here instead of silently dropping the post.
+    5. Negative control: **c** — subscribed to nothing, GFS-paired with
        nothing, QR-paired with a but not a member of this space — must NOT
-       hold the post. This is the §"non-member households MUST NOT see space
-       content" hard rule from CLAUDE.md, asserted on the real wire.
+       hold EITHER post. This is the §"non-member households MUST NOT see
+       space content" hard rule from CLAUDE.md, asserted on the real wire.
     """
     state = _load()
     if not state:
@@ -1256,29 +1259,70 @@ def cmd_gfs_space_post() -> None:
         )
     print(f"  d sees the post decrypted, authored by {seen['author']} ✓")
 
-    # 4. Negative control — c is not a member, not a subscriber, not GFS-paired.
-    c_rows = _rows("c", "SELECT id FROM space_posts WHERE id = ?", (post_id,))
-    if c_rows:
+    # 4. The OTHER author shape: Alpha's setup admin, whose user_id is
+    #    username-anchored rather than uuid4-anchored. Same relay, same
+    #    self-cert, different minting rule.
+    admin_id = a["user_id"]
+    admin_content = f"Setup-admin post over the GFS — {time.time_ns()}"
+    s, admin_post = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": admin_content},
+    )
+    _must("a's setup admin posts in the global space", s, admin_post, ok=(201,))
+    admin_post_id = admin_post["id"]
+    print(f"  a's setup admin posted → id={admin_post_id}")
+
+    # Settle: same encrypt → sign → relay → fan-out path as above; d already
+    # holds the epoch content key, so only the per-author self-cert is new.
+    admin_seen = _await_space_post(state, "d", space_id, admin_post_id)
+    if admin_seen.get("content") != admin_content:
         raise SystemExit(
-            f"gfs-space-post: c holds space post {post_id} — a non-member "
-            "household received space content (§ hard rule violated).",
+            f"gfs-space-post: d decrypted content={admin_seen.get('content')!r}, "
+            f"expected {admin_content!r}",
         )
+    if admin_seen.get("author") != admin_id:
+        raise SystemExit(
+            f"gfs-space-post: d attributes the setup-admin post to "
+            f"{admin_seen.get('author')!r}, expected {admin_id!r} — the admin's "
+            "user_id is not the derivable one the relay self-cert checks.",
+        )
+    print(f"  d sees the setup-admin post decrypted, authored by {admin_id} ✓")
+
+    # 5. Negative control — c is not a member, not a subscriber, not GFS-paired.
+    #    Neither author shape may reach it.
+    for label, pid in (("provisioned", post_id), ("setup-admin", admin_post_id)):
+        c_rows = _rows("c", "SELECT id FROM space_posts WHERE id = ?", (pid,))
+        if c_rows:
+            raise SystemExit(
+                f"gfs-space-post: c holds the {label} space post {pid} — a "
+                "non-member household received space content (§ hard rule "
+                "violated).",
+            )
     s, c_feed = _request(
         f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/feed",
         token=c["token"],
     )
     if s == 200:
         rows = c_feed if isinstance(c_feed, list) else (c_feed.get("posts") or [])
-        if any(p.get("id") == post_id for p in rows):
+        have = {p.get("id") for p in rows}
+        leaked = have & {post_id, admin_post_id}
+        if leaked:
             raise SystemExit(
-                f"gfs-space-post: c's feed for {space_id} exposes {post_id}",
+                f"gfs-space-post: c's feed for {space_id} exposes {sorted(leaked)}",
             )
-    print("  c (non-member, non-subscriber) sees nothing ✓")
+    print("  c (non-member, non-subscriber) sees neither post ✓")
 
     state["gfs_space_post_id"] = post_id
     state["gfs_space_post_content"] = content
+    state["gfs_space_admin_post_id"] = admin_post_id
+    state["gfs_space_admin_post_content"] = admin_content
     _save(state)
-    print("gfs-space-post: ok (relay + authority sig + key handoff + decrypt)")
+    print(
+        "gfs-space-post: ok (relay + authority sig + key handoff + decrypt, "
+        "both author shapes)"
+    )
 
 
 def cmd_gfs_space_rotate() -> None:
@@ -2925,6 +2969,47 @@ def cmd_verify() -> None:
                 failures.append(
                     f"c: space feed for {gfs_space_id} exposes {sorted(leaked)}",
                 )
+
+        # 13d. The setup-admin-authored post — the OTHER author-id shape. The
+        #      admin's user_id is username-anchored, a provisioned user's is
+        #      uuid4-anchored, and the relay's per-author self-cert
+        #      (``derive_user_id(author_pk, anchor_or_username) ==
+        #      author_user_id``) has to hold for both. A regression that mints
+        #      a synthetic admin id again drops this post at the subscriber
+        #      with "author verification failed" while erin's still arrives.
+        if "gfs_space_admin_post_id" in state:
+            admin_pid = state["gfs_space_admin_post_id"]
+            admin_uid = state["instances"]["a"]["user_id"]
+            s, body = _request(
+                f"http://127.0.0.1:{d['port']}/api/spaces/{gfs_space_id}/feed",
+                token=d["token"],
+            )
+            if s != 200:
+                failures.append(
+                    f"d: GET /api/spaces/{gfs_space_id}/feed failed: HTTP {s}",
+                )
+            else:
+                rows = body if isinstance(body, list) else (body.get("posts") or [])
+                mine = next((p for p in rows if p.get("id") == admin_pid), None)
+                if mine is None:
+                    failures.append(
+                        f"d: setup-admin GFS post {admin_pid} missing from the "
+                        f"space feed (got {sorted(p.get('id') for p in rows)})",
+                    )
+                elif mine.get("author") != admin_uid:
+                    failures.append(
+                        f"d: setup-admin GFS post {admin_pid} attributed to "
+                        f"{mine.get('author')!r}, expected {admin_uid!r}",
+                    )
+                else:
+                    print("  d still sees a's setup-admin GFS post ✓")
+            if _rows("c", "SELECT id FROM space_posts WHERE id = ?", (admin_pid,)):
+                failures.append(
+                    f"c: holds setup-admin GFS space post {admin_pid} — "
+                    "non-member household received space content",
+                )
+            else:
+                print("  c still does not hold the setup-admin GFS post ✓")
     else:
         print(
             "  GFS public-space content skipped — run 'gfs-space-subscribe' / "

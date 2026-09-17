@@ -14,9 +14,18 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from socialhome.config import Config
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    derive_user_id,
+    generate_identity_keypair,
+)
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.post import Post, PostType
 from socialhome.platform.standalone.adapter import StandaloneAdapter
+from socialhome.services.space_public_author import (
+    build_signed_author_inner,
+    verify_signed_author_inner,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -30,12 +39,22 @@ def _sha256(token: str) -> str:
 
 
 @pytest.fixture
-async def db(tmp_path):
+def identity_kp():
+    """The instance identity keypair seeded into the ``db`` fixture.
+
+    Exposed so tests can reproduce ``derive_user_id(instance_pk, ...)`` —
+    the household's users are cryptographically bound to this key.
+    """
+    return generate_identity_keypair()
+
+
+@pytest.fixture
+async def db(tmp_path, identity_kp):
     """Fully-migrated AsyncDatabase with instance_identity seeded."""
     database = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
     await database.startup()
 
-    kp = generate_identity_keypair()
+    kp = identity_kp
     iid = derive_instance_id(kp.public_key)
     await database.enqueue(
         "INSERT INTO instance_identity"
@@ -396,19 +415,71 @@ async def test_provision_admin_requires_password(adapter):
         await adapter.provision_admin(username="admin", password="")
 
 
-async def test_provision_admin_respects_username_override(db, adapter):
+async def test_provision_admin_respects_username_override(db, adapter, identity_kp):
     await adapter.provision_admin(username="owner", password="pw")
     pu = await db.fetchone("SELECT * FROM platform_users WHERE username='owner'")
     assert pu is not None
     u = await db.fetchone("SELECT * FROM users WHERE username='owner'")
     assert u is not None
-    assert u["user_id"] == "uid-owner"
+    assert u["user_id"] == derive_user_id(identity_kp.public_key, "owner")
+
+
+async def test_provision_admin_derives_cryptographic_user_id(db, adapter, identity_kp):
+    """The first admin's ``user_id`` is derived, never the synthetic ``uid-*``.
+
+    Regression (#standalone-admin-user-id): the setup admin used to get a
+    made-up ``uid-<username>``, which no peer can self-certify against the
+    household's public key — every post they authored was dropped by the
+    public-space relay's per-author check.
+    """
+    await adapter.provision_admin(username="owner", password="pw")
+    u = await db.fetchone("SELECT * FROM users WHERE username='owner'")
+    assert u is not None
+    assert u["user_id"] != "uid-owner"
+    assert u["user_id"] == derive_user_id(identity_kp.public_key, "owner")
+    # Username-anchored, like the HAOS owner: keeps the column non-NULL and
+    # keeps ``user_id == derive_user_id(pk, identity_anchor)`` true.
+    assert u["identity_anchor"] == "owner"
+
+
+async def test_provision_admin_user_id_passes_public_relay_self_cert(
+    db,
+    adapter,
+    identity_kp,
+):
+    """The user-visible bug: the admin's posts must survive the relay check.
+
+    Builds the signed author inner exactly as ``SpacePublicOutbound`` does
+    (author_pk / seed = the household identity) and asserts the canonical
+    verifier accepts it. With a synthetic ``uid-owner`` the self-cert
+    ``derive_user_id(author_pk, anchor) == author_user_id`` can never hold.
+    """
+    await adapter.provision_admin(username="owner", password="pw")
+    u = await db.fetchone("SELECT * FROM users WHERE username='owner'")
+    assert u is not None
+    post = Post(
+        id="p-1",
+        author=u["user_id"],
+        type=PostType.TEXT,
+        content="hello from the household admin",
+        created_at=datetime.now(timezone.utc),
+    )
+    inner = build_signed_author_inner(
+        post=post,
+        space_id="sp-public",
+        author_username="owner",
+        author_pk=identity_kp.public_key,
+        author_identity_seed=identity_kp.private_key,
+        origin_instance_id=derive_instance_id(identity_kp.public_key),
+        author_identity_anchor=u["identity_anchor"],
+    )
+    assert verify_signed_author_inner(inner) is True
 
 
 # ── issue_bearer_token ↔ api_tokens mirror (§platform/standalone) ────────────
 
 
-async def test_issue_bearer_token_mirrors_to_api_tokens(db, adapter):
+async def test_issue_bearer_token_mirrors_to_api_tokens(db, adapter, identity_kp):
     """Successful login writes the token hash to BOTH platform_tokens and api_tokens.
 
     Without the api_tokens mirror, BearerTokenStrategy (which joins
@@ -428,7 +499,8 @@ async def test_issue_bearer_token_mirrors_to_api_tokens(db, adapter):
         (h,),
     )
     assert pt is not None and pt["username"] == "admin"
-    assert at is not None and at["user_id"] == "uid-admin"
+    assert at is not None
+    assert at["user_id"] == derive_user_id(identity_kp.public_key, "admin")
 
 
 async def test_issue_bearer_token_skips_api_mirror_when_no_users_row(db, adapter):
