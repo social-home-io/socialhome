@@ -598,6 +598,34 @@ class RouteDiscoveryService:
         self._negative_until.pop(target_instance_id, None)
         return True
 
+    async def invalidate_if_eph(
+        self,
+        target_instance_id: str,
+        *,
+        target_eph_pk: str,
+    ) -> bool:
+        """Drop the cached route only if it still points at ``target_eph_pk``.
+
+        The origin-side ``SPACE_ROUTE_STALE`` handler calls this with the
+        eph the nacked envelope was sealed under. A blanket
+        :meth:`invalidate` there is wrong once several envelopes were
+        sealed under the same dead key: the first nack rebuilds the route
+        under a fresh key, and every later nack for the OLD key would
+        evict that fresh route and re-flood — one flood per lost envelope
+        instead of one per restart. Only an entry whose ``target_eph_pk``
+        is the nacked key is stale; anything else is already the rebuilt
+        route and stays.
+
+        Returns True when the entry was dropped (the negative cooldown goes
+        with it, same as :meth:`invalidate`). Never probes.
+        """
+        cached = self._route_cache.get(target_instance_id)
+        if cached is None or cached.target_eph_pk != target_eph_pk:
+            return False
+        self._route_cache.pop(target_instance_id, None)
+        self._negative_until.pop(target_instance_id, None)
+        return True
+
     def lookup_target_eph_priv(self, pub_b64: str) -> str | None:
         """Return the cached target-ephemeral *private* half for ``pub_b64``.
 

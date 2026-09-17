@@ -914,6 +914,10 @@ class _FakeRouteService:
     def __init__(self):
         self._result: tuple[list[str], str] | None = None
         self._eph_store: dict[str, str] = {}
+        #: Hex identity pk the real service pins on the cached route at
+        #: discovery; the coordinator hands it to ``send_routed`` so the
+        #: origin holds a ``SPACE_ROUTE_STALE`` nack against it.
+        self.pinned_identity_pk: str | None = None
 
     def configure(self, path: list[str], pub_b64: str, priv_b64: str) -> None:
         self._result = (path, pub_b64)
@@ -922,8 +926,50 @@ class _FakeRouteService:
     async def discover_route(self, target_instance_id):
         return self._result
 
+    def cached_target_identity_pk(self, target_instance_id) -> str | None:
+        return self.pinned_identity_pk
+
     def lookup_target_eph_priv(self, pub_b64: str) -> str | None:
         return self._eph_store.get(pub_b64)
+
+
+async def test_redeem_via_mesh_pins_the_issuer_identity_pk():
+    """The routed REDEEM carries the identity pk discovery pinned for the
+    issuer, so a later ``SPACE_ROUTE_STALE`` nack is checked against the
+    key WE verified rather than the origin's empty-pin fallback (same shape
+    as ``FederationService.send_with_mesh_fallback``)."""
+    route_svc = _FakeRouteService()
+    route_svc.configure(["self", "issuer-1"], "eph-pub", "eph-priv")
+    route_svc.pinned_identity_pk = "ab" * 32
+    routed_handler = AsyncMock()
+    sender = _make_coordinator(federation_repo=_FakeFederationRepo(), timeout=0.01)
+    sender._route_service = route_svc
+    sender._routed_handler = routed_handler
+    with pytest.raises(TimeoutError):
+        await sender.request_redeem(
+            "tkn", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+        )
+    routed_handler.send_routed.assert_awaited_once()
+    kwargs = routed_handler.send_routed.await_args.kwargs
+    assert kwargs["path"] == ["self", "issuer-1"]
+    assert kwargs["target_eph_pk_b64"] == "eph-pub"
+    assert kwargs["target_identity_pk"] == "ab" * 32
+
+
+async def test_redeem_via_mesh_without_a_pin_sends_the_empty_fallback():
+    """No pinned route (cache raced out between discovery and send) → the
+    documented ``""`` fallback, never ``None``."""
+    route_svc = _FakeRouteService()
+    route_svc.configure(["self", "issuer-1"], "eph-pub", "eph-priv")
+    routed_handler = AsyncMock()
+    sender = _make_coordinator(federation_repo=_FakeFederationRepo(), timeout=0.01)
+    sender._route_service = route_svc
+    sender._routed_handler = routed_handler
+    with pytest.raises(TimeoutError):
+        await sender.request_redeem(
+            "tkn", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+        )
+    assert routed_handler.send_routed.await_args.kwargs["target_identity_pk"] == ""
 
 
 async def test_redeem_round_trip_via_mesh_routing():

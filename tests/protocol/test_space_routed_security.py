@@ -32,6 +32,11 @@ Coverage:
   invalidate a working route (a relay-driven denial of service), a nack
   whose ``stale_eph_pk`` was swapped fails verification, and an unknown
   ``sig_suite`` is a hard reject — never a fallback to a default algorithm.
+* **A relay cannot use the target as a signing oracle.** Substituting the
+  envelope's ``target_eph_pk`` makes the target genuinely sign a nack over
+  a key the origin never sealed under. The origin binds ``stale_eph_pk`` to
+  the key IT sealed under for that ``route_id`` — before the signature
+  check — so the target-signed nack is inert and the live route stays.
 """
 
 from __future__ import annotations
@@ -351,8 +356,11 @@ class _RecordingRouteService:
         self.invalidated: list[str] = []
         self.discover_calls: list[str] = []
 
-    async def invalidate(self, target_instance_id: str) -> None:
+    async def invalidate_if_eph(
+        self, target_instance_id: str, *, target_eph_pk: str
+    ) -> bool:
         self.invalidated.append(target_instance_id)
+        return True
 
     async def discover_route(self, target_instance_id: str):
         self.discover_calls.append(target_instance_id)
@@ -508,3 +516,59 @@ async def test_route_stale_unknown_sig_suite_is_rejected_with_no_fallback():
     )
     assert rs.invalidated == []
     assert route_id in handler._pending_routed
+
+
+async def test_relay_substituted_eph_cannot_tear_down_a_live_route():
+    """Signing-oracle closure. Relay M forwards ``SPACE_ROUTED`` with
+    ``sealed.target_eph_pk`` replaced by garbage P'. Target T holds no
+    private half for P' and — correctly, from its point of view — signs a
+    nack over ``(route_id, P')``. That signature is genuine, the identity
+    pk is the pinned one, the route_id is live: everything the origin
+    checked before this fix passes. The origin must still drop it, because
+    P' is not the key it sealed under for this route_id — otherwise any
+    on-path relay could evict any route through it at will and trigger a
+    flood + retransmit per envelope. The genuine nack over the sealed key
+    is unaffected."""
+    handler, rs, target, path, route_id, sealed_pub = await _origin_with_pending_send()
+    _garbage_priv, garbage_pub = routed_crypto.generate_ephemeral_keypair()
+    oracle = _nack_payload(
+        route_id=route_id,
+        path=path,
+        target_pk_hex=target.public_key.hex(),
+        stale_pub=garbage_pub,
+        sig=routed_crypto.sign_route_stale(
+            seed=target.private_key, route_id=route_id, stale_eph_pk_b64=garbage_pub
+        ),
+    )
+    # The signature is real — this is not the tampered-sig case.
+    assert routed_crypto.verify_route_stale(
+        identity_pk=target.public_key,
+        route_id=route_id,
+        stale_eph_pk_b64=garbage_pub,
+        sig_b64=oracle["sig"],
+        sig_suite=oracle["sig_suite"],
+    )
+    await handler._on_route_stale(
+        _nack_event(oracle, from_instance=path[1], to_instance=path[0])
+    )
+    assert rs.invalidated == [], (
+        "target-signed nack over a substituted eph evicted a live route"
+    )
+    assert rs.discover_calls == []
+    assert route_id in handler._pending_routed
+    # The real nack — over the key the origin actually sealed under — lands.
+    handler._seen_nacks.clear()  # hop-level dedup already saw route_id
+    genuine = _nack_payload(
+        route_id=route_id,
+        path=path,
+        target_pk_hex=target.public_key.hex(),
+        stale_pub=sealed_pub,
+        sig=routed_crypto.sign_route_stale(
+            seed=target.private_key, route_id=route_id, stale_eph_pk_b64=sealed_pub
+        ),
+    )
+    await handler._on_route_stale(
+        _nack_event(genuine, from_instance=path[1], to_instance=path[0])
+    )
+    assert rs.invalidated == [path[-1]]
+    assert route_id not in handler._pending_routed

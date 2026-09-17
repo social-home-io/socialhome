@@ -59,10 +59,17 @@ fields only — no content, per the encryption-first rule.
 
 At the origin (:meth:`SpaceRoutedHandler._on_route_stale_at_origin`)
 every ``send_routed`` leaves a :class:`_PendingRouted` record (target,
-the identity pk pinned at discovery, the inner event) for the ephemeral
-window. A nack is honoured only if it names a route_id we sent, ends at
-that record's target, carries the pinned identity pk, and verifies
-under it — then the route is invalidated, rediscovered, and the inner
+the identity pk pinned at discovery, the eph we sealed under, the inner
+event's wire bytes) for the ephemeral window. A nack is honoured only if
+it names a route_id we sent, ends at that record's target, carries the
+pinned identity pk, names exactly the eph we sealed under for that
+route_id, and verifies under the pinned key. The eph binding is what
+keeps a relay from using the target as a signing oracle: swapping the
+envelope's ``target_eph_pk`` for garbage makes the target sign a
+perfectly genuine nack over a key we never used — inert here. The route
+is then invalidated only if the cache still points at the nacked key
+(:meth:`RouteDiscoveryService.invalidate_if_eph`; a sibling nack may
+already have rebuilt it), rediscovered (cache-first), and the inner
 event retransmitted exactly once (a nacked retry gives up).
 """
 
@@ -152,10 +159,18 @@ class _PendingRouted:
     #: Hex identity pk pinned at discovery (``""`` when the caller had
     #: none) — the key a nack's ``target_identity_pk`` must equal.
     target_identity_pk: str
+    #: The target ephemeral X25519 pub (b64url) this send was sealed
+    #: under — the ONLY ``stale_eph_pk`` a nack for this route_id may
+    #: name. Binds the nack to our envelope, not to whatever key an
+    #: on-path relay substituted into it.
+    target_eph_pk: str
     inner_event_type: FederationEventType
-    #: Copy of the inner payload, or ``None`` when it exceeded
+    #: The exact compact-JSON wire bytes that were measured and sealed
+    #: (``json.loads`` at retransmit), or ``None`` when they exceeded
     #: :data:`_MAX_RETAINED_INNER_BYTES` (invalidate-only, no retransmit).
-    inner_payload: dict | None
+    #: A string, not the caller's dict: a shallow copy would share nested
+    #: structures the caller may mutate after the send.
+    inner_payload_json: str | None
     #: True when this send IS the one retransmit — a nack for it gives up.
     is_retry: bool
     expires_at: float
@@ -287,6 +302,12 @@ class SpaceRoutedHandler:
             raise ValueError(
                 "SpaceRoutedHandler.send_routed: path[0] must equal own instance id",
             )
+        now = time.monotonic()
+        # Growth path: a household sending many routed events to a down
+        # target with no inbound routed traffic never hits the inbound
+        # prunes, so reap + cap here too or ``_pending_routed`` grows
+        # unbounded (≤ 64 KiB per entry).
+        self._prune_eph_state(now)
         route_id = secrets.token_hex(16)
         # Mint origin ephemeral, seal the inner payload, stash priv
         # for the reply leg.
@@ -304,23 +325,24 @@ class SpaceRoutedHandler:
             route_id=route_id,
             inner_event_type=inner_event_type.value,
         )
-        now = time.monotonic()
         self._origin_eph_state[route_id] = (
             origin_priv_b64,
             origin_pub_b64,
             now + self._eph_ttl_s,
         )
-        # Retain what a SPACE_ROUTE_STALE nack needs. Measured on the
-        # compact JSON already built for the seal (the same bytes that go
-        # on the wire); over the cap → invalidate-only record.
-        retained: dict | None = dict(inner_payload)
+        # Retain what a SPACE_ROUTE_STALE nack needs: the compact JSON
+        # already built for the seal (the same bytes that go on the wire —
+        # exact, and immune to the caller mutating its dict afterwards);
+        # over the cap → invalidate-only record.
+        retained: str | None = inner_payload_json
         if len(inner_payload_json.encode()) > _MAX_RETAINED_INNER_BYTES:
             retained = None
         self._pending_routed[route_id] = _PendingRouted(
             target_instance_id=path[-1],
             target_identity_pk=target_identity_pk,
+            target_eph_pk=target_eph_pk_b64,
             inner_event_type=inner_event_type,
-            inner_payload=retained,
+            inner_payload_json=retained,
             is_retry=is_retry,
             expires_at=now + self._eph_ttl_s,
         )
@@ -781,7 +803,7 @@ class SpaceRoutedHandler:
             "sig_suite": routed_crypto.ROUTE_STALE_SIG_SUITE_ED25519,
         }
         try:
-            await self._federation.send_event(
+            result = await self._federation.send_event(
                 to_instance_id=prev_hop,
                 event_type=FederationEventType.SPACE_ROUTE_STALE,
                 payload=payload,
@@ -792,6 +814,18 @@ class SpaceRoutedHandler:
                 route_id[:8],
                 prev_hop,
                 exc_info=True,
+            )
+            return
+        if not result.ok:
+            # ``send_event`` reports delivery failure as ``ok=False``, not
+            # an exception. A nack that never left IS the pre-v_28 silent
+            # drop — worth seeing.
+            log.warning(
+                "SPACE_ROUTED route_id=%s: SPACE_ROUTE_STALE nack to %s not"
+                " delivered (%s)",
+                route_id[:8],
+                prev_hop,
+                result.error or "delivery failed",
             )
             return
         # A handled condition — INFO, not WARNING: the demo harness's log
@@ -956,7 +990,7 @@ class SpaceRoutedHandler:
             )
             return
         try:
-            await self._federation.send_event(
+            result = await self._federation.send_event(
                 to_instance_id=next_hop,
                 event_type=FederationEventType.SPACE_ROUTE_STALE,
                 payload={
@@ -975,6 +1009,14 @@ class SpaceRoutedHandler:
                 route_id[:8],
                 next_hop,
                 exc_info=True,
+            )
+            return
+        if not result.ok:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: forward to %s not delivered (%s)",
+                route_id[:8],
+                next_hop,
+                result.error or "delivery failed",
             )
 
     async def _on_route_stale_at_origin(
@@ -1005,12 +1047,23 @@ class SpaceRoutedHandler:
            (second, independent binding — the relay check only proved
            the carried pk derives to ``path[-1]``). An empty pin (legacy
            caller) falls back to re-deriving against the record's target.
-        4. The Ed25519 signature verifies; an unknown ``sig_suite`` is a
+        4. ``stale_eph_pk`` is exactly the eph *we* sealed this route_id
+           under. Checked before the signature so a relay that swapped
+           the envelope's ``target_eph_pk`` cannot turn the target into a
+           signing oracle: the target only ever produces a useful
+           signature over ``(route_id, P_real)`` when it genuinely lacks
+           P_real's private half — the sole legitimate case.
+        5. The Ed25519 signature verifies; an unknown ``sig_suite`` is a
            hard reject, never a fallback.
-        5. Pop the record — one nack per envelope.
-        6. Invalidate the cached route.
-        7. Retransmit the retained inner once (never for a nacked retry,
+        6. Pop the record — one nack per envelope.
+        7. Invalidate the cached route only if it still points at the
+           nacked key (:meth:`RouteDiscoveryService.invalidate_if_eph`).
+           N envelopes sealed under one dead key nack back one by one;
+           the first rebuilds the route, the rest must not evict it.
+        8. Retransmit the retained inner once (never for a nacked retry,
            never for an oversized inner, never without a fresh route).
+           ``discover_route`` is cache-first, so a late nack after the
+           rebuild retransmits over the fresh route with zero floods.
 
         Drops of expected attacker / replay input log at DEBUG or INFO;
         WARNING is reserved for a send failure. Never raises.
@@ -1073,6 +1126,13 @@ class SpaceRoutedHandler:
                     target,
                 )
                 return
+        if stale_eph_pk != pending.target_eph_pk:
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: nack names an eph we never sealed"
+                " under for this route_id; ignoring",
+                route_id[:8],
+            )
+            return
         try:
             verified = routed_crypto.verify_route_stale(
                 identity_pk=bytes.fromhex(target_identity_pk),
@@ -1116,36 +1176,47 @@ class SpaceRoutedHandler:
             )
             return
         try:
-            await route_service.invalidate(target)
+            # Conditional: only a cache entry still pointing at the nacked
+            # key is stale. A sibling nack may already have rebuilt the
+            # route under a fresh key — evicting THAT would re-flood once
+            # per lost envelope instead of once per restart.
+            dropped = await route_service.invalidate_if_eph(
+                target, target_eph_pk=stale_eph_pk
+            )
+            state = "invalidated" if dropped else "already rebuilt"
             if pending.is_retry:
                 log.info(
-                    "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated; retry"
+                    "SPACE_ROUTE_STALE route_id=%s: route to %s %s; retry"
                     " also nacked, giving up on %s",
                     route_id[:8],
                     target,
+                    state,
                     pending.inner_event_type.value,
                 )
                 return
-            if pending.inner_payload is None:
+            if pending.inner_payload_json is None:
                 log.info(
-                    "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated;"
+                    "SPACE_ROUTE_STALE route_id=%s: route to %s %s;"
                     " oversized inner %s not retransmitted (durable outbox will"
                     " retry)",
                     route_id[:8],
                     target,
+                    state,
                     pending.inner_event_type.value,
                 )
                 return
-            # ``discover_route`` single-flights per target and honours the
-            # negative cooldown, so a burst of nacks for one target costs
-            # one flood.
+            # ``discover_route`` is cache-first (a late nack after the
+            # rebuild costs zero floods), single-flights per target and
+            # honours the negative cooldown, so a burst of nacks for one
+            # target costs at most one flood.
             discovery = await route_service.discover_route(target)
             if discovery is None or len(discovery[0]) < 2:
                 log.info(
-                    "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated; no"
+                    "SPACE_ROUTE_STALE route_id=%s: route to %s %s; no"
                     " route on rediscovery, giving up on %s",
                     route_id[:8],
                     target,
+                    state,
                     pending.inner_event_type.value,
                 )
                 return
@@ -1154,7 +1225,7 @@ class SpaceRoutedHandler:
                 path=new_path,
                 target_eph_pk_b64=new_eph,
                 inner_event_type=pending.inner_event_type,
-                inner_payload=pending.inner_payload,
+                inner_payload=json.loads(pending.inner_payload_json),
                 target_identity_pk=route_service.cached_target_identity_pk(target)
                 or "",
                 is_retry=True,
@@ -1168,10 +1239,11 @@ class SpaceRoutedHandler:
             )
             return
         log.info(
-            "SPACE_ROUTE_STALE route_id=%s: route to %s invalidated, rediscovered,"
+            "SPACE_ROUTE_STALE route_id=%s: route to %s %s, rediscovered,"
             " retransmitted %s as route_id=%s",
             route_id[:8],
             target,
+            state,
             pending.inner_event_type.value,
             new_route_id[:8],
         )

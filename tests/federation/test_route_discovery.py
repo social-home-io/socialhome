@@ -1619,6 +1619,51 @@ async def test_invalidate_if_older_than_lifts_the_cooldown_when_it_drops():
     assert target not in svc._negative_until
 
 
+async def test_invalidate_if_eph_drops_only_the_matching_key():
+    """The origin's SPACE_ROUTE_STALE handler invalidates conditionally: a
+    nack names the eph it was sealed under, and only a cache entry still
+    pointing at THAT key is stale. A route already rebuilt under a fresh
+    key survives a late nack for the old one (no re-flood)."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    target = nodes["b"].instance_id
+
+    assert await svc.discover_route(target) is not None
+    live_eph = svc._route_cache[target].target_eph_pk
+    _priv, other_eph = routed_crypto.generate_ephemeral_keypair()
+
+    # Names a key the cache does not point at → keep, report False.
+    assert await svc.invalidate_if_eph(target, target_eph_pk=other_eph) is False
+    assert target in svc._route_cache
+
+    # Names the live key → drop, report True.
+    assert await svc.invalidate_if_eph(target, target_eph_pk=live_eph) is True
+    assert target not in svc._route_cache
+
+
+async def test_invalidate_if_eph_is_a_noop_without_a_cached_route():
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    assert await svc.invalidate_if_eph("nobody", target_eph_pk="any") is False
+
+
+async def test_invalidate_if_eph_lifts_the_cooldown_when_it_drops():
+    """Same contract as ``invalidate`` / ``invalidate_if_older_than``: a drop
+    is an explicit "go look again", so the negative cooldown goes with it —
+    and a keep leaves it alone."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    target = nodes["b"].instance_id
+    assert await svc.discover_route(target) is not None
+    live_eph = svc._route_cache[target].target_eph_pk
+    svc._negative_until[target] = time.monotonic() + 60.0
+
+    assert await svc.invalidate_if_eph(target, target_eph_pk="stale") is False
+    assert target in svc._negative_until
+    assert await svc.invalidate_if_eph(target, target_eph_pk=live_eph) is True
+    assert target not in svc._negative_until
+
+
 async def test_cooldown_remaining_exposes_the_negative_window():
     """Callers need to tell "we didn't probe" apart from "we probed and
     failed".
