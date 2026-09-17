@@ -131,11 +131,28 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
 
 - DataChannel opens → emit `SPACE_SYNC_DIRECT_READY` and start
   consuming chunks off the channel.
-- Timeout / channel never opens → emit `SPACE_SYNC_DIRECT_FAILED
-  {reason: "ice_timeout"}`. The provider's `_handle_space_sync_direct_failed`
-  calls `trigger_relay_sync`, which mints a fresh `SPACE_SYNC_BEGIN
-  {prefer_direct: false}` and the provider re-admits the session in
-  HTTPS mode.
+- Timeout / channel never opens → the requester's ICE watcher emits
+  `SPACE_SYNC_DIRECT_FAILED {reason: "ice_timeout"}` to the provider so it
+  releases its half-session (RTC handle + signaling node), and the
+  **requester** — not the provider — re-issues the BEGIN via
+  `trigger_relay_sync` (`SPACE_SYNC_BEGIN {prefer_direct: false}`). The
+  provider must not mint a BEGIN of its own here: a bounced BEGIN would land
+  back at the requester as an event it doesn't expect. Which side retries is
+  decided by the originating direction of DIRECT_FAILED (see
+  `_handle_space_sync_direct_failed`); the provider only owns the retry when
+  it was the one that sent DIRECT_FAILED (e.g. rate-limited).
+
+**Direct-only vs mesh-capable legs.** `SPACE_SYNC_OFFER`, `SPACE_SYNC_ANSWER`,
+`SPACE_SYNC_ICE` and `SPACE_SYNC_DIRECT_READY` only make sense on the direct
+path — ICE cannot traverse a relay, so the provider never offers a mesh-only
+requester (it forces HTTPS mode), and the requester ignores an `OFFER` from,
+or skips `DIRECT_READY` toward, a provider it holds no CONFIRMED row for (debug
+log, no send). Every other leg — `SPACE_SYNC_BEGIN` (including the relay
+re-BEGIN), `SPACE_SYNC_DIRECT_FAILED`, `SPACE_SYNC_REJECTED`, `SPACE_SYNC_CHUNK`
+— goes through `send_with_mesh_fallback`, which is plain `send_event` for a
+paired peer and a `SPACE_ROUTED` envelope for a mesh-only one. A bare
+`send_event` toward an unpaired household is an un-queued `unknown_instance`
+drop, so no sync helper uses one for a possibly-unpaired counterpart.
 
 The HTTPS chunk handler (`_handle_space_sync_chunk`) validates that the
 envelope's `from_instance` matches the session's recorded provider and
