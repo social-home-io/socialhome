@@ -41,6 +41,21 @@ ACK / response routing: when an inner handler runs
 :attr:`FederationEvent.routed_route_id`), the response travels back
 through the reverse of the original path with ``direction="reply"``
 and the seal uses the target→origin key.
+
+Route-stale nack (:data:`FederationEventType.SPACE_ROUTE_STALE`):
+the target's ephemeral private half lives only in RAM, so after a
+restart every envelope sealed under the old pub is undecryptable —
+while origins keep sealing under it for the rest of their route-cache
+window, believing delivery succeeded. When the forward-leg unwrap
+finds no private half, the target signs ``(route_id, stale_eph_pk)``
+with its identity key and ships the nack to the previous hop; each
+relay walks it back one hop (``position`` names the hop that SENT the
+nack, mirroring ``SPACE_ROUTED``) until it reaches ``path[0]``.
+Relays are opaque forwarders — structural checks only, no signature
+verification; the origin is the enforcement point. Gated per hop on
+:data:`FederationCapability.MIN_FOR_ROUTE_STALE_NACK` so a pre-v_28
+peer sees exactly today's silent drop. Payload is routing/validation
+fields only — no content, per the encryption-first rule.
 """
 
 from __future__ import annotations
@@ -52,7 +67,9 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from ..crypto import derive_instance_id
 from ..domain.federation import FederationEvent, FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
 from .route_discovery import cap_by_expiry
 
@@ -105,6 +122,7 @@ class SpaceRoutedHandler:
         "_seen_ttl_s",
         "_eph_ttl_s",
         "_seen_routes",
+        "_seen_nacks",
         "_origin_eph_state",
         "_reply_eph_state",
     )
@@ -129,6 +147,11 @@ class SpaceRoutedHandler:
         #: chain from cycling forever even if the discovery layer
         #: produced an invalid path.
         self._seen_routes: dict[str, float] = {}
+        #: ``route_id`` → wall-clock expiry for SPACE_ROUTE_STALE nacks
+        #: we already forwarded / consumed. A nack visits each hop of
+        #: a path at most once; a replay is a no-op. Same TTL + cap as
+        #: ``_seen_routes``.
+        self._seen_nacks: dict[str, float] = {}
         #: Origin-side: ``route_id`` →
         #: ``(origin_eph_priv_b64, origin_eph_pub_b64, expires_at)``.
         #: Set on ``send_routed``; consumed on the matching
@@ -149,6 +172,10 @@ class SpaceRoutedHandler:
         registry.register(
             FederationEventType.SPACE_ROUTED,
             self._on_routed,
+        )
+        registry.register(
+            FederationEventType.SPACE_ROUTE_STALE,
+            self._on_route_stale,
         )
 
     # ── Public API ─────────────────────────────────────────────────────
@@ -493,11 +520,11 @@ class SpaceRoutedHandler:
                 return
             target_priv = self._target_eph_lookup(target_pub)
             if target_priv is None:
-                log.warning(
-                    "SPACE_ROUTED route_id=%s: no cached target_eph_priv"
-                    " for pub=%s (expired or unknown); dropping",
-                    route_id[:8],
-                    target_pub[:8],
+                await self._nack_stale_target_eph(
+                    event=event,
+                    route_id=route_id,
+                    path=path,
+                    target_pub=target_pub,
                 )
                 return
             try:
@@ -609,12 +636,291 @@ class SpaceRoutedHandler:
         )
         await self._dispatcher(synth)
 
+    # ── Route-stale nack (SPACE_ROUTE_STALE) ───────────────────────────
+
+    async def _nack_stale_target_eph(
+        self,
+        *,
+        event: FederationEvent,
+        route_id: str,
+        path: list[str],
+        target_pub: str,
+    ) -> None:
+        """Target-side: we hold no private half for ``target_pub`` (we
+        restarted, or the origin's route cache outlived our key). Tell
+        the previous hop so the nack can walk back to the origin — or,
+        if that hop predates v_28, drop exactly as before.
+
+        The destination is ``event.from_instance`` — never recomputed
+        from ``path``: :meth:`_on_routed` already enforced
+        ``path[position] == event.from_instance`` before calling the
+        unwrap, so the two agree, and the §24.11-authenticated sender
+        is the value we trust.
+        """
+        prev_hop = event.from_instance
+        if not await self._federation.peer_supports(
+            prev_hop, min_version=FederationCapability.MIN_FOR_ROUTE_STALE_NACK
+        ):
+            log.warning(
+                "SPACE_ROUTED route_id=%s: no cached target_eph_priv"
+                " for pub=%s (expired or unknown); dropping",
+                route_id[:8],
+                target_pub[:8],
+            )
+            log.debug(
+                "SPACE_ROUTED route_id=%s: previous hop %s is pre-v_28;"
+                " no SPACE_ROUTE_STALE nack sent",
+                route_id[:8],
+                prev_hop,
+            )
+            return
+        payload = {
+            "route_id": route_id,
+            "path": list(path),
+            # Mirrors SPACE_ROUTED: ``position`` names the hop that SENT
+            # this nack hop — the target sits at the end of the path.
+            "position": len(path) - 1,
+            "target_identity_pk": self._federation.own_identity_pk.hex(),
+            "stale_eph_pk": target_pub,
+            "sig": routed_crypto.sign_route_stale(
+                seed=self._federation.own_identity_seed,
+                route_id=route_id,
+                stale_eph_pk_b64=target_pub,
+            ),
+            "sig_suite": routed_crypto.ROUTE_STALE_SIG_SUITE_ED25519,
+        }
+        try:
+            await self._federation.send_event(
+                to_instance_id=prev_hop,
+                event_type=FederationEventType.SPACE_ROUTE_STALE,
+                payload=payload,
+            )
+        except Exception:
+            log.warning(
+                "SPACE_ROUTED route_id=%s: SPACE_ROUTE_STALE nack to %s failed",
+                route_id[:8],
+                prev_hop,
+                exc_info=True,
+            )
+            return
+        # A handled condition — INFO, not WARNING: the demo harness's log
+        # audit treats unexpected WARNINGs as failures, and the nack IS
+        # the recovery path here.
+        log.info(
+            "SPACE_ROUTED route_id=%s: no cached target_eph_priv for pub=%s"
+            " (expired or unknown); nacked to %s",
+            route_id[:8],
+            target_pub[:8],
+            prev_hop,
+        )
+
+    async def _on_route_stale(self, event: FederationEvent) -> None:
+        """Walk a ``SPACE_ROUTE_STALE`` nack one hop back toward the origin.
+
+        ``position`` names the hop that SENT this nack hop, so a relay
+        at index ``i`` receives ``position == i + 1`` and forwards to
+        ``path[i - 1]`` with ``position = i``. When ``position - 1 == 0``
+        we are the origin and hand off to
+        :meth:`_on_route_stale_at_origin`.
+
+        Structural validation mirrors :meth:`_on_routed`. Relays do NOT
+        verify the Ed25519 signature: verifying needs nothing a relay
+        has that the origin lacks (the identity pk travels in the
+        payload and is pinned by ``derive_instance_id`` against
+        ``path[-1]``), the same bytes reach the origin either way, and
+        a relay that verified would be deciding for the origin which
+        nacks it gets to see. The origin (T3) is the enforcement point.
+        Fail-soft throughout — a nack never raises into the dispatcher.
+        """
+        p = event.payload
+        route_id_raw = p.get("route_id")
+        path_raw = p.get("path")
+        position_raw = p.get("position")
+        sig = p.get("sig")
+        sig_suite = p.get("sig_suite")
+        target_identity_pk = p.get("target_identity_pk")
+        stale_eph_pk = p.get("stale_eph_pk")
+        if (
+            not isinstance(route_id_raw, str)
+            or not route_id_raw
+            or not isinstance(path_raw, list)
+            or not path_raw
+            or not all(isinstance(h, str) for h in path_raw)
+            or isinstance(position_raw, bool)
+            or not isinstance(position_raw, int)
+            or not isinstance(sig, str)
+            or not isinstance(sig_suite, str)
+            or not isinstance(target_identity_pk, str)
+            or not isinstance(stale_eph_pk, str)
+        ):
+            log.debug(
+                "SPACE_ROUTE_STALE: malformed payload from %s; dropping",
+                event.from_instance,
+            )
+            return
+        route_id: str = route_id_raw
+        path: list[str] = list(path_raw)
+        position: int = position_raw
+        if len(path) > _MAX_ROUTED_PATH_LEN:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: path too long (%d > %d); dropping",
+                route_id[:8],
+                len(path),
+                _MAX_ROUTED_PATH_LEN,
+            )
+            return
+        if not 1 <= position < len(path):
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: position=%s out of range for"
+                " path_len=%s; dropping",
+                route_id[:8],
+                position,
+                len(path),
+            )
+            return
+        # Anti-spoof: the hop named at ``path[position]`` must be the
+        # §24.11-authenticated sender.
+        if path[position] != event.from_instance:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: path[%d]=%s != from_instance=%s;"
+                " dropping (mis-route/spoof)",
+                route_id[:8],
+                position,
+                path[position],
+                event.from_instance,
+            )
+            return
+        self_id = self._federation.own_instance_id
+        if path[position - 1] != self_id:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: wrong-next-hop (path[%d]=%s, self=%s)",
+                route_id[:8],
+                position - 1,
+                path[position - 1],
+                self_id,
+            )
+            return
+        # Cheap early-shed, no key material needed: the carried identity
+        # pk must be the one ``path[-1]`` is derived from, or this cannot
+        # be a nack for this route. Bad hex / wrong length → ValueError.
+        try:
+            derived = derive_instance_id(bytes.fromhex(target_identity_pk))
+        except ValueError:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: malformed target_identity_pk; dropping",
+                route_id[:8],
+            )
+            return
+        if derived != path[-1]:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: target_identity_pk derives to %s,"
+                " not path[-1]=%s; dropping",
+                route_id[:8],
+                derived,
+                path[-1],
+            )
+            return
+        # Dedup AFTER every structural check, on purpose. Everything
+        # above is a deterministic reject of input the legitimate
+        # previous hop would never send, so no genuine nack is lost by
+        # checking it first — and only that authenticated previous hop
+        # (``path[position] == from_instance``, ``path[position-1] ==
+        # self``) can reach this line. Dedup-first would let any peer
+        # that learned the route_id (a relay further down the path,
+        # say, which is also paired with us) burn the slot with a
+        # malformed nack and suppress the real one that follows.
+        now = time.monotonic()
+        self._prune_expired(now)
+        if route_id in self._seen_nacks:
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: already forwarded; ignoring duplicate",
+                route_id[:8],
+            )
+            return
+        self._seen_nacks[route_id] = now + self._seen_ttl_s
+
+        if position - 1 == 0:
+            await self._on_route_stale_at_origin(
+                event=event,
+                route_id=route_id,
+                path=path,
+                target_identity_pk=target_identity_pk,
+                stale_eph_pk=stale_eph_pk,
+                sig=sig,
+                sig_suite=sig_suite,
+            )
+            return
+
+        next_hop = path[position - 2]
+        if not await self._federation.peer_supports(
+            next_hop, min_version=FederationCapability.MIN_FOR_ROUTE_STALE_NACK
+        ):
+            # Degrades to today's behaviour for that leg: the origin
+            # never learns, and re-seals until its route cache expires.
+            log.debug(
+                "SPACE_ROUTE_STALE route_id=%s: next hop %s is pre-v_28;"
+                " nack ends here",
+                route_id[:8],
+                next_hop,
+            )
+            return
+        try:
+            await self._federation.send_event(
+                to_instance_id=next_hop,
+                event_type=FederationEventType.SPACE_ROUTE_STALE,
+                payload={
+                    "route_id": route_id,
+                    "path": list(path),
+                    "position": position - 1,
+                    "target_identity_pk": target_identity_pk,
+                    "stale_eph_pk": stale_eph_pk,
+                    "sig": sig,
+                    "sig_suite": sig_suite,
+                },
+            )
+        except Exception:
+            log.warning(
+                "SPACE_ROUTE_STALE route_id=%s: forward to %s failed",
+                route_id[:8],
+                next_hop,
+                exc_info=True,
+            )
+
+    async def _on_route_stale_at_origin(
+        self,
+        *,
+        event: FederationEvent,
+        route_id: str,
+        path: list[str],
+        target_identity_pk: str,
+        stale_eph_pk: str,
+        sig: str,
+        sig_suite: str,
+    ) -> None:
+        """Origin-side handling of a ``SPACE_ROUTE_STALE`` nack.
+
+        # T3 — stub. T3 verifies ``sig`` against ``target_identity_pk``
+        # via :func:`routed_crypto.verify_route_stale` (rejecting unknown
+        # ``sig_suite``), then evicts the route-cache entry for
+        # ``path[-1]`` whose ``target_eph_pk == stale_eph_pk`` so the
+        # next send re-discovers. Until then: log and return.
+        """
+        log.debug(
+            "SPACE_ROUTE_STALE route_id=%s reached origin (handling lands in T3)",
+            route_id[:8],
+        )
+
     # ── Helpers ────────────────────────────────────────────────────────
 
     def _prune_expired(self, now: float) -> None:
         if self._seen_routes:
             self._seen_routes = cap_by_expiry(
                 {k: v for k, v in self._seen_routes.items() if v > now},
+                key=lambda kv: kv[1],
+            )
+        if self._seen_nacks:
+            self._seen_nacks = cap_by_expiry(
+                {k: v for k, v in self._seen_nacks.items() if v > now},
                 key=lambda kv: kv[1],
             )
         self._prune_eph_state(now)
