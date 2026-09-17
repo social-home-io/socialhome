@@ -1718,11 +1718,27 @@ class FederationInboundService:
     # ── User-profile handlers ──────────────────────────────────────────
 
     async def _on_users_sync(self, event: "FederationEvent") -> None:
+        """Import a peer's full user roster.
+
+        Each user is guarded on its own: the batch is a snapshot, so one
+        unusable entry must never drop the tail of the envelope. Failures are
+        logged at WARNING rather than swallowed — a silently-eaten
+        ``IntegrityError`` here is exactly what hid the repaired-user_id
+        collision (migration 0049) for a full release.
+        """
         users = event.payload.get("users") or []
         if not isinstance(users, list):
             return
         for u in users:
-            await self._upsert_remote_user(event.from_instance, u)
+            try:
+                await self._upsert_remote_user(event.from_instance, u)
+            except Exception as exc:
+                log.warning(
+                    "USERS_SYNC: skipping user %r from %s: %s",
+                    (u or {}).get("username") if isinstance(u, dict) else u,
+                    event.from_instance,
+                    exc,
+                )
 
     async def _on_user_updated(self, event: "FederationEvent") -> None:
         await self._upsert_remote_user(event.from_instance, event.payload)

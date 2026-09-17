@@ -737,3 +737,64 @@ async def test_get_remote_user_identity_pubkey_round_trips(env):
     assert got == bytes.fromhex("ab" * 32)
     # Unknown user_id → None.
     assert await env.user_repo.get_remote_user_identity_pubkey("ghost") is None
+
+
+async def _seed_peer_instance(env, instance_id: str = "peer-b") -> None:
+    await env.db.enqueue(
+        """INSERT INTO remote_instances(
+               id, display_name, remote_identity_pk, key_self_to_remote,
+               key_remote_to_self, remote_inbox_url, local_inbox_id,
+               status, source
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            instance_id,
+            "Peer B",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://peer-b.example/federation/inbox/x",
+            "local-inbox",
+            "confirmed",
+            "manual",
+        ),
+    )
+
+
+async def test_upsert_remote_rebinds_a_stale_natural_key_row(env):
+    """A peer that repaired its synthetic ``uid-<name>`` id re-broadcasts a
+    NEW ``user_id`` under the SAME ``(instance_id, remote_username)``.
+
+    That pair is UNIQUE and is *not* the ``ON CONFLICT(user_id)`` target, so a
+    single-target upsert raised ``IntegrityError`` forever — the cached row
+    could never learn the repaired id (migration 0049). The second conflict
+    target rebinds the existing row onto the new id instead.
+    """
+    from socialhome.domain.user import RemoteUser
+
+    await _seed_peer_instance(env)
+    await env.user_repo.upsert_remote(
+        RemoteUser(
+            user_id="uid-admin",
+            instance_id="peer-b",
+            remote_username="admin",
+            display_name="Old Admin",
+        ),
+    )
+
+    await env.user_repo.upsert_remote(
+        RemoteUser(
+            user_id="derivedadminid",
+            instance_id="peer-b",
+            remote_username="admin",
+            display_name="Admin",
+        ),
+    )
+
+    rows = await env.db.fetchall(
+        "SELECT user_id, display_name FROM remote_users WHERE instance_id='peer-b'"
+    )
+    assert [(r["user_id"], r["display_name"]) for r in rows] == [
+        ("derivedadminid", "Admin")
+    ]
+    got = await env.user_repo.get_remote_by_member("peer-b", "admin")
+    assert got is not None and got.user_id == "derivedadminid"

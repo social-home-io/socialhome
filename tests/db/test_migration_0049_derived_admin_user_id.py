@@ -17,6 +17,7 @@ never-booted DB is a clean no-op, and that a re-run changes nothing.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 from pathlib import Path
 
@@ -340,3 +341,203 @@ def test_remote_users_cache_is_left_alone(conn, kp):
     assert conn.execute("SELECT user_id FROM users WHERE username='admin'").fetchone()[
         0
     ] == derive_user_id(kp.public_key, "admin")
+
+
+# ── Pre-flight: a derived-id collision must never brick the boot ─────────────
+
+
+def test_conflicting_derived_id_outside_users_skips_instead_of_raising(
+    conn, kp, caplog
+):
+    """A UNIQUE conflict anywhere in the sweep is a *skip*, not a crash.
+
+    The pre-flight used to cover ``users`` only, so a row elsewhere already
+    holding the derived id (here ``space_members(space_id, user_id)``) blew up
+    mid-sweep with a bare ``IntegrityError`` — which the runner turns into a
+    failed ``AsyncDatabase.startup``, i.e. a household that cannot boot at all,
+    on every attempt. A household that merely still cannot federate is
+    strictly better, and a later run retries.
+    """
+    import logging
+
+    _seed_identity(conn, kp)
+    _seed_user(conn, "alice", "uid-alice")
+    _seed_children(conn, "uid-alice", "a")
+    derived = derive_user_id(kp.public_key, "alice")
+    conn.execute(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-a',?,'member')",
+        (derived,),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _load_migrate()(conn)
+
+    # Untouched — the repair is a no-op a later run can retry.
+    assert (
+        conn.execute("SELECT user_id FROM users WHERE username='alice'").fetchone()[0]
+        == "uid-alice"
+    )
+    for (table, col), vals in _values(conn).items():
+        assert "uid-alice" in vals, f"{table}.{col} was partially rewritten"
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "space_members.user_id" in blob and "alice" in blob
+
+
+# ── A user whose *username* looks like the retired id ────────────────────────
+
+
+def test_a_user_named_like_the_retired_id_is_not_renamed(conn, kp):
+    """``users.username`` / ``identity_anchor`` are outside the sweep.
+
+    A local user literally called ``uid-alice`` would otherwise be renamed to
+    the admin's derived id, their anchor rewritten and ``platform_users``
+    cascaded — inflicting the exact bug this migration repairs, silently and
+    permanently (``derive_user_id(pk, anchor) != user_id`` for them forever).
+    """
+    _seed_identity(conn, kp)
+    _seed_user(conn, "alice", "uid-alice")
+    _seed_children(conn, "uid-alice", "a")
+    victim_id = derive_user_id(kp.public_key, "uid-alice")
+    _seed_user(conn, "uid-alice", victim_id)
+    conn.execute(
+        "INSERT INTO platform_users(username, display_name) VALUES('uid-alice','V')"
+    )
+
+    _load_migrate()(conn)
+
+    row = conn.execute(
+        "SELECT username, user_id, identity_anchor FROM users WHERE user_id=?",
+        (victim_id,),
+    ).fetchone()
+    assert row["username"] == "uid-alice"
+    assert row["identity_anchor"] == "uid-alice"
+    # Their self-cert still reproduces: derive(pk, anchor) == user_id.
+    assert derive_user_id(kp.public_key, row["identity_anchor"]) == row["user_id"]
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM platform_users WHERE username='uid-alice'"
+        ).fetchone()[0]
+        == 1
+    )
+    # The admin was still repaired.
+    assert conn.execute("SELECT user_id FROM users WHERE username='alice'").fetchone()[
+        0
+    ] == derive_user_id(kp.public_key, "alice")
+
+
+# ── Ids embedded in JSON ────────────────────────────────────────────────────
+
+
+def _seed_json_sites(conn: sqlite3.Connection, user_id: str) -> None:
+    """A row in each shape the JSON sweep has to understand."""
+    conn.execute(
+        "UPDATE tasks SET assignees_json=? WHERE id='t-a'",
+        (f'["{user_id}", "other-user"]',),
+    )
+    conn.execute(
+        "INSERT INTO calendars(id, name, owner_username) VALUES('cal-a','Cal','alice')"
+    )
+    conn.execute(
+        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt,"
+        " attendees_json, created_by) VALUES('ev-a','cal-a','Dinner',"
+        "'2026-01-01T18:00:00+00:00','2026-01-01T19:00:00+00:00',?,?)",
+        (f'["{user_id}"]', user_id),
+    )
+    conn.execute(
+        "INSERT INTO call_sessions(id, initiator_user_id, call_type,"
+        " participant_user_ids) VALUES('call-a',?, 'audio', ?)",
+        (user_id, f'["{user_id}", "other-user"]'),
+    )
+    conn.execute(
+        "INSERT INTO highlights(id, author_user_id, highlight_date, audience_kind,"
+        " audience_json, expires_at) VALUES('hl-a',?, '2026-01-01','users',?,"
+        "'2026-02-01T00:00:00+00:00')",
+        (user_id, f'["{user_id}", "other-user"]'),
+    )
+    conn.execute(
+        "INSERT INTO feed_posts(id, author, type, content, reactions)"
+        " VALUES('fp-a',?, 'text','hi',?)",
+        (user_id, json.dumps({"❤": [user_id, "other-user"]})),
+    )
+    conn.execute(
+        "UPDATE users SET preferences_json=? WHERE username='alice'",
+        (
+            json.dumps(
+                {
+                    "highlights": {
+                        "default_audience": {
+                            "kind": "users",
+                            "ids": [user_id, "other-user"],
+                        }
+                    }
+                }
+            ),
+        ),
+    )
+
+
+def test_ids_inside_json_columns_are_repaired(conn, kp):
+    """Whole-cell matching is blind to an id inside a JSON document.
+
+    Left unrepaired, every task assigned to the admin shows as unassigned,
+    their call history loses them as a participant, and a ``users``-scoped
+    highlight audience silently stops including them.
+    """
+    _seed_identity(conn, kp)
+    _seed_user(conn, "alice", "uid-alice")
+    _seed_children(conn, "uid-alice", "a")
+    _seed_json_sites(conn, "uid-alice")
+
+    _load_migrate()(conn)
+
+    new_id = derive_user_id(kp.public_key, "alice")
+    assert json.loads(
+        conn.execute("SELECT assignees_json FROM tasks WHERE id='t-a'").fetchone()[0]
+    ) == [new_id, "other-user"]
+    assert json.loads(
+        conn.execute(
+            "SELECT attendees_json FROM calendar_events WHERE id='ev-a'"
+        ).fetchone()[0]
+    ) == [new_id]
+    assert json.loads(
+        conn.execute(
+            "SELECT participant_user_ids FROM call_sessions WHERE id='call-a'"
+        ).fetchone()[0]
+    ) == [new_id, "other-user"]
+    assert json.loads(
+        conn.execute("SELECT audience_json FROM highlights WHERE id='hl-a'").fetchone()[
+            0
+        ]
+    ) == [new_id, "other-user"]
+    assert json.loads(
+        conn.execute("SELECT reactions FROM feed_posts WHERE id='fp-a'").fetchone()[0]
+    ) == {"❤": [new_id, "other-user"]}
+    prefs = json.loads(
+        conn.execute(
+            "SELECT preferences_json FROM users WHERE username='alice'"
+        ).fetchone()[0]
+    )
+    assert prefs["highlights"]["default_audience"]["ids"] == [new_id, "other-user"]
+
+
+def test_malformed_json_is_left_alone_not_crashed_on(conn, kp, caplog):
+    """A blob that does not parse is already broken; the boot must not die."""
+    import logging
+
+    _seed_identity(conn, kp)
+    _seed_user(conn, "alice", "uid-alice")
+    _seed_children(conn, "uid-alice", "a")
+    conn.execute("UPDATE tasks SET assignees_json='[uid-alice' WHERE id='t-a'")
+
+    with caplog.at_level(logging.WARNING):
+        _load_migrate()(conn)
+
+    assert (
+        conn.execute("SELECT assignees_json FROM tasks WHERE id='t-a'").fetchone()[0]
+        == "[uid-alice"
+    )
+    assert conn.execute("SELECT user_id FROM users WHERE username='alice'").fetchone()[
+        0
+    ] == derive_user_id(kp.public_key, "alice")
+    assert any("not valid JSON" in r.getMessage() for r in caplog.records)

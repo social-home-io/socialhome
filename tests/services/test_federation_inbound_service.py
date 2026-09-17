@@ -1299,6 +1299,66 @@ async def test_users_sync_upserts_remote_users(db, inbound):
     assert rows[0]["remote_username"] == "alice"
 
 
+async def test_users_sync_one_bad_user_does_not_drop_the_rest(
+    db, inbound, caplog, monkeypatch
+):
+    """One failing user must not abort the tail of the envelope.
+
+    The loop had no per-user guard, so a single raise (e.g. the UNIQUE
+    ``(instance_id, remote_username)`` collision a peer's repaired user_id
+    used to provoke — migration 0049) skipped every remaining user AND was
+    swallowed by the dispatcher: silent, recurring data loss.
+    """
+    import logging
+
+    await db.enqueue(
+        """INSERT INTO remote_instances(
+               id, display_name, remote_identity_pk,
+               key_self_to_remote, key_remote_to_self,
+               remote_inbox_url, local_inbox_id,
+               status, source, created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "peer-a",
+            "Peer A",
+            "aa" * 32,
+            "enc",
+            "enc",
+            "https://peer/wh",
+            "wh-peer-a",
+            "confirmed",
+            "manual",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    real = type(inbound)._upsert_remote_user
+
+    async def flaky(self, instance_id, payload):
+        if payload.get("username") == "bob":
+            raise RuntimeError("boom")
+        await real(self, instance_id, payload)
+
+    monkeypatch.setattr(type(inbound), "_upsert_remote_user", flaky)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_users_sync(
+            _event(
+                FederationEventType.USERS_SYNC,
+                {
+                    "users": [
+                        {"user_id": "u-r1", "username": "alice"},
+                        {"user_id": "u-r2", "username": "bob"},
+                        {"user_id": "u-r3", "username": "carol"},
+                    ]
+                },
+                from_instance="peer-a",
+            )
+        )
+
+    rows = await db.fetchall("SELECT user_id FROM remote_users ORDER BY user_id")
+    assert [r["user_id"] for r in rows] == ["u-r1", "u-r3"]
+    assert any("boom" in r.getMessage() for r in caplog.records)
+
+
 # ─── USERS_SYNC — per-user identity binding (proto v_25) ──────────
 
 
