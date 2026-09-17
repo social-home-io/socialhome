@@ -75,7 +75,6 @@ from ..domain.federation_capabilities import (
     space_features_missing_below,
 )
 from ..media.cleanup import unlink_media
-from .child_protection_service import _VALID_MIN_AGES
 from .space_purge import purge_space_and_media
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
@@ -106,6 +105,7 @@ from ..domain.space import (
     SpaceRole,
     SpaceType,
     normalize_category,
+    normalize_min_age,
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.base import row_to_dict
@@ -186,6 +186,7 @@ class SpaceService(SpaceMemberGuardMixin):
         "_remote_members",
         "_redeem_coordinator",
         "_space_crypto",
+        "_gfs_mirror",
         "_media_dir",
         "_gallery",
         "_bazaar",
@@ -214,6 +215,7 @@ class SpaceService(SpaceMemberGuardMixin):
         self._covers = None
         self._icons = None
         self._gfs = None
+        self._gfs_mirror = None
         self._federation_repo = None
         self._federation = None
         self._remote_members = None
@@ -267,6 +269,15 @@ class SpaceService(SpaceMemberGuardMixin):
         no GFS is paired, GfsConnectionService may be absent entirely.
         """
         self._gfs = gfs_service
+
+    def attach_gfs_space_mirror(self, mirror) -> None:
+        """Wire the GFS-discovered-space on-ramp so ``subscribe_to_space``
+        can mirror a remote listing onto a local stub row (and register this
+        household on the GFS relay) before seating the subscriber. Optional:
+        absent when no GFS is paired — subscribe then behaves exactly as it
+        did before, 404ing on an unknown space id.
+        """
+        self._gfs_mirror = mirror
 
     def attach_federation(
         self,
@@ -3769,6 +3780,17 @@ class SpaceService(SpaceMemberGuardMixin):
     #   ``add_member``.
 
     async def subscribe_to_space(self, user_id: str, space_id: str) -> None:
+        # GFS on-ramp: a space discovered through a paired GFS has no local
+        # ``spaces`` row yet, so ``_require_space`` below would 404 it. Mirror
+        # the GFS listing onto a local stub FIRST (see
+        # :class:`GfsSpaceMirrorService` for the TOFU trust boundary). A
+        # mirror that returns ``None`` (no GFS knows it / unverifiable pin)
+        # falls through to the unchanged 404.
+        gfs_id: str | None = None
+        if self._gfs_mirror is not None and await self._spaces.get(space_id) is None:
+            mirrored = await self._gfs_mirror.ensure_mirror(space_id)
+            if mirrored is not None:
+                gfs_id = mirrored[1]
         space = await self._require_space(space_id)
         if space.space_type not in PUBLIC_SPACE_TIERS:
             raise SpacePermissionError(
@@ -3785,6 +3807,14 @@ class SpaceService(SpaceMemberGuardMixin):
             return
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        # ORDER MATTERS: the GFS-side subscriber registration happens only
+        # AFTER every local refusal (public-tier, ban, §CP.F1 age gate) has
+        # passed. A locally-refused user must never end up on the GFS's
+        # ``space_subscribers`` set — that would fan relayed space content at
+        # this household on their behalf. A failing GFS subscribe propagates:
+        # no local member row is seated for a relay we never registered for.
+        if gfs_id is not None and self._gfs_mirror is not None:
+            await self._gfs_mirror.subscribe_to_gfs(space_id, gfs_id)
         member = SpaceMember(
             space_id=space_id,
             user_id=user_id,
@@ -3829,6 +3859,77 @@ class SpaceService(SpaceMemberGuardMixin):
                 action="removed",
                 actor_id=user_id,
             )
+        await self._maybe_purge_gfs_mirror(space_id)
+
+    async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
+        """Drop a GFS-mirrored stub once its last local subscriber leaves.
+
+        Both of the things this does — telling every paired GFS we are gone,
+        and deleting the row with its posts / gallery / bazaar / media — are
+        irreversible and visible to third parties, so they run only on
+        *positive* evidence that the row is a GFS mirror:
+
+        * the space is ``GLOBAL`` (what the mirror seats), owned by another
+          instance, and we hold no space seed for it (we are not its
+          authority); **and**
+        * a ``public_space_cache`` row exists for the id — i.e. some paired
+          GFS directory actually advertised this space
+          (``GfsSpaceMirrorService.was_gfs_listed``).
+
+        Without that evidence the row may be a public/global stub learned
+        from a direct peer, which has nothing to do with any GFS: fanning a
+        signed, identity-bound unsubscribe at every GFS operator would
+        disclose a relationship with a space they never knew about, and the
+        purge would destroy a space we were never asked to forget. In that
+        case the local member removal (already done by the caller) is all
+        that happens — losing a stub row is worse than keeping an inert one.
+
+        The GFS-side unsubscribe is best-effort (a down GFS must not block the
+        local leave); the local purge then cascades from ``spaces``, which is
+        what drops the space's ``space_keys`` row — the content key goes with
+        the mirror rather than lingering for a space we can no longer read.
+        """
+        if self._gfs_mirror is None:
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id == self._own_instance_id:
+            return
+        try:
+            if await self._spaces.get_space_seed(space_id) is not None:
+                # We hold authority for this space — not a passive mirror.
+                return
+        except RuntimeError:
+            # Seed access is unavailable (no KEK wired). We cannot establish
+            # that we are *not* this space's authority, and this path is
+            # destructive — fail safe by doing nothing.
+            log.debug(
+                "space %s: cannot read the space seed — skipping mirror purge",
+                space_id,
+            )
+            return
+        if await self._spaces.list_members(space_id):
+            # Another local user still subscribes — keep the mirror.
+            return
+        proven_mirror = space.space_type is SpaceType.GLOBAL and (
+            await self._gfs_mirror.was_gfs_listed(space_id)
+        )
+        if not proven_mirror:
+            log.debug(
+                "space %s: not provably a GFS mirror (type=%s, gfs-listed=no)"
+                " — leaving the row alone and sending no GFS unsubscribe",
+                space_id,
+                space.space_type,
+            )
+            return
+        await self._gfs_mirror.unsubscribe(space_id)
+        await purge_space_and_media(
+            space_repo=self._spaces,
+            post_repo=self._posts,
+            gallery_repo=self._gallery,
+            bazaar_repo=self._bazaar,
+            media_dir=self._media_dir,
+            space_id=space_id,
+        )
 
     async def list_subscriptions(self, user_id: str) -> list[dict]:
         return await self._spaces.list_subscriptions_for_user(user_id)
@@ -4458,17 +4559,10 @@ def _coerce_roster_sequence(meta: dict) -> int:
 def _coerce_min_age(value: object) -> int:
     """Clamp a federated ``min_age`` to the allowed set ({0,13,16,18}).
 
-    A non-conforming / malicious peer shipping e.g. ``15`` must not reach
-    the ``spaces.min_age`` CHECK (it would raise and abort the join) — fall
-    back to 0 (no restriction, the fail-soft default).
+    Thin alias for :func:`socialhome.domain.space.normalize_min_age`, kept
+    for the existing federation importers.
     """
-    if not isinstance(value, (int, str)):
-        return 0
-    try:
-        coerced = int(value)
-    except TypeError, ValueError:
-        return 0
-    return coerced if coerced in _VALID_MIN_AGES else 0
+    return normalize_min_age(value)
 
 
 async def can_seat_remote_stub(

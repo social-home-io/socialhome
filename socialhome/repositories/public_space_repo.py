@@ -16,6 +16,7 @@ from ..domain.public_space import PublicSpaceListing  # noqa: F401,E402
 @runtime_checkable
 class AbstractPublicSpaceRepo(Protocol):
     async def upsert(self, listing: PublicSpaceListing) -> None: ...
+    async def get(self, space_id: str) -> PublicSpaceListing | None: ...
     async def list_active(self, *, limit: int = 50) -> list[PublicSpaceListing]: ...
     async def list_visible_for_user(
         self,
@@ -75,6 +76,20 @@ class SqlitePublicSpaceRepo:
                 cached,
             ),
         )
+
+    async def get(self, space_id: str) -> PublicSpaceListing | None:
+        """Return the cached directory listing for *space_id*, or ``None``.
+
+        Presence of a row is the household's only local evidence that some
+        paired GFS directory actually advertised this space — used by the
+        mirror teardown path to tell a GFS mirror apart from a
+        peer-discovered public/global stub.
+        """
+        row = await self._db.fetchone(
+            "SELECT * FROM public_space_cache WHERE space_id=?",
+            (space_id,),
+        )
+        return _row(row) if row is not None else None
 
     async def list_active(self, *, limit: int = 50) -> list[PublicSpaceListing]:
         rows = await self._db.fetchall(

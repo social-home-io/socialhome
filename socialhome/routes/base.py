@@ -68,6 +68,7 @@ from ..services.moment_service import MomentNotFoundError, MomentRateLimitError
 from ..services.highlight_publication_service import (
     HighlightNotFoundError as HighlightPublicationNotFoundError,
 )
+from ..services.gfs_connection_service import GfsConnectionError
 from ..services.highlight_publication_service import HighlightPublicationError
 from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
 from ..services.highlight_service import (
@@ -221,6 +222,12 @@ class BaseView(web.View):
         except AppQuotaExceededError as exc:
             return error_response(413, "QUOTA_EXCEEDED", str(exc))
         except HighlightPublicationError as exc:
+            return error_response(502, "GFS_UNAVAILABLE", str(exc))
+        except GfsConnectionError as exc:
+            # A paired global server is unreachable / refused the call (e.g.
+            # subscribing to a GFS-discovered space while that GFS is down).
+            # 502 + GFS_UNAVAILABLE matches HighlightPublicationError above:
+            # an upstream we depend on failed, not the caller's request.
             return error_response(502, "GFS_UNAVAILABLE", str(exc))
         except HighlightFrameLimitError as exc:
             return error_response(429, "HIGHLIGHT_FRAME_LIMIT", str(exc))

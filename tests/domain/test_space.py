@@ -11,6 +11,7 @@ from socialhome.domain.space import (
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
+    normalize_min_age,
 )
 
 
@@ -160,3 +161,21 @@ def test_config_gap_error():
     """SpaceConfigGapError includes space_id, have, and need in its string form."""
     e = SpaceConfigGapError(space_id="s1", have=3, need=7)
     assert "s1" in str(e) and "3" in str(e)
+
+
+# ─── normalize_min_age ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("value", [0, 13, 16, 18, "13", "18"])
+def test_normalize_min_age_passes_allowed_values(value):
+    """Every value in the allowed set (and its string form) round-trips."""
+    assert normalize_min_age(value) == int(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [15, -1, 99, None, "nope", 1.5, object(), [13]],
+)
+def test_normalize_min_age_clamps_everything_else(value):
+    """Anything outside {0,13,16,18} falls back to 0 (fail-soft default)."""
+    assert normalize_min_age(value) == 0

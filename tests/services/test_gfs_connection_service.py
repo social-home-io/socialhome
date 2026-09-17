@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 
 import aiohttp
@@ -19,21 +20,37 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.services.gfs_connection_service import (
+    MAX_REMOTE_DETAIL_CHARS,
     GfsConnectionError,
     GfsConnectionService,
+    _remote_detail,
 )
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 
 
+class _Content:
+    """Minimal stand-in for ``aiohttp``'s streaming body reader."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
 class _StubResp:
-    __slots__ = ("status", "_body", "_text")
+    __slots__ = ("status", "_body", "_text", "content", "content_length")
 
     def __init__(self, status: int, body: dict | None = None, text: str = ""):
         self.status = status
         self._body = body or {}
         self._text = text
+        self.content = _Content(text.encode())
+        self.content_length = len(text.encode())
 
     async def __aenter__(self):
         return self
@@ -1601,3 +1618,105 @@ async def test_publish_space_event_skips_unpublished_space(env):
     )
     assert delivered == 0
     assert session.posts == []
+
+
+# ─── unsubscribe_from_gfs_space ──────────────────────────────────────────
+
+
+async def test_unsubscribe_from_gfs_space_signs_body(env):
+    """``unsubscribe_from_gfs_space`` signs the canonical
+    ``{action, instance_id, space_id, ts}`` body with the household identity
+    key and POSTs it to ``/gfs/subscribe``. The GFS requires the signature
+    (an unsigned unsubscribe is a 403) and the ``action`` rides inside the
+    signed bytes, so the signature can't be replayed as a subscribe."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
+    session = _StubSession(method_responses={"POST": (200, {"status": "removed"})})
+    svc, pubkey = _signing_svc(repo, session)
+    status = await svc.unsubscribe_from_gfs_space("sp-leave", "gfs-unsub")
+    assert status == "removed"
+    assert session.calls == [("POST", "https://gfs.example/gfs/subscribe")]
+    body = session._last_body  # type: ignore[attr-defined]
+    assert body["action"] == "unsubscribe"
+    assert body["instance_id"] == "alpha.home"
+    assert body["space_id"] == "sp-leave"
+    assert body["ts"]
+    canonical = json.dumps(
+        {
+            "action": "unsubscribe",
+            "instance_id": "alpha.home",
+            "space_id": "sp-leave",
+            "ts": body["ts"],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    assert verify_ed25519(pubkey, canonical, b64url_decode(body["signature"]))
+
+
+async def test_unsubscribe_from_gfs_space_404_is_success(env):
+    """Idempotent: already-absent on the GFS is not an error."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
+    session = _StubSession(method_responses={"POST": (404, {})})
+    svc, _pk = _signing_svc(repo, session)
+    assert await svc.unsubscribe_from_gfs_space("sp-gone", "gfs-unsub")
+
+
+async def test_unsubscribe_from_gfs_space_raises_on_server_error(env):
+    _, repo = env
+    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
+    session = _StubSession(method_responses={"POST": (500, {})})
+    svc, _pk = _signing_svc(repo, session)
+    with pytest.raises(GfsConnectionError):
+        await svc.unsubscribe_from_gfs_space("sp-x", "gfs-unsub")
+
+
+async def test_unsubscribe_from_gfs_space_unknown_gfs_raises(env):
+    _, repo = env
+    session = _StubSession(status=200)
+    svc, _pk = _signing_svc(repo, session)
+    with pytest.raises(GfsConnectionError):
+        await svc.unsubscribe_from_gfs_space("sp-x", "nope")
+    assert session.calls == []
+
+
+async def test_unsubscribe_from_gfs_space_without_signing_key_raises(env):
+    """Fail-closed: no signing identity → never send an unsigned body."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
+    session = _StubSession(status=200)
+    svc = GfsConnectionService(repo, http_client=session)
+    with pytest.raises(GfsConnectionError):
+        await svc.unsubscribe_from_gfs_space("sp-x", "gfs-unsub")
+    assert session.calls == []
+
+
+# ─── remote-authored error text (FIX 6) ──────────────────────────────────
+
+
+async def test_remote_error_detail_is_truncated(caplog):
+    """``GfsConnectionError`` text reaches the SPA as the 502
+    ``GFS_UNAVAILABLE`` message (``routes/base.py``), so a hostile GFS must
+    not be able to author arbitrarily long copy in the household's own error
+    toast. The full body goes to the log instead."""
+    resp = _StubResp(500, text="X" * 5000)
+    with caplog.at_level(logging.WARNING):
+        detail = await _remote_detail(resp, context="publish")
+
+    assert len(detail) <= MAX_REMOTE_DETAIL_CHARS + len("… (truncated)")
+    assert detail.endswith("… (truncated)")
+    assert "X" * 5000 in caplog.text
+
+
+async def test_short_remote_error_detail_passes_through():
+    resp = _StubResp(400, text="space not published")
+    assert await _remote_detail(resp, context="publish") == "space not published"
+
+
+async def test_remote_error_detail_bounds_the_read():
+    """Even the logged body is bounded — a multi-gigabyte error body must
+    never be buffered whole."""
+    resp = _StubResp(500, text="Y" * (1024 * 1024))
+    detail = await _remote_detail(resp, context="subscribe")
+    assert len(detail) <= MAX_REMOTE_DETAIL_CHARS + len("… (truncated)")

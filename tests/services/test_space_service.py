@@ -4982,3 +4982,371 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
         space_id=space_id,
         host_instance_id=host_instance,
     )
+
+
+# ── GFS-discovered space on-ramp (mirror → subscribe) ─────────────────────
+
+
+_MIRROR_PIN = "aa" * 32
+
+
+class _FakeGfsMirror:
+    """Stand-in for :class:`GfsSpaceMirrorService` — seats a real stub row
+    (via the production helper) and records the GFS-side calls."""
+
+    def __init__(
+        self,
+        space_repo,
+        *,
+        gfs_id: str = "gfs-1",
+        min_age: int = 0,
+        ban_user_id: str | None = None,
+        found: bool = True,
+        gfs_listed: bool = True,
+    ):
+        self._spaces = space_repo
+        self._gfs_id = gfs_id
+        self._min_age = min_age
+        self._ban_user_id = ban_user_id
+        self._found = found
+        # Mirrors ``GfsSpaceMirrorService.was_gfs_listed`` — whether a
+        # ``public_space_cache`` row proves a GFS directory advertised this
+        # space. Default True: rows this fake seats came from a GFS.
+        self._gfs_listed = gfs_listed
+        self.ensure_calls: list[str] = []
+        self.subscribes: list[tuple[str, str]] = []
+        self.unsubscribes: list[str] = []
+
+    async def ensure_mirror(self, space_id):
+        from socialhome.services.space_service import stub_space_from_metadata
+
+        self.ensure_calls.append(space_id)
+        if not self._found:
+            return None
+        space = stub_space_from_metadata(
+            space_id,
+            host_instance_id="remote-host",
+            meta={
+                "name": "Remote Global",
+                "identity_public_key": _MIRROR_PIN,
+                "space_type": "global",
+                "join_mode": "invite_only",
+                "owner_username": "",
+                "min_age": self._min_age,
+                "category": "gaming",
+            },
+        )
+        await self._spaces.save(space)
+        if self._ban_user_id is not None:
+            await self._spaces.ban_member(
+                space_id, self._ban_user_id, banned_by="remote", reason="t"
+            )
+        return space, self._gfs_id
+
+    async def subscribe_to_gfs(self, space_id, gfs_id):
+        self.subscribes.append((space_id, gfs_id))
+
+    async def was_gfs_listed(self, space_id):
+        return self._gfs_listed
+
+    async def unsubscribe(self, space_id):
+        self.unsubscribes.append(space_id)
+
+
+async def test_subscribe_mirrors_gfs_space_then_subscribes(stack):
+    """A space with no local row is mirrored from the GFS, the subscriber is
+    seated, and the GFS-side registration fires exactly once."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+
+    assert mirror.ensure_calls == ["remote-sp"]
+    assert mirror.subscribes == [("remote-sp", "gfs-1")]
+    member = await stack.space_repo.get_member("remote-sp", fan.user_id)
+    assert member is not None and member.role == "subscriber"
+    stored = await stack.space_repo.get("remote-sp")
+    assert stored is not None
+    assert stored.identity_public_key == _MIRROR_PIN
+
+
+async def test_subscribe_without_mirror_keeps_legacy_404(stack):
+    """No mirror attached (no GFS paired) → unchanged behaviour."""
+    fan = await stack.provision_user("fan")
+    with pytest.raises(KeyError):
+        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+
+
+async def test_subscribe_when_mirror_finds_nothing_still_404s(stack):
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo, found=False)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    with pytest.raises(KeyError):
+        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    assert mirror.subscribes == []
+
+
+async def test_subscribe_to_local_space_skips_the_mirror(stack):
+    """An already-local space never triggers a GFS round-trip."""
+    await stack.provision_user("owner_m")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="owner_m", name="P", space_type=SpaceType.GLOBAL
+    )
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    assert mirror.ensure_calls == []
+    assert mirror.subscribes == []
+
+
+async def test_banned_user_never_reaches_the_gfs(stack):
+    """Ordering regression: the local ban refusal runs BEFORE the GFS-side
+    subscribe, so a banned user is never registered on the relay."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo, ban_user_id=fan.user_id)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    assert mirror.subscribes == []
+    assert await stack.space_repo.get_member("remote-sp", fan.user_id) is None
+
+
+async def test_age_gated_user_never_reaches_the_gfs(stack):
+    """Same ordering regression for the §CP.F1 age gate."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    kid = await stack.provision_user("kid")
+    cp = await _attach_cp(stack)
+    await cp.enable_protection(
+        minor_username="kid",
+        declared_age=8,
+        actor_user_id=anna.user_id,
+    )
+    mirror = _FakeGfsMirror(stack.space_repo, min_age=18)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+
+    with pytest.raises(SpacePermissionError, match="18"):
+        await stack.space_svc.subscribe_to_space(kid.user_id, "remote-sp")
+    assert mirror.subscribes == []
+    assert await stack.space_repo.get_member("remote-sp", kid.user_id) is None
+
+
+async def _seed_space_key(stack, space_id: str) -> None:
+    from socialhome.domain.space_key import SpaceKey
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+
+    await SqliteSpaceKeyRepo(stack.db).save(
+        SpaceKey(space_id=space_id, epoch=1, content_key_hex="ab" * 16)
+    )
+
+
+async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
+    """Last local subscriber leaves → GFS unsubscribe + the stub row and its
+    content key are dropped."""
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await _seed_space_key(stack, "remote-sp")
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == ["remote-sp"]
+    assert await stack.space_repo.get("remote-sp") is None
+    keys = SqliteSpaceKeyRepo(stack.db)
+    assert await keys.get_latest("remote-sp") is None
+
+
+async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
+    fan = await stack.provision_user("fan")
+    other = await stack.provision_user("other")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await stack.space_svc.subscribe_to_space(other.user_id, "remote-sp")
+    await _seed_space_key(stack, "remote-sp")
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("remote-sp") is not None
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+
+    assert await SqliteSpaceKeyRepo(stack.db).get_latest("remote-sp") is not None
+
+
+async def test_unsubscribe_never_purges_an_owned_space(stack):
+    """An owned (or seed-held) space is not a mirror — never purged."""
+    await stack.provision_user("owner_p")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="owner_p", name="P", space_type=SpaceType.GLOBAL
+    )
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, space.id)
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get(space.id) is not None
+
+
+async def test_unsubscribe_leaves_a_peer_discovered_stub_alone(stack):
+    """A public/global stub learned from a **direct peer** matches every
+    structural test for a mirror (remote-owned, no seed, no members left) but
+    has nothing to do with any GFS.
+
+    Two things must therefore NOT happen: the signed, identity-bound GFS
+    unsubscribe (which would tell every paired GFS operator this household
+    had a relationship with a space they never knew about — third-party
+    metadata disclosure the user never opted into), and the purge (which
+    would destroy a space nobody asked us to forget). Only the local member
+    row goes.
+    """
+    fan = await stack.provision_user("fan")
+    # No ``public_space_cache`` row → no GFS directory ever listed this id.
+    mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=False)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "peer-sp")
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "peer-sp")
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("peer-sp") is not None
+    assert await stack.space_repo.get_member("peer-sp", fan.user_id) is None
+
+
+async def test_unsubscribe_leaves_a_non_global_remote_stub_alone(stack):
+    """The mirror only ever seats ``space_type=global``; a remote PUBLIC
+    stub is some other trust path's row."""
+    from socialhome.services.space_service import stub_space_from_metadata
+
+    fan = await stack.provision_user("fan")
+    await stack.space_repo.save(
+        stub_space_from_metadata(
+            "public-sp",
+            host_instance_id="remote-host",
+            meta={
+                "name": "Peer public",
+                "identity_public_key": _MIRROR_PIN,
+                "space_type": "public",
+                "join_mode": "open",
+                "owner_username": "",
+            },
+        )
+    )
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "public-sp")
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "public-sp")
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("public-sp") is not None
+
+
+async def test_unsubscribe_purges_a_proven_gfs_mirror(stack):
+    """The positive case, alongside the two refusals above: a global stub a
+    GFS directory really did list is unsubscribed and purged."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=True)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == ["remote-sp"]
+    assert await stack.space_repo.get("remote-sp") is None
+
+
+async def test_unsubscribe_skips_the_purge_when_the_seed_is_unreadable(stack):
+    """Failing to determine whether we hold space authority must SUPPRESS
+    the purge, not permit it — the old ``except RuntimeError: pass`` failed
+    open on a destructive path."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+
+    async def _boom(space_id):
+        raise RuntimeError("space seed access requires a key_manager")
+
+    stack.space_repo.get_space_seed = _boom
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("remote-sp") is not None
+
+
+async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
+    """A GFS that refuses / is down must never block the local unsubscribe —
+    exercised against the REAL mirror service so the swallow is verified."""
+    from socialhome.domain.federation import GfsConnection
+    from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+    from socialhome.services.gfs_connection_service import GfsConnectionError
+    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
+
+    fan = await stack.provision_user("fan")
+    conn_repo = SqliteGfsConnectionRepo(stack.db)
+    await conn_repo.save(
+        GfsConnection(
+            id="gfs-1",
+            gfs_instance_id="inst-1",
+            display_name="G",
+            public_key="pk",
+            inbox_url="https://gfs.test",
+            status="active",
+            paired_at="2025-01-01T00:00:00+00:00",
+        )
+    )
+
+    class _DownGfs:
+        def __init__(self):
+            self.calls = []
+
+        async def unsubscribe_from_gfs_space(self, space_id, gfs_id):
+            self.calls.append((space_id, gfs_id))
+            raise GfsConnectionError("down")
+
+    from socialhome.domain.public_space import PublicSpaceListing
+    from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
+
+    public_repo = SqlitePublicSpaceRepo(stack.db)
+    # The directory row is what proves this stub is a GFS mirror.
+    await public_repo.upsert(
+        PublicSpaceListing(
+            space_id="remote-sp",
+            instance_id="remote-host",
+            name="Remote Global",
+            description=None,
+            emoji=None,
+            lat=None,
+            lon=None,
+            radius_km=None,
+            member_count=1,
+        )
+    )
+    down = _DownGfs()
+    real_mirror = GfsSpaceMirrorService(
+        space_repo=stack.space_repo,
+        gfs_connection_repo=conn_repo,
+        gfs_connection_service=down,
+        public_space_repo=public_repo,
+    )
+    # Seat the stub the way ensure_mirror would, then subscribe locally.
+    seeder = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(seeder)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    stack.space_svc.attach_gfs_space_mirror(real_mirror)
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert down.calls == [("remote-sp", "gfs-1")]
+    assert await stack.space_repo.get("remote-sp") is None

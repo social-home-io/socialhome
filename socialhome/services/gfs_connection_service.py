@@ -36,6 +36,43 @@ from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 
 log = logging.getLogger(__name__)
 
+#: Characters of a *remote-authored* error body that may be interpolated
+#: into a :class:`GfsConnectionError`. That message travels to the SPA as
+#: the 502 ``GFS_UNAVAILABLE`` detail (``routes/base.py``), so an unbounded
+#: body would let a hostile GFS author arbitrary — and arbitrarily long —
+#: copy inside the household's own error toast. The full body still reaches
+#: the operator, in the log.
+MAX_REMOTE_DETAIL_CHARS = 200
+
+#: Bytes read from a remote error body at all. Beyond this even the log
+#: line is not worth the memory.
+_REMOTE_DETAIL_READ_BYTES = 8192
+
+
+async def _remote_detail(resp, *, context: str) -> str:
+    """Read a GFS error body for display, bounded and truncated.
+
+    Returns at most :data:`MAX_REMOTE_DETAIL_CHARS` characters. Anything
+    longer is logged in full (up to :data:`_REMOTE_DETAIL_READ_BYTES`) and
+    elided in the returned string — never trust a remote peer with the text
+    a local user reads.
+    """
+    try:
+        raw = await resp.content.read(_REMOTE_DETAIL_READ_BYTES)
+    except Exception as exc:  # pragma: no cover - transport-level failure
+        log.debug("GFS %s: could not read the error body: %s", context, exc)
+        return ""
+    body = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+    if len(body) <= MAX_REMOTE_DETAIL_CHARS:
+        return body
+    log.warning(
+        "GFS %s returned a %d-char error body (truncated for display): %s",
+        context,
+        len(body),
+        body,
+    )
+    return body[:MAX_REMOTE_DETAIL_CHARS] + "… (truncated)"
+
 
 class GfsConnectionError(Exception):
     """Raised when a GFS operation fails."""
@@ -161,7 +198,7 @@ class GfsConnectionService:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
-                    detail = await resp.text()
+                    detail = await _remote_detail(resp, context="/gfs/info")
                     raise GfsConnectionError(
                         f"GFS /gfs/info failed (HTTP {resp.status}): {detail}",
                     )
@@ -210,7 +247,7 @@ class GfsConnectionService:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    detail = await resp.text()
+                    detail = await _remote_detail(resp, context="/gfs/register")
                     raise GfsConnectionError(
                         f"GFS registration failed (HTTP {resp.status}): {detail}",
                     )
@@ -334,7 +371,7 @@ class GfsConnectionService:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status not in (200, 201):
-                    detail = await resp.text()
+                    detail = await _remote_detail(resp, context="publish")
                     raise GfsConnectionError(
                         f"GFS rejected publish (HTTP {resp.status}): {detail}",
                     )
@@ -498,7 +535,7 @@ class GfsConnectionService:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status not in (200, 204, 404):
-                    detail = await resp.text()
+                    detail = await _remote_detail(resp, context="unpublish")
                     raise GfsConnectionError(
                         f"GFS rejected unpublish (HTTP {resp.status}): {detail}",
                     )
@@ -554,7 +591,7 @@ class GfsConnectionService:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status not in (200, 201):
-                    detail = await resp.text()
+                    detail = await _remote_detail(resp, context="subscribe")
                     raise GfsConnectionError(
                         f"GFS rejected subscribe (HTTP {resp.status}): {detail}",
                     )
@@ -567,6 +604,72 @@ class GfsConnectionService:
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
         return str(data.get("status") or "subscribed")
+
+    async def unsubscribe_from_gfs_space(self, space_id: str, gfs_id: str) -> str:
+        """Unsubscribe this household from a GFS-listed space's relay fan-out.
+
+        Mirror of :meth:`subscribe_to_gfs_space`: the GFS mandates an
+        Ed25519 signature on every (un)subscribe (so a caller can only
+        unsubscribe **itself** — without it any household could evict any
+        other from a space's relay), so this signs the canonical
+        ``{action: "unsubscribe", instance_id, space_id, ts}`` body — the
+        ``action`` is inside the signed bytes so the signature can't be
+        replayed as a subscribe — and POSTs it to ``/gfs/subscribe``.
+        Fail-closed: with no signing identity wired it raises rather than
+        send an unsigned body the GFS would reject with a 403.
+
+        ``404`` counts as success alongside ``200``/``204`` — mirroring
+        :meth:`unpublish_space`, removing an already-absent subscription is
+        idempotent. Returns the GFS-reported status.
+        """
+        if not self._own_instance_id or not self._own_signing_key:
+            raise GfsConnectionError(
+                "cannot unsubscribe from a GFS space without a wired signing identity",
+            )
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+
+        ts = datetime.now(timezone.utc).isoformat()
+        canonical = json.dumps(
+            {
+                "action": "unsubscribe",
+                "instance_id": self._own_instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "action": "unsubscribe",
+            "instance_id": self._own_instance_id,
+            "space_id": space_id,
+            "ts": ts,
+            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
+        }
+        client = self._client()
+        url = f"{conn.inbox_url}/gfs/subscribe"
+        try:
+            async with client.post(
+                url,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status not in (200, 204, 404):
+                    detail = await _remote_detail(resp, context="unsubscribe")
+                    raise GfsConnectionError(
+                        f"GFS rejected unsubscribe (HTTP {resp.status}): {detail}",
+                    )
+                try:
+                    data = await resp.json()
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
+        return str(data.get("status") or "unsubscribed")
 
     async def publish_space_to_all(self, space_id: str) -> int:
         """Publish a space to every active GFS connection.
@@ -748,7 +851,7 @@ class GfsConnectionService:
                         "GFS %s rejected name sync (HTTP %d): %s",
                         conn.id,
                         resp.status,
-                        await resp.text(),
+                        await _remote_detail(resp, context="name sync"),
                     )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             log.warning(
@@ -853,7 +956,7 @@ class GfsConnectionService:
                 log.warning(
                     "GFS report_fraud returned HTTP %d: %s",
                     resp.status,
-                    await resp.text(),
+                    await _remote_detail(resp, context="report_fraud"),
                 )
                 return False
         except aiohttp.ClientError as exc:
@@ -910,7 +1013,7 @@ class GfsConnectionService:
                 log.warning(
                     "GFS send_appeal returned HTTP %d: %s",
                     resp.status,
-                    await resp.text(),
+                    await _remote_detail(resp, context="send_appeal"),
                 )
                 return False
         except aiohttp.ClientError as exc:

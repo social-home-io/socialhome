@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,6 +19,10 @@ from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
     SqlitePublicSpaceRepo,
+)
+from socialhome.services.gfs_http import (
+    MAX_GFS_DIRECTORY_BODY_BYTES,
+    MAX_GFS_DIRECTORY_ITEMS,
 )
 from socialhome.services.public_space_discovery_service import (
     PublicSpaceDiscoveryService,
@@ -150,10 +157,23 @@ async def test_purge_older_than(env):
 # ─── Service ─────────────────────────────────────────────────────────────
 
 
+class _Content:
+    """Minimal stand-in for ``aiohttp``'s streaming body reader."""
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
 class _StubResp:
-    def __init__(self, status: int, body):
+    def __init__(self, status: int, body, *, raw: bytes | None = None):
         self.status = status
         self._body = body
+        payload = json.dumps(body).encode() if raw is None else raw
+        self.content = _Content(payload)
+        self.content_length = len(payload)
 
     async def __aenter__(self):
         return self
@@ -166,14 +186,15 @@ class _StubResp:
 
 
 class _StubSession:
-    def __init__(self, *, status: int = 200, body=None):
+    def __init__(self, *, status: int = 200, body=None, raw: bytes | None = None):
         self._status = status
         self._body = body
+        self._raw = raw
         self.calls: list[str] = []
 
     def get(self, url, **kw):
         self.calls.append(url)
-        return _StubResp(self._status, self._body)
+        return _StubResp(self._status, self._body, raw=self._raw)
 
 
 async def test_disabled_when_no_gfs_connection_repo(env):
@@ -410,3 +431,165 @@ async def test_start_is_idempotent(env):
     await svc.start()
     assert svc._task is first_task
     await svc.stop()
+
+
+# ─── GFS directory contract (regression: wrong URL + wrong field names) ──
+
+
+def _global_space_item(space_id: str = "s1", **over) -> dict:
+    """A realistic ``asdict(GlobalSpace)`` row as the GFS actually emits it."""
+    item = {
+        "space_id": space_id,
+        "owning_instance": "inst-a",
+        "name": "N",
+        "description": "D",
+        "subscriber_count": 7,
+        "icon_url": "data:image/webp;base64,AA",
+        "identity_public_key": "ab" * 32,
+        "category": "tech",
+        "min_age": 13,
+        "status": "active",
+    }
+    item.update(over)
+    return item
+
+
+async def test_fetch_directory_hits_gfs_spaces_path(env):
+    """REGRESSION: the directory lives at ``/gfs/spaces`` on the GFS.
+
+    ``/api/public_spaces`` is *this household's own* API route, so polling
+    it 404'd forever and the Global tab never populated.
+    """
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    session = _StubSession(body={"spaces": []})
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=session,
+    )
+    await svc.poll_once()
+    assert session.calls == ["https://gfs.example.com/gfs/spaces"]
+
+
+async def test_poll_once_maps_global_space_shape(env):
+    """A ``GlobalSpace``-shaped row maps onto the cache columns."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={"spaces": [_global_space_item()]}),
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert len(out) == 1
+    got = out[0]
+    assert got.space_id == "s1"
+    assert got.instance_id == "inst-a"
+    assert got.member_count == 7
+    assert got.category == "tech"
+    assert got.min_age == 13
+    # The GFS directory is geo-less — never invent coordinates.
+    assert got.emoji is None
+    assert got.lat is None
+    assert got.lon is None
+    assert got.radius_km is None
+
+
+async def test_poll_once_clamps_min_age_without_losing_siblings(env):
+    """REGRESSION: a GFS row with a non-conforming ``min_age`` (e.g. 15)
+    violates the ``public_space_cache`` CHECK — before the clamp it raised
+    and aborted the whole tick, dropping every other listing too."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            _global_space_item("s-bad", min_age=15),
+            _global_space_item("s-good", min_age=18),
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    assert await svc.poll_once() == 2
+    out = {row.space_id: row for row in await repo.list_active()}
+    assert set(out) == {"s-bad", "s-good"}
+    assert out["s-bad"].min_age == 0
+    assert out["s-good"].min_age == 18
+
+
+async def test_fetch_directory_logs_non_200_above_debug(env, caplog):
+    """A 404/5xx from the GFS is visible at INFO — the debug-level silence
+    is exactly why the wrong-URL bug survived."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(status=404, body={}),
+    )
+    with caplog.at_level(
+        logging.INFO,
+        logger="socialhome.services.public_space_discovery_service",
+    ):
+        assert await svc.poll_once() == 0
+    records = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert records, "non-200 GFS directory response must log above debug"
+    joined = " ".join(r.getMessage() for r in records)
+    assert "404" in joined
+    assert "https://gfs.example.com/gfs/spaces" in joined
+
+
+# ─── response bounds (FIX 5) ─────────────────────────────────────────────
+
+
+async def test_poll_once_refuses_an_oversized_directory_body(env):
+    """``aiohttp`` caps nothing by default: a hostile/compromised GFS could
+    return a multi-gigabyte directory and OOM the household. Fail soft —
+    the tick imports nothing and the next one retries."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    giant = b'{"pad": "' + b"x" * (MAX_GFS_DIRECTORY_BODY_BYTES + 10) + b'"}'
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={}, raw=giant),
+    )
+
+    assert await svc.poll_once() == 0
+    assert await repo.list_active() == []
+
+
+async def test_poll_once_caps_the_number_of_imported_items(env):
+    """A body well under the byte cap can still carry an enormous number of
+    tiny rows — each of which would become a cache write."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {"space_id": f"sp-{i}", "instance_id": "inst-X", "name": "n"}
+            for i in range(MAX_GFS_DIRECTORY_ITEMS + 25)
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+
+    assert await svc.poll_once() == MAX_GFS_DIRECTORY_ITEMS
+
+
+async def test_poll_once_ignores_an_unparsable_directory_body(env):
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={}, raw=b"<html>nope</html>"),
+    )
+
+    assert await svc.poll_once() == 0
