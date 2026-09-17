@@ -468,7 +468,9 @@ class GfsConnectionService:
 
         The GFS mandates an Ed25519 signature on every subscribe (so a
         caller can only subscribe itself), so this signs the canonical
-        ``{instance_id, space_id, ts}`` body with the household identity
+        ``{action: "subscribe", instance_id, space_id, ts}`` body — the
+        ``action`` is inside the signed bytes so the GFS can't have the
+        signature replayed as an unsubscribe — with the household identity
         key and POSTs it to ``/gfs/subscribe``. Fail-closed: with no
         signing identity wired, it raises rather than sending an unsigned
         body the GFS would reject. Returns the GFS-reported status.
@@ -484,6 +486,7 @@ class GfsConnectionService:
         ts = datetime.now(timezone.utc).isoformat()
         canonical = json.dumps(
             {
+                "action": "subscribe",
                 "instance_id": self._own_instance_id,
                 "space_id": space_id,
                 "ts": ts,
@@ -492,6 +495,7 @@ class GfsConnectionService:
             sort_keys=True,
         ).encode("utf-8")
         body = {
+            "action": "subscribe",
             "instance_id": self._own_instance_id,
             "space_id": space_id,
             "ts": ts,

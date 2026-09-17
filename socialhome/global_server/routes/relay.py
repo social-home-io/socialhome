@@ -13,6 +13,10 @@ from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
 
+#: The only actions ``POST /gfs/subscribe`` accepts. Anything else is a 400 —
+#: a typo'd action must never silently fall through to a subscribe.
+_SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
+
 
 class GfsInfoView(GfsBaseView):
     """``GET /gfs/info`` — public GFS identity descriptor.
@@ -172,12 +176,19 @@ class PublishView(GfsBaseView):
 class SubscribeView(GfsBaseView):
     """``POST /gfs/subscribe`` — subscribe or unsubscribe an instance.
 
-    Subscribe is Ed25519-signed (mandatory): body
-    ``{instance_id, space_id, ts, signature}``, signed over the canonical
-    JSON of ``{instance_id, space_id, ts}`` and verified against the
-    registered ``ClientInstance.public_key`` (replay-guarded ±300 s on
+    BOTH actions are Ed25519-signed (mandatory): body
+    ``{instance_id, space_id, ts, signature, action?}``, signed over the
+    canonical JSON of ``{action, instance_id, space_id, ts}`` — the
+    ``action`` rides inside the signed bytes (domain separation), so a
+    signature for one action can never be replayed as the other — and
+    verified against
+    the registered ``ClientInstance.public_key`` (replay-guarded ±300 s on
     ``ts``). The signature binds the request to *instance_id* so a caller
-    can only subscribe itself. Auth failures map to ``403``.
+    can only subscribe — or unsubscribe — **itself**; an unsigned
+    unsubscribe would otherwise let anyone evict any household from any
+    space's relay fan-out. A missing ``ts`` / ``signature`` — or an
+    ``action`` outside ``{"subscribe", "unsubscribe"}`` — is a ``400``;
+    auth failures map to ``403``.
     """
 
     async def post(self) -> web.Response:
@@ -188,15 +199,25 @@ class SubscribeView(GfsBaseView):
             space_id = body["space_id"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        action = body.get("action", "subscribe")
-        if action == "unsubscribe":
-            await svc.unsubscribe(str(instance_id), str(space_id))
-            return web.json_response({"status": "unsubscribed"})
+        action = str(body.get("action", "subscribe"))
+        if action not in _SUBSCRIBE_ACTIONS:
+            raise web.HTTPBadRequest(reason=f"Unknown action: {action}")
         try:
             ts = body["ts"]
             signature = body["signature"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        if action == "unsubscribe":
+            try:
+                await svc.unsubscribe(
+                    str(instance_id),
+                    str(space_id),
+                    str(ts),
+                    str(signature),
+                )
+            except PermissionError as exc:
+                return web.json_response({"error": str(exc)}, status=403)
+            return web.json_response({"status": "unsubscribed"})
         try:
             await svc.subscribe(
                 str(instance_id),

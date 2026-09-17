@@ -206,7 +206,12 @@ async def test_subscribe_then_unsubscribe(client):
     await _publish_known_space(client, "sp-sub")
     ts = _now_iso()
     signed = _sign(
-        {"instance_id": "peer.home", "space_id": "sp-sub", "ts": ts},
+        {
+            "action": "subscribe",
+            "instance_id": "peer.home",
+            "space_id": "sp-sub",
+            "ts": ts,
+        },
         client._seed,
     )
     resp = await client.post(
@@ -220,13 +225,25 @@ async def test_subscribe_then_unsubscribe(client):
     )
     assert resp.status == 200
     assert (await resp.json())["status"] == "subscribed"
-    # Unsubscribe action (no signature required).
+    # Unsubscribe action — signed and self-binding, exactly like subscribe.
+    ts2 = _now_iso()
+    signed2 = _sign(
+        {
+            "action": "unsubscribe",
+            "instance_id": "peer.home",
+            "space_id": "sp-sub",
+            "ts": ts2,
+        },
+        client._seed,
+    )
     resp = await client.post(
         "/gfs/subscribe",
         json={
             "instance_id": "peer.home",
             "space_id": "sp-sub",
             "action": "unsubscribe",
+            "ts": ts2,
+            "signature": signed2["signature"],
         },
     )
     assert (await resp.json())["status"] == "unsubscribed"
@@ -680,7 +697,12 @@ async def test_fan_out_delivers_to_real_subscriber_inbox(
             assert resp.status == 200
             ts = _now_iso()
             signed_sub = _sign(
-                {"instance_id": "sub.home", "space_id": "sp-xyz", "ts": ts},
+                {
+                    "action": "subscribe",
+                    "instance_id": "sub.home",
+                    "space_id": "sp-xyz",
+                    "ts": ts,
+                },
                 sub_seed,
             )
             resp = await tc.post(

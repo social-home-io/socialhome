@@ -1341,8 +1341,10 @@ async def test_publish_body_raises_when_space_missing(env):
 
 async def test_subscribe_to_gfs_space_signs_body(env):
     """``subscribe_to_gfs_space`` signs the canonical
-    ``{instance_id, space_id, ts}`` body with the household identity key
-    and POSTs it to the GFS ``/gfs/subscribe`` endpoint."""
+    ``{action, instance_id, space_id, ts}`` body with the household
+    identity key and POSTs it to the GFS ``/gfs/subscribe`` endpoint.
+    The ``action`` rides inside the signed bytes (domain separation), so
+    the GFS can't have this signature replayed as an unsubscribe."""
     from socialhome.crypto import b64url_decode, verify_ed25519
 
     _, repo = env
@@ -1360,12 +1362,18 @@ async def test_subscribe_to_gfs_space_signs_body(env):
         ("POST", "https://gfs.example/gfs/subscribe"),
     ]
     body = session._last_body  # type: ignore[attr-defined]
+    assert body["action"] == "subscribe"
     assert body["instance_id"] == "alpha.home"
     assert body["space_id"] == "sp-join"
     assert body["ts"]
     sig = body["signature"]
     canonical = json.dumps(
-        {"instance_id": "alpha.home", "space_id": "sp-join", "ts": body["ts"]},
+        {
+            "action": "subscribe",
+            "instance_id": "alpha.home",
+            "space_id": "sp-join",
+            "ts": body["ts"],
+        },
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")

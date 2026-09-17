@@ -162,8 +162,10 @@ class GfsFederationService:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
         try:
+            # A malformed stored pubkey is unverifiable — fail closed as a
+            # 403 rather than escaping the handler as a 500.
+            raw_key = bytes.fromhex(inst.public_key)
             raw_sig = b64url_decode(signature)
         except (ValueError, TypeError) as exc:
             raise PermissionError("Invalid Ed25519 signature") from exc
@@ -291,6 +293,68 @@ class GfsFederationService:
         if not ok:
             raise PermissionError("invalid authority signature")
 
+    async def _verify_signed_request(
+        self,
+        instance_id: str,
+        payload: dict[str, object],
+        *,
+        signature: str,
+    ) -> ClientInstance:
+        """Verify a self-signed, replay-guarded request from *instance_id*.
+
+        Shared by every ``{instance_id, ..., ts}``-shaped GFS request
+        (``update_instance``, ``subscribe``, ``unsubscribe``). The Ed25519
+        *signature* is checked over the canonical JSON of *payload* against
+        the instance's REGISTERED public key — because ``instance_id`` is
+        part of the signed payload, a caller can only act as **itself**.
+        The freshness check reads ``payload["ts"]`` — the very timestamp
+        the signature covers, so a caller can never have a signature
+        verified over one timestamp and freshness-checked against another.
+        The signed ``ts`` must be a fresh, tz-aware ISO 8601 timestamp
+        within ±300 s of now; unparseable / naive timestamps are rejected
+        (a missing offset is treated as untrusted).
+
+        Fails closed with :class:`PermissionError` on an unknown instance,
+        a missing / malformed / non-verifying signature, or a stale ``ts``.
+        Returns the looked-up :class:`ClientInstance` so callers can reuse
+        it without a second read.
+        """
+        inst = await self._repo.get_instance(instance_id)
+        if inst is None:
+            raise PermissionError(f"Unknown instance: {instance_id}")
+
+        # Signature is REQUIRED here (unlike publish_space's optional-sig
+        # branch): an empty or invalid signature is a hard PermissionError.
+        if not signature:
+            raise PermissionError("Invalid Ed25519 signature")
+        canonical = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        try:
+            # A malformed stored pubkey is just as unverifiable as a
+            # malformed signature — fail closed with the same
+            # PermissionError instead of escaping the handler as a 500.
+            raw_key = bytes.fromhex(inst.public_key)
+            raw_sig = b64url_decode(signature)
+        except (ValueError, TypeError) as exc:
+            raise PermissionError("Invalid Ed25519 signature") from exc
+        if not verify_ed25519(raw_key, canonical, raw_sig):
+            raise PermissionError("Invalid Ed25519 signature")
+
+        ts = str(payload["ts"])
+        try:
+            parsed = datetime.fromisoformat(ts)
+        except (ValueError, TypeError) as exc:
+            raise PermissionError("Stale timestamp") from exc
+        if parsed.tzinfo is None:
+            raise PermissionError("Stale timestamp")
+        now = datetime.now(timezone.utc)
+        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
+            raise PermissionError("Stale timestamp")
+        return inst
+
     async def subscribe(
         self,
         instance_id: str,
@@ -301,9 +365,11 @@ class GfsFederationService:
         """Add *instance_id* as a subscriber of *space_id*.
 
         Authenticated the same way as :meth:`update_instance`: the request
-        is signed by *instance_id* over the canonical ``{instance_id,
-        space_id, ts}`` JSON and verified against the instance's registered
-        public key. Because the signature binds to the *instance_id* in the
+        is signed by *instance_id* over the canonical ``{action:
+        "subscribe", instance_id, space_id, ts}`` JSON and verified against
+        the instance's registered public key. The ``action`` discriminator
+        is part of the signed bytes (domain separation), so a captured
+        subscribe signature can never be replayed as an unsubscribe. Because the signature binds to the *instance_id* in the
         body, a caller can only subscribe **itself** — it can't sign as
         another household. The signed ``ts`` is replay-guarded (±300 s).
 
@@ -313,40 +379,16 @@ class GfsFederationService:
         an unauthenticated demand signal — a subscription must target a real
         published space).
         """
-        inst = await self._repo.get_instance(instance_id)
-        if inst is None:
-            raise PermissionError(f"Unknown instance: {instance_id}")
-
-        if not signature:
-            raise PermissionError("Invalid Ed25519 signature")
-        canonical = json.dumps(
+        inst = await self._verify_signed_request(
+            instance_id,
             {
+                "action": "subscribe",
                 "instance_id": instance_id,
                 "space_id": space_id,
                 "ts": ts,
             },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
-        try:
-            raw_sig = b64url_decode(signature)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Invalid Ed25519 signature") from exc
-        if not verify_ed25519(raw_key, canonical, raw_sig):
-            raise PermissionError("Invalid Ed25519 signature")
-
-        # Replay guard: same ±300 s tolerance / tz-aware ISO 8601 rule as
-        # update_instance.
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+            signature=signature,
+        )
 
         # A subscription must target a space the GFS already knows about.
         # Auto-minting a row from an (un)authenticated subscribe let any
@@ -479,8 +521,40 @@ class GfsFederationService:
 
         return await self._repo.list_subscribers_with_keys(space_id)
 
-    async def unsubscribe(self, instance_id: str, space_id: str) -> None:
-        """Remove *instance_id* from subscribers of *space_id*."""
+    async def unsubscribe(
+        self,
+        instance_id: str,
+        space_id: str,
+        ts: str,
+        signature: str,
+    ) -> None:
+        """Remove *instance_id* from the subscribers of *space_id*.
+
+        Authenticated exactly like :meth:`subscribe`: an Ed25519 signature
+        over the canonical ``{action: "unsubscribe", instance_id, space_id,
+        ts}`` JSON — the ``action`` is inside the signed bytes, so an
+        unsubscribe signature can't be replayed as a subscribe — verified
+        against the instance's registered public key and replay-guarded
+        (±300 s). The signature binds the request to *instance_id*, so a
+        caller can only unsubscribe **itself** — without this, any caller
+        could evict any household from any space's relay fan-out.
+
+        Fails closed (``PermissionError``) on an unknown instance, a
+        missing / malformed / invalid signature, or a stale / naive
+        timestamp. Unlike :meth:`subscribe` it deliberately does NOT
+        require the space to still exist: unsubscribing from an
+        already-removed space stays idempotent.
+        """
+        await self._verify_signed_request(
+            instance_id,
+            {
+                "action": "unsubscribe",
+                "instance_id": instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            signature=signature,
+        )
         await self._repo.remove_subscriber(
             space_id=space_id,
             instance_id=instance_id,
@@ -681,43 +755,15 @@ class GfsFederationService:
         trust model as publish_space — a peer can't rename another
         household). Rejects unknown instances, bad signatures, and stale
         timestamps (replay guard)."""
-        inst = await self._repo.get_instance(instance_id)
-        if inst is None:
-            raise PermissionError(f"Unknown instance: {instance_id}")
-
-        # Signature is REQUIRED here (unlike publish_space's optional-sig
-        # branch): an empty or invalid signature is a hard PermissionError.
-        if not signature:
-            raise PermissionError("Invalid Ed25519 signature")
-        canonical = json.dumps(
+        await self._verify_signed_request(
+            instance_id,
             {
                 "instance_id": instance_id,
                 "display_name": display_name,
                 "ts": ts,
             },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        raw_key = bytes.fromhex(inst.public_key)
-        try:
-            raw_sig = b64url_decode(signature)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Invalid Ed25519 signature") from exc
-        if not verify_ed25519(raw_key, canonical, raw_sig):
-            raise PermissionError("Invalid Ed25519 signature")
-
-        # Replay guard: the signed ``ts`` must be a fresh, tz-aware ISO 8601
-        # timestamp within ±300 s of now. Unparseable / naive timestamps are
-        # rejected too (a missing offset is treated as untrusted).
-        try:
-            parsed = datetime.fromisoformat(ts)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Stale timestamp") from exc
-        if parsed.tzinfo is None:
-            raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
-        if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
-            raise PermissionError("Stale timestamp")
+            signature=signature,
+        )
 
         cleaned = display_name.strip()
         if not cleaned or len(cleaned) > MAX_DISPLAY_NAME_CHARS:

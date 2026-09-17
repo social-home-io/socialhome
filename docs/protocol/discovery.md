@@ -68,11 +68,14 @@ The Social Home ↔ GFS link is split by direction:
     by the post id** carried inside the payload, enforced by the HFS
     `space_public_inbound` consumer (the same way moments dedupe by
     `moment_id`).
-  - `subscribe` requires a signature over `{instance_id, space_id, ts}`
-    (replay-guarded ±300 s on `ts`). The signature binds the request to
-    `instance_id`, so a caller can only subscribe **itself**, and the
-    target space must already be published — the GFS no longer mints a
-    pending row from an (unauthenticated) subscribe.
+  - `subscribe` and `unsubscribe` each require a signature over
+    `{action, instance_id, space_id, ts}` (replay-guarded ±300 s on `ts`).
+    The `action` is inside the signed bytes (domain separation), so a
+    subscribe signature can't be replayed as an unsubscribe or vice versa.
+    The signature binds the request to `instance_id`, so a caller can only
+    (un)subscribe **itself**, and a subscribe's target space must already
+    be published — the GFS no longer mints a pending row from an
+    (unauthenticated) subscribe.
 - **GFS → SH** is a persistent WebSocket the SH opens to
   `wss://<gfs>/gfs/ws`. The first frame is a signed hello
   `{type:"hello", instance_id, ts, sig}`; once accepted the GFS pushes
