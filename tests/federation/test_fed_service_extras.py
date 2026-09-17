@@ -10,6 +10,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     FederationEventType,
     InstanceSource,
     PairingStatus,
@@ -145,7 +146,7 @@ async def test_send_event_transport_error(env):
         payload={},
     )
     assert result.ok is False
-    assert result.error == "delivery_failed"
+    assert result.error == DELIVERY_ERROR_QUEUED
 
 
 # ─── broadcast_to_peers — empty + with explicit list ────────────────────

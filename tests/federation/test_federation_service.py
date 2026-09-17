@@ -9,6 +9,7 @@ import dataclasses
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from socialhome.crypto import (
     generate_x25519_keypair,
 )
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DeliveryResult,
     FederationEventType,
@@ -2961,6 +2963,165 @@ async def test_broadcast_to_space_members_all_ok_logs_no_warning(caplog):
         )
 
     assert result.all_ok is True
+    assert caplog.text == ""
+
+
+def _broadcast_svc_with_per_peer_results(
+    results_by_peer: dict[str, DeliveryResult],
+) -> tuple[FederationService, str, Any]:
+    """Service + a ``patch.object`` that makes ``send_with_mesh_fallback``
+    answer per target from ``results_by_peer`` — lets a broadcast test mix
+    direct-path (outbox-queued) and mesh-path (terminal) outcomes without a
+    live transport. The service is slotted, so the class attribute is
+    patched (an ``AsyncMock`` is not a descriptor: no ``self`` is passed)."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    space_id = "space-mixed"
+    for iid in results_by_peer:
+        fed_repo.add_space_member(space_id, iid)
+
+    async def _fake_send(*, to_instance_id: str, **_kw: Any) -> DeliveryResult:
+        return results_by_peer[to_instance_id]
+
+    patcher = patch.object(
+        FederationService,
+        "send_with_mesh_fallback",
+        AsyncMock(side_effect=_fake_send),
+    )
+    return svc, space_id, patcher
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_queued_failure_logs_no_warning(caplog):
+    """A direct-peer ``send_event`` failure is enqueued to the durable outbox
+    BEFORE it returns ``ok=False, error=DELIVERY_ERROR_QUEUED`` — the outbox
+    redelivers, so it is "queued for retry", not "lost". Warning "did not
+    reach" for it is false and noisy (the demo audit flagged exactly this
+    during the pair-settle window while every content assertion passed)."""
+    svc, space_id, patcher = _broadcast_svc_with_per_peer_results(
+        {
+            "direct-peer": DeliveryResult(
+                instance_id="direct-peer", ok=False, error=DELIVERY_ERROR_QUEUED
+            ),
+        }
+    )
+
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+
+    # ``failed`` still counts every ok=False — only the WARNING is gated.
+    assert result.failed == 1
+    assert result.terminal_failures == ()
+    assert "broadcast_to_space_members" not in caplog.text
+    assert "did not reach" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_mesh_failure_still_warns(caplog):
+    """The mesh path has no outbox: ``no_route`` is a single-attempt,
+    permanent loss and MUST stay diagnosable."""
+    svc, space_id, patcher = _broadcast_svc_with_per_peer_results(
+        {
+            "mesh-only-peer": DeliveryResult(
+                instance_id="mesh-only-peer", ok=False, error="no_route"
+            ),
+        }
+    )
+
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+
+    assert result.failed == 1
+    assert len(result.terminal_failures) == 1
+    assert "broadcast_to_space_members" in caplog.text
+    assert "mesh-only-peer=no_route" in caplog.text
+    assert space_id in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_mixed_names_only_terminal_peer(caplog):
+    """One outbox-queued direct peer + one mesh ``no_route`` peer: the
+    WARNING names ONLY the mesh peer, and counts 1 (not 2) as unreached."""
+    svc, space_id, patcher = _broadcast_svc_with_per_peer_results(
+        {
+            "direct-peer": DeliveryResult(
+                instance_id="direct-peer", ok=False, error=DELIVERY_ERROR_QUEUED
+            ),
+            "mesh-only-peer": DeliveryResult(
+                instance_id="mesh-only-peer", ok=False, error="no_route"
+            ),
+            "happy-peer": DeliveryResult(instance_id="happy-peer", ok=True),
+        }
+    )
+
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+
+    assert result.attempted == 3
+    assert result.succeeded == 1
+    assert result.failed == 2
+    assert [r.instance_id for r in result.terminal_failures] == ["mesh-only-peer"]
+    assert "mesh-only-peer=no_route" in caplog.text
+    assert "direct-peer" not in caplog.text
+    assert "did not reach 1/3" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_skips_own_instance(caplog):
+    """``create_space`` adds the host's OWN row to ``space_instances``, so
+    ``list_member_instance_ids`` returns the sender itself. Sending to self
+    has no ``remote_instances`` row → mesh branch → ``discover_route(self)``
+    floods peers for a route to the sender → ``no_route`` (and a 30 s
+    negative cooldown keyed on self). The demo audit's four "did not reach"
+    warnings all named the sender. Self must be skipped at the loop and
+    must not count in ``attempted`` / ``failed`` / ``results``."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    space_id = "space-self"
+    fed_repo.add_space_member(space_id, svc.own_instance_id)
+    fed_repo.add_space_member(space_id, "happy-peer")
+    sent_to: list[str] = []
+
+    async def _fake_send(*, to_instance_id: str, **_kw: Any) -> DeliveryResult:
+        sent_to.append(to_instance_id)
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    patcher = patch.object(
+        FederationService,
+        "send_with_mesh_fallback",
+        AsyncMock(side_effect=_fake_send),
+    )
+    route_service, routed_handler, discover_route, _send_routed = _make_mesh_pair()
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+
+    assert sent_to == ["happy-peer"]
+    assert result.attempted == 1  # len(instances) - 1: self is not a target
+    assert result.succeeded == 1
+    assert result.failed == 0
+    assert [r.instance_id for r in result.results] == ["happy-peer"]
+    assert result.all_ok is True
+    discover_route.assert_not_awaited()
     assert caplog.text == ""
 
 

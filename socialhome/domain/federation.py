@@ -651,6 +651,17 @@ class PairingSession:
 #: milliseconds against a route that is seconds from warming up.
 DELIVERY_ERROR_ROUTE_COOLDOWN: str = "route_cooldown"
 
+#: :attr:`DeliveryResult.error` value meaning "enqueued to the durable
+#: ``federation_outbox`` for retry" — NOT a loss. ``send_event`` emits it
+#: only AFTER the envelope is queued, so the outbox drainer redelivers once
+#: the direct peer is reachable again. The literal stays ``"delivery_failed"``
+#: for log consumers that already match it; the name carries the semantics.
+#: It is the one ``ok=False`` reason that is *not* terminal — the mesh path
+#: (``no_route`` / ``unknown_instance`` / ``not_confirmed`` /
+#: ``routed_send_failed`` / :data:`DELIVERY_ERROR_ROUTE_COOLDOWN`) has no
+#: outbox, so every other reason is a single-attempt, permanent loss.
+DELIVERY_ERROR_QUEUED: str = "delivery_failed"
+
 
 @dataclass(slots=True, frozen=True)
 class DeliveryResult:
@@ -678,6 +689,20 @@ class BroadcastResult:
     @property
     def all_ok(self) -> bool:
         return self.failed == 0 and self.attempted > 0
+
+    @property
+    def terminal_failures(self) -> tuple[DeliveryResult, ...]:
+        """The ``ok=False`` results that are genuine losses.
+
+        Excludes :data:`DELIVERY_ERROR_QUEUED` — a direct-peer send that
+        ``send_event`` already parked in the durable outbox and that
+        redelivers on its own. What remains is the mesh-path subset (no
+        outbox, single attempt), i.e. what a caller should warn about.
+        ``failed`` keeps counting every ``ok=False`` result regardless.
+        """
+        return tuple(
+            r for r in self.results if not r.ok and r.error != DELIVERY_ERROR_QUEUED
+        )
 
 
 # ─── High-level typed inbound event ───────────────────────────────────────

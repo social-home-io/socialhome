@@ -2175,16 +2175,20 @@ class SpaceService(SpaceMemberGuardMixin):
                 "role": role,
             },
         )
-        # DURABILITY GAP: the mesh fan-out has NO outbox (unlike send_event),
-        # so a member household we couldn't reach never gets this role change
-        # — and the v_23 roster gossip right below does NOT rescue it: it
-        # rides the same ``broadcast_to_space_members`` helper and fails for
-        # the same peers. The local write genuinely succeeded, so the request
+        # Only TERMINAL failures are worth a WARNING. A direct-peer failure
+        # (``DELIVERY_ERROR_QUEUED``) was parked in the durable outbox by
+        # ``send_event`` and redelivers on its own — the role change lands
+        # late, not never. The mesh fan-out has NO outbox, so a mesh-only
+        # member household we couldn't reach never gets this role change —
+        # and the v_23 roster gossip right below does NOT rescue it: it rides
+        # the same ``broadcast_to_space_members`` helper and fails for the
+        # same peers. The local write genuinely succeeded, so the request
         # stays 200 rather than lying about it; a durable outbox for space
         # gossip is deliberately out of scope here. Until there is one, a
         # WARNING naming what did not propagate is the operator's only signal
         # that a remote member's role is now stale on its own household.
-        if broadcast is not None and getattr(broadcast, "failed", 0):
+        terminal = broadcast.terminal_failures if broadcast is not None else ()
+        if terminal:
             log.warning(
                 "set_remote_member_role: space=%s role=%s for %s@%s did not "
                 "reach %d/%d member household(s): %s — those households keep "
@@ -2194,11 +2198,9 @@ class SpaceService(SpaceMemberGuardMixin):
                 role,
                 user_id,
                 instance_id,
-                broadcast.failed,
+                len(terminal),
                 broadcast.attempted,
-                ", ".join(
-                    f"{r.instance_id}={r.error}" for r in broadcast.results if not r.ok
-                ),
+                ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
             )
         # v_23 — peer-replicate the role change as an authority-signed JOINED
         # gossip (doubles as the role upsert) so every member household's

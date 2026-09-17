@@ -5669,3 +5669,111 @@ async def test_set_remote_member_role_all_ok_logs_no_warning(stack, caplog):
         )
 
     assert caplog.text == ""
+
+
+async def test_set_remote_member_role_queued_failure_logs_no_warning(stack, caplog):
+    """A direct-peer failure comes back ``error=DELIVERY_ERROR_QUEUED`` only
+    AFTER ``send_event`` enqueued it to the durable outbox — the role change
+    will land on redelivery. That is not a loss, so no "did not reach"
+    WARNING; ``failed`` on the BroadcastResult still counts it."""
+    import logging as _logging
+    from unittest.mock import AsyncMock
+
+    from socialhome.domain.federation import (
+        DELIVERY_ERROR_QUEUED,
+        BroadcastResult,
+        DeliveryResult,
+    )
+    from socialhome.domain.space import SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    fed = _roster_gossip_fed()
+    fed.broadcast_to_space_members = AsyncMock(
+        return_value=BroadcastResult(
+            attempted=1,
+            succeeded=0,
+            failed=1,
+            results=(
+                DeliveryResult(
+                    instance_id="peer-x", ok=False, error=DELIVERY_ERROR_QUEUED
+                ),
+            ),
+        ),
+    )
+    stack.space_svc._federation = fed
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="R",
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="socialhome"):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="peer-x",
+            user_id="ru1",
+            role=SpaceRole.ADMIN,
+        )
+
+    row = await remote.get(space.id, "peer-x", "ru1")
+    assert row.role == SpaceRole.ADMIN
+    assert "set_remote_member_role" not in caplog.text
+    assert "did not reach" not in caplog.text
+
+
+async def test_set_remote_member_role_mixed_names_only_terminal_peer(stack, caplog):
+    """Queued direct peer + mesh ``no_route`` peer: the WARNING names only
+    the mesh peer and counts 1/2 — the queued one self-heals via the outbox."""
+    import logging as _logging
+    from unittest.mock import AsyncMock
+
+    from socialhome.domain.federation import (
+        DELIVERY_ERROR_QUEUED,
+        BroadcastResult,
+        DeliveryResult,
+    )
+    from socialhome.domain.space import SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    fed = _roster_gossip_fed()
+    fed.broadcast_to_space_members = AsyncMock(
+        return_value=BroadcastResult(
+            attempted=2,
+            succeeded=0,
+            failed=2,
+            results=(
+                DeliveryResult(
+                    instance_id="peer-queued", ok=False, error=DELIVERY_ERROR_QUEUED
+                ),
+                DeliveryResult(instance_id="peer-x", ok=False, error="no_route"),
+            ),
+        ),
+    )
+    stack.space_svc._federation = fed
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="R",
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="socialhome"):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="peer-x",
+            user_id="ru1",
+            role=SpaceRole.ADMIN,
+        )
+
+    assert "peer-x=no_route" in caplog.text
+    assert "peer-queued" not in caplog.text
+    assert "did not reach 1/2" in caplog.text
