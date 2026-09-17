@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +19,10 @@ from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
     SqlitePublicSpaceRepo,
+)
+from socialhome.services.gfs_http import (
+    MAX_GFS_DIRECTORY_BODY_BYTES,
+    MAX_GFS_DIRECTORY_ITEMS,
 )
 from socialhome.services.public_space_discovery_service import (
     PublicSpaceDiscoveryService,
@@ -151,10 +157,23 @@ async def test_purge_older_than(env):
 # ─── Service ─────────────────────────────────────────────────────────────
 
 
+class _Content:
+    """Minimal stand-in for ``aiohttp``'s streaming body reader."""
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
 class _StubResp:
-    def __init__(self, status: int, body):
+    def __init__(self, status: int, body, *, raw: bytes | None = None):
         self.status = status
         self._body = body
+        payload = json.dumps(body).encode() if raw is None else raw
+        self.content = _Content(payload)
+        self.content_length = len(payload)
 
     async def __aenter__(self):
         return self
@@ -167,14 +186,15 @@ class _StubResp:
 
 
 class _StubSession:
-    def __init__(self, *, status: int = 200, body=None):
+    def __init__(self, *, status: int = 200, body=None, raw: bytes | None = None):
         self._status = status
         self._body = body
+        self._raw = raw
         self.calls: list[str] = []
 
     def get(self, url, **kw):
         self.calls.append(url)
-        return _StubResp(self._status, self._body)
+        return _StubResp(self._status, self._body, raw=self._raw)
 
 
 async def test_disabled_when_no_gfs_connection_repo(env):
@@ -521,3 +541,55 @@ async def test_fetch_directory_logs_non_200_above_debug(env, caplog):
     joined = " ".join(r.getMessage() for r in records)
     assert "404" in joined
     assert "https://gfs.example.com/gfs/spaces" in joined
+
+
+# ─── response bounds (FIX 5) ─────────────────────────────────────────────
+
+
+async def test_poll_once_refuses_an_oversized_directory_body(env):
+    """``aiohttp`` caps nothing by default: a hostile/compromised GFS could
+    return a multi-gigabyte directory and OOM the household. Fail soft —
+    the tick imports nothing and the next one retries."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    giant = b'{"pad": "' + b"x" * (MAX_GFS_DIRECTORY_BODY_BYTES + 10) + b'"}'
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={}, raw=giant),
+    )
+
+    assert await svc.poll_once() == 0
+    assert await repo.list_active() == []
+
+
+async def test_poll_once_caps_the_number_of_imported_items(env):
+    """A body well under the byte cap can still carry an enormous number of
+    tiny rows — each of which would become a cache write."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {"space_id": f"sp-{i}", "instance_id": "inst-X", "name": "n"}
+            for i in range(MAX_GFS_DIRECTORY_ITEMS + 25)
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+
+    assert await svc.poll_once() == MAX_GFS_DIRECTORY_ITEMS
+
+
+async def test_poll_once_ignores_an_unparsable_directory_body(env):
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={}, raw=b"<html>nope</html>"),
+    )
+
+    assert await svc.poll_once() == 0

@@ -19,13 +19,27 @@ from socialhome.services.gfs_connection_service import (
 # ─── stubs (same shape as test_gfs_connection_service) ──────────────────
 
 
+class _Content:
+    """Minimal stand-in for ``aiohttp``'s streaming body reader."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
 class _StubResp:
-    __slots__ = ("status", "_body", "_text")
+    __slots__ = ("status", "_body", "_text", "content", "content_length")
 
     def __init__(self, status: int, body: dict | None = None, text: str = ""):
         self.status = status
         self._body = body or {}
         self._text = text
+        self.content = _Content(text.encode())
+        self.content_length = len(text.encode())
 
     async def __aenter__(self):
         return self

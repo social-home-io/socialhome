@@ -1575,6 +1575,10 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=repos.space,
         gfs_connection_repo=repos.gfs_connection,
         gfs_connection_service=gfs_connection_service,
+        # The GFS directory cache is the evidence that a given space really
+        # came off a GFS listing — the teardown path refuses to unsubscribe
+        # or purge without it (see ``was_gfs_listed``).
+        public_space_repo=repos.public_space,
     )
     space_service.attach_gfs_space_mirror(gfs_space_mirror)
 

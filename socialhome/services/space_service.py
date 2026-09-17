@@ -3864,11 +3864,25 @@ class SpaceService(SpaceMemberGuardMixin):
     async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
         """Drop a GFS-mirrored stub once its last local subscriber leaves.
 
-        Only ever touches a row that is unambiguously a mirror: it exists, it
-        is owned by another instance, we hold no space seed for it (so we are
-        not an authority for it), and no local member remains. Anything else
-        — an owned space, a §D1b stub where another user still participates —
-        is left alone.
+        Both of the things this does — telling every paired GFS we are gone,
+        and deleting the row with its posts / gallery / bazaar / media — are
+        irreversible and visible to third parties, so they run only on
+        *positive* evidence that the row is a GFS mirror:
+
+        * the space is ``GLOBAL`` (what the mirror seats), owned by another
+          instance, and we hold no space seed for it (we are not its
+          authority); **and**
+        * a ``public_space_cache`` row exists for the id — i.e. some paired
+          GFS directory actually advertised this space
+          (``GfsSpaceMirrorService.was_gfs_listed``).
+
+        Without that evidence the row may be a public/global stub learned
+        from a direct peer, which has nothing to do with any GFS: fanning a
+        signed, identity-bound unsubscribe at every GFS operator would
+        disclose a relationship with a space they never knew about, and the
+        purge would destroy a space we were never asked to forget. In that
+        case the local member removal (already done by the caller) is all
+        that happens — losing a stub row is worse than keeping an inert one.
 
         The GFS-side unsubscribe is best-effort (a down GFS must not block the
         local leave); the local purge then cascades from ``spaces``, which is
@@ -3885,10 +3899,27 @@ class SpaceService(SpaceMemberGuardMixin):
                 # We hold authority for this space — not a passive mirror.
                 return
         except RuntimeError:
-            # No KEK wired (several test stacks) — treat as "no seed held".
-            pass
+            # Seed access is unavailable (no KEK wired). We cannot establish
+            # that we are *not* this space's authority, and this path is
+            # destructive — fail safe by doing nothing.
+            log.debug(
+                "space %s: cannot read the space seed — skipping mirror purge",
+                space_id,
+            )
+            return
         if await self._spaces.list_members(space_id):
             # Another local user still subscribes — keep the mirror.
+            return
+        proven_mirror = space.space_type is SpaceType.GLOBAL and (
+            await self._gfs_mirror.was_gfs_listed(space_id)
+        )
+        if not proven_mirror:
+            log.debug(
+                "space %s: not provably a GFS mirror (type=%s, gfs-listed=no)"
+                " — leaving the row alone and sending no GFS unsubscribe",
+                space_id,
+                space.space_type,
+            )
             return
         await self._gfs_mirror.unsubscribe(space_id)
         await purge_space_and_media(

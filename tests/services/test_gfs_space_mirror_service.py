@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -12,7 +14,13 @@ from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionError
-from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
+from socialhome.domain.public_space import PublicSpaceListing
+from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
+from socialhome.services.gfs_http import MAX_GFS_BODY_BYTES
+from socialhome.services.gfs_space_mirror_service import (
+    _MIRROR_FETCH_TIMEOUT_S,
+    GfsSpaceMirrorService,
+)
 
 
 PIN_A = "aa" * 32
@@ -22,12 +30,34 @@ PIN_B = "bb" * 32
 # ─── Stubs ───────────────────────────────────────────────────────────────
 
 
-class _StubResp:
-    __slots__ = ("status", "_body")
+class _Content:
+    """Minimal stand-in for ``aiohttp``'s streaming body reader."""
 
-    def __init__(self, status: int, body: dict | None = None):
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
+class _StubResp:
+    __slots__ = ("status", "_body", "content", "content_length")
+
+    def __init__(
+        self,
+        status: int,
+        body: dict | None = None,
+        *,
+        raw: bytes | None = None,
+        content_length: int | None = None,
+    ):
         self.status = status
         self._body = body or {}
+        payload = json.dumps(self._body).encode() if raw is None else raw
+        self.content = _Content(payload)
+        self.content_length = len(payload) if content_length is None else content_length
 
     async def __aenter__(self):
         return self
@@ -61,8 +91,10 @@ class _StubSession:
         self.calls.append(url)
         if self.raise_for is not None and self.raise_for in url:
             raise OSError("boom")
-        status, body = self.responses.get(url, (404, {}))
-        return _StubResp(status, body)
+        entry = self.responses.get(url, (404, {}))
+        status, body = entry[0], entry[1]
+        raw = entry[2] if len(entry) > 2 else None
+        return _StubResp(status, body if isinstance(body, dict) else {}, raw=raw)
 
 
 class _StubGfs:
@@ -144,11 +176,18 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-def _mirror(env, session, gfs: _StubGfs | None = None) -> GfsSpaceMirrorService:
+def _mirror(
+    env,
+    session,
+    gfs: _StubGfs | None = None,
+    *,
+    public_space_repo=None,
+) -> GfsSpaceMirrorService:
     svc = GfsSpaceMirrorService(
         space_repo=env.spaces,
         gfs_connection_repo=env.conns,
         gfs_connection_service=gfs or _StubGfs(),
+        public_space_repo=public_space_repo,
     )
     svc.attach_session(session)
     return svc
@@ -331,3 +370,166 @@ async def test_unsubscribe_swallows_gfs_errors(env):
     # Must not propagate — a down GFS never blocks a local unsubscribe.
     await _mirror(env, _StubSession(), gfs).unsubscribe("sp-1")
     assert gfs.unsubscribes == [("sp-1", "gfs-1")]
+
+
+# ─── space-id validation (URL-injection guard) ───────────────────────────
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "../../admin/api/clients",  # yarl normalises the prefix away entirely
+        "../..",
+        "a/b",  # a bare slash adds a path segment
+        "..",
+        ".",
+        "",
+        "sp 1",
+        "sp?x=1",  # would graft a query string onto the GFS request
+        "x" * 129,
+    ],
+)
+async def test_ensure_mirror_refuses_unsafe_space_id(env, unsafe):
+    """A crafted space id must never reach the GFS URL.
+
+    ``space_id`` comes from ``POST /api/spaces/{space_id}/subscribe`` and
+    aiohttp percent-DECODES the path before filling ``match_info`` — so
+    ``..%2F..%2Fadmin`` arrives as the literal ``../../admin``. Interpolated
+    into ``{inbox_url}/gfs/spaces/{space_id}``, yarl normalises the
+    ``/gfs/spaces/`` prefix away and the metadata fetch becomes a GET against
+    an arbitrary path on the paired GFS, driveable by any authenticated local
+    user. Fail closed before the URL is ever built.
+    """
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession()
+
+    assert await _mirror(env, session).ensure_mirror(unsafe) is None
+    assert session.calls == []  # no request was issued at all
+
+
+# ─── hostile-body coercion (FIX 4) ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("hostile", [[1, 2, 3], {"a": 1}, 42])
+@pytest.mark.parametrize("field", ["name", "description", "about_markdown"])
+async def test_ensure_mirror_coerces_non_string_text_fields(env, hostile, field):
+    """A GFS answering ``{"about_markdown": [1, 2, 3]}`` must not reach
+    SQLite: the driver raises ``ProgrammingError``, which escapes
+    ``ensure_mirror`` → ``subscribe_to_space`` unmapped → HTTP 500.
+    """
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                _gfs_space_body(**{field: hostile}),
+            ),
+        },
+    )
+
+    got = await _mirror(env, session).ensure_mirror("sp-1")
+
+    assert got is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert isinstance(getattr(stored, field), str)
+
+
+@pytest.mark.parametrize("hostile", [[1, 2, 3], {"a": 1}, 42])
+@pytest.mark.parametrize("field", ["owning_instance", "status", "identity_public_key"])
+async def test_ensure_mirror_refuses_non_string_identity_fields(env, hostile, field):
+    """Identifier-shaped fields are validated, never stringified — a
+    ``["x"]`` owning instance is a malformed listing, not a host id."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                _gfs_space_body(**{field: hostile}),
+            ),
+        },
+    )
+
+    assert await _mirror(env, session).ensure_mirror("sp-1") is None
+    assert await env.spaces.get("sp-1") is None
+
+
+@pytest.mark.parametrize("hostile", [[1, 2, 3], {"a": 1}, "nonsense"])
+@pytest.mark.parametrize("field", ["min_age", "category"])
+async def test_ensure_mirror_normalises_hostile_enum_fields(env, hostile, field):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                _gfs_space_body(**{field: hostile}),
+            ),
+        },
+    )
+
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.min_age in {0, 13, 16, 18}
+    assert isinstance(stored.category, str)
+
+
+# ─── response-size bound (FIX 5) ─────────────────────────────────────────
+
+
+async def test_ensure_mirror_refuses_an_oversized_body(env):
+    """aiohttp caps nothing by default — a hostile GFS returning a
+    multi-gigabyte body would exhaust household memory. Fail closed."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    giant = b'{"pad": "' + b"x" * (MAX_GFS_BODY_BYTES + 10) + b'"}'
+    session = _StubSession(
+        {"https://gfs.test/gfs/spaces/sp-1": (200, {}, giant)},
+    )
+
+    assert await _mirror(env, session).ensure_mirror("sp-1") is None
+    assert await env.spaces.get("sp-1") is None
+
+
+async def test_ensure_mirror_refuses_an_unparsable_body(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {"https://gfs.test/gfs/spaces/sp-1": (200, {}, b"<html>nope</html>")},
+    )
+
+    assert await _mirror(env, session).ensure_mirror("sp-1") is None
+
+
+async def test_mirror_fetch_timeout_is_short(env):
+    """``ensure_mirror`` walks every paired GFS serially, and any local user
+    can drive it against an arbitrary unknown id — so the per-connection
+    budget bounds the held request slot."""
+    assert _MIRROR_FETCH_TIMEOUT_S <= 5.0
+
+
+# ─── was_gfs_listed (mirror-provenance evidence, FIX 1) ──────────────────
+
+
+async def test_was_gfs_listed_is_false_without_a_directory_repo(env):
+    """No evidence available is not evidence of a mirror — fail safe."""
+    assert await _mirror(env, _StubSession()).was_gfs_listed("sp-1") is False
+
+
+async def test_was_gfs_listed_follows_the_public_space_cache(env):
+    repo = SqlitePublicSpaceRepo(env.db)
+    await repo.upsert(
+        PublicSpaceListing(
+            space_id="sp-1",
+            instance_id="remote-host",
+            name="Cool Space",
+            description=None,
+            emoji=None,
+            lat=None,
+            lon=None,
+            radius_km=None,
+            member_count=3,
+        )
+    )
+    svc = _mirror(env, _StubSession(), public_space_repo=repo)
+
+    assert await svc.was_gfs_listed("sp-1") is True
+    assert await svc.was_gfs_listed("sp-other") is False

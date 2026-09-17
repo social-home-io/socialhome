@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 
 import aiohttp
@@ -19,21 +20,37 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.services.gfs_connection_service import (
+    MAX_REMOTE_DETAIL_CHARS,
     GfsConnectionError,
     GfsConnectionService,
+    _remote_detail,
 )
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 
 
+class _Content:
+    """Minimal stand-in for ``aiohttp``'s streaming body reader."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
 class _StubResp:
-    __slots__ = ("status", "_body", "_text")
+    __slots__ = ("status", "_body", "_text", "content", "content_length")
 
     def __init__(self, status: int, body: dict | None = None, text: str = ""):
         self.status = status
         self._body = body or {}
         self._text = text
+        self.content = _Content(text.encode())
+        self.content_length = len(text.encode())
 
     async def __aenter__(self):
         return self
@@ -1673,3 +1690,33 @@ async def test_unsubscribe_from_gfs_space_without_signing_key_raises(env):
     with pytest.raises(GfsConnectionError):
         await svc.unsubscribe_from_gfs_space("sp-x", "gfs-unsub")
     assert session.calls == []
+
+
+# ─── remote-authored error text (FIX 6) ──────────────────────────────────
+
+
+async def test_remote_error_detail_is_truncated(caplog):
+    """``GfsConnectionError`` text reaches the SPA as the 502
+    ``GFS_UNAVAILABLE`` message (``routes/base.py``), so a hostile GFS must
+    not be able to author arbitrarily long copy in the household's own error
+    toast. The full body goes to the log instead."""
+    resp = _StubResp(500, text="X" * 5000)
+    with caplog.at_level(logging.WARNING):
+        detail = await _remote_detail(resp, context="publish")
+
+    assert len(detail) <= MAX_REMOTE_DETAIL_CHARS + len("… (truncated)")
+    assert detail.endswith("… (truncated)")
+    assert "X" * 5000 in caplog.text
+
+
+async def test_short_remote_error_detail_passes_through():
+    resp = _StubResp(400, text="space not published")
+    assert await _remote_detail(resp, context="publish") == "space not published"
+
+
+async def test_remote_error_detail_bounds_the_read():
+    """Even the logged body is bounded — a multi-gigabyte error body must
+    never be buffered whole."""
+    resp = _StubResp(500, text="Y" * (1024 * 1024))
+    detail = await _remote_detail(resp, context="subscribe")
+    assert len(detail) <= MAX_REMOTE_DETAIL_CHARS + len("… (truncated)")

@@ -32,10 +32,26 @@ Consequences, stated plainly:
 
 * A household that pairs with a **hostile GFS** can be served a fabricated
   space whose authority key that GFS controls, and would then accept relayed
-  "space content" signed by it. The blast radius is confined to spaces
-  discovered *through that GFS*; every other trust path — direct paired
-  peers, §D1b invites, owned spaces — is unaffected, and an already-pinned
-  space cannot be hijacked.
+  "space content" signed by it. An already-pinned space cannot be hijacked,
+  and an owned space is never touched.
+* **The §D1b crossing is not protected, and this is a real gap.** "Already
+  pinned" cuts both ways: a hostile GFS can list a *real* space id (ids are
+  harvestable from any public directory) with that space's real
+  ``owning_instance`` but an attacker-controlled ``identity_public_key``. If
+  a local user subscribes before this household has ever met the space, the
+  stub is seated with the attacker's pin. A later, perfectly legitimate
+  §D1b ``SPACE_PRIVATE_INVITE`` from the *real* host then passes
+  ``can_seat_remote_stub`` (the owner matches) and re-``save``s the row — but
+  ``save`` excludes ``identity_public_key`` from its upsert, so the
+  attacker's pin stays **permanently**. Genuine space-authority frames then
+  fail verification (a permanent denial of service for that space at this
+  household) while the hostile GFS's forged frames verify. So the blast
+  radius is "spaces this household first learned about through that GFS" —
+  which is *not* the same as "spaces only that GFS knows about".
+  Fixing it means recording mirror provenance on the row so an
+  authenticated §D1b envelope sender may outrank a GFS listing when
+  re-pinning; that touches the §D1b handler path and is deliberately left to
+  its own reviewed change (see the TODO at the seating site).
 * ``owner_instance_id`` here comes from the GFS listing
   (``owning_instance``) and is **not** an authenticated envelope sender, unlike
   the §D1b callers of ``stub_space_from_metadata``. That is precisely why every
@@ -51,25 +67,65 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import aiohttp
 
 from ..domain.space import Space
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
+from .gfs_http import MAX_GFS_BODY_BYTES, read_json_capped
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
 
 log = logging.getLogger(__name__)
 
+#: Characters a space id may contain before it is interpolated into a GFS
+#: URL. ``space_id`` arrives from ``POST /api/spaces/{space_id}/subscribe``,
+#: and aiohttp percent-DECODES the path before populating ``match_info`` — so
+#: a request for ``..%2F..%2Fadmin`` yields the literal ``../../admin``, which
+#: yarl then normalises away the ``/gfs/spaces/`` prefix entirely, turning the
+#: metadata fetch into a GET against an arbitrary path on the paired GFS.
+#: Validate before building the URL rather than trusting the router.
+_SAFE_SPACE_ID = re.compile(r"\A[A-Za-z0-9_.-]{1,128}\Z")
+
 #: Length in hex characters of an Ed25519 public key (32 raw bytes).
 _PIN_HEX_LEN = 64
+
+#: Per-GFS timeout for the metadata fetch. Deliberately short: this is a
+#: small metadata GET, never a bulk transfer, and ``ensure_mirror`` walks
+#: every active GFS connection **serially** (first hit wins, which keeps the
+#: ordering deterministic and the code simple). The worst case therefore
+#: bounds a single ``POST /api/spaces/{id}/subscribe`` at
+#: ``_MIRROR_FETCH_TIMEOUT_S × len(active GFS connections)`` of held request
+#: slot — and any authenticated local user can drive that against an
+#: arbitrary unknown id, so the per-connection budget stays small rather
+#: than the 15 s used for the interactive GFS calls.
+_MIRROR_FETCH_TIMEOUT_S = 5.0
+
+
+def _as_text(value: object) -> str | None:
+    """Coerce a GFS-supplied field to ``str``, preserving ``None``.
+
+    The GFS response is remote input with no schema guarantee; a non-string
+    (list / dict / int) passed through to the ``spaces`` upsert raises
+    ``sqlite3.ProgrammingError`` from inside ``ensure_mirror``, which is not
+    a mapped domain exception and surfaces as an HTTP 500.
+    """
+    return None if value is None else str(value)
 
 
 class GfsSpaceMirrorService:
     """Seats + tears down local stub rows for GFS-discovered spaces."""
 
-    __slots__ = ("_spaces", "_gfs_conn_repo", "_gfs", "_http_client")
+    __slots__ = (
+        "_spaces",
+        "_gfs_conn_repo",
+        "_public_spaces",
+        "_gfs",
+        "_http_client",
+    )
 
     def __init__(
         self,
@@ -77,9 +133,16 @@ class GfsSpaceMirrorService:
         space_repo: AbstractSpaceRepo,
         gfs_connection_repo: AbstractGfsConnectionRepo,
         gfs_connection_service: GfsConnectionService,
+        public_space_repo: AbstractPublicSpaceRepo | None = None,
     ) -> None:
         self._spaces = space_repo
         self._gfs_conn_repo = gfs_connection_repo
+        # The ``public_space_cache`` directory — the household's only local
+        # evidence that a GFS ever advertised a given space id. Optional so
+        # older wiring keeps working; without it :meth:`was_gfs_listed`
+        # answers ``False``, which is the fail-safe answer (no destructive
+        # teardown on an unprovable mirror).
+        self._public_spaces = public_space_repo
         self._gfs = gfs_connection_service
         self._http_client: aiohttp.ClientSession | None = None
 
@@ -101,6 +164,12 @@ class GfsSpaceMirrorService:
         docstring), or when a local row already exists under a different host
         (``can_seat_remote_stub``).
         """
+        if not _SAFE_SPACE_ID.fullmatch(space_id) or space_id in {".", ".."}:
+            # Never interpolate an unvalidated id into the GFS URL — see
+            # ``_SAFE_SPACE_ID``. Fail closed: a malformed id is not a space
+            # any GFS could legitimately serve.
+            log.warning("gfs_space_mirror: refusing unsafe space id %r", space_id)
+            return None
         client = self._http_client
         if client is None:
             log.debug(
@@ -113,7 +182,7 @@ class GfsSpaceMirrorService:
             try:
                 async with client.get(
                     url,
-                    timeout=aiohttp.ClientTimeout(total=15),
+                    timeout=aiohttp.ClientTimeout(total=_MIRROR_FETCH_TIMEOUT_S),
                 ) as resp:
                     if resp.status == 404:
                         continue
@@ -124,9 +193,21 @@ class GfsSpaceMirrorService:
                             resp.status,
                         )
                         continue
-                    body = await resp.json()
+                    # Bounded read — a GFS body is remote input and aiohttp
+                    # caps nothing by default. An over-large or unparsable
+                    # body reads as a failed fetch (fail-closed: nothing is
+                    # seated from it).
+                    body = await read_json_capped(
+                        resp,
+                        url=url,
+                        limit=MAX_GFS_BODY_BYTES,
+                    )
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 log.warning("gfs_space_mirror: fetch failed for %s: %s", url, exc)
+                continue
+            if body is None:
+                # Already logged by ``read_json_capped`` (over cap / not
+                # JSON). Try the next paired GFS.
                 continue
             if not isinstance(body, dict):
                 log.warning("gfs_space_mirror: %s returned a non-object body", url)
@@ -136,6 +217,23 @@ class GfsSpaceMirrorService:
             if meta is None:
                 continue
             owning_instance = str(body.get("owning_instance") or "")
+            # CONTRACT DEVIATION — read before reusing this call.
+            # ``can_seat_remote_stub`` documents that its third argument MUST
+            # be the *authenticated envelope sender* (§D1b), never a claimed
+            # owner. Here it is the ``owning_instance`` string straight out
+            # of the GFS response body: unauthenticated, attacker-controlled
+            # if the GFS is hostile.
+            # It is safe **only** because of the precondition upstream:
+            # ``SpaceService.subscribe_to_space`` calls ``ensure_mirror``
+            # exclusively when ``await self._spaces.get(space_id) is None``,
+            # so the guard's "no local row → always seatable" branch is the
+            # only one that can be taken; the claimed owner is never compared
+            # against an existing row and so can never win against one.
+            # WARNING: calling ``ensure_mirror`` to *refresh* an existing
+            # mirror would turn this into a direct overwrite of the claimed
+            # owner — a hostile GFS could then re-home any space we already
+            # hold. Any such call site needs the authenticated-sender
+            # contract restored first.
             if not await can_seat_remote_stub(
                 self._spaces,
                 space_id,
@@ -148,6 +246,15 @@ class GfsSpaceMirrorService:
                     conn.id,
                 )
                 return None
+            # TODO(gfs-mirror-provenance): record that this row's pin came
+            # from a GFS listing (a provenance column / side table on the
+            # space row) and let an *authenticated* envelope sender — a §D1b
+            # invite from the space's real host — outrank that GFS listing
+            # when re-pinning ``identity_public_key``. Without it a hostile
+            # GFS that wins the race on a real space id pins its own key
+            # permanently; see the "§D1b crossing" bullet in the module
+            # docstring. Deliberately out of scope here: the fix touches the
+            # §D1b invite handler path and needs its own review.
             space = stub_space_from_metadata(
                 space_id,
                 host_instance_id=owning_instance,
@@ -178,22 +285,28 @@ class GfsSpaceMirrorService:
         a forged relay frame, so an absent or malformed one is fatal, never
         defaulted.
         """
-        if str(body.get("status") or "") != "active":
+        status = body.get("status")
+        if not isinstance(status, str) or status != "active":
             log.warning(
                 "gfs_space_mirror: GFS %s lists space %s as %r — not mirroring",
                 gfs_id,
                 space_id,
-                body.get("status"),
+                status,
             )
             return None
-        if not str(body.get("owning_instance") or ""):
+        # Validated, not coerced: an instance id is an identifier the rest
+        # of the stack compares for equality, so a non-string here is a
+        # malformed listing rather than something to stringify.
+        owning = body.get("owning_instance")
+        if not isinstance(owning, str) or not owning:
             log.warning(
                 "gfs_space_mirror: GFS %s listing for %s has no owning_instance",
                 gfs_id,
                 space_id,
             )
             return None
-        pin = str(body.get("identity_public_key") or "")
+        pin_raw = body.get("identity_public_key")
+        pin = pin_raw if isinstance(pin_raw, str) else ""
         if len(pin) != _PIN_HEX_LEN:
             log.warning(
                 "gfs_space_mirror: GFS %s listing for %s has no usable "
@@ -215,9 +328,15 @@ class GfsSpaceMirrorService:
             )
             return None
         return {
-            "name": body.get("name") or "Untitled space",
-            "description": body.get("description"),
-            "about_markdown": body.get("about_markdown"),
+            "name": _as_text(body.get("name")) or "Untitled space",
+            # Every string-shaped field is coerced, not passed through: a
+            # GFS may answer ``{"about_markdown": [1, 2, 3]}``, and a list
+            # reaching SQLite raises ``ProgrammingError`` out of
+            # ``ensure_mirror`` → ``subscribe_to_space`` → an unmapped HTTP
+            # 500. Fail-closed means "the hostile body cannot crash us"
+            # just as much as "the hostile body cannot seat a bad pin".
+            "description": _as_text(body.get("description")),
+            "about_markdown": _as_text(body.get("about_markdown")),
             "identity_public_key": pin,
             # A GFS mirror is a *subscription* stub, never a locally joinable
             # space: joining still goes through
@@ -227,10 +346,32 @@ class GfsSpaceMirrorService:
             # The owning household's local username means nothing here (the
             # GFS listing carries no such field) — leave it empty.
             "owner_username": "",
-            # Clamped to the allowed set inside ``stub_space_from_metadata``.
+            # Both are clamped to their allowed set inside
+            # ``stub_space_from_metadata`` (``normalize_min_age`` /
+            # ``normalize_category``) — but ``normalize_category`` does a
+            # set membership test, which *raises* on an unhashable value, so
+            # the category is stringified first.
             "min_age": body.get("min_age"),
-            "category": body.get("category"),
+            "category": _as_text(body.get("category")),
         }
+
+    async def was_gfs_listed(self, space_id: str) -> bool:
+        """Whether a paired GFS directory actually advertised *space_id*.
+
+        The household caches every directory poll into
+        ``public_space_cache`` (:class:`PublicSpaceDiscoveryService`), and
+        that table has exactly one writer — the GFS poll — so a row there is
+        positive evidence that the space came off a GFS directory rather
+        than, say, a peer-discovered public/global stub.
+
+        Used as the teardown guard: destructive or GFS-visible work on a
+        space we cannot prove is a mirror is skipped. Answers ``False``
+        whenever the evidence is absent *or* unavailable (no directory repo
+        wired), which is the fail-safe direction.
+        """
+        if self._public_spaces is None:
+            return False
+        return await self._public_spaces.get(space_id) is not None
 
     async def subscribe_to_gfs(self, space_id: str, gfs_id: str) -> None:
         """Register this household on *gfs_id*'s subscriber set for *space_id*.

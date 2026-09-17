@@ -132,17 +132,40 @@ goes through `POST /api/public_spaces/{id}/join-request`).
   `identity_public_key` from its upsert, so a later refresh — from this GFS or
   another — can never move a pin. A hostile GFS can therefore fabricate a
   space it controls the authority key for, but cannot hijack one already
-  pinned, and no other trust path (direct peers, §D1b invites) is affected.
-  `owning_instance` from the listing is *not* an authenticated envelope
-  sender, which is why every inbound relay verifies against the pinned key,
-  never the claimed owner.
+  pinned. `owning_instance` from the listing is *not* an authenticated
+  envelope sender, which is why every inbound relay verifies against the
+  pinned key, never the claimed owner.
+- **Known gap — a GFS can poison a space this household hasn't met yet.**
+  "Cannot hijack one already pinned" only helps once a pin exists. A hostile
+  GFS can list a *real* space id (ids are harvestable from any public
+  directory) with the real `owning_instance` but an authority key it
+  controls; a local subscribe then seats that pin. A later legitimate §D1b
+  `SPACE_PRIVATE_INVITE` from the real host passes `can_seat_remote_stub`
+  (the owner matches) and re-saves the row, but the upsert excludes
+  `identity_public_key` — so the attacker's pin stays permanently: genuine
+  space-authority frames fail verification (a permanent DoS for that space
+  at this household) while the hostile GFS's forged frames verify. The blast
+  radius is therefore "spaces this household first learned about through
+  that GFS", not "spaces only that GFS knows about". The fix — recording
+  mirror provenance on the row so an authenticated §D1b sender outranks a
+  GFS listing when re-pinning — is tracked as a TODO at the seating site in
+  `services/gfs_space_mirror_service.py`.
 - **Ordering.** The GFS-side `subscribe` is sent only after every local
   refusal (public-tier check, ban, §CP.F1 age gate) has passed, so a
   locally-refused user is never registered on the relay.
-- **Teardown.** When the last local subscriber of a mirrored space leaves,
-  the household unsubscribes from every paired GFS (best-effort — a down GFS
-  never blocks the local leave) and purges the stub; the `spaces` cascade
-  takes `space_keys` with it, so the content key doesn't outlive the mirror.
+- **Teardown, on positive evidence only.** When the last local subscriber of
+  a mirrored space leaves, the household unsubscribes from every paired GFS
+  (best-effort — a down GFS never blocks the local leave) and purges the
+  stub; the `spaces` cascade takes `space_keys` with it, so the content key
+  doesn't outlive the mirror. Both steps run **only** when the row is
+  provably a GFS mirror: `space_type=global`, owned by another instance, no
+  space seed held, no local member left, *and* a `public_space_cache` row for
+  the id (the directory poll is that table's only writer). A public/global
+  stub learned from a direct peer matches the first four and must not be
+  touched — the signed, identity-bound unsubscribe would disclose to every
+  GFS operator a relationship with a space they never knew about, and the
+  purge would destroy content nobody asked us to forget. Without the
+  evidence, only the local member row goes.
 
 ### HFS producer + consumer for public space content (Phase 5a2)
 

@@ -24,6 +24,11 @@ from ..repositories.public_space_repo import (
     AbstractPublicSpaceRepo,
     PublicSpaceListing,
 )
+from .gfs_http import (
+    MAX_GFS_DIRECTORY_BODY_BYTES,
+    MAX_GFS_DIRECTORY_ITEMS,
+    read_json_capped,
+)
 
 log = logging.getLogger(__name__)
 
@@ -217,7 +222,17 @@ class PublicSpaceDiscoveryService:
                         resp.status,
                     )
                     return []
-                body = await resp.json()
+                # Bounded read: a paired GFS is still remote input, and
+                # aiohttp caps nothing by default — an unbounded body would
+                # let a hostile directory OOM the household. Over the cap
+                # reads as a failed poll (fail-soft: next tick retries).
+                body = await read_json_capped(
+                    resp,
+                    url=url,
+                    limit=MAX_GFS_DIRECTORY_BODY_BYTES,
+                )
+                if body is None:
+                    return []
         except Exception as exc:
             # Fail-soft: a down GFS must not break the poll loop — but stay
             # visible so a persistent outage isn't silent.
@@ -227,6 +242,20 @@ class PublicSpaceDiscoveryService:
         items = body.get("spaces") if isinstance(body, dict) else body
         if not isinstance(items, list):
             return []
+        if len(items) > MAX_GFS_DIRECTORY_ITEMS:
+            # Independent of the byte cap: a body well under the size limit
+            # can still carry an enormous number of minimal rows, each of
+            # which would become a ``public_space_cache`` write. Import the
+            # first N and say so — truncating beats both OOM and a poll tick
+            # that never finishes.
+            log.warning(
+                "public_space_discovery: %s returned %d listings — importing"
+                " the first %d",
+                url,
+                len(items),
+                MAX_GFS_DIRECTORY_ITEMS,
+            )
+            items = items[:MAX_GFS_DIRECTORY_ITEMS]
         out: list[PublicSpaceListing] = []
         for item in items:
             if not isinstance(item, dict):

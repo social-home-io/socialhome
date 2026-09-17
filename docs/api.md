@@ -161,7 +161,7 @@ events these routes fire.
 | GET | `/api/admin/spaces` | Admin-only: list all spaces on this HFS. |
 | GET | `/api/spaces/{id}/feed` | Space feed summary. |
 | POST | `/api/spaces/{id}/sync` | Trigger a re-sync with the space hosts. |
-| POST / DELETE | `/api/spaces/{id}/subscribe` | Subscribe / unsubscribe to a public or global space. Idempotent. Subscribe adds the caller as `role='subscriber'` in `space_members` (read-only member — receives content, cannot post / comment / react). Private / household spaces return 403. Unsubscribe is a no-op for users who aren't subscribers (won't demote real members). Returns `{subscribed}`. |
+| POST / DELETE | `/api/spaces/{id}/subscribe` | Subscribe / unsubscribe to a public or global space. Idempotent. Subscribe adds the caller as `role='subscriber'` in `space_members` (read-only member — receives content, cannot post / comment / react). For an id with **no local row**, subscribe first mirrors the listing from the first paired GFS that serves it (`GET {gfs}/gfs/spaces/{id}`) and seats a `space_type=global` stub with the GFS-served authority key (TOFU-pinned) before registering on the GFS relay — no GFS knows it, or the listing fails validation → unchanged 404; a paired GFS that errors → **502 `GFS_UNAVAILABLE`**. Private / household spaces return 403. Unsubscribe is a no-op for users who aren't subscribers (won't demote real members); when it removes the **last** local member of a provable GFS mirror it also unsubscribes from every paired GFS and purges the stub with its content. Returns `{subscribed}`. |
 
 **Members**
 
@@ -758,6 +758,7 @@ selected transparently by the server.  See [protocol/apps.md](./protocol/apps.md
 | POST | `/gfs/report` | File a fraud / abuse report. |
 | POST | `/gfs/appeal` | Appeal a ban. |
 | GET | `/gfs/spaces` | Public directory listing. |
+| GET | `/gfs/spaces/{id}` | Single published space's metadata — the subscriber-side mirror source. Returns the stored listing (`{space_id, owning_instance, name, description, about_markdown, category, min_age, status, identity_public_key, …}`). Unknown, non-`active`, or owner-`withdrawn` space → 404. Unauthenticated, like the directory. |
 | GET | `/gfs/spaces/{id}/subscribers` | Release the space's subscriber list to a verified **seed-holder** (owner OR delegated admin) — the Phase-5b-c reconcile. Query params `{ts, authority_sig, authority_sig_suite}`; the **space-authority signature** is over canonical JSON of `{space_id, ts}` under event type `space_subscribers_query` and verified against the space's TOFU-pinned `identity_public_key` (the same key `/gfs/publish` pins), replay-guarded (±300 s on `ts`). Returns `{subscribers: [{instance_id, identity_public_key, keywrap_public_key, keywrap_sig}…]}` — only each subscriber's already-registered public key material (no inbox URL), so the seed-holder can re-seal the per-space content key to each. Fail-closed — missing / forged / stale signature, unknown suite, unknown space, or a space with no pinned pubkey → 403. |
 | GET | `/healthz` | Liveness. |
 
