@@ -9,6 +9,9 @@ Security invariants under test:
 
 * the wire envelope carries NO plaintext key bytes (only inside
   ``sealed.ciphertext``);
+* the wire envelope names NOBODY — no ``target_instance_id``, so neither the
+  GFS nor a non-target subscriber learns which household is being onboarded;
+  the seal is the gate;
 * the subscriber's key-wrap binding is VERIFIED before sealing — a forged
   binding (key-wrap sig that doesn't match the identity) → NO relay
   (anti-GFS-substitution);
@@ -154,10 +157,13 @@ async def test_valid_binding_relays_sealed_key_handoff(env):
     assert call["space_id"] == "sp-pub"
     envelope = call["payload"]
     assert envelope["space_id"] == "sp-pub"
-    assert envelope["target_instance_id"] == sub_iid
-    assert set(envelope) >= {
+    # The wire envelope names NOBODY: no ``target_instance_id`` (the seal is
+    # the gate), so neither the GFS nor a non-target subscriber learns which
+    # household is being onboarded.
+    assert "target_instance_id" not in envelope
+    assert sub_iid not in json.dumps(envelope)
+    assert set(envelope) == {
         "space_id",
-        "target_instance_id",
         "sealed",
         "authority_sig",
         "authority_sig_suite",
@@ -420,7 +426,10 @@ async def test_reconcile_pulls_and_relays_per_subscriber(recon_env):
     assert len(recon_env["gfs"].calls) == 1
     call = recon_env["gfs"].calls[0]
     assert call["space_id"] == "sp-rec"
-    assert call["payload"]["target_instance_id"] == sub_iid
+    # Reconcile goes through the same builder — no target on the wire here
+    # either; the subscriber is identified only by what it can unseal.
+    assert "target_instance_id" not in call["payload"]
+    assert sub_iid not in json.dumps(call["payload"])
     # The subscriber can open the seal.
     epoch, raw_key = await recon_env["crypto"].export_current_key("sp-rec")
     pt = open_keywrap(

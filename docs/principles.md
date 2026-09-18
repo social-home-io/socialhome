@@ -109,10 +109,9 @@ The honest residual: this is not "the GFS cannot learn it". A household
 normally holds an authenticated WebSocket to the same server from the same
 IP, so an operator can correlate a publish's source IP, timing and size
 with that session. Closing that would need a mix/onion egress and is out of
-scope. Two smaller residuals are tracked with the relay itself: a subscriber
-key handoff still names its target in the clear (Phase B removes it), and a
-per-instance GFS ban cannot gate an anonymous relay — the space-level ban is
-the moderation lever there. See
+scope. One smaller residual is tracked with the relay itself: a per-instance
+GFS ban cannot gate an anonymous relay — the space-level ban is the
+moderation lever there. See
 [`protocol/discovery.md`](./protocol/discovery.md).
 
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)

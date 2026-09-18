@@ -11,14 +11,15 @@ later relay/backfill decodes; that is a follow-up).
 Pipeline — fail-closed, the relay and the GFS are NEVER trusted:
 
 1. **Target gate.** The GFS fans the handoff out to EVERY subscriber of the
-   space. When the payload names a ``target_instance_id``, drop unless it is
-   us (a non-target also can't ``open_keywrap`` it, but the explicit gate
-   avoids needless work + makes the intent auditable). When it does NOT — the
-   identity-free shape, so the GFS never learns which household a key is
-   for — the **seal itself is the gate**: step 3's unseal failure means "not
-   for us" and is dropped quietly at DEBUG (in a space with N subscribers
-   every household receives the other N-1 handoffs; a WARNING per drop would
-   be pure noise).
+   space. The shape current senders emit names NOBODY — the GFS never learns
+   which household a key is for — and the **seal itself is the gate**:
+   step 3's unseal failure means "not for us" and is dropped quietly at DEBUG
+   (in a space with N subscribers every household receives the other N-1
+   handoffs; a WARNING per drop would be pure noise). The LEGACY shape from an
+   older seed-holder still names a ``target_instance_id``; it is still
+   accepted, and then drops unless the target is us (a non-target also can't
+   ``open_keywrap`` it, but the explicit gate avoids needless work + makes the
+   intent auditable).
 2. **Local space + authority verify.** Load the locally-mirrored space; drop
    if we don't mirror it or it carries no pinned pubkey. Re-verify the
    space-authority Ed25519 signature against ``spaces.identity_public_key``
@@ -105,10 +106,11 @@ class SpaceSubscriberKeyInbound:
         target = str(envelope.get("target_instance_id") or "")
         if not space_id:
             return
-        # Target gate: the GFS fans the handoff to every subscriber. An
-        # untargeted payload (no ``target_instance_id`` — nothing on the wire
-        # says which household the key is for) falls through to the unseal,
-        # which is then the gate.
+        # Target gate: the GFS fans the handoff to every subscriber. The
+        # current wire shape is untargeted (no ``target_instance_id`` —
+        # nothing on the wire says which household the key is for) and falls
+        # through to the unseal, which is then the gate. A LEGACY payload from
+        # an older seed-holder still names its target; honour that gate.
         if target and target != self._own_instance_id:
             log.debug(
                 "space_subscriber_key.inbound: handoff for %s not us (%s) — dropped",
