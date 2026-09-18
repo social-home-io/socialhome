@@ -145,10 +145,10 @@ class SqliteFederationRepo:
                 remote_inbox_url, local_inbox_id,
                 status, source, proto_version,
                 remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
-                intro_relay_enabled, relay_via,
+                intro_relay_enabled, relay_via, remote_keywrap_pk,
                 home_lat, home_lon, paired_at, created_at,
                 last_reachable_at, unreachable_since, share_home
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 display_name=excluded.display_name,
                 remote_identity_pk=excluded.remote_identity_pk,
@@ -163,6 +163,7 @@ class SqliteFederationRepo:
                 sig_suite=excluded.sig_suite,
                 intro_relay_enabled=excluded.intro_relay_enabled,
                 relay_via=excluded.relay_via,
+                remote_keywrap_pk=excluded.remote_keywrap_pk,
                 home_lat=excluded.home_lat,
                 home_lon=excluded.home_lon,
                 paired_at=excluded.paired_at,
@@ -185,6 +186,7 @@ class SqliteFederationRepo:
                 inst.sig_suite,
                 int(inst.intro_relay_enabled),
                 inst.relay_via,
+                inst.remote_keywrap_pk,
                 inst.home_lat,
                 inst.home_lon,
                 inst.paired_at,
@@ -700,6 +702,7 @@ def _row_to_instance(row: dict | None) -> RemoteInstance | None:
         sig_suite=str(row.get("sig_suite") or "ed25519"),
         intro_relay_enabled=bool_col(row.get("intro_relay_enabled", 1)),
         relay_via=row.get("relay_via"),
+        remote_keywrap_pk=row.get("remote_keywrap_pk"),
         home_lat=row.get("home_lat"),
         home_lon=row.get("home_lon"),
         paired_at=row.get("paired_at"),

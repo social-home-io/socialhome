@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import aiohttp
+import orjson
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -32,9 +34,12 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    FederationEvent,
+    FederationEventType,
     GfsConnection,
     InstanceSource,
     PairingStatus,
+    RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.space import JoinMode, SpaceType
@@ -42,8 +47,16 @@ from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.invite_bootstrap import InviteBootstrapHint
+from socialhome.federation.gfs_relay_transport import (
+    GfsRelayTransport,
+    seal_relay_envelope,
+)
 from socialhome.federation.invite_token_redeem import (
     SpaceInviteTokenRedeemCoordinator,
+)
+from socialhome.federation.transport import (
+    FederationTransport,
+    HttpsInboxTransport,
 )
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.federation_repo import SqliteFederationRepo
@@ -210,13 +223,50 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         user_repo=user_repo,
         federation_repo=federation_repo,
     )
+    envelope_sender = GfsEnvelopeSender(gfs_service=gfs_service, gfs_repo=gfs_repo)
     coordinator.attach_bootstrap(
-        relay_sender=GfsEnvelopeSender(gfs_service=gfs_service, gfs_repo=gfs_repo),
+        relay_sender=envelope_sender,
         keywrap_private_key=keywrap.private_key,
         keywrap_public_key=keywrap.public_key,
         keywrap_sig=keywrap_sig,
         key_manager=key_manager,
     )
+
+    # The real transport facade, including the third tier: a household
+    # seated from an invite link has no address, so its envelopes are
+    # sealed to its key-wrap key and carried by the connection server.
+    async def _client_factory():
+        return http_session
+
+    async def _no_signaling(to_instance_id, event_type, payload):
+        # No RTC in this fixture: an ordinary paired peer falls back to
+        # its HTTPS inbox, and a link-joined peer must never get here at
+        # all (pinned in tests/federation/test_federation_transport.py).
+        raise RuntimeError("no RTC signalling in this fixture")
+
+    fed_transport = FederationTransport(
+        own_instance_id=instance_id,
+        https_inbox=HttpsInboxTransport(client_factory=_client_factory),
+        gfs_relay=GfsRelayTransport(relay_sender=envelope_sender),
+        signaling_send=_no_signaling,
+    )
+    fed_transport.mark_ice_primed()
+    federation.attach_transport(fed_transport)
+
+    #: Every federation event this household's §24.11 pipeline validated,
+    #: decrypted and dispatched. Registering a capture handler is the
+    #: receiving end of "did the envelope actually arrive and decrypt".
+    received: list[FederationEvent] = []
+
+    async def _capture(event: FederationEvent) -> None:
+        received.append(event)
+
+    for _evt in (
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+    ):
+        federation._event_registry.register(_evt, _capture)
     space_service.attach_redeem_coordinator(coordinator)
     gfs.sockets[instance_id] = coordinator
 
@@ -232,6 +282,11 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
     return SimpleNamespace(
         db=db,
         name=name,
+        key_manager=key_manager,
+        federation=federation,
+        transport=fed_transport,
+        received=received,
+        identity_seed=ident.private_key,
         instance_id=instance_id,
         identity_pk=ident.public_key,
         keywrap_pub=keywrap.public_key,
@@ -413,3 +468,335 @@ async def test_a_relay_that_cannot_carry_invites_fails_the_redeem(
             bootstrap=hint,
         )
     assert gfs.mailbox == []
+
+
+# ─── The delivery leg: space events over the relay ────────────────────────
+
+
+POST_MARKER = "post-body-do-not-leak"
+
+
+def _post_payload(marker: str = POST_MARKER) -> dict:
+    return {
+        "post_id": "post-1",
+        "author_user_id": "author-user-id",
+        "content": marker,
+        "created_at": "2026-09-18T10:00:00+00:00",
+    }
+
+
+async def _join(a, b, gfs):
+    """b mints an invite, a redeems it. Returns the space."""
+    space, hint = await _mint_invite(b, gfs.url)
+    await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=hint,
+    )
+    await gfs.drain()
+    a.received.clear()
+    b.received.clear()
+    gfs.mailbox.clear()
+    return space
+
+
+async def test_the_host_reaches_a_link_joined_member(households, gfs):
+    """The gap this closes: before the relay tier, a space fan-out to a
+    household seated from an invite link went to a transport with no
+    address and was simply lost."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    result = await b.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_POST_CREATED,
+        _post_payload(),
+    )
+    await gfs.drain()
+
+    assert result.succeeded == 1
+    assert [e.event_type for e in a.received] == [
+        FederationEventType.SPACE_POST_CREATED,
+    ]
+    # Decrypted under the pair's session key, by the ordinary §24.11
+    # pipeline — the relay only carried ciphertext.
+    assert a.received[0].payload["content"] == POST_MARKER
+    assert a.received[0].space_id == space.id
+    assert a.received[0].from_instance == b.instance_id
+
+
+async def test_a_link_joined_member_reaches_the_host(households, gfs):
+    """Both directions, or the member is a read-only guest."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    result = await a.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_POST_CREATED,
+        _post_payload("member-wrote-this"),
+    )
+    await gfs.drain()
+
+    assert result.succeeded == 1
+    assert [e.payload["content"] for e in b.received] == ["member-wrote-this"]
+
+
+async def test_a_roster_change_and_a_rekey_reach_the_link_joined_member(
+    households,
+    gfs,
+):
+    """Not just posts: roster events and the next content-key epoch ride
+    the same leg, or the member silently rots out of the space."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    for event_type, payload in (
+        (FederationEventType.SPACE_MEMBER_JOINED, {"user_id": "new-member"}),
+        (
+            FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+            {"epoch": 2, "wrapped_key": "sealed-for-the-member"},
+        ),
+        (FederationEventType.SPACE_POST_CREATED, _post_payload("after-the-rekey")),
+    ):
+        await b.federation.broadcast_to_space_members(space.id, event_type, payload)
+    await gfs.drain()
+
+    assert [e.event_type for e in a.received] == [
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_POST_CREATED,
+    ]
+    assert a.received[1].payload["epoch"] == 2
+    # The post that FOLLOWS the rekey still decrypts: the pair's session
+    # key is independent of the space content key epoch.
+    assert a.received[2].payload["content"] == "after-the-rekey"
+
+
+async def test_every_relayed_body_is_a_recipient_and_ciphertext(households, gfs):
+    """§24.11 envelopes carry PLAINTEXT routing fields. If one reached the
+    relay unsealed, the connection server would learn who talks to whom,
+    about which space, and what event. Nothing but the recipient may."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    await b.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_POST_CREATED,
+        _post_payload(),
+    )
+    await a.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_POST_CREATED,
+        _post_payload("and-back-again"),
+    )
+    await gfs.drain()
+
+    assert len(gfs.mailbox) == 2
+    everything = json.dumps(gfs.mailbox)
+    for marker in (
+        "from_instance",
+        "event_type",
+        "space_id",
+        "space_post_created",
+        space.id,
+        POST_MARKER,
+        "and-back-again",
+        a.user_id,
+        b.user_id,
+        SPACE_NAME,
+    ):
+        assert marker not in everything, f"relay saw {marker!r}"
+    for _to_instance, body in gfs.mailbox:
+        assert set(body) == {"to_instance", "sealed"}
+        assert set(body["sealed"]) == {"kem_suite", "eph_pk", "ciphertext"}
+        assert body["sealed"]["kem_suite"] == "x25519"
+    # Each leg names only its recipient — never its sender.
+    assert gfs.mailbox[0][0] == a.instance_id
+    assert a.instance_id not in json.dumps(gfs.mailbox[1][1])
+
+
+async def test_a_tampered_blob_is_dropped_at_the_receiver(households, gfs):
+    """A relay that flips a byte gets nothing dispatched. (The WS client
+    swallows the raise — see tests/services/test_gfs_ws_client.py.)"""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    await b.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_POST_CREATED,
+        _post_payload(),
+    )
+    await gfs.drain()
+    _to, body = gfs.mailbox[-1]
+    a.received.clear()
+
+    sealed = dict(body["sealed"])
+    nonce, ct = sealed["ciphertext"].split(":", 1)
+    sealed["ciphertext"] = f"{nonce}:{ct[:-4]}AAAA"
+
+    with pytest.raises(ValueError):
+        await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    assert a.received == []
+
+
+async def test_an_envelope_from_a_household_that_is_not_this_pair_is_rejected(
+    households,
+    gfs,
+):
+    """The seal is confidentiality, not authorization. Anyone who reads
+    the public invite blob knows the key-wrap key and can seal a blob to
+    it — the §24.11 signature under the PAIR key is what says who sent
+    it, and it runs unchanged on the relay leg."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    stranger = generate_identity_keypair()
+    envelope = {
+        "msg_id": "forged-1",
+        "event_type": FederationEventType.SPACE_POST_CREATED.value,
+        # Claims to be b — the household a actually holds keys for.
+        "from_instance": b.instance_id,
+        "to_instance": a.instance_id,
+        # Fresh, so the rejection is the SIGNATURE and not the clock.
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "encrypted_payload": "nonce:ciphertext",
+        "space_id": space.id,
+        "proto_version": 1,
+        "sig_suite": "ed25519",
+    }
+    envelope["signatures"] = {
+        "ed25519": b64url_encode(
+            sign_ed25519(stranger.private_key, orjson.dumps(envelope)),
+        ),
+    }
+    sealed = seal_relay_envelope(
+        envelope_dict=envelope,
+        peer_keywrap_pub=a.keywrap_pub,
+    )
+
+    with pytest.raises(ValueError, match="signature"):
+        await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    assert a.received == []
+
+
+async def test_the_seat_survives_a_restart(households, gfs):
+    """The key-wrap key and the introducing server are read off the row on
+    every send, so they have to be on disk, not in memory."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    # A cold repo over the same file — what the next boot sees.
+    reloaded = SqliteFederationRepo(b.db)
+    row = await reloaded.get_instance(a.instance_id)
+    assert row is not None
+    assert row.remote_keywrap_pk == a.keywrap_pub.hex()
+    assert row.relay_via == gfs.url
+    assert row.source is InstanceSource.SPACE_SESSION
+
+    # And it still delivers off that reloaded row alone.
+    ok, _status = await b.transport._gfs_relay.send(
+        instance=row,
+        envelope_dict={
+            "msg_id": "after-restart",
+            "event_type": FederationEventType.SPACE_POST_CREATED.value,
+            "from_instance": b.instance_id,
+            "to_instance": a.instance_id,
+            "timestamp": "2026-09-18T10:00:00+00:00",
+            "encrypted_payload": "x",
+            "space_id": space.id,
+            "proto_version": 1,
+            "sig_suite": "ed25519",
+            "signatures": {"ed25519": "not-checked-here"},
+        },
+    )
+    assert ok is True
+    assert gfs.mailbox[-1][0] == a.instance_id
+
+
+# ─── Mixed fan-out: a link-joined member and an ordinary paired one ───────
+
+
+async def _pair_over_https(host, peer, peer_base_url: str):
+    """Seat ``host`` and ``peer`` as an ordinary CONFIRMED pair."""
+    key_h_to_p = bytes([1]) * 32
+    key_p_to_h = bytes([2]) * 32
+    await host.federation_repo.save_instance(
+        RemoteInstance(
+            id=peer.instance_id,
+            display_name=peer.name,
+            remote_identity_pk=peer.identity_pk.hex(),
+            key_self_to_remote=host.key_manager.encrypt(key_h_to_p),
+            key_remote_to_self=host.key_manager.encrypt(key_p_to_h),
+            remote_inbox_url=f"{peer_base_url}/inbox/inbox-{peer.name}",
+            local_inbox_id=f"inbox-{host.name}-for-{peer.name}",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        ),
+    )
+    await peer.federation_repo.save_instance(
+        RemoteInstance(
+            id=host.instance_id,
+            display_name=host.name,
+            remote_identity_pk=host.identity_pk.hex(),
+            key_self_to_remote=peer.key_manager.encrypt(key_p_to_h),
+            key_remote_to_self=peer.key_manager.encrypt(key_h_to_p),
+            remote_inbox_url="",
+            local_inbox_id=f"inbox-{peer.name}",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        ),
+    )
+
+
+async def test_one_fanout_reaches_a_relayed_member_and_a_paired_member(
+    households,
+    gfs,
+    tmp_path,
+    http_session,
+):
+    """The host's own members do not all share a transport: the link-joined
+    household rides the relay, an ordinary paired household keeps its
+    HTTPS inbox, and one ``broadcast_to_space_members`` serves both."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    c = await _household(tmp_path, "c", gfs, http_session)
+    try:
+        inbox = web.Application()
+
+        async def _inbox(request: web.Request) -> web.Response:
+            await c.federation.handle_inbound_envelope(
+                request.match_info["inbox_id"],
+                await request.read(),
+            )
+            return web.json_response({"status": "ok"})
+
+        inbox.router.add_post("/inbox/{inbox_id}", _inbox)
+        server = TestServer(inbox)
+        await server.start_server()
+        try:
+            await _pair_over_https(b, c, str(server.make_url("")).rstrip("/"))
+            await b.space_repo.add_space_instance(space.id, c.instance_id)
+
+            result = await b.federation.broadcast_to_space_members(
+                space.id,
+                FederationEventType.SPACE_POST_CREATED,
+                _post_payload("everyone-gets-this"),
+            )
+            await gfs.drain()
+
+            assert result.attempted == 2
+            assert result.succeeded == 2
+            assert [e.payload["content"] for e in a.received] == [
+                "everyone-gets-this",
+            ]
+            assert [e.payload["content"] for e in c.received] == [
+                "everyone-gets-this",
+            ]
+            # The paired household's envelope never touched the relay.
+            assert [to for to, _ in gfs.mailbox] == [a.instance_id]
+        finally:
+            await server.close()
+    finally:
+        await c.db.shutdown()

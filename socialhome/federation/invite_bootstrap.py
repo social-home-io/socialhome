@@ -295,6 +295,57 @@ def seal_bootstrap_envelope(
     return {"to_instance": recipient_instance_id, "sealed": sealed}
 
 
+def unseal_envelope_body(
+    *,
+    envelope: dict[str, Any],
+    keywrap_private_key: bytes,
+) -> dict[str, Any]:
+    """Caps + unseal + JSON-parse one relayed blob → the inner body.
+
+    The first three fail-closed steps of
+    :func:`open_bootstrap_envelope`, split out because the relay leg
+    carries two unrelated families through one socket: bootstrap bodies
+    (validated by :func:`validate_bootstrap_body`) and full §24.11
+    envelopes (:mod:`socialhome.federation.gfs_relay_transport`, whose
+    own signature/timestamp/replay checks are the §24.11 pipeline's).
+    The receiver dispatches on the body's ``kind`` marker, so it must be
+    able to read that marker before choosing a validator — without
+    unsealing the same blob twice.
+
+    Raises :class:`ValueError` (or
+    :class:`~socialhome.federation.keywrap_seal.UnsupportedKemSuite`) on
+    any malformed or unopenable input.
+    """
+    sealed = envelope.get("sealed") if isinstance(envelope, dict) else None
+    if not isinstance(sealed, dict):
+        raise ValueError("bootstrap envelope missing sealed payload")
+    ciphertext = sealed.get("ciphertext")
+    if not isinstance(ciphertext, str) or not ciphertext:
+        raise ValueError("bootstrap envelope missing ciphertext")
+    if len(ciphertext) > MAX_SEALED_BLOB_BYTES:
+        raise ValueError("bootstrap envelope too large")
+
+    try:
+        plaintext = open_keywrap(
+            sealed=sealed,
+            recipient_keywrap_priv=keywrap_private_key,
+        )
+    except UnsupportedKemSuite:
+        raise
+    except Exception as exc:  # InvalidTag, ValueError, …
+        raise ValueError(f"bootstrap envelope does not open: {exc}") from exc
+
+    if len(plaintext) > MAX_INNER_BYTES:
+        raise ValueError("bootstrap body too large")
+    try:
+        body = json.loads(plaintext)
+    except Exception as exc:
+        raise ValueError(f"bootstrap body is not JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ValueError("bootstrap body is not an object")
+    return body
+
+
 def open_bootstrap_envelope(
     *,
     envelope: dict[str, Any],
@@ -330,34 +381,20 @@ def open_bootstrap_envelope(
     Returns the validated inner body. Raises :class:`ValueError` (or its
     subclasses) on every rejection.
     """
-    sealed = envelope.get("sealed") if isinstance(envelope, dict) else None
-    if not isinstance(sealed, dict):
-        raise ValueError("bootstrap envelope missing sealed payload")
-    ciphertext = sealed.get("ciphertext")
-    if not isinstance(ciphertext, str) or not ciphertext:
-        raise ValueError("bootstrap envelope missing ciphertext")
-    if len(ciphertext) > MAX_SEALED_BLOB_BYTES:
-        raise ValueError("bootstrap envelope too large")
+    body = unseal_envelope_body(
+        envelope=envelope,
+        keywrap_private_key=keywrap_private_key,
+    )
+    return validate_bootstrap_body(body, expected_kinds=expected_kinds, now=now)
 
-    try:
-        plaintext = open_keywrap(
-            sealed=sealed,
-            recipient_keywrap_priv=keywrap_private_key,
-        )
-    except UnsupportedKemSuite:
-        raise
-    except Exception as exc:  # InvalidTag, ValueError, …
-        raise ValueError(f"bootstrap envelope does not open: {exc}") from exc
 
-    if len(plaintext) > MAX_INNER_BYTES:
-        raise ValueError("bootstrap body too large")
-    try:
-        body = json.loads(plaintext)
-    except Exception as exc:
-        raise ValueError(f"bootstrap body is not JSON: {exc}") from exc
-    if not isinstance(body, dict):
-        raise ValueError("bootstrap body is not an object")
-
+def validate_bootstrap_body(
+    body: dict[str, Any],
+    *,
+    expected_kinds: frozenset[str],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate an already-unsealed bootstrap body (steps 3-7 above)."""
     kind = body.get("kind")
     if not isinstance(kind, str) or kind not in _KNOWN_KINDS:
         raise ValueError(f"unknown bootstrap kind {kind!r}")
@@ -499,6 +536,8 @@ __all__ = [
     "sign_bootstrap_body",
     "seal_bootstrap_envelope",
     "open_bootstrap_envelope",
+    "unseal_envelope_body",
+    "validate_bootstrap_body",
     "derive_space_session_keys",
     "verify_peer_keywrap",
 ]

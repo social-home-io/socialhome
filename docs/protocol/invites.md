@@ -349,6 +349,10 @@ TOFU-verified body dispatched ahead of the pipeline (see
 [`pairing.md`](pairing.md)). The pipeline itself is untouched; no
 ordinary event gets a weaker check.
 
+This applies to the **redeem handshake only**. Once the pair is seated
+the row exists, and every envelope that then rides the same relay goes
+through the pipeline unchanged — see *Delivery afterwards* below.
+
 ### What this deliberately does NOT create
 
 A bootstrap redeem seats a **space-scoped** `remote_instances` row —
@@ -415,25 +419,98 @@ redeemer fails immediately with the unchanged *"no route to issuer —
 pair with them, or with one of their household's peers"* rather than
 burning a timeout on a household that has no handler for the envelope.
 
-### Open: reaching a bootstrap member afterwards
+### Delivery afterwards — every envelope rides the relay
 
-Seating works; **ongoing delivery does not, yet**. The relay above carries
-the redeem handshake only — nothing re-uses it for space traffic. Neither household
-holds an address for the other (by design — the blob is public), and a
-`space_session` peer may have no mesh path either, so
-`remote_inbox_url` is empty and the direct transports have nothing to
-dial. The pair does hold matching session keys, so the missing piece is
-purely a carrier. The options, for the owner to choose:
+Seating a `space_session` row is only half the job: the pair holds
+matching directional session keys but **no address for each other**, by
+design (the invite blob is public, so neither household publishes an
+`inbox_url`), and a `space_session` peer may have no mesh path either.
+Option 1 of the three that were open here is what shipped: every
+federation envelope between such a pair is carried by the same
+`POST /gfs/envelope` relay the redeem handshake used.
 
-1. **Relay every space envelope for this pair through the GFS**, sealed
-   the same way. Simple and consistent with the bootstrap itself; costs
-   the GFS traffic and gives it per-pair timing metadata.
-2. **Exchange addresses inside the sealed ACK** once the token has
-   authorized the join. Restores direct/HTTPS delivery, but publishes
-   each household's address to the other — which the token arguably
-   already authorizes, unlike the public blob.
-3. **Promote to a mesh path when one exists** — treat the GFS as the
-   fallback and prefer `SPACE_ROUTED` whenever discovery finds a chain.
+`FederationTransport.send` picks the transport. A peer with
+`source = space_session` is routed to `GfsRelayTransport`
+(`federation/gfs_relay_transport.py`) — never RTC signalling (which
+itself travels over the peer relationship this pair does not have) and
+never the HTTPS inbox (there is no URL; a fall-through would POST at the
+empty string). Every other peer keeps the unchanged RTC-first /
+HTTPS-fallback path.
+
+**The envelope is sealed a second time.** A §24.11 envelope is already
+AES-256-GCM-encrypted under the pair key and Ed25519-signed, but its
+*routing* fields are plaintext by construction — `from_instance`,
+`to_instance`, `event_type`, `space_id`, `msg_id`, `timestamp`. Handing
+that to the relay would give the connection server the social graph §D2b
+exists to withhold. So the whole envelope JSON is sealed to the peer's
+static key-wrap key (`keywrap_seal.seal_to_keywrap`, `kem_suite` tag
+included — the same primitive the bootstrap used) and the relay is handed
+the identity-free `{to_instance, sealed}` body:
+
+```jsonc
+// what the connection server sees, per envelope
+{"to_instance": "<32 hex>",
+ "sealed": {"kem_suite": "x25519", "eph_pk": "…", "ciphertext": "…"}}
+
+// the sealed plaintext, readable only by the addressed household
+{"kind": "space_relay_envelope", "envelope": { …the §24.11 envelope… }}
+```
+
+The `kind` marker is what lets one socket carry two families — bootstrap
+redeem bodies and full federation envelopes — without either side
+sniffing at field shapes. Inbound, `handle_relayed_envelope` unseals,
+reads the marker, and hands a `space_relay_envelope` to the
+**unmodified** §24.11 pipeline (the lookup-by-`instance_id` variant, as a
+relayed envelope carries no inbox id): row lookup → ±300 s window →
+Ed25519 verify under the pair key → replay → decrypt → idempotency →
+ban → dispatch. Riding the relay buys no exemption; the seal is
+confidentiality, not authorization. Anyone can read the public invite
+blob and seal a blob to that key-wrap key — the signature is what says
+who sent it, and an envelope that is not from this pair is dropped at the
+verify step.
+
+Two pieces of the seat are persisted for this, both read off the row on
+every send so they survive a restart:
+
+| Column | Holds | Why it cannot be re-derived |
+|---|---|---|
+| `remote_instances.remote_keywrap_pk` | the peer's static X25519 key-wrap pub (verified bound to its identity at seat time) | `remote_identity_pk` is Ed25519 and there is no Ed25519→X25519 conversion here; the session keys are one-way HKDF outputs. Re-fetching it from the GFS is exactly the substitution `verify_keywrap_binding` defeats. Migration `0050`. |
+| `remote_instances.relay_via` | the base URL of the connection server that introduced the pair | Reused: the column already answers "who do I go through to reach this peer" (it holds an introducer `instance_id` for auto-paired peers). The two sources never mix on one row. |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as HFS host
+    participant G as GFS (relay)
+    participant M as HFS link-joined member
+    Note over H: space event → broadcast_to_space_members
+    H->>H: §24.11 envelope: encrypt payload<br/>under the pair key, Ed25519-sign
+    H->>H: seal the WHOLE envelope to the<br/>member's key-wrap pub (kem_suite x25519)
+    H->>G: POST /gfs/envelope<br/>{to_instance: M, sealed}
+    G-->>H: 202 accepted (uniform)
+    G->>M: ws {type: envelope, sealed}<br/>(queued up to 24 h if offline)
+    M->>M: unseal → kind: space_relay_envelope
+    M->>M: §24.11 pipeline, unchanged:<br/>lookup → ts → signature → replay →<br/>decrypt → idempotency → ban → dispatch
+    Note over M: member replies the same way,<br/>sealed to the host's key-wrap pub
+```
+
+**Failure handling.** A relay that refuses or is unreachable is an
+ordinary transport failure: `send_event` queues the envelope in
+`federation_outbox`, and redelivery re-uses the same selection point
+rather than POSTing at the empty inbox URL.
+
+**Media does NOT flow to a link-joined member yet.** `space_media_outbox`
+ships blobs as one chunk up to `SINGLE_CHUNK_BYTES_THRESHOLD` (1 MiB) and
+in `MAX_BLOB_CHUNK_BYTES` (512 KiB) chunks above that; base64 in the JSON
+fallback path inflates that to ~683 KiB – 1.4 MiB, against a relay body
+cap of `ENVELOPE_MAX_BODY_BYTES` = 320 KiB. Nothing fits. `GfsRelayTransport`
+therefore refuses an oversize envelope **locally**, at WARNING, naming the
+peer, the event type and the size — it never ships one to earn a 413, and
+it never drops one silently. Posts, comments, reactions, roster events,
+config changes and key rotations all fit comfortably and flow normally;
+a post's *text* reaches the member, its *image* does not. Closing this
+needs either a chunker that respects a per-transport maximum or a larger
+relay cap, and is deliberately out of scope here.
 
 ### Token lifetime
 
@@ -597,6 +674,17 @@ Backend (federation + persistence):
   ``_ACK`` / ``_DENY`` round-trip; transparently ships via
   ``SPACE_ROUTED`` for non-paired issuers and falls back to direct
   delivery for paired ones.
+  Also the inbound end of the relay leg: `handle_relayed_envelope`
+  unseals, dispatches bootstrap bodies by `kind`, and hands a
+  `space_relay_envelope` to the §24.11 pipeline.
+- `socialhome/federation/gfs_relay_transport.py` — `GfsRelayTransport`,
+  the third `TransportStrategy` tier: seals a §24.11 envelope to a
+  link-joined peer's key-wrap key and hands it to the connection server
+  that introduced the pair. Selected in
+  `socialhome/federation/transport.py` for `source = space_session`.
+- `socialhome/services/gfs_envelope_sender.py` — the
+  `POST {gfs}/gfs/envelope` carrier, shared by the redeem handshake and
+  the delivery leg (one HTTP client, one capability cache).
 
 SPA (issuer + receiver side):
 

@@ -47,10 +47,16 @@ from . import app_framing
 from . import media_framing
 from ..domain.events import PeerTransportChanged
 from ..exception_text import describe_exception
-from ..domain.federation import DeliveryResult, FederationEventType, RemoteInstance
+from ..domain.federation import (
+    DeliveryResult,
+    FederationEventType,
+    InstanceSource,
+    RemoteInstance,
+)
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
+    from .gfs_relay_transport import GfsRelayTransport
 
 log = logging.getLogger(__name__)
 
@@ -1472,7 +1478,7 @@ class _TransportSendResult:
     """What :meth:`FederationTransport.send` returns to the caller."""
 
     ok: bool
-    via: str  # "rtc" | "https"
+    via: str  # "rtc" | "https" | "gfs_relay"
     status_code: int | None = None
     error: str | None = None
 
@@ -1489,6 +1495,7 @@ class FederationTransport:
     __slots__ = (
         "_own_instance_id",
         "_https_inbox",
+        "_gfs_relay",
         "_signaling_send",
         "_ice_servers",
         "_peers",
@@ -1514,6 +1521,7 @@ class FederationTransport:
         *,
         own_instance_id: str,
         https_inbox: HttpsInboxTransport,
+        gfs_relay: "GfsRelayTransport | None" = None,
         signaling_send: Callable[
             [str, FederationEventType, dict], Awaitable[DeliveryResult]
         ],
@@ -1529,6 +1537,13 @@ class FederationTransport:
     ) -> None:
         self._own_instance_id = own_instance_id
         self._https_inbox = https_inbox
+        #: Third transport tier — the connection-server envelope relay,
+        #: the ONLY way to reach a household seated from an invite link
+        #: (:data:`InstanceSource.SPACE_SESSION`): that pair deliberately
+        #: never exchanged an address, so there is nothing for RTC to
+        #: signal towards and nothing for the HTTPS inbox to POST to.
+        #: ``None`` in tests and in builds with no connection server.
+        self._gfs_relay = gfs_relay
         self._signaling_send = signaling_send
         self._ice_servers = ice_servers or []
         self._peers: dict[str, _RtcPeer] = {}
@@ -1687,6 +1702,35 @@ class FederationTransport:
         The envelope is unchanged across transports — the signature and
         AES-256-GCM payload are already baked in.
         """
+        # A household seated from an invite link has no address AT ALL,
+        # by design (§D2b): ``remote_inbox_url`` is empty and no RTC
+        # signalling can reach it, because signalling itself travels over
+        # the peer relationship this pair does not have. It rides the
+        # connection-server relay or it goes nowhere — never a fall-
+        # through to an HTTPS POST at the empty string.
+        if instance.source is InstanceSource.SPACE_SESSION:
+            if self._gfs_relay is None:
+                log.warning(
+                    "fed send to %s needs the connection-server relay, "
+                    "which is not wired on this host",
+                    instance.id,
+                )
+                return _TransportSendResult(
+                    ok=False,
+                    via="gfs_relay",
+                    error="gfs_relay_unavailable",
+                )
+            ok, status = await self._gfs_relay.send(
+                instance=instance,
+                envelope_dict=envelope_dict,
+            )
+            return _TransportSendResult(
+                ok=ok,
+                via="gfs_relay",
+                status_code=status,
+                error=None if ok else "gfs_relay_failed",
+            )
+
         peer = self._peers.get(instance.id)
         if peer is not None and peer.is_ready:
             try:

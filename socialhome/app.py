@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import aiohttp
 import aiolibdatachannel as rtc
+import orjson
 from aiohttp import web
 
 from . import app_keys as K
@@ -40,7 +41,7 @@ from .exception_text import describe_exception
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
 from .db import AsyncDatabase
-from .domain.federation import FederationEventType
+from .domain.federation import FederationEventType, InstanceSource
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.sync_manager import SyncSessionManager
@@ -215,6 +216,7 @@ from .services.corner_service import CornerService
 from .federation.peer_directory_handler import PeerDirectoryHandler
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.route_discovery import RouteDiscoveryService
+from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.routed_envelope import SpaceRoutedHandler
 from .federation.private_invite_handler import PrivateSpaceInviteHandler
 from .services.peer_directory_service import PeerDirectoryService
@@ -412,6 +414,31 @@ async def _redeliver_envelope(
     except Exception as exc:
         log.warning("outbox: undecodable entry %s — dropping: %s", entry.id, exc)
         return DeliveryOutcome.PERMANENT
+
+    if instance.source is InstanceSource.SPACE_SESSION:
+        # A household seated from an invite link has no inbox URL by
+        # design — re-POSTing would target the empty string on every
+        # attempt until the entry burns through MAX_ATTEMPTS. Its
+        # envelopes ride the connection-server relay, and the transport
+        # facade already knows how to pick it (``FederationTransport
+        # .send``), so redelivery reuses that one selection point rather
+        # than growing a second copy of the rule.
+        transport = federation_service._transport
+        if transport is None:
+            log.warning(
+                "outbox: %s is reachable only through the connection-server "
+                "relay, which is not wired — dropping",
+                entry.instance_id,
+            )
+            return DeliveryOutcome.PERMANENT
+        result = await transport.send(
+            instance=instance,
+            envelope_dict=orjson.loads(body),
+        )
+        if result.ok:
+            await federation_repo.mark_reachable(entry.instance_id)
+            return DeliveryOutcome.SUCCESS
+        return DeliveryOutcome.TRANSIENT
 
     try:
         client = await federation_service._get_http_client()
@@ -2554,11 +2581,12 @@ def create_app(config: Config | None = None) -> web.Application:
         # issuer can seal its reply back and both sides derive matching
         # space-session keys. The inbound leg is attached to the GFS
         # socket further down (``attach_envelope_handler``).
+        gfs_envelope_sender = GfsEnvelopeSender(
+            gfs_service=gfs_connection_service,
+            gfs_repo=repos.gfs_connection,
+        )
         invite_redeem_coordinator.attach_bootstrap(
-            relay_sender=GfsEnvelopeSender(
-                gfs_service=gfs_connection_service,
-                gfs_repo=repos.gfs_connection,
-            ),
+            relay_sender=gfs_envelope_sender,
             keywrap_private_key=identity.keywrap_private_key,
             keywrap_public_key=identity.keywrap_public_key,
             keywrap_sig=identity.keywrap_sig,
@@ -2652,6 +2680,13 @@ def create_app(config: Config | None = None) -> web.Application:
             https_inbox=HttpsInboxTransport(
                 client_factory=federation_service._get_http_client,
             ),
+            # Third tier: households seated from an invite link hold no
+            # address for each other, so their envelopes are sealed to
+            # the peer's key-wrap key and carried by the connection
+            # server that introduced them. Same ``RelayEnvelopeSender``
+            # the bootstrap redeem uses — one HTTP client, one capability
+            # cache, one footprint on that server.
+            gfs_relay=GfsRelayTransport(relay_sender=gfs_envelope_sender),
             signaling_send=_signaling_send,
             ice_servers=fed_ice_servers,
             inbound_handler=federation_service.handle_inbound_rtc,

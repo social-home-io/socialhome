@@ -526,7 +526,27 @@ class RemoteInstance:
     #: Default ``"ed25519"`` matches the classical (and safest-floor)
     #: behaviour when the remote side doesn't advertise a hybrid key.
     sig_suite: str = "ed25519"
-    relay_via: str | None = None  # introducer instance_id, if introduced
+    #: Who introduced this peer. For an auto-paired peer (§11 trust
+    #: relay) that is the introducer's ``instance_id``. For a
+    #: :data:`InstanceSource.SPACE_SESSION` row — a household seated from
+    #: an invite link, which has no address at all — it is instead the
+    #: **base URL of the connection server that introduced the pair**,
+    #: because that relay is the only way to reach them
+    #: (:mod:`socialhome.federation.gfs_relay_transport`). Deliberately
+    #: the same column: both values answer "who do I go through to reach
+    #: this peer", the two sources never mix on one row, and nothing reads
+    #: ``relay_via`` as an instance id without first excluding
+    #: ``space_session`` (``auto_pair_coordinator`` refuses those rows as
+    #: introducers outright).
+    relay_via: str | None = None
+    #: The peer's static X25519 **key-wrap** public key, hex — verified
+    #: bound to :attr:`remote_identity_pk` at seat time via
+    #: :func:`~socialhome.federation.keywrap_seal.verify_keywrap_binding`.
+    #: Set only on :data:`InstanceSource.SPACE_SESSION` rows, where it is
+    #: what every outbound envelope is sealed to before the connection
+    #: server carries it. ``None`` on every ordinary peer (they have an
+    #: address; nothing needs sealing).
+    remote_keywrap_pk: str | None = None
     home_lat: float | None = None  # 4dp-truncated
     home_lon: float | None = None
     paired_at: str | None = None

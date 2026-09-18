@@ -45,6 +45,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+import orjson
+
 from ..domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -62,14 +64,16 @@ from ..services.space_service import (
     can_seat_remote_stub,
     stub_space_from_metadata,
 )
+from .gfs_relay_transport import is_relay_envelope_body
 from .invite_bootstrap import (
     KIND_REDEEM,
     KIND_REDEEM_ACK,
     KIND_REDEEM_DENY,
     InviteBootstrapHint,
     derive_space_session_keys,
-    open_bootstrap_envelope,
     seal_bootstrap_envelope,
+    unseal_envelope_body,
+    validate_bootstrap_body,
     verify_peer_keywrap,
 )
 
@@ -532,6 +536,9 @@ class SpaceInviteTokenRedeemCoordinator:
                     keywrap_sig=bootstrap.keywrap_sig,
                     proto_version=bootstrap.proto_version,
                     is_redeemer=True,
+                    # The server that served the invite blob — the issuer
+                    # answered on it, so it reaches them.
+                    gfs_url=bootstrap.gfs_url,
                 )
             await self._spaces.add_space_instance(
                 space_id,
@@ -937,13 +944,29 @@ class SpaceInviteTokenRedeemCoordinator:
         (that is the point — it is identity-free), so this one entry
         point opens it and dispatches on the inner ``kind``.
 
-        The §24.11 pipeline is deliberately **not** used: it resolves
-        signing keys from a CONFIRMED ``remote_instances`` row, which by
-        definition does not exist for a stranger. §11 pairing has the
-        identical problem and solves it the same way — a self-signed,
-        TOFU-verified body dispatched ahead of the pipeline
-        (``docs/protocol/pairing.md``). The pipeline is untouched for
-        every ordinary event.
+        Two families ride this socket:
+
+        * **Bootstrap bodies** (``space_invite_bootstrap_redeem`` and its
+          ack / deny). The §24.11 pipeline is deliberately **not** used
+          for these: it resolves signing keys from a CONFIRMED
+          ``remote_instances`` row, which by definition does not exist
+          for a stranger. §11 pairing has the identical problem and
+          solves it the same way — a self-signed, TOFU-verified body
+          dispatched ahead of the pipeline (``docs/protocol/pairing.md``).
+        * **Ordinary §24.11 envelopes** for a household seated from an
+          invite link, sealed by
+          :class:`~socialhome.federation.gfs_relay_transport
+          .GfsRelayTransport` because the pair holds no address for each
+          other. Those go straight into the **unmodified** pipeline
+          (:meth:`FederationService.handle_inbound_rtc` — the
+          lookup-by-instance-id variant, since a relayed envelope carries
+          no inbox id) with every step intact: the row lookup, the
+          ±300 s window, the Ed25519 verify under the pair key, replay,
+          decrypt, idempotency and the ban check all apply exactly as
+          they do over RTC or the HTTPS inbox. Riding the relay buys no
+          exemption.
+
+        The pipeline itself is untouched for every ordinary event.
 
         Raises :class:`ValueError` on any validation failure; the caller
         drops the blob.
@@ -958,9 +981,23 @@ class SpaceInviteTokenRedeemCoordinator:
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
             raise ValueError("invite bootstrap inbound rate limit exceeded")
-        body = open_bootstrap_envelope(
+        body = unseal_envelope_body(
             envelope=envelope,
             keywrap_private_key=self._keywrap_private_key,
+        )
+        if is_relay_envelope_body(body):
+            # A §24.11 envelope for a link-joined peer. No bootstrap
+            # validation applies (there is no ``redeem_nonce`` and the
+            # inner envelope carries its own signature): hand it to the
+            # pipeline, which is the authority on every check. No
+            # per-sender throttle either — the only id available before
+            # the pipeline runs is the envelope's UNVERIFIED
+            # ``from_instance``, and keying a budget on that would let
+            # anyone starve a household's traffic by claiming its id.
+            # The process-wide limiter above is the shed.
+            return await self._dispatch_relayed_federation_envelope(body)
+        validate_bootstrap_body(
+            body,
             expected_kinds=frozenset({KIND_REDEEM, KIND_REDEEM_ACK, KIND_REDEEM_DENY}),
         )
         # Per-sender throttle, once the signature has proven who the
@@ -986,6 +1023,32 @@ class SpaceInviteTokenRedeemCoordinator:
         if body["kind"] == KIND_REDEEM:
             return await self._handle_bootstrap_redeem(body, gfs_url=gfs_url)
         return await self._handle_bootstrap_reply(body)
+
+    async def _dispatch_relayed_federation_envelope(self, body: dict) -> dict:
+        """Run one relayed §24.11 envelope through the normal pipeline.
+
+        The sender is taken from the envelope's own ``from_instance``
+        and used only to LOOK UP the row; the pipeline's signature step
+        then requires that row's identity key to have signed these exact
+        bytes and rejects anything else, so a claimed id buys nothing.
+        A household that is not this peer — or this peer with a bad
+        signature — is dropped there, not here.
+        """
+        inner = body.get("envelope")
+        if not isinstance(inner, dict):
+            raise ValueError("relayed federation envelope missing envelope body")
+        from_instance = inner.get("from_instance")
+        if not isinstance(from_instance, str) or not from_instance:
+            raise ValueError("relayed federation envelope missing from_instance")
+        log.debug(
+            "gfs_relay: inbound %r envelope from %s",
+            inner.get("event_type"),
+            from_instance,
+        )
+        return await self._federation.handle_inbound_rtc(
+            from_instance,
+            orjson.dumps(inner),
+        )
 
     async def _handle_bootstrap_redeem(self, body: dict, *, gfs_url: str = "") -> dict:
         """Issuer-side: authorize a stranger's sealed redeem, reply sealed.
@@ -1057,6 +1120,9 @@ class SpaceInviteTokenRedeemCoordinator:
             keywrap_sig=str(body["keywrap_sig"]),
             proto_version=int(body.get("proto_version") or 1),
             is_redeemer=False,
+            # The server the request arrived on: the one relay we know
+            # reaches this redeemer, and the one they are listening on.
+            gfs_url=gfs_url,
         )
         await self._send_bootstrap_reply(
             body,
@@ -1170,6 +1236,7 @@ class SpaceInviteTokenRedeemCoordinator:
         keywrap_sig: str,
         proto_version: int,
         is_redeemer: bool,
+        gfs_url: str = "",
     ) -> None:
         """Persist the counterpart as a **space-scoped** instance row.
 
@@ -1226,6 +1293,16 @@ class SpaceInviteTokenRedeemCoordinator:
                 # an inbox URL to the other. See the "reaching a
                 # bootstrap member" note in docs/protocol/invites.md.
                 remote_inbox_url="",
+                # The two halves of "how do I reach this household": the
+                # connection server that introduced the pair, and the
+                # static key-wrap key every envelope for them is sealed
+                # to before that server carries it. Both are read back by
+                # :class:`~socialhome.federation.gfs_relay_transport
+                # .GfsRelayTransport` on every send, so both have to
+                # survive a restart — the key-wrap key cannot be
+                # re-derived from anything else on the row.
+                relay_via=gfs_url or None,
+                remote_keywrap_pk=peer_keywrap_pub.hex(),
                 local_inbox_id=secrets.token_urlsafe(24),
                 status=PairingStatus.CONFIRMED,
                 source=InstanceSource.SPACE_SESSION,

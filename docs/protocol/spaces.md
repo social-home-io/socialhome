@@ -1200,6 +1200,31 @@ signature, harmless on their own and forwarded unaltered; the origin
 verifies them to defeat key substitution (see "Authenticating
 `target_eph_pk`" above).
 
+### Third tier: no path at all (the connection-server relay)
+
+Direct peer, then mesh — and then a household that has neither. A member
+seated from an invite link (§D2b, [`invites.md`](./invites.md)) holds a
+`source = space_session` row with an **empty `remote_inbox_url`**: the
+pair deliberately never exchanged an address, so there is nothing to dial
+and no chain of confirmed peers to route along either. Its envelopes ride
+a third transport tier, the connection server's opaque envelope relay.
+
+`FederationTransport.send` picks it on `source = space_session` — never
+RTC (its signalling travels over the peer relationship this pair does not
+have), never the HTTPS inbox (there is no URL). `GfsRelayTransport`
+(`federation/gfs_relay_transport.py`) seals the **whole** §24.11
+envelope — plaintext routing fields included — to the peer's static
+key-wrap key and hands the connection server `{to_instance, sealed}`.
+The same discipline as a mesh relay, against a different adversary: a
+mesh relay sees `SPACE_ROUTED` and no content; the GFS sees a recipient,
+a size and a timing, and no content, no sender and no space.
+
+Inbound, the receiver unseals, recognises the `space_relay_envelope`
+marker and runs the **unmodified** §24.11 pipeline — so a relayed space
+event is checked exactly like one off the DataChannel. Media does not
+fit the relay's 320 KiB body cap and is refused locally with a WARNING;
+see *Delivery afterwards* in [`invites.md`](./invites.md).
+
 ### First consumer: token-redeem (`SPACE_INVITE_TOKEN_REDEEM`)
 
 PR 1 (v_6) added receiver-initiated cross-instance redeem of
