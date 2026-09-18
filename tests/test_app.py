@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome._version import __version__
-from socialhome.app import MAP_TILE_USER_AGENT, create_app
+from socialhome.app import (
+    MAP_TILE_USER_AGENT,
+    create_app,
+    dispatch_gfs_relay_frame,
+)
+from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+    AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+)
 from socialhome.config import Config
 from socialhome.services.app_federation_service import AppFederationService
 
@@ -285,3 +294,86 @@ async def test_gfs_space_mirror_wired_into_space_service(tmp_dir):
         assert isinstance(mirror, GfsSpaceMirrorService)
         assert mirror._http_client is not None  # noqa: SLF001
         assert mirror._gfs is app[gfs_connection_service_key]  # noqa: SLF001
+
+
+# ── GFS relay fan-out dispatch (identity-free frame) ──────────────────────
+
+
+class _RecordingConsumer:
+    """Stand-in relay consumer that records the frames handed to it."""
+
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+
+    async def handle(self, frame: dict, **kwargs) -> None:
+        self.frames.append(frame)
+
+
+def _relay_frame(event_type: str) -> dict:
+    """The four-key frame the GFS now fans out — no ``from_instance``."""
+    return {
+        "type": "relay",
+        "space_id": "sp-1",
+        "event_type": event_type,
+        "payload": {"space_id": "sp-1"},
+    }
+
+
+async def test_gfs_relay_dispatches_a_public_post_frame_without_from_instance():
+    posts, keys = _RecordingConsumer(), _RecordingConsumer()
+    frame = _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC)
+    await dispatch_gfs_relay_frame(
+        frame,
+        space_public_inbound=posts,
+        space_subscriber_key_inbound=keys,
+    )
+    assert posts.frames == [frame]
+    assert keys.frames == []
+
+
+async def test_gfs_relay_dispatches_a_key_handoff_frame_without_from_instance():
+    posts, keys = _RecordingConsumer(), _RecordingConsumer()
+    frame = _relay_frame(AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF)
+    await dispatch_gfs_relay_frame(
+        frame,
+        space_public_inbound=posts,
+        space_subscriber_key_inbound=keys,
+    )
+    assert keys.frames == [frame]
+    assert posts.frames == []
+
+
+async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):
+    """A legacy GFS may still ship ``from_instance``. It is a household
+    identity the GFS is not supposed to know — it must reach no log line."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    frame = _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC)
+    frame["from_instance"] = "victim.home"
+    posts = _RecordingConsumer()
+    await dispatch_gfs_relay_frame(
+        frame,
+        space_public_inbound=posts,
+        space_subscriber_key_inbound=None,
+    )
+    assert posts.frames == [frame]
+    leaked = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("socialhome") and "victim.home" in r.getMessage()
+    ]
+    assert leaked == []
+
+
+async def test_gfs_relay_is_a_noop_without_consumers():
+    """Before the crypto-dependent consumers are built they are ``None`` —
+    a frame arriving then must not raise."""
+    await dispatch_gfs_relay_frame(
+        _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC),
+        space_public_inbound=None,
+        space_subscriber_key_inbound=None,
+    )
+    await dispatch_gfs_relay_frame(
+        _relay_frame("some_other_event"),
+        space_public_inbound=None,
+        space_subscriber_key_inbound=None,
+    )

@@ -11,9 +11,14 @@ later relay/backfill decodes; that is a follow-up).
 Pipeline — fail-closed, the relay and the GFS are NEVER trusted:
 
 1. **Target gate.** The GFS fans the handoff out to EVERY subscriber of the
-   space; drop unless ``target_instance_id`` is us (a non-target also can't
-   ``open_keywrap`` it, but the explicit gate avoids needless work + makes
-   the intent auditable).
+   space. When the payload names a ``target_instance_id``, drop unless it is
+   us (a non-target also can't ``open_keywrap`` it, but the explicit gate
+   avoids needless work + makes the intent auditable). When it does NOT — the
+   identity-free shape, so the GFS never learns which household a key is
+   for — the **seal itself is the gate**: step 3's unseal failure means "not
+   for us" and is dropped quietly at DEBUG (in a space with N subscribers
+   every household receives the other N-1 handoffs; a WARNING per drop would
+   be pure noise).
 2. **Local space + authority verify.** Load the locally-mirrored space; drop
    if we don't mirror it or it carries no pinned pubkey. Re-verify the
    space-authority Ed25519 signature against ``spaces.identity_public_key``
@@ -80,7 +85,11 @@ class SpaceSubscriberKeyInbound:
 
     async def handle(self, frame: dict[str, Any]) -> None:
         """Dispatch one GFS relay frame. Non-handoff frames are ignored so
-        this can sit on the generic relay channel. Never raises."""
+        this can sit on the generic relay channel. Never raises.
+
+        The frame carries no household identity — an outer ``from_instance``
+        from an older GFS is neither read nor logged.
+        """
         if frame.get("event_type") != AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF:
             return
         envelope = frame.get("payload")
@@ -96,8 +105,11 @@ class SpaceSubscriberKeyInbound:
         target = str(envelope.get("target_instance_id") or "")
         if not space_id:
             return
-        # Target gate: the GFS fans the handoff to every subscriber.
-        if target != self._own_instance_id:
+        # Target gate: the GFS fans the handoff to every subscriber. An
+        # untargeted payload (no ``target_instance_id`` — nothing on the wire
+        # says which household the key is for) falls through to the unseal,
+        # which is then the gate.
+        if target and target != self._own_instance_id:
             log.debug(
                 "space_subscriber_key.inbound: handoff for %s not us (%s) — dropped",
                 target,
@@ -135,7 +147,11 @@ class SpaceSubscriberKeyInbound:
         except (InvalidTag, UnsupportedKemSuite, ValueError) as exc:
             # Sealed to a key-wrap key we don't hold (InvalidTag), an unknown
             # KEM suite (no fallback), or a malformed wire shape — drop.
-            log.info(
+            # Untargeted: the failure IS the "not for us" signal (including
+            # for a handoff we sealed ourselves), and every subscriber sees
+            # every other subscriber's handoff — so DEBUG, not INFO/WARNING.
+            log.log(
+                logging.DEBUG if not target else logging.INFO,
                 "space_subscriber_key.inbound: cannot open sealed key for space %s: %s",
                 space_id,
                 exc,

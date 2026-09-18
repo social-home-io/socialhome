@@ -12,6 +12,7 @@ missing content key (epoch not held).
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -87,8 +88,10 @@ async def env(tmp_dir):
         space_crypto=crypto,
         space_post_repo=post_repo,
     )
+    inbound.attach_identity(own_instance_id="us.home")
     return {
         "db": db,
+        "own_iid": "us.home",
         "bus": bus,
         "crypto": crypto,
         "post_repo": post_repo,
@@ -437,3 +440,94 @@ async def test_wrong_event_type_ignored(env):
     await env["inbound"].handle(frame, gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
+
+
+# ── Identity-free GFS fan-out (the GFS never sees which household relayed) ──
+
+
+def _anonymous_frame(envelope: dict) -> dict:
+    """The identity-free fan-out frame the GFS now pushes — exactly four keys,
+    no ``from_instance``."""
+    return {
+        "type": "relay",
+        "space_id": envelope["space_id"],
+        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        "payload": envelope,
+    }
+
+
+async def test_frame_without_from_instance_uses_inner_origin(env):
+    """A four-key frame (no ``from_instance``) is processed normally and the
+    published origin comes from the encrypted, authority-signed inner."""
+    envelope = await _make_envelope(env)
+    await env["inbound"].handle(_anonymous_frame(envelope), gfs_id="g1")
+    got = await env["post_repo"].get("post-1")
+    assert got is not None
+    assert got[1].content == "secret space content"
+    assert len(env["events"]) == 1
+    assert env["events"][0].origin_instance_id == "remote.home"
+
+
+async def test_spoofed_outer_from_instance_is_ignored(env, caplog):
+    """A legacy/hostile frame whose outer ``from_instance`` names a victim must
+    never become the attribution — the inner wins and the spoofed value lands
+    in no stored field and no log record."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    envelope = await _make_envelope(env)
+    frame = _anonymous_frame(envelope)
+    frame["from_instance"] = "victim.home"
+    await env["inbound"].handle(frame, gfs_id="g1")
+
+    got = await env["post_repo"].get("post-1")
+    assert got is not None
+    assert len(env["events"]) == 1
+    assert env["events"][0].origin_instance_id == "remote.home"
+    assert "victim.home" not in repr(got)
+    leaked = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("socialhome") and "victim.home" in r.getMessage()
+    ]
+    assert leaked == []
+
+
+async def test_self_echo_dropped_before_any_write(env, caplog):
+    """The GFS no longer excludes the publisher from its own fan-out, so our
+    own post comes back to us. An inner origin equal to our own instance id is
+    dropped at DEBUG before any persist."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    inner = {
+        "post_id": "post-echo",
+        "space_id": "sp-1",
+        "author_user_id": env["author_user_id"],
+        "author_pk": env["author_kp"].public_key.hex(),
+        "author_username": "bob",
+        "type": "text",
+        "content": "our own post, echoed back",
+        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "origin_instance_id": env["own_iid"],
+    }
+    inner["author_sig"] = b64url_encode(
+        sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
+    )
+    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(inner).encode())
+    envelope = {"space_id": "sp-1", "epoch": epoch, "encrypted_payload": ct}
+    envelope.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id="sp-1",
+            payload=strip_authority_sig_fields(envelope),
+            space_seed=env["space_kp"].private_key,
+        )
+    )
+
+    await env["inbound"].handle(_anonymous_frame(envelope), gfs_id="g1")
+
+    assert await env["post_repo"].get("post-echo") is None
+    assert env["events"] == []
+    noisy = [
+        r
+        for r in caplog.records
+        if r.name.startswith("socialhome") and r.levelno > logging.DEBUG
+    ]
+    assert noisy == []

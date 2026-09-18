@@ -17,14 +17,26 @@ trusted by the receiver:
    epoch's key (subscribers receive it in Phase 5b) → drop gracefully.
 3. **Author self-cert** — verify ``derive_user_id(author_pk, username) ==
    author_user_id`` so a relay can't forge authorship.
-4. **Dedupe** — the GFS relay is at-least-once and keeps no replay cache
+4. **Self-echo guard** — the GFS can no longer identify the publisher, so it
+   no longer excludes it from its own fan-out: a household that publishes to
+   a space it also subscribes to receives its own post back. An inner
+   ``origin_instance_id`` equal to our own instance id is dropped at DEBUG
+   before any write (the dedupe below would usually catch it, but only while
+   the local row still exists — an echo arriving after a local delete would
+   otherwise resurrect the post from our own copy).
+5. **Dedupe** — the GFS relay is at-least-once and keeps no replay cache
    (it's content-blind, it can't see the post id). Drop if a post with
    this id already exists locally (idempotent — the content-layer replay
    backstop the GFS relay design relies on).
-5. **Persist + publish** — save to ``space_posts`` (the same store the
+6. **Persist + publish** — save to ``space_posts`` (the same store the
    §24.11 inbound path uses) and publish :class:`SpacePostCreated` with
    ``origin_instance_id`` set (so the local realtime/search surfaces light
    up AND the federation outbound bridge's loop-guard skips re-fanning).
+
+Attribution comes from the **encrypted, authority-signed inner only**. The
+fan-out frame carries no household identity (the GFS never learns which
+household relayed); a frame from an older GFS may still carry an outer
+``from_instance``, and that value is ignored — never read, never logged.
 """
 
 from __future__ import annotations
@@ -59,7 +71,7 @@ log = logging.getLogger(__name__)
 class SpacePublicInbound:
     """GFS-relay → local-persist consumer for public/global space posts."""
 
-    __slots__ = ("_bus", "_spaces", "_crypto", "_posts")
+    __slots__ = ("_bus", "_spaces", "_crypto", "_posts", "_own_instance_id")
 
     def __init__(
         self,
@@ -73,19 +85,27 @@ class SpacePublicInbound:
         self._spaces = space_repo
         self._crypto = space_crypto
         self._posts = space_post_repo
+        self._own_instance_id: str = ""
+
+    def attach_identity(self, *, own_instance_id: str) -> None:
+        """Wire our own instance id — the self-echo guard's only input."""
+        self._own_instance_id = own_instance_id
 
     async def handle(self, frame: dict[str, Any], *, gfs_id: str | None = None) -> None:
         """Dispatch one GFS relay frame. Non-``space_post_public`` frames
-        are ignored so this can sit on the generic relay channel."""
+        are ignored so this can sit on the generic relay channel.
+
+        The frame carries no household identity — an outer ``from_instance``
+        from an older GFS is neither read nor logged.
+        """
         if frame.get("event_type") != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
             return
         envelope = frame.get("payload")
         if not isinstance(envelope, dict):
             return
-        from_instance = str(frame.get("from_instance") or "")
-        await self._on_relay(envelope, from_instance=from_instance)
+        await self._on_relay(envelope)
 
-    async def _on_relay(self, envelope: dict, *, from_instance: str) -> None:
+    async def _on_relay(self, envelope: dict) -> None:
         space_id = str(envelope.get("space_id") or "")
         if not space_id:
             return
@@ -137,6 +157,16 @@ class SpacePublicInbound:
 
         post_id = str(inner.get("post_id") or "")
         author_user_id = str(inner.get("author_user_id") or "")
+        origin_instance_id = str(inner.get("origin_instance_id") or "")
+        # Self-echo guard: the GFS can't identify the publisher any more, so it
+        # fans every relay out to every subscriber — including us, when we both
+        # publish to and subscribe to the space. Drop our own post before any
+        # write: the dedupe below only covers it while the local row still
+        # exists, so without this an echo arriving after a local delete would
+        # resurrect the post from our own copy.
+        if origin_instance_id and origin_instance_id == self._own_instance_id:
+            log.debug("space_public.inbound: self-echo for post %s — dropped", post_id)
+            return
         # Self-cert (author_pk ↔ author_user_id, both PUBLIC) + per-author
         # signature (the named author's HOUSEHOLD identity key must have signed
         # the inner content — only a household holding the author's identity
@@ -175,8 +205,7 @@ class SpacePublicInbound:
             SpacePostCreated(
                 post=post,
                 space_id=space_id,
-                origin_instance_id=from_instance
-                or str(inner.get("origin_instance_id") or ""),
+                origin_instance_id=origin_instance_id,
             )
         )
 

@@ -537,6 +537,43 @@ async def _redeliver_envelope(
         return DeliveryOutcome.TRANSIENT
 
 
+async def dispatch_gfs_relay_frame(
+    frame: dict,
+    *,
+    space_public_inbound: SpacePublicInbound | None,
+    space_subscriber_key_inbound: SpaceSubscriberKeyInbound | None,
+) -> None:
+    """Route one inbound GFS fan-out frame to its consumer.
+
+    The frame is identity-free — ``{type, space_id, event_type, payload}``:
+    the GFS can no longer tell which household relayed an event, so nothing
+    here reads (or logs) a household id. An older GFS may still ship an outer
+    ``from_instance``; it is ignored — attribution comes from the encrypted,
+    authority-signed inner alone.
+    """
+    log.info(
+        "gfs.relay.received: space=%s event=%s",
+        frame.get("space_id"),
+        frame.get("event_type"),
+    )
+    # Public space-content relay (Phase 5a2): a ``space_post_public`` frame
+    # carries an encrypted, authority-signed post envelope. The inbound
+    # consumer verifies + decrypts + dedupes; other event types remain
+    # logged-only until their consumers land.
+    if (
+        frame.get("event_type") == AUTHORITY_EVENT_SPACE_POST_PUBLIC
+        and space_public_inbound is not None
+    ):
+        await space_public_inbound.handle(frame)
+    # Phase 5b-b subscriber content-key handoff: the subscriber unseals +
+    # imports the relayed content key so it can decrypt the relay.
+    elif (
+        frame.get("event_type") == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+        and space_subscriber_key_inbound is not None
+    ):
+        await space_subscriber_key_inbound.handle(frame)
+
+
 def _default_ice_servers(
     config: Config,
     *,
@@ -2325,6 +2362,10 @@ def create_app(config: Config | None = None) -> web.Application:
             space_crypto=space_crypto,
             space_post_repo=space_post_repo,
         )
+        # The GFS fans a relay out to every subscriber (it can't identify the
+        # publisher to exclude it any more) — our own id is what the self-echo
+        # guard drops on.
+        space_public_inbound.attach_identity(own_instance_id=real_instance_id)
         # Phase 5b-b — subscriber content-key delivery. Outbound: a seed-holder
         # seals + relays the content key on a GFS ``new_subscriber`` notify.
         # Inbound: the subscriber unseals + imports the relayed handoff.
@@ -2672,28 +2713,11 @@ def create_app(config: Config | None = None) -> web.Application:
         # Inbound relay frames are logged here today; integration into the
         # federation inbound pipeline is a follow-up.
         async def _on_gfs_relay(frame: dict) -> None:
-            log.info(
-                "gfs.relay.received: space=%s event=%s from=%s",
-                frame.get("space_id"),
-                frame.get("event_type"),
-                frame.get("from_instance"),
+            await dispatch_gfs_relay_frame(
+                frame,
+                space_public_inbound=space_public_inbound,
+                space_subscriber_key_inbound=space_subscriber_key_inbound,
             )
-            # Public space-content relay (Phase 5a2): a ``space_post_public``
-            # frame carries an encrypted, authority-signed post envelope.
-            # The inbound consumer verifies + decrypts + dedupes; other
-            # event types remain logged-only until their consumers land.
-            if (
-                frame.get("event_type") == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-                and space_public_inbound is not None
-            ):
-                await space_public_inbound.handle(frame)
-            # Phase 5b-b subscriber content-key handoff: the subscriber unseals
-            # + imports the relayed content key so it can decrypt the relay.
-            elif (
-                frame.get("event_type") == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
-                and space_subscriber_key_inbound is not None
-            ):
-                await space_subscriber_key_inbound.handle(frame)
 
         # Re-fetch the GFS's current server_name on each WS (re)connect and
         # refresh the stored display_name if the operator renamed the
