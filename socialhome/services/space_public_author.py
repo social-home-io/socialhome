@@ -78,8 +78,17 @@ _SIGNED_FIELDS: tuple[str, ...] = (
 #: anchor MUST reproduce the exact v_25 signing bytes (no ``identity_anchor``
 #: key at all) — otherwise a not-yet-upgraded subscriber recomputes the old
 #: layout, the author sig mismatches, and even legacy username-anchored posts
-#: are silently dropped during rollout. Only uuid-anchored (new) authors
-#: include it, and those legitimately verify on v_26+ only (the migration tail).
+#: are silently dropped during rollout.
+#:
+#: "Absent" is decided by :func:`build_signed_author_inner`, NOT by the
+#: callers: in production every ``users`` row carries a non-NULL anchor
+#: (migration ``0041`` backfilled ``identity_anchor = username``; the
+#: admin-mirror / HA-person paths via ``derive_local_user_id`` still mint
+#: ``= username`` today), so the producers always pass an anchor. The builder
+#: therefore normalises a username-anchored author (``anchor == username``,
+#: or an empty anchor) to "absent" — only an anchor that differs from the
+#: username (uuid4-provisioned users) writes the key, and those verify on
+#: v_26+ receivers only.
 _OPTIONAL_OMITTED_WHEN_ABSENT: frozenset[str] = frozenset({"identity_anchor"})
 
 
@@ -126,7 +135,35 @@ def build_signed_author_inner(
     the resulting ``author_sig`` (b64url) is added to the returned dict.
     Centralised so the local relay (space_public_outbound) and the
     member-broadcast relay-hint (space_post_outbound) produce byte-identical
-    signed inners."""
+    signed inners.
+
+    **Username-anchor normalisation (v_25 wire compatibility).** Callers pass
+    the author's stored ``identity_anchor`` verbatim — and in production that
+    is never ``None``: migration ``0041`` backfilled ``= username`` for every
+    pre-existing user, and ``identity_bootstrap.derive_local_user_id`` keeps
+    minting ``identity_anchor = username`` for every admin-mirror and
+    HA-person row, so username-anchored authors are a permanent class, not a
+    rollout tail. Any author whose anchor equals their username (or is empty)
+    is normalised here to *absent*: no ``identity_anchor`` key is written and
+    none is signed, so their bytes are byte-identical to the pre-anchor v_25
+    layout and a not-yet-upgraded subscriber (GFS relay path, no proto
+    negotiation) still verifies them. Only an anchor that differs from the
+    username (uuid4-provisioned users) is carried and signed. Equality is the
+    trigger, not an invariant — a user may rename to a string equal to their
+    uuid anchor; the derivation is then identical either way, so omitting the
+    key remains correct. Done here — the single producer choke point — so
+    every present and future producer inherits it.
+
+    Security argument: the verifier derives
+    ``derive_user_id(author_pk, anchor if present else username)`` and checks
+    it against ``author_user_id``. For a legacy author the anchor *is* the
+    username, so omitting it leaves the derivation unchanged. A relayer that
+    *adds* ``identity_anchor: <username>`` to a legacy inner changes the
+    recomputed bytes on a v_26+ receiver (sig fails) and is ignored by a v_25
+    receiver (unchanged) — no forged attribution either way. A relayer that
+    *removes* the anchor from a uuid4 author makes the derivation fall back
+    to the username, which does not equal the uuid-derived ``author_user_id``
+    (rejected). See ``tests/services/test_space_public_author.py``."""
     inner: dict[str, object] = {
         "post_id": post.id,
         "space_id": space_id,
@@ -148,10 +185,13 @@ def build_signed_author_inner(
             "label": post.location.label,
         }
     # The derivation input for ``author_user_id`` (a uuid for new users). OMITTED
-    # entirely for legacy authors whose user_id derives from the username, so the
-    # signed bytes stay byte-identical to the pre-anchor (v_25) layout and a
-    # not-yet-upgraded subscriber still verifies their posts during rollout.
-    if author_identity_anchor is not None:
+    # entirely for username-anchored authors (the 0041 backfill and the
+    # admin-mirror / HA-person rows store ``identity_anchor = username``), so
+    # treat ``anchor == username`` (or empty) as absent — keeping the signed bytes byte-identical
+    # to the pre-anchor (v_25) layout so a not-yet-upgraded subscriber still
+    # verifies their posts during rollout (see the docstring for the security
+    # argument).
+    if author_identity_anchor and author_identity_anchor != author_username:
         inner["identity_anchor"] = author_identity_anchor
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, author_signing_bytes(inner))

@@ -204,6 +204,28 @@ boundary on both ends:
   bytes cover `hidden_from_feed` too, so a relay can't flip a post's
   feed-presentation intent.
 
+  **`identity_anchor` and cross-version compatibility.** The inner may carry
+  the author's `identity_anchor` (v_26 — the `user_id` derivation input, see
+  [`user-identity.md`](./user-identity.md)); when present it is signed, and
+  the receiver self-certifies with
+  `derive_user_id(author_pk, identity_anchor if present else author_username)`.
+  The GFS relay path has **no proto-version negotiation**, so
+  `build_signed_author_inner` keeps the v_25 wire shape for username-anchored
+  authors by construction. Every `users` row has a non-NULL anchor — migration
+  `0041` backfilled `identity_anchor = username` for pre-existing users, and
+  `derive_local_user_id` still mints `= username` for every admin-mirror and
+  HA-person row, so this is a permanent class of authors, not a rollout tail.
+  The builder — not the callers — treats `anchor == username` (or an empty
+  anchor) as *absent* and writes/signs **no** `identity_anchor` key, so such an
+  author's signed bytes are byte-identical to the pre-anchor layout and verify
+  on a sub-v_26 subscriber; only an author whose anchor differs from their
+  username (uuid4-provisioned on v_26+) carries the key, and those posts
+  verify on v_26+ receivers only. Neither direction is forgeable: adding
+  `identity_anchor: <username>` to a username-anchored inner breaks the sig on
+  v_26+ and is ignored on v_25; stripping a uuid author's anchor makes the
+  derivation fall back to the username, which no longer matches
+  `author_user_id`.
+
 - **Remote-author relay** (owner-offline-capable). A plain member's public
   post no longer waits for the owner: when **any** member creates a
   public/global-space post, the author's household builds the same per-author

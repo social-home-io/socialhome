@@ -114,6 +114,165 @@ def test_legacy_signed_inner_has_no_anchor_key_and_verifies_under_v25():
     )
 
 
+def test_legacy_username_anchored_author_normalised_to_v25_layout():
+    """REGRESSION (live cross-version bug): every real user row carries a
+    non-NULL ``identity_anchor`` — migration ``0041`` backfilled
+    ``identity_anchor = username`` for every pre-existing user and every
+    provision path writes one — so the producers ALWAYS hand the builder an
+    anchor. For a legacy (username-anchored) author the builder MUST treat
+    ``anchor == username`` as *absent*: no ``identity_anchor`` key in the
+    inner, and the signature over the 13-field v_25 layout — otherwise a
+    not-yet-upgraded (June 2026, ``OURS=24``) subscriber recomputes 13 fields,
+    the sig mismatches, and every public post from an upgraded household is
+    silently dropped."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    inner = build_signed_author_inner(
+        post=_post(author=derive_user_id(kp.public_key, username)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        author_identity_anchor=username,  # what the producers actually pass
+    )
+    assert "identity_anchor" not in inner
+    # Byte-identical to the v_25 layout — a sub-v_26 receiver accepts it.
+    assert author_signing_bytes(inner) == _v25_author_signing_bytes(inner)
+    assert verify_ed25519(
+        kp.public_key,
+        _v25_author_signing_bytes(inner),
+        b64url_decode(inner["author_sig"]),
+    )
+    # ...and a v_26+ receiver accepts it too (username derivation still holds).
+    assert verify_signed_author_inner(inner) is True
+
+
+def test_empty_anchor_normalised_to_v25_layout():
+    """An empty-string anchor is *absent* too. The verifier already treats
+    ``""`` as no anchor for the derivation (``anchor if anchor else None``), so
+    a producer that signed an ``identity_anchor: ""`` key would verify on v_26+
+    but lose the v_25 layout for no reason — the builder normalises it the
+    same way as ``anchor == username`` so all three sites agree."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    inner = build_signed_author_inner(
+        post=_post(author=derive_user_id(kp.public_key, username)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        author_identity_anchor="",
+    )
+    assert "identity_anchor" not in inner
+    assert author_signing_bytes(inner) == _v25_author_signing_bytes(inner)
+    assert verify_signed_author_inner(inner) is True
+
+
+def test_legacy_normalisation_matches_explicit_none():
+    """``anchor == username`` and ``anchor=None`` produce the SAME inner (bar
+    the randomised signature) — the normalisation is exactly "treat as
+    absent", nothing more."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    kw = dict(
+        post=_post(author=derive_user_id(kp.public_key, username)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+    )
+    a = build_signed_author_inner(author_identity_anchor=username, **kw)
+    b = build_signed_author_inner(author_identity_anchor=None, **kw)
+    a.pop("author_sig")
+    b.pop("author_sig")
+    assert a == b
+
+
+def test_uuid_anchored_author_still_signs_14_field_layout():
+    """A uuid4-anchored author (``anchor != username``) is NOT normalised: the
+    inner carries the anchor and the signature covers the 14-field layout
+    (differs from v_25 bytes — such authors legitimately verify on v_26+ only)."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    anchor = "2f3c9d1e4b5a6789abcdef0123456789"
+    inner = build_signed_author_inner(
+        post=_post(author=derive_user_id(kp.public_key, anchor)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        author_identity_anchor=anchor,
+    )
+    assert inner["identity_anchor"] == anchor
+    assert author_signing_bytes(inner) != _v25_author_signing_bytes(inner)
+    assert json.loads(author_signing_bytes(inner)[len(b"space-post-author:v1:") :]) == {
+        **{k: inner.get(k) for k in _V25_SIGNED_FIELDS},
+        "identity_anchor": anchor,
+    }
+    assert verify_signed_author_inner(inner) is True
+
+
+def test_relayer_adding_username_anchor_to_legacy_inner_rejected():
+    """Security: a relayer that ADDS ``identity_anchor: <username>`` to a
+    legacy (normalised, anchor-free) inner cannot forge anything. On a v_26+
+    receiver the recomputed bytes now include the key, so the author_sig
+    fails; a v_25 receiver ignores the unknown key and is unchanged. The
+    derivation is unaffected either way (anchor == username)."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    inner = build_signed_author_inner(
+        post=_post(author=derive_user_id(kp.public_key, username)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        author_identity_anchor=username,
+    )
+    assert verify_signed_author_inner(inner) is True
+    tampered = dict(inner)
+    tampered["identity_anchor"] = username
+    assert verify_signed_author_inner(tampered) is False
+    # The v_25 view of the tampered inner is byte-identical to the original —
+    # the addition is inert there, not a forgery vector.
+    assert _v25_author_signing_bytes(tampered) == _v25_author_signing_bytes(inner)
+
+
+def test_relayer_removing_anchor_from_uuid_inner_rejected():
+    """Security: a relayer that REMOVES the anchor from a uuid4-anchored inner
+    makes the self-cert fall back to username derivation, which does not equal
+    the uuid-derived ``author_user_id`` — rejected before the sig is even
+    checked (and the sig would fail too, since the anchor was signed)."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    anchor = "2f3c9d1e4b5a6789abcdef0123456789"
+    inner = build_signed_author_inner(
+        post=_post(author=derive_user_id(kp.public_key, anchor)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        author_identity_anchor=anchor,
+    )
+    assert verify_signed_author_inner(inner) is True
+    stripped = dict(inner)
+    stripped.pop("identity_anchor")
+    assert derive_user_id(kp.public_key, username) != stripped["author_user_id"]
+    assert verify_signed_author_inner(stripped) is False
+    # Even a v_25 receiver (13-field bytes, username derivation) rejects it —
+    # the uuid author never verified there in the first place.
+    assert not verify_ed25519(
+        kp.public_key,
+        _v25_author_signing_bytes(stripped),
+        b64url_decode(stripped["author_sig"]),
+    )
+
+
 def test_author_sig_excluded_from_signed_bytes():
     """Presence of ``author_sig`` must not change the signing bytes."""
     without = author_signing_bytes(_inner())
