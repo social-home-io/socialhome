@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.space import normalize_join_mode
 from .base import rows_to_dicts
 
 # Domain dataclass lives in ``socialhome/domain/public_space.py``;
@@ -46,8 +47,8 @@ class SqlitePublicSpaceRepo:
             INSERT INTO public_space_cache(
                 space_id, instance_id, name, description, emoji,
                 lat, lon, radius_km, member_count,
-                min_age, category, cached_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                min_age, category, join_mode, cached_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 instance_id=excluded.instance_id,
                 name=excluded.name,
@@ -59,6 +60,7 @@ class SqlitePublicSpaceRepo:
                 member_count=excluded.member_count,
                 min_age=excluded.min_age,
                 category=excluded.category,
+                join_mode=excluded.join_mode,
                 cached_at=excluded.cached_at
             """,
             (
@@ -73,6 +75,7 @@ class SqlitePublicSpaceRepo:
                 listing.member_count,
                 int(listing.min_age or 0),
                 listing.category or "general",
+                normalize_join_mode(listing.join_mode),
                 cached,
             ),
         )
@@ -191,6 +194,7 @@ def _row(r) -> PublicSpaceListing:
         cached_at=r["cached_at"],
         min_age=int(_get(r, "min_age") or 0),
         category=(_get(r, "category") or "general"),
+        join_mode=normalize_join_mode(_get(r, "join_mode")),
     )
 
 

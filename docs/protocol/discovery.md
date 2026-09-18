@@ -54,6 +54,36 @@ The Social Home ↔ GFS link is split by direction:
     Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
     off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
     the relay (`publish`) and existing subscribers are untouched.
+  - `spaces/{id}/publish` also carries the space's **`join_mode`**
+    (`invite_only` / `open` / `request`), inside the same signed canonical
+    body — so no on-path party can flip it. It tells the GFS whether the
+    listing is publicly **readable**, which is a separate question from
+    whether it is discoverable:
+
+    | `join_mode` | Listed in the directory | Publicly readable |
+    |---|---|---|
+    | `open` / `request` | yes | yes — `POST /gfs/subscribe` seats the caller, content relays |
+    | `invite_only` | **yes** | **no** — subscribe is refused `403`, no content relay, no content key |
+
+    An invite-only global space is therefore an *advert*: people can find it
+    and ask for an invite, but nothing inside it is published. Enforcement
+    is symmetric on both sides of the wire — the host relays nothing, and
+    the GFS refuses to seat a subscriber.
+
+    The field is **optional on the wire** for the mixed-version window and is
+    folded into the signed bytes only when present (an older household signs
+    a body without the key; stripping it in transit only moves the value
+    towards the *more* restrictive one). A missing or unknown value stores
+    the fail-closed `invite_only`, and so does the `0009` migration's column
+    default for rows published before the field existed. That is a
+    deliberate choice over a backfill: an unreadable-but-listed space is the
+    safe error, and the truth arrives by itself one reconnect later, because
+    every GFS-WS (re)connect re-publishes the metadata of every space this
+    household published to that server (the NULL-pin self-heal below).
+    When a publish stores `invite_only`, the GFS also **drops that space's
+    subscriber rows** (logged at INFO with the count): seats taken under the
+    earlier, join-mode-blind behaviour would otherwise linger forever on a
+    space that relays nothing.
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
     **TOFU-pins** it on the first publish and holds it immutable — a later
@@ -215,7 +245,9 @@ The Social Home ↔ GFS link is split by direction:
     The signature binds the request to `instance_id`, so a caller can only
     (un)subscribe **itself**, and a subscribe's target space must already
     be published — the GFS no longer mints a pending row from an
-    (unauthenticated) subscribe.
+    (unauthenticated) subscribe. A subscribe also requires the target
+    space to be publicly readable: `join_mode == "invite_only"` → `403`
+    (`space is invite-only — not publicly readable`).
 - **GFS → SH** is a persistent WebSocket the SH opens to
   `wss://<gfs>/gfs/ws`. The first frame is a signed hello
   `{type:"hello", instance_id, ts, sig}`; once accepted the GFS pushes

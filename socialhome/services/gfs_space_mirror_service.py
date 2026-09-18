@@ -71,7 +71,7 @@ import re
 
 import aiohttp
 
-from ..domain.space import Space
+from ..domain.space import Space, normalize_join_mode
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -342,7 +342,12 @@ class GfsSpaceMirrorService:
             # space: joining still goes through
             # ``POST /api/public_spaces/{id}/join-request``.
             "space_type": "global",
-            "join_mode": "invite_only",
+            # The owner's real join mode, as the GFS directory reports it —
+            # this used to be hardcoded ``invite_only`` because the field
+            # never arrived, which left the household unable to tell an open
+            # space from a closed one. Normalised, so a missing field (an
+            # older GFS) or a hostile value fails closed to ``invite_only``.
+            "join_mode": normalize_join_mode(body.get("join_mode")),
             # The owning household's local username means nothing here (the
             # GFS listing carries no such field) — leave it empty.
             "owner_username": "",

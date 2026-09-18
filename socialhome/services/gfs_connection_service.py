@@ -64,7 +64,7 @@ import aiohttp
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
-from ..domain.space import normalize_category
+from ..domain.space import normalize_category, normalize_join_mode
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -711,6 +711,14 @@ class GfsConnectionService:
             "icon_url": icon_uri,
             "min_age": 0,
             "category": normalize_category(space.category),
+            # The GFS needs the join mode to know whether this listing is
+            # publicly READABLE: an ``invite_only`` global space is listed for
+            # discovery but relays no content and seats no subscriber. Inside
+            # the already-signed canonical body — no new signing step, and a
+            # relay can't flip it in transit.
+            "join_mode": normalize_join_mode(
+                getattr(space, "join_mode", None),
+            ),
             "accent_color": accent,
             "primary_color": primary,
             # Phase 5a: ship the space's Ed25519 authority verify key so the GFS

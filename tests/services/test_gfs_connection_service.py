@@ -1164,6 +1164,53 @@ async def test_publish_body_carries_metadata_and_signature(env):
     # Phase 5a: the publish body ships the space's Ed25519 authority verify key
     # so the GFS can TOFU-pin it for space-authority-signed relays.
     assert body["identity_public_key"] == "aa" * 32
+    # The GFS needs the join mode to know whether the listing is publicly
+    # READABLE — an invite-only global space is listed but relays nothing.
+    assert body["join_mode"] == "open"
+    sig_b64 = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))
+
+
+async def test_publish_body_carries_invite_only_join_mode(env):
+    """A global space whose owner keeps it invite-only says so on the wire:
+    the GFS lists it for discovery but must refuse to seat a subscriber, so
+    the value has to travel (it used to be absent entirely)."""
+    from socialhome.domain.space import (
+        JoinMode,
+        Space,
+        SpaceFeatures,
+        SpaceType,
+    )
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+    db, conn_repo = env
+    await conn_repo.save(_make_conn("gfs-jm", inbox_url="https://gfs.example"))
+    space_repo = SqliteSpaceRepo(db)
+    await space_repo.save(
+        Space(
+            id="sp-jm",
+            name="Quiet",
+            owner_instance_id="alpha.home",
+            owner_username="alice",
+            identity_public_key="aa" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    kp = generate_identity_keypair()
+    session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
+    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=space_repo,
+        own_instance_id="alpha.home",
+        own_signing_key=kp.private_key,
+    )
+    await svc.publish_space("sp-jm", "gfs-jm")
+    body = session._last_body  # type: ignore[attr-defined]
+    assert body["join_mode"] == "invite_only"
     sig_b64 = body.pop("signature")
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))

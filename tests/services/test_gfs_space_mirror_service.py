@@ -454,6 +454,40 @@ async def test_ensure_mirror_refuses_non_string_identity_fields(env, hostile, fi
     assert await env.spaces.get("sp-1") is None
 
 
+async def test_ensure_mirror_carries_the_real_join_mode(env):
+    """The stub reflects what the GFS directory says, instead of the
+    hardcoded ``invite_only`` that used to stand in for a field that never
+    arrived — a household could not tell an open space from a closed one."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                _gfs_space_body(join_mode="open"),
+            ),
+        },
+    )
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.join_mode is JoinMode.OPEN
+
+
+@pytest.mark.parametrize("hostile", [None, "wide-open", 7, [1], {"a": 1}])
+async def test_ensure_mirror_join_mode_fails_closed(env, hostile):
+    """A missing (older GFS) or hostile join mode reads as invite-only —
+    never as something more permissive."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    body = _gfs_space_body()
+    if hostile is not None:
+        body["join_mode"] = hostile
+    session = _StubSession({"https://gfs.test/gfs/spaces/sp-1": (200, body)})
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.join_mode is JoinMode.INVITE_ONLY
+
+
 @pytest.mark.parametrize("hostile", [[1, 2, 3], {"a": 1}, "nonsense"])
 @pytest.mark.parametrize("field", ["min_age", "category"])
 async def test_ensure_mirror_normalises_hostile_enum_fields(env, hostile, field):

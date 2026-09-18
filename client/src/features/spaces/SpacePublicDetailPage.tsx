@@ -177,10 +177,13 @@ export default function SpacePublicDetailPage() {
     entry.scope === 'household' ? '🏠 Your household'
       : entry.scope === 'public' ? '🤝 Public'
       : '🌐 Global'
+  // Invite-only is not merely a join gate: such a space publishes no content
+  // publicly, so there is nothing to read (and nothing to subscribe to)
+  // without an invite.
   const joinModeLabel =
     entry.join_mode === 'open' ? '🔓 Open to join'
       : entry.join_mode === 'request' ? '✉ Approval required'
-      : '🎟 Invite-only'
+      : '🎟 Invite-only · content is private'
 
   const primaryLabel =
     entry.already_member ? 'Open space'
@@ -244,6 +247,15 @@ export default function SpacePublicDetailPage() {
         <section class="sh-space-public__section">
           <h2>About</h2>
           <p>{entry.description}</p>
+        </section>
+      )}
+
+      {entry.join_mode === 'invite_only' && (
+        <section class="sh-space-public__section sh-muted">
+          <p>
+            Posts in this space stay private — they are never published to
+            the directory. You need an invite from a member to read or join.
+          </p>
         </section>
       )}
 

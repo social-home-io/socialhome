@@ -10,7 +10,7 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..domain.federation import PairingStatus
-from ..domain.space import normalize_category
+from ..domain.space import normalize_category, normalize_join_mode
 from .base import BaseView
 
 
@@ -78,6 +78,12 @@ class PublicSpaceCollectionView(BaseView):
                     "member_count": lst.member_count,
                     "min_age": lst.min_age,
                     "category": normalize_category(lst.category),
+                    # The host's real join mode. ``invite_only`` means the
+                    # listing is discoverable but the content is NOT publicly
+                    # readable — the SPA must not offer Subscribe for it.
+                    # Before this field existed the client fabricated
+                    # ``'request'`` for every global listing.
+                    "join_mode": normalize_join_mode(lst.join_mode),
                 }
                 for lst in listings
             ]

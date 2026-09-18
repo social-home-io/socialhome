@@ -133,6 +133,9 @@ async def _publish_known_space(
         "icon_url": "",
         "min_age": 0,
         "category": "general",
+        # Subscribable ⇒ the space must be publicly readable; an invite-only
+        # one is listed for discovery but seats no subscriber.
+        "join_mode": "open",
         "accent_color": "#D2542A",
         "primary_color": "#D2542A",
         "identity_public_key": identity_public_key,
@@ -741,6 +744,8 @@ async def test_fan_out_delivers_to_real_subscriber_inbox(
                 "icon_url": "",
                 "min_age": 0,
                 "category": "general",
+                # Subscribable ⇒ publicly readable (not invite-only).
+                "join_mode": "open",
                 "accent_color": "#D2542A",
                 "primary_color": "#D2542A",
             }

@@ -105,8 +105,11 @@ async function loadAll() {
     global_.value = (rawGlobal as DirectoryEntry[]).map((e) => ({
       ...e,
       scope: 'global' as const,
-      // /api/public_spaces doesn't carry join_mode — default to request.
-      join_mode:          e.join_mode || 'request',
+      // /api/public_spaces now carries the host's real join_mode (it used to
+      // omit it, and this defaulted to 'request' — which advertised a join
+      // path, and a Subscribe button, for spaces that are not publicly
+      // readable at all). Fail closed if an older backend still omits it.
+      join_mode:          e.join_mode || 'invite_only',
       already_subscribed: subIds.has(e.space_id),
       already_member:     realMemberIds.has(e.space_id),
       request_pending:    pendingIds.has(e.space_id),

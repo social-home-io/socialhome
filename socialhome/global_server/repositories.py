@@ -23,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.space import normalize_join_mode
 from .domain import (
     AdminSession,
     ClientInstance,
@@ -117,6 +118,7 @@ class AbstractGfsFederationRepo(Protocol):
         space_id: str,
         instance_id: str,
     ) -> None: ...
+    async def purge_subscribers(self, space_id: str) -> int: ...
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
     async def list_subscribers_with_keys(
         self,
@@ -235,10 +237,11 @@ class SqliteGfsFederationRepo:
             """
             INSERT INTO global_spaces(
                 space_id, owning_instance, name, description, about_markdown,
-                cover_url, icon_url, min_age, category, accent_color,
+                cover_url, icon_url, min_age, category, join_mode,
+                accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
                 published_at, identity_public_key, withdrawn
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                      COALESCE(?, datetime('now')), ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
@@ -248,6 +251,7 @@ class SqliteGfsFederationRepo:
                 icon_url = excluded.icon_url,
                 min_age = excluded.min_age,
                 category = excluded.category,
+                join_mode = excluded.join_mode,
                 accent_color = excluded.accent_color,
                 primary_color = excluded.primary_color,
                 status = excluded.status,
@@ -275,6 +279,7 @@ class SqliteGfsFederationRepo:
                 space.icon_url,
                 space.min_age,
                 space.category,
+                normalize_join_mode(space.join_mode),
                 space.accent_color,
                 space.primary_color,
                 space.status,
@@ -416,6 +421,33 @@ class SqliteGfsFederationRepo:
             "WHERE space_id=?",
             (space_id, space_id),
         )
+
+    async def purge_subscribers(self, space_id: str) -> int:
+        """Drop EVERY subscriber seat on *space_id* and zero its count.
+
+        Called when a publish reveals the space is ``invite_only`` — it has no
+        public readership, so a seat taken earlier (under the permissive
+        behaviour that preceded the join-mode field, or before the owner locked
+        the space down) must not linger in ``space_subscribers`` and keep
+        pulling relayed content. Returns how many seats were removed so the
+        caller can log the repair.
+        """
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM space_subscribers WHERE space_id=?",
+            (space_id,),
+        )
+        removed = int((_to_dict(row) or {}).get("n") or 0)
+        if removed == 0:
+            return 0
+        await self._db.enqueue(
+            "DELETE FROM space_subscribers WHERE space_id=?",
+            (space_id,),
+        )
+        await self._db.enqueue(
+            "UPDATE global_spaces SET subscriber_count=0 WHERE space_id=?",
+            (space_id,),
+        )
+        return removed
 
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]:
         rows = await self._db.fetchall(
@@ -1123,6 +1155,9 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         icon_url=row.get("icon_url"),
         min_age=int(row.get("min_age") or 0),
         category=row.get("category", "general"),
+        # Fail-closed: a row written before 0009 (or by a cluster peer that
+        # sent no join mode) reads as invite-only — listed, not readable.
+        join_mode=normalize_join_mode(row.get("join_mode")),
         accent_color=row.get("accent_color", "#6366f1"),
         primary_color=row.get("primary_color") or "#6366f1",
         status=row.get("status", "pending"),

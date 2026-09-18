@@ -100,6 +100,24 @@ describe('SpacePublicDetailPage onPrimary', () => {
     expect(container.querySelector('.sh-modal, [role="dialog"]')).toBeNull()
   })
 
+  it('INVITE-ONLY space says the content is private and offers no way in', async () => {
+    cacheDirectoryEntries([
+      entry({
+        host_instance_id: 'remote-1',
+        host_display_name: 'Friends',
+        scope:            'global',
+        join_mode:        'invite_only',
+      }),
+    ])
+    const { getByText, getByRole } = await renderPage()
+    await waitFor(() => getByText(/content is private/i))
+    // The chip is honest about readability, not just about joining…
+    expect(getByText(/Posts in this space stay private/i)).toBeTruthy()
+    // …and the only CTA is disabled, so nothing can be sent.
+    expect((getByRole('button') as HTMLButtonElement).disabled).toBe(true)
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
   it('REQUEST space still pops the JoinRequestModal (no immediate send)', async () => {
     cacheDirectoryEntries([
       entry({ host_instance_id: 'local', scope: 'public', join_mode: 'request' }),

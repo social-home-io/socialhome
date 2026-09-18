@@ -22,3 +22,9 @@ class PublicSpaceListing:
     min_age: int = 0
     #: Discovery category (§23.50) — normalizes to ``"general"`` if unknown.
     category: str = "general"
+    #: How the host household lets people in — ``invite_only`` / ``open`` /
+    #: ``request``. ``invite_only`` means the listing is discoverable but the
+    #: content is NOT publicly readable (no subscription, no content key).
+    #: Fail-closed default so a directory that reports none never widens
+    #: access.
+    join_mode: str = "invite_only"

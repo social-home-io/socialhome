@@ -13,6 +13,7 @@ from socialhome.domain.space import (
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
+    normalize_join_mode,
     normalize_min_age,
 )
 
@@ -192,3 +193,30 @@ def test_public_readable_join_modes_is_a_fail_closed_allow_list():
     assert JoinMode.INVITE_ONLY not in PUBLIC_READABLE_JOIN_MODES
     # Every member of the enum is deliberately classified one way or the other.
     assert set(JoinMode) - PUBLIC_READABLE_JOIN_MODES == {JoinMode.INVITE_ONLY}
+
+
+# ─── normalize_join_mode ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("value", ["invite_only", "open", "request"])
+def test_normalize_join_mode_passes_known_values(value):
+    """Every known join mode round-trips as a plain ``str``."""
+    got = normalize_join_mode(value)
+    assert got == value
+    assert type(got) is str
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "Open", "public", 7, 1.5, ["open"], {"open": 1}, object()],
+)
+def test_normalize_join_mode_fails_closed(value):
+    """Anything unknown — missing, misspelled, hostile, non-string — becomes
+    ``invite_only``, the mode that grants no public readership."""
+    assert normalize_join_mode(value) == "invite_only"
+
+
+def test_normalize_join_mode_accepts_the_enum_member():
+    """A :class:`JoinMode` member (a ``StrEnum``) normalises to its value, so
+    callers can pass the domain object straight through."""
+    assert normalize_join_mode(JoinMode.OPEN) == "open"

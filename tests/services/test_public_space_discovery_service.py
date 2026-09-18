@@ -282,6 +282,57 @@ async def test_poll_once_normalizes_unknown_category(env):
     assert out[0].category == "general"
 
 
+async def test_poll_once_caches_join_mode(env):
+    """A GFS directory item's ``join_mode`` round-trips into the cache — the
+    household needs it to tell a readable space from an invite-only one."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {
+                "space_id": "sp-jm",
+                "instance_id": "inst-X",
+                "name": "Open",
+                "join_mode": "open",
+            },
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert out[0].join_mode == "open"
+
+
+@pytest.mark.parametrize("item_extra", [{}, {"join_mode": "anything"}])
+async def test_poll_once_join_mode_fails_closed(env, item_extra):
+    """An older GFS sends no join mode and a hostile one may send nonsense —
+    both cache as ``invite_only`` (listed, not publicly readable)."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {
+                "space_id": "sp-jm2",
+                "instance_id": "inst-X",
+                "name": "Unknown",
+                **item_extra,
+            },
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert out[0].join_mode == "invite_only"
+
+
 async def test_poll_once_skips_blocked_instances(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))

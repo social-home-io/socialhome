@@ -1,0 +1,39 @@
+-- Carry a discovered space's ``join_mode`` through the local directory cache.
+--
+-- The GFS directory now publishes ``join_mode`` (see
+-- ``global_server/migrations/0009_global_space_join_mode.sql``). The household
+-- caches every directory poll into ``public_space_cache``, and that cache is
+-- what ``GET /api/public_spaces`` — the SPA's "Global directory" tab — reads.
+-- Without a column here the truth stops at the poll: the SPA fabricated
+-- ``'request'`` for every global listing and offered a Subscribe button for
+-- spaces that are not publicly readable at all.
+--
+-- Fail-closed default, matching the GFS side: a row cached before this column
+-- existed reads as ``invite_only`` (listed, not readable) until the next poll
+-- tick overwrites it with the truth — minutes, not a reconnect.
+--
+-- Audit per the CLAUDE.md "Before adding a SQL migration" rule:
+--
+-- 1. Existing code paths touching this data: ``public_space_cache`` has
+--    exactly one writer, ``PublicSpaceDiscoveryService._parse_listings`` →
+--    ``SqlitePublicSpaceRepo.upsert`` (the GFS directory poll), and three
+--    readers — ``routes/public_spaces.py`` (the SPA directory),
+--    ``GfsSpaceMirrorService.was_gfs_listed`` (mirror provenance), and the
+--    maintenance purge. None of them knew a join mode. The neighbouring
+--    peer-directory table (``peer_space_directory_repo``) already carries one,
+--    which is why "From friends" listings were truthful and GFS ones were not.
+-- 2. Non-migration alternatives considered and rejected: (a) read the mode off
+--    the local ``spaces`` stub — a stub only exists AFTER subscribing, and the
+--    browser needs the mode BEFORE (to decide whether to offer Subscribe at
+--    all); (b) re-fetch ``GET {gfs}/gfs/spaces/{id}`` per row when the SPA
+--    lists the directory — one outbound HTTPS request per listing per page
+--    load, against a server that may be down, to render a chip; (c) leave it
+--    out and keep the SPA's fabricated value — that is the bug being fixed.
+--    The value belongs with the cached listing it describes.
+-- 3. Minimality: one additive ``ADD COLUMN`` with a NOT NULL default. No
+--    backfill, no table rebuild (unlike 0038, which had to recreate this table
+--    to shed a CHECK-locked column), no index — the cache is read by primary
+--    key or fully listed.
+
+ALTER TABLE public_space_cache
+    ADD COLUMN join_mode TEXT NOT NULL DEFAULT 'invite_only';

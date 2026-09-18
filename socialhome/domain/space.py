@@ -659,6 +659,20 @@ PUBLIC_READABLE_JOIN_MODES: frozenset["JoinMode"] = frozenset(
 )
 
 
+def normalize_join_mode(value: object) -> str:
+    """Map any stored/received join mode to a known value.
+
+    Fails CLOSED: anything unknown (missing, misspelled, hostile, a non-string
+    a remote directory made up) becomes ``"invite_only"`` — the mode that
+    grants no public readership. Used wherever a join mode crosses a trust
+    boundary (the GFS publish body, a GFS directory listing mirrored onto a
+    local stub) so an unparseable value can never widen access.
+    """
+    if isinstance(value, str) and value in tuple(JoinMode):
+        return str(value)
+    return str(JoinMode.INVITE_ONLY)
+
+
 @dataclass(slots=True, frozen=True)
 class Space:
     """A space (the cross-household container for a group of people)."""

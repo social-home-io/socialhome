@@ -55,6 +55,14 @@ class GlobalSpace:
     min_age: int = 0
     #: Discovery category (§23.50) — normalizes to ``"general"`` if unknown.
     category: str = "general"
+    #: How the owning household lets people in — ``invite_only`` / ``open`` /
+    #: ``request``, straight off the owner's signed publish body. An
+    #: ``invite_only`` global space is LISTED here for discovery but is NOT
+    #: publicly readable: the GFS refuses a subscription for it and relays no
+    #: content key. Fail-closed default: a row published before this field
+    #: existed reads as ``invite_only`` until the owner's next publish
+    #: (which happens automatically on its next GFS-WS connect).
+    join_mode: str = "invite_only"
     accent_color: str = "#6366f1"
     primary_color: str = "#6366f1"
     status: str = "pending"  # 'pending' | 'active' | 'banned'

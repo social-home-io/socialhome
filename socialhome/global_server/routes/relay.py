@@ -311,7 +311,9 @@ class SubscribeView(GfsBaseView):
     unsubscribe would otherwise let anyone evict any household from any
     space's relay fan-out. A missing ``ts`` / ``signature`` — or an
     ``action`` outside ``{"subscribe", "unsubscribe"}`` — is a ``400``;
-    auth failures map to ``403``.
+    auth failures map to ``403``. A subscribe for an ``invite_only`` space is
+    also a ``403``: such a space is listed for discovery but is not publicly
+    readable, so there is no readership to join.
     """
 
     async def post(self) -> web.Response:
@@ -438,7 +440,8 @@ class SpacePublishView(GfsBaseView):
     space metadata so this GFS can list it on ``/gfs/spaces``.
 
     Body: ``{owning_instance, name, description?, about_markdown?,
-    cover_url?, min_age?, category?, accent_color?, ts?, signature}``.
+    cover_url?, min_age?, category?, join_mode?, accent_color?, ts?,
+    signature}``.
     The Ed25519 signature is verified against the registered
     ``ClientInstance.public_key`` (so a paired-but-malicious peer
     can't masquerade as another household's space owner). ``ts``, when
@@ -466,6 +469,11 @@ class SpacePublishView(GfsBaseView):
                 icon_url=body.get("icon_url"),
                 min_age=int(body.get("min_age") or 0),
                 category=str(body.get("category") or "general"),
+                # Optional on the wire (older households send none) and only
+                # folded into the signed bytes when present — see
+                # ``GfsFederationService.publish_space``. Absent/unknown ⇒
+                # stored as the fail-closed ``invite_only``.
+                join_mode=str(body.get("join_mode") or ""),
                 accent_color=str(body.get("accent_color") or "#D2542A"),
                 primary_color=str(body.get("primary_color") or "#D2542A"),
                 identity_public_key=str(body.get("identity_public_key") or ""),

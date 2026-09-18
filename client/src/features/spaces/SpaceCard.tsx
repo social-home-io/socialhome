@@ -67,7 +67,14 @@ function joinModeChip(mode: DirectoryEntry['join_mode']) {
     case 'request':
       return { cls: 'sh-join-mode-chip sh-join-mode-chip--request', icon: '✉', label: 'Approval required' }
     case 'invite_only':
-      return { cls: 'sh-join-mode-chip sh-join-mode-chip--invite', icon: '🎟', label: 'Invite-only' }
+      // Not just a join gate: an invite-only space publishes nothing
+      // publicly, so there is no content to read and nothing to subscribe
+      // to. The old "Invite-only" read as "you may ask for an invite".
+      return {
+        cls: 'sh-join-mode-chip sh-join-mode-chip--invite',
+        icon: '🎟',
+        label: 'Invite-only · content is private',
+      }
   }
 }
 
@@ -95,9 +102,15 @@ function subscribableScope(entry: DirectoryEntry): boolean {
   // works for spaces this household hosts. Remote (friends/global) spaces
   // have no remote-subscribe federation path — showing the button there
   // just 404s; they're joined via the request flow instead.
+  //
+  // An invite-only space is never subscribable, local or not: it publishes
+  // no content and hands out no content key, so a subscriber would sit on a
+  // seat that never receives anything (the GFS refuses such a subscribe
+  // outright with a 403).
   return (
     entry.host_instance_id === 'local'
     && (entry.scope === 'public' || entry.scope === 'global')
+    && entry.join_mode !== 'invite_only'
     && !entry.already_member
   )
 }

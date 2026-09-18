@@ -31,7 +31,7 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..crypto import b64url_decode, verify_ed25519
-from ..domain.space import normalize_category
+from ..domain.space import JoinMode, normalize_category, normalize_join_mode
 from .domain import (
     ClientInstance,
     GfsSubscriber,
@@ -710,6 +710,12 @@ class GfsFederationService:
         existing = await self._repo.get_space(space_id)
         if existing is None:
             raise PermissionError("space not published")
+        # An invite-only space is LISTED for discovery but is not publicly
+        # readable: its owner relays no content and hands out no content key,
+        # so a subscription would be a seat that never receives anything and
+        # lingers in ``space_subscribers`` forever. Refuse it outright.
+        if normalize_join_mode(existing.join_mode) == JoinMode.INVITE_ONLY:
+            raise PermissionError("space is invite-only — not publicly readable")
 
         await self._repo.add_subscriber(
             space_id=space_id,
@@ -1032,6 +1038,7 @@ class GfsFederationService:
         icon_url: str | None = None,
         min_age: int = 0,
         category: str = "general",
+        join_mode: str = "",
         accent_color: str = "#D2542A",
         primary_color: str = "#D2542A",
         identity_public_key: str = "",
@@ -1056,6 +1063,14 @@ class GfsFederationService:
         but CANNOT restore a withdrawn listing: its body is replayable
         forever, so honouring it would let anyone holding one historical
         publish body re-list a space its owner deliberately delisted.
+
+        ``join_mode`` is OPTIONAL on the wire for the same mixed-version
+        reason, and folded into the signed canonical body only when present
+        (an older household's signature covers no such field). An empty or
+        unknown value stores the fail-closed ``invite_only`` — a space nobody
+        may read. Storing ``invite_only`` also PURGES the space's subscriber
+        seats: an invite-only space has no public readership, so a seat taken
+        earlier would linger forever, pulling relayed content.
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -1081,6 +1096,15 @@ class GfsFederationService:
             "primary_color": primary_color,
             "identity_public_key": identity_public_key or "",
         }
+        # ``join_mode`` rides inside the signed bytes when the household sent
+        # one, so it cannot be flipped in transit (a relay can't turn an
+        # invite-only listing into a publicly readable one). An older
+        # household sends none and signs a body without the key — folding an
+        # empty value in unconditionally would break every such signature.
+        # Stripping it is safe in the other direction: the missing value
+        # normalises to the MORE restrictive ``invite_only``.
+        if join_mode:
+            signed["join_mode"] = join_mode
         # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
         # subscribe/unsubscribe, ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
@@ -1161,6 +1185,9 @@ class GfsFederationService:
         next_status = "active" if inst.auto_accept else "pending"
         if existing is not None and existing.status == "banned":
             next_status = "banned"
+        # Never trust the wire: an unknown / missing value is stored as the
+        # fail-closed ``invite_only`` rather than verbatim.
+        normalized_join_mode = normalize_join_mode(join_mode)
         space = GlobalSpace(
             space_id=space_id,
             owning_instance=owning_instance,
@@ -1171,6 +1198,7 @@ class GfsFederationService:
             icon_url=icon_url,
             min_age=min_age,
             category=normalize_category(category),
+            join_mode=normalized_join_mode,
             accent_color=accent_color,
             primary_color=primary_color,
             status=next_status,
@@ -1194,11 +1222,28 @@ class GfsFederationService:
                 space_id,
             )
         await self._repo.upsert_space(space)
+        # Data repair, at the moment the truth arrives: an invite-only space
+        # has no public readership, so every seat in ``space_subscribers`` is
+        # meaningless and would otherwise keep pulling relayed content. This
+        # lives here rather than in the migration because at migration time
+        # EVERY row defaults to ``invite_only`` — a blanket purge would evict
+        # every legitimate subscriber on the server.
+        if normalized_join_mode == JoinMode.INVITE_ONLY:
+            purged = await self._repo.purge_subscribers(space_id)
+            if purged:
+                log.info(
+                    "GFS: space %s published as invite-only — dropped %d "
+                    "subscriber seat(s); an invite-only space is listed for "
+                    "discovery but is not publicly readable",
+                    space_id,
+                    purged,
+                )
         log.info(
-            "GFS: published space %s (owner=%s, status=%s)",
+            "GFS: published space %s (owner=%s, status=%s, join_mode=%s)",
             space_id,
             owning_instance,
             next_status,
+            normalized_join_mode,
         )
         return space
 

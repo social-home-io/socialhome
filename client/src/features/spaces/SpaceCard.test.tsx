@@ -163,6 +163,31 @@ describe('SpaceCard', () => {
     expect(getByText(/Subscribe/)).toBeTruthy()
   })
 
+  it('hides Subscribe for an invite-only space this household hosts', () => {
+    // Invite-only publishes no content and hands out no content key, so a
+    // subscription would seat someone who never receives anything (the GFS
+    // refuses such a subscribe with a 403).
+    const { queryByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry, host_instance_id: 'local', join_mode: 'invite_only',
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(queryByText(/Subscribe/)).toBeNull()
+  })
+
+  it('says invite-only content is private, not just that joining needs an invite', () => {
+    const { getByText } = render(
+      <SpaceCard
+        entry={{ ...baseEntry, join_mode: 'invite_only' }}
+        onAction={() => {}}
+      />,
+    )
+    expect(getByText(/content is private/i)).toBeTruthy()
+  })
+
   it('hides Subscribe for a remotely-hosted (friends / global) space', () => {
     // No remote-subscribe federation path — the button would just 404, so
     // it must not show; remote spaces are joined via the request flow.
