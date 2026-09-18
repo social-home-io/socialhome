@@ -311,9 +311,11 @@ class SubscribeView(GfsBaseView):
     unsubscribe would otherwise let anyone evict any household from any
     space's relay fan-out. A missing ``ts`` / ``signature`` — or an
     ``action`` outside ``{"subscribe", "unsubscribe"}`` — is a ``400``;
-    auth failures map to ``403``. A subscribe for an ``invite_only`` space is
-    also a ``403``: such a space is listed for discovery but is not publicly
-    readable, so there is no readership to join.
+    auth failures map to ``403``. A subscribe for a space whose stored
+    ``allow_subscribers`` is false is also a ``403``: such a space is listed
+    for discovery but is not publicly readable, so there is no readership to
+    join. That is the OWNER's explicit opt-in, NOT ``join_mode`` — an
+    ``invite_only`` space that allows subscribers seats them normally.
     """
 
     async def post(self) -> web.Response:

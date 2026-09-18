@@ -55,27 +55,29 @@ from .media_status import READY, media_filename, video_poster_path
 _PROFILE_PICTURE_MAX_UPLOAD_BYTES = PROFILE_PICTURE_MAX_UPLOAD_BYTES
 
 
-def _features_from_body(raw: object) -> SpaceFeatures | None:
+def _features_from_body(
+    raw: object,
+    *,
+    defaults: SpaceFeatures | None = None,
+) -> SpaceFeatures | None:
     """Rehydrate :class:`SpaceFeatures` from a PATCH body.
 
     The wire shape mirrors :meth:`SpaceFeatures.to_wire_dict` —
     boolean flags + access-level enums + an ``allowed_post_types``
-    list.  Missing keys fall back to dataclass defaults.
+    list.  Missing keys fall back to *defaults*.
     Returns ``None`` when the caller didn't include a ``features``
     block, so the service layer treats it as "leave unchanged".
+
+    Callers pass the space's CURRENT features as *defaults*, so a partial
+    body means "change these keys, leave the rest". The SPA happens to PATCH
+    the full dict, but the API accepts (and a script will send) a partial one
+    — and with class defaults a partial ``{"bazaar": false}`` would reset
+    ``allow_subscribers`` to OFF, silently withdrawing the space's public
+    readability and evicting its followers.
     """
     if not isinstance(raw, dict):
         return None
-    # The SPA always PATCHes the FULL features dict (SpaceSettings spreads the
-    # existing ``space.features`` then overrides the edited keys), and no other
-    # caller sends a partial ``features`` block, so deferring to the canonical
-    # ``from_wire_dict`` is behaviour-neutral while removing a hand-rolled
-    # second copy of the wire shape (the landmine that dropped
-    # ``delegated_admin_authority``). NOTE: ``from_wire_dict`` defaults
-    # ``calendar`` / ``stickies`` to True when absent (dataclass default),
-    # versus this parser's historical False — harmless given the full-dict
-    # contract above, and the correct canonical default.
-    return SpaceFeatures.from_wire_dict(raw)
+    return SpaceFeatures.from_wire_dict(raw, defaults=defaults)
 
 
 # Earth's mean radius — used by the zone-match helper. Mirrors the
@@ -258,7 +260,15 @@ class SpaceDetailView(BaseView):
         # appeared to save (200 OK) but never actually flipped the
         # feature.  Rehydrate into a ``SpaceFeatures`` instance so the
         # service layer can persist it.
-        features = _features_from_body(body.get("features"))
+        # Merge onto the space's CURRENT features so a partial body edits only
+        # the keys it names (see ``_features_from_body``). ``_require_space``
+        # raises the mapped ``SpaceNotFoundError`` for an unknown id, exactly
+        # as ``update_config`` would a moment later.
+        current = await svc._require_space(space_id)
+        features = _features_from_body(
+            body.get("features"),
+            defaults=current.features,
+        )
         # ``space_type`` (publication tier) is NOT applied here — it is gated
         # behind multi-admin approval (v_16). The SPA proposes a tier change
         # via ``POST /api/spaces/{id}/proposals``; the generic config PATCH

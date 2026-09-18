@@ -233,6 +233,38 @@ describe('SpaceCard', () => {
     expect(getByText(/content is private/i)).toBeTruthy()
   })
 
+  it('says nothing about readability on a household-scope card', () => {
+    // A private household space is private BY DEFINITION — it is never
+    // published, never relayed, never subscribable. The "Your household" tab
+    // maps allow_subscribers off every local space's features, so without a
+    // scope check every private space on the tab wore a 🔒 "Content is
+    // private" chip, which is noise: it announces the default.
+    const { queryByText } = render(
+      <SpaceCard
+        entry={{ ...baseEntry, scope: 'household', allow_subscribers: false }}
+        onAction={() => {}}
+      />,
+    )
+    expect(queryByText(/content is private/i)).toBeNull()
+  })
+
+  it('still flags a PUBLIC household-hosted space that takes no followers', () => {
+    // Scope, not host: a public space of ours is discoverable, so whether
+    // strangers may read it is real information.
+    const { getByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          scope:             'public',
+          host_instance_id:  'local',
+          allow_subscribers: false,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(getByText(/content is private/i)).toBeTruthy()
+  })
+
   it('says nothing about readability when the flag is unknown', () => {
     // The peer "From friends" directory does not carry the flag yet —
     // claiming "content is private" for an open friend space would be a lie.

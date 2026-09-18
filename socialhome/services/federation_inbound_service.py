@@ -18,6 +18,7 @@ import base64
 import binascii
 import logging
 import pathlib
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -1621,6 +1622,37 @@ class FederationInboundService:
             host_instance_id=event.from_instance,
             meta=meta,
         )
+        # SECURITY: on the household that HOSTS this space, two feature flags
+        # are the OWNER's alone — ``allow_subscribers`` (whether strangers on a
+        # connection server may read the space) and ``delegated_admin_authority``
+        # (whether admins act on the owner's behalf). The authority-signed path
+        # above accepts a whole ``features`` block from ANY seed holder, so
+        # without this a delegated admin could write over the owner's own row
+        # and expose the space — or grant itself delegation. Pin both to what we
+        # already store. We pin ONLY where we host: a member household mirroring
+        # the space is not the authority for it, and the owner's value is
+        # exactly what it should be mirroring.
+        own_instance_id = (
+            self._federation_service.own_instance_id
+            if self._federation_service is not None
+            else None
+        )
+        if own_instance_id and existing.owner_instance_id == own_instance_id:
+            pinned = replace(
+                refreshed.features,
+                allow_subscribers=existing.features.allow_subscribers,
+                delegated_admin_authority=(existing.features.delegated_admin_authority),
+            )
+            if pinned != refreshed.features:
+                log.info(
+                    "SPACE_CONFIG_CHANGED for %s from %s tried to change an "
+                    "owner-only feature flag on the space we host "
+                    "(allow_subscribers / delegated_admin_authority) — pinned "
+                    "to the stored values; the rest of the block applies",
+                    space_id,
+                    event.from_instance,
+                )
+            refreshed = replace(refreshed, features=pinned)
         await self._space_repo.save(refreshed)
         # Record the author of the edit we just applied so a later
         # equal-sequence edit can deterministically tie-break (v_24 LWW).

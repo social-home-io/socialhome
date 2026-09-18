@@ -673,21 +673,14 @@ def cmd_gfs_traffic() -> None:
     # space relays nothing and seats no subscriber. The whole downstream chain
     # (``gfs-space-subscribe`` → ``gfs-space-post`` → ``gfs-space-rotate``)
     # proves the READABLE path, so turn followers on. ``POST /api/spaces``
-    # takes no ``features`` block, so this is a PATCH — and PATCH replaces the
-    # whole features dict, so read the current one back first rather than
-    # resetting every other feature to its default.
-    s, current = _request(
-        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}",
-        token=a["token"],
-    )
-    current = _must("read-global-space", s, current, ok=(200,))
-    features = dict(current.get("features") or {})
-    features["allow_subscribers"] = True
+    # takes no ``features`` block, so this is a PATCH — a partial one, which
+    # merges onto the space's current features and leaves every other flag
+    # alone.
     s, patched = _request(
         f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}",
         token=a["token"],
         method="PATCH",
-        body={"features": features},
+        body={"features": {"allow_subscribers": True}},
     )
     _must("enable-subscribers-on-global-space", s, patched, ok=(200,))
     print("  a: followers enabled — the space is now publicly readable")

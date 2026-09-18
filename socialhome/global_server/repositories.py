@@ -428,12 +428,18 @@ class SqliteGfsFederationRepo:
     async def purge_subscribers(self, space_id: str) -> int:
         """Drop EVERY subscriber seat on *space_id* and zero its count.
 
-        Called when a publish reveals the space is ``invite_only`` — it has no
-        public readership, so a seat taken earlier (under the permissive
-        behaviour that preceded the join-mode field, or before the owner locked
-        the space down) must not linger in ``space_subscribers`` and keep
+        Called when a publish carries an EXPLICIT ``allow_subscribers: false``
+        — the owner has withdrawn public readability, so a seat taken while the
+        space was readable must not linger in ``space_subscribers`` and keep
         pulling relayed content. Returns how many seats were removed so the
         caller can log the repair.
+
+        Deliberately NOT called when the publish omits the key: that is an
+        older household that does not know the field, and evicting everyone on
+        a mixed-version server is not what the owner asked for. The publish
+        handler still stores the fail-closed ``0`` in that case, so no NEW
+        subscribe is seated — gate without purge. Not ``join_mode`` either:
+        readability and the membership gate are independent dials.
         """
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM space_subscribers WHERE space_id=?",

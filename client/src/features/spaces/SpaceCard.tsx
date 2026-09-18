@@ -82,9 +82,16 @@ function scopeChip(scope: DirectoryEntry['scope']) {
  * open friend-hosted space would be a lie; saying nothing is honest, and
  * costs nothing — a peer-hosted space is never subscribable from here
  * anyway (see {@link subscribableScope}, which requires an explicit `true`).
+ *
+ * Public/global scope only. A `household` space is private by definition —
+ * never published, never relayed, never subscribable — so the flag carries no
+ * information there, and the "Your household" tab maps it off every local
+ * space's features. Without this check every private space on that tab wore a
+ * 🔒 "Content is private" chip, announcing the default on every card and
+ * teaching the reader to ignore the one place it matters.
  */
 export function contentIsGated(entry: DirectoryEntry): boolean {
-  return entry.allow_subscribers === false
+  return entry.scope !== 'household' && entry.allow_subscribers === false
 }
 
 /** The 🔒 chip that says so, rendered only when {@link contentIsGated}. */

@@ -1241,13 +1241,21 @@ class GfsFederationService:
                 space_id,
             )
         await self._repo.upsert_space(space)
-        # Data repair, at the moment the truth arrives: a space that allows no
-        # subscribers has no public readership, so every seat in
-        # ``space_subscribers`` is meaningless and would otherwise keep pulling
-        # relayed content. This lives here rather than in the migration because
-        # at migration time EVERY row defaults to not-readable — a blanket
-        # purge would evict every legitimate subscriber on the server.
-        if not readable:
+        # Data repair, at the moment the truth arrives: a space whose owner
+        # EXPLICITLY withdrew readability has no public readership, so every
+        # seat in ``space_subscribers`` is meaningless and would otherwise keep
+        # pulling relayed content. This lives here rather than in the migration
+        # because at migration time EVERY row defaults to not-readable — a
+        # blanket purge would evict every legitimate subscriber on the server.
+        #
+        # ONLY on an explicit ``false``. An ABSENT key is an older household
+        # that does not know the field yet, which is not the same statement:
+        # the stored flag still fails closed above (so no NEW subscribe is
+        # seated), but evicting the existing readers would mass-evict everyone
+        # on a mixed-version server the moment an un-upgraded household
+        # re-published — and the reader gets no signal that it happened. The
+        # gate is reversible on the owner's next publish; the purge is not.
+        if allow_subscribers is False:
             purged = await self._repo.purge_subscribers(space_id)
             if purged:
                 log.info(

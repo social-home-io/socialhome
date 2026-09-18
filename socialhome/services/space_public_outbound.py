@@ -49,11 +49,16 @@ per-space content key, and authority-signs the GFS envelope with the space
 seed. An inbound event with no ``public_relay`` is the pure loop guard and is
 never re-fanned.
 
-Join-mode gate: a PUBLIC/GLOBAL space whose ``join_mode`` is ``invite_only``
-is published to the GFS *directory* (that is how people discover it and get
-invited) but is **not publicly readable** — no post of it is ever relayed,
-on either the local-author or the remote-author path. Members are unaffected:
-they receive content through ``broadcast_to_space_members``, not the GFS.
+Readability gate: a PUBLIC/GLOBAL space whose ``features.allow_subscribers``
+is OFF is published to the GFS *directory* (that is how people discover it and
+get invited) but is **not publicly readable** — no post of it is ever relayed,
+on either the local-author or the remote-author path. This is NOT ``join_mode``:
+how a person becomes a posting member is a separate dial, and an ``invite_only``
+space with followers on is a legitimate broadcast space. The flag is the OWNER's
+alone (``SpaceService.update_config`` gates it with ``_require_owner``, and the
+forwarded-admin path pins it) — exposing a space's content to strangers is not a
+delegated-admin decision. Members are unaffected either way: they receive content
+through ``broadcast_to_space_members``, not the GFS.
 
 This service is the encryption boundary: the cleartext post never leaves
 in a GFS-bound envelope (CLAUDE.md Encryption-First Rule). If the space

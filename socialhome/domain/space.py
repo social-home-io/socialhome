@@ -362,18 +362,34 @@ class SpaceFeatures:
         }
 
     @classmethod
-    def from_wire_dict(cls, raw: dict) -> "SpaceFeatures":
+    def from_wire_dict(
+        cls,
+        raw: dict,
+        *,
+        defaults: "SpaceFeatures | None" = None,
+    ) -> "SpaceFeatures":
         """Faithful inverse of :meth:`to_wire_dict`.
 
         The single canonical wire-dict → :class:`SpaceFeatures` parser:
         the route PATCH body, federation receive (remote-space stub
         builder), and the cross-household admin-action host dispatcher
         (``SPACE_REMOTE_ADMIN_ACTION``) all rebuild features through here.
-        Each field falls back to the class default when absent so a
-        partial / older-shaped dict still produces a valid object.
+        Each field falls back to *defaults* when absent so a partial /
+        older-shaped dict still produces a valid object.
         Unknown access levels fall back to ``OPEN`` rather than raising.
+
+        ``defaults`` is what an ABSENT key means. Pass the space's CURRENT
+        features whenever the dict is an EDIT of an existing space (a PATCH
+        body, a forwarded ``update_config``) — then "absent" reads as "leave
+        it alone", which is what a partial body means. Omitting it falls back
+        to the class defaults, i.e. "absent means the factory setting", which
+        is right only when there is no prior state to preserve (building a
+        brand-new remote stub). Getting this wrong is not cosmetic: a partial
+        ``{"bazaar": false}`` PATCH would otherwise reset ``allow_subscribers``
+        to its OFF default and silently withdraw the space's public
+        readability.
         """
-        defaults = cls()
+        defaults = defaults if defaults is not None else cls()
 
         def access(name: str, default: SpaceFeatureAccess) -> SpaceFeatureAccess:
             v = raw.get(name)

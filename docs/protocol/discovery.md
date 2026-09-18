@@ -88,10 +88,16 @@ The Social Home ↔ GFS link is split by direction:
     safe error, and the truth arrives by itself one reconnect later, because
     every GFS-WS (re)connect re-publishes the metadata of every space this
     household published to that server (the NULL-pin self-heal below).
-    When a publish stores `allow_subscribers: false`, the GFS also **drops
-    that space's subscriber rows** (logged at INFO with the count): seats
-    taken while the space was readable would otherwise linger forever on a
-    space that relays nothing.
+    When a publish carries an **explicit** `allow_subscribers: false`, the
+    GFS also **drops that space's subscriber rows** (logged at INFO with the
+    count): the owner has withdrawn readability, and seats taken while the
+    space was readable would otherwise linger forever on a space that relays
+    nothing. An **absent** key does *not* purge. It gates (the stored `0`
+    refuses every new subscribe) but keeps the existing seats: absent means
+    "this household does not know the field", not "the owner withdrew
+    readability", and evicting on it would mass-evict every reader on a
+    mixed-version server the moment one un-upgraded household re-published.
+    The gate reverses itself on the owner's next publish; a purge does not.
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
     **TOFU-pins** it on the first publish and holds it immutable — a later
@@ -383,11 +389,39 @@ flag.
 touches the GFS. The metadata publish path is likewise untouched: a space
 that disappears from the directory is a regression, not the rule.
 
+**Only the owner may flip it.** `allow_subscribers` is `_require_owner`-gated
+in `SpaceService.update_config`, exactly like `delegated_admin_authority`: a
+delegated remote admin holds the space seed for day-to-day config while the
+owner is offline, but exposing the space's content to strangers — or
+withdrawing it — is the owner's decision. The gate is enforced on all three
+paths that can reach the config: the local edit, the forwarded
+`SPACE_REMOTE_ADMIN_ACTION` (the host re-executes it *as the owner*, so
+`_run_admin_action` pins the flag to the stored value), and the inbound
+authority-signed `SPACE_CONFIG_CHANGED` (a seed holder's signed `features`
+block is accepted, but on the household that HOSTS the space both owner-only
+flags are pinned to the stored values before the row is saved — logged at
+INFO; a household merely *mirroring* the space applies the value it is told,
+since it is not the authority for that space).
+
 **Changing the flag re-publishes.** Flipping `allow_subscribers` (or
 `join_mode`) on a global space re-publishes its metadata to every paired GFS
 immediately, rather than waiting for the owner's next WS reconnect — and a
-publish that lands the flag as off is what PURGES the seats taken while it
-was on.
+publish that lands the flag as explicitly off is what PURGES the seats taken
+while it was on. The owner's own household drops its **local**
+`role='subscriber'` rows in the same edit, publishing the usual member-left
+event, so a follower is never left reading out of the local DB a space that
+was withdrawn from them.
+
+**Readers re-register on reconnect.** The GFS seat is registered only on a
+household's first-ever subscribe, so a purged seat would otherwise never come
+back — the household would show "subscribed" forever and receive nothing.
+Every GFS-WS (re)connect therefore re-POSTs `/gfs/subscribe` for each local
+subscription mirrored from that server
+(`GfsSpaceMirrorService.resubscribe_all`, wired beside the pin self-heal). The
+GFS's `add_subscriber` is an upsert, so a seat we still hold is a no-op, and a
+`403` (the owner really did withdraw readability) is swallowed at DEBUG. This
+is what makes the purge recoverable: turn the flag back on and the readers
+return by themselves.
 
 ### HFS producer + consumer for public space content (Phase 5a2)
 

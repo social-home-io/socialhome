@@ -20,6 +20,25 @@
 -- rather than here: at migration time EVERY row looks non-readable, and a
 -- blanket DELETE would evict every legitimate subscriber on the server.)
 --
+-- ROLLOUT BEHAVIOUR, precisely, because gate and purge are NOT the same
+-- statement:
+--
+--   * ABSENT key on a publish (an un-upgraded household) => GATE ONLY. The
+--     row stores 0 so ``POST /gfs/subscribe`` refuses every NEW subscribe,
+--     but the existing ``space_subscribers`` seats are KEPT. Absent means
+--     "this household does not know the field", not "the owner withdrew
+--     readability" — purging on it would mass-evict every reader on this
+--     server the moment one old household re-published, and the reader gets
+--     no signal that it happened.
+--   * EXPLICIT ``allow_subscribers: false`` => GATE AND PURGE. That is the
+--     owner actually withdrawing readability, so the seats go.
+--
+-- A purged reader is not stranded either: every household re-POSTs
+-- ``/gfs/subscribe`` for its local subscriptions on each GFS-WS (re)connect
+-- (``GfsSpaceMirrorService.resubscribe_all``, the subscriber-side mirror of
+-- ``heal_space_pins``), and ``add_subscriber`` is an upsert — so turning the
+-- flag back on restores the readership without operator action.
+--
 -- Audit per the CLAUDE.md "Before adding a SQL migration" rule:
 --
 -- 1. Existing code paths touching this data, all read: the owner's signed

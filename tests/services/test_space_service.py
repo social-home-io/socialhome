@@ -61,6 +61,7 @@ async def stack(tmp_dir):
 
     s = Stack()
     s.db = db
+    s.bus = bus
     s.user_svc = user_svc
     s.space_svc = space_svc
     s.space_repo = space_repo
@@ -1969,6 +1970,63 @@ async def test_unsubscribe_removes_subscriber_only(stack):
     still = await stack.space_repo.get_member(space.id, real.user_id)
     assert still is not None
     assert still.role == "member"
+
+
+async def test_turning_followers_off_drops_local_subscriber_rows(stack):
+    """F5: subscribers are exactly the readers the owner just withdrew from, so
+    turning ``allow_subscribers`` off must remove their local rows too — not
+    leave them reading the space out of the local DB while the connection
+    server evicts their seat. Real members are untouched, and a
+    ``SpaceMemberLeft`` is published for each so the SPA stays coherent."""
+    from socialhome.domain.events import SpaceMemberLeft
+
+    await stack.provision_user("owner_off")
+    fan = await stack.provision_user("fan")
+    real = await stack.provision_user("real")
+    space = await stack.space_svc.create_space(
+        owner_username="owner_off",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.add_member(
+        space.id, actor_username="owner_off", user_id=real.user_id
+    )
+    left: list[SpaceMemberLeft] = []
+    stack.bus.subscribe(SpaceMemberLeft, left.append)
+
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="owner_off",
+        features=SpaceFeatures(allow_subscribers=False),
+    )
+
+    assert await stack.space_repo.get_member(space.id, fan.user_id) is None
+    assert await stack.space_svc.list_subscriptions(fan.user_id) == []
+    still = await stack.space_repo.get_member(space.id, real.user_id)
+    assert still is not None and still.role == "member"
+    assert [e.user_id for e in left] == [fan.user_id]
+
+
+async def test_turning_followers_on_leaves_members_alone(stack):
+    """F5 counterpart: the sweep is bound to the True→False edge — turning the
+    flag ON (or any other config edit) touches nobody."""
+    await stack.provision_user("owner_on")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="owner_on",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="owner_on",
+        features=SpaceFeatures(allow_subscribers=True, bazaar=False),
+    )
+    assert await stack.space_repo.get_member(space.id, fan.user_id) is not None
 
 
 async def test_list_subscriptions_only_returns_subscribers(stack):
@@ -5903,3 +5961,55 @@ async def test_set_remote_member_role_mixed_names_only_terminal_peer(stack, capl
     assert "peer-x=no_route" in caplog.text
     assert "peer-queued" not in caplog.text
     assert "did not reach 1/2" in caplog.text
+
+
+async def test_remote_admin_update_config_cannot_flip_allow_subscribers(stack):
+    """F1: ``allow_subscribers`` is OWNER-only, so a forwarded update_config
+    must not turn public readability on — even with delegation ON, where the
+    host re-executes the action AS THE OWNER and the owner gate in
+    ``update_config`` therefore passes trivially. A benign field in the same
+    edit still applies, proving the edit ran."""
+    from socialhome.domain.space import RemoteAdminOutcome, SpaceFeatures
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    assert space.features.allow_subscribers is False
+    # The wire tries to EXPOSE the space publicly (False -> True) while also
+    # changing a benign feature and the name.
+    wire = SpaceFeatures(
+        delegated_admin_authority=True,
+        allow_subscribers=True,
+        location=True,
+    ).to_wire_dict()
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="update_config",
+        params={"name": "Benign Rename", "features": wire},
+    )
+    assert outcome is RemoteAdminOutcome.EXECUTED
+    refreshed = await stack.space_repo.get(space.id)
+    # The owner-only readability flag is pinned to its current value.
+    assert refreshed.features.allow_subscribers is False
+    # …but the rest of the edit applied.
+    assert refreshed.name == "Benign Rename"
+    assert refreshed.features.location is True
+
+
+async def test_approved_admin_update_config_cannot_flip_allow_subscribers(stack):
+    """F1 (owner-approved path): ``apply_approved_admin_action`` funnels through
+    the same ``_run_admin_action`` helper, so the pin holds there too."""
+    from socialhome.domain.space import SpaceFeatures
+
+    space = await _host_space_with_remote_admin(stack, delegation=False)
+    assert space.features.allow_subscribers is False
+    wire = SpaceFeatures(allow_subscribers=True, location=True).to_wire_dict()
+    await stack.space_svc.apply_approved_admin_action(
+        space.id,
+        action="update_config",
+        params={"name": "Approved Rename", "features": wire},
+    )
+    refreshed = await stack.space_repo.get(space.id)
+    assert refreshed.features.allow_subscribers is False
+    assert refreshed.name == "Approved Rename"
+    assert refreshed.features.location is True

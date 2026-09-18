@@ -323,6 +323,153 @@ async def test_patch_sets_delegated_admin_authority(client):
     assert body["features"]["delegated_admin_authority"] is True
 
 
+async def _promote_bob_to_admin(client, sid: str) -> None:
+    """Seat bob on *sid* and promote him to space ADMIN (not owner)."""
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.patch(
+        f"/api/spaces/{sid}/members/{client._bob_uid}",
+        json={"role": "admin"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+
+
+async def test_partial_features_patch_leaves_allow_subscribers_alone(client):
+    """F3: a PATCH body carrying only SOME feature keys must merge onto the
+    space's current features, not onto the class defaults.
+
+    Before the fix, ``{"features": {"bazaar": false}}`` silently turned
+    ``allow_subscribers`` back OFF — withdrawing the space's public readability
+    (and purging its connection-server seats) on an edit that never mentioned it.
+    """
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Partial", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"bazaar": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is True
+    assert body["features"]["bazaar"] is False
+
+
+async def test_partial_features_patch_by_an_admin_is_not_an_owner_gate(client):
+    """F3: a non-owner ADMIN editing an unrelated feature must not trip the
+    owner-only ``allow_subscribers`` gate — before the fix the missing key read
+    as the class default, so the gate saw a change the admin never made."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "AdminPartial", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    await _promote_bob_to_admin(client, sid)
+
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"bazaar": False}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is True
+    assert body["features"]["bazaar"] is False
+
+
+async def test_explicit_allow_subscribers_false_still_turns_it_off_for_the_owner(
+    client,
+):
+    """F3: merging onto the current features must not make the flag
+    un-clearable — an EXPLICIT ``false`` from the owner still withdraws
+    readability."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "OwnerOff", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is False
+
+
+async def test_explicit_allow_subscribers_change_by_an_admin_is_still_forbidden(client):
+    """F3: the owner-only gate still bites when the admin actually asks for the
+    change — the merge narrows the gate to real edits, it does not remove it."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "AdminOff", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    await _promote_bob_to_admin(client, sid)
+
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": False}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is True
+
+
+def test_features_from_body_merges_onto_supplied_defaults():
+    """Unit: with ``defaults`` given, an absent key takes the CURRENT space's
+    value; a present key still wins (including an explicit ``False``)."""
+    current = SpaceFeatures(allow_subscribers=True, bazaar=True, location=True)
+    merged = _features_from_body({"bazaar": False}, defaults=current)
+    assert merged.allow_subscribers is True
+    assert merged.location is True
+    assert merged.bazaar is False
+    off = _features_from_body({"allow_subscribers": False}, defaults=current)
+    assert off.allow_subscribers is False
+
+
 def test_features_from_body_carries_delegated_admin_authority():
     """Unit: _features_from_body rehydrates delegated_admin_authority from the
     PATCH body (True when set, False when omitted)."""

@@ -15,14 +15,17 @@ never sees the content key.
 
 Pipeline (fail-closed at every step):
 
-1. **Gate on seed + tier + join mode.** Act only if this household holds the
+1. **Gate on seed + tier + readability.** Act only if this household holds the
    space seed (``get_space_seed`` non-None → owner or delegated admin), the
-   space is PUBLIC/GLOBAL, and its ``join_mode`` is not ``invite_only``. A
+   space is PUBLIC/GLOBAL, and its ``features.allow_subscribers`` is ON. A
    non-seed-holder can't authority-sign; a private/household space is never
-   GFS-discoverable, so its key must never leave via the GFS; and an
-   invite-only public/global space is *listed* for discovery but is **not
-   publicly readable** — only invited members get content, so its key is
-   never sealed to a mere subscriber.
+   GFS-discoverable, so its key must never leave via the GFS; and a
+   public/global space with followers OFF is *listed* for discovery but is
+   **not publicly readable** — only members get content, so its key is never
+   sealed to a mere subscriber. The readability flag is NOT ``join_mode`` (an
+   ``invite_only`` space with followers on is a broadcast space), and it is
+   the OWNER's alone — a seed-holding delegated admin can sign a config edit
+   but cannot flip this one.
 2. **Verify the key-wrap binding (anti-substitution).** The key-wrap pubkey
    is learned *from the GFS*; a malicious GFS could substitute one it
    controls and read the sealed key. ``verify_keywrap_binding`` binds the

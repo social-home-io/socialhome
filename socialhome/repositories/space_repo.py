@@ -111,6 +111,7 @@ class AbstractSpaceRepo(Protocol):
         picture_hash: str | None | object = None,
     ) -> None: ...
     async def list_local_member_user_ids(self, space_id: str) -> list[str]: ...
+    async def list_subscribed_space_ids(self) -> list[str]: ...
 
     # ── Instances that mirror this space ───────────────────────────────
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
@@ -695,6 +696,27 @@ class SqliteSpaceRepo:
             {"space_id": r["space_id"], "subscribed_at": r["subscribed_at"]}
             for r in rows
         ]
+
+    async def list_subscribed_space_ids(self) -> list[str]:
+        """Return every space id this HOUSEHOLD holds a subscription on.
+
+        Household-wide (any local user with ``role='subscriber'``), unlike
+        :meth:`list_subscriptions_for_user` which answers per user. The GFS
+        seat is registered once per household, not per user, so the reconnect
+        self-heal (``GfsSpaceMirrorService.resubscribe_all``) needs the
+        household view. Dissolved spaces excluded.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT DISTINCT m.space_id AS space_id
+              FROM space_members m
+              JOIN spaces s ON s.id = m.space_id
+             WHERE m.role = 'subscriber'
+               AND s.dissolved = 0
+             ORDER BY m.space_id
+            """,
+        )
+        return [r["space_id"] for r in rows]
 
     async def list_all(self) -> list[Space]:
         """Return every active space hosted on this instance (admin).

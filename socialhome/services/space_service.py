@@ -1301,6 +1301,7 @@ class SpaceService(SpaceMemberGuardMixin):
         directory_state_changed = False
         location_feature_just_enabled = False
         delegated_admin_just_enabled = False
+        subscribers_just_disabled = False
         if features is not None:
             location_mode_changed = (
                 features.location_mode != space.features.location_mode
@@ -1321,6 +1322,10 @@ class SpaceService(SpaceMemberGuardMixin):
             # (see the re-publish block below).
             directory_state_changed = (
                 features.allow_subscribers != space.features.allow_subscribers
+            )
+            # Track ON→OFF so we can drop our local followers after the write.
+            subscribers_just_disabled = (
+                space.features.allow_subscribers and not features.allow_subscribers
             )
             new_fields["features"] = features
             payload["features"] = features.to_wire_dict()
@@ -1430,6 +1435,18 @@ class SpaceService(SpaceMemberGuardMixin):
             # hence the was_global/will_be_global guard. Fail-soft:
             # GfsConnectionService logs and never raises.
             await self._gfs.publish_space_to_all(space_id)
+        if subscribers_just_disabled:
+            # The owner just withdrew public readability, and our local
+            # ``role='subscriber'`` rows are EXACTLY the readers withdrawn
+            # from: nothing is relayed to them any more and no content key is
+            # sealed to them, so a row left behind is a follower reading the
+            # space out of the local DB forever with no way to notice. Drop
+            # them (they can subscribe again if the owner turns it back on) —
+            # real members are untouched, since ``unsubscribe_from_space``
+            # refuses to demote anything but a subscriber.
+            for member in await self._spaces.list_members(space_id):
+                if member.role == SpaceRole.SUBSCRIBER:
+                    await self.unsubscribe_from_space(member.user_id, space_id)
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
             # privacy tier within seconds rather than waiting for the
@@ -2095,17 +2112,33 @@ class SpaceService(SpaceMemberGuardMixin):
                 kwargs = {k: v for k, v in p.items() if k in self._REMOTE_CONFIG_FIELDS}
                 feats = kwargs.get("features")
                 if feats is not None:
-                    new_features = SpaceFeatures.from_wire_dict(feats)
-                    # delegated_admin_authority is OWNER-ONLY: a remote-forwarded
-                    # config edit must never change it (otherwise an approved /
-                    # self-authorized edit could grant or revoke delegation
-                    # itself). Pin it to the space's current value regardless of
-                    # the wire.
+                    # A forwarded edit is an EDIT of an existing space, so an
+                    # absent key means "leave it alone" — merge onto the
+                    # space's current features rather than the class defaults
+                    # (which would reset every key the forwarder didn't send).
+                    new_features = SpaceFeatures.from_wire_dict(
+                        feats,
+                        defaults=space.features,
+                    )
+                    # Two flags are OWNER-ONLY and a remote-forwarded config
+                    # edit must never change either — this runs AS THE OWNER, so
+                    # the ``_require_owner`` gates inside ``update_config`` pass
+                    # trivially and are no defence here. Pin both to the space's
+                    # current value regardless of the wire:
+                    #
+                    # * ``delegated_admin_authority`` — otherwise an approved /
+                    #   self-authorized edit could grant or revoke delegation
+                    #   itself.
+                    # * ``allow_subscribers`` — otherwise a delegated remote
+                    #   admin could expose the space's content to every stranger
+                    #   on a connection server (or withdraw it), which is the
+                    #   owner's call alone.
                     kwargs["features"] = replace(
                         new_features,
                         delegated_admin_authority=(
                             space.features.delegated_admin_authority
                         ),
+                        allow_subscribers=space.features.allow_subscribers,
                     )
                 await self.update_config(space_id, actor_username=owner, **kwargs)
             case "archive":

@@ -2985,6 +2985,50 @@ async def test_publishing_with_subscribers_off_purges_existing_subscribers(svc, 
     )
 
 
+async def test_publishing_without_the_key_gates_but_does_not_purge(svc):
+    """F4a: a publish carrying NO ``allow_subscribers`` key is an OLD household
+    that does not know the field — not an owner withdrawing readability.
+
+    The stored flag still fails closed (0 ⇒ new subscribes refused), but the
+    existing seats are KEPT: purging them would mass-evict every reader on a
+    mixed-version server the moment an un-upgraded household re-published, and
+    the subscriber has no way to tell it was dropped.
+    """
+    owner_seed, owner_pk = _make_keypair()
+    a_seed, a_pk = _make_keypair()
+    b_seed, b_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-absent", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-absent-a", a_pk.hex(), "http://a.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-absent-b", b_pk.hex(), "http://b.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="owner-absent", space_id="sp-absent"
+    )
+    await _subscribe(svc, a_seed, instance_id="sub-absent-a", space_id="sp-absent")
+    assert len(await svc._repo.list_subscribers("sp-absent")) == 1
+
+    # An older household re-publishes: no ``allow_subscribers`` key at all.
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-absent",
+        space_id="sp-absent",
+        allow_subscribers=None,
+    )
+    # Seats kept …
+    assert len(await svc._repo.list_subscribers("sp-absent")) == 1
+    # … but the gate is still fail-closed: no NEW subscriber is seated.
+    row = await svc._repo.get_space("sp-absent")
+    assert row is not None and row.allow_subscribers is False
+    with pytest.raises(PermissionError, match="not publicly readable"):
+        await _subscribe(svc, b_seed, instance_id="sub-absent-b", space_id="sp-absent")
+
+
 async def test_republishing_a_readable_space_keeps_subscribers(svc):
     """A re-publish that keeps the space publicly readable touches nobody."""
     owner_seed, owner_pk = _make_keypair()
