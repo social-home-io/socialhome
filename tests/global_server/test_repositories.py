@@ -16,6 +16,7 @@ from socialhome.global_server.domain import (
 from socialhome.global_server.repositories import (
     SqliteGfsAdminRepo,
     SqliteGfsFederationRepo,
+    SqliteGfsInviteRepo,
 )
 
 
@@ -625,3 +626,143 @@ async def test_list_subscribed_spaces_returns_only_subscriptions(fed):
 
 async def test_list_subscribed_spaces_empty_for_unknown_instance(fed):
     assert await fed.list_subscribed_spaces("nobody") == []
+
+
+# ── Invite tokens ─────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def invites(gfs_db):
+    return SqliteGfsInviteRepo(gfs_db)
+
+
+async def _listed_space(fed, space_id: str = "inv-sp") -> None:
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="inv-owner",
+            display_name="Owner",
+            public_key="aa" * 32,
+            inbox_url="http://owner",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id=space_id,
+            owning_instance="inv-owner",
+            name="Space",
+            status="active",
+        )
+    )
+
+
+async def test_create_and_get_live_round_trip(invites, fed):
+    await _listed_space(fed)
+    now = int(time.time())
+    created = await invites.create(
+        gfs_token="tok-a",
+        space_id="inv-sp",
+        source_instance_id="inv-owner",
+        blob="YWJj",
+        created_at=now,
+        expires_at=now + 60,
+    )
+    assert created.blob == "YWJj"
+    got = await invites.get_live("tok-a", now=now)
+    assert got is not None
+    assert got.gfs_token == "tok-a"
+    assert got.space_id == "inv-sp"
+    assert got.source_instance_id == "inv-owner"
+    assert got.blob == "YWJj"
+    assert got.expires_at == now + 60
+
+
+async def test_get_live_filters_expired_rows(invites, fed):
+    """An expired row is invisible between two sweeps — the reader must not
+    depend on the hourly prune having run."""
+    await _listed_space(fed)
+    now = int(time.time())
+    await invites.create(
+        gfs_token="tok-old",
+        space_id="inv-sp",
+        source_instance_id="inv-owner",
+        blob="YWJj",
+        created_at=now - 120,
+        expires_at=now - 1,
+    )
+    assert await invites.get_live("tok-old", now=now) is None
+
+
+async def test_get_live_unknown_token(invites):
+    assert await invites.get_live("nope", now=int(time.time())) is None
+
+
+async def test_delete_and_prune(invites, fed):
+    await _listed_space(fed)
+    now = int(time.time())
+    for token, expires in (("t1", now + 60), ("t2", now - 1), ("t3", now - 5)):
+        await invites.create(
+            gfs_token=token,
+            space_id="inv-sp",
+            source_instance_id="inv-owner",
+            blob="YWJj",
+            created_at=now - 10,
+            expires_at=expires,
+        )
+    assert await invites.delete("t1") == 1
+    assert await invites.delete("t1") == 0
+    assert await invites.prune_expired(now) == 2
+
+
+async def test_delete_for_space_drops_every_invite(invites, fed):
+    await _listed_space(fed)
+    await _listed_space(fed, "inv-sp2")
+    now = int(time.time())
+    for token, space in (("a", "inv-sp"), ("b", "inv-sp"), ("c", "inv-sp2")):
+        await invites.create(
+            gfs_token=token,
+            space_id=space,
+            source_instance_id="inv-owner",
+            blob="YWJj",
+            created_at=now,
+            expires_at=now + 60,
+        )
+    assert await invites.delete_for_space("inv-sp") == 2
+    assert await invites.get_live("c", now=now) is not None
+
+
+def test_no_invite_statement_names_the_use_counter():
+    """PRIVACY: ``uses`` / ``max_uses`` are dead columns by design — a use
+    counter would make the server a record of who joined what.
+
+    Reads the SQL the repo actually compiles (every string constant naming
+    the table) rather than its prose, so the assertion can't be satisfied by
+    a comment or defeated by one.
+    """
+    statements = [
+        const
+        for name in dir(SqliteGfsInviteRepo)
+        if callable(getattr(SqliteGfsInviteRepo, name, None))
+        for const in _string_consts(getattr(SqliteGfsInviteRepo, name))
+        if "gfs_invite_tokens" in const
+    ]
+    assert statements, "no SQL found — did the repo move?"
+    for sql in statements:
+        assert "uses" not in sql, sql
+
+
+def _string_consts(func) -> list[str]:
+    """Every string constant in *func*, including nested code objects."""
+    code = getattr(func, "__code__", None)
+    if code is None:
+        return []
+    out: list[str] = []
+    stack = [code]
+    while stack:
+        current = stack.pop()
+        for const in current.co_consts:
+            if isinstance(const, str):
+                out.append(const)
+            elif hasattr(const, "co_consts"):
+                stack.append(const)
+    return out

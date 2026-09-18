@@ -106,3 +106,40 @@ async def test_envelope_sweep_failure_does_not_skip_the_others():
     assert len(admin.purge_calls) == 1
     assert len(highlight.prune_calls) == 1
     assert len(admin.prune_token_calls) == 1
+
+
+class _StubInviteRepo:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.prune_calls: list[int] = []
+
+    async def prune_expired(self, now: int) -> int:
+        if self.boom:
+            raise RuntimeError("boom")
+        self.prune_calls.append(now)
+        return 5
+
+
+async def test_maintain_once_sweeps_expired_invites():
+    invites = _StubInviteRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        invite_repo=invites,
+    )
+    await sched._maintain_once()
+    assert len(invites.prune_calls) == 1
+
+
+async def test_invite_sweep_failure_does_not_skip_the_others():
+    admin = _StubAdminRepo()
+    highlight = _StubHighlightRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=admin,
+        highlight_repo=highlight,
+        invite_repo=_StubInviteRepo(boom=True),
+    )
+    await sched._maintain_once()
+    assert len(admin.purge_calls) == 1
+    assert len(highlight.prune_calls) == 1
+    assert len(admin.prune_token_calls) == 1

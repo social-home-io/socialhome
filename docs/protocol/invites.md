@@ -225,6 +225,100 @@ controls. `routed_crypto.py`'s sealing is the wrong tool here: it
 negotiates a *target ephemeral* key over an online `SPACE_FIND_ROUTE`
 round-trip, and there is no mesh path to run one over.
 
+### The mint + landing leg — where the blob comes from
+
+The transport above starts with a blob in a stranger's hands. That blob
+gets there through the connection server's **bulletin board**: the owner
+parks it, a visitor's browser picks it up.
+
+| | |
+|---|---|
+| `POST /gfs/spaces/{id}/invite` | Owner parks a blob. Body `{owning_instance, blob, expires_at, ts, signature}`, signed over canonical `{action:"mint_invite", owning_instance, space_id, ts}` and verified against the household's registered instance key (±300 s). Returns `201 {gfs_token, url}`. |
+| `GET /join/{gfs_token}` | Public HTML page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code — copyable text **and** a QR of the same string. |
+| `DELETE\|POST /gfs/spaces/{id}/invite/{gfs_token}` | Owner takes it down. Signed over `{action:"revoke_invite", gfs_token, owning_instance, space_id, ts}`. `204`, idempotent. |
+
+The `action` discriminator lives inside the signed bytes on both verbs,
+so a captured mint signature is not a revoke signature and the reverse —
+the same domain separation `subscribe` / `unsubscribe` / `unpublish`
+already use. On revoke the **token** is inside them too, so a revoke for
+one link can't be redirected at another.
+
+**What the connection server is here.** A bulletin board and nothing
+more. It holds an opaque string it never parses (size ≤ 4 KiB and
+base64url alphabet are the only checks — a household must be able to
+grow a field in the payload, or move to a Phase-2 PQ suite, without any
+server being redeployed). It shows a space name it already publishes on
+`/spaces/{id}` and `GET /gfs/spaces`. And it hands the string to whoever
+asks.
+
+**It must never learn who redeemed.** `GET /join/{token}` writes
+*nothing*: no use counter, no fetch row, no log line naming the token or
+the visitor. `gfs_invite_tokens` has carried `uses` / `max_uses` columns
+since GFS migration `0001`; they stay dead forever, and the repo's SQL
+never names them (`tests/global_server/test_repositories.py` asserts
+that against the compiled statements, not the prose). Whether an invite
+may still be redeemed is decided by the **issuing household** — the only
+party that can decide it without building a record of who joined what.
+The redeem itself is authorised end-to-end by that household anyway, so
+a server-side counter would buy nothing and cost the property the whole
+feature rests on. The HTTP access log is the accepted residual.
+
+**Nor may the blob carry an address.** The page is served to anyone with
+the link, so the payload holds public keys and ids only — the redeem
+travels by instance id through `POST /gfs/envelope` (above). This is the
+same constraint stated in "Transport", enforced at the other end.
+
+**Listing state gates the link.** A mint is refused unless the caller
+owns the space *and* the space is `status='active'` and not `withdrawn`.
+Withdrawing a listing deletes every invite for it: `withdrawn` is
+reversible, but an invite link is a standing public URL already sitting
+in other people's chats, and leaving it live would keep a working side
+door into a listing its owner deliberately delisted. Re-publishing
+restores the listing, not the old links.
+
+**Capability-gated.** `GET /gfs/info`'s SIGNED capability block carries
+`invite_links: true`. A household refuses to mint against a server that
+hasn't proved it, rather than handing the owner a URL that 404s for
+everyone they send it to.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as Owner household
+    participant G as Connection server (GFS)
+    participant B as Visitor's browser
+    participant R as Redeemer household
+
+    O->>G: GET /gfs/info
+    G-->>O: capabilities {invite_links: true} + signature
+    Note over O: verify against the key pinned at pair time
+    O->>G: POST /gfs/spaces/{id}/invite<br/>{blob, expires_at, ts, sig(action=mint_invite)}
+    Note over G: verify sig vs registered key · owner? · listed?<br/>blob checked for SIZE + ALPHABET only
+    G-->>O: 201 {gfs_token, url}
+    O-->>B: shares {gfs}/join/{gfs_token} (chat, email, paper)
+
+    B->>G: GET /join/{gfs_token}
+    Note over G: pure read — no counter, no row, no token in any log
+    G-->>B: space name + icon + socialhome://invite#<blob> + QR
+    B-->>R: human copies the code into their OWN Social Home
+
+    R->>G: POST /gfs/envelope<br/>{to_instance, sealed}
+    Note over G,R: the sealed redeem leg — see above
+    G-->>R: 202 accepted
+
+    O->>G: DELETE /gfs/spaces/{id}/invite/{gfs_token}<br/>{ts, sig(action=revoke_invite, gfs_token)}
+    G-->>O: 204 (idempotent)
+```
+
+**Why no clickable "Open in Social Home" button.** The visitor has to
+redeem from *their own* household, and a deep link can only ever open
+the issuer's — the wrong instance, where they have no account. The SPA's
+own wrong-instance fallback (`SpaceJoinLanding.tsx`) reaches the same
+conclusion and renders the same code. The page that used to sit at this
+URL offered `sh://gfs-invite/…`, a scheme no client has ever registered:
+a CTA that did nothing on every device it was clicked on. The per-space
+page's `sh://join-space/…` was the same bug and is gone with it.
+
 ### The relay leg — `POST /gfs/envelope`
 
 The connection server half of the transport above. It is what the

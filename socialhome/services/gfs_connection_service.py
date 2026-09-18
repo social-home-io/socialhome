@@ -187,6 +187,7 @@ class GfsConnectionService:
         "_caps_warned",
         "_info_failed_at",
         "_envelope_relay",
+        "_invite_links",
     )
 
     def __init__(
@@ -237,6 +238,9 @@ class GfsConnectionService:
         # unknown and is re-probed on the next attempt rather than
         # cached as a permanent "no".
         self._envelope_relay: dict[str, bool] = {}
+        # Same discipline again, for the ``invite_links`` capability
+        # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
+        self._invite_links: dict[str, bool] = {}
 
     def attach_publish_context(
         self,
@@ -611,14 +615,44 @@ class GfsConnectionService:
         doesn't carry those has no such route, so the sender asks here first
         and fails the redeem with a sentence a human can act on instead of a
         404 behind a ten-second timeout.
+        """
+        return await self._signed_capability_supported(
+            conn,
+            "envelope_relay",
+            self._envelope_relay,
+        )
+
+    async def invite_links_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``invite_links`` on /gfs/info.
+
+        Gates :meth:`publish_invite` / :meth:`revoke_invite`: an older
+        connection server has no ``/gfs/spaces/{id}/invite`` route and no
+        ``/join`` page, so minting there would hand the owner a link that
+        404s for everyone they send it to.
+        """
+        return await self._signed_capability_supported(
+            conn,
+            "invite_links",
+            self._invite_links,
+        )
+
+    async def _signed_capability_supported(
+        self,
+        conn: GfsConnection,
+        name: str,
+        cache: dict[str, bool],
+    ) -> bool:
+        """Whether *conn*'s GFS proved capability *name* under a VALID signature.
 
         Same shape as :meth:`_anonymous_publish_supported`: answered from the
         RAM cache when warm, probed once on a cold miss, and suppressed for
         :data:`GFS_INFO_NEGATIVE_TTL_S` after an unreachable probe. Only a
-        ``True`` under a VALID signature is cached — an unsigned or stripped
-        block is "unknown", re-probed next time, never a sticky "no".
+        ``True`` under a valid signature is cached — an unsigned or stripped
+        block is "unknown", re-probed next time, never a sticky "no". One
+        implementation for every per-capability gate so a new one cannot
+        accidentally trust the unsigned top-level flag.
         """
-        if self._envelope_relay.get(conn.id):
+        if cache.get(conn.id):
             return True
         failed_at = self._info_failed_at.get(conn.id)
         if failed_at is not None and time.monotonic() - failed_at < (
@@ -629,9 +663,9 @@ class GfsConnectionService:
         if info is None:
             return False
         caps = self._verified_capabilities(conn, info)
-        if caps is None or caps.get("envelope_relay") is not True:
+        if caps is None or caps.get(name) is not True:
             return False
-        self._envelope_relay[conn.id] = True
+        cache[conn.id] = True
         return True
 
     async def refresh_connection_metadata(self, gfs_id: str) -> None:
@@ -898,6 +932,175 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         await self._repo.unpublish_space(space_id, gfs_id)
+
+    async def publish_invite(
+        self,
+        space_id: str,
+        gfs_id: str,
+        blob: str,
+        expires_at: int,
+    ) -> tuple[str, str]:
+        """Park an invite *blob* for *space_id* on *gfs_id*'s bulletin board.
+
+        Returns ``(gfs_token, url)`` — the URL is the shareable
+        ``{base}/join/{token}`` page that renders the blob back as a
+        ``socialhome://invite#…`` code for a visitor to copy into their own
+        Social Home.
+
+        *blob* is this household's business: the connection server never
+        parses it, and it MUST NOT contain a household address — the page is
+        served to anyone holding the link. Signed like
+        :meth:`unpublish_space`, over the canonical ``{action: "mint_invite",
+        owning_instance, space_id, ts}`` body, so the ``action`` is inside the
+        signed bytes and a captured mint signature can't be replayed as a
+        revoke (or a publish, or a subscribe).
+
+        Capability-gated: a server whose SIGNED ``/gfs/info`` block lacks
+        ``invite_links`` has no such route, so this raises with a sentence an
+        operator can act on rather than minting a link that 404s for every
+        person it is sent to.
+        """
+        if not self._own_instance_id or not self._own_signing_key:
+            raise GfsConnectionError(
+                "cannot mint an invite without a wired signing identity",
+            )
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        if not await self.invite_links_supported(conn):
+            raise GfsConnectionError(
+                "this connection server can't host invite links yet",
+            )
+
+        ts = datetime.now(timezone.utc).isoformat()
+        body = {
+            "owning_instance": self._own_instance_id,
+            "blob": blob,
+            "expires_at": int(expires_at),
+            "ts": ts,
+            "signature": self._sign_invite_action(
+                "mint_invite",
+                space_id=space_id,
+                ts=ts,
+            ),
+        }
+        client = self._client()
+        url = f"{conn.inbox_url}/gfs/spaces/{space_id}/invite"
+        try:
+            async with client.post(
+                url,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status not in (200, 201):
+                    detail = await _remote_detail(resp, context="invite")
+                    raise GfsConnectionError(
+                        f"GFS rejected invite (HTTP {resp.status}): {detail}",
+                    )
+                try:
+                    data = await resp.json()
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
+
+        gfs_token = str(data.get("gfs_token") or "")
+        invite_url = str(data.get("url") or "")
+        if not gfs_token or not invite_url:
+            # Without both there is nothing to share and nothing to revoke
+            # later — fail loudly rather than hand the caller a half-answer.
+            raise GfsConnectionError("GFS returned no invite token")
+        return gfs_token, invite_url
+
+    async def revoke_invite(
+        self,
+        space_id: str,
+        gfs_id: str,
+        gfs_token: str,
+    ) -> None:
+        """Take one invite link down. Idempotent.
+
+        Signed over the canonical ``{action: "revoke_invite", gfs_token,
+        owning_instance, space_id, ts}`` body — both the action AND the token
+        are inside the signed bytes, so a mint signature can't be replayed as
+        a revoke and a revoke can't be redirected at another token.
+
+        ``200`` / ``204`` / ``404`` are all success: the link is gone either
+        way, and a revoke that races a sweep or a second revoke must not
+        surface as an error. Unlike :meth:`publish_invite` this does NOT
+        capability-gate — a server that never had the route also never has the
+        link, so refusing here would strand an owner trying to clean up after
+        a downgrade.
+        """
+        if not self._own_instance_id or not self._own_signing_key:
+            raise GfsConnectionError(
+                "cannot revoke an invite without a wired signing identity",
+            )
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+
+        ts = datetime.now(timezone.utc).isoformat()
+        body = {
+            "owning_instance": self._own_instance_id,
+            "ts": ts,
+            "signature": self._sign_invite_action(
+                "revoke_invite",
+                space_id=space_id,
+                ts=ts,
+                gfs_token=gfs_token,
+            ),
+        }
+        client = self._client()
+        url = f"{conn.inbox_url}/gfs/spaces/{space_id}/invite/{gfs_token}"
+        try:
+            # POST, not DELETE: the GFS route accepts both identically, and
+            # some proxies strip a DELETE request body — which would turn the
+            # signed revoke into a permanent 400.
+            async with client.post(
+                url,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status not in (200, 204, 404):
+                    detail = await _remote_detail(resp, context="invite revoke")
+                    raise GfsConnectionError(
+                        f"GFS rejected invite revoke (HTTP {resp.status}): {detail}",
+                    )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
+
+    def _sign_invite_action(
+        self,
+        action: str,
+        *,
+        space_id: str,
+        ts: str,
+        gfs_token: str | None = None,
+    ) -> str:
+        """Sign the canonical body for an invite *action*.
+
+        ONE place builds the signed bytes for both invite verbs, so the
+        ``action`` discriminator and the token binding can't drift apart
+        between mint and revoke — the drift being exactly what would let one
+        signature be replayed as the other.
+        """
+        payload: dict[str, object] = {
+            "action": action,
+            "owning_instance": self._own_instance_id,
+            "space_id": space_id,
+            "ts": ts,
+        }
+        if gfs_token is not None:
+            payload["gfs_token"] = gfs_token
+        canonical = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return b64url_encode(sign_ed25519(self._own_signing_key, canonical))
 
     async def subscribe_to_gfs_space(self, space_id: str, gfs_id: str) -> str:
         """Subscribe this household to a GFS-listed space's relay fan-out.

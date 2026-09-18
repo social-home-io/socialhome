@@ -306,6 +306,30 @@ class GfsQueuedEnvelope:
     expires_at: int
 
 
+@dataclass(slots=True, frozen=True)
+class GfsInviteToken:
+    """One owner-minted space invite, parked on this server's bulletin board.
+
+    ``GET /join/{gfs_token}`` looks the row up and renders ``blob`` back as a
+    ``socialhome://invite#<blob>`` code. The GFS is a bulletin board here and
+    nothing more: it holds an OPAQUE string it never parses, shows the space
+    name it already publishes on ``/spaces/{id}``, and hands the string to
+    anyone with the link.
+
+    ``uses`` / ``max_uses`` exist on the table (migration 0001) and are
+    deliberately absent here: a use counter would turn this server into a
+    record of how many strangers opened a family's invite. Nothing reads or
+    writes them — see ``0012_gfs_invite_tokens_blob.sql``.
+    """
+
+    gfs_token: str
+    space_id: str
+    source_instance_id: str
+    blob: str
+    created_at: int
+    expires_at: int
+
+
 # Backwards-compatible aliases for the pre-spec stub names so existing
 # tests / imports keep working through the transition.
 GfsInstance = ClientInstance

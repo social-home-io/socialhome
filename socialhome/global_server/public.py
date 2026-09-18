@@ -3,8 +3,10 @@
 Server-side-rendered HTML. No JS framework, no build step. Three routes:
 
 * ``GET /``          — landing page (hero + pairing QR + spaces list).
-* ``GET /spaces/{slug}`` — per-space public page with deep-link CTA.
-* ``GET /join/{gfs_token}`` — invite link landing + deep-link CTA.
+* ``GET /spaces/{slug}`` — per-space public page.
+* ``GET /join/{gfs_token}`` — invite-link landing: the space's public name
+  next to the ``socialhome://invite#<blob>`` code + QR a visitor copies into
+  their OWN Social Home. A pure read — see :func:`handle_invite_page`.
 
 Shared QR-token service handles the single-use 10-minute pairing token
 (spec §24.7.4) with a 1-new-token-per-30-s-per-IP rate limit.
@@ -29,6 +31,7 @@ from aiohttp import web
 from ..domain.space import SPACE_CATEGORIES
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
+from .invites import build_invite_code
 from .markdown_lite import render_markdown
 
 if TYPE_CHECKING:
@@ -335,8 +338,14 @@ def _build_window_limiter(
 
 
 def _is_public_listing(path: str) -> bool:
-    """The public HTML pages — the landing page and the per-space pages."""
-    return path == "/" or path.startswith("/spaces/")
+    """The public HTML pages — landing, per-space, and invite-link pages.
+
+    ``/join/`` belongs here: it is the same kind of anonymous, unauthenticated
+    SSR page, and it is the one an attacker would hammer to walk the token
+    space. It writes nothing, so there is no per-household identity to key a
+    limiter on — the client address is all there is.
+    """
+    return path == "/" or path.startswith("/spaces/") or path.startswith("/join/")
 
 
 def _is_public_rtc_entry(path: str) -> bool:
@@ -411,6 +420,72 @@ def _render_qr_png_data_uri_sync(payload: str) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+#: Styling for the "here is a code, here is a button that copies it" widget.
+#: ONE definition shared by the landing's pairing code and the invite page's
+#: ``socialhome://invite#…`` code — the two surfaces are the same affordance
+#: and a visitor who has seen one should recognise the other instantly.
+#: Interpolated into a page's ``<style>``; it reads the page's own design
+#: tokens, so it inherits whatever palette that page declares.
+_COPY_WIDGET_CSS = """
+    .copy-code { background: var(--warm-bg); border: 1px solid var(--hair);
+                 padding: 4px 8px; border-radius: 6px;
+                 display: inline-block; word-break: break-all;
+                 font-size: 13px; max-width: 100%; }
+    .copy-btn { margin-top: 6px; padding: 6px 14px;
+                background: var(--primary); color: #fff;
+                border: 0; border-radius: 999px; font: inherit;
+                font-size: 13px; font-weight: 600; cursor: pointer;
+                transition: filter 100ms; }
+    .copy-btn:hover { filter: brightness(0.95); }
+    .copy-btn.copied { background: #2D8F4E; }
+"""
+
+#: The copy-to-clipboard shim, parameterised by element id. Tiny and inline on
+#: purpose: these are server-rendered pages a first-time visitor loads once, so
+#: shipping a bundle to power one button would be absurd. Falls back to
+#: selecting the code text where the clipboard API is unavailable (older
+#: Safari, ``file://``).
+_COPY_BUTTON_SCRIPT = """
+    <script>
+      (function() {
+        var btn = document.getElementById("__BTN_ID__");
+        var target = document.getElementById("__CODE_ID__");
+        if (!btn || !target) return;
+        btn.addEventListener("click", function() {
+          var text = target.textContent || "";
+          var done = function() {
+            btn.textContent = btn.dataset.copiedLabel || "Copied";
+            btn.classList.add("copied");
+            setTimeout(function() {
+              btn.textContent = btn.dataset.defaultLabel || "Copy code";
+              btn.classList.remove("copied");
+            }, 1800);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(function() {
+              var r = document.createRange(); r.selectNode(target);
+              window.getSelection().removeAllRanges();
+              window.getSelection().addRange(r);
+            });
+          } else {
+            var r = document.createRange(); r.selectNode(target);
+            window.getSelection().removeAllRanges();
+            window.getSelection().addRange(r);
+          }
+        });
+      })();
+    </script>
+"""
+
+
+def _copy_button_script(button_id: str, code_id: str) -> str:
+    """The inline copy shim wired to *button_id* / *code_id*."""
+    return _COPY_BUTTON_SCRIPT.replace("__BTN_ID__", button_id).replace(
+        "__CODE_ID__",
+        code_id,
+    )
 
 
 #: Discovery categories (§23.50) as ``(value, label)`` pairs. The values
@@ -570,17 +645,7 @@ def _render_landing(
     .pair img {{ width: 200px; height: 200px;
                  background: #fff; padding: 6px;
                  border: 1px solid var(--hair); border-radius: 8px; }}
-    .pair code {{ background: var(--warm-bg); border: 1px solid var(--hair);
-                 padding: 4px 8px; border-radius: 6px;
-                 display: inline-block; word-break: break-all;
-                 font-size: 13px; max-width: 100%; }}
-    .pair .copy-btn {{ margin-top: 6px; padding: 6px 14px;
-                       background: var(--primary); color: #fff;
-                       border: 0; border-radius: 999px; font: inherit;
-                       font-size: 13px; font-weight: 600; cursor: pointer;
-                       transition: filter 100ms; }}
-    .pair .copy-btn:hover {{ filter: brightness(0.95); }}
-    .pair .copy-btn.copied {{ background: #2D8F4E; }}
+    {_COPY_WIDGET_CSS}
     .filters {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }}
     .filters a {{ padding: 4px 12px; border-radius: 999px;
                   border: 1px solid var(--hair); color: var(--ink-soft);
@@ -629,7 +694,8 @@ def _render_landing(
             <li>Spaces → Discover → ⬡ Global</li>
             <li>Scan the QR or copy the pairing code below</li>
           </ol>
-          <p><code id="pair-code" data-pair-token="{_escape(token)}"
+          <p><code class="copy-code" id="pair-code"
+                   data-pair-token="{_escape(token)}"
                    >{_escape(pair_code)}</code></p>
           <p>
             <button type="button" class="copy-btn" id="copy-pair-btn"
@@ -641,39 +707,7 @@ def _render_landing(
         </div>
       </div>
     </section>
-    <script>
-      // Tiny inline copy-button shim — keeps the landing as a single
-      // server-rendered HTML page (no SPA bundle to ship to first-time
-      // visitors). Falls back to selecting the code text if the
-      // clipboard API is unavailable (older Safari, file://).
-      (function() {{
-        var btn = document.getElementById("copy-pair-btn");
-        var target = document.getElementById("pair-code");
-        if (!btn || !target) return;
-        btn.addEventListener("click", function() {{
-          var text = target.textContent || "";
-          var done = function() {{
-            btn.textContent = btn.dataset.copiedLabel || "Copied";
-            btn.classList.add("copied");
-            setTimeout(function() {{
-              btn.textContent = btn.dataset.defaultLabel || "Copy code";
-              btn.classList.remove("copied");
-            }}, 1800);
-          }};
-          if (navigator.clipboard && navigator.clipboard.writeText) {{
-            navigator.clipboard.writeText(text).then(done).catch(function() {{
-              var r = document.createRange(); r.selectNode(target);
-              window.getSelection().removeAllRanges();
-              window.getSelection().addRange(r);
-            }});
-          }} else {{
-            var r = document.createRange(); r.selectNode(target);
-            window.getSelection().removeAllRanges();
-            window.getSelection().addRange(r);
-          }}
-        }});
-      }})();
-    </script>
+{_copy_button_script("copy-pair-btn", "pair-code")}
 
     <section>
       <h2>Spaces</h2>
@@ -713,13 +747,23 @@ def _render_space_page(
     server_name: str,
     base_url: str,
 ) -> str:
+    """The ``GET /spaces/{slug}`` page.
+
+    The call to action points at this server's landing page, not at a
+    ``socialhome://`` deep link. There is no invite code to hand over here —
+    this is the public face of a LISTED space, and the way into one is to
+    connect your own household to this server and subscribe from inside your
+    own Social Home. What used to sit here was an ``sh://join-space/…`` URL,
+    a scheme no client has ever registered: a CTA that did nothing on every
+    device it was ever clicked on. The surface that DOES carry a pasteable
+    ``socialhome://invite#…`` code is an owner-minted ``/join`` link.
+    """
     primary = _escape(
         space.get("primary_color") or space.get("accent_color") or "#D2542A"
     )
     accent = _escape(space.get("accent_color") or primary)
     icon_url = _escape(space.get("icon_url") or "")
     cover_uri = _escape(space.get("cover_url") or "")
-    deep_link = f"sh://join-space/{base_url}/spaces/{_escape(space['space_id'])}"
     og_image = cover_uri or icon_url
     og_title = _escape(f"{space.get('name') or ''} — {server_name}")
     og_desc = _escape(space.get("description") or "")
@@ -836,7 +880,9 @@ def _render_space_page(
       · {_escape(_category_label(space.get("category")))}</p>
 
     <section class="cta-section">
-      <a class="cta" href="{_escape(deep_link)}">Open in Social Home</a>
+      <a class="cta" href="/">Connect your Social Home</a>
+      <p class="muted">Already connected? Find this space under
+      Spaces → Discover → ⬡ Global.</p>
     </section>
 
     <section>
@@ -864,11 +910,26 @@ def _render_space_page(
 
 def _render_invite_page(
     *,
-    token: str,
     space: dict | None,
+    invite_code: str,
+    invite_qr_data_uri: str,
     server_name: str,
-    base_url: str,
 ) -> str:
+    """The ``GET /join/{gfs_token}`` page.
+
+    Renders the space's already-public directory metadata (name, icon,
+    accent) next to the one thing this page exists to hand over: the
+    ``socialhome://invite#<blob>`` code, as copyable text and as a QR of the
+    same string. Exactly the shape the landing page uses for the pairing
+    code, because it is exactly the same job.
+
+    There is deliberately no clickable "Open in Social Home" CTA. The visitor
+    has to redeem this from THEIR OWN household, and a link can only ever open
+    the issuer's — the wrong instance, where they have no account. Copy-paste
+    is the honest affordance; the SPA's own wrong-instance fallback
+    (``client/src/features/spaces/SpaceJoinLanding.tsx``) reaches the same
+    conclusion and renders the same code.
+    """
     if space is None:
         return (
             "<!doctype html>"
@@ -877,7 +938,7 @@ def _render_invite_page(
             "<p>This invite has expired or was revoked.</p>"
         )
     accent = _escape(space.get("accent_color") or "#D2542A")
-    deep_link = f"sh://gfs-invite/{base_url}/join/{_escape(token)}"
+    icon_url = _escape(space.get("icon_url") or "")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -896,17 +957,22 @@ def _render_invite_page(
      * the GFS surface and the SH SPA. */
     :root {{
       --warm-bg:  #F4ECE0;
+      --paper:    #EFE3D2;
       --ink:      #1A1814;
       --ink-soft: #807766;
+      --hair:     #D8CFC0;
+      --primary:  {accent};
     }}
     /* Dark mode — warm ember (see ``users_directory.css``
-     * rationale). The CTA keeps the per-space accent for contrast
+     * rationale). The accent keeps the space's colour for contrast
      * even at night. */
     @media (prefers-color-scheme: dark) {{
       :root {{
         --warm-bg:  #1A1612;
+        --paper:    #251E18;
         --ink:      #F1E9DA;
         --ink-soft: #9A8E7D;
+        --hair:     #3D332A;
       }}
     }}
     body {{
@@ -915,30 +981,55 @@ def _render_invite_page(
       margin: 0; color: var(--ink); background: var(--warm-bg);
     }}
     main {{ max-width: 640px; margin: 0 auto; padding: 24px; }}
-    .accent-bar {{ height: 6px; background: {accent};
+    .accent-bar {{ height: 6px; background: var(--primary);
                    margin: 12px 0 22px; border-radius: 3px; }}
+    .space-avatar {{ width: 64px; height: 64px; border-radius: 50%;
+                     object-fit: cover; background: var(--paper);
+                     border: 3px solid var(--warm-bg); display: block; }}
     h1 {{
       font-family: 'Fraunces', 'Iowan Old Style', 'Palatino Linotype', serif;
       font-feature-settings: "ss01" on, "salt" on;
       font-variation-settings: "SOFT" 75, "WONK" 1, "opsz" 96;
       font-size: 30px; margin-bottom: 4px; letter-spacing: -0.01em;
     }}
-    .cta {{ background: {accent}; color: #fff; padding: 11px 22px;
-            border-radius: 999px; display: inline-block;
-            text-decoration: none; font-weight: 600; font-size: 15px;
-            transition: transform 100ms, filter 100ms; }}
-    .cta:hover {{ transform: translateY(-1px); filter: brightness(0.95); }}
+    ol {{ padding-left: 20px; }}
+    .handoff {{ display: flex; gap: 22px; align-items: center;
+                flex-wrap: wrap; }}
+    .handoff img.qr {{ width: 180px; height: 180px; background: #fff;
+                       padding: 6px; border: 1px solid var(--hair);
+                       border-radius: 8px; }}
+    {_COPY_WIDGET_CSS}
     .muted {{ color: var(--ink-soft); font-size: 13px; }}
   </style>
 </head>
 <body>
   <main>
     <div class="accent-bar"></div>
+    {'<img class="space-avatar" src="' + icon_url + '" alt="" />' if icon_url else ""}
     <h1>You're invited to {_escape(space.get("name") or "")}</h1>
     <p>on {_escape(server_name)}.</p>
-    <p><a class="cta" href="{_escape(deep_link)}">Open in Social Home</a></p>
-    <p class="muted">Opens the invite in your Social Home app — you join
-    from your own household instance.</p>
+
+    <div class="handoff">
+      <img class="qr" src="{invite_qr_data_uri}" alt="Invite QR" />
+      <div>
+        <ol>
+          <li>Open <strong>your own</strong> Social Home</li>
+          <li>Spaces → Join with invite code</li>
+          <li>Scan the QR or paste the code below</li>
+        </ol>
+        <p><code class="copy-code" id="invite-code"
+                 >{_escape(invite_code)}</code></p>
+        <p>
+          <button type="button" class="copy-btn" id="copy-invite-btn"
+                  data-copy-target="invite-code"
+                  data-copied-label="Copied ✓"
+                  data-default-label="Copy code">Copy code</button>
+        </p>
+      </div>
+    </div>
+{_copy_button_script("copy-invite-btn", "invite-code")}
+    <p class="muted">You join from your own household — this code is what
+    tells it where to knock.</p>
   </main>
 </body>
 </html>
@@ -1060,37 +1151,53 @@ async def handle_space_page(request: web.Request) -> web.Response:
 
 
 async def handle_invite_page(request: web.Request) -> web.Response:
-    """GET /join/{gfs_token} — invite link landing."""
+    """GET /join/{gfs_token} — invite-link landing.
+
+    A pure READ. This handler writes nothing at all: no use counter, no
+    fetch row, no log line naming the token or the visitor. That is the
+    privacy property the whole feature rests on — a connection server that
+    counted fetches would be a record of who opened whose invite, and the
+    access log is the accepted residual, not a licence to add more. The
+    ``uses`` / ``max_uses`` columns exist on the table and stay untouched
+    (``migrations/0012_gfs_invite_tokens_blob.sql``).
+
+    404 — rendering the same styled "expired or revoked" page — when the
+    token is unknown, expired, or its space is no longer publicly listed
+    (never published, moderator-banned, owner-withdrawn). One answer for all
+    of those: distinguishing them would tell an anonymous prober which tokens
+    once existed.
+    """
     cfg = request.app[K.gfs_config_key]
     admin_repo = request.app[K.gfs_admin_repo_key]
     fed_repo = request.app[K.gfs_fed_repo_key]
+    invite_svc = request.app[K.gfs_invite_service_key]
 
-    token = request.match_info["gfs_token"]
-    row = await admin_repo._db.fetchone(  # type: ignore[attr-defined]
-        "SELECT space_id, expires_at FROM gfs_invite_tokens WHERE gfs_token=?",
-        (token,),
-    )
-    space = None
-    if row is not None:
-        expires_at = row["expires_at"]
-        if expires_at is None or int(expires_at) > int(time.time()):
-            space_row = await fed_repo.get_space(row["space_id"])
-            if (
-                space_row is not None
-                and space_row.status == "active"
-                and not space_row.withdrawn
-            ):
-                space = {
-                    "name": space_row.name,
-                    "accent_color": space_row.accent_color,
-                    "space_id": space_row.space_id,
-                }
+    invite = await invite_svc.get_live(request.match_info["gfs_token"])
+    space: dict | None = None
+    invite_code = ""
+    if invite is not None:
+        space_row = await fed_repo.get_space(invite.space_id)
+        if (
+            space_row is not None
+            and space_row.status == "active"
+            and not space_row.withdrawn
+        ):
+            # Directory metadata only — all of it already served publicly on
+            # ``/spaces/{id}`` and ``GET /gfs/spaces``.
+            space = {
+                "name": space_row.name,
+                "accent_color": space_row.accent_color,
+                "icon_url": space_row.icon_url,
+                "space_id": space_row.space_id,
+            }
+            invite_code = build_invite_code(invite.blob)
     server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
+    qr_data = await _render_qr_png_data_uri(invite_code) if space else ""
     html = _render_invite_page(
-        token=token,
         space=space,
+        invite_code=invite_code,
+        invite_qr_data_uri=qr_data,
         server_name=server_name,
-        base_url=cfg.base_url,
     )
     return web.Response(
         text=html,

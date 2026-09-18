@@ -32,6 +32,7 @@ from .domain import (
     GfsFraudReport,
     GfsHighlightPublication,
     GfsHighlightToken,
+    GfsInviteToken,
     GfsMomentFollow,
     GfsQueuedEnvelope,
     GfsSubscriber,
@@ -1892,3 +1893,143 @@ class SqliteGfsEnvelopeQueueRepo:
         )
         d = _as_dict(row)
         return int(d["n"]) if d else 0
+
+
+# ─── Invite tokens ───────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsInviteRepo(Protocol):
+    """Bulletin board for owner-minted space invites (§24.8.5)."""
+
+    async def create(
+        self,
+        *,
+        gfs_token: str,
+        space_id: str,
+        source_instance_id: str,
+        blob: str,
+        created_at: int,
+        expires_at: int,
+    ) -> GfsInviteToken: ...
+
+    async def get_live(
+        self,
+        gfs_token: str,
+        *,
+        now: int,
+    ) -> GfsInviteToken | None: ...
+
+    async def delete(self, gfs_token: str) -> int: ...
+
+    async def delete_for_space(self, space_id: str) -> int: ...
+
+    async def prune_expired(self, now: int) -> int: ...
+
+
+class SqliteGfsInviteRepo:
+    """SQLite-backed :class:`AbstractGfsInviteRepo`.
+
+    Read-only on the public path: :meth:`get_live` is the ONLY method
+    ``GET /join/{gfs_token}`` calls, and it writes nothing. There is
+    deliberately no ``bump_uses`` / ``record_fetch`` — counting fetches would
+    make this server a record of who opened whose invite (see
+    ``migrations/0012_gfs_invite_tokens_blob.sql``). The ``uses`` /
+    ``max_uses`` columns 0001 shipped are never named by any statement here.
+    """
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def create(
+        self,
+        *,
+        gfs_token: str,
+        space_id: str,
+        source_instance_id: str,
+        blob: str,
+        created_at: int,
+        expires_at: int,
+    ) -> GfsInviteToken:
+        await self._db.enqueue(
+            "INSERT INTO gfs_invite_tokens("
+            "gfs_token, space_id, source_instance_id, blob, created_at, expires_at"
+            ") VALUES(?,?,?,?,?,?)",
+            (gfs_token, space_id, source_instance_id, blob, created_at, expires_at),
+        )
+        return GfsInviteToken(
+            gfs_token=gfs_token,
+            space_id=space_id,
+            source_instance_id=source_instance_id,
+            blob=blob,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+
+    async def get_live(
+        self,
+        gfs_token: str,
+        *,
+        now: int,
+    ) -> GfsInviteToken | None:
+        """The unexpired row for *gfs_token*, or ``None``.
+
+        Expiry is filtered in SQL as well as swept hourly: a visitor arriving
+        between two sweeps must not be handed a blob whose TTL has run out.
+        """
+        row = await self._db.fetchone(
+            "SELECT gfs_token, space_id, source_instance_id, blob, "
+            "created_at, expires_at FROM gfs_invite_tokens "
+            "WHERE gfs_token=? AND expires_at > ?",
+            (gfs_token, now),
+        )
+        d = _as_dict(row)
+        if not d:
+            return None
+        return GfsInviteToken(
+            gfs_token=d["gfs_token"],
+            space_id=d["space_id"],
+            source_instance_id=d["source_instance_id"],
+            blob=d["blob"] or "",
+            created_at=int(d["created_at"] or 0),
+            expires_at=int(d["expires_at"] or 0),
+        )
+
+    async def delete(self, gfs_token: str) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_invite_tokens WHERE gfs_token=?",
+                (gfs_token,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def delete_for_space(self, space_id: str) -> int:
+        """Drop every invite for *space_id*.
+
+        Called when the owner withdraws the listing: a withdrawn space's
+        public page 404s, and its invite page must go with it rather than
+        stay a working side door into a listing its owner delisted.
+        """
+
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_invite_tokens WHERE space_id=?",
+                (space_id,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def prune_expired(self, now: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_invite_tokens WHERE expires_at <= ?",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)

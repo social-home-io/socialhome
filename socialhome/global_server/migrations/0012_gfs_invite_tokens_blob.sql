@@ -1,0 +1,69 @@
+-- Give ``gfs_invite_tokens`` the one thing it was missing to be useful: the
+-- opaque invite blob the public ``GET /join/{gfs_token}`` page hands out.
+--
+-- The table shipped in 0001 (§24.8.5) with a primary key, a space FK and a
+-- use counter — and with no writer and no repo method anywhere in the tree.
+-- It described a bulletin board that nothing could post to. This column is
+-- what a household pins to it: the verbatim ``base64url(JSON)`` fragment of
+-- the ``socialhome://invite#<blob>`` code the SPA's
+-- ``client/src/lib/spaceInviteCode.ts`` decodes. The GFS NEVER parses it.
+--
+-- ``uses`` / ``max_uses`` STAY UNUSED, DELIBERATELY AND PERMANENTLY.
+-- Incrementing a counter on fetch would make this server a record of how
+-- many strangers opened a given family's invite — and, with the access log,
+-- of which addresses did. The bulletin board answers everybody the same way
+-- and writes NOTHING on a fetch; the redeem itself is authorised end-to-end
+-- by the household that minted the blob, which is the only party that can
+-- meaningfully count or cap redemptions. The two columns are kept because
+-- 0001 shipped them and §28.4 forbids dropping a column; nothing reads or
+-- writes them (``SqliteGfsInviteRepo`` never names them).
+--
+-- Migration audit (mandatory 3 points, CLAUDE.md):
+--
+--   (1) Audited every code path that already touches this data. There is
+--       exactly one reader — ``public.handle_invite_page`` — and it reached
+--       around the repo layer into ``admin_repo._db`` to SELECT
+--       ``space_id, expires_at``; it rendered a ``sh://gfs-invite/`` link no
+--       client has ever recognised. There is NO writer: no route, no
+--       service, no repo method inserts a row, and the only INSERT in the
+--       tree is inside a test. ``gfs_pair_tokens`` (the neighbouring
+--       single-use token table) was read as the closest precedent and is
+--       wrong here: it is a short-lived server-minted nonce consumed by the
+--       server, not an owner-minted artefact served verbatim to anonymous
+--       visitors.
+--
+--   (2) Non-migration alternatives considered and REJECTED. (a) Derive the
+--       blob at request time from ``global_spaces`` — impossible: the blob
+--       carries the issuing household's invite token and its published
+--       identity / key-wrap keys, and the GFS cannot mint or sign any of
+--       that. (b) Carry the blob in an existing column — there is none; the
+--       table's columns are all routing/lifecycle scalars and overloading
+--       ``source_instance_id`` to hold a payload is exactly the shape
+--       collapse this rule exists to prevent. (c) Keep it in RAM, like the
+--       publish replay cache — rejected: an invite link is handed to a human
+--       and lives for days or weeks, so a restart (or a second cluster node)
+--       would break links that are already in someone's chat history, with
+--       no way for either household to notice. (d) Put it in
+--       ``gfs_envelope_queue`` — that is a TTL'd delivery queue addressed by
+--       recipient, not a bulletin board addressed by public token.
+--
+--   (3) Smallest possible change. ONE additive ``ADD COLUMN`` with a
+--       NOT NULL DEFAULT '' (no backfill — pre-existing rows, of which there
+--       are none in the field since nothing ever wrote one, read back as an
+--       empty blob and are simply never served) plus ONE index for the
+--       retention sweep. No table renamed, no column dropped or rewritten,
+--       not a single existing row changed.
+--
+-- Value domain:
+--   blob  verbatim base64url text, ≤ ``INVITE_BLOB_MAX_BYTES`` (4 KiB),
+--         validated for SIZE and ALPHABET only at the mint route. Opaque:
+--         never parsed, never logged, and it must never contain a household
+--         address — it is served to anyone holding the link.
+
+ALTER TABLE gfs_invite_tokens ADD COLUMN blob TEXT NOT NULL DEFAULT '';
+
+-- Covers the hourly retention sweep (``GfsMaintenanceScheduler`` →
+-- ``SqliteGfsInviteRepo.prune_expired``), which is the only query that scans
+-- by expiry; the lookup and revoke paths both go through the primary key.
+CREATE INDEX IF NOT EXISTS idx_gfs_invite_tokens_expires
+    ON gfs_invite_tokens(expires_at);

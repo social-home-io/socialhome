@@ -48,10 +48,12 @@ from .config import (
     write_example_config,
 )
 from .federation import GfsFederationService
+from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
 from .maintenance import GfsMaintenanceScheduler
 from .public import (
     ClientIpResolver,
     PairingTokenService,
+    SlidingWindowCounter,
     build_listing_rate_limit,
     build_public_rtc_rate_limit,
     build_publish_rate_limit,
@@ -60,6 +62,7 @@ from .repositories import (
     SqliteClusterRepo,
     SqliteGfsAdminRepo,
     SqliteGfsEnvelopeQueueRepo,
+    SqliteGfsInviteRepo,
     SqliteGfsFederationRepo,
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
@@ -275,6 +278,7 @@ class GfsApp:
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
+            invites=SqliteGfsInviteRepo(db),
         )
 
     def _build_services(
@@ -287,6 +291,16 @@ class GfsApp:
         federation = GfsFederationService(
             repos.federation,
             ws_registry=ws_registry,
+            # So withdrawing a listing takes its public invite pages down with
+            # it rather than leaving a working side door.
+            invite_repo=repos.invites,
+        )
+        # Owner-minted invite links (§24.8.5): a bulletin board holding an
+        # opaque blob this server never parses and never counts fetches of.
+        invites = GfsInviteService(
+            federation=federation,
+            invite_repo=repos.invites,
+            mint_limiter=SlidingWindowCounter(INVITE_MINT_MAX_PER_MINUTE),
         )
         admin = GfsAdminService(
             fed_repo=repos.federation,
@@ -347,6 +361,7 @@ class GfsApp:
             admin_repo=repos.admin,
             highlight_repo=repos.highlight_pubs,
             envelope_queue_repo=repos.envelope_queue,
+            invite_repo=repos.invites,
         )
         return SimpleNamespace(
             federation=federation,
@@ -361,6 +376,7 @@ class GfsApp:
             highlight_pubs=highlight_pubs,
             moment_public=moment_public,
             envelope_relay=envelope_relay,
+            invites=invites,
         )
 
     def _build_app(self) -> web.Application:
@@ -399,6 +415,8 @@ class GfsApp:
         a[K.gfs_user_picture_repo_key] = self.repos.moment_public_pictures
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
+        a[K.gfs_invite_repo_key] = self.repos.invites
+        a[K.gfs_invite_service_key] = self.services.invites
         # Non-typed helpers the admin module reads directly.
         a["admin_auth"] = self.services.admin_auth
         a["gfs_token_service"] = self.services.tokens

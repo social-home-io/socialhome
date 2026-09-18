@@ -53,7 +53,12 @@ The Social Home ↔ GFS link is split by direction:
     otherwise one captured publish body would re-list a delisted space forever.
     Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
     off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
-    the relay (`publish`) and existing subscribers are untouched.
+    the relay (`publish`) and existing subscribers are untouched. Withdrawal
+    also **deletes every invite link** minted for the space
+    (`gfs_invite_tokens`): those are standing public URLs already sitting in
+    other people's chats, so leaving them live would keep a working side door
+    into a delisted listing. Re-publishing restores the listing, not the old
+    links — the owner mints fresh ones.
   - `spaces/{id}/publish` also carries **two independent dials**, both inside
     the same signed canonical body — so no on-path party can flip either:
 
@@ -98,6 +103,13 @@ The Social Home ↔ GFS link is split by direction:
     readability", and evicting on it would mass-evict every reader on a
     mixed-version server the moment one un-upgraded household re-published.
     The gate reverses itself on the owner's next publish; a purge does not.
+  - `spaces/{id}/invite` (+ `invite/{gfs_token}`) mint and revoke those links,
+    owner-signed with an `action` discriminator inside the signed bytes. The
+    public half is `GET /join/{gfs_token}`, which renders the space's
+    already-public directory metadata next to a `socialhome://invite#<blob>`
+    code the visitor pastes into their own Social Home. The blob is opaque to
+    the server and the page **writes nothing** — see
+    [invites.md](invites.md#the-mint--landing-leg--where-the-blob-comes-from).
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
     **TOFU-pins** it on the first publish and holds it immutable — a later

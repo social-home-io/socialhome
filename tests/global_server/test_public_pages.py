@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -299,7 +300,7 @@ async def test_landing_listing_rate_limit(client):
 # ─── Space page ───────────────────────────────────────────────────────
 
 
-async def test_space_page_renders_deep_link(client):
+async def test_space_page_renders_connect_cta(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
     await fed_repo.upsert_instance(
@@ -324,7 +325,13 @@ async def test_space_page_renders_deep_link(client):
     resp = await client.get("/spaces/sp-deep")
     assert resp.status == 200
     text = await resp.text()
-    assert "sh://join-space/http://gfs.test/spaces/sp-deep" in text
+    # The CTA sends a visitor to this server's landing page, where the
+    # pairing code lives. It used to be an ``sh://join-space/…`` URL — a
+    # scheme no client has ever registered, so the button did nothing
+    # anywhere. A space page has no invite code to hand over; an
+    # owner-minted ``/join/{token}`` link is the surface that does.
+    assert "sh://" not in text
+    assert '<a class="cta" href="/">Connect your Social Home</a>' in text
     assert 'property="og:title"' in text
 
 
@@ -416,14 +423,24 @@ async def test_invite_page_known_token(client):
     # Seed a valid invite-token row.
     await admin_repo._db.enqueue(
         "INSERT INTO gfs_invite_tokens(gfs_token, space_id, "
-        "source_instance_id, max_uses) VALUES(?, ?, ?, ?)",
-        ("invtok-1", "inv-sp", "o.home", 5),
+        "source_instance_id, blob, expires_at) VALUES(?, ?, ?, ?, ?)",
+        (
+            "invtok-1",
+            "inv-sp",
+            "o.home",
+            "eyJ0b2tlbiI6ICJ4In0",
+            int(time.time()) + 3600,
+        ),
     )
     resp = await client.get("/join/invtok-1")
     assert resp.status == 200
     text = await resp.text()
     assert "Invite Me" in text
-    assert "sh://gfs-invite/http://gfs.test/join/invtok-1" in text
+    # The page hands over the opaque blob as the code the SPA decodes. The
+    # ``sh://gfs-invite/…`` URL it used to render was a dead scheme. Full
+    # coverage of the mint/serve/revoke flow is in ``test_invites.py``.
+    assert "socialhome://invite#eyJ0b2tlbiI6ICJ4In0" in text
+    assert "sh://" not in text
 
 
 async def test_invite_page_unknown_token_404(client):

@@ -46,6 +46,7 @@ from .admin import (
     AdminUiIndexView,
 )
 from .envelope import EnvelopeRelayView
+from .invites import SpaceInviteTokenView, SpaceInviteView
 from .cluster import (
     ClusterHealthView,
     ClusterSignalingBeginView,
@@ -162,6 +163,14 @@ def register_routes(
     app.router.add_view("/gfs/spaces/{space_id}/subscribers", SpaceSubscribersView)
     app.router.add_view("/gfs/spaces/{space_id}/publish", SpacePublishView)
     app.router.add_view("/gfs/spaces/{space_id}/unpublish", SpaceUnpublishView)
+    # Owner-minted invite links (§24.8.5). The mint/revoke pair is signed by
+    # the owning household; the public half is ``GET /join/{gfs_token}``
+    # below.
+    app.router.add_view("/gfs/spaces/{space_id}/invite", SpaceInviteView)
+    app.router.add_view(
+        "/gfs/spaces/{space_id}/invite/{gfs_token}",
+        SpaceInviteTokenView,
+    )
     app.router.add_view("/healthz", HealthzView)
 
     # Public SSR pages (spec §24.7 / §24.8) — staying procedural since

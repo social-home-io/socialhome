@@ -74,7 +74,17 @@ class GfsInfoView(GfsBaseView):
         # It ships inside the SIGNED block for the same reason
         # ``anonymous_publish`` does — an on-path stripper must not be able to
         # push a household back onto a path that reveals more.
-        capabilities = {"anonymous_publish": True, "envelope_relay": True}
+        # ``invite_links``: this GFS carries the owner-signed
+        # ``/gfs/spaces/{id}/invite`` mint/revoke pair and the public
+        # ``GET /join/{token}`` page. Signed for the same reason as its two
+        # siblings — a stripped flag would silently send a household back to
+        # a path that discloses more (here: none at all, so the household
+        # refuses rather than 404-ing behind a timeout).
+        capabilities = {
+            "anonymous_publish": True,
+            "envelope_relay": True,
+            "invite_links": True,
+        }
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
             "gfs_instance_id": cfg.instance_id,

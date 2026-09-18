@@ -244,6 +244,10 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # ``anonymous_publish`` is: an on-path stripper must not be able to
         # push a household back onto a path that reveals more.
         "envelope_relay": True,
+        # §24.8.5 — this GFS hosts owner-minted invite links, so a household
+        # only offers to mint one against a server that proved it can serve
+        # the ``/join`` page. Signed for the same reason as its siblings.
+        "invite_links": True,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(
