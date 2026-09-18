@@ -84,3 +84,45 @@ async def test_list_due_excludes_future_iso_timestamp(env):
 
     due = await env.outbox_repo.list_due()
     assert all(e.id != entry_id for e in due)
+
+
+async def test_purge_terminal_keeps_naive_failure_inside_grace(env):
+    """``purge_terminal`` must not purge a row inside its grace window.
+
+    ``mark_failed`` writes SQLite's naive ``datetime('now')`` while the
+    processor's cutoff is Python tz-aware ISO. Compared as raw TEXT a
+    naive stamp always sorts *below* an ISO one on the same date ("T"
+    0x54 > " " 0x20), so a row that failed late today was purged against
+    a cutoff from early today — well before the 24h grace elapsed.
+    """
+    entry_id = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET status='failed', failed_at=? WHERE id=?",
+        (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), entry_id),
+    )
+    # Cutoff at the start of today: the failure is far newer, so nothing
+    # may be purged.
+    cutoff = f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00+00:00"
+    assert await env.outbox_repo.purge_terminal(cutoff) == 0
+    rows = await env.db.fetchall("SELECT id FROM federation_outbox")
+    assert [r["id"] for r in rows] == [entry_id]
+
+
+async def test_purge_terminal_still_reclaims_genuinely_old_rows(env):
+    """The normalisation doesn't stop a real backlog from draining."""
+    entry_id = await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET status='failed', failed_at=? WHERE id=?",
+        ("2000-01-01 00:00:00", entry_id),
+    )
+    cutoff = datetime.now(timezone.utc).isoformat()
+    assert await env.outbox_repo.purge_terminal(cutoff) == 1
+    assert await env.db.fetchall("SELECT id FROM federation_outbox") == []

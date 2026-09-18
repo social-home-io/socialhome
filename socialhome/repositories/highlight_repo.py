@@ -194,7 +194,7 @@ class SqliteHighlightRepo:
         rows = await self._db.fetchall(
             """
             SELECT * FROM highlights
-            WHERE expires_at > datetime('now')
+            WHERE datetime(expires_at) > datetime('now')
               AND author_user_id NOT IN (
                   SELECT blocked_user_id FROM user_blocks
                   WHERE blocker_user_id = ?
@@ -435,7 +435,7 @@ class SqliteHighlightRepo:
 
     async def _expired_ids(self) -> list[str]:
         rows = await self._db.fetchall(
-            "SELECT id FROM highlights WHERE expires_at < datetime('now')",
+            "SELECT id FROM highlights WHERE datetime(expires_at) < datetime('now')",
         )
         return [r["id"] for r in rows_to_dicts(rows)]
 

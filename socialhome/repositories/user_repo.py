@@ -847,12 +847,28 @@ class SqliteUserRepo:
         )
 
     async def get_user_by_token_hash(self, token_hash: str) -> User | None:
+        """Resolve a bearer token to its user, honouring revocation + expiry.
+
+        ``api_tokens.expires_at`` is stored verbatim from the
+        ``POST /api/me/tokens`` body, so it carries the caller's tz-aware
+        ISO 8601 shape (``2099-01-01T00:00:00+00:00``) while
+        ``datetime('now')`` yields SQLite's naive ``2026-09-18 15:52:14``.
+        SQLite compares TEXT lexicographically and ``"T"`` (0x54) sorts
+        above ``" "`` (0x20), so an unwrapped comparison kept an *expired*
+        token authenticating for the remainder of the UTC day it expired
+        on. ``datetime()`` normalises both shapes (and converts a non-UTC
+        offset to UTC); an unparseable value yields NULL, so a malformed
+        ``expires_at`` now fails closed instead of never expiring.
+        """
         row = await self._db.fetchone(
             """
             SELECT u.* FROM users u
              JOIN api_tokens t ON t.user_id = u.user_id
             WHERE t.token_hash=? AND t.revoked_at IS NULL
-              AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
+              AND (
+                   t.expires_at IS NULL
+                   OR datetime(t.expires_at) > datetime('now')
+              )
             """,
             (token_hash,),
         )

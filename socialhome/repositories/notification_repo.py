@@ -324,7 +324,15 @@ class SqliteNotificationRepo:
         )
 
     async def delete_old(self, older_than_days: int = 90) -> int:
-        """Delete notifications older than N days. Returns purge count."""
+        """Delete notifications older than N days. Returns purge count.
+
+        Shape invariant: ``cutoff`` and ``notifications.created_at`` are
+        both tz-aware ISO 8601 — every ``save()`` caller supplies a
+        ``created_at``, so the SQL's naive ``COALESCE(?, datetime('now'))``
+        fallback never fires. Keep it that way: a naive value landing in
+        the column would mis-compare here, because SQLite orders TEXT
+        lexicographically and "T" (0x54) sorts above " " (0x20).
+        """
         cutoff = (
             datetime.now(timezone.utc) - _timedelta_days(older_than_days)
         ).isoformat()

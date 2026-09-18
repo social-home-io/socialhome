@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -805,3 +806,131 @@ async def test_host_identity_pk_survives_a_resave(env):
 
 async def test_host_identity_pk_is_none_for_unknown_space(env):
     assert await env.repo.get_host_identity_pk("no-such-space") is None
+
+
+# ── Invite-token expiry (shape-mismatch regression) ───────────────────────
+
+
+def _expired_today_iso() -> str:
+    """A tz-aware expiry at the very start of the current UTC day.
+
+    Always in the past, and always on the *same calendar date* as
+    SQLite's ``datetime('now')`` — precisely the window where the raw
+    TEXT compare went wrong ("T" 0x54 > " " 0x20 only decides the
+    comparison once the date digits tie). Using it makes the regression
+    fire deterministically instead of only when the clock cooperates.
+    """
+    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+
+
+async def _expiry_token(env, space_id: str, expires_at: str | None) -> str:
+    """Mint an invite token with an exact ``expires_at`` string."""
+    await env.repo.save(_space(space_id))
+    return await env.repo.create_invite_token(
+        space_id, "uid-alice", uses=1, expires_at=expires_at
+    )
+
+
+async def test_consume_rejects_expired_tz_aware_token(env):
+    """A tz-aware expiry an hour in the past must NOT be consumable.
+
+    Regression: the guard compared the stored tz-aware ISO string
+    (``2026-09-18T14:52:14.331881+00:00``) against SQLite's naive
+    ``datetime('now')`` (``2026-09-18 15:52:14``) as raw TEXT. ``"T"``
+    (0x54) sorts above ``" "`` (0x20), so an expired token read as still
+    valid for the rest of the UTC day it expired on — short-lived invite
+    tokens (5 min for remote invites) were effectively immortal.
+    """
+    token = await _expiry_token(env, "sp-exp-past", _expired_today_iso())
+    assert await env.repo.consume_invite_token(token) is None
+
+
+async def test_consume_rejects_expired_token_minted_minutes_ago(env):
+    """The real ``invite_remote_user`` shape: a 5-minute TTL, 10 min old."""
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    token = await _expiry_token(env, "sp-exp-5min", past)
+    assert await env.repo.consume_invite_token(token) is None
+
+
+async def test_consume_accepts_future_tz_aware_token(env):
+    """A tz-aware expiry in the future is still consumable."""
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    token = await _expiry_token(env, "sp-exp-future", future)
+    result = await env.repo.consume_invite_token(token)
+    assert result is not None
+    assert result["space_id"] == "sp-exp-future"
+
+
+async def test_consume_accepts_null_expiry(env):
+    """``expires_at IS NULL`` means uses-limited only, never time-limited."""
+    token = await _expiry_token(env, "sp-exp-null", None)
+    assert await env.repo.consume_invite_token(token) is not None
+
+
+async def test_consume_handles_naive_sqlite_shaped_expiry(env):
+    """The naive ``YYYY-MM-DD HH:MM:SS`` shape works in both directions.
+
+    No production writer emits this shape today, but the column's sibling
+    ``created_at`` carries ``DEFAULT (datetime('now'))``, so a future
+    SQL-side writer could. ``datetime()`` normalises it either way.
+    """
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    future = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    expired = await _expiry_token(env, "sp-naive-past", past)
+    live = await _expiry_token(env, "sp-naive-future", future)
+    assert await env.repo.consume_invite_token(expired) is None
+    assert await env.repo.consume_invite_token(live) is not None
+
+
+async def test_consume_handles_fractional_seconds(env):
+    """Fractional seconds don't break the comparison in either direction."""
+    now = datetime.now(timezone.utc)
+    expired = await _expiry_token(env, "sp-frac-past", _expired_today_iso())
+    live = await _expiry_token(
+        env, "sp-frac-future", (now + timedelta(minutes=30)).isoformat()
+    )
+    assert "." in _expired_today_iso()
+    assert await env.repo.consume_invite_token(expired) is None
+    assert await env.repo.consume_invite_token(live) is not None
+
+
+async def test_consume_handles_non_utc_offset(env):
+    """A non-UTC offset is converted to UTC, not ignored.
+
+    ``2026-09-18T16:52:14+02:00`` is 14:52:14 UTC — an hour in the *past*
+    at 15:52 UTC even though its wall-clock digits read as the future.
+    SQLite's ``datetime()`` applies the offset, so the token is rejected.
+    """
+    now = datetime.now(timezone.utc)
+    plus2 = timezone(timedelta(hours=2))
+    minus5 = timezone(timedelta(hours=-5))
+    # Past instant, but wall-clock digits an hour ahead of UTC "now".
+    expired = await _expiry_token(
+        env, "sp-off-past", (now - timedelta(hours=1)).astimezone(plus2).isoformat()
+    )
+    # Future instant, but wall-clock digits five hours behind UTC "now".
+    live = await _expiry_token(
+        env, "sp-off-future", (now + timedelta(hours=1)).astimezone(minus5).isoformat()
+    )
+    assert await env.repo.consume_invite_token(expired) is None
+    assert await env.repo.consume_invite_token(live) is not None
+
+
+async def test_list_expired_join_requests_sees_same_day_expiry(env):
+    """``list_expired_join_requests`` normalises both sides too.
+
+    ``space_join_requests.expires_at`` is written by Python as tz-aware
+    ISO, so the same raw-TEXT mismatch hid a request that expired earlier
+    today from the retention sweep.
+    """
+    await env.repo.save(_space("sp-jr"))
+    rid = await env.repo.save_join_request(
+        "sp-jr", "uid-bob", message="please", ttl_days=7
+    )
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET expires_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), rid),
+    )
+    rows = await env.repo.list_expired_join_requests()
+    assert [r["id"] for r in rows] == [rid]

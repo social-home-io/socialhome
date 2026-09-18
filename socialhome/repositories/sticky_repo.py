@@ -145,6 +145,15 @@ class SqliteStickyRepo:
 
         Household-scoped (NULL space_id) stickies are never returned —
         they don't federate so a peer has no use for them.
+
+        Shape trap: ``updated_at`` is mixed — created rows carry the
+        Python tz-aware ISO shape, later edits overwrite it with SQLite's
+        naive ``datetime('now')``. The only caller today passes the
+        ``1970-01-01T00:00:00+00:00`` epoch cursor, whose year digits
+        decide the comparison long before the separator does, so the raw
+        ``>`` is safe. A real (non-epoch) ``since`` must wrap both sides
+        in ``datetime()`` — "T" (0x54) sorts above " " (0x20) in a raw
+        TEXT compare, so same-day rows would be skipped on resume.
         """
         rows = await self._db.fetchall(
             "SELECT * FROM stickies "

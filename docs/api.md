@@ -177,7 +177,7 @@ events these routes fire.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/spaces/{id}/invite-tokens` | Mint an invite token. |
+| POST | `/api/spaces/{id}/invite-tokens` | Mint an invite token. Body `{uses?: int, ttl_seconds?: int\|null}`; `uses` defaults to `1`. `ttl_seconds` defaults to `604800` (7 days) — pass an explicit `null` for a token that never expires, limited only by `uses`. Returns `201 {token}`. |
 | GET | `/api/spaces/{id}/join-requests` | Pending requests. |
 | POST | `/api/spaces/{id}/join-requests/{req_id}/{approve\|reject}` | Decide. |
 | POST | `/api/spaces/{id}/remote-invites` | Invite a user on another HFS. Returns `201 {token}` when minted directly (owner, or a seed-holding delegated admin on a delegation-ON space); returns `202 {"status":"pending_owner_approval"}` when a non-owner admin invites on a delegation-OFF space — the invite is forwarded to the host for owner approval (rides `SPACE_REMOTE_ADMIN_ACTION`, action `invite`). |

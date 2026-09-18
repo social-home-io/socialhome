@@ -71,17 +71,24 @@ class PostDraftCleanupScheduler:
 
     async def _prune_once(self) -> int:
         """Run one prune pass. Exposed for tests."""
+        # ``post_drafts.updated_at`` only ever gets the column's naive
+        # ``DEFAULT (datetime('now'))`` today, which is why the cutoff is
+        # formatted to match. Both sides still go through ``datetime()``
+        # so the first Python writer (``…isoformat()`` → tz-aware, the
+        # other shape used across this codebase) can't silently break the
+        # prune: a raw TEXT compare puts "T" (0x54) above " " (0x20).
         cutoff = (datetime.now(timezone.utc) - timedelta(days=self._ttl_days)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
         row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM post_drafts WHERE updated_at < ?",
+            "SELECT COUNT(*) AS n FROM post_drafts "
+            "WHERE datetime(updated_at) < datetime(?)",
             (cutoff,),
         )
         n = int(row["n"]) if row else 0
         if n:
             await self._db.enqueue(
-                "DELETE FROM post_drafts WHERE updated_at < ?",
+                "DELETE FROM post_drafts WHERE datetime(updated_at) < datetime(?)",
                 (cutoff,),
             )
         return n
