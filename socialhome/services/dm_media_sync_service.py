@@ -40,7 +40,6 @@ import asyncio
 import base64
 import logging
 import pathlib
-import random
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -50,6 +49,7 @@ import aiofiles.os
 from ..domain.federation import FederationEventType
 from ..media.image_processor import ImageProcessor
 from ..media.video_processor import VideoProcessor
+from .backoff import jittered_backoff_seconds
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -538,9 +538,11 @@ class DmMediaSyncService(VisibilityMixin):
     ) -> None:
         """Bump ``attempts`` + push ``next_attempt_at``; fail at the cap.
 
-        Backoff is exponential with full jitter so a swarm of
-        outstanding blobs to the same peer doesn't all hammer at the
-        same retry tick.
+        Backoff is exponential with equal jitter
+        (:func:`~socialhome.services.backoff.jittered_backoff_seconds`) so
+        a swarm of outstanding blobs to the same peer doesn't all hammer
+        at the same retry tick, while no single blob can come back due on
+        the next tick.
         """
         attempts = entry.attempts + 1
         if attempts >= MAX_ATTEMPTS:
@@ -558,10 +560,11 @@ class DmMediaSyncService(VisibilityMixin):
                 status="failed",
             )
             return
-        base = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
-        delay = min(base, BACKOFF_CAP_SECONDS)
-        # Full jitter — pick a value uniformly in [0, delay].
-        delay = random.uniform(0, delay)
+        delay = jittered_backoff_seconds(
+            attempts=attempts,
+            base_seconds=BACKOFF_BASE_SECONDS,
+            cap_seconds=BACKOFF_CAP_SECONDS,
+        )
         next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
         await self._outbox.reschedule(
             blob_id=entry.blob_id,

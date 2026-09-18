@@ -614,18 +614,19 @@ async def test_flush_once_reschedules_on_failure(stack, monkeypatch):
         target_instance_ids=["inst-bob"],
     )
     stack["fed"].should_fail = True
-    # Pin the jittered backoff to a known mid-range value so this test
-    # never flakes: ``random.uniform(0, 30)`` (the first-attempt cap)
-    # otherwise rolls below ~1 s about 1 in 10 runs, which leaves the
-    # rescheduled row already past its ``next_attempt_at`` by the time
-    # the ``list_due`` assertion runs.
+    # Pin the jitter to its *minimum* — the worst case for the
+    # "no rows due-now" assertion below. Equal jitter guarantees at
+    # least half the 30 s first window, so even this roll keeps the
+    # row out of the due set. (It used to be full jitter, which rolled
+    # below ~1 s often enough to make this test flake; the fix is in
+    # ``socialhome.services.backoff``, not a pinned mid-range value.)
     monkeypatch.setattr(
-        "socialhome.services.dm_media_sync_service.random.uniform",
-        lambda _lo, _hi: 30.0,
+        "socialhome.services.backoff.random.uniform",
+        lambda lo, _hi: lo,
     )
     shipped = await stack["svc"].flush_once()
     assert shipped == 0
-    # No rows due-now (reschedule pushed the timestamp 30 s out).
+    # No rows due-now (reschedule pushed the timestamp ≥ 15 s out).
     immediate = await stack["outbox"].list_due()
     assert immediate == []
     all_rows = await stack["outbox"].list_for_message("m1")

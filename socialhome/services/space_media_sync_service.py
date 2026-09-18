@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-import random
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -42,6 +41,7 @@ from ..repositories.space_media_outbox_repo import (
     AbstractSpaceMediaOutboxRepo,
     SpaceMediaOutboxEntry,
 )
+from .backoff import jittered_backoff_seconds
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -389,7 +389,7 @@ class SpaceMediaSyncService:
         entry: SpaceMediaOutboxEntry,
         last_error: str,
     ) -> None:
-        """Exponential backoff with full jitter; ``status='failed'`` at cap."""
+        """Exponential backoff with equal jitter; ``status='failed'`` at cap."""
         attempts = entry.attempts + 1
         if attempts >= MAX_ATTEMPTS:
             await self._outbox.mark_failed(
@@ -398,9 +398,11 @@ class SpaceMediaSyncService:
                 last_error=last_error[:500],
             )
             return
-        base = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
-        delay = min(base, BACKOFF_CAP_SECONDS)
-        delay = random.uniform(0, delay)
+        delay = jittered_backoff_seconds(
+            attempts=attempts,
+            base_seconds=BACKOFF_BASE_SECONDS,
+            cap_seconds=BACKOFF_CAP_SECONDS,
+        )
         next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
         await self._outbox.reschedule(
             blob_id=entry.blob_id,

@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-import random
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -44,6 +43,7 @@ import aiofiles.os
 from ..domain.events import MediaTranscodeFailed, MediaTranscodeReady
 from ..media.video_processor import VideoProcessor
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
+from .backoff import jittered_backoff_seconds
 from .bus_publisher import BusPublisherMixin
 
 if TYPE_CHECKING:
@@ -223,8 +223,10 @@ class MediaTranscodeService(BusPublisherMixin):
         At :data:`MAX_ATTEMPTS` the row flips to ``status='failed'`` and
         the temp source is removed — the upload won't transcode and
         retrying further just burns CPU. Below the cap the row is
-        rescheduled with full-jitter backoff so a swarm of failing jobs
-        doesn't all retry on the same tick.
+        rescheduled with equal-jitter backoff
+        (:func:`~socialhome.services.backoff.jittered_backoff_seconds`) so
+        a swarm of failing jobs doesn't all retry on the same tick, while
+        no single job can land back in the due set on the next tick.
         """
         attempts = job.attempts + 1
         if attempts >= MAX_ATTEMPTS:
@@ -232,10 +234,11 @@ class MediaTranscodeService(BusPublisherMixin):
             await self._remove_source(pathlib.Path(job.source_path))
             await self._publish_failed(job)
             return
-        base = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
-        delay = min(base, BACKOFF_CAP_SECONDS)
-        # Full jitter — pick a value uniformly in [0, delay].
-        delay = random.uniform(0, delay)
+        delay = jittered_backoff_seconds(
+            attempts=attempts,
+            base_seconds=BACKOFF_BASE_SECONDS,
+            cap_seconds=BACKOFF_CAP_SECONDS,
+        )
         next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
         await self._repo.reschedule(
             job.output_filename,
