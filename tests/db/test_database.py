@@ -356,6 +356,50 @@ async def test_concurrent_reads_do_not_misuse_connection(tmp_dir):
         await db.shutdown()
 
 
+async def test_shutdown_does_not_close_under_an_in_flight_read(tmp_dir):
+    """``shutdown()`` must take the connection lock before closing.
+
+    Without it, ``conn.close()`` runs on one executor thread while another
+    is still inside ``conn.execute(...)`` for a read that passed
+    ``_assert_running()`` a moment earlier — a data race down in
+    ``_sqlite3`` that faults the interpreter outright (no traceback, the
+    whole process dies; under xdist it reads as "node down: Not properly
+    terminated"). A leaked background task holding a repo is exactly how
+    that happens in real life.
+
+    A late read must therefore fail as a *Python* exception the caller can
+    see — never as a crash — and the reads that were already in flight
+    must come back with their rows intact.
+    """
+    import asyncio
+
+    db = AsyncDatabase(tmp_dir / "closerace.db", batch_timeout_ms=10)
+    await db.startup()
+    await db.enqueue("CREATE TABLE race(a INTEGER)")
+    for i in range(200):
+        await db.enqueue("INSERT INTO race VALUES(?)", (i,))
+
+    # Stand-in for the leaked task: still reading when shutdown lands.
+    reader = asyncio.gather(
+        *[
+            db.fetchall("SELECT a, (SELECT COUNT(*) FROM race) FROM race")
+            for _ in range(40)
+        ],
+        return_exceptions=True,
+    )
+    await asyncio.sleep(0)  # let the reads reach the executor
+    await db.shutdown()
+
+    for outcome in await reader:
+        assert isinstance(outcome, (list, RuntimeError, sqlite3.ProgrammingError)), (
+            outcome
+        )
+
+    # And a read issued after the close is a clean refusal, not a crash.
+    with pytest.raises(RuntimeError):
+        await db.fetchone("SELECT 1")
+
+
 async def test_foreign_keys_enforced_after_full_migration_chain(tmp_dir):
     """The long-lived writer must leave startup() with FK enforcement ON.
 
