@@ -12,8 +12,10 @@ to the subscriber's inbox URL.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -23,6 +25,7 @@ from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     AUTHORITY_RELAY_EVENT_TYPES,
     UnsupportedAuthoritySuite,
+    authority_signing_bytes,
     strip_authority_sig_fields,
     verify_authority_event,
 )
@@ -62,6 +65,36 @@ FAN_OUT_CONCURRENCY: int = 8
 #: Per-target delivery timeout for the HTTPS-inbox fallback (seconds).
 FAN_OUT_TIMEOUT_SECONDS: int = 10
 
+#: Wall-clock ceiling on ONE relay's whole fan-out (seconds). Bounded
+#: concurrency alone still lets an accepted publish pin the request handler for
+#: ``ceil(len(subscribers) / FAN_OUT_CONCURRENCY) × FAN_OUT_TIMEOUT_SECONDS``
+#: when every target blackholes — minutes for a space with a few hundred
+#: subscribers, and the caller of ``/gfs/publish`` is anonymous, so an attacker
+#: who registers N instances and subscribes them with blackhole inbox URLs can
+#: hold hundreds of handlers at the per-IP publish limit. With the deadline the
+#: handler returns whatever was delivered by then and the stragglers are
+#: cancelled: the relay is at-least-once and subscribers dedupe by the post id
+#: inside the payload, so a cancelled HTTPS-inbox delivery is indistinguishable
+#: from one that was simply lost. 15 s leaves a healthy fan-out (a WS push is
+#: sub-millisecond; a live inbox answers well inside the per-target timeout)
+#: entirely untouched.
+FAN_OUT_DEADLINE_SECONDS: float = 15.0
+
+#: How long a relayed payload's digest is remembered for replay suppression
+#: (seconds). Matches the ±300 s freshness window the §24.11 inbound pipeline
+#: and every other replay guard in this codebase use, so "recent" means the
+#: same thing everywhere. A capture replayed after the window fans out again —
+#: the guard bounds the amplification burst an attacker can drive from one
+#: captured frame, it is not a permanent content-id store (the GFS is
+#: content-blind and cannot see a post id).
+PUBLISH_REPLAY_TTL_S: float = 300.0
+
+#: Hard cap on remembered payload digests. 10 000 × (32-byte key + float) is
+#: well under a megabyte and far more distinct publishes than a GFS sees in
+#: five minutes; past the cap the oldest entries are evicted, which is also the
+#: closest-to-expiring order.
+PUBLISH_REPLAY_MAX_ENTRIES: int = 10_000
+
 #: Verify key used on the unknown-instance branch of the LEGACY transport-
 #: signature check so that branch does the same Ed25519 verification work as
 #: the registered-instance branch — otherwise an unknown instance returns
@@ -71,6 +104,13 @@ FAN_OUT_TIMEOUT_SECONDS: int = 10
 _TIMING_UNIFORM_DUMMY_KEY_HEX: str = (
     "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
 )
+
+#: Fixed, well-formed (64-byte) Ed25519 signature fed to the dummy verify on
+#: every early rejection. A real Ed25519 verification of a wrong-length
+#: signature fails on the length check and costs nothing, so the burn has to
+#: use a full-length value to match the work a genuine bad-signature rejection
+#: does. It can never verify under any key.
+_TIMING_UNIFORM_DUMMY_SIG: bytes = bytes(64)
 
 #: Freshness window for the signed instance-update timestamp (seconds). A
 #: ``ts`` further than this from now is treated as a replay and rejected —
@@ -87,6 +127,109 @@ INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
 MAX_RECONNECT_NOTIFIES: int = 50
 
 
+def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
+    """Do one throw-away Ed25519 verification on an early-rejection path.
+
+    ``publish_event``'s authority branch returns the SAME opaque 403 for every
+    failure, but "same body" is not "same cost": the early rejects (space not
+    published, banned, event type not in the allow-set, payload not a signed
+    dict, no pinned key, unknown suite, unparseable pinned key) do one DB read
+    and no signature verification, while a merely-invalid signature does one
+    verification. An anonymous caller could time the difference and learn which
+    spaces exist, which are banned and which carry a pinned authority key.
+
+    So each early reject burns one verification over the bytes it WOULD have
+    verified, against the same fixed dummy key the legacy branch uses
+    (:data:`_TIMING_UNIFORM_DUMMY_KEY_HEX`) and a fixed full-length signature.
+    The result is discarded — the caller raises regardless.
+    """
+    bare = strip_authority_sig_fields(payload) if isinstance(payload, dict) else {}
+    message = authority_signing_bytes(
+        event_type=event_type,
+        space_id=space_id,
+        payload=bare,
+    )
+    verify_ed25519(
+        bytes.fromhex(_TIMING_UNIFORM_DUMMY_KEY_HEX),
+        message,
+        _TIMING_UNIFORM_DUMMY_SIG,
+    )
+
+
+class SeenPayloadCache:
+    """Bounded, TTL'd set of recently-relayed payload digests.
+
+    The content-blind GFS cannot dedupe on a post id — that id lives inside the
+    encrypted payload. It CAN dedupe on the payload bytes it already holds:
+    hashing them leaks nothing it does not already have, and the digest is over
+    the SAME canonical JSON encoding the space-authority signature is computed
+    against, so two payloads with equal bytes have equal signing input. A
+    forged or tampered payload therefore never collides with a legitimate one
+    — mutating any field (the signature included) changes the digest.
+
+    In-memory and per-process on purpose: no table, no migration. A GFS restart
+    or a second cluster node simply forgets, which costs one extra fan-out of a
+    replayed frame and never correctness (the relay is at-least-once and
+    subscribers dedupe by post id).
+    """
+
+    __slots__ = ("_cap", "_seen", "_ttl")
+
+    def __init__(
+        self,
+        *,
+        ttl_s: float = PUBLISH_REPLAY_TTL_S,
+        cap: int = PUBLISH_REPLAY_MAX_ENTRIES,
+    ) -> None:
+        self._ttl = ttl_s
+        self._cap = cap
+        # key → monotonic expiry. Insertion order IS expiry order because the
+        # TTL is constant, which is what lets the prune stop at the first
+        # unexpired entry.
+        self._seen: dict[bytes, float] = {}
+
+    @staticmethod
+    def digest(payload: object) -> bytes:
+        """Return the 32-byte BLAKE2b digest of *payload*'s canonical JSON."""
+        canonical = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.blake2b(canonical, digest_size=32).digest()
+
+    def seen(self, key: bytes, *, now: float | None = None) -> bool:
+        """Return whether *key* was recorded within the TTL."""
+        stamp = time.monotonic() if now is None else now
+        expires = self._seen.get(key)
+        if expires is None:
+            return False
+        if expires <= stamp:
+            del self._seen[key]
+            return False
+        return True
+
+    def record(self, key: bytes, *, now: float | None = None) -> None:
+        """Remember *key* for the TTL, pruning expired + overflowing entries."""
+        stamp = time.monotonic() if now is None else now
+        self._seen.pop(key, None)  # re-insert at the end to keep expiry order
+        self._seen[key] = stamp + self._ttl
+        self._prune(stamp)
+
+    def _prune(self, stamp: float) -> None:
+        for key, expires in list(self._seen.items()):
+            if expires > stamp:
+                break
+            del self._seen[key]
+        overflow = len(self._seen) - self._cap
+        if overflow > 0:
+            for key in list(self._seen)[:overflow]:
+                del self._seen[key]
+
+    def __len__(self) -> int:
+        return len(self._seen)
+
+
 class GfsFederationService:
     """Lightweight federation relay for the GFS process.
 
@@ -98,7 +241,7 @@ class GfsFederationService:
     * Listing all known global spaces.
     """
 
-    __slots__ = ("_reconnect_tasks", "_repo", "_ws_registry")
+    __slots__ = ("_reconnect_tasks", "_repo", "_seen_payloads", "_ws_registry")
 
     def __init__(
         self,
@@ -107,6 +250,7 @@ class GfsFederationService:
     ) -> None:
         self._repo = repo
         self._ws_registry = ws_registry
+        self._seen_payloads = SeenPayloadCache()
         # Strong refs to in-flight reconnect-notify tasks — an asyncio task
         # with no reference can be garbage-collected mid-await.
         self._reconnect_tasks: set[asyncio.Task[None]] = set()
@@ -216,16 +360,35 @@ class GfsFederationService:
         # row from an event — mirrors subscribe).
         existing = await self._repo.get_space(space_id)
         if existing is None:
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError("space not published")
         # A moderator ban is fail-closed: banned content is not relayed, and
         # the check runs BEFORE any fan-out.
         if existing.status == "banned":
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError("space is banned")
         # A withdrawn space is delisted from the DIRECTORY only (see
         # ``unpublish_space``) — households that already subscribed keep
         # receiving the relay, so ``withdrawn`` is deliberately not a reject.
 
         self._authorize_authority_relay(space_id, event_type, payload, existing)
+
+        # Replay suppression — AFTER authorization, never before. Recording a
+        # rejected payload would let a forged frame mute the legitimate relay
+        # of the same bytes (e.g. one sent before the space healed its pin).
+        # A forged payload can't pre-poison a legitimate one either: any change
+        # to the payload — the signature field included — changes the digest.
+        digest = SeenPayloadCache.digest(payload)
+        if self._seen_payloads.seen(digest):
+            log.debug(
+                "GFS: suppressing replayed %s for space %s (identical payload)",
+                event_type,
+                space_id,
+            )
+            # Idempotent no-op: the route answers 200 with ``delivered_to: 0``,
+            # so a replayer learns nothing a first publish wouldn't also show.
+            return []
+        self._seen_payloads.record(digest)
 
         subscribers = await self._repo.list_subscribers(space_id)
 
@@ -336,15 +499,26 @@ class GfsFederationService:
         fields stripped, mirroring the signer).
 
         Replay/dedupe contract: the authority signature binds the space id +
-        payload but NO timestamp / nonce / epoch, and the GFS keeps no replay
-        cache, so this relay is idempotent / at-least-once — a captured
-        authority-signed payload can be re-POSTed and re-fanned-out (a property
-        the retired owner relay already had under #598). We deliberately
-        do NOT add GFS-side replay machinery: the GFS is content-blind and
-        can't see a post id inside the (encrypted) payload. The content-layer
-        backstop is SUBSCRIBER-side dedupe by the post id carried inside the
-        payload — enforced by the HFS ``space_public_inbound`` consumer (the
-        same way moments dedupe by moment_id). See ``docs/protocol/discovery.md``.
+        payload but NO timestamp / nonce / epoch, so a captured authority-signed
+        payload stays valid forever and can be re-POSTed by anyone who saw it.
+        The GFS can't dedupe on a post id — that lives inside the encrypted
+        payload — but it CAN dedupe on the payload BYTES it already holds:
+        ``publish_event`` keeps a :class:`SeenPayloadCache` of BLAKE2b digests
+        over the same canonical JSON the authority signature is computed
+        against, and a digest seen within :data:`PUBLISH_REPLAY_TTL_S` makes the
+        relay an idempotent no-op (200, ``delivered_to: 0``, no fan-out). That
+        is what bounds the amplification a single captured frame can drive at
+        the per-IP publish limit — each replay would otherwise cost every
+        subscriber another copy of the body.
+
+        The cache is in-memory, TTL'd and capped, so it is a burst bound, not a
+        permanent content-id store: past the TTL (or after a restart, or on a
+        second cluster node) the same bytes fan out once more. The standing
+        backstop is therefore still SUBSCRIBER-side dedupe by the post id
+        carried inside the payload — enforced by the HFS
+        ``space_public_inbound`` consumer (the same way moments dedupe by
+        moment_id). The relay stays at-least-once.
+        See ``docs/protocol/discovery.md``.
         """
         # The authority signature authorizes only the event types in
         # ``AUTHORITY_RELAY_EVENT_TYPES`` (``space_post_public`` and the
@@ -355,16 +529,19 @@ class GfsFederationService:
         # signed for one allowed type can't be replayed under the other (the
         # signing bytes bind the event type).
         if event_type not in AUTHORITY_RELAY_EVENT_TYPES:
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError(
                 "authority relay only permits the "
                 f"{sorted(AUTHORITY_RELAY_EVENT_TYPES)!r} event types",
             )
         if not isinstance(payload, dict) or "authority_sig" not in payload:
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError("missing space-authority signature")
         if not existing.identity_public_key:
             # No TOFU-pinned key → the GFS cannot verify a space-authority
             # signature, so nothing may be relayed for this space until the
             # owner re-publishes its metadata and pins one.
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError(
                 "no pinned authority key for this space",
             )
@@ -380,11 +557,17 @@ class GfsFederationService:
                 space_public_key=bytes.fromhex(existing.identity_public_key),
             )
         except UnsupportedAuthoritySuite as exc:
+            # The suite check fires before any verification — burn one so an
+            # unknown suite costs what a bad signature costs.
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError(
                 f"unknown authority signature suite: {exc}",
             ) from exc
         except ValueError as exc:
             # Malformed pinned pubkey hex — treat as unverifiable, fail-closed.
+            # ``bytes.fromhex`` raises while building the call arguments, so
+            # nothing was verified: burn one.
+            _burn_dummy_verify(event_type, space_id, payload)
             raise PermissionError("invalid authority key") from exc
         if not ok:
             raise PermissionError("invalid authority signature")
@@ -1048,6 +1231,15 @@ class GfsFederationService:
         handle for an anonymous caller — while unbounded concurrency would let
         one publish open a socket per subscriber. Returns the ids actually
         reached, in subscriber order.
+
+        Bounded concurrency caps the sockets, not the WALL CLOCK: with every
+        target blackholed the handler is still pinned for
+        ``ceil(N / FAN_OUT_CONCURRENCY) × FAN_OUT_TIMEOUT_SECONDS``. So the
+        whole fan-out also runs under a :data:`FAN_OUT_DEADLINE_SECONDS`
+        deadline — on expiry the stragglers are cancelled and the PARTIAL list
+        of ids reached so far is returned. Cancelling an in-flight HTTPS-inbox
+        POST is equivalent to that delivery being lost, which the at-least-once
+        relay (plus subscriber-side dedupe by post id) already tolerates.
         """
         own_session = session is None
         active: aiohttp.ClientSession = (
@@ -1055,17 +1247,45 @@ class GfsFederationService:
         )
         push_frame = {"type": "relay", **event_body}
         limit = asyncio.Semaphore(FAN_OUT_CONCURRENCY)
+        # Slot-per-subscriber rather than gather()'s return value: on the
+        # deadline path gather is cancelled and yields nothing, so the results
+        # have to be recorded as they land — and by index, to keep the partial
+        # list in subscriber order.
+        reached: list[str | None] = [None] * len(subscribers)
 
-        async def _deliver(sub: GfsSubscriber) -> str | None:
+        async def _deliver(index: int, sub: GfsSubscriber) -> None:
             async with limit:
-                return await self._deliver_one(sub, push_frame, event_body, active)
+                reached[index] = await self._deliver_one(
+                    sub, push_frame, event_body, active
+                )
 
+        tasks = [
+            asyncio.create_task(_deliver(i, sub)) for i, sub in enumerate(subscribers)
+        ]
         try:
-            results = await asyncio.gather(*(_deliver(s) for s in subscribers))
-            return [instance_id for instance_id in results if instance_id is not None]
+            await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=FAN_OUT_DEADLINE_SECONDS,
+            )
+        except TimeoutError:
+            log.info(
+                "GFS fan-out: deadline of %.1fs hit — delivered to %d of %d "
+                "subscriber(s), cancelling the rest",
+                FAN_OUT_DEADLINE_SECONDS,
+                sum(1 for r in reached if r is not None),
+                len(subscribers),
+            )
         finally:
+            pending = [task for task in tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                # Await the cancellations so no delivery is still touching the
+                # session when it closes below.
+                await asyncio.gather(*pending, return_exceptions=True)
             if own_session:
                 await active.close()
+        return [instance_id for instance_id in reached if instance_id is not None]
 
     async def _deliver_one(
         self,

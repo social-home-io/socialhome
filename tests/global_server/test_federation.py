@@ -788,6 +788,20 @@ class _RecordingWsRegistry:
         return True
 
 
+class _SlowWsRegistry:
+    """A ws-registry stub whose ``send`` sleeps *delay* seconds then succeeds —
+    stands in for a subscriber that accepts the push only very slowly."""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.sent: list[str] = []
+
+    async def send(self, instance_id: str, frame: dict) -> bool:
+        await asyncio.sleep(self.delay)
+        self.sent.append(instance_id)
+        return True
+
+
 def _sign_authority(space_seed: bytes, *, space_id: str, payload: dict) -> dict:
     """Produce the authority-sig wire fields for a space-content relay payload."""
     from socialhome.services.space_crypto_service import (
@@ -2481,3 +2495,295 @@ async def test_fan_out_is_bounded_concurrent(gfs_db):
     assert ws.peak > 1, "delivery is still sequential"
     # 24 targets at 50 ms each: sequential is ≥ 1.2 s, bounded-concurrent ≈ 0.15 s.
     assert elapsed < 0.6, elapsed
+
+
+# ── Replay dedupe: content-blind payload idempotency ───────────────────────────
+
+
+def test_seen_payload_cache_digest_is_canonical():
+    """Key insertion order must not change the digest — the authority signature
+    is computed over the SAME canonicalisation, so equal payload bytes imply
+    equal signing input."""
+    a = federation_mod.SeenPayloadCache.digest({"b": 1, "a": {"y": 2, "x": 3}})
+    b = federation_mod.SeenPayloadCache.digest({"a": {"x": 3, "y": 2}, "b": 1})
+    assert a == b
+    assert len(a) == 32
+    assert a != federation_mod.SeenPayloadCache.digest({"b": 1, "a": {"x": 3}})
+
+
+def test_seen_payload_cache_records_and_expires():
+    cache = federation_mod.SeenPayloadCache(ttl_s=300.0, cap=10)
+    key = federation_mod.SeenPayloadCache.digest({"x": 1})
+    assert cache.seen(key, now=1000.0) is False
+    cache.record(key, now=1000.0)
+    assert cache.seen(key, now=1000.0) is True
+    assert cache.seen(key, now=1299.0) is True
+    # Past the TTL the entry is gone — a later legitimate re-publish of the
+    # same bytes fans out again.
+    assert cache.seen(key, now=1301.0) is False
+    assert len(cache) == 0
+
+
+def test_seen_payload_cache_evicts_oldest_past_the_cap():
+    cache = federation_mod.SeenPayloadCache(ttl_s=300.0, cap=3)
+    keys = [federation_mod.SeenPayloadCache.digest({"i": i}) for i in range(5)]
+    for i, key in enumerate(keys):
+        cache.record(key, now=1000.0 + i)
+    assert len(cache) == 3
+    # The two oldest were evicted; the three newest survive.
+    assert cache.seen(keys[0], now=1005.0) is False
+    assert cache.seen(keys[1], now=1005.0) is False
+    for key in keys[2:]:
+        assert cache.seen(key, now=1005.0) is True
+
+
+@pytest.mark.security
+async def test_publish_event_identical_payload_is_an_idempotent_no_op(gfs_db):
+    """Replaying a captured relay frame must NOT re-fan-out. The authority sig
+    carries no nonce/timestamp, so without this the same 256 KiB body could be
+    re-POSTed 120x/min per IP and multiplied by every subscriber."""
+    svc, ws, space_seed, _admin_seed = await _anon_relay_env(
+        gfs_db, space_id="sp-replay"
+    )
+    payload = _authority_payload(space_seed, space_id="sp-replay")
+
+    first = await svc.publish_event("sp-replay", "space_post_public", payload)
+    assert first == ["sub-a"]
+    assert len(ws.sent) == 1
+
+    second = await svc.publish_event("sp-replay", "space_post_public", payload)
+    assert second == []
+    assert len(ws.sent) == 1, "a replayed payload must not reach any subscriber"
+
+
+async def test_publish_event_distinct_payload_still_fans_out(gfs_db):
+    """The dedupe is per-payload, not a global mute — a second, different post
+    relays normally."""
+    svc, ws, space_seed, _admin_seed = await _anon_relay_env(
+        gfs_db, space_id="sp-distinct"
+    )
+    for blob in ("blob-one", "blob-two"):
+        payload = {"ciphertext": blob}
+        payload.update(
+            _sign_authority(space_seed, space_id="sp-distinct", payload=payload)
+        )
+        delivered = await svc.publish_event("sp-distinct", "space_post_public", payload)
+        assert delivered == ["sub-a"]
+    assert len(ws.sent) == 2
+
+
+@pytest.mark.security
+async def test_publish_event_rejected_payload_is_not_recorded(gfs_db):
+    """The digest is recorded only AFTER authorization succeeds. Otherwise a
+    rejected payload would poison the cache and mute the legitimate relay of
+    the very same bytes once the space heals its pin."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, space_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-h", owner_pk.hex(), "http://owner-h.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-h", sub_pk.hex(), "http://sub-h.example.com/wh", auto_accept=True
+    )
+    # Published with NO pinned authority key -> every relay is rejected.
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="owner-h", space_id="sp-heal"
+    )
+    ts = _now_iso()
+    sig = _sign(
+        sub_seed,
+        {
+            "action": "subscribe",
+            "instance_id": "sub-h",
+            "space_id": "sp-heal",
+            "ts": ts,
+        },
+    )
+    await svc.subscribe("sub-h", "sp-heal", ts, sig)
+    ws.sent.clear()  # drop the owner's new_subscriber notify
+
+    payload = _authority_payload(space_seed, space_id="sp-heal")
+    with pytest.raises(PermissionError):
+        await svc.publish_event("sp-heal", "space_post_public", payload)
+
+    # The owner re-publishes, pinning the space authority key.
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-h",
+        space_id="sp-heal",
+        identity_public_key=space_pk.hex(),
+    )
+    delivered = await svc.publish_event("sp-heal", "space_post_public", payload)
+    assert delivered == ["sub-h"]
+    assert len(ws.sent) == 1
+
+
+# ── Fan-out deadline ──────────────────────────────────────────────────────────
+
+
+async def test_fan_out_returns_within_the_deadline_with_a_partial_list(monkeypatch):
+    """Without the deadline a fan-out to N unreachable subscribers pins the
+    request handler for ``ceil(N / FAN_OUT_CONCURRENCY) x FAN_OUT_TIMEOUT``.
+    With it the handler returns what it delivered and the stragglers are
+    cancelled."""
+    monkeypatch.setattr(federation_mod, "FAN_OUT_DEADLINE_SECONDS", 2.0)
+    ws = _SlowWsRegistry(delay=1.0)
+    svc = GfsFederationService(object(), ws_registry=ws)
+    subscribers = [
+        GfsSubscriber(instance_id=f"sub-{i}", inbox_url=f"http://s{i}.invalid/wh")
+        for i in range(33)
+    ]
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    delivered = await svc._fan_out(subscribers, {"space_id": "sp", "payload": {}}, None)
+    elapsed = loop.time() - started
+
+    # 33 subscribers / concurrency 8 = 5 rounds x 1 s ~= 5 s without the bound.
+    assert 1.9 <= elapsed < 4.0, elapsed
+    assert 0 < len(delivered) < 33
+    # The partial result keeps subscriber order.
+    reached = set(delivered)
+    assert delivered == [s.instance_id for s in subscribers if s.instance_id in reached]
+
+
+async def test_fan_out_under_the_deadline_delivers_everything():
+    """The deadline is a ceiling, not a throttle — a healthy fan-out is
+    unaffected and still returns every subscriber, in order."""
+    ws = _SlowWsRegistry(delay=0.0)
+    svc = GfsFederationService(object(), ws_registry=ws)
+    subscribers = [
+        GfsSubscriber(instance_id=f"sub-{i}", inbox_url=f"http://s{i}.invalid/wh")
+        for i in range(20)
+    ]
+    delivered = await svc._fan_out(subscribers, {"space_id": "sp", "payload": {}}, None)
+    assert delivered == [s.instance_id for s in subscribers]
+
+
+# ── Timing-uniform authority rejections ───────────────────────────────────────
+
+
+@pytest.fixture
+def verify_calls(monkeypatch):
+    """Record module-level ``verify_ed25519`` calls made by ``federation``.
+
+    The REAL authority verification runs inside ``socialhome.authority_sig``,
+    so anything this records on the authority branch is the deliberate dummy
+    burn that keeps every early rejection as expensive as a bad-signature one.
+    Tests clear the list after fixture setup (``publish_space`` verifies the
+    owner's signature through this same module-level name).
+    """
+    calls: list[tuple] = []
+    real = federation_mod.verify_ed25519
+
+    def _counting(public_key, message, signature):
+        calls.append((public_key, message, signature))
+        return real(public_key, message, signature)
+
+    monkeypatch.setattr(federation_mod, "verify_ed25519", _counting)
+    return calls
+
+
+@pytest.mark.security
+async def test_unpublished_space_burns_a_dummy_verify(gfs_db, verify_calls):
+    svc, _ws, _seed, _admin = await _anon_relay_env(gfs_db, space_id="sp-uniform")
+    payload = _authority_payload(_seed, space_id="sp-uniform")
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="space not published"):
+        await svc.publish_event("sp-missing", "space_post_public", payload)
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_banned_space_burns_a_dummy_verify(gfs_db, verify_calls):
+    svc, _ws, space_seed, _admin = await _anon_relay_env(gfs_db, space_id="sp-ban-t")
+    await svc._repo.set_space_status("sp-ban-t", "banned")
+    payload = _authority_payload(space_seed, space_id="sp-ban-t")
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="banned"):
+        await svc.publish_event("sp-ban-t", "space_post_public", payload)
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_disallowed_event_type_burns_a_dummy_verify(gfs_db, verify_calls):
+    svc, _ws, space_seed, _admin = await _anon_relay_env(gfs_db, space_id="sp-type-t")
+    payload = _authority_payload(space_seed, space_id="sp-type-t")
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="event types"):
+        await svc.publish_event("sp-type-t", "space_admin_action", payload)
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_missing_authority_sig_burns_a_dummy_verify(gfs_db, verify_calls):
+    svc, _ws, _space_seed, _admin = await _anon_relay_env(gfs_db, space_id="sp-nosig-t")
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="missing space-authority signature"):
+        await svc.publish_event("sp-nosig-t", "space_post_public", {"ciphertext": "x"})
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_non_dict_payload_burns_a_dummy_verify(gfs_db, verify_calls):
+    svc, _ws, _space_seed, _admin = await _anon_relay_env(
+        gfs_db, space_id="sp-nondict-t"
+    )
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="missing space-authority signature"):
+        await svc.publish_event("sp-nondict-t", "space_post_public", "not-a-dict")
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_unpinned_key_burns_a_dummy_verify(svc, verify_calls):
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, _space_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-nopin-t", owner_pk.hex(), "http://nopin.example.com/wh", auto_accept=True
+    )
+    # Published with NO ``identity_public_key`` → nothing to verify against.
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="owner-nopin-t", space_id="sp-nopin-t"
+    )
+    payload = _authority_payload(space_seed, space_id="sp-nopin-t")
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="no pinned authority key"):
+        await svc.publish_event("sp-nopin-t", "space_post_public", payload)
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_unknown_suite_burns_a_dummy_verify(gfs_db, verify_calls):
+    svc, _ws, space_seed, _admin = await _anon_relay_env(gfs_db, space_id="sp-suite-t")
+    payload = _authority_payload(space_seed, space_id="sp-suite-t")
+    payload["authority_sig_suite"] = "ed25519+future-pq"
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="unknown authority signature suite"):
+        await svc.publish_event("sp-suite-t", "space_post_public", payload)
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.security
+async def test_malformed_pinned_key_burns_a_dummy_verify(svc, verify_calls):
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, _space_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-hex-t", owner_pk.hex(), "http://hex.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-hex-t",
+        space_id="sp-hex-t",
+        identity_public_key="zz-not-hex",
+    )
+    payload = _authority_payload(space_seed, space_id="sp-hex-t")
+    verify_calls.clear()
+    with pytest.raises(PermissionError, match="invalid authority key"):
+        await svc.publish_event("sp-hex-t", "space_post_public", payload)
+    assert len(verify_calls) == 1

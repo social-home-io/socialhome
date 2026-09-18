@@ -49,6 +49,18 @@ DEFAULT_CONFIG_FILENAME = "global_server.toml"
 #: expose the GFS directly (or whose proxy lives on a public address) set
 #: ``[server] trusted_proxies`` / ``GFS_TRUSTED_PROXIES`` explicitly; an empty
 #: list means "never believe the header".
+#:
+#: Two limits this default does NOT cover, both documented in
+#: :class:`~socialhome.global_server.public.ClientIpResolver` and
+#: ``docs/api.md``:
+#:
+#: * The proxy must OVERWRITE ``X-Forwarded-For``. An L4/TCP proxy (or an L7
+#:   one configured to append) passes the client's own header through, so the
+#:   last entry is attacker-chosen again and a single source mints unlimited
+#:   rate-limit buckets. With such a front end the only safe value is ``[]``.
+#: * Only the LAST entry is read (single-hop assumption). A chain of two or
+#:   more trusted proxies resolves to the inner hop — the outer proxy, not the
+#:   client — so every client behind the chain shares one bucket.
 DEFAULT_TRUSTED_PROXIES: tuple[str, ...] = (
     "127.0.0.0/8",
     "::1/128",

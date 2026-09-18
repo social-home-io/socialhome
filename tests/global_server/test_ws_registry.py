@@ -126,6 +126,36 @@ async def test_send_serializes_default_str_for_unknown_types(registry):
     assert "stringified" in ws.sent[0]
 
 
+async def test_send_unserialisable_frame_returns_false_without_raising(registry):
+    """An encode failure must not escape ``send``. Fan-out gathers every
+    delivery, so a raised TypeError propagated out of ``_deliver_one`` and
+    turned the whole relay request into a 500."""
+
+    class _Unhashable:
+        """A key orjson cannot encode — ``default=`` covers values, not keys."""
+
+    ws = _FakeWS()
+    await registry.register("inst-1", ws)
+    payload: dict[Any, Any] = {"type": "relay", _Unhashable(): 1}
+
+    delivered = await registry.send("inst-1", payload)
+    assert delivered is False
+    assert ws.sent == []
+    # The socket itself is healthy — an encode bug must not evict it.
+    assert registry.is_connected("inst-1") is True
+
+
+async def test_send_unserialisable_frame_does_not_break_broadcast(registry):
+    """One unserialisable frame returns 0 delivered rather than raising."""
+    ws = _FakeWS()
+    await registry.register("inst-1", ws)
+
+    class _Unhashable:
+        pass
+
+    assert await registry.broadcast({_Unhashable(): 1}) == 0
+
+
 # ── broadcast ────────────────────────────────────────────────────────────────────
 
 

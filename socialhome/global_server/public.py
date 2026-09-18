@@ -69,6 +69,12 @@ PUBLISH_MAX_PER_MINUTE: int = 120
 #: than a GFS sees in a 60-second window while costing well under a megabyte;
 #: past the cap the least-recently-seen buckets are evicted, which is also the
 #: correct eviction order (their windows are the closest to expiring).
+#:
+#: The cap is a MEMORY bound, not a defence: an attacker with at least this
+#: many source addresses evicts every bucket each window, so no limiter here
+#: ever fires against a distributed flood. These per-IP windows shed one noisy
+#: source; volumetric defence belongs at the network edge. Stated in
+#: ``docs/api.md`` so operators don't read the limits as DDoS protection.
 RATE_LIMIT_MAX_TRACKED_IPS: int = 10_000
 
 #: Sliding-window length for every per-IP limiter in this module, in seconds.
@@ -100,10 +106,33 @@ class ClientIpResolver:
     entry is used — that is the hop the trusted proxy appended; everything to
     its left was written by whoever was upstream of it (the client included).
 
+    IPv4-mapped IPv6 addresses (``::ffff:1.2.3.4``) are unmapped to their IPv4
+    form before the trusted-peer test AND before the key is returned. A
+    dual-stack listener reports a v4 proxy as ``::ffff:127.0.0.1``, which
+    matches none of the v4 trusted networks — the header would be ignored and
+    every client behind that proxy would then collapse into the proxy's single
+    bucket, 429-ing the whole deployment after one client's quota. Unmapping
+    also stops one host doubling its quota by switching address family.
+
     The trusted set is parsed into :mod:`ipaddress` networks ONCE, at
     construction, so the middleware never re-parses CIDRs per request.
     Unparseable entries are dropped at construction (an operator typo must not
     turn into a per-request exception on the hot path).
+
+    Two documented limits of this design:
+
+    * **Single hop.** Only the last ``X-Forwarded-For`` entry is read, so a
+      chain of two or more trusted proxies resolves to the address the
+      INNERMOST proxy appended — i.e. the outer proxy, not the real client.
+      Every client behind such a chain then shares one bucket. Operators
+      running multi-hop ingress must collapse the chain (have the outermost
+      proxy rewrite the header) before the GFS sees it.
+    * **The proxy must OVERWRITE the header.** Trust here is "this peer's last
+      entry is authoritative". An L4/TCP proxy (or any L7 proxy configured to
+      APPEND rather than set) forwards the client's own ``X-Forwarded-For``
+      untouched, so the "last entry" is once again attacker-chosen and a single
+      source can mint an unlimited number of buckets. With such a front end the
+      only safe configuration is ``trusted_proxies = []``.
     """
 
     __slots__ = ("_networks",)
@@ -131,7 +160,7 @@ class ClientIpResolver:
         forwarded = request.headers.get("X-Forwarded-For", "")
         last = forwarded.rsplit(",", 1)[-1].strip()
         try:
-            return str(ipaddress.ip_address(last))
+            return str(self._unmap(ipaddress.ip_address(last)))
         except ValueError:
             # No header, or a malformed last hop — fall back to the real peer
             # rather than keying the limiter on an attacker-chosen string.
@@ -149,9 +178,25 @@ class ClientIpResolver:
         try:
             # A link-local peer arrives as "fe80::1%eth0"; the zone is not part
             # of the address for matching purposes.
-            return ipaddress.ip_address(str(raw).split("%", 1)[0])
+            return ClientIpResolver._unmap(
+                ipaddress.ip_address(str(raw).split("%", 1)[0])
+            )
         except ValueError:  # pragma: no cover - a UNIX socket path, etc.
             return None
+
+    @staticmethod
+    def _unmap(
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+        """Collapse an IPv4-mapped IPv6 address to its IPv4 form.
+
+        ``::ffff:1.2.3.4`` and ``1.2.3.4`` are the same host; keeping them
+        distinct both breaks trusted-proxy matching on a dual-stack listener
+        and hands one source two rate-limit buckets.
+        """
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            return addr.ipv4_mapped
+        return addr
 
     def _is_trusted(
         self,

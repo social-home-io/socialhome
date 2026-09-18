@@ -15,7 +15,11 @@ Send semantics: :meth:`send` returns ``True`` when delivery to the live
 socket succeeded and ``False`` if no socket is registered or the send
 failed; the caller (fan-out) then falls back to the HTTPS inbox path.
 Dead sockets are evicted on send failure so a single broken peer cannot
-block fan-out.
+block fan-out. :meth:`send` never RAISES — a frame that cannot even be
+serialised also returns ``False`` (the socket is left registered, since
+the fault is in the payload, not the peer). The fan-out gathers every
+delivery, so an escaping exception would turn one bad frame into a 500 on
+the whole relay request.
 """
 
 from __future__ import annotations
@@ -120,9 +124,23 @@ class GfsWebSocketRegistry:
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed:
             return False
-        msg = orjson.dumps(
-            payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME
-        ).decode()
+        try:
+            # Inside the guard on purpose: an unencodable frame used to escape
+            # ``send`` as a TypeError, past ``_deliver_one``, past the fan-out
+            # gather, and out of the relay handler as a 500. A frame we cannot
+            # serialise is simply undeliverable — report it like any other
+            # failed push and let the caller fall back to the HTTPS inbox.
+            msg = orjson.dumps(
+                payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME
+            ).decode()
+        except TypeError as exc:
+            # The socket is healthy — this is a payload bug, so do NOT evict it.
+            log.warning(
+                "gfs.ws.send: unserialisable frame for instance=%s: %s",
+                instance_id,
+                exc,
+            )
+            return False
         try:
             await ws.send_str(msg)
             return True

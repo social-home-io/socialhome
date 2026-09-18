@@ -551,6 +551,35 @@ def test_client_ip_without_transport_is_unknown():
     assert ClientIpResolver(DEFAULT_TRUSTED_PROXIES)(req) == "unknown"
 
 
+def test_client_ip_unmaps_ipv4_mapped_loopback_peer():
+    """A dual-stack listener reports a local proxy as ``::ffff:127.0.0.1``.
+    Without unmapping that is an unrecognised IPv6 address, the proxy is not
+    trusted, ``X-Forwarded-For`` is ignored — and EVERY client behind that
+    proxy shares one bucket, so the whole deployment 429s after one client's
+    quota."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("::ffff:127.0.0.1", "1.2.3.4")) == "1.2.3.4"
+    assert resolve(_fake_request("::ffff:10.0.0.5", "1.2.3.4")) == "1.2.3.4"
+
+
+def test_client_ip_unmaps_ipv4_mapped_untrusted_peer_to_one_bucket():
+    """``::ffff:203.0.113.9`` and ``203.0.113.9`` are the SAME host — they must
+    share a rate-limit bucket, or an attacker doubles its quota by switching
+    address family."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("::ffff:203.0.113.9")) == "203.0.113.9"
+    assert resolve(_fake_request("203.0.113.9")) == "203.0.113.9"
+
+
+def test_client_ip_unmaps_ipv4_mapped_forwarded_entry():
+    """A proxy that appends ``::ffff:198.51.100.7`` keys the same bucket as one
+    that appends the dotted-quad form."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    mapped = resolve(_fake_request("127.0.0.1", "::ffff:198.51.100.7"))
+    plain = resolve(_fake_request("127.0.0.1", "198.51.100.7"))
+    assert mapped == plain == "198.51.100.7"
+
+
 def test_client_ip_resolver_parses_cidrs_once():
     """The middleware must not re-parse CIDRs per request."""
     resolve = ClientIpResolver(("10.0.0.0/8", "bogus-entry"))
