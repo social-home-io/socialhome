@@ -443,6 +443,21 @@ hex>$<hash hex>`. Parameters can be bumped without a schema change.
 | `{data_dir}/.vapid_private.pem` | P-256 ECDSA private key (PKCS8 PEM) | `0600` |
 | `{data_dir}/.vapid_public.txt` | P-256 public key (base64url uncompressed point) | `0644` |
 
+On a **GFS** (the separate relay deploy artifact) one more file lives beside
+its database:
+
+| Path | Content | Permissions |
+|------|---------|-------------|
+| `{data_dir}/gfs_identity.seed` | 32-byte Ed25519 seed — the GFS's identity key: signs cluster gossip and the `/gfs/info` capability block, and its public half is what households pin at pair time | `0600` |
+
+Minted randomly on first boot (`secrets.token_bytes(32)`) and read back on
+every later boot, or replaced by `[server] signing_seed_hex` / `GFS_SIGNING_SEED`
+(64 hex chars) when the operator injects it from a vault. It is never derived
+from configuration: deriving it from the publicly-served `gfs_instance_id`
+would let anyone recompute the private key and forge a signed capability
+block. Losing the file changes the server's identity, so every paired
+household must re-pair.
+
 The KEK itself is never stored — it's re-derived from the salt on each
 startup via `KeyManager.from_data_dir`. Passphrase-mode deployments
 use `KeyManager.from_passphrase(passphrase, salt)`; losing the

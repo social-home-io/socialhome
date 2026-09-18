@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import logging
 import time
@@ -75,10 +76,22 @@ FAN_OUT_TIMEOUT_SECONDS: int = 10
 #: handler returns whatever was delivered by then and the stragglers are
 #: cancelled: the relay is at-least-once and subscribers dedupe by the post id
 #: inside the payload, so a cancelled HTTPS-inbox delivery is indistinguishable
-#: from one that was simply lost. 15 s leaves a healthy fan-out (a WS push is
+#: from one that was simply lost. 8 s leaves a healthy fan-out (a WS push is
 #: sub-millisecond; a live inbox answers well inside the per-target timeout)
 #: entirely untouched.
-FAN_OUT_DEADLINE_SECONDS: float = 15.0
+#:
+#: It MUST stay below the household's publish client timeout — the relay POST
+#: in ``socialhome.services.gfs_connection_service`` runs under
+#: ``aiohttp.ClientTimeout(total=10)`` — so the GFS, not the client, decides
+#: when a slow fan-out ends. Two reasons. The client otherwise gives up on a
+#: relay the server is still completing and reports a failure that did not
+#: happen. And the payload digest is recorded BEFORE the fan-out starts, so a
+#: client-side timeout would leave the sender believing it must retry while the
+#: GFS suppresses the identical bytes for :data:`PUBLISH_REPLAY_TTL_S`. No
+#: retry loop exists today and real payloads are byte-unique per send (each
+#: carries its own post id), so nothing is lost in practice — but the ordering
+#: is the invariant that keeps it that way.
+FAN_OUT_DEADLINE_SECONDS: float = 8.0
 
 #: How long a relayed payload's digest is remembered for replay suppression
 #: (seconds). Matches the ±300 s freshness window the §24.11 inbound pipeline
@@ -217,13 +230,20 @@ class SeenPayloadCache:
         self._prune(stamp)
 
     def _prune(self, stamp: float) -> None:
-        for key, expires in list(self._seen.items()):
-            if expires > stamp:
+        # Front-pop rather than a scan over a COPY of the dict: this runs on
+        # every ``record`` (i.e. every accepted publish) and copying up to
+        # ``_cap`` items each time made the common case — nothing expired —
+        # O(n) in the cache size. Insertion order is expiry order (constant
+        # TTL), so the first unexpired entry ends the loop.
+        while self._seen:
+            key = next(iter(self._seen))
+            if self._seen[key] > stamp:
                 break
             del self._seen[key]
         overflow = len(self._seen) - self._cap
         if overflow > 0:
-            for key in list(self._seen)[:overflow]:
+            # Only the overflowing prefix is materialised, never the whole dict.
+            for key in list(itertools.islice(self._seen, overflow)):
                 del self._seen[key]
 
     def __len__(self) -> int:

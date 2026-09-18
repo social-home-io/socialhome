@@ -2651,6 +2651,18 @@ async def test_fan_out_returns_within_the_deadline_with_a_partial_list(monkeypat
     assert delivered == [s.instance_id for s in subscribers if s.instance_id in reached]
 
 
+def test_fan_out_deadline_stays_under_the_household_publish_timeout():
+    """The household POSTs ``/gfs/publish`` under
+    ``aiohttp.ClientTimeout(total=10)``
+    (``socialhome.services.gfs_connection_service``). The GFS deadline must sit
+    BELOW that so the SERVER decides when a slow fan-out ends and answers 200
+    with a partial delivery — a client-side timeout instead leaves the client
+    believing the relay failed while the GFS has already recorded the payload
+    digest, so a retry of the identical bytes would be suppressed for
+    ``PUBLISH_REPLAY_TTL_S``."""
+    assert federation_mod.FAN_OUT_DEADLINE_SECONDS < 10
+
+
 async def test_fan_out_under_the_deadline_delivers_everything():
     """The deadline is a ceiling, not a throttle — a healthy fan-out is
     unaffected and still returns every subscriber, in order."""

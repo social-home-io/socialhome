@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import stat
+
 import pytest
 from aiohttp import web
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.global_server import create_gfs_app, server
@@ -13,7 +19,8 @@ from socialhome.capabilities_sig import (
     verify_capabilities,
 )
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
-from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
+from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 
 
@@ -814,3 +821,89 @@ def test_main_env_overrides_config_host_port(tmp_path, monkeypatch):
     )
     server.main()
     assert captured == {"host": "127.0.0.1", "port": 5555}
+
+
+# ─── GFS identity seed (random, persisted, never derivable) ─────────────
+
+
+def _identity_pubkey_hex(seed: bytes) -> str:
+    return (
+        ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        .hex()
+    )
+
+
+def _boot(data_dir, **overrides) -> str:
+    """Boot a GFS rooted at *data_dir* and return its served identity key."""
+    cfg = GfsConfig(
+        base_url="http://127.0.0.1:8765",
+        data_dir=str(data_dir),
+        **overrides,
+    )
+    app = create_gfs_app(cfg)
+    return app[gfs_cluster_key].own_public_key_hex
+
+
+def test_identity_seed_is_persisted_and_stable_across_boots(tmp_path):
+    """The GFS identity key is minted ONCE per data dir and read back after
+    that — restarting must not change the key households pinned at pair."""
+    first = _boot(tmp_path)
+    seed_file = tmp_path / server.SIGNING_SEED_FILENAME
+    assert seed_file.is_file()
+    assert _boot(tmp_path) == first
+
+
+def test_identity_seed_differs_per_data_dir(tmp_path):
+    """Two deployments are two identities — nothing about the key is derived
+    from public config, so two nodes with the same instance_id differ."""
+    a = _boot(tmp_path / "a")
+    b = _boot(tmp_path / "b")
+    assert a != b
+
+
+def test_identity_seed_is_not_derivable_from_public_config(tmp_path):
+    """Regression for the seed derived as sha256("gfs-cluster-" + instance_id):
+    ``instance_id`` is served in the clear by ``/gfs/info``, so anyone could
+    recompute the private key and forge a signed capability block."""
+    derived = hashlib.sha256(b"gfs-cluster-gfs-node-0").digest()
+    assert _boot(tmp_path) != _identity_pubkey_hex(derived)
+
+
+def test_identity_seed_file_is_owner_only(tmp_path):
+    """The seed is the GFS's private key — 0600, never group/world readable."""
+    _boot(tmp_path)
+    mode = (tmp_path / server.SIGNING_SEED_FILENAME).stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_identity_seed_first_boot_warns_about_re_pairing(tmp_path, caplog):
+    """An existing deployment upgrading into this code mints a fresh identity;
+    the operator gets exactly one WARNING saying households must re-pair."""
+    with caplog.at_level(logging.WARNING, logger="socialhome.global_server.server"):
+        _boot(tmp_path)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "re-pair" in warnings[0].getMessage()
+
+
+def test_signing_seed_override_is_honoured(tmp_path):
+    """Operators managing secrets externally pin the seed via config/env; the
+    file is then never written (there is nothing to persist)."""
+    seed = bytes(range(32))
+    served = _boot(tmp_path, signing_seed_hex=seed.hex())
+    assert served == _identity_pubkey_hex(seed)
+    assert not (tmp_path / server.SIGNING_SEED_FILENAME).exists()
+
+
+@pytest.mark.parametrize("bad", ["ab" * 16, "zz" * 32, "not-hex"])
+def test_bad_signing_seed_override_is_rejected(tmp_path, bad):
+    """A wrong-length or non-hex override fails the boot rather than silently
+    falling back — and the value itself never reaches the message."""
+    with pytest.raises(ValueError) as exc:
+        _boot(tmp_path, signing_seed_hex=bad)
+    assert bad not in str(exc.value)

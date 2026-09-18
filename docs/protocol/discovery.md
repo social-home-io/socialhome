@@ -109,7 +109,13 @@ The Social Home ↔ GFS link is split by direction:
 
     signed with the GFS's **own identity key** — the one already published in
     the same response as `public_key` and pinned (TOFU) by every paired
-    household. Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
+    household. That key is random per deployment: the GFS mints a 32-byte seed
+    on first boot and persists it as `<data_dir>/gfs_identity.seed` (0600), or
+    takes `[server] signing_seed_hex` / `GFS_SIGNING_SEED` when an operator
+    manages the secret externally. It used to be *derived* from
+    `gfs_instance_id`, which `/gfs/info` serves in the clear — anyone could
+    recompute the private key and sign their own capability block, so the
+    signature proved nothing. Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
     (`sort_keys`, compact separators) of
     `{"gfs_instance_id": …, "capabilities": {…}}`, so a block can't be lifted
     onto another server or another statement that key signs
@@ -123,6 +129,24 @@ The Social Home ↔ GFS link is split by direction:
     legacy identified body, whose household transport signature is a
     third-party-provable "household X relayed into space Y" artefact. The
     downgrade *is* the attack, so it has to be authenticated away.
+
+    **What signing buys, precisely: detection and a ratchet — not
+    fail-closed.** On a COLD cache the household cannot tell a stripping MITM
+    from an old GFS, because both look identical: no verifiable block. So the
+    first `/gfs/info` after an HFS boot — and the one at pair time — still
+    falls back to the legacy identified body plus a WARNING, exactly as it
+    would against a genuinely older server. The signature makes the strip
+    *visible* (an operator sees the warning, and a tampered-but-present block
+    is named as tampering rather than age) and makes it *un-repeatable* (once
+    a valid `true` is seen, it latches — see the ratchet below). It does not
+    make a stripped response fail closed.
+
+    A GFS **rollback** to a pre-capability build interacts with that latch the
+    other way: a household that already latched `true` keeps sending the
+    identity-free body, which the rolled-back server `403`s, until that
+    household's process restarts (the ratchet is RAM-only). Rolling a GFS
+    backwards is therefore a breaking change for latched households, not a
+    graceful degrade.
 
     The household caches the verified answer per connection (RAM only — it is
     a property of the remote server's build, so a column would go stale the
@@ -166,16 +190,24 @@ The Social Home ↔ GFS link is split by direction:
     space it has published to that server. This is idempotent (the pin is
     immutable once set), sequential, and fail-soft per space.
   - **Replay / dedupe contract.** The authority signature binds the space id
-    and the (opaque) `payload`, but **no timestamp, nonce, or epoch**, and the
-    GFS keeps **no replay cache**, so `publish` relay is idempotent /
-    at-least-once: a captured authority-signed payload can be re-POSTed and
-    re-fanned-out (a property the owner relay already had under #598, widened
-    by the non-owner authority path). The GFS deliberately adds **no** replay
-    machinery — it is content-blind and can't read the post id inside the
-    encrypted payload. The content-layer backstop is **subscriber-side dedupe
-    by the post id** carried inside the payload, enforced by the HFS
-    `space_public_inbound` consumer (the same way moments dedupe by
-    `moment_id`).
+    and the (opaque) `payload`, but **no timestamp, nonce, or epoch**, so a
+    captured authority-signed payload stays valid forever and anyone who saw
+    one can re-POST it. The GFS bounds the resulting burst with a
+    **content-blind dedupe**: it remembers a BLAKE2b digest of each authorized
+    payload — over the same canonical JSON the authority signature covers — for
+    **5 minutes**, and answers a byte-identical re-POST with `200` /
+    `delivered_to: 0` and no fan-out. It still can't dedupe on the post id:
+    that lives inside the encrypted payload.
+
+    That cache is in-memory and **per GFS node**, so it is a burst bound, not
+    a content-id store. Past the TTL, after a restart, or on a sibling node the
+    same bytes fan out once more — in a cluster of N nodes behind one address a
+    replay burst is suppressed only **1-in-N**, since each node must see the
+    bytes once before it starts suppressing them. The standing content-layer
+    backstop is therefore still **subscriber-side dedupe by the post id**
+    carried inside the payload, enforced by the HFS `space_public_inbound`
+    consumer (the same way moments dedupe by `moment_id`), and the relay stays
+    at-least-once.
   - `subscribe` and `unsubscribe` each require a signature over
     `{action, instance_id, space_id, ts}` (replay-guarded ±300 s on `ts`).
     The `action` is inside the signed bytes (domain separation), so a

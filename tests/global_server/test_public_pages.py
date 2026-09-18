@@ -580,6 +580,26 @@ def test_client_ip_unmaps_ipv4_mapped_forwarded_entry():
     assert mapped == plain == "198.51.100.7"
 
 
+def test_client_ip_strips_an_ipv6_zone_from_a_forwarded_entry():
+    """``2001:db8::1%eth0`` is the same host as ``2001:db8::1`` — the zone is a
+    local interface label, not part of the address. ``_peer_ip`` already
+    stripped it; the forwarded branch did not, so every zone spelling minted a
+    fresh rate-limit bucket for one source."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    plain = resolve(_fake_request("127.0.0.1", "2001:db8::1"))
+    assert plain == "2001:db8::1"
+    for zone in ("eth0", "1", "A" * 4096):
+        assert resolve(_fake_request("127.0.0.1", f"2001:db8::1%{zone}")) == plain
+
+
+def test_client_ip_key_length_is_bounded_by_the_address_not_the_zone():
+    """An unbounded zone string must not grow the bucket KEY — otherwise one
+    source both multiplies buckets and inflates each one's memory cost."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    key = resolve(_fake_request("127.0.0.1", "2001:db8::1%" + "z" * 10_000))
+    assert len(key) < 64
+
+
 def test_client_ip_resolver_parses_cidrs_once():
     """The middleware must not re-parse CIDRs per request."""
     resolve = ClientIpResolver(("10.0.0.0/8", "bogus-entry"))

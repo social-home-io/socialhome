@@ -208,12 +208,17 @@ class PublishView(GfsBaseView):
     present (a bogus legacy field is a ``403``), then discarded.
 
     The response reports only the NUMBER of subscribers reached. The authority
-    signature carries no nonce or timestamp and the GFS keeps no replay cache
-    (deliberately — see ``_authorize_authority_relay``), so anyone who captured
-    one relay frame can re-POST it indefinitely; returning the roster would
-    hand that anonymous replayer exactly the data
-    ``GET /gfs/spaces/{id}/subscribers`` gates behind a replay-guarded
-    authority query.
+    signature carries no nonce or timestamp, so a captured relay frame stays
+    valid forever and anyone who saw one can re-POST it. What bounds that is a
+    content-blind replay dedupe: this node remembers the digest of each
+    accepted payload for ``PUBLISH_REPLAY_TTL_S`` (5 minutes) and answers an
+    identical body with ``delivered_to: 0`` and no fan-out. The cache is
+    in-memory and PER NODE — a restart, or a sibling node in a cluster, forgets
+    — so it bounds the burst one captured frame can drive, and SUBSCRIBER-side
+    dedupe by the post id inside the payload stays the standing backstop (see
+    ``_authorize_authority_relay``). Returning the roster would hand an
+    anonymous replayer exactly the data ``GET /gfs/spaces/{id}/subscribers``
+    gates behind a replay-guarded authority query.
 
     Every authorization failure returns ONE uniform ``403`` body — distinct
     messages would let an unauthenticated caller enumerate space existence,

@@ -2716,3 +2716,41 @@ async def test_e2e_legacy_body_from_this_sender_still_accepted_by_a_new_gfs(
     assert len(received) == 1
     assert set(received[0]) == {"space_id", "event_type", "payload"}
     assert _E2E_OWN_INSTANCE not in json.dumps(received[0])
+
+
+async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
+    tmp_dir, real_gfs
+):
+    """Pairing against a REAL GFS learns ``anonymous_publish`` through the
+    signed capability block, verified against the key pinned in that same
+    response — and a later ``/gfs/info`` refresh keeps it.
+
+    This is the only test that exercises ``sign_capabilities`` (GFS side) and
+    ``verify_capabilities`` (household side) against each other over the wire,
+    so it is what catches canonicalisation drift between the two packages.
+    """
+    token, _wait = await real_gfs.server.app["gfs_token_service"].generate("127.0.0.55")
+    assert token is not None
+    gfs_base = str(real_gfs.make_url("")).rstrip("/")
+
+    db = AsyncDatabase(tmp_dir / "hfs-pair-e2e.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        conn_repo = SqliteGfsConnectionRepo(db)
+        async with aiohttp.ClientSession() as session:
+            svc = GfsConnectionService(conn_repo, http_client=session)
+            conn = await svc.pair(
+                {"gfs_url": gfs_base, "token": token},
+                own_instance_id=_E2E_OWN_INSTANCE,
+                own_public_key_hex=generate_identity_keypair().public_key.hex(),
+                own_inbox_url="https://alpha.example/federation/inbox",
+                own_display_name="Alpha House",
+            )
+            # Learned from the signed block, not the bare flag: the pinned key
+            # verified the signature over {gfs_instance_id, capabilities}.
+            assert svc._anon_publish[conn.id] is True  # noqa: SLF001
+            # A refresh re-verifies the same block and must not downgrade.
+            await svc.refresh_connection_metadata(conn.id)
+            assert svc._anon_publish[conn.id] is True  # noqa: SLF001
+    finally:
+        await db.shutdown()

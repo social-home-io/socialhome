@@ -158,13 +158,12 @@ class ClientIpResolver:
         if not self._is_trusted(peer):
             return str(peer)
         forwarded = request.headers.get("X-Forwarded-For", "")
-        last = forwarded.rsplit(",", 1)[-1].strip()
-        try:
-            return str(self._unmap(ipaddress.ip_address(last)))
-        except ValueError:
+        last = self._parse_ip(forwarded.rsplit(",", 1)[-1])
+        if last is None:
             # No header, or a malformed last hop — fall back to the real peer
             # rather than keying the limiter on an attacker-chosen string.
             return str(peer)
+        return str(last)
 
     @staticmethod
     def _peer_ip(
@@ -175,13 +174,28 @@ class ClientIpResolver:
         raw = peername[0] if peername else request.remote
         if not raw:
             return None
+        return ClientIpResolver._parse_ip(str(raw))
+
+    @staticmethod
+    def _parse_ip(
+        raw: str,
+    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        """Parse one address — peer or ``X-Forwarded-For`` entry — or ``None``.
+
+        The SAME parse for both sources, deliberately: whatever normalisation
+        one side does, the other must do too, or the two disagree about what
+        "the client" is. It strips the IPv6 zone (``fe80::1%eth0``) — a local
+        interface label, not part of the address, and ``ipaddress`` keeps it
+        as a scope id, so leaving it on hands one host a fresh rate-limit
+        bucket per zone spelling AND makes the bucket key as long as the
+        attacker-supplied zone — then unmaps IPv4-mapped IPv6 (see
+        :meth:`_unmap`).
+        """
         try:
-            # A link-local peer arrives as "fe80::1%eth0"; the zone is not part
-            # of the address for matching purposes.
             return ClientIpResolver._unmap(
-                ipaddress.ip_address(str(raw).split("%", 1)[0])
+                ipaddress.ip_address(raw.strip().split("%", 1)[0])
             )
-        except ValueError:  # pragma: no cover - a UNIX socket path, etc.
+        except ValueError:
             return None
 
     @staticmethod

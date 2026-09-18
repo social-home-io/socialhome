@@ -273,3 +273,30 @@ def test_example_toml_documents_trusted_proxies():
     from socialhome.global_server.config import EXAMPLE_TOML
 
     assert "trusted_proxies" in EXAMPLE_TOML
+
+
+def test_signing_seed_hex_loads_from_toml(tmp_dir):
+    """Operators who manage secrets externally pin the GFS identity seed in
+    ``[server] signing_seed_hex`` instead of letting the data dir own it."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f'[server]\nbase_url = "https://g.example"\nsigning_seed_hex = "{"ab" * 32}"\n'
+    )
+    assert GfsConfig.from_toml(p).signing_seed_hex == "ab" * 32
+
+
+def test_signing_seed_hex_defaults_to_empty(tmp_dir):
+    """No key in the file → empty, i.e. "use the persisted seed file"."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text('[server]\nbase_url = "https://g.example"\n')
+    assert GfsConfig.from_toml(p).signing_seed_hex == ""
+
+
+def test_gfs_signing_seed_env_overrides_the_file(tmp_dir, monkeypatch):
+    """``GFS_SIGNING_SEED`` wins over the file, like every other [server] key."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f'[server]\nbase_url = "https://g.example"\nsigning_seed_hex = "{"ab" * 32}"\n'
+    )
+    monkeypatch.setenv("GFS_SIGNING_SEED", "cd" * 32)
+    assert GfsConfig.load(p).signing_seed_hex == "cd" * 32
