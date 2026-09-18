@@ -285,7 +285,10 @@ export interface Space {
   join_mode: 'invite_only' | 'open' | 'request'
   /** Discovery category (e.g. ``'gaming'``); ``'general'``/absent = none. */
   category?: string
-  features: SpaceFeatures
+  /** Present on `GET /api/spaces/{id}` AND on every `GET /api/spaces` list
+   *  row. Optional only because an older backend's list withheld it — see
+   *  `hydrateLocalReadability` in `SpaceBrowserPage`. */
+  features?: SpaceFeatures
   retention_days: number | null
   /** When true, HA automations may post into this space via the
    *  bot-bridge. Required before any SpaceBot is registered. */
@@ -613,10 +616,15 @@ export interface DirectoryEntry {
   /** How a person becomes a posting MEMBER. Says nothing about whether
    *  the content is readable — see `allow_subscribers`. */
   join_mode: 'invite_only' | 'open' | 'request'
-  /** The host's readability opt-in. False/absent ⇒ the listing is
-   *  discoverable but its content is private: no Subscribe button, and the
-   *  "content is private" note shows. Fail closed on absent so an older
-   *  backend never advertises a Subscribe that 403s. */
+  /** The host's readability opt-in — three states, not two.
+   *
+   *  `true`  ⇒ readable: Subscribe is offered.
+   *  `false` ⇒ private: the 🔒 "content is private" chip shows.
+   *  absent  ⇒ UNKNOWN: no chip, no Subscribe. The peer "From friends"
+   *            directory does not carry the flag, and `GET /api/spaces`
+   *            (the list) ships no features block — claiming either answer
+   *            there would be a guess. Subscribe needs an explicit `true`,
+   *            so an older backend never advertises one that 403s. */
   allow_subscribers?: boolean
   min_age: number
   /** Discovery category (e.g. ``'gaming'``). ``'general'``/absent =

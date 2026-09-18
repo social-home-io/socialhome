@@ -28,7 +28,7 @@ import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
-import { contentIsGated, GATED_CHIP, joinModeChip } from './SpaceCard'
+import { contentIsGated, GATED_CHIP, hostLabel, joinModeChip } from './SpaceCard'
 
 /** Shown when the space's owner has NOT opted into read-only followers
  *  (``SpaceFeatures.allow_subscribers`` off): the space is listed so people
@@ -132,7 +132,7 @@ export default function SpacePublicDetailPage() {
     // Remote (public peer or global GFS) — needs a paired host before
     // either the open send or the request modal can reach it.
     if (!isLocalEntry && !entry.host_is_paired) {
-      showToast(`Pair with ${entry.host_display_name} first.`, 'info')
+      showToast(`Pair with ${hostLabel(entry)} first.`, 'info')
       return
     }
     // Open spaces join immediately with no message — match the browser's
@@ -214,7 +214,7 @@ export default function SpacePublicDetailPage() {
       : entry.join_mode === 'invite_only'
         ? 'Invite required'
       : entry.scope !== 'household' && !entry.host_is_paired
-        ? `Pair with ${entry.host_display_name} first`
+        ? `Pair with ${hostLabel(entry)} first`
       : entry.join_mode === 'open' ? 'Join space'
       : 'Request to join'
 
@@ -241,7 +241,7 @@ export default function SpacePublicDetailPage() {
           <p class="sh-muted">
             {entry.member_count} {entry.member_count === 1 ? 'member' : 'members'}
             {!isLocal && (
-              <> · hosted by <strong>{entry.host_display_name}</strong></>
+              <> · hosted by <strong>{hostLabel(entry)}</strong></>
             )}
           </p>
         </div>
@@ -290,7 +290,7 @@ export default function SpacePublicDetailPage() {
         <section class="sh-space-public__section sh-muted">
           <p>
             This space lives on another household.  Pair with
-            <strong> {entry.host_display_name}</strong> from
+            <strong> {hostLabel(entry)}</strong> from
             Settings → Connections to join, post, or read.
           </p>
         </section>

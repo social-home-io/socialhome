@@ -14869,6 +14869,14 @@ a.sh-welcome-card:hover {
   border-bottom: 1px solid var(--sh-border);
   overflow-x: auto;
 }
+/* On a phone the three tab labels (each carrying a count) overflow 390 px,
+   and `overflow-x: auto` hid the third one — "Global" — off the right edge
+   with no scrollbar to hint at it, so the whole global directory was
+   unreachable, and the ACTIVE tab could sit off-screen. Wrap instead: two
+   short rows beat one invisible one. */
+@media (max-width: 560px) {
+  .sh-browser-tabs { flex-wrap: wrap; overflow-x: visible; }
+}
 .sh-browser-tab {
   padding: var(--sh-space-sm) var(--sh-space-md);
   background: transparent; border: none;
@@ -15350,6 +15358,42 @@ a.sh-welcome-card:hover {
 .sh-age-chip {
   background: color-mix(in srgb, #ef4444 14%, transparent);
   color: #991b1b;
+}
+
+/* The chip row carries two independent facts — how you join, and whether the
+   content is readable — so both have to be legible in both themes. The hues
+   above pair a translucent tint with a DARK ink, which vanishes on the dark
+   ember background (the 🔒 "Content is private" chip was the worst: slate ink
+   on slate tint on near-black). Keep the hue, lift the ink and the tint. */
+.sh-theme-dark .sh-scope-chip--global {
+  background: color-mix(in srgb, #2d9cdb 22%, transparent);
+  color: #8fd0f2;
+}
+.sh-theme-dark .sh-join-mode-chip--open {
+  background: color-mix(in srgb, #22c55e 22%, transparent);
+  color: #86efac;
+}
+.sh-theme-dark .sh-join-mode-chip--request {
+  background: color-mix(in srgb, #f59e0b 22%, transparent);
+  color: #fcd34d;
+}
+.sh-theme-dark .sh-join-mode-chip--private {
+  background: color-mix(in srgb, #64748b 28%, transparent);
+  color: #cbd5e1;
+}
+.sh-theme-dark .sh-age-chip {
+  background: color-mix(in srgb, #ef4444 20%, transparent);
+  color: #fca5a5;
+}
+
+/* A checkbox row whose input is disabled must LOOK disabled, not merely
+   fail to respond. The Followers fieldset gates "let followers react /
+   comment" on the master follow switch; with only the (barely tinted)
+   checkbox to go on, the two gated rows were indistinguishable from the
+   live one above them and read as broken rather than conditional. */
+.sh-form-fieldset label:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .sh-host-callout {

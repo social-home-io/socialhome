@@ -139,6 +139,14 @@ class SpaceCollectionView(BaseView):
                         "description": s.description,
                         "space_type": s.space_type.value,
                         "join_mode": s.join_mode.value,
+                        # Same block the detail endpoint emits — the space
+                        # browser reads ``features.allow_subscribers`` off
+                        # each row to decide whether a discoverable space
+                        # wears the 🔒 "content is private" chip, and
+                        # withholding it here made the SPA fetch
+                        # ``/api/spaces/{id}`` once per space on every
+                        # browse load just to learn one boolean.
+                        "features": s.features.to_wire_dict(),
                         # Read-only archive state — the SPA groups
                         # archived spaces out of the active sidebar list.
                         "archived": s.archived,
