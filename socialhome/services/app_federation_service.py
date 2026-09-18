@@ -55,7 +55,7 @@ from ..domain.apps import (
     AppPendingSession,
 )
 from ..domain.events import AppChallengeReceived
-from ..domain.federation import FederationEvent, FederationEventType, PairingStatus
+from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 
 if TYPE_CHECKING:
@@ -159,9 +159,10 @@ class AppFederationService:
         The SPA uses this to populate the peer picker when an app wants
         to start a cross-household session.
         """
-        instances = await self._federation_repo.list_instances(
-            status=PairingStatus.CONFIRMED.value,
-        )
+        # §D2b: social surface — a ``space_session`` row (a household we
+        # only share a space with, via an invite link) is not a social
+        # peer, so read the social list, not every CONFIRMED row.
+        instances = await self._federation_repo.list_social_instances()
         return [
             {
                 "instance_id": inst.id,

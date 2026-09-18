@@ -1258,4 +1258,11 @@ class DmService(VisibilityMixin):
         status = getattr(instance, "status", None)
         if status is None:
             return False
+        # §D2b: a ``space_session`` row is a household we share a space
+        # with via an invite link — CONFIRMED, but never a DM peer. DMs
+        # are a social relationship nobody consented to by joining a
+        # space, so it is not "directly paired" for this purpose.
+        source = getattr(instance, "source", None)
+        if getattr(source, "value", str(source)) == "space_session":
+            return False
         return getattr(status, "value", str(status)) == "confirmed"

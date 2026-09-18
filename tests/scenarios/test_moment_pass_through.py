@@ -53,7 +53,9 @@ async def env(db):
     federation.own_instance_id = "self"
     federation.send_event = AsyncMock()
     federation_repo = MagicMock()
-    federation_repo.list_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    federation_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-onward")]
+    )
     user_repo = MagicMock()
     user_repo.get_instance_for_user = AsyncMock(return_value="inst-remote")
 

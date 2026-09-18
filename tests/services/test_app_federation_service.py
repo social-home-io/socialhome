@@ -28,6 +28,7 @@ from socialhome.domain.apps import (
     InstalledApp,
 )
 from socialhome.domain.federation import (
+    InstanceSource,
     FederationEvent,
     FederationEventType,
     PairingStatus,
@@ -200,6 +201,13 @@ class _FakeUserRepo:
 class _FakeFederationRepo:
     def __init__(self, instances: list[RemoteInstance] | None = None) -> None:
         self._instances: list[RemoteInstance] = instances or []
+
+    async def list_social_instances(self):
+        return [
+            i
+            for i in await self.list_instances(status="confirmed")
+            if i.source is not InstanceSource.SPACE_SESSION
+        ]
 
     async def list_instances(
         self,
@@ -1857,3 +1865,36 @@ async def test_list_contacts_uses_active_users():
     contacts = await svc.list_contacts(self_user_id="u-alice")
     refs = {c["user_ref"] for c in contacts}
     assert "u-gone" not in refs
+
+
+async def test_list_peers_excludes_space_session_households():
+    """§D2b — an invite-link household is not offered as an app peer.
+
+    Starting a cross-household app session is a social act; sharing a
+    space does not imply consent to it.
+    """
+    paired = RemoteInstance(
+        id="peer-social",
+        display_name="Paired",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k",
+        key_remote_to_self="k",
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh-1",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    space_only = RemoteInstance(
+        id="peer-space",
+        display_name="Invite link",
+        remote_identity_pk="bb" * 32,
+        key_self_to_remote="k",
+        key_remote_to_self="k",
+        remote_inbox_url="",
+        local_inbox_id="wh-2",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+    )
+    svc, _fed, _ws = _make_svc(instances=[paired, space_only])
+    peers = await svc.list_peers()
+    assert [p["instance_id"] for p in peers] == ["peer-social"]

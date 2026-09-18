@@ -40,12 +40,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from ..domain.federation import FederationEventType, PairingStatus
-from ..domain.federation_capabilities import FederationCapability
+from ..domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
+from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.space import SpaceMember, SpacePermissionError, SpaceRole
 from ..services.space_service import (
     _coerce_min_age,
@@ -56,8 +62,19 @@ from ..services.space_service import (
     can_seat_remote_stub,
     stub_space_from_metadata,
 )
+from .invite_bootstrap import (
+    KIND_REDEEM,
+    KIND_REDEEM_ACK,
+    KIND_REDEEM_DENY,
+    InviteBootstrapHint,
+    derive_space_session_keys,
+    open_bootstrap_envelope,
+    seal_bootstrap_envelope,
+    verify_peer_keywrap,
+)
 
 if TYPE_CHECKING:
+    from ..infrastructure.key_manager import KeyManager
     from ..domain.federation import FederationEvent
     from ..infrastructure.event_bus import EventBus
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -66,8 +83,10 @@ if TYPE_CHECKING:
         AbstractSpaceRemoteMemberRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
+    from ..rate_limiter import RateLimiter
     from ..repositories.user_repo import AbstractUserRepo
     from .federation_service import FederationService
+    from .invite_bootstrap import RelayEnvelopeSender
     from .route_discovery import RouteDiscoveryService
     from .routed_envelope import SpaceRoutedHandler
 
@@ -77,6 +96,22 @@ log = logging.getLogger(__name__)
 #: How long the receiver waits for an ACK / DENY before giving up.
 #: Calibrated for a single hop over a healthy WebRTC DataChannel.
 REDEEM_TIMEOUT_SECONDS: float = 10.0
+
+#: §D2b inbound throttles. This surface is unauthenticated by
+#: construction — anybody who can reach the relay can address a blob at
+#: us — so it is both a DoS and a token-guessing surface. Tokens are
+#: ``uuid4().hex`` (122 bits), so guessing is not the threat; flooding
+#: is. Two buckets on the same :class:`~socialhome.rate_limiter.
+#: RateLimiter` the HTTP surface uses:
+#:
+#: * a **process-wide** bucket checked BEFORE the unseal, so a flood
+#:   costs a list append rather than an AES-GCM open;
+#: * a **per-sender** bucket checked once the body's identity has been
+#:   verified, so one household can't burn the global budget alone.
+BOOTSTRAP_INBOUND_LIMIT: int = 600
+BOOTSTRAP_INBOUND_WINDOW_S: int = 60
+BOOTSTRAP_PER_SENDER_LIMIT: int = 30
+BOOTSTRAP_PER_SENDER_WINDOW_S: int = 60
 
 
 class SpaceInviteTokenRedeemCoordinator:
@@ -104,6 +139,13 @@ class SpaceInviteTokenRedeemCoordinator:
         "_timeout",
         "_route_service",
         "_routed_handler",
+        "_relay_sender",
+        "_keywrap_private_key",
+        "_keywrap_public_key",
+        "_keywrap_sig",
+        "_key_manager",
+        "_bootstrap_hints",
+        "_rate_limiter",
     )
 
     def __init__(
@@ -154,6 +196,60 @@ class SpaceInviteTokenRedeemCoordinator:
         #: rather than fail-fast with "pair first".
         self._route_service = route_service
         self._routed_handler = routed_handler
+        #: §D2b bootstrap-redeem material, wired by
+        #: :meth:`attach_bootstrap`. Absent → the bootstrap path is not
+        #: offered and an unreachable issuer still fails with "pair
+        #: first" / "no route to issuer".
+        self._relay_sender: "RelayEnvelopeSender | None" = None
+        self._keywrap_private_key: bytes = b""
+        self._keywrap_public_key: bytes = b""
+        self._keywrap_sig: str = ""
+        self._key_manager: "KeyManager | None" = None
+        #: ``redeem_nonce`` → the hint we sealed the request under, so
+        #: the reply leg can be pinned to the issuer identity the invite
+        #: blob advertised rather than trusting whatever comes back.
+        self._bootstrap_hints: dict[str, InviteBootstrapHint] = {}
+        self._rate_limiter: "RateLimiter | None" = None
+
+    def attach_bootstrap(
+        self,
+        *,
+        relay_sender: "RelayEnvelopeSender",
+        keywrap_private_key: bytes,
+        keywrap_public_key: bytes,
+        keywrap_sig: str,
+        key_manager: "KeyManager",
+        rate_limiter: "RateLimiter | None" = None,
+    ) -> None:
+        """Enable the §D2b bootstrap path.
+
+        ``relay_sender`` is the seam to whatever carries an opaque blob
+        to a household we have no address for (production: the GFS
+        socket). The key-wrap triple is this household's own published
+        static X25519 key, its self-signature, and the private half —
+        the redeemer ships the first two inside the sealed request so
+        the issuer can seal the reply back, and both sides derive their
+        space-scoped session keys from the pair.
+
+        ``key_manager`` encrypts those session keys at rest, exactly as
+        the pairing coordinator does for a QR-paired peer.
+        """
+        self._relay_sender = relay_sender
+        self._keywrap_private_key = keywrap_private_key
+        self._keywrap_public_key = keywrap_public_key
+        self._keywrap_sig = keywrap_sig
+        self._key_manager = key_manager
+        self._rate_limiter = rate_limiter
+
+    def _bootstrap_ready(self) -> bool:
+        """True when every piece the bootstrap path needs is wired."""
+        return (
+            self._relay_sender is not None
+            and self._key_manager is not None
+            and bool(self._keywrap_private_key)
+            and bool(self._keywrap_public_key)
+            and bool(self._keywrap_sig)
+        )
 
     def attach_to(self, federation_service: "FederationService") -> None:
         """Wire the three inbound event-type handlers into the registry."""
@@ -179,6 +275,7 @@ class SpaceInviteTokenRedeemCoordinator:
         *,
         viewer_user_id: str,
         issuer_instance_id: str,
+        bootstrap: InviteBootstrapHint | None = None,
     ) -> dict:
         """Drive the receiver-side handshake.
 
@@ -189,6 +286,15 @@ class SpaceInviteTokenRedeemCoordinator:
         :data:`FederationEventType.SPACE_ROUTED` and ships along
         that path. The ACK / DENY arrives via the reverse path and
         resolves the same nonce-keyed Future.
+
+        When neither holds and the caller supplies a ``bootstrap`` hint
+        (the public invite blob the redeemer opened), falls through to
+        the §D2b **bootstrap** path: a sealed, self-authenticating
+        redeem envelope relayed to the issuer by instance id, with no
+        pre-existing relationship and no network address on either side.
+        Both existing paths are tried first and unchanged — they are
+        strictly better (the direct one needs no new trust, the mesh one
+        leaks nothing to a third party).
 
         Returns ``{space_id, role}`` on ACK. Raises
         :class:`SpacePermissionError` on DENY (or "no route to issuer"
@@ -215,8 +321,17 @@ class SpaceInviteTokenRedeemCoordinator:
         mesh_available = (
             self._route_service is not None and self._routed_handler is not None
         )
+        # §D2b — the bootstrap path needs the blob's hint (it carries
+        # the issuer's identity + key-wrap material, which is the only
+        # thing we can address and seal to) and it must describe the
+        # issuer we were actually asked to redeem against.
+        bootstrap_available = (
+            bootstrap is not None
+            and bootstrap.instance_id == issuer_instance_id
+            and self._bootstrap_ready()
+        )
 
-        if not direct_peer and not mesh_available:
+        if not direct_peer and not mesh_available and not bootstrap_available:
             raise SpacePermissionError(
                 "issuer instance is not a confirmed peer — pair first",
             )
@@ -238,7 +353,7 @@ class SpaceInviteTokenRedeemCoordinator:
 
         route_path: list[str] | None = None
         target_eph_pk: str | None = None
-        if not direct_peer:
+        if not direct_peer and mesh_available:
             # Run mesh discovery. The discovery layer already gates
             # candidate hops on v_6 so we don't need to re-check
             # ``peer_supports`` here. The discovery returns the
@@ -249,17 +364,32 @@ class SpaceInviteTokenRedeemCoordinator:
             discovery_result = await self._route_service.discover_route(
                 issuer_instance_id,
             )
-            if discovery_result is None:
+            if discovery_result is not None and len(discovery_result[0]) >= 2:
+                route_path, target_eph_pk = discovery_result
+            elif not bootstrap_available:
                 raise SpacePermissionError(
                     "no route to issuer — pair with them, or with one of"
                     " their household's peers",
                 )
-            route_path, target_eph_pk = discovery_result
-            if len(route_path) < 2:
-                raise SpacePermissionError(
-                    "no route to issuer — pair with them, or with one of"
-                    " their household's peers",
-                )
+
+        # §D2b bootstrap — no direct pair and no mesh chain, but we do
+        # hold a valid invite blob. The token IS the authorization, so
+        # ship a sealed redeem envelope through the relay.
+        use_bootstrap = not direct_peer and route_path is None
+        if use_bootstrap:
+            assert bootstrap is not None
+            result = await self._request_redeem_bootstrap(
+                token,
+                viewer_user_id=viewer_user_id,
+                user=user,
+                hint=bootstrap,
+            )
+            return await self._seat_local_after_ack(
+                result,
+                viewer_user_id=viewer_user_id,
+                issuer_instance_id=issuer_instance_id,
+                bootstrap=bootstrap,
+            )
 
         nonce = uuid.uuid4().hex
         loop = asyncio.get_event_loop()
@@ -307,6 +437,32 @@ class SpaceInviteTokenRedeemCoordinator:
                 ) from exc
         finally:
             self._pending.pop(nonce, None)
+
+        return await self._seat_local_after_ack(
+            result,
+            viewer_user_id=viewer_user_id,
+            issuer_instance_id=issuer_instance_id,
+        )
+
+    async def _seat_local_after_ack(
+        self,
+        result: dict,
+        *,
+        viewer_user_id: str,
+        issuer_instance_id: str,
+        bootstrap: InviteBootstrapHint | None = None,
+    ) -> dict:
+        """Receiver-side persistence for an accepted redeem.
+
+        Shared by all three outbound paths (direct peer, mesh-routed,
+        §D2b bootstrap) so the §CP.F1 age gate, the §D1b anti-hijack
+        check and the stub / membership / roster seating can never drift
+        between them. ``bootstrap`` is set only on the §D2b path, where
+        it also seats the space-scoped
+        :class:`~socialhome.domain.federation.RemoteInstance` row for
+        the issuer — every gate above it has already passed at that
+        point, so a refused redeem creates no instance record.
+        """
 
         # Receiver-side post-condition: register the (space_id, issuer)
         # mapping locally so subsequent space-scoped fan-outs include
@@ -362,6 +518,20 @@ class SpaceInviteTokenRedeemCoordinator:
                 raise SpacePermissionError(
                     "This invite points at a space that conflicts with one "
                     "you already belong to under a different host."
+                )
+            # §D2b — the issuer is not (and must not silently become)
+            # a social peer, but the space still needs a keyed instance
+            # row to federate against. Seated only after every gate
+            # above has passed.
+            if bootstrap is not None:
+                await self._seat_space_session_instance(
+                    instance_id=issuer_instance_id,
+                    display_name=(bootstrap.display_hint or issuer_instance_id[:8]),
+                    identity_pk=bootstrap.identity_pk,
+                    keywrap_pk=bootstrap.keywrap_pk,
+                    keywrap_sig=bootstrap.keywrap_sig,
+                    proto_version=bootstrap.proto_version,
+                    is_redeemer=True,
                 )
             await self._spaces.add_space_instance(
                 space_id,
@@ -490,119 +660,22 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return
 
-        try:
-            row = await self._spaces.consume_invite_token(token)
-        except Exception:
-            log.exception(
-                "SPACE_INVITE_TOKEN_REDEEM: consume_invite_token raised"
-                " for token from %s",
-                event.from_instance,
-            )
+        ack_payload, deny_reason = await self._consume_seat_and_build_ack(
+            token=token,
+            redeemer_instance_id=event.from_instance,
+            redeemer_user_id=redeemer_user_id,
+            redeemer_pk=redeemer_pk,
+            redeemer_display=redeemer_display,
+        )
+        if ack_payload is None:
             await self._send_deny(
                 event.from_instance,
                 nonce,
-                "issuer storage error during token consume",
+                deny_reason or "invite redeem denied by issuer",
                 routed_route_id=routed_route_id,
             )
             return
-
-        if row is None:
-            await self._send_deny(
-                event.from_instance,
-                nonce,
-                "invite token invalid, expired, or exhausted",
-                routed_route_id=routed_route_id,
-            )
-            return
-
-        space_id = str(row.get("space_id") or "")
-        if not space_id:
-            await self._send_deny(
-                event.from_instance,
-                nonce,
-                "invite token row missing space_id",
-                routed_route_id=routed_route_id,
-            )
-            return
-
-        # §13.7 — a ban on the issuer side overrides a valid token.
-        try:
-            banned = await self._spaces.is_banned(space_id, redeemer_user_id)
-        except Exception:
-            log.exception(
-                "SPACE_INVITE_TOKEN_REDEEM: is_banned raised for"
-                " space_id=%s user_id=%s",
-                space_id,
-                redeemer_user_id,
-            )
-            await self._send_deny(
-                event.from_instance,
-                nonce,
-                "issuer storage error during ban check",
-                routed_route_id=routed_route_id,
-            )
-            return
-        if banned:
-            await self._send_deny(
-                event.from_instance,
-                nonce,
-                "banned from this space",
-                routed_route_id=routed_route_id,
-            )
-            return
-
-        # Seat the remote redeemer + register their instance so the
-        # issuer's outbound fan-outs reach them.
-        try:
-            await self._remote_members.add(
-                space_id=space_id,
-                instance_id=event.from_instance,
-                user_id=redeemer_user_id,
-                user_pk=redeemer_pk,
-                display_name=redeemer_display,
-            )
-            await self._spaces.add_space_instance(
-                space_id,
-                event.from_instance,
-            )
-        except Exception:
-            log.exception(
-                "SPACE_INVITE_TOKEN_REDEEM: seating remote member failed"
-                " for space_id=%s instance=%s user_id=%s",
-                space_id,
-                event.from_instance,
-                redeemer_user_id,
-            )
-            await self._send_deny(
-                event.from_instance,
-                nonce,
-                "issuer storage error during member seat",
-                routed_route_id=routed_route_id,
-            )
-            return
-
-        # Pull the full space row so we can ship metadata + the
-        # member roster back to the receiver. Without the meta the
-        # receiver's stub card is blank; without the roster the
-        # receiver's Members tab shows only herself (see PR for
-        # #115).
-        space = await self._spaces.get(space_id)
-        ack_payload: dict = {
-            "redeem_nonce": nonce,
-            "space_id": space_id,
-            "role": SpaceRole.MEMBER.value,
-        }
-        if space is not None:
-            ack_payload["space_meta"] = await build_space_snapshot_for_federation(
-                space,
-                space_repo=self._spaces,
-                remote_member_repo=self._remote_members,
-                user_repo=self._users,
-                own_instance_id=self._federation.own_instance_id,
-                cover_repo=self._cover_repo,
-                icon_repo=self._icon_repo,
-                space_crypto_service=self._space_crypto,
-            )
+        ack_payload = {"redeem_nonce": nonce, **ack_payload}
         if routed_route_id is not None and self._routed_handler is not None:
             await self._routed_handler.send_routed_reply(
                 route_id=routed_route_id,
@@ -615,6 +688,102 @@ class SpaceInviteTokenRedeemCoordinator:
                 event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
                 payload=ack_payload,
             )
+
+    async def _consume_seat_and_build_ack(
+        self,
+        *,
+        token: str,
+        redeemer_instance_id: str,
+        redeemer_user_id: str,
+        redeemer_pk: str | None,
+        redeemer_display: str | None,
+    ) -> tuple[dict | None, str | None]:
+        """Issuer-side authorization + seating for one redeem.
+
+        Returns ``(ack_body, None)`` on success or ``(None, reason)`` on
+        every denial. Shared verbatim by the §D2 event path
+        (:meth:`_on_redeem`) and the §D2b bootstrap path so the atomic
+        token consume, the §13.7 ban check and the remote-member seating
+        can never diverge between them.
+
+        ``consume_invite_token`` is a single atomic UPDATE guarded on
+        ``uses_remaining > 0`` and the expiry, so an unknown, expired or
+        exhausted token returns ``None`` here.
+        """
+        try:
+            row = await self._spaces.consume_invite_token(token)
+        except Exception:
+            log.exception(
+                "invite redeem: consume_invite_token raised for token from %s",
+                redeemer_instance_id,
+            )
+            return None, "issuer storage error during token consume"
+
+        if row is None:
+            return None, "invite token invalid, expired, or exhausted"
+
+        space_id = str(row.get("space_id") or "")
+        if not space_id:
+            return None, "invite token row missing space_id"
+
+        # §13.7 — a ban on the issuer side overrides a valid token.
+        try:
+            banned = await self._spaces.is_banned(space_id, redeemer_user_id)
+        except Exception:
+            log.exception(
+                "invite redeem: is_banned raised for space_id=%s user_id=%s",
+                space_id,
+                redeemer_user_id,
+            )
+            return None, "issuer storage error during ban check"
+        if banned:
+            return None, "banned from this space"
+
+        # Seat the remote redeemer + register their instance so the
+        # issuer's outbound fan-outs reach them.
+        try:
+            await self._remote_members.add(
+                space_id=space_id,
+                instance_id=redeemer_instance_id,
+                user_id=redeemer_user_id,
+                user_pk=redeemer_pk,
+                display_name=redeemer_display,
+            )
+            await self._spaces.add_space_instance(
+                space_id,
+                redeemer_instance_id,
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: seating remote member failed for"
+                " space_id=%s instance=%s user_id=%s",
+                space_id,
+                redeemer_instance_id,
+                redeemer_user_id,
+            )
+            return None, "issuer storage error during member seat"
+
+        # Pull the full space row so we can ship metadata + the member
+        # roster back to the receiver. Without the meta the receiver's
+        # stub card is blank; without the roster the receiver's Members
+        # tab shows only herself (#115).
+        space = await self._spaces.get(space_id)
+        ack_body: dict = {
+            "space_id": space_id,
+            "role": SpaceRole.MEMBER.value,
+        }
+        if space is not None:
+            ack_body["space_meta"] = await build_space_snapshot_for_federation(
+                space,
+                space_repo=self._spaces,
+                remote_member_repo=self._remote_members,
+                user_repo=self._users,
+                own_instance_id=self._federation.own_instance_id,
+                cover_repo=self._cover_repo,
+                icon_repo=self._icon_repo,
+                space_crypto_service=self._space_crypto,
+            )
+        return ack_body, None
 
     async def _on_redeem_ack(self, event: "FederationEvent") -> None:
         """Receiver-side: resolve the in-flight Future with the issuer's
@@ -653,6 +822,393 @@ class SpaceInviteTokenRedeemCoordinator:
             return
         reason = str(p.get("reason") or "invite redeem denied by issuer")
         fut.set_exception(SpacePermissionError(reason))
+
+    # ── §D2b bootstrap redeem (no pre-existing relationship) ───────────
+
+    async def _request_redeem_bootstrap(
+        self,
+        token: str,
+        *,
+        viewer_user_id: str,
+        user: Any,
+        hint: InviteBootstrapHint,
+    ) -> dict:
+        """Seal a redeem request to the issuer and await the sealed reply.
+
+        The issuer is a stranger: no pairing, no mesh route, no address.
+        What we do have is the invite blob, and **possession of a valid
+        token is the authorization** — so the request authenticates
+        itself (Ed25519 over canonical JSON with our own identity key,
+        TOFU-verified by the issuer) and travels as an opaque blob the
+        relay can only route, never read.
+
+        Raises :class:`SpacePermissionError` on a refusal we can name
+        locally (issuer too old, unsealed material, relay down, DENY
+        from the issuer) and ``TimeoutError`` when no reply lands.
+        """
+        assert self._relay_sender is not None
+        # Version gate. There is no peer row to run ``peer_supports``
+        # against — which is exactly why the invite blob carries the
+        # issuer's advertised proto_version. An older issuer has no
+        # handler for this envelope and would simply drop it, so fail
+        # with the unchanged "pair first" wording instead of burning a
+        # timeout on it.
+        if hint.proto_version < FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM:
+            raise SpacePermissionError(
+                "no route to issuer — pair with them, or with one of"
+                " their household's peers",
+            )
+
+        local = await self._federation_repo.get_local_identity()
+        own_display_name = str((local or {}).get("display_name") or "")
+        nonce = uuid.uuid4().hex
+        body = {
+            "kind": KIND_REDEEM,
+            "invite_token": token,
+            "space_id": hint.space_id,
+            "redeem_nonce": nonce,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "instance_id": self._federation.own_instance_id,
+            "identity_pk": self._federation.own_identity_pk.hex(),
+            "keywrap_pk": self._keywrap_public_key.hex(),
+            "keywrap_sig": self._keywrap_sig,
+            "display_name": own_display_name,
+            "proto_version": OURS,
+            "redeemer_user_id": viewer_user_id,
+            "redeemer_display_name": (user.display_name or user.username),
+            "redeemer_public_key": getattr(user, "public_key", None),
+        }
+        try:
+            envelope = seal_bootstrap_envelope(
+                body=body,
+                identity_seed=self._federation.own_identity_seed,
+                recipient_instance_id=hint.instance_id,
+                recipient_identity_pk=hint.identity_pk,
+                recipient_keywrap_pk=hint.keywrap_pk,
+                recipient_keywrap_sig=hint.keywrap_sig,
+            )
+        except ValueError as exc:
+            log.warning("invite bootstrap: refusing to seal redeem: %s", exc)
+            raise SpacePermissionError(
+                "this invite link's keys don't check out — ask for a fresh one",
+            ) from exc
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[dict] = loop.create_future()
+        self._pending[nonce] = fut
+        self._bootstrap_hints[nonce] = hint
+        try:
+            delivered = await self._relay_sender.send_sealed_envelope(
+                to_instance_id=hint.instance_id,
+                envelope=envelope,
+            )
+            if not delivered:
+                raise SpacePermissionError(
+                    "couldn't reach the issuing household through the "
+                    "connection server — try again later",
+                )
+            try:
+                return await asyncio.wait_for(fut, timeout=self._timeout)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    "issuer did not respond to invite-token redeem",
+                ) from exc
+        finally:
+            self._pending.pop(nonce, None)
+            self._bootstrap_hints.pop(nonce, None)
+
+    async def handle_relayed_envelope(self, envelope: dict) -> dict:
+        """Inbound entry point for one relayed §D2b envelope.
+
+        The relay hands us an opaque blob with no idea which leg it is
+        (that is the point — it is identity-free), so this one entry
+        point opens it and dispatches on the inner ``kind``.
+
+        The §24.11 pipeline is deliberately **not** used: it resolves
+        signing keys from a CONFIRMED ``remote_instances`` row, which by
+        definition does not exist for a stranger. §11 pairing has the
+        identical problem and solves it the same way — a self-signed,
+        TOFU-verified body dispatched ahead of the pipeline
+        (``docs/protocol/pairing.md``). The pipeline is untouched for
+        every ordinary event.
+
+        Raises :class:`ValueError` on any validation failure; the caller
+        drops the blob.
+        """
+        if not self._bootstrap_ready():
+            raise ValueError("invite bootstrap is not configured on this host")
+        # Process-wide throttle BEFORE the unseal — the cheapest place
+        # to shed a flood.
+        if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
+            "invite-bootstrap:inbound",
+            limit=BOOTSTRAP_INBOUND_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        ):
+            raise ValueError("invite bootstrap inbound rate limit exceeded")
+        body = open_bootstrap_envelope(
+            envelope=envelope,
+            keywrap_private_key=self._keywrap_private_key,
+            expected_kinds=frozenset({KIND_REDEEM, KIND_REDEEM_ACK, KIND_REDEEM_DENY}),
+        )
+        # Per-sender throttle, once the signature has proven who the
+        # sender is (an unverified id would let anyone burn somebody
+        # else's budget).
+        sender = str(body.get("instance_id") or "")
+        if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
+            f"invite-bootstrap:sender:{sender}",
+            limit=BOOTSTRAP_PER_SENDER_LIMIT,
+            window_s=BOOTSTRAP_PER_SENDER_WINDOW_S,
+        ):
+            raise ValueError("invite bootstrap per-sender rate limit exceeded")
+
+        # Replay guard on the nonce, on the same cache + durable table
+        # the §24.11 pipeline uses for ``msg_id``. Namespaced so a
+        # bootstrap nonce can never collide with an envelope msg_id.
+        nonce = str(body.get("redeem_nonce") or "")
+        if not nonce:
+            raise ValueError("bootstrap body missing redeem_nonce")
+        if await self._federation.note_replay_id(f"invite-bootstrap:{nonce}"):
+            raise ValueError(f"Replay detected: bootstrap nonce={nonce!r}")
+
+        if body["kind"] == KIND_REDEEM:
+            return await self._handle_bootstrap_redeem(body)
+        return await self._handle_bootstrap_reply(body)
+
+    async def _handle_bootstrap_redeem(self, body: dict) -> dict:
+        """Issuer-side: authorize a stranger's sealed redeem, reply sealed.
+
+        Every gate above this point (shape caps, ``derive_instance_id``
+        anti-tamper, signature, timestamp, replay) already ran in
+        :func:`~socialhome.federation.invite_bootstrap
+        .open_bootstrap_envelope` / :meth:`handle_relayed_envelope`.
+        What is left is the authorization itself: an atomic token
+        consume, the ban check, and the seating — all shared with the
+        §D2 path via :meth:`_consume_seat_and_build_ack`.
+        """
+        redeemer_instance_id = str(body["instance_id"])
+        nonce = str(body["redeem_nonce"])
+        # We can only answer a redeemer whose key-wrap key is genuinely
+        # bound to the identity that signed the request. An unbound one
+        # means either a corrupt blob or an attempt to have us seal the
+        # space snapshot (content key included!) to somebody else's key.
+        keywrap_pub = verify_peer_keywrap(
+            instance_id=redeemer_instance_id,
+            identity_pk=str(body.get("identity_pk") or ""),
+            keywrap_pk=str(body.get("keywrap_pk") or ""),
+            keywrap_sig=str(body.get("keywrap_sig") or ""),
+        )
+        if keywrap_pub is None:
+            raise ValueError(
+                "bootstrap redeem key-wrap key is not bound to its identity",
+            )
+
+        redeemer_user_id = str(body.get("redeemer_user_id") or "")
+        if not redeemer_user_id:
+            await self._send_bootstrap_deny(
+                body,
+                nonce,
+                "redeemer_user_id missing from redeem payload",
+            )
+            return {"ok": True, "denied": True}
+
+        ack_body, deny_reason = await self._consume_seat_and_build_ack(
+            token=str(body.get("invite_token") or ""),
+            redeemer_instance_id=redeemer_instance_id,
+            redeemer_user_id=redeemer_user_id,
+            redeemer_pk=(
+                str(body["redeemer_public_key"])
+                if body.get("redeemer_public_key")
+                else None
+            ),
+            redeemer_display=(
+                str(body["redeemer_display_name"])
+                if body.get("redeemer_display_name")
+                else None
+            ),
+        )
+        if ack_body is None:
+            await self._send_bootstrap_deny(
+                body,
+                nonce,
+                deny_reason or "invite redeem denied by issuer",
+            )
+            return {"ok": True, "denied": True}
+
+        # Space-scoped instance row — NOT a social peer. Seated only
+        # once the token has actually been consumed.
+        await self._seat_space_session_instance(
+            instance_id=redeemer_instance_id,
+            display_name=str(body.get("display_name") or redeemer_instance_id[:8]),
+            identity_pk=str(body["identity_pk"]),
+            keywrap_pk=str(body["keywrap_pk"]),
+            keywrap_sig=str(body["keywrap_sig"]),
+            proto_version=int(body.get("proto_version") or 1),
+            is_redeemer=False,
+        )
+        await self._send_bootstrap_reply(
+            body,
+            {"kind": KIND_REDEEM_ACK, "redeem_nonce": nonce, **ack_body},
+        )
+        return {"ok": True, "space_id": ack_body["space_id"]}
+
+    async def _handle_bootstrap_reply(self, body: dict) -> dict:
+        """Redeemer-side: resolve the in-flight redeem on a sealed reply.
+
+        The reply is pinned to the issuer identity the invite blob
+        advertised — a body that opens, verifies and is in-window but
+        comes from a *different* household than the one we addressed is
+        dropped rather than resolving the Future.
+        """
+        nonce = str(body["redeem_nonce"])
+        hint = self._bootstrap_hints.get(nonce)
+        fut = self._pending.get(nonce)
+        if hint is None or fut is None or fut.done():
+            # Late reply after our timeout, or a nonce that was never
+            # ours. Nothing to resolve.
+            return {"ok": True, "stale": True}
+        if str(body.get("instance_id") or "") != hint.instance_id:
+            raise ValueError(
+                "bootstrap reply came from a household we did not address",
+            )
+        if body["kind"] == KIND_REDEEM_DENY:
+            fut.set_exception(
+                SpacePermissionError(
+                    str(body.get("reason") or "invite redeem denied by issuer"),
+                )
+            )
+            return {"ok": True, "denied": True}
+        fut.set_result(
+            {
+                "space_id": str(body.get("space_id") or ""),
+                "role": str(body.get("role") or SpaceRole.MEMBER.value),
+                "space_meta": body.get("space_meta"),
+            }
+        )
+        return {"ok": True}
+
+    async def _send_bootstrap_deny(
+        self,
+        request_body: dict,
+        nonce: str,
+        reason: str,
+    ) -> None:
+        """Best-effort sealed DENY back to the redeemer.
+
+        Same contract as :meth:`_send_deny` on the §D2 path — logged,
+        never raised: a failed DENY just leaves the redeemer waiting out
+        its own timeout, which is what a dropped frame looks like too.
+        """
+        try:
+            await self._send_bootstrap_reply(
+                request_body,
+                {
+                    "kind": KIND_REDEEM_DENY,
+                    "redeem_nonce": nonce,
+                    "reason": reason,
+                },
+            )
+        except Exception:
+            log.exception("invite bootstrap: DENY ship-back failed")
+
+    async def _send_bootstrap_reply(self, request_body: dict, reply: dict) -> None:
+        """Seal ``reply`` to the requester's key-wrap key and relay it."""
+        assert self._relay_sender is not None
+        local = await self._federation_repo.get_local_identity()
+        envelope = seal_bootstrap_envelope(
+            body={
+                **reply,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "instance_id": self._federation.own_instance_id,
+                "identity_pk": self._federation.own_identity_pk.hex(),
+                "keywrap_pk": self._keywrap_public_key.hex(),
+                "keywrap_sig": self._keywrap_sig,
+                "display_name": str((local or {}).get("display_name") or ""),
+                "proto_version": OURS,
+            },
+            identity_seed=self._federation.own_identity_seed,
+            recipient_instance_id=str(request_body["instance_id"]),
+            recipient_identity_pk=str(request_body["identity_pk"]),
+            recipient_keywrap_pk=str(request_body["keywrap_pk"]),
+            recipient_keywrap_sig=str(request_body["keywrap_sig"]),
+        )
+        await self._relay_sender.send_sealed_envelope(
+            to_instance_id=str(request_body["instance_id"]),
+            envelope=envelope,
+        )
+
+    async def _seat_space_session_instance(
+        self,
+        *,
+        instance_id: str,
+        display_name: str,
+        identity_pk: str,
+        keywrap_pk: str,
+        keywrap_sig: str,
+        proto_version: int,
+        is_redeemer: bool,
+    ) -> None:
+        """Persist the counterpart as a **space-scoped** instance row.
+
+        :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
+        is what makes this row space-scoped rather than a full social
+        peer: DMs, the user roster, presence, the friends constellation,
+        app / calendar peer pickers and the auto-pair vouching relay all
+        read the *social* peer list, which excludes this source. Space
+        federation — the space's own events, roster, content key, mesh
+        relaying — reads the space's own instance list and works
+        normally.
+
+        Session keys come from a static-static X25519 exchange over the
+        two households' published key-wrap keys (each already verified
+        as bound to its identity), so the pair holds directional AES
+        keys without a further round-trip. No ``PairingConfirmed`` is
+        published — that event kicks off the user roster sync, DM
+        history backfill and public-space snapshot, none of which a
+        space-scoped relationship is entitled to.
+        """
+        assert self._key_manager is not None
+        peer_keywrap_pub = verify_peer_keywrap(
+            instance_id=instance_id,
+            identity_pk=identity_pk,
+            keywrap_pk=keywrap_pk,
+            keywrap_sig=keywrap_sig,
+        )
+        if peer_keywrap_pub is None:
+            raise ValueError(
+                "refusing to seat a space-session instance whose key-wrap "
+                "key is not bound to its identity",
+            )
+        key_self_to_remote, key_remote_to_self = derive_space_session_keys(
+            own_keywrap_priv=self._keywrap_private_key,
+            peer_keywrap_pub=peer_keywrap_pub,
+            is_redeemer=is_redeemer,
+        )
+        existing = await self._federation_repo.get_instance(instance_id)
+        if existing is not None:
+            # Never downgrade or re-key an existing relationship (a real
+            # pairing, or a second space joined with the same household)
+            # off the back of an invite link.
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        await self._federation_repo.save_instance(
+            RemoteInstance(
+                id=instance_id,
+                display_name=display_name,
+                remote_identity_pk=identity_pk,
+                key_self_to_remote=self._key_manager.encrypt(key_self_to_remote),
+                key_remote_to_self=self._key_manager.encrypt(key_remote_to_self),
+                # No address is exchanged on this path by design — the
+                # invite blob is public, so neither household publishes
+                # an inbox URL to the other. See the "reaching a
+                # bootstrap member" note in docs/protocol/invites.md.
+                remote_inbox_url="",
+                local_inbox_id=secrets.token_urlsafe(24),
+                status=PairingStatus.CONFIRMED,
+                source=InstanceSource.SPACE_SESSION,
+                proto_version=proto_version,
+                paired_at=now,
+            )
+        )
 
     # ── Internal helpers ───────────────────────────────────────────────
 

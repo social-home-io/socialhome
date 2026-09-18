@@ -131,6 +131,9 @@ class InMemoryFederationRepo:
         self._instances[inst.id] = inst
         return inst
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(
         self,
         *,
@@ -391,6 +394,24 @@ def test_wrong_key_signature_rejected():
     sig = svc._sign_envelope(message)
     other_kp = generate_identity_keypair()
     assert not svc._verify_signature(message, sig, other_kp.public_key)
+
+
+# ─── note_replay_id ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_note_replay_id_is_check_and_insert():
+    """Off-pipeline callers (the §D2b invite bootstrap) share the same
+    replay cache + durable table, so a nonce can be spent exactly once."""
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo)
+
+    assert await svc.note_replay_id("invite-bootstrap:n1") is False
+    assert await svc.note_replay_id("invite-bootstrap:n1") is True
+    # Persisted, so a restart can't re-open the window.
+    assert "invite-bootstrap:n1" in dict(await fed_repo.load_replay_cache())
+    # A different id is unaffected.
+    assert await svc.note_replay_id("invite-bootstrap:n2") is False
 
 
 # ─── send_event ───────────────────────────────────────────────────────────

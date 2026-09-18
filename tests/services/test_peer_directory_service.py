@@ -68,6 +68,13 @@ class _FakeFedRepo:
     def __init__(self, peers: list[_PeerRow]) -> None:
         self._peers = peers
 
+    async def list_social_instances(self):
+        return [
+            p
+            for p in self._peers
+            if getattr(p.status, "value", p.status) == "confirmed"
+        ]
+
     async def list_instances(self):
         return list(self._peers)
 

@@ -42,6 +42,9 @@ class FakeFederationRepo:
         self._peers = peers
         self.list_kwargs: dict | None = None
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(self, **kwargs) -> list[FakePeer]:
         self.list_kwargs = kwargs
         return list(self._peers)

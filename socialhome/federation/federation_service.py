@@ -777,6 +777,27 @@ class FederationService:
         )
         self._replay_cache.load(entries)
 
+    async def note_replay_id(self, msg_id: str) -> bool:
+        """Check-and-insert one id against the shared replay cache.
+
+        Returns ``True`` if this id was already seen inside the window
+        (i.e. the caller is looking at a replay and must drop it), and
+        records it otherwise. Backed by the same
+        :class:`~socialhome.crypto.ReplayCache` and the same durable
+        ``federation_replay_cache`` table the §24.11 pipeline uses, so a
+        restart cannot re-open a window — see
+        :func:`~socialhome.federation.inbound_validator.make_check_replay`
+        and ``make_persist_replay``.
+
+        Callers outside the pipeline namespace their ids (e.g.
+        ``"invite-bootstrap:<nonce>"``) so they can never collide with
+        an envelope ``msg_id``.
+        """
+        if self._replay_cache.seen(msg_id, now=datetime.now(timezone.utc)):
+            return True
+        await self._federation_repo.insert_replay_id(msg_id)
+        return False
+
     # ─── HTTP client helper ───────────────────────────────────────────────
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:

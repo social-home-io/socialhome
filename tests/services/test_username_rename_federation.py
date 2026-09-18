@@ -96,6 +96,9 @@ class _OnePeerRepo:
     def __init__(self, peer_id: str) -> None:
         self._peer_id = peer_id
 
+    async def list_social_instances(self):
+        return await self.list_instances("confirmed")
+
     async def list_instances(self, status: str):
         assert status == "confirmed"
         return [self._Peer(self._peer_id)]

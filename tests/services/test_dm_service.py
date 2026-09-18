@@ -425,6 +425,20 @@ def _unconfirmed_peer(instance_id: str):
     return SimpleNamespace(id=instance_id, status=PairingStatus.PENDING_SENT)
 
 
+def _space_session_peer(instance_id: str):
+    """CONFIRMED, but reached through a §D2b invite link — a household we
+    share a space with, never a DM peer."""
+    from types import SimpleNamespace
+
+    from socialhome.domain.federation import InstanceSource, PairingStatus
+
+    return SimpleNamespace(
+        id=instance_id,
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+    )
+
+
 async def _attach_remote_member(stack, *, conversation_id, instance_id, username):
     from datetime import datetime, timezone
 
@@ -766,3 +780,27 @@ async def test_dm_message_outbound_no_repo_fans_to_every_peer(stack):
 
     sent = [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE]
     assert {s["to"] for s in sent} == {"peer-a", "peer-b"}
+
+
+async def test_send_skips_space_session_peer(stack):
+    """§D2b — sharing a space via an invite link does not open a DM
+    channel. The row is CONFIRMED, so only the ``source`` check keeps
+    the message from federating."""
+    fed = _FakeFederationService()
+    repo = _FakeFederationRepo({"peer-a": _space_session_peer("peer-a")})
+    stack.dm_svc.attach_federation(fed, repo, own_instance_id="self")
+
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    await _attach_remote_member(
+        stack,
+        conversation_id=dm.id,
+        instance_id="peer-a",
+        username="bob",
+    )
+    await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
+
+    from socialhome.domain.federation import FederationEventType
+
+    assert [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE] == []

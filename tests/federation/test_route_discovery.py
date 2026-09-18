@@ -71,6 +71,9 @@ class _FakeFederationRepo:
     async def get_instance(self, instance_id: str) -> _FakeInstance | None:
         return self._instances.get(instance_id)
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(
         self,
         *,

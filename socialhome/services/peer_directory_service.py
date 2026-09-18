@@ -19,7 +19,7 @@ from ..domain.events import (
     PairingConfirmed,
     SpaceConfigChanged,
 )
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import FederationEventType
 from ..domain.space import SpaceType, normalize_category
 from ..infrastructure.event_bus import EventBus
 
@@ -85,10 +85,11 @@ class PeerDirectoryService:
 
     async def _broadcast_snapshot(self) -> None:
         snapshot = await self._build_snapshot()
-        peers = await self._federation_repo.list_instances()
+        # §D2b: social surface — a ``space_session`` row (a household we
+        # only share a space with, via an invite link) is not a social
+        # peer, so read the social list, not every CONFIRMED row.
+        peers = await self._federation_repo.list_social_instances()
         for peer in peers:
-            if peer.status is not PairingStatus.CONFIRMED:
-                continue
             try:
                 await self._federation.send_event(
                     to_instance_id=peer.id,

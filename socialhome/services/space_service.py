@@ -38,6 +38,7 @@ from ..crypto import generate_identity_keypair
 if TYPE_CHECKING:
     import pathlib
 
+    from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
 from ..domain.events import (
@@ -178,6 +179,19 @@ DEFAULT_INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 #: Post content caps — matches FeedService values.
 MAX_POST_LENGTH = 10_000
 MAX_COMMENT_LENGTH = 2_000
+
+
+#: Default lifetime of an invite token minted through the SPA. Seven days
+#: is long enough to hand a link to somebody in person, message it, and
+#: have them get round to it over a weekend — and short enough that a
+#: link leaked into a chat backup, a screenshot or a browser history
+#: stops working before it can be crawled. Before this, a SPA-minted
+#: token carried no expiry at all and stayed live until its uses ran
+#: out; the §D2b bootstrap redeem makes such a link redeemable by a
+#: complete stranger, so an unbounded lifetime is no longer defensible.
+#: Callers can still override per token (``expires_at`` / ``ttl_seconds``,
+#: ``0`` meaning "never").
+DEFAULT_INVITE_TOKEN_TTL_SECONDS: int = 7 * 24 * 3600
 
 
 class SpaceService(SpaceMemberGuardMixin):
@@ -3092,6 +3106,7 @@ class SpaceService(SpaceMemberGuardMixin):
         *,
         user_id: str,
         issuer_instance_id: str | None = None,
+        bootstrap: "InviteBootstrapHint | None" = None,
     ) -> dict:
         """Consume an invite token, possibly via a cross-instance round-trip.
 
@@ -3102,6 +3117,12 @@ class SpaceService(SpaceMemberGuardMixin):
         handshakes with the issuer and returns the same shape. Raises
         :class:`SpacePermissionError` (unpaired / banned / denied) or
         ``TimeoutError`` (issuer unreachable).
+
+        ``bootstrap`` carries what the redeeming household read out of a
+        public invite blob (§D2b). It is used only when the issuer is
+        neither a confirmed peer nor mesh-reachable — the token is then
+        the sole authorization and the redeem travels sealed through a
+        connection server.
         """
         if issuer_instance_id is None or issuer_instance_id == self._own_instance_id:
             member = await self.accept_invite_token(token, user_id=user_id)
@@ -3114,6 +3135,7 @@ class SpaceService(SpaceMemberGuardMixin):
             token,
             viewer_user_id=user_id,
             issuer_instance_id=issuer_instance_id,
+            bootstrap=bootstrap,
         )
 
     async def accept_invite_token(

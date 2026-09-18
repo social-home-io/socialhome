@@ -18,6 +18,9 @@ class _FakeRepo:
         self._raises = raises
         self.calls = []
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(self, *, status):
         self.calls.append(status)
         if self._raises:
@@ -110,3 +113,37 @@ async def test_send_to_instance_is_fail_soft():
 async def test_send_to_instance_noop_without_federation():
     svc = _Sender(None)
     await svc.send_to_instance("a", "EVT", {})
+
+
+class _SourceAwareRepo:
+    """Repo double that distinguishes the two peer lists.
+
+    ``list_instances`` returns everything CONFIRMED (including the §D2b
+    ``space_session`` household); ``list_social_instances`` returns only
+    the socially-paired one. A surface that regresses to the former is
+    caught by the assertion, not by a mock call count.
+    """
+
+    def __init__(self):
+        self.social_calls = 0
+
+    async def list_instances(self, **kwargs):
+        return [_Peer("paired"), _Peer("space-session")]
+
+    async def list_social_instances(self):
+        self.social_calls += 1
+        return [_Peer("paired")]
+
+
+async def test_confirmed_peers_excludes_space_session_households():
+    """§D2b — joining somebody's space via an invite link must not put
+    them on the social fan-out list (profile updates, capabilities, URL
+    changes, moments, highlights all ride this mixin)."""
+    repo = _SourceAwareRepo()
+    svc = _Broadcaster(_FakeFederation(own="me"), repo)
+
+    peers = await svc.confirmed_peers()
+
+    assert [p.id for p in peers] == ["paired"]
+    assert repo.social_calls == 1
+    assert await svc.list_confirmed_peer_ids() == ["paired"]

@@ -1106,6 +1106,50 @@ async def test_create_invite_token(client):
     assert "token" in body
 
 
+async def test_create_invite_token_rejects_bad_ttl(client):
+    """``ttl_seconds`` bounds the link's life; garbage is a 422, not a
+    silently-immortal token."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "TtlSpace"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    for bad in ("soon", -1):
+        resp = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"uses": 1, "ttl_seconds": bad},
+            headers=_auth(client._admin_token),
+        )
+        assert resp.status == 422
+
+
+async def test_create_invite_token_with_ttl_expires(client):
+    """A token minted with a 1-second TTL is dead on arrival a moment
+    later — proof the value reaches the DB row, not just the API."""
+    import asyncio
+
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "TtlSpace2"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r2 = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1, "ttl_seconds": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r2.json())["token"]
+    await asyncio.sleep(1.5)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status >= 400
+
+
 async def test_join_via_invite_token(client):
     """POST /api/spaces/join with a valid token adds the user as member."""
     r = await client.post(

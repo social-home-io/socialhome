@@ -416,7 +416,25 @@ from __future__ import annotations
 #:   ``route_discovery.ROUTE_CACHE_TTL_S`` expires (#648 window). Space-scoped
 #:   (the stuck envelopes are space content), so it appears in the per-space
 #:   compatibility banner.
-OURS: int = 28
+#: * **v_29** (2026-09-18) — invite-link bootstrap redeem:
+#:   :data:`FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM`. Somebody who
+#:   opens a space invite link from a household they have never federated with
+#:   seals a self-authenticating redeem envelope to the issuer's published
+#:   key-wrap key and relays it by instance id through the connection server;
+#:   the issuer validates it (``derive_instance_id`` anti-tamper, Ed25519
+#:   signature, ±300 s timestamp, nonce replay, atomic token consume, ban, age
+#:   gate), seats the redeemer behind an
+#:   :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
+#:   instance row, and replies sealed through the same relay. The redeemer
+#:   gates the attempt on the issuer's ``proto_version`` **from the invite
+#:   blob** — there is no peer row to run ``peer_supports`` against, which is
+#:   why the blob carries it. **Fail-fast, not best-effort.** Older-issuer
+#:   fallback: the redeemer reads the sub-v_29 version in the blob and fails
+#:   with today's "pair with them, or with one of their household's peers"
+#:   message, so no envelope is burned on a household that can't answer.
+#:   Space-scoped (it is how a household joins a space at all), so it appears
+#:   in the per-space compatibility banner.
+OURS: int = 29
 
 
 class FederationCapability:
@@ -675,6 +693,18 @@ class FederationCapability:
     #: content), so it appears in the per-space compatibility banner.
     MIN_FOR_ROUTE_STALE_NACK = 28
 
+    #: Minimum proto_version where the issuing household understands the
+    #: §D2b invite-link **bootstrap** redeem — a sealed, self-authenticating
+    #: redeem envelope relayed by instance id, from a household that is
+    #: neither a confirmed peer nor mesh-reachable. Gated on the version the
+    #: public invite blob advertises rather than on ``peer_supports``: there
+    #: is no ``remote_instances`` row for a stranger, so the blob is the only
+    #: place the version can come from. A sub-v_29 issuer has no handler and
+    #: would silently drop the envelope, so the redeemer refuses up front with
+    #: the unchanged "pair with them, or with one of their household's peers"
+    #: message instead of waiting out a timeout.
+    MIN_FOR_INVITE_BOOTSTRAP_REDEEM = 29
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -736,6 +766,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "UUID identity anchor",
     ),
     (
+        FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM,
+        "Invite-link bootstrap redeem",
+    ),
+    (
         FederationCapability.MIN_FOR_USER_MOVE,
         "User move-out link",
     ),
@@ -793,6 +827,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP,
         FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS,
         FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
+        FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM,
     }
 )
 

@@ -127,6 +127,20 @@ class FederationEventType(str, enum.Enum):
     SPACE_INVITE_TOKEN_REDEEM = "space_invite_token_redeem"
     SPACE_INVITE_TOKEN_REDEEM_ACK = "space_invite_token_redeem_ack"
     SPACE_INVITE_TOKEN_REDEEM_DENY = "space_invite_token_redeem_deny"
+    # ── §D2b invite-link bootstrap redeem (v_29) ──
+    #
+    # Same intent as the three above, but between households with **no**
+    # pre-existing relationship: no confirmed pair, no mesh route, no
+    # address. The body is sealed to the counterpart's published
+    # key-wrap key and relayed by instance id through a connection
+    # server, so these never ride an encrypted federation envelope and
+    # never reach the §24.11 pipeline — they are dispatched ahead of it
+    # exactly like the §11 pairing bootstrap. The values below are the
+    # inner ``kind`` discriminators inside the sealed blob (see
+    # ``socialhome.federation.invite_bootstrap``).
+    SPACE_INVITE_BOOTSTRAP_REDEEM = "space_invite_bootstrap_redeem"
+    SPACE_INVITE_BOOTSTRAP_REDEEM_ACK = "space_invite_bootstrap_redeem_ack"
+    SPACE_INVITE_BOOTSTRAP_REDEEM_DENY = "space_invite_bootstrap_redeem_deny"
     # ── Federation mesh routing (v_6 PR 2) ──
     #
     # Generic source-routed envelope. Wraps **any** inner

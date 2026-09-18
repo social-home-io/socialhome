@@ -629,6 +629,44 @@ async def test_consume_exhausted_token_returns_none(env):
     assert result is None
 
 
+async def test_consume_expired_tz_aware_token_returns_none(env):
+    """Regression: a tz-aware ISO expiry in the past must deny.
+
+    The guard used to compare ``expires_at`` to ``datetime('now')`` as a
+    string. Python writes ``2026-09-18T15:25:42+00:00`` and SQLite emits
+    ``2026-09-18 15:25:42``; ``T`` sorts above the space, so every
+    expiry looked like it was in the future and no invite token ever
+    expired — including the 5-minute ones minted for remote invites.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    await env.repo.save(_space("sp-expired"))
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    token = await env.repo.create_invite_token(
+        "sp-expired",
+        "uid-alice",
+        uses=1,
+        expires_at=past,
+    )
+    assert await env.repo.consume_invite_token(token) is None
+
+
+async def test_consume_future_tz_aware_token_succeeds(env):
+    from datetime import datetime, timedelta, timezone
+
+    await env.repo.save(_space("sp-live"))
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    token = await env.repo.create_invite_token(
+        "sp-live",
+        "uid-alice",
+        uses=1,
+        expires_at=soon,
+    )
+    row = await env.repo.consume_invite_token(token)
+    assert row is not None
+    assert row["space_id"] == "sp-live"
+
+
 async def test_consume_missing_token_returns_none(env):
     """consume_invite_token returns None for a non-existent token."""
     result = await env.repo.consume_invite_token("no-such-token")

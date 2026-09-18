@@ -376,9 +376,10 @@ class OnlineStatusService(VisibilityMixin, SingleTargetSender):
         if self._federation is None or self._federation_repo is None:
             return
         try:
-            instances = await self._federation_repo.list_instances(
-                status="confirmed",
-            )
+            # §D2b: social surface — a ``space_session`` row (a household
+            # we only share a space with, via an invite link) is NOT a
+            # social peer, so read the social list, not every CONFIRMED row.
+            instances = await self._federation_repo.list_social_instances()
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("online-status fan-out: list_confirmed failed: %s", exc)
             return

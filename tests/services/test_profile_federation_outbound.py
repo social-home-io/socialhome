@@ -106,6 +106,9 @@ class _FakeFedRepo:
     def __init__(self, peers: list[str]) -> None:
         self._peers = peers
 
+    async def list_social_instances(self):
+        return await self.list_instances("confirmed")
+
     async def list_instances(self, status: str):
         assert status == "confirmed"
         return [_Peer(p) for p in self._peers]
@@ -249,6 +252,9 @@ async def test_peer_id_missing_is_skipped():
     fed = _FakeFederationService()
 
     class _BrokenPeerRepo:
+        async def list_social_instances(self):
+            return await self.list_instances("confirmed")
+
         async def list_instances(self, status):
             class _NoId:
                 pass
