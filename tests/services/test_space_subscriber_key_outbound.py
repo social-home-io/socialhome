@@ -106,7 +106,7 @@ async def env(tmp_dir):
     crypto = SpaceContentEncryption(key_repo, kek, own_instance_id=own_iid)
     gfs = _CaptureGfs()
 
-    async def _make_space(space_id, stype, *, with_seed):
+    async def _make_space(space_id, stype, *, with_seed, join_mode=JoinMode.OPEN):
         skp = generate_space_keypair()
         await space_repo.save(
             Space(
@@ -118,7 +118,7 @@ async def env(tmp_dir):
                 config_sequence=0,
                 features=SpaceFeatures(),
                 space_type=stype,
-                join_mode=JoinMode.OPEN,
+                join_mode=join_mode,
             )
         )
         if with_seed:
@@ -674,4 +674,84 @@ async def test_reconcile_space_everywhere_is_fail_soft(recon_env):
     await recon_env["svc"].reconcile_space_everywhere("sp-down")
     await recon_env["svc"].reconcile_space("gfs-1", "sp-down")
 
+    assert recon_env["gfs"].calls == []
+
+
+# ─── invite_only: listed for discovery, never publicly readable ────────
+
+
+async def test_invite_only_space_seals_no_key_on_new_subscriber(env):
+    """A GLOBAL space whose ``join_mode`` is ``invite_only`` is listed in the
+    GFS directory (so people can discover it and ask for an invite) but is NOT
+    publicly readable: the content key is never sealed to a GFS subscriber, so
+    a subscriber holds only ciphertext it can never open."""
+    await env["make_space"](
+        "sp-inv",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    frame = _new_subscriber_frame(
+        "sp-inv", sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig
+    )
+
+    await env["svc"].handle(frame)
+
+    assert env["gfs"].calls == []
+
+
+async def test_request_join_mode_space_still_seals_key(env):
+    """``request`` stays publicly readable — only ``invite_only`` is gated."""
+    await env["make_space"](
+        "sp-req",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.REQUEST,
+    )
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    frame = _new_subscriber_frame(
+        "sp-req", sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig
+    )
+
+    await env["svc"].handle(frame)
+
+    assert len(env["gfs"].calls) == 1
+
+
+async def test_reconcile_skips_invite_only_space(recon_env):
+    """The reconcile path is gated too — and *before* the subscriber-list HTTP
+    round-trip, so an invite-only space never even asks the GFS who subscribed
+    to it."""
+    await recon_env["make_space"](
+        "sp-inv",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    recon_env["conn_repo"].add_conn("gfs-1")
+    recon_env["conn_repo"].publish("gfs-1", "sp-inv")
+
+    await recon_env["svc"].reconcile("gfs-1")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+async def test_reconcile_space_everywhere_skips_invite_only_space(recon_env):
+    """The post-rotation re-seal (``reconcile_space_everywhere``) funnels
+    through the same gate, so a key rotation never leaks the new epoch into an
+    invite-only space's subscriber set."""
+    await recon_env["make_space"](
+        "sp-inv",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    recon_env["conn_repo"].add_conn("gfs-1")
+    recon_env["conn_repo"].publish("gfs-1", "sp-inv")
+
+    await recon_env["svc"].reconcile_space_everywhere("sp-inv")
+
+    assert recon_env["session"].gets == []
     assert recon_env["gfs"].calls == []

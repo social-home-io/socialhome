@@ -114,6 +114,41 @@ sequenceDiagram
     Note over A,B: both sides ready to<br/>exchange encrypted content
 ```
 
+## `join_mode` gates public readability
+
+A space carries two independent dials: `space_type`
+(`private` / `household` / `public` / `global`) decides whether it is
+*discoverable*, and `join_mode` (`invite_only` / `open` / `request`) decides
+how a newcomer gets in. The column default and the `POST /api/spaces`
+default are both `invite_only`.
+
+**A public/global space whose `join_mode` is `invite_only` is listed for
+discovery but is not publicly readable.** Its metadata (name, description,
+icon) is still published to every paired connection server — that listing is
+how people find the space and ask for an invite — but its **content stream
+stops at the member households**:
+
+- no post is relayed to the GFS (`services/space_public_outbound.py`, both
+  the local-author and the owner-offline remote-author paths);
+- the per-space AES-256 content key is never sealed to a GFS subscriber
+  (`services/space_subscriber_key_outbound.py`, the `new_subscriber` handoff
+  and every reconcile entry point), so a subscriber cannot open even a
+  ciphertext it obtained some other way;
+- the pre-signed `public_relay` hint is not attached to the member broadcast
+  (`services/space_post_outbound.py`) — it exists only to let a seed-holding
+  member run the GFS relay, which is dead for this space.
+
+`open` and `request` stay publicly readable; `request` only means the host
+approves the *membership*, not the *reading*.
+
+**Members are unaffected.** Space content reaches member households through
+`broadcast_to_space_members` over `space_instances`, which is independent of
+the GFS relay and of the `public_relay` hint — including mesh-only remote
+members reached via `SPACE_ROUTED`. Turning a global space invite-only
+removes the public audience, never the federation.
+
+See [`discovery.md`](./discovery.md) for the GFS-side view.
+
 ## Dissolution (host hard-deletes; members keep a read-only archive)
 
 Dissolving a space is asymmetric: a **permanent removal** on the owner

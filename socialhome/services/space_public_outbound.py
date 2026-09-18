@@ -49,6 +49,12 @@ per-space content key, and authority-signs the GFS envelope with the space
 seed. An inbound event with no ``public_relay`` is the pure loop guard and is
 never re-fanned.
 
+Join-mode gate: a PUBLIC/GLOBAL space whose ``join_mode`` is ``invite_only``
+is published to the GFS *directory* (that is how people discover it and get
+invited) but is **not publicly readable** — no post of it is ever relayed,
+on either the local-author or the remote-author path. Members are unaffected:
+they receive content through ``broadcast_to_space_members``, not the GFS.
+
 This service is the encryption boundary: the cleartext post never leaves
 in a GFS-bound envelope (CLAUDE.md Encryption-First Rule). If the space
 has no content key, :meth:`SpaceContentEncryption.encrypt` raises
@@ -67,7 +73,7 @@ from ..authority_sig import (
     strip_authority_sig_fields,
 )
 from ..domain.events import SpacePostCreated
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_READABLE_JOIN_MODES, PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import (
     build_signed_author_inner,
@@ -155,6 +161,17 @@ class SpacePublicOutbound:
             return
         space = await self._spaces.get(event.space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # An invite-only public/global space is LISTED in the GFS directory
+        # (discovery + invites) but is NOT publicly readable: only invited
+        # members get content. Stop the relay at the source — nothing of its
+        # content stream ever reaches the GFS.
+        if space.join_mode not in PUBLIC_READABLE_JOIN_MODES:
+            log.debug(
+                "space_public.outbound: space %s is invite_only — not publicly "
+                "readable, skipping relay",
+                event.space_id,
+            )
             return
         # Only a seed-holder (owner or delegated admin) relays. A NULL seed
         # means this household can't authority-sign — skip silently.
@@ -260,6 +277,16 @@ class SpacePublicOutbound:
             return
         space = await self._spaces.get(event.space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # Same gate on the owner-offline path: a seed-holder must not launder
+        # another member's post into an invite-only space's (nonexistent)
+        # public stream.
+        if space.join_mode not in PUBLIC_READABLE_JOIN_MODES:
+            log.debug(
+                "space_public.outbound: space %s is invite_only — not publicly "
+                "readable, skipping remote-authored relay",
+                event.space_id,
+            )
             return
         seed = await self._spaces.get_space_seed(event.space_id)
         if seed is None:

@@ -646,6 +646,19 @@ class JoinMode(StrEnum):
     REQUEST = "request"
 
 
+#: The join modes under which a PUBLIC/GLOBAL space is *publicly readable* —
+#: i.e. its posts relay to the GFS and its content key may be sealed to a mere
+#: subscriber. An ``invite_only`` space is LISTED for discovery (that is how
+#: people find it and get invited) but only invited members ever get content.
+#: An allow-list rather than ``is not INVITE_ONLY`` so a future fourth join
+#: mode is non-readable until someone deliberately adds it here. Shared by the
+#: public-relay producers (``space_public_outbound`` + ``space_post_outbound``)
+#: and the subscriber key handoff (``space_subscriber_key_outbound``).
+PUBLIC_READABLE_JOIN_MODES: frozenset["JoinMode"] = frozenset(
+    {JoinMode.OPEN, JoinMode.REQUEST}
+)
+
+
 @dataclass(slots=True, frozen=True)
 class Space:
     """A space (the cross-household container for a group of people)."""

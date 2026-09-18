@@ -21,7 +21,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.post import Post, PostType
-from socialhome.domain.space import SpaceType
+from socialhome.domain.space import JoinMode, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.space_post_outbound import SpacePostOutbound
 from socialhome.services.space_public_author import (
@@ -34,6 +34,9 @@ from tests.services.test_space_public_author import _v25_author_signing_bytes
 @dataclass
 class _FakeSpace:
     space_type: SpaceType
+    #: Mirrors the real ``Space`` field. An ``invite_only`` public/global space
+    #: is listed for discovery but never GFS-relayed, so it gets no relay hint.
+    join_mode: JoinMode = JoinMode.OPEN
 
 
 @dataclass
@@ -674,3 +677,120 @@ async def test_public_space_without_identity_omits_public_relay():
     federation.broadcast_to_space_members.assert_awaited_once()
     payload = federation.broadcast_to_space_members.call_args.args[2]
     assert "public_relay" not in payload
+
+
+# ─── invite_only: listed for discovery, never publicly readable ────────
+
+
+@pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
+async def test_invite_only_public_space_omits_public_relay(tier):
+    """A public/global space whose ``join_mode`` is ``invite_only`` is listed
+    for discovery but never publicly readable: its content is never relayed to
+    the GFS. The pre-signed ``public_relay`` hint exists solely so a
+    seed-holding member can run that relay, so it must be neither signed nor
+    shipped."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    space_repo = _FakeSpaceRepo(
+        {"sp-1": _FakeSpace(space_type=tier, join_mode=JoinMode.INVITE_ONLY)}
+    )
+    uid = derive_user_id(keypair.public_key, "alice")
+    user_repo = _FakeUserRepo({uid: _FakeUser(username="alice")})
+    _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=space_repo,
+        user_repo=user_repo,
+        identity=(keypair, "inst-self"),
+    )
+
+    post = Post(
+        id="post-invite",
+        author=uid,
+        type=PostType.TEXT,
+        content="members only",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert "public_relay" not in payload
+
+
+@pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
+async def test_invite_only_space_still_broadcasts_to_members(tier):
+    """Suppressing the relay hint is NOT "invite-only spaces don't federate":
+    genuine members are fanned out over ``space_instances`` by
+    ``broadcast_to_space_members``, independently of the hint, so a remote
+    MEMBER of an invite-only global space still receives the post in full."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    space_repo = _FakeSpaceRepo(
+        {"sp-1": _FakeSpace(space_type=tier, join_mode=JoinMode.INVITE_ONLY)}
+    )
+    uid = derive_user_id(keypair.public_key, "alice")
+    user_repo = _FakeUserRepo({uid: _FakeUser(username="alice")})
+    _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=space_repo,
+        user_repo=user_repo,
+        identity=(keypair, "inst-self"),
+    )
+
+    post = Post(
+        id="post-invite",
+        author=uid,
+        type=PostType.TEXT,
+        content="members only",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+
+    federation.broadcast_to_space_members.assert_awaited_once()
+    call = federation.broadcast_to_space_members.call_args
+    assert call.args[0] == "sp-1"
+    assert call.args[1] is FederationEventType.SPACE_POST_CREATED
+    payload = call.args[2]
+    assert payload["id"] == "post-invite"
+    assert payload["content"] == "members only"
+    assert payload["author"] == uid
+
+
+@pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
+async def test_request_join_mode_still_attaches_public_relay(tier):
+    """``request`` is a publicly-readable join mode (anyone may ask to join and
+    the content stream stays public), so the relay hint is unchanged."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    space_repo = _FakeSpaceRepo(
+        {"sp-1": _FakeSpace(space_type=tier, join_mode=JoinMode.REQUEST)}
+    )
+    uid = derive_user_id(keypair.public_key, "alice")
+    user_repo = _FakeUserRepo({uid: _FakeUser(username="alice")})
+    _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=space_repo,
+        user_repo=user_repo,
+        identity=(keypair, "inst-self"),
+    )
+
+    post = Post(
+        id="post-req",
+        author=uid,
+        type=PostType.TEXT,
+        content="ask to join",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert relay["post_id"] == "post-req"
+    assert verify_signed_author_inner(relay)

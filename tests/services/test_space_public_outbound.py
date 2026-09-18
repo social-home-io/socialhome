@@ -86,7 +86,13 @@ async def env(tmp_dir):
     bus = EventBus()
     gfs = _CaptureGfs()
 
-    async def _make_space(space_id: str, stype: SpaceType, *, with_seed: bool):
+    async def _make_space(
+        space_id: str,
+        stype: SpaceType,
+        *,
+        with_seed: bool,
+        join_mode: JoinMode = JoinMode.OPEN,
+    ):
         skp = generate_space_keypair()
         await space_repo.save(
             Space(
@@ -98,7 +104,7 @@ async def env(tmp_dir):
                 config_sequence=0,
                 features=SpaceFeatures(),
                 space_type=stype,
-                join_mode=JoinMode.OPEN,
+                join_mode=join_mode,
             )
         )
         if with_seed:
@@ -516,8 +522,14 @@ async def test_space_service_created_global_space_can_relay(env):
         own_instance_id=env["own_iid"],
     )
     svc.attach_space_crypto_service(env["crypto"])
+    # ``join_mode`` defaults to ``invite_only``, which is deliberately NOT
+    # publicly readable (no GFS relay). This regression is about the content
+    # key existing at create time, so ask for the readable ``open`` mode.
     space = await svc.create_space(
-        owner_username="alice", name="World", space_type=_SpaceType.GLOBAL
+        owner_username="alice",
+        name="World",
+        space_type=_SpaceType.GLOBAL,
+        join_mode=JoinMode.OPEN,
     )
 
     await env["bus"].publish(
@@ -531,3 +543,91 @@ async def test_space_service_created_global_space_can_relay(env):
         space.id, envelope["epoch"], envelope["encrypted_payload"]
     )
     assert json.loads(pt)["post_id"] == "post-1"
+
+
+# ─── invite_only: listed for discovery, never publicly readable ────────
+
+
+async def test_invite_only_global_space_post_not_relayed(env):
+    """A GLOBAL space whose ``join_mode`` is ``invite_only`` is discoverable
+    (its metadata is published to the GFS) but NOT publicly readable: no post
+    of it is ever relayed to the GFS subscribers."""
+    await env["make_space"](
+        "sp-inv",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-inv")
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_invite_only_public_space_post_not_relayed(env):
+    await env["make_space"](
+        "sp-inv-pub",
+        SpaceType.PUBLIC,
+        with_seed=True,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-inv-pub")
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_invite_only_remote_authored_post_not_relayed(env):
+    """The owner-offline remote-author relay is gated the same way — a
+    seed-holder must not launder another member's post into an invite-only
+    space's (nonexistent) public stream."""
+    await env["make_space"](
+        "sp-pub",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    _kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_request_join_mode_global_space_still_relays(env):
+    """``request`` (anyone may ask to join) stays publicly readable — the only
+    non-readable mode is ``invite_only``."""
+    await env["make_space"](
+        "sp-req",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.REQUEST,
+    )
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-req")
+    )
+    assert len(env["gfs"].calls) == 1
+
+
+async def test_request_join_mode_remote_authored_still_relays(env):
+    await env["make_space"](
+        "sp-pub",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        join_mode=JoinMode.REQUEST,
+    )
+    _kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert len(env["gfs"].calls) == 1

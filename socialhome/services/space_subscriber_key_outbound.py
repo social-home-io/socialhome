@@ -15,10 +15,14 @@ never sees the content key.
 
 Pipeline (fail-closed at every step):
 
-1. **Gate on seed + tier.** Act only if this household holds the space seed
-   (``get_space_seed`` non-None → owner or delegated admin) and the space is
-   PUBLIC/GLOBAL. A non-seed-holder can't authority-sign; a private/household
-   space is never GFS-discoverable, so its key must never leave via the GFS.
+1. **Gate on seed + tier + join mode.** Act only if this household holds the
+   space seed (``get_space_seed`` non-None → owner or delegated admin), the
+   space is PUBLIC/GLOBAL, and its ``join_mode`` is not ``invite_only``. A
+   non-seed-holder can't authority-sign; a private/household space is never
+   GFS-discoverable, so its key must never leave via the GFS; and an
+   invite-only public/global space is *listed* for discovery but is **not
+   publicly readable** — only invited members get content, so its key is
+   never sealed to a mere subscriber.
 2. **Verify the key-wrap binding (anti-substitution).** The key-wrap pubkey
    is learned *from the GFS*; a malicious GFS could substitute one it
    controls and read the sealed key. ``verify_keywrap_binding`` binds the
@@ -66,7 +70,7 @@ from ..authority_sig import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_READABLE_JOIN_MODES, PUBLIC_SPACE_TIERS
 from ..federation.keywrap_seal import seal_to_keywrap, verify_keywrap_binding
 from ..services.space_crypto_service import KEY_SUITE_AESGCM_256
 
@@ -134,6 +138,18 @@ class SpaceSubscriberKeyOutbound:
 
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # An invite-only public/global space is LISTED in the GFS directory
+        # (that's how people discover it and get invited) but is NOT publicly
+        # readable: only invited members get content. Never seal the content
+        # key to a mere subscriber — no key ⇒ the relayed ciphertext (which
+        # is itself suppressed, see space_public_outbound) is unopenable.
+        if space.join_mode not in PUBLIC_READABLE_JOIN_MODES:
+            log.debug(
+                "space_subscriber_key.outbound: space %s is invite_only — "
+                "not publicly readable, skipping handoff",
+                space_id,
+            )
             return
         # Only a seed-holder (owner or delegated admin) can authority-sign.
         seed = await self._spaces.get_space_seed(space_id)
@@ -382,6 +398,16 @@ class SpaceSubscriberKeyOutbound:
             return
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # Invite-only ⇒ listed for discovery but not publicly readable. Gated
+        # here (before the subscriber-list round-trip) so we never even ask the
+        # GFS who subscribed to a space whose content nobody may read.
+        if space.join_mode not in PUBLIC_READABLE_JOIN_MODES:
+            log.debug(
+                "space_subscriber_key.reconcile: space %s is invite_only — "
+                "not publicly readable, skipping",
+                space_id,
+            )
             return
         seed = await self._spaces.get_space_seed(space_id)
         if seed is None:

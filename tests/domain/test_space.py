@@ -6,6 +6,8 @@ import pytest
 
 from socialhome.domain.space import (
     HouseholdFeatures,
+    JoinMode,
+    PUBLIC_READABLE_JOIN_MODES,
     RemoteAdminOutcome,
     SpaceConfigGapError,
     SpaceFeatureAccess,
@@ -179,3 +181,14 @@ def test_normalize_min_age_passes_allowed_values(value):
 def test_normalize_min_age_clamps_everything_else(value):
     """Anything outside {0,13,16,18} falls back to 0 (fail-soft default)."""
     assert normalize_min_age(value) == 0
+
+
+def test_public_readable_join_modes_is_a_fail_closed_allow_list():
+    """A PUBLIC/GLOBAL space relays + seals its content key only under a join
+    mode named here. It is an ALLOW-list on purpose: a future fourth
+    ``JoinMode`` is non-readable until someone deliberately adds it, rather
+    than becoming publicly readable the moment the enum grows."""
+    assert PUBLIC_READABLE_JOIN_MODES == {JoinMode.OPEN, JoinMode.REQUEST}
+    assert JoinMode.INVITE_ONLY not in PUBLIC_READABLE_JOIN_MODES
+    # Every member of the enum is deliberately classified one way or the other.
+    assert set(JoinMode) - PUBLIC_READABLE_JOIN_MODES == {JoinMode.INVITE_ONLY}

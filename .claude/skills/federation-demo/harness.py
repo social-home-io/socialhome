@@ -660,6 +660,14 @@ def cmd_gfs_traffic() -> None:
             "name": space_name,
             "description": "harness end-to-end probe for GFS publish",
             "space_type": "global",
+            # Explicit: the API default is ``invite_only``, which is listed for
+            # discovery but deliberately NOT publicly readable (no content
+            # relay, no content-key handoff). The whole downstream chain
+            # (``gfs-space-subscribe`` → ``gfs-space-post`` →
+            # ``gfs-space-rotate``) proves the readable path, so it needs a
+            # readable join mode. The invite-only rule has its own step:
+            # :func:`cmd_gfs_space_invite_only`.
+            "join_mode": "open",
         },
     )
     body = _must("create-global-space", s, body, ok=(201,))
@@ -1598,6 +1606,206 @@ def cmd_gfs_space_rotate() -> None:
     state["gfs_space_rotated_post_content"] = content
     _save(state)
     print("gfs-space-rotate: ok (epoch rotation re-keys GFS subscribers)")
+
+
+def cmd_gfs_space_invite_only() -> None:
+    """An invite-only global space is LISTED but never publicly readable.
+
+    A space carries a ``space_type`` (private / public / global) and a separate
+    ``join_mode`` (``invite_only`` / ``open`` / ``request``). The product rule:
+    a public/global space whose ``join_mode`` is ``invite_only`` is published
+    to the GFS directory — that is how people discover it and get invited —
+    but its CONTENT never leaves the member households. No post is relayed to
+    the GFS, and the per-space content key is never sealed to a subscriber, so
+    a stranger cannot read a group nobody invited them to.
+
+    Prereqs (chain via ``up`` → ``gfs-up`` → ``gfs-pair``): a and d are active
+    GFS clients. Independent of the readable-space chain — ``gfs-traffic``
+    creates its space with ``join_mode=open`` precisely so that chain keeps
+    proving the relay works.
+
+    Sequence:
+    1. Alpha creates a SECOND global space, this time ``join_mode=invite_only``
+       (also the API default). ``_auto_publish_on_type`` publishes its
+       METADATA to every paired GFS exactly as before.
+    2. Assert the GFS directory lists it — ``GET /gfs/spaces``. The metadata
+       path is deliberately untouched by the content gate; a regression that
+       "fixes" the leak by refusing to publish would hide the space from the
+       people meant to request an invite, and fails here.
+    3. Assert d DISCOVERS it too (``POST /api/public_spaces/refresh`` then
+       ``GET /api/public_spaces``) — discovery is the whole point of listing.
+    4. Waits for d's SH↔GFS WebSocket to be registered (a relay frame would be
+       fanned out over exactly that socket, so the negative assertion in step 6
+       is only meaningful once it is up), then d tries to subscribe. Tolerated
+       either way: today the subscribe
+       succeeds (the GFS does not publish ``join_mode`` yet, so the
+       subscriber side can't tell), and the host-side gates are what stop the
+       content. A refusal is equally fine — the assertions below are about
+       what d RECEIVES, not what it may ask for.
+    5. Alpha posts into the invite-only space.
+    6. Assert d got NO relay frame for that space (no ``gfs.relay.received:
+       space=<id>`` in d's log since the bookmark) and holds no
+       ``space_posts`` row / feed entry for the post. c — non-member,
+       non-subscriber, not GFS-paired — must not hold it either.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    if not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' first")
+    pairings = (state.get("gfs") or {}).get("pairings") or {}
+    if "a" not in pairings or "d" not in pairings:
+        raise SystemExit("run 'gfs-pair' first — a and d must be GFS clients")
+
+    a = state["instances"]["a"]
+    c = state["instances"]["c"]
+    d = state["instances"]["d"]
+    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
+
+    # 1. The invite-only global space.
+    space_name = f"Invite Only Global Space — {time.time_ns()}"
+    s, body = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": space_name,
+            "description": "harness probe: listed for discovery, never relayed",
+            "space_type": "global",
+            "join_mode": "invite_only",
+        },
+    )
+    body = _must("create-invite-only-global-space", s, body, ok=(201,))
+    space_id = body["id"]
+    print(f"  a: created invite-only global space {space_id}")
+
+    # 2. The GFS directory must LIST it — metadata publish is unaffected.
+    deadline = time.monotonic() + 30.0
+    listing: list[dict] = []
+    while time.monotonic() < deadline:
+        s, payload = _request(f"{gfs_url}/gfs/spaces")
+        if s == 200:
+            listing = payload.get("spaces", []) if isinstance(payload, dict) else []
+            if any(sp["space_id"] == space_id for sp in listing):
+                break
+        time.sleep(1.0)
+    if not any(sp["space_id"] == space_id for sp in listing):
+        raise SystemExit(
+            f"gfs-space-invite-only: {space_id} never appeared on GET "
+            f"/gfs/spaces within 30 s — an invite-only space must still be "
+            f"LISTED for discovery. Listing was {listing!r}",
+        )
+    print(f"  the GFS lists '{space_name}' (discovery intact) ✓")
+
+    # 3. d discovers it through the directory poll.
+    s, refreshed = _request(
+        f"http://127.0.0.1:{d['port']}/api/public_spaces/refresh",
+        token=d["token"],
+        method="POST",
+    )
+    _must("d: POST /api/public_spaces/refresh", s, refreshed, ok=(202,))
+    deadline = time.monotonic() + 20.0
+    entry: dict | None = None
+    d_listing: list[dict] = []
+    while time.monotonic() < deadline:
+        s, payload = _request(
+            f"http://127.0.0.1:{d['port']}/api/public_spaces",
+            token=d["token"],
+        )
+        if s == 200 and isinstance(payload, list):
+            d_listing = payload
+            entry = next(
+                (row for row in d_listing if row.get("space_id") == space_id),
+                None,
+            )
+            if entry is not None:
+                break
+        time.sleep(1.0)
+    if entry is None:
+        raise SystemExit(
+            f"gfs-space-invite-only: {space_id} never appeared on d's "
+            f"/api/public_spaces within 20 s — the invite-only space is not "
+            f"discoverable. Listing was {d_listing!r}",
+        )
+    print(f"  d discovers '{entry.get('name')}' in the directory ✓")
+
+    # d's SH↔GFS WebSocket must be REGISTERED before the negative assertion
+    # means anything: a relay frame, had one been produced, is fanned out over
+    # exactly that socket. Same wait as ``gfs-space-subscribe``.
+    _wait_for_gfs_ws(d["instance_id"], timeout=60.0)
+    print("  d's SH↔GFS WebSocket is registered on the GFS ✓")
+
+    # 4. d asks to subscribe. Either answer is acceptable (see docstring).
+    s, sub = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/subscribe",
+        token=d["token"],
+        method="POST",
+    )
+    if s == 200 and isinstance(sub, dict) and sub.get("subscribed"):
+        print("  d subscribed (the GFS does not publish join_mode yet) ✓")
+    else:
+        print(f"  d's subscribe was refused (HTTP {s}) — also fine ✓")
+
+    # Bookmark d's log AFTER the subscribe so step 6 only scans what the post
+    # produced. (``_spawn`` truncates log.txt on respawn — read at step time.)
+    d_off = _log_size("d")
+
+    # 5. Alpha posts into the invite-only space.
+    content = f"Invite-only content that must never leave — {time.time_ns()}"
+    s, post = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    _must("a posts in the invite-only global space", s, post, ok=(201,))
+    post_id = post["id"]
+    print(f"  a posted in the invite-only space → id={post_id}")
+
+    # Settle: long enough that a relay, had one been produced, would have been
+    # encrypted, authority-signed, POSTed to the GFS and fanned out to d.
+    # ``gfs-space-post`` sees the readable equivalent land well inside this.
+    time.sleep(10)
+
+    # 6a. d saw no relay frame for this space at all.
+    relay_lines = [
+        line
+        for line in _log_lines_matching("d", "gfs.relay.received:", offset=d_off)
+        if f"space={space_id}" in line
+    ]
+    if relay_lines:
+        raise SystemExit(
+            "gfs-space-invite-only: d received a GFS relay frame for the "
+            f"invite-only space {space_id} — its content stream must be dead. "
+            f"Lines: {relay_lines!r}",
+        )
+    print("  d received no relay frame for the invite-only space ✓")
+
+    # 6b. …and holds none of its content, by row and by feed.
+    for label, inst in (("d", d), ("c", c)):
+        if _rows(label, "SELECT id FROM space_posts WHERE id = ?", (post_id,)):
+            raise SystemExit(
+                f"gfs-space-invite-only: {label} holds post {post_id} from an "
+                "invite-only space it was never invited to (§ hard rule "
+                "violated).",
+            )
+        s, feed = _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/feed",
+            token=inst["token"],
+        )
+        if s == 200:
+            rows = feed if isinstance(feed, list) else (feed.get("posts") or [])
+            if any(p.get("id") == post_id for p in rows):
+                raise SystemExit(
+                    f"gfs-space-invite-only: {label}'s feed for {space_id} "
+                    f"exposes {post_id}",
+                )
+    print("  neither d nor c can see the invite-only post ✓")
+
+    state["gfs_invite_only_space_id"] = space_id
+    state["gfs_invite_only_post_id"] = post_id
+    _save(state)
+    print("gfs-space-invite-only: ok (listed for discovery, content never relayed)")
 
 
 def cmd_gfs_down() -> None:
@@ -3223,6 +3431,38 @@ def cmd_verify() -> None:
             "  GFS public-space content skipped — run 'gfs-space-subscribe' / "
             "'gfs-space-post' / 'gfs-space-rotate' to exercise"
         )
+
+    # 13f. Invite-only global space (``gfs-space-invite-only``): still LISTED
+    #    in the GFS directory, still unreadable by everyone else. Gated on the
+    #    step having run — the whole gfs-* chain is opt-in.
+    if "gfs_invite_only_space_id" in state:
+        io_space_id = state["gfs_invite_only_space_id"]
+        io_post_id = state.get("gfs_invite_only_post_id")
+        s, payload = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/spaces")
+        if s != 200:
+            failures.append(f"GFS: GET /gfs/spaces failed: HTTP {s}")
+        else:
+            rows = payload.get("spaces", []) if isinstance(payload, dict) else []
+            if not any(sp.get("space_id") == io_space_id for sp in rows):
+                failures.append(
+                    f"GFS: invite-only space {io_space_id} dropped out of the "
+                    "directory — it must stay listed so people can discover it "
+                    "and ask for an invite",
+                )
+            else:
+                print("  the GFS still lists the invite-only space ✓")
+        if io_post_id:
+            for label in ("d", "c"):
+                if _rows(
+                    label, "SELECT id FROM space_posts WHERE id = ?", (io_post_id,)
+                ):
+                    failures.append(
+                        f"{label}: holds invite-only space post {io_post_id} — "
+                        "content of an invite-only space reached a household "
+                        "that was never invited",
+                    )
+                else:
+                    print(f"  {label} still cannot see the invite-only post ✓")
 
     # 13b. admin-promote-kick durability — dave's promotion on d must
     #    still read 'admin' after everything that ran since (app-session,

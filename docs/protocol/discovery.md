@@ -293,6 +293,40 @@ goes through `POST /api/public_spaces/{id}/join-request`).
   purge would destroy content nobody asked us to forget. Without the
   evidence, only the local member row goes.
 
+### `join_mode: invite_only` — listed, never relayed
+
+Being listed in the directory and being publicly readable are two different
+things. A **public/global space whose `join_mode` is `invite_only` is
+published to the GFS directory but its content is never relayed to it, and
+its content key is never sealed to a subscriber.** The listing is deliberate:
+name, description and icon are how someone discovers the space and asks for
+an invite. Only the content stream stops.
+
+The gate is enforced **host-side**, at the two places where content would
+otherwise leave, plus the hint that enables the first:
+
+| Seam | Effect for an `invite_only` public/global space |
+|---|---|
+| `services/space_public_outbound.py` | No `space_post_public` envelope is produced — neither for a locally-authored post nor on the owner-offline remote-author relay. |
+| `services/space_subscriber_key_outbound.py` | No content key is sealed to a subscriber — on the `new_subscriber` push and on every reconcile entry point (the gate sits *before* the subscriber-list round-trip, so the GFS is never even asked who subscribed). |
+| `services/space_post_outbound.py` | The pre-signed `public_relay` hint is omitted from the member broadcast — it exists only so a seed-holding member can run the GFS relay, which is dead here, so nothing is signed or shipped. |
+
+Two layers, both fail-closed: **no ciphertext** (nothing is relayed) and
+**no key** (nothing sealed), so even a subscriber that obtained a frame out
+of band holds an unopenable blob. `open` and `request` are unchanged —
+`request` gates *membership*, not *reading*.
+
+**Members are unaffected.** Member households receive space content through
+`broadcast_to_space_members` over `space_instances` (mesh-only members via
+`SPACE_ROUTED`), a path that neither consults the `public_relay` hint nor
+touches the GFS. The metadata publish path is likewise untouched: a space
+that disappears from the directory is a regression, not the rule.
+
+The GFS does not publish `join_mode` in its listings today, so a mirrored
+stub is seated with `join_mode=invite_only` locally
+(`gfs_space_mirror_service`) — the gates above are the host's, and the host
+is the only side that can apply them.
+
 ### HFS producer + consumer for public space content (Phase 5a2)
 
 The GFS only *relays* — the HFS owns the encryption and authorship

@@ -38,7 +38,7 @@ from ..domain.events import (
     SpacePostCreated,
 )
 from ..domain.federation import FederationEventType
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_READABLE_JOIN_MODES, PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import build_signed_author_inner
 
@@ -188,11 +188,18 @@ class SpacePostOutbound:
         # Attach a pre-signed relay hint so a seed-holding member can forward this
         # public/global post to the GFS subscribers even when the owner is offline
         # (remote-author relay). Built only for a public/global space + a local
-        # author we can sign for; private spaces never relay to the GFS.
+        # author we can sign for; private spaces never relay to the GFS. An
+        # invite-only public/global space is listed for discovery but is NOT
+        # publicly readable, so its GFS relay is dead (see
+        # ``space_public_outbound``) — don't sign or ship a hint nothing may
+        # use. Members are unaffected: they are fanned out below over
+        # ``space_instances`` by ``broadcast_to_space_members``, which never
+        # consults the hint.
         space = await self._spaces.get(event.space_id)
         if (
             space is not None
             and space.space_type in PUBLIC_SPACE_TIERS
+            and space.join_mode in PUBLIC_READABLE_JOIN_MODES
             and self._own_instance_id
             and self._own_instance_pk
             and self._own_identity_seed
