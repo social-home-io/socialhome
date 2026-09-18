@@ -8,7 +8,6 @@ import aiohttp
 from aiohttp.web import AppKey
 
 from ..db import AsyncDatabase
-from .admin import AdminAuth
 from .admin_service import GfsAdminService
 from .cluster import ClusterService
 from .config import GfsConfig
@@ -33,6 +32,10 @@ if TYPE_CHECKING:
     # ``public`` imports this module, so the resolver type is annotation-only.
     from .public import ClientIpResolver
 
+    # ``admin`` reads ``gfs_client_ip_key`` off the app, so it imports this
+    # module — the auth type stays annotation-only to keep that one-way.
+    from .admin import AdminAuth
+
 gfs_db_key: AppKey[AsyncDatabase] = AppKey("gfs_db")
 gfs_config_key: AppKey[GfsConfig] = AppKey("gfs_config")
 #: Resolves a request's client IP under the configured trusted-proxy policy.
@@ -41,7 +44,7 @@ gfs_client_ip_key: "AppKey[ClientIpResolver]" = AppKey("gfs_client_ip")
 gfs_federation_key: AppKey[GfsFederationService] = AppKey("gfs_federation")
 gfs_fed_repo_key: AppKey[AbstractGfsFederationRepo] = AppKey("gfs_fed_repo")
 gfs_admin_repo_key: AppKey[AbstractGfsAdminRepo] = AppKey("gfs_admin_repo")
-gfs_admin_auth_key: AppKey[AdminAuth] = AppKey("gfs_admin_auth")
+gfs_admin_auth_key: "AppKey[AdminAuth]" = AppKey("gfs_admin_auth")
 gfs_admin_service_key: AppKey[GfsAdminService] = AppKey("gfs_admin_service")
 gfs_cluster_key: AppKey[ClusterService] = AppKey("gfs_cluster")
 gfs_cluster_repo_key: AppKey[AbstractClusterRepo] = AppKey("gfs_cluster_repo")

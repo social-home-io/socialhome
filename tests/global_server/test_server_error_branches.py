@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import replace
 
 import pytest
 from aiohttp import web
@@ -960,20 +961,53 @@ async def test_rtc_ping_bad_signature(client):
     assert resp.status == 401
 
 
-# ─── _ip X-Forwarded-For branch ───────────────────────────────────────
+# ─── Client-IP resolution on the admin audit trail ────────────────────
 
 
-async def test_admin_route_honours_x_forwarded_for(client):
-    """``_ip`` prefers the first X-Forwarded-For entry over peername."""
+async def test_admin_audit_ip_uses_last_forwarded_entry_from_trusted_peer(client):
+    """The TestServer peer is loopback — trusted by default — so the LAST
+    ``X-Forwarded-For`` entry is the hop that proxy appended and becomes the
+    audit IP. The client-supplied prefix must never be recorded: an operator
+    reading the audit log would otherwise be reading attacker-chosen text."""
     resp = await client.post(
         "/admin/api/clients/peer.home/accept",
         headers={"X-Forwarded-For": "10.0.0.1, 10.0.0.2"},
     )
     assert resp.status == 200
-    # The audit row written should record the XFF IP.
     resp = await client.get("/admin/api/audit?action=accept_client")
-    rows = await resp.json()
-    assert any(r.get("admin_ip") == "10.0.0.1" for r in rows)
+    ips = {r.get("admin_ip") for r in await resp.json()}
+    assert "10.0.0.2" in ips
+    assert "10.0.0.1" not in ips
+
+
+async def test_admin_audit_ip_ignores_forwarded_for_from_untrusted_peer(tmp_dir):
+    """With no trusted proxies the header is inert — the audit log records the
+    real TCP peer, not whatever the caller claimed."""
+    app = create_gfs_app(replace(_config(tmp_dir), trusted_proxies=()))
+    async with TestClient(TestServer(app)) as tc:
+        await app[gfs_admin_repo_key].set_config(
+            "admin_password_hash",
+            hash_password("admin-pw"),
+        )
+        await tc.post("/admin/login", json={"password": "admin-pw"})
+        _seed, pub_hex = _gen_ed25519()
+        await app[gfs_fed_repo_key].upsert_instance(
+            ClientInstance(
+                instance_id="peer.home",
+                display_name="Peer",
+                public_key=pub_hex,
+                inbox_url="http://peer.home/wh",
+                status="active",
+            )
+        )
+        resp = await tc.post(
+            "/admin/api/clients/peer.home/accept",
+            headers={"X-Forwarded-For": "10.0.0.1, 10.0.0.2"},
+        )
+        assert resp.status == 200
+        resp = await tc.get("/admin/api/audit?action=accept_client")
+        ips = {r.get("admin_ip") for r in await resp.json()}
+        assert ips == {"127.0.0.1"}
 
 
 # ─── /gfs/publish hardening — roster leak, uniform 403, input bounds ───

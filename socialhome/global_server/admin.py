@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 import bcrypt
 from aiohttp import web
 
+from . import app_keys as K
+
 if TYPE_CHECKING:
     from .repositories import AbstractGfsAdminRepo
 
@@ -161,17 +163,6 @@ def build_admin_middleware(auth: AdminAuth):
 # ─── Route handlers ─────────────────────────────────────────────────────
 
 
-def _client_ip(request: web.Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        # Use the leftmost entry — the original client.
-        return fwd.split(",")[0].strip()
-    peer = request.transport.get_extra_info("peername") if request.transport else None
-    if peer:
-        return str(peer[0])
-    return "unknown"
-
-
 async def handle_login(request: web.Request) -> web.Response:
     """``POST /admin/login`` — body ``{"password": "..."}``. Sets the cookie."""
     auth: AdminAuth = request.app["admin_auth"]
@@ -181,7 +172,12 @@ async def handle_login(request: web.Request) -> web.Response:
     except Exception:
         raise web.HTTPBadRequest(reason="Invalid JSON body")
 
-    token, status = await auth.login(password, _client_ip(request))
+    # The login throttle keys on the client address, so it must come from the
+    # server's ONE ``ClientIpResolver`` — a local re-parse that believed
+    # ``X-Forwarded-For`` unconditionally would hand every attacker a fresh
+    # 5-attempt bucket per request.
+    client_ip = request.app[K.gfs_client_ip_key](request)
+    token, status = await auth.login(password, client_ip)
     if status == "locked":
         resp = web.json_response(
             {"error": "rate_limited"},

@@ -15,6 +15,8 @@ from typing import Any
 
 from aiohttp import web
 
+from .. import app_keys as K
+
 log = logging.getLogger(__name__)
 
 
@@ -55,13 +57,13 @@ class GfsBaseView(web.View):
             ) from exc
 
     def client_ip(self) -> str:
-        """Extract the client IP, honouring ``X-Forwarded-For``."""
-        fwd = self.request.headers.get("X-Forwarded-For", "")
-        if fwd:
-            return fwd.split(",")[0].strip()
-        peer = (
-            self.request.transport.get_extra_info("peername")
-            if self.request.transport
-            else None
-        )
-        return str(peer[0]) if peer else "unknown"
+        """Resolve the caller's address under the trusted-proxy policy.
+
+        Delegates to the server's single
+        :class:`~socialhome.global_server.public.ClientIpResolver`, which
+        believes ``X-Forwarded-For`` only when the TCP peer is itself a
+        trusted proxy. Admin views write this straight into the audit log's
+        ``admin_ip``, so a local re-parse of the header would let any caller
+        forge the trail.
+        """
+        return self.svc(K.gfs_client_ip_key)(self.request)

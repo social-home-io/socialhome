@@ -896,7 +896,10 @@ These pages are server-rendered HTML and require no auth.
 
 Rate-limit responses return HTTP 429 with a `Retry-After` header.
 
-**Which IP a GFS limiter counts.** `X-Forwarded-For` is client-supplied, so the
+**Which IP a GFS limiter counts** — and the same answer for the admin-login
+throttle, the `admin_ip` written to the admin audit log, and every route view's
+`client_ip()`, which all resolve through the one shared resolver.
+`X-Forwarded-For` is client-supplied, so the
 GFS believes it only when the TCP peer is itself a trusted proxy, and then uses
 the **last** entry (the hop that proxy appended); otherwise the peer address is
 used. The trusted set is `[server] trusted_proxies` in `global_server.toml`
