@@ -151,8 +151,28 @@ class _FakeGfs:
         return web.json_response({"status": "accepted"}, status=202)
 
     async def drain(self) -> None:
-        if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        """Await every push-leg task, including ones spawned while draining.
+
+        A single ``gather`` over a snapshot is not enough: a push leg can
+        POST a sealed reply back through this same fake, which spawns
+        another task after the snapshot was taken. Looping until the set
+        is empty is what makes "drained" actually mean drained.
+
+        ``return_exceptions=True`` is load-bearing too — a push leg that
+        raises (an unsigned envelope is meant to be rejected) must have
+        its exception retrieved here, or the task dies with an
+        unretrieved exception and only surfaces later, from the garbage
+        collector, attached to whatever test happened to be running.
+        """
+        while self._tasks:
+            # Take the batch out of the set before awaiting it: the
+            # ``discard`` done-callback only runs on a later loop tick, so
+            # re-testing ``self._tasks`` against a set the callbacks have
+            # not emptied yet would spin forever. Anything spawned by this
+            # batch lands in the now-empty set and is picked up next round.
+            batch = list(self._tasks)
+            self._tasks.clear()
+            await asyncio.gather(*batch, return_exceptions=True)
 
 
 async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
@@ -337,6 +357,16 @@ async def households(tmp_path, gfs, http_session):
     a = await _household(tmp_path, "a", gfs, http_session)
     b = await _household(tmp_path, "b", gfs, http_session)
     yield a, b
+    # Drain BEFORE the databases go. The fake GFS's push leg is a detached
+    # ``asyncio.create_task`` (a real server writes the frame to the
+    # household's socket while the POST is still returning), so a test that
+    # sends a relayed envelope and then simply ends leaves that task mid
+    # ``handle_relayed_envelope`` — which is mid SQLite read on ``a.db``.
+    # ``households`` depends on ``gfs``, so ``gfs``'s own finalizer runs
+    # AFTER this one: draining there would already be too late, with the
+    # connection closed underneath the task. Draining here is also what
+    # retrieves the exception from a push leg that was meant to be rejected.
+    await gfs.drain()
     await a.db.shutdown()
     await b.db.shutdown()
 
