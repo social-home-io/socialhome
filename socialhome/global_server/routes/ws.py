@@ -22,8 +22,10 @@ on hello timeout, ``4408``.
 
 Push frames (sent by :class:`GfsFederationService._fan_out`)::
 
-    {"type": "relay", "space_id": ..., "event_type": ..., "payload": ...,
-     "from_instance": ...}
+    {"type": "relay", "space_id": ..., "event_type": ..., "payload": ...}
+
+The frame is deliberately identity-free: the GFS never learns which
+household relayed a space event, so it has nothing to forward.
 
 Fire-and-forget — the SH never acks at the application layer.
 """

@@ -26,6 +26,11 @@ class GfsInfoView(GfsBaseView):
     carries ``{base_url, token}``) can fetch the public key it needs to
     pin before sending its registration. Unauthenticated by design —
     the public key is, well, public.
+
+    Also the capability channel for the GFS↔HFS leg, which has no
+    ``proto_version`` negotiation: ``anonymous_publish`` tells a household
+    that ``POST /gfs/publish`` authorizes on the space-authority signature
+    alone, so it can stop sending ``from_instance``.
     """
 
     async def get(self) -> web.Response:
@@ -39,6 +44,7 @@ class GfsInfoView(GfsBaseView):
                 "public_key": cluster.own_public_key_hex,
                 "server_name": server_name,
                 "base_url": cfg.base_url,
+                "anonymous_publish": True,
             }
         )
 
@@ -138,11 +144,18 @@ class InstanceUpdateView(GfsBaseView):
 
 
 class PublishView(GfsBaseView):
-    """``POST /gfs/publish`` — relay an event to a space's subscribers.
+    """``POST /gfs/publish`` — relay an event to a space's subscribers,
+    **without learning which household relayed it**.
 
-    The Ed25519 signature is mandatory and verified against the
-    ``from_instance``'s registered ``public_key``; unknown instance,
-    missing / malformed / invalid signature all map to ``403``.
+    Canonical body: ``{space_id, event_type, payload}``. Authorization is the
+    space-authority signature inside the opaque ``payload`` alone (verified
+    against the space's TOFU-pinned key) — the GFS never needs, stores or
+    forwards the relaying household's identity.
+
+    ``from_instance`` / ``signature`` (+ ``ts``) from an older household are
+    accepted but never trusted: the transport signature is still verified when
+    present (a bogus legacy field is a ``403``), then discarded. Every
+    authorization failure maps to ``403``.
     """
 
     async def post(self) -> web.Response:
@@ -153,10 +166,11 @@ class PublishView(GfsBaseView):
             space_id = body["space_id"]
             event_type = body["event_type"]
             payload = body["payload"]
-            from_instance = body["from_instance"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        signature = body.get("signature", "")
+        # Legacy fields — tolerated, verified, never trusted (see the service).
+        from_instance = str(body.get("from_instance") or "")
+        signature = str(body.get("signature") or "")
         try:
             delivered = await svc.publish_event(
                 space_id,

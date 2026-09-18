@@ -18,6 +18,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+    sign_authority_event,
+)
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.global_server.admin import hash_password
 from socialhome.global_server.app_keys import (
@@ -111,8 +115,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _publish_known_space(client, space_id: str) -> None:
-    """Publish a minimal active space owned by the fixture's peer.home."""
+async def _publish_known_space(
+    client, space_id: str, *, identity_public_key: str = ""
+) -> None:
+    """Publish a minimal active space owned by the fixture's peer.home.
+
+    ``identity_public_key`` (hex) TOFU-pins the space's authority verify key —
+    required before ``/gfs/publish`` will relay anything for the space.
+    """
     pub_body = {
         "owning_instance": "peer.home",
         "name": "Known",
@@ -124,13 +134,9 @@ async def _publish_known_space(client, space_id: str) -> None:
         "category": "general",
         "accent_color": "#D2542A",
         "primary_color": "#D2542A",
+        "identity_public_key": identity_public_key,
     }
-    # Phase 5a: ``identity_public_key`` (default "") is folded into the signed
-    # canonical body by the service.
-    signed = _sign(
-        {**pub_body, "space_id": space_id, "identity_public_key": ""},
-        client._seed,
-    )
+    signed = _sign({**pub_body, "space_id": space_id}, client._seed)
     resp = await client.post(
         f"/gfs/spaces/{space_id}/publish",
         json={**pub_body, "signature": signed["signature"]},
@@ -138,19 +144,70 @@ async def _publish_known_space(client, space_id: str) -> None:
     assert resp.status == 200
 
 
-async def test_publish_happy_path_delivers_zero_when_no_subscribers(client):
-    # The space must exist and be owned by the publisher (peer.home).
-    await _publish_known_space(client, "sp-empty")
+async def _authority_space(client, space_id: str) -> bytes:
+    """Publish *space_id* with a fresh pinned authority key; return its seed."""
+    space_seed, space_pub_hex = _gen_ed25519()
+    await _publish_known_space(client, space_id, identity_public_key=space_pub_hex)
+    return space_seed
+
+
+def _authority_payload(space_seed: bytes, *, space_id: str) -> dict:
+    payload = {"ciphertext": "opaque-blob"}
+    payload.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id=space_id,
+            payload=payload,
+            space_seed=space_seed,
+        )
+    )
+    return payload
+
+
+async def test_publish_canonical_identity_free_body_is_accepted(client):
+    """The canonical body carries NO household identity — the space-authority
+    signature inside the payload is the whole authorization."""
+    space_seed = await _authority_space(client, "sp-empty")
+    resp = await client.post(
+        "/gfs/publish",
+        json={
+            "space_id": "sp-empty",
+            "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            "payload": _authority_payload(space_seed, space_id="sp-empty"),
+        },
+    )
+    assert resp.status == 200
+    payload = await resp.json()
+    assert payload["delivered_to"] == []
+
+
+async def test_publish_legacy_body_with_authority_sig_is_accepted(client):
+    """An older household still sending ``from_instance`` + its transport
+    signature keeps working — the legacy fields are verified, then ignored."""
+    space_seed = await _authority_space(client, "sp-legacy-route")
     body = {
-        "space_id": "sp-empty",
-        "event_type": "TEST",
-        "payload": {"x": 1},
+        "space_id": "sp-legacy-route",
+        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        "payload": _authority_payload(space_seed, space_id="sp-legacy-route"),
         "from_instance": "peer.home",
     }
     resp = await client.post("/gfs/publish", json=_sign(body, client._seed))
     assert resp.status == 200
-    payload = await resp.json()
-    assert payload["delivered_to"] == []
+    assert (await resp.json())["delivered_to"] == []
+
+
+async def test_publish_without_authority_sig_is_403(client):
+    """The owner loophole is closed at the route too: a signed legacy body from
+    the space's OWNER with no authority sig in the payload is a 403."""
+    await _authority_space(client, "sp-noauth-route")
+    body = {
+        "space_id": "sp-noauth-route",
+        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        "payload": {"ciphertext": "opaque-blob"},
+        "from_instance": "peer.home",
+    }
+    resp = await client.post("/gfs/publish", json=_sign(body, client._seed))
+    assert resp.status == 403
 
 
 async def test_publish_unknown_space_is_403(client):
@@ -686,10 +743,9 @@ async def test_fan_out_delivers_to_real_subscriber_inbox(
                 "accent_color": "#D2542A",
                 "primary_color": "#D2542A",
             }
-            signed_pub = _sign(
-                {**pub_body, "space_id": "sp-xyz", "identity_public_key": ""},
-                pub_seed,
-            )
+            space_seed, space_pub = _gen_ed25519()
+            pub_body["identity_public_key"] = space_pub
+            signed_pub = _sign({**pub_body, "space_id": "sp-xyz"}, pub_seed)
             resp = await tc.post(
                 "/gfs/spaces/sp-xyz/publish",
                 json={**pub_body, "signature": signed_pub["signature"]},
@@ -717,17 +773,19 @@ async def test_fan_out_delivers_to_real_subscriber_inbox(
             assert resp.status == 200
             event_body = {
                 "space_id": "sp-xyz",
-                "event_type": "POST_PUBLISH",
-                "payload": {"kind": "hello"},
-                "from_instance": "pub.home",
+                "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+                "payload": _authority_payload(space_seed, space_id="sp-xyz"),
             }
-            resp = await tc.post("/gfs/publish", json=_sign(event_body, pub_seed))
+            resp = await tc.post("/gfs/publish", json=event_body)
             assert resp.status == 200
             assert (await resp.json())["delivered_to"] == ["sub.home"]
         # Wait for the HTTPS inbox to capture the event.
         await asyncio.sleep(0.05)
         assert received
-        assert received[0]["event_type"] == "POST_PUBLISH"
+        assert received[0]["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
+        # The HTTPS-inbox body is identity-free too.
+        assert set(received[0]) == {"space_id", "event_type", "payload"}
+        assert "pub.home" not in json.dumps(received[0])
     finally:
         await sub_server.close()
 

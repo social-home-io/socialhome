@@ -17,6 +17,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+    sign_authority_event,
+)
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
@@ -148,6 +152,7 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
             )
         )
         # other.home publishes space-1 so it's a real subscribe target.
+        space_seed, space_pub_hex = _gen_ed25519()
         pub_args = {
             "space_id": "space-1",
             "owning_instance": "other.home",
@@ -160,7 +165,7 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
             "category": "general",
             "accent_color": "#D2542A",
             "primary_color": "#D2542A",
-            "identity_public_key": "",
+            "identity_public_key": space_pub_hex,
         }
         pub_canonical = json.dumps(
             pub_args, separators=(",", ":"), sort_keys=True
@@ -170,6 +175,7 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
             owning_instance="other.home",
             name="Space One",
             signature=b64url_encode(sign_ed25519(other_seed, pub_canonical)),
+            identity_public_key=space_pub_hex,
         )
         sub_ts = _now_iso()
         sub_canonical = json.dumps(
@@ -188,32 +194,32 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
             sub_ts,
             b64url_encode(sign_ed25519(ws_client._seed, sub_canonical)),
         )
-        ev_canonical = json.dumps(
-            {
-                "space_id": "space-1",
-                "event_type": "post.created",
-                "payload": {"text": "hello"},
-                "from_instance": "other.home",
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        payload = {"ciphertext": "opaque-blob"}
+        payload.update(
+            sign_authority_event(
+                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+                space_id="space-1",
+                payload=payload,
+                space_seed=space_seed,
+            )
+        )
+        # Identity-free publish: no ``from_instance``, no household signature.
         delivered = await federation.publish_event(
             "space-1",
-            "post.created",
-            {"text": "hello"},
-            "other.home",
-            signature=b64url_encode(sign_ed25519(other_seed, ev_canonical)),
+            AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            payload,
         )
         assert delivered == ["peer.home"]
 
         msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
         frame = json.loads(msg.data)
+        assert set(frame) == {"type", "space_id", "event_type", "payload"}
         assert frame["type"] == "relay"
         assert frame["space_id"] == "space-1"
-        assert frame["event_type"] == "post.created"
-        assert frame["from_instance"] == "other.home"
-        assert frame["payload"] == {"text": "hello"}
+        assert frame["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
+        assert "from_instance" not in frame
+        assert "other.home" not in msg.data
+        assert frame["payload"] == payload
 
 
 async def test_ws_rejects_bad_signature(ws_client):

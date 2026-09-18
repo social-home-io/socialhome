@@ -51,6 +51,7 @@ from .public import (
     PairingTokenService,
     build_listing_rate_limit,
     build_public_rtc_rate_limit,
+    build_publish_rate_limit,
 )
 from .repositories import (
     SqliteClusterRepo,
@@ -227,6 +228,7 @@ class GfsApp:
             build_admin_middleware(self.services.admin_auth),
             build_listing_rate_limit(),
             build_public_rtc_rate_limit(),
+            build_publish_rate_limit(),
         ]
         return web.Application(middlewares=middlewares)
 

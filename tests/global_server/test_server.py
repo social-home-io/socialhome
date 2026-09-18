@@ -7,6 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.global_server import create_gfs_app, server
+from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
 from socialhome.global_server.app_keys import gfs_fed_repo_key
 from socialhome.global_server.domain import ClientInstance
 
@@ -204,6 +205,34 @@ async def test_gfs_info_returns_public_key(gfs_client):
     assert body["public_key"]
     assert len(body["public_key"]) == 64  # Ed25519 hex
     assert body["server_name"]
+
+
+async def test_gfs_info_advertises_anonymous_publish(gfs_client):
+    """``/gfs/info`` is the capability channel for the GFS↔HFS leg (no
+    proto_version negotiation there): ``anonymous_publish`` tells a household
+    it may drop ``from_instance`` from its ``/gfs/publish`` bodies."""
+    resp = await gfs_client.get("/gfs/info")
+    assert resp.status == 200
+    assert (await resp.json())["anonymous_publish"] is True
+
+
+async def test_publish_endpoint_is_rate_limited_per_ip(gfs_client):
+    """``POST /gfs/publish`` sheds a per-IP flood with 429. The relay is
+    authorized by the space-authority signature alone, so the GFS cannot
+    identify the caller — the IP window is the only shedding handle."""
+    body = {"space_id": "sp-rl", "event_type": "space_post_public", "payload": {}}
+    allowed = 0
+    for _ in range(PUBLISH_MAX_PER_MINUTE + 1):
+        resp = await gfs_client.post("/gfs/publish", json=body)
+        if resp.status == 429:
+            assert resp.headers.get("Retry-After") == "60"
+            break
+        # Un-relayable (no such space) but past the limiter — 403, not 429.
+        assert resp.status == 403
+        allowed += 1
+    else:  # pragma: no cover - limiter never fired
+        pytest.fail("/gfs/publish was never rate-limited")
+    assert allowed == PUBLISH_MAX_PER_MINUTE
 
 
 async def test_admin_static_index_served(gfs_client):

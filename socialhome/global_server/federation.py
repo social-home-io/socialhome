@@ -131,39 +131,110 @@ class GfsFederationService:
         space_id: str,
         event_type: str,
         payload: object,
-        from_instance: str,
+        from_instance: str = "",
         signature: str = "",
         *,
         session: aiohttp.ClientSession | None = None,
     ) -> list[str]:
-        """Relay an event to all subscribers of *space_id*.
+        """Relay an event to all subscribers of *space_id* — **anonymously**.
 
-        Validates the Ed25519 *signature* using the public key registered
-        for *from_instance*. Returns the list of instance_ids successfully
-        notified.
+        The canonical request body is ``{space_id, event_type, payload}``: the
+        GFS must never learn WHICH household relayed a public/global space
+        event, so the relaying identity is not part of the contract. The only
+        authenticator is the **space-authority signature** carried inside the
+        (opaque) ``payload`` and verified against the space's TOFU-pinned
+        ``identity_public_key`` — see :meth:`_authorize_authority_relay`. Any
+        seed-holder (owner OR delegated admin) can produce one, so the space
+        keeps working while the owner is offline, and the GFS stays blind to
+        the content: it verifies a signature over opaque bytes, never decrypts.
 
-        Raises :class:`PermissionError` when *from_instance* is unknown,
-        the signature is missing / malformed / invalid, the space was never
-        published, or *from_instance* is not the space's owning instance.
-        The signature is MANDATORY: an empty signature is rejected (a
-        registered peer must not be able to publish another household's
-        space content unsigned).
+        *from_instance* / *signature* are **legacy** fields an older household
+        still sends. They are TOLERATED but never trusted: when either is
+        present the household transport signature is verified exactly as before
+        (a garbage legacy field must not be a free pass), and then the value is
+        discarded — it authorizes nothing, never enters the fan-out frame, and
+        is never logged.
 
-        Only the space's **owning instance** may relay events for it. The
-        GFS has no space-membership roster (it knows registered instances,
-        space ``owning_instance``, and subscribers — not who joined), so the
-        owning instance is the only relationship it can authoritatively
-        check. A non-owner peer that catches a space_id (they travel in
-        discovery links) must not be able to inject events into another
-        household's space fan-out, even with a signature valid for its own
-        key. A multi-publisher model would be a deliberate feature (the GFS
-        learning membership), not an implicit allow-any-registered-instance.
+        Returns the instance_ids successfully notified. Fails closed with
+        :class:`PermissionError` on a bad/unverifiable legacy field, an
+        unpublished or moderator-``banned`` space, an event type outside
+        ``AUTHORITY_RELAY_EVENT_TYPES``, a space with no pinned authority key,
+        or a missing / invalid / unknown-suite authority signature.
         """
-        inst = await self._repo.get_instance(from_instance)
-        if inst is None:
-            raise PermissionError(f"Unknown instance: {from_instance}")
+        # Legacy transport-signature check. Verified when present so a forged
+        # legacy field is rejected rather than ignored; the identity it names
+        # is NEVER used to authorize the relay.
+        if from_instance or signature:
+            await self._verify_legacy_publish_sig(
+                space_id,
+                event_type,
+                payload,
+                from_instance,
+                signature,
+            )
 
-        if not signature:
+        # The space must already be published (no auto-mint of an ownership
+        # row from an event — mirrors subscribe).
+        existing = await self._repo.get_space(space_id)
+        if existing is None:
+            raise PermissionError("space not published")
+        # A moderator ban is fail-closed: banned content is not relayed, and
+        # the check runs BEFORE any fan-out.
+        if existing.status == "banned":
+            raise PermissionError("space is banned")
+        # A withdrawn space is delisted from the DIRECTORY only (see
+        # ``unpublish_space``) — households that already subscribed keep
+        # receiving the relay, so ``withdrawn`` is deliberately not a reject.
+
+        self._authorize_authority_relay(space_id, event_type, payload, existing)
+
+        subscribers = await self._repo.list_subscribers(space_id)
+
+        # Identity-free fan-out frame: routing fields only. No ``from_instance``
+        # and no GFS-added target id — a subscriber learns nothing about which
+        # household relayed the event, and dedupes on the post id inside the
+        # encrypted payload.
+        event_body = {
+            "space_id": space_id,
+            "event_type": event_type,
+            "payload": payload,
+        }
+        log.debug(
+            "GFS: relaying %s for space %s to %d subscriber(s)",
+            event_type,
+            space_id,
+            len(subscribers),
+        )
+
+        return await self._fan_out(subscribers, event_body, session)
+
+    async def _verify_legacy_publish_sig(
+        self,
+        space_id: str,
+        event_type: str,
+        payload: object,
+        from_instance: str,
+        signature: str,
+    ) -> None:
+        """Verify the LEGACY household transport signature on a publish.
+
+        Older households POST ``{space_id, event_type, payload, from_instance,
+        signature}`` where *signature* is that household's Ed25519 signature
+        over the canonical JSON of the first four fields. Those requests must
+        keep working, but a present-but-bogus legacy field must not be a free
+        pass, so the signature is verified exactly as it used to be — and then
+        the identity is dropped on the floor (it authorizes nothing).
+
+        Fails closed with :class:`PermissionError` when one legacy field is
+        supplied without the other, the named instance is unregistered or
+        banned, or the signature is malformed / doesn't verify. Every failure
+        raises the SAME message and never echoes *from_instance*, so the
+        endpoint is not an instance-existence oracle.
+        """
+        if not from_instance or not signature:
+            raise PermissionError("Invalid Ed25519 signature")
+        inst = await self._repo.get_instance(from_instance)
+        if inst is None or inst.status == "banned":
             raise PermissionError("Invalid Ed25519 signature")
         canonical = json.dumps(
             {
@@ -185,48 +256,6 @@ class GfsFederationService:
         if not verify_ed25519(raw_key, canonical, raw_sig):
             raise PermissionError("Invalid Ed25519 signature")
 
-        # The space must already be published (no auto-mint of an ownership
-        # row from an event — mirrors subscribe).
-        existing = await self._repo.get_space(space_id)
-        if existing is None:
-            raise PermissionError("space not published")
-
-        # Authorize the relay. The household transport signature above proved
-        # WHO sent the bytes (anti-spoof at the GFS edge, #597/#598); this
-        # step decides whether that sender may relay content for *this* space.
-        #
-        # Two acceptable proofs (Phase 5a):
-        #   1. Legacy/owner: from_instance IS the space's owning instance.
-        #   2. Space-authority: the payload carries a space-authority
-        #      signature over its own bytes, verifiable against the TOFU-pinned
-        #      space public key. Any seed-holder (owner OR delegated admin) can
-        #      produce one, so the space keeps working while the owner is
-        #      offline. The GFS stays BLIND to the content — it only verifies
-        #      the signature over the opaque payload bytes, never decrypts.
-        #
-        # Fail-closed: a present-but-invalid authority sig is a hard reject
-        # (no fall-through to the owner check); an unknown suite is a reject; a
-        # non-owner against a space with no pinned pubkey is a reject (the GFS
-        # cannot verify authority, so only the owner may relay until a pubkey
-        # is pinned on a later publish).
-        is_owner = existing.owning_instance == from_instance
-        if not is_owner:
-            self._authorize_authority_relay(space_id, event_type, payload, existing)
-
-        subscribers = await self._repo.list_subscribers(
-            space_id,
-            exclude=from_instance,
-        )
-
-        event_body = {
-            "space_id": space_id,
-            "event_type": event_type,
-            "payload": payload,
-            "from_instance": from_instance,
-        }
-
-        return await self._fan_out(subscribers, event_body, session)
-
     def _authorize_authority_relay(
         self,
         space_id: str,
@@ -234,17 +263,22 @@ class GfsFederationService:
         payload: object,
         existing: GlobalSpace,
     ) -> None:
-        """Authorize a NON-owner relay via the space-authority signature.
+        """Authorize a relay via the space-authority signature — the ONLY
+        authenticator ``publish_event`` accepts.
 
         Raises :class:`PermissionError` unless the ``payload`` carries a valid
         space-authority signature verifiable against the space's TOFU-pinned
-        public key. Fail-closed in every other case:
+        public key. There is no owner exemption: the retired
+        ``from_instance == owning_instance`` path let an owner relay ANY event
+        type with no authority signature at all, and it also required the GFS
+        to know who was relaying. Fail-closed in every case:
 
         * wire ``event_type`` isn't one the authority sig authorizes (the
           ``AUTHORITY_RELAY_EVENT_TYPES`` set — ``space_post_public`` or
           ``space_subscriber_key_handoff``) → reject;
         * payload isn't a signed dict / no ``authority_sig`` → reject;
-        * no pinned pubkey on the space → reject (GFS can't verify authority);
+        * no pinned pubkey on the space → reject (GFS can't verify authority;
+          the owner re-publishes the space metadata to heal the pin);
         * unknown authority suite → reject (no default fallback);
         * signature present but doesn't verify → reject.
 
@@ -256,32 +290,32 @@ class GfsFederationService:
         payload but NO timestamp / nonce / epoch, and the GFS keeps no replay
         cache, so this relay is idempotent / at-least-once — a captured
         authority-signed payload can be re-POSTed and re-fanned-out (a property
-        the owner relay already had under #598, widened here). We deliberately
+        the retired owner relay already had under #598). We deliberately
         do NOT add GFS-side replay machinery: the GFS is content-blind and
         can't see a post id inside the (encrypted) payload. The content-layer
         backstop is SUBSCRIBER-side dedupe by the post id carried inside the
         payload — enforced by the HFS ``space_public_inbound`` consumer (the
         same way moments dedupe by moment_id). See ``docs/protocol/discovery.md``.
         """
-        if not isinstance(payload, dict) or "authority_sig" not in payload:
-            raise PermissionError("not the owner of this space")
         # The authority signature authorizes only the event types in
         # ``AUTHORITY_RELAY_EVENT_TYPES`` (``space_post_public`` and the
         # Phase-5b ``space_subscriber_key_handoff``). Bind the caller-supplied
         # WIRE event_type to one of those AND verify the signature under that
-        # SAME type below — a non-owner holding one valid payload can't relay
-        # it under an arbitrary type (e.g. ``space_admin_action``), and a
-        # payload signed for one allowed type can't be replayed under the
-        # other (the signing bytes bind the event type). The owner path is
-        # exempt (handled by the caller) and keeps relaying any type.
+        # SAME type below — a relayer holding one valid payload can't relay it
+        # under an arbitrary type (e.g. ``space_admin_action``), and a payload
+        # signed for one allowed type can't be replayed under the other (the
+        # signing bytes bind the event type).
         if event_type not in AUTHORITY_RELAY_EVENT_TYPES:
             raise PermissionError(
                 "authority relay only permits the "
                 f"{sorted(AUTHORITY_RELAY_EVENT_TYPES)!r} event types",
             )
+        if not isinstance(payload, dict) or "authority_sig" not in payload:
+            raise PermissionError("missing space-authority signature")
         if not existing.identity_public_key:
             # No TOFU-pinned key → the GFS cannot verify a space-authority
-            # signature, so only the owner may relay (rejected above).
+            # signature, so nothing may be relayed for this space until the
+            # owner re-publishes its metadata and pins one.
             raise PermissionError(
                 "no pinned authority key for this space",
             )

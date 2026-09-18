@@ -49,6 +49,16 @@ LISTING_MAX_PER_MINUTE: int = 30
 #: gated here — the viewer polls them ~1/s by design.
 PUBLIC_RTC_MAX_PER_MINUTE: int = 20
 
+#: Per-IP/minute cap on ``POST /gfs/publish``. Since the relay is authorized by
+#: the space-authority signature alone, the GFS deliberately cannot identify
+#: the caller — the client IP is the only handle left for shedding a flood, so
+#: this limiter replaces the per-instance accountability the old
+#: ``from_instance`` check implied. 120/min = 2/s sustained per IP: orders of
+#: magnitude above a real household (one publish per public post or subscriber
+#: key handoff, per GFS) while still bounding how much unauthenticated
+#: signature-verification + fan-out work one source can force.
+PUBLISH_MAX_PER_MINUTE: int = 120
+
 
 # ─── Token service ──────────────────────────────────────────────────────
 
@@ -138,6 +148,33 @@ def build_public_rtc_rate_limit():
         ip = _client_ip(request)
         hits = [t for t in counters.get(ip, []) if now - t < 60.0]
         if len(hits) >= PUBLIC_RTC_MAX_PER_MINUTE:
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        hits.append(now)
+        counters[ip] = hits
+        return await handler(request)
+
+    return _rate_limit
+
+
+def build_publish_rate_limit():
+    """Per-IP rate limiter for ``POST /gfs/publish``.
+
+    The relay is authorized by the space-authority signature alone, so the GFS
+    cannot (and must not) identify the publishing household — per-IP is the
+    only rate handle available. Mirrors
+    :func:`build_public_rtc_rate_limit`'s in-memory sliding window."""
+    counters: dict[str, list[float]] = {}
+
+    @web.middleware
+    async def _rate_limit(request: web.Request, handler):
+        if request.rel_url.path != "/gfs/publish":
+            return await handler(request)
+        now = time.monotonic()
+        ip = _client_ip(request)
+        hits = [t for t in counters.get(ip, []) if now - t < 60.0]
+        if len(hits) >= PUBLISH_MAX_PER_MINUTE:
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
             return resp
