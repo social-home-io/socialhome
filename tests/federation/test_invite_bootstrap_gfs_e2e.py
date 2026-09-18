@@ -606,15 +606,27 @@ async def test_a_roster_change_and_a_rekey_reach_the_link_joined_member(
         await b.federation.broadcast_to_space_members(space.id, event_type, payload)
     await gfs.drain()
 
-    assert [e.event_type for e in a.received] == [
+    # Keyed by event type, not by arrival index: the relay's push leg is
+    # concurrent with the 202 by construction (a real server writes the
+    # frame to the recipient's socket while answering the sender, and
+    # ``envelope_relay``'s own docstring notes that an envelope arriving
+    # during a drain can overtake a queued one). What this test is about
+    # is that roster events and the next content-key epoch ride the same
+    # leg as posts do — not the order three concurrent pushes happen to
+    # land in.
+    by_type = {e.event_type: e for e in a.received}
+    assert set(by_type) == {
         FederationEventType.SPACE_MEMBER_JOINED,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
         FederationEventType.SPACE_POST_CREATED,
-    ]
-    assert a.received[1].payload["epoch"] == 2
+    }
+    assert by_type[FederationEventType.SPACE_KEY_EXCHANGE_REKEY].payload["epoch"] == 2
     # The post that FOLLOWS the rekey still decrypts: the pair's session
     # key is independent of the space content key epoch.
-    assert a.received[2].payload["content"] == "after-the-rekey"
+    assert (
+        by_type[FederationEventType.SPACE_POST_CREATED].payload["content"]
+        == "after-the-rekey"
+    )
 
 
 async def test_every_relayed_body_is_a_recipient_and_ciphertext(households, gfs):

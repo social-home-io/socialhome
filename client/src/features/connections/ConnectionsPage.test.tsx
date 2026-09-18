@@ -171,6 +171,26 @@ describe('ConnectionsPage', () => {
       expect(icon.getAttribute('aria-label')).toBe('Via HTTPS (fallback)')
     })
 
+    it('renders the relay glyph labelled "Via connection server relay" for transport=gfs_relay', async () => {
+      apiMock.get.mockImplementation((url: string) => {
+        if (url === '/api/connections') return Promise.resolve([makeConnection({ transport: 'gfs_relay' })])
+        return Promise.resolve([])
+      })
+
+      const { container } = render(<ConnectionsPage />)
+
+      await waitFor(() => {
+        const icon = container.querySelector('.sh-transport-icon--gfs-relay')
+        expect(icon).not.toBeNull()
+      })
+
+      const icon = container.querySelector('.sh-transport-icon--gfs-relay')!
+      expect(icon.getAttribute('title')).toBe('Via connection server relay')
+      expect(icon.getAttribute('aria-label')).toBe('Via connection server relay')
+      // Not mislabelled as a plain HTTPS peer.
+      expect(container.querySelector('.sh-transport-icon--https')).toBeNull()
+    })
+
     it('renders no transport glyph when transport is null', async () => {
       apiMock.get.mockImplementation((url: string) => {
         if (url === '/api/connections') return Promise.resolve([makeConnection({ transport: null })])

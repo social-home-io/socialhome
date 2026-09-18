@@ -119,9 +119,21 @@ async def _remote_detail(resp, *, context: str) -> str:
 
 
 class GfsConnectionError(Exception):
-    """Raised when a GFS operation fails."""
+    """Raised when a GFS operation fails.
 
-    __slots__ = ()
+    ``status`` is the upstream HTTP status when there was one, and
+    ``None`` when the failure happened before an answer (unreachable,
+    timeout, TLS). Callers that turn this into a user-facing message map
+    on the status CLASS rather than reading ``str(exc)``: the message
+    holds the server's own words, which are useful in a log and useless
+    — sometimes misleading — in a toast.
+    """
+
+    __slots__ = ("status",)
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _is_private_host(host: str) -> bool:
@@ -996,6 +1008,7 @@ class GfsConnectionService:
                     detail = await _remote_detail(resp, context="invite")
                     raise GfsConnectionError(
                         f"GFS rejected invite (HTTP {resp.status}): {detail}",
+                        status=resp.status,
                     )
                 try:
                     data = await resp.json()
@@ -1068,6 +1081,7 @@ class GfsConnectionService:
                     detail = await _remote_detail(resp, context="invite revoke")
                     raise GfsConnectionError(
                         f"GFS rejected invite revoke (HTTP {resp.status}): {detail}",
+                        status=resp.status,
                     )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc

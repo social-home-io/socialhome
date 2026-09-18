@@ -49,7 +49,9 @@ async function consumeToken(token: string, spaceId: string | null) {
       // the fallback code without it produced a code that could only
       // ever take the local path, i.e. fail the same way again on the
       // other side.
-      pasteCode.value = buildInviteCode({
+      // Prefer the issuer's own, bootstrap-capable code; fall back to the
+      // locally-built one when the endpoint isn't there or says 404.
+      pasteCode.value = await fetchIssuerCode(token) ?? buildInviteCode({
         token,
         space_id: spaceId,
         issuer_instance_id: instanceConfig.value?.instance_id ?? null,
@@ -60,6 +62,32 @@ async function consumeToken(token: string, spaceId: string | null) {
     const msg = (err as Error)?.message ?? String(err)
     message.value = msg || 'Invite link rejected'
     status.value = 'error'
+  }
+}
+
+/**
+ * Ask the issuing household for the *complete* paste code for this token.
+ *
+ * A locally-minted `buildInviteCode(...)` carries only the token / space /
+ * issuer id — it has no bootstrap block (the issuer's identity + key-wrap
+ * keys and the connection-server URL), so the receiving household can never
+ * actually bootstrap a redeem with it. `GET /api/invite-links/{token}/code`
+ * returns the real, bootstrap-capable blob (the token is itself the
+ * credential, so the endpoint is public + per-IP rate limited).
+ *
+ * Returns `null` when the token isn't a live invite link here (404) or the
+ * request fails — the caller then falls back to the local code, so this
+ * page is never worse than before.
+ */
+async function fetchIssuerCode(token: string): Promise<string | null> {
+  try {
+    const r = await api.get(`/api/invite-links/${encodeURIComponent(token)}/code`) as {
+      code?: string | null
+    }
+    const code = r?.code
+    return typeof code === 'string' && code !== '' ? code : null
+  } catch {
+    return null
   }
 }
 

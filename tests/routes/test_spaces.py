@@ -2209,13 +2209,21 @@ async def test_invite_token_explicit_null_ttl_never_expires(client):
     assert await _token_expiry(client, (await resp.json())["token"]) is None
 
 
-@pytest.mark.parametrize("bad", [-1, "soon", [5]])
+@pytest.mark.parametrize("bad", [-1, "soon", [5], 0.5, 1.0, True, False, "60"])
 async def test_invite_token_rejects_bad_ttl(client, bad):
     """A negative or non-integer ``ttl_seconds`` is a 422.
 
     ``0`` is deliberately absent: the SPA's expiry picker sends it for
     "Never", so the route maps it onto the service's ``None`` — see
-    :func:`test_ttl_seconds_zero_means_never_expires`."""
+    :func:`test_ttl_seconds_zero_means_never_expires`.
+
+    ``int()`` accepted every one of the odd values here and quietly
+    changed what the caller asked for: ``0.5`` became ``0``, i.e. a link
+    that never expires; ``True`` became one second; ``"60"`` worked by
+    accident and taught clients a shape the API does not promise. An
+    expiry is a number the owner picked — a value that is not a JSON
+    integer is a client bug worth reporting, not one worth guessing at.
+    """
     sid = await _invite_space(client)
     resp = await client.post(
         f"/api/spaces/{sid}/invite-tokens",
@@ -2599,3 +2607,166 @@ async def test_ttl_seconds_zero_means_never_expires(client):
         headers=_auth(client._admin_token),
     )
     assert (await default.json())["expires_at"] is not None
+
+
+# ─── GET /api/invite-links/{token}/code ──────────────────────────────────
+
+
+async def test_invite_link_code_is_public_and_returns_the_full_code(client):
+    """The ``/join`` landing page's "wrong instance" fallback needs a code
+    the RECEIVING household can actually bootstrap a redeem with — which
+    means the issuer's keys and the connection-server URL, none of which
+    the page can mint on its own. No Authorization header: the token is
+    the credential, and whoever holds it can already redeem the link."""
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+
+    resp = await client.get(f"/api/invite-links/{token}/code")
+
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["code"].startswith("socialhome://invite#")
+    # It is the same code the admin list hands out — one builder, so the
+    # paste path and the /join path cannot drift.
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    rows = (await listed.json())["tokens"]
+    assert body["code"] == next(r for r in rows if r["token"] == token)["code"]
+
+
+async def test_invite_link_code_404s_for_an_unknown_token(client):
+    """A token that was never ours and one that has expired must be
+    indistinguishable — otherwise this is a probe for which links a
+    household has issued."""
+    resp = await client.get("/api/invite-links/deadbeef" + "0" * 24 + "/code")
+    assert resp.status == 404
+
+
+async def test_invite_link_code_404s_once_the_link_is_revoked(client):
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+    assert (await client.get(f"/api/invite-links/{token}/code")).status == 200
+
+    revoked = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    assert revoked.status in (200, 204)
+
+    assert (await client.get(f"/api/invite-links/{token}/code")).status == 404
+
+
+async def test_invite_link_code_404s_once_the_link_has_expired(client):
+    import asyncio
+
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1, "ttl_seconds": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+    await asyncio.sleep(1.2)
+
+    assert (await client.get(f"/api/invite-links/{token}/code")).status == 404
+
+
+async def test_invite_link_code_is_rate_limited_per_ip(client):
+    """An anonymous endpoint gets a budget. Not brute-force protection —
+    a uuid4 token is not guessable — just ordinary shedding."""
+    from socialhome.routes.spaces import INVITE_CODE_RATE_LIMIT
+
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+
+    statuses = [
+        (await client.get(f"/api/invite-links/{token}/code")).status
+        for _ in range(INVITE_CODE_RATE_LIMIT + 1)
+    ]
+
+    assert statuses[:INVITE_CODE_RATE_LIMIT] == [200] * INVITE_CODE_RATE_LIMIT
+    assert statuses[-1] == 429
+
+
+# ─── Publishing an invite link: the upstream's words stay upstream ───────
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (403, "owner key"),
+        (429, "rate-limiting"),
+        (500, "couldn't publish the link right now"),
+        (None, "couldn't publish the link right now"),
+    ],
+)
+async def test_publish_failure_is_a_sentence_not_an_upstream_dump(
+    client,
+    caplog,
+    status,
+    expected,
+):
+    """The SPA was showing people this, verbatim, in a toast:
+
+        GFS rejected invite (HTTP 403): {"error": "not the owner of this space"}
+
+    Three problems. It is not a sentence anybody can act on; it leaks the
+    upstream's error vocabulary into our UI, so a wording change over
+    there changes what our users read; and it says nothing about what to
+    DO. ``security.error_response`` says as much in its own docstring —
+    "Pass a fixed string literal — never ``str(exc)`` directly". Map it
+    per status class here, and keep the raw text where it is useful: the
+    log.
+    """
+    import logging
+
+    from socialhome.app_keys import space_service_key
+    from socialhome.services.gfs_connection_service import GfsConnectionError
+
+    sid = await _invite_space(client)
+    svc = client.server.app[space_service_key]
+
+    raw = 'GFS rejected invite (HTTP 403): {"error": "not the owner of this space"}'
+
+    async def _boom(*a, **kw):
+        raise GfsConnectionError(raw, status=status)
+
+    from unittest.mock import patch
+
+    with (
+        patch.object(type(svc), "create_invite_link", side_effect=_boom),
+        caplog.at_level(logging.WARNING),
+    ):
+        resp = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"uses": 1, "publish_to_gfs": "gfs-1"},
+            headers=_auth(client._admin_token),
+        )
+
+    assert resp.status == 422
+    body = await resp.json()
+    assert body["error"]["code"] == "GFS_PUBLISH_FAILED"
+    message = body["error"]["detail"]
+    assert expected in message
+    # Not one word of the upstream's own text reaches the user…
+    assert "HTTP 403" not in message
+    assert "not the owner of this space" not in message
+    # …but an operator can still find it.
+    assert any(raw in r.getMessage() for r in caplog.records)

@@ -77,6 +77,9 @@ class _FakeInstance:
 
     id: str
     status: PairingStatus = PairingStatus.CONFIRMED
+    #: Carried over when a stale (non-CONFIRMED) row is replaced by a
+    #: space-session seat — the peer may already hold this URL.
+    local_inbox_id: str = "existing-inbox-id"
 
 
 class _FakeFederationRepo:
@@ -121,6 +124,21 @@ class _FakeSpaceRepo:
         # Pre-seed ``get`` returns; tests that drive the issuer-side
         # _on_redeem should populate this so the ACK can carry meta.
         self.space_rows_for_get: dict = {}
+
+    async def get_live_invite_token(self, token):
+        """Read-only peek — mirrors the repo's "live" predicate exactly and
+        must never move ``uses_remaining``."""
+        row = self.tokens.get(token)
+        if row is None or row.get("expired") or row["uses_remaining"] <= 0:
+            return None
+        return {
+            "token": token,
+            "space_id": row["space_id"],
+            "created_by": row["created_by"],
+            "uses_remaining": row["uses_remaining"],
+            "expires_at": row.get("expires_at"),
+            "role": row.get("role", SpaceRole.MEMBER.value),
+        }
 
     async def consume_invite_token(self, token, *, redeemer_user_id=None):
         if self.consume_should_raise is not None:
@@ -775,6 +793,9 @@ async def test_redeem_deny_with_no_reason_uses_default():
     loop = asyncio.get_event_loop()
     fut: asyncio.Future = loop.create_future()
     coord._pending["n1"] = fut
+    # Every path that mints a nonce records who it was addressed to;
+    # ``_on_redeem_deny`` fails closed without it.
+    coord._pending_issuer["n1"] = "issuer-1"
     ev = FederationEvent(
         msg_id="m1",
         event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
@@ -1784,6 +1805,46 @@ async def test_bootstrap_does_not_overwrite_an_existing_relationship():
     assert env.issuer_repo._instances[env.redeemer_party.instance_id] is existing
 
 
+async def test_a_stale_unconfirmed_row_is_upgraded_to_a_relay_seat():
+    """ "Never re-key an existing relationship" must mean an existing
+    *relationship*, not an existing ROW.
+
+    A household can already have a non-CONFIRMED ``remote_instances`` row
+    for us — an abandoned QR pairing left at ``pending_sent``, a
+    handshake that timed out. The
+    seat used to early-return on ANY row, so it wrote no session keys, no
+    ``relay_via`` and no key-wrap key: the redeem ACKed, both sides
+    believed they were seated, and then every single envelope failed
+    because the transport had nothing to seal to. Silent, and only
+    visible as "the space is there but nothing ever arrives".
+    """
+    env = _bootstrap_pair()
+    stale = _FakeInstance(
+        env.redeemer_party.instance_id,
+        status=PairingStatus.PENDING_SENT,
+    )
+    env.issuer_repo._instances[env.redeemer_party.instance_id] = stale
+
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+
+    saved = [i for i in env.issuer_repo.saved if i.id == env.redeemer_party.instance_id]
+    assert saved, "the stale row must be replaced by a usable relay seat"
+    seat = saved[-1]
+    assert seat.status is PairingStatus.CONFIRMED
+    assert seat.source is InstanceSource.SPACE_SESSION
+    # The three things the relay transport reads on every send.
+    assert seat.remote_keywrap_pk
+    assert seat.relay_via
+    assert seat.key_self_to_remote and seat.key_remote_to_self
+    # The inbox URL the peer may already hold survives the replacement.
+    assert seat.local_inbox_id == "existing-inbox-id"
+
+
 async def test_bootstrap_inbound_is_rate_limited_process_wide():
     """The relay hands us blobs from anyone — cap them before the unseal."""
     env = _bootstrap_pair()
@@ -1886,11 +1947,21 @@ async def test_redeem_of_an_admin_link_seats_an_admin():
     ]
 
 
-async def test_admin_seat_shares_the_delegated_admin_signing_seed():
-    """An admin seated by link gets what an admin seated by promotion
-    gets — the same seam ``set_remote_member_role`` uses, so the new
-    admin can act with the owner offline."""
-    sender, issuer, _sf, _if, _repo, _members = _wire_pair(
+async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
+    """An admin met through a public link gets the ROLE and nothing else.
+
+    The space's signing seed is the authority to act AS the space, and
+    the connection server pins a space's authority key TOFU-immutably —
+    so if this household later turns out to be the wrong one to trust,
+    the seed cannot be rotated away from it. A link is not an
+    acquaintance: anyone who saw the URL could be holding it. The seat
+    is therefore a delegated admin WITHOUT authority — its actions ride
+    ``SPACE_REMOTE_ADMIN_ACTION`` to the host, which signs them. The
+    seed still travels on an explicit promotion
+    (``set_remote_member_role``), which is a deliberate act about a
+    household the owner already knows.
+    """
+    sender, issuer, _sf, _if, _repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-seed",
             "created_by": "owner",
@@ -1898,64 +1969,19 @@ async def test_admin_seat_shares_the_delegated_admin_signing_seed():
             "role": SpaceRole.ADMIN.value,
         },
     )
-    shared: list[tuple[str, str]] = []
+    # Nothing on the coordinator may even be able to ship a seed.
+    assert not hasattr(issuer, "attach_admin_seed_sharer")
 
-    async def _share(space_id, *, instance_id):
-        shared.append((space_id, instance_id))
-
-    issuer.attach_admin_seed_sharer(_share)
-    await sender.request_redeem(
-        "good-token",
-        viewer_user_id="u-local",
-        issuer_instance_id="issuer-1",
-    )
-    assert shared == [("sp-seed", "sender-1")]
-
-
-async def test_member_seat_shares_no_signing_seed():
-    """The seed is an ADMIN-only consequence — a plain member link must
-    never trigger it."""
-    sender, issuer, _sf, _if, _repo, _members = _wire_pair(
-        {"space_id": "sp-plain", "created_by": "owner", "uses_remaining": 1},
-    )
-    shared: list = []
-
-    async def _share(space_id, *, instance_id):
-        shared.append((space_id, instance_id))
-
-    issuer.attach_admin_seed_sharer(_share)
     result = await sender.request_redeem(
         "good-token",
         viewer_user_id="u-local",
         issuer_instance_id="issuer-1",
     )
-    assert result["role"] == SpaceRole.MEMBER.value
-    assert shared == []
 
-
-async def test_a_failing_seed_share_still_seats_the_admin():
-    """Fail-soft: a share that raises must not un-seat an admin who
-    legitimately redeemed."""
-    sender, issuer, _sf, _if, _repo, issuer_members = _wire_pair(
-        {
-            "space_id": "sp-seed-fail",
-            "created_by": "owner",
-            "uses_remaining": 1,
-            "role": SpaceRole.ADMIN.value,
-        },
-    )
-
-    async def _boom(space_id, *, instance_id):
-        raise RuntimeError("peer unreachable")
-
-    issuer.attach_admin_seed_sharer(_boom)
-    result = await sender.request_redeem(
-        "good-token",
-        viewer_user_id="u-local",
-        issuer_instance_id="issuer-1",
-    )
     assert result["role"] == SpaceRole.ADMIN.value
-    assert issuer_members.added
+    assert issuer_members.roles == [
+        ("sp-seed", "sender-1", "u-local", SpaceRole.ADMIN.value)
+    ]
 
 
 async def test_subscriber_link_is_refused_across_households():
@@ -1981,16 +2007,36 @@ async def test_subscriber_link_is_refused_across_households():
     assert issuer_members.added == []
 
 
+async def test_a_published_follower_link_cannot_be_burned_by_strangers():
+    """The refusal used to run AFTER the atomic consume, so every stranger
+    who opened a published Follower link spent one of its uses on a denial.
+    A 20-use link shared in a group chat was dead before the first person
+    it was meant for got to it. Read the seat, refuse, and leave the
+    counter exactly where it was."""
+    sender, _issuer, _sf, _if, repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 20,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    for _ in range(3):
+        with pytest.raises(SpacePermissionError):
+            await sender.request_redeem(
+                "good-token",
+                viewer_user_id="u-local",
+                issuer_instance_id="issuer-1",
+            )
+
+    assert repo.tokens["good-token"]["uses_remaining"] == 20
+    assert issuer_members.added == []
+
+
 async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
     """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so
     the role reaches a household that has never federated with us too."""
     env = _bootstrap_pair(role=SpaceRole.ADMIN.value)
-    shared: list = []
-
-    async def _share(space_id, *, instance_id):
-        shared.append((space_id, instance_id))
-
-    env.issuer.attach_admin_seed_sharer(_share)
     result = await env.redeemer.request_redeem(
         "tok-1",
         viewer_user_id="u-local",
@@ -2001,4 +2047,87 @@ async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
     assert env.issuer_members.roles == [
         ("space-1", env.redeemer_party.instance_id, "u-local", SpaceRole.ADMIN.value)
     ]
-    assert shared == [("space-1", env.redeemer_party.instance_id)]
+
+
+# ─── §D2: an ACK is only an ACK from the household we addressed ───────
+
+
+async def test_a_redeem_ack_from_a_household_we_did_not_address_is_ignored():
+    """``redeem_nonce`` addresses an in-flight redeem, not an identity.
+
+    Any confirmed peer can send us a SPACE_INVITE_TOKEN_REDEEM_ACK, and
+    without a pin one of them could answer a redeem aimed at somebody
+    else — resolving our Future with ITS ``space_meta``, which is what
+    the local seating then writes: a stub space, a membership row and a
+    roster, all sourced from a household we never asked. The §D2b
+    bootstrap leg already pins its reply to the issuer the invite blob
+    named; this is the same pin for the paired leg.
+    """
+    sender, _issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-pin", "created_by": "owner", "uses_remaining": 1},
+    )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    sender._pending["nonce-1"] = fut
+    sender._pending_issuer["nonce-1"] = "issuer-1"
+
+    await sender._on_redeem_ack(
+        SimpleNamespace(
+            from_instance="an-unrelated-peer",
+            payload={
+                "redeem_nonce": "nonce-1",
+                "space_id": "sp-theirs",
+                "role": SpaceRole.ADMIN.value,
+                "space_meta": {"id": "sp-theirs"},
+            },
+        ),
+    )
+
+    assert not fut.done()
+
+
+async def test_a_redeem_deny_from_a_household_we_did_not_address_is_ignored():
+    """Same pin on the refusal leg — otherwise any peer can cancel
+    somebody else's redeem by guessing nothing more than a nonce it
+    happens to observe."""
+    sender, _issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-pin", "created_by": "owner", "uses_remaining": 1},
+    )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    sender._pending["nonce-2"] = fut
+    sender._pending_issuer["nonce-2"] = "issuer-1"
+
+    await sender._on_redeem_deny(
+        SimpleNamespace(
+            from_instance="an-unrelated-peer",
+            payload={"redeem_nonce": "nonce-2", "reason": "nope"},
+        ),
+    )
+
+    assert not fut.done()
+
+
+async def test_the_addressed_issuer_still_resolves_the_redeem():
+    """The other side of the pin: the household we actually addressed
+    resolves the Future exactly as before."""
+    sender, _issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-pin", "created_by": "owner", "uses_remaining": 1},
+    )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    sender._pending["nonce-3"] = fut
+    sender._pending_issuer["nonce-3"] = "issuer-1"
+
+    await sender._on_redeem_ack(
+        SimpleNamespace(
+            from_instance="issuer-1",
+            payload={
+                "redeem_nonce": "nonce-3",
+                "space_id": "sp-pin",
+                "role": SpaceRole.MEMBER.value,
+            },
+        ),
+    )
+
+    assert fut.result()["space_id"] == "sp-pin"

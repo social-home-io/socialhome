@@ -175,6 +175,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_space_crypto",
         "_child_protection",
         "_pending",
+        "_pending_issuer",
         "_timeout",
         "_route_service",
         "_routed_handler",
@@ -185,7 +186,6 @@ class SpaceInviteTokenRedeemCoordinator:
         "_key_manager",
         "_bootstrap_hints",
         "_rate_limiter",
-        "_admin_seed_sharer",
     )
 
     def __init__(
@@ -228,6 +228,12 @@ class SpaceInviteTokenRedeemCoordinator:
         self._child_protection = child_protection_service
         #: ``redeem_nonce`` → in-flight Future awaiting the ACK / DENY.
         self._pending: dict[str, asyncio.Future[dict]] = {}
+        #: ``redeem_nonce`` → the household we addressed this redeem to.
+        #: A nonce addresses an in-flight request, not an identity, so
+        #: the ACK / DENY legs check the answer came from the household
+        #: we asked — the same pin ``_handle_bootstrap_reply`` applies on
+        #: the §D2b leg, where the invite blob names the issuer.
+        self._pending_issuer: dict[str, str] = {}
         self._timeout = timeout
         #: Mesh-routing pair. Optional so legacy tests that exercise
         #: only the direct-pair path can construct the coordinator
@@ -250,23 +256,6 @@ class SpaceInviteTokenRedeemCoordinator:
         #: blob advertised rather than trusting whatever comes back.
         self._bootstrap_hints: dict[str, InviteBootstrapHint] = {}
         self._rate_limiter: "RateLimiter | None" = None
-        #: Optional — ``SpaceService.share_admin_seed_with_remote_admin``.
-        #: Wired so seating a remote ADMIN off an invite link triggers the
-        #: same delegated-admin signing-seed share a promotion does.
-        #: Absent → the seat still happens, the admin just can't act with
-        #: the owner offline until a later share.
-        self._admin_seed_sharer: Any | None = None
-
-    def attach_admin_seed_sharer(self, sharer: Any) -> None:
-        """Wire the delegated-admin signing-seed share for admin seats.
-
-        ``sharer`` is an ``async (space_id, *, instance_id) -> None``
-        seam — in production ``SpaceService`` — which re-checks the
-        owner-only / opt-in / capability gates itself. Kept as a callable
-        rather than a service reference so the coordinator does not grow
-        a dependency on the whole space service.
-        """
-        self._admin_seed_sharer = sharer
 
     def attach_bootstrap(
         self,
@@ -452,6 +441,7 @@ class SpaceInviteTokenRedeemCoordinator:
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[dict] = loop.create_future()
         self._pending[nonce] = fut
+        self._pending_issuer[nonce] = issuer_instance_id
         payload = {
             "redeem_nonce": nonce,
             "invite_token": token,
@@ -494,6 +484,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 ) from exc
         finally:
             self._pending.pop(nonce, None)
+            self._pending_issuer.pop(nonce, None)
 
         return await self._seat_local_after_ack(
             result,
@@ -778,6 +769,41 @@ class SpaceInviteTokenRedeemCoordinator:
         a surface anybody holding a link can reach. The detail lives in
         ``log.exception`` on the issuer, where it belongs.
         """
+        # ── Refuse a cross-household subscriber seat BEFORE the consume ──
+        # ``space_remote_members.role`` admits member|admin only (migration
+        # 0009: a subscriber has no row there at all), so this seat cannot
+        # be honoured across households and fails closed. Reading the seat
+        # first is the whole point: the refusal used to run *after* the
+        # atomic consume, which meant every stranger who opened a published
+        # Follower link spent one of its uses to be told no — a twenty-use
+        # link posted in a group chat was exhausted before the people it was
+        # for arrived. A peek is not an authorization decision (the consume
+        # below is still the only thing that can spend a use), so nothing
+        # about the race is weakened by doing it here.
+        try:
+            peek = await self._spaces.get_live_invite_token(token)
+        except Exception:
+            log.exception(
+                "invite redeem: get_live_invite_token raised for token from %s",
+                redeemer_instance_id,
+            )
+            return None, REDEEM_DENY_REASON
+        if peek is not None and str(peek.get("role") or "") == (
+            SpaceRole.SUBSCRIBER.value
+        ):
+            # The one denial that does NOT collapse to
+            # :data:`REDEEM_DENY_REASON`. The caller is holding a link
+            # whose seat we published ourselves, so naming the reason
+            # tells it nothing it could not read off the link — while a
+            # bare "denied" would leave the SPA unable to explain why a
+            # legitimate link refuses. It is not an oracle either: the
+            # answer depends only on the seat the issuer minted, never on
+            # who is asking.
+            return None, (
+                "a subscriber invite link can only be redeemed on the "
+                "household that issued it"
+            )
+
         try:
             row = await self._spaces.consume_invite_token(
                 token,
@@ -806,20 +832,17 @@ class SpaceInviteTokenRedeemCoordinator:
         # redeemer never gets to ask for a role, so this is read here and
         # nowhere else.
         seat = str(row.get("role") or SpaceRole.MEMBER.value)
-        if seat == SpaceRole.SUBSCRIBER.value:
-            # ``space_remote_members.role`` admits member|admin only
-            # (migration 0009: a subscriber has no row there at all).
-            # Seating a subscriber as a member would hand a cross-
-            # household reader write authority nobody granted, so this
-            # fails closed until subscriptions grow a cross-household
-            # shape of their own.
-            #
-            # This is the one denial that does NOT collapse to
-            # :data:`REDEEM_DENY_REASON`: it is reached only after the
-            # token already consumed successfully, so the caller has
-            # proved it holds a live link and learns nothing it did not
-            # already know — while a bare "denied" would leave the SPA
-            # unable to say why a link it legitimately holds refuses.
+        if seat == SpaceRole.SUBSCRIBER.value:  # pragma: no cover — belt
+            # Unreachable in practice: the peek above refuses this seat
+            # before a use is spent. Kept as the last line of defence, so
+            # a future caller that reaches the consume by another route
+            # still cannot seat a reader with write authority — and
+            # deliberately NOT the place the denial is supposed to happen
+            # (getting here means a use was already burned).
+            log.warning(
+                "invite redeem: a subscriber seat reached the consume — "
+                "a use was spent on a link that cannot be redeemed",
+            )
             return None, (
                 "a subscriber invite link can only be redeemed on the "
                 "household that issued it"
@@ -861,25 +884,20 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return None, REDEEM_DENY_REASON
 
-        # An ADMIN seat gets exactly what a promotion gets: when the
-        # owner opted into delegated-admin authority, the space's signing
-        # seed goes to the new admin's household so it can act with the
-        # owner offline. Reuses the seam the role-change path uses —
-        # fail-soft, because a missed share must not un-seat an admin who
-        # legitimately redeemed (a later re-share fixes it).
-        if seat == SpaceRole.ADMIN.value and self._admin_seed_sharer is not None:
-            try:
-                await self._admin_seed_sharer(
-                    space_id,
-                    instance_id=redeemer_instance_id,
-                )
-            except Exception:
-                log.exception(
-                    "invite redeem: admin signing-seed share failed for "
-                    "space_id=%s instance=%s",
-                    space_id,
-                    redeemer_instance_id,
-                )
+        # An ADMIN seat gets the ROLE and nothing else. NO signing-seed
+        # share happens here, on either leg, and none should be added:
+        # the seed is the authority to act AS the space, the connection
+        # server pins a space's authority key TOFU-immutably (so the seed
+        # cannot be rotated away from a household that turns out to be
+        # the wrong one to trust), and a household met through a public
+        # link is exactly the household we cannot make that bet on —
+        # anyone who saw the URL could be holding it. The seat is a
+        # delegated admin WITHOUT authority: its actions ride
+        # SPACE_REMOTE_ADMIN_ACTION to the host, which signs them. The
+        # seed still travels on an explicit promotion
+        # (``set_remote_member_role``), which is a deliberate act about a
+        # household the owner already knows. See "An admin met through a
+        # link never holds the signing seed" in docs/protocol/invites.md.
 
         # Pull the full space row so we can ship metadata + the member
         # roster back to the receiver. Without the meta the receiver's
@@ -905,7 +923,12 @@ class SpaceInviteTokenRedeemCoordinator:
 
     async def _on_redeem_ack(self, event: "FederationEvent") -> None:
         """Receiver-side: resolve the in-flight Future with the issuer's
-        payload. No-op if the nonce isn't ours (late ACK after timeout).
+        payload. No-op if the nonce isn't ours (late ACK after timeout)
+        or if the answer came from a household we did not address.
+
+        On a mesh-routed redeem ``from_instance`` is the *origin* of the
+        inner event (``routed_envelope`` rebuilds it that way), so the
+        pin reads the same on both the direct and the routed path.
         """
         p = event.payload
         nonce = str(p.get("redeem_nonce") or "")
@@ -913,6 +936,8 @@ class SpaceInviteTokenRedeemCoordinator:
             return
         fut = self._pending.get(nonce)
         if fut is None or fut.done():
+            return
+        if not self._is_addressed_issuer(nonce, event):
             return
         fut.set_result(
             {
@@ -938,8 +963,34 @@ class SpaceInviteTokenRedeemCoordinator:
         fut = self._pending.get(nonce)
         if fut is None or fut.done():
             return
+        if not self._is_addressed_issuer(nonce, event):
+            return
         reason = str(p.get("reason") or "invite redeem denied by issuer")
         fut.set_exception(SpacePermissionError(reason))
+
+    def _is_addressed_issuer(self, nonce: str, event: "FederationEvent") -> bool:
+        """True when ``event`` answers the household we sent ``nonce`` to.
+
+        Without it, a ``redeem_nonce`` is an address anybody may answer:
+        a confirmed peer that observes one can ACK somebody else's
+        redeem, and the local seating writes ITS ``space_meta`` — a stub
+        space, a membership row and a roster we never asked for — or
+        DENY it, cancelling a legitimate join. The nonce identifies the
+        request; this identifies the respondent.
+
+        Fails **closed** on an unknown nonce: every path that creates one
+        records its addressee in the same breath, so a live Future with
+        no recorded issuer is a bug, not a legacy shape to tolerate.
+        """
+        expected = self._pending_issuer.get(nonce, "")
+        if event.from_instance != expected:
+            log.warning(
+                "invite redeem: %s answered a redeem addressed to %s — ignoring",
+                event.from_instance,
+                expected,
+            )
+            return False
+        return True
 
     # ── §D2b bootstrap redeem (no pre-existing relationship) ───────────
 
@@ -1015,6 +1066,10 @@ class SpaceInviteTokenRedeemCoordinator:
         fut: asyncio.Future[dict] = loop.create_future()
         self._pending[nonce] = fut
         self._bootstrap_hints[nonce] = hint
+        # Also pinned on the §D2 event legs: a confirmed peer must not be
+        # able to answer a BOOTSTRAP redeem by sending a plain
+        # SPACE_INVITE_TOKEN_REDEEM_ACK carrying this nonce.
+        self._pending_issuer[nonce] = hint.instance_id
         try:
             delivered = await self._relay_sender.send_sealed_envelope(
                 to_instance_id=hint.instance_id,
@@ -1038,6 +1093,7 @@ class SpaceInviteTokenRedeemCoordinator:
         finally:
             self._pending.pop(nonce, None)
             self._bootstrap_hints.pop(nonce, None)
+            self._pending_issuer.pop(nonce, None)
 
     async def handle_relayed_envelope(
         self,
@@ -1446,11 +1502,29 @@ class SpaceInviteTokenRedeemCoordinator:
             is_redeemer=is_redeemer,
         )
         existing = await self._federation_repo.get_instance(instance_id)
-        if existing is not None:
-            # Never downgrade or re-key an existing relationship (a real
+        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+            # Never downgrade or re-key an existing RELATIONSHIP (a real
             # pairing, or a second space joined with the same household)
             # off the back of an invite link.
             return
+        if existing is not None:
+            # …but a row is not a relationship. A ``pending_sent`` /
+            # ``pending_received`` / ``unpairing`` row is an abandoned or
+            # half-finished handshake, and bailing out on it left this
+            # seat with no session keys, no ``relay_via`` and no key-wrap
+            # key — so the redeem ACKed, both households believed they
+            # were seated, and then every envelope failed silently
+            # because the relay transport had nothing to seal to. There
+            # is no trust here to preserve (an unfinished pairing granted
+            # nothing), so the seat replaces it. The local inbox id is
+            # carried over: it is the URL the other side may already
+            # hold, and there is no reason to invalidate it.
+            log.info(
+                "invite bootstrap: replacing a stale %s row for %s with a "
+                "space-session seat",
+                existing.status.value,
+                instance_id,
+            )
         now = datetime.now(timezone.utc).isoformat()
         await self._federation_repo.save_instance(
             RemoteInstance(
@@ -1474,7 +1548,11 @@ class SpaceInviteTokenRedeemCoordinator:
                 # re-derived from anything else on the row.
                 relay_via=gfs_url or None,
                 remote_keywrap_pk=peer_keywrap_pub.hex(),
-                local_inbox_id=secrets.token_urlsafe(24),
+                local_inbox_id=(
+                    existing.local_inbox_id
+                    if existing is not None and existing.local_inbox_id
+                    else secrets.token_urlsafe(24)
+                ),
                 status=PairingStatus.CONFIRMED,
                 source=InstanceSource.SPACE_SESSION,
                 # ``RemoteInstance.share_home`` defaults True — right for a

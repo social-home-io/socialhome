@@ -21,6 +21,7 @@ import sqlite3
 from typing import Any, TYPE_CHECKING
 
 from ....domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DeliveryResult,
     FederationEventType,
@@ -53,6 +54,43 @@ MAX_ROUTE_COOLDOWN_WAIT_S: float = 35.0
 #: is genuinely coming back (one lost discovery window, one retry); a
 #: household that is actually unreachable still terminates the stream.
 MAX_ROUTE_COOLDOWN_WAITS: int = 2
+
+#: Upper bound on a single wait for a connection-server relay 429.
+#: :data:`~socialhome.federation.invite_bootstrap.RELAY_THROTTLE_COOLDOWN_S`
+#: is what the sender actually reports; like the route-cooldown cap above
+#: this is a deliberately local ceiling so a wrong ``retry_after_s`` cannot
+#: park a provider task.
+MAX_RELAY_THROTTLE_WAIT_S: float = 10.0
+
+#: How many relay windows ONE stream will wait out. Much larger than
+#: :data:`MAX_ROUTE_COOLDOWN_WAITS` because the two conditions are not
+#: comparable: a route cooldown is an anomaly (discovery found nothing),
+#: while relay back-pressure is the *expected* steady state of a big
+#: catch-up — a household seated from an invite link has no other
+#: transport, so a few hundred chunks meeting a per-minute window is
+#: normal operation, not a broken path. ~20 waits ≈ 100 s of patience,
+#: still bounded so a relay that never lets us through terminates.
+MAX_RELAY_THROTTLE_WAITS: int = 20
+
+
+def _wait_budget(error: str) -> tuple[int, float] | None:
+    """``(max waits per stream, ceiling on one wait)`` for a waitable failure.
+
+    Two delivery failures are *windows* rather than broken paths: mesh
+    route-discovery's negative cooldown and the connection-server relay's
+    per-minute limit. Both mean "we never got a fair attempt"; everything
+    else means "we tried and it did not work" and counts a strike.
+
+    Resolved per call rather than baked into a module-level table so the
+    caps stay patchable in tests — and so the two budgets can never be
+    conflated into one number, which is the bug that let a stream arrive
+    at the relay window with its route-cooldown patience already spent.
+    """
+    if error == DELIVERY_ERROR_ROUTE_COOLDOWN:
+        return MAX_ROUTE_COOLDOWN_WAITS, MAX_ROUTE_COOLDOWN_WAIT_S
+    if error == DELIVERY_ERROR_RELAY_THROTTLED:
+        return MAX_RELAY_THROTTLE_WAITS, MAX_RELAY_THROTTLE_WAIT_S
+    return None
 
 
 class SpaceSyncService:
@@ -115,7 +153,9 @@ class SpaceSyncService:
         sync_id = session.sync_id
         space_id = session.space_id
         consecutive_failures = 0
-        cooldown_waits = 0
+        # Per-stream patience, one count per waitable reason — see
+        # :meth:`_send_chunk`.
+        waits: dict[str, int] = {}
         try:
             for resource in RESOURCE_ORDER:
                 exporter = self._exporters.get(resource)
@@ -128,11 +168,7 @@ class SpaceSyncService:
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
                 ):
-                    sent, cooldown_waits = await self._send_chunk(
-                        session,
-                        envelope,
-                        cooldown_waits,
-                    )
+                    sent = await self._send_chunk(session, envelope, waits)
                     if sent:
                         consecutive_failures = 0
                         continue
@@ -187,58 +223,70 @@ class SpaceSyncService:
         self,
         session,
         envelope: dict[str, Any],
-        cooldown_waits: int,
-    ) -> tuple[bool, int]:
-        """Ship one chunk, waiting out mesh route-discovery cooldowns.
+        waits: dict[str, int],
+    ) -> bool:
+        """Ship one chunk, waiting out delivery windows that are not failures.
 
-        Returns ``(sent, cooldown_waits)`` — the caller carries
-        ``cooldown_waits`` across the whole stream so the patience budget is
-        per-stream, not per-chunk.
+        ``waits`` counts how many windows of each kind this STREAM has
+        already sat out — the caller owns it for the whole stream, so the
+        patience budget is per-stream rather than per-chunk, and each
+        reason keeps its own count (see :func:`_wait_budget`).
 
-        ``RouteDiscoveryService`` arms a 30 s negative cooldown after a flood
-        that found nothing, and while it is live ``discover_route`` returns
-        ``None`` *immediately, without probing*. The chunk loop has no delay
-        between chunks, so a single missed discovery window used to fail
-        :data:`MAX_CONSECUTIVE_CHUNK_FAILURES` chunks within milliseconds and
-        abandon the entire stream — converting a two-second race into a
-        permanent loss, exactly when the cache was about to warm from a
-        ROUTE_FOUND that missed the window. The cooldown itself is correct
-        anti-flood behaviour (we still flood at most once per cooldown period
-        per stream); what was wrong was counting a no-probe against the retry
-        budget. So: wait it out and retry the SAME chunk, bounded by
-        :data:`MAX_ROUTE_COOLDOWN_WAITS` so a genuinely unreachable household
-        still terminates the stream.
+        Two ``ok=False`` results mean "we never got a fair attempt":
+
+        * :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` — ``RouteDiscoveryService``
+          arms a 30 s negative cooldown after a flood that found nothing,
+          and while it is live ``discover_route`` returns ``None``
+          *immediately, without probing*. The chunk loop has no delay
+          between chunks, so a single missed discovery window used to fail
+          :data:`MAX_CONSECUTIVE_CHUNK_FAILURES` chunks within
+          milliseconds and abandon the entire stream — converting a
+          two-second race into a permanent loss, exactly when the cache
+          was about to warm from a ROUTE_FOUND that missed the window.
+        * :data:`DELIVERY_ERROR_RELAY_THROTTLED` — the connection server
+          is over its per-minute window. A household seated from an
+          invite link has NO other transport, and a first catch-up is
+          hundreds of chunks, so meeting that window is ordinary
+          operation; three of them in a row used to abandon the backfill
+          and leave the household in a space it could not see.
+
+        Both are waited out and the SAME chunk is retried, bounded so a
+        genuinely unreachable household (or a relay that never lets us
+        through) still terminates the stream. Every other failure counts
+        a strike, unchanged.
         """
         while True:
             result = await self._send(session, envelope)
             if result.ok:
-                return True, cooldown_waits
-            if result.error != DELIVERY_ERROR_ROUTE_COOLDOWN:
-                # Every other failure keeps its existing meaning: we probed
-                # (or the ship itself broke), so it counts a strike.
-                return False, cooldown_waits
-            if cooldown_waits >= MAX_ROUTE_COOLDOWN_WAITS:
+                return True
+            reason = result.error or ""
+            budget = _wait_budget(reason)
+            if budget is None:
+                # We probed (or the ship itself broke), so it counts.
+                return False
+            max_waits, max_wait_s = budget
+            done = waits.get(reason, 0)
+            if done >= max_waits:
                 log.warning(
-                    "sync %s: route to %s still in discovery cooldown after "
-                    "%d waits — counting it as a chunk failure",
+                    "sync %s: delivery to %s still blocked (%s) after %d "
+                    "waits — counting it as a chunk failure",
                     session.sync_id,
                     session.requester_instance_id,
-                    cooldown_waits,
+                    reason,
+                    done,
                 )
-                return False, cooldown_waits
-            cooldown_waits += 1
-            delay = min(
-                max(result.retry_after_s or 0.0, 0.0),
-                MAX_ROUTE_COOLDOWN_WAIT_S,
-            )
+                return False
+            waits[reason] = done + 1
+            delay = min(max(result.retry_after_s or 0.0, 0.0), max_wait_s)
             log.info(
-                "sync %s: route discovery for %s is in its negative cooldown "
-                "— waiting %.1fs and retrying the same chunk (wait %d/%d)",
+                "sync %s: delivery to %s is inside a %s window — waiting "
+                "%.1fs and retrying the same chunk (wait %d/%d)",
                 session.sync_id,
                 session.requester_instance_id,
+                reason,
                 delay,
-                cooldown_waits,
-                MAX_ROUTE_COOLDOWN_WAITS,
+                done + 1,
+                max_waits,
             )
             await asyncio.sleep(delay)
 

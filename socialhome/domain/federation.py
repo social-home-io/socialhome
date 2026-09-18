@@ -861,6 +861,28 @@ class PairingSession:
 #: milliseconds against a route that is seconds from warming up.
 DELIVERY_ERROR_ROUTE_COOLDOWN: str = "route_cooldown"
 
+#: :attr:`DeliveryResult.error` value meaning "the connection-server relay
+#: answered 429". Like :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` this is a
+#: *waitable* window, not a broken path: the relay is up, the envelope is
+#: well-formed, and the same send succeeds once the sliding window drains
+#: (:data:`~socialhome.federation.invite_bootstrap.RELAY_THROTTLE_COOLDOWN_S`
+#: is how long to wait, carried on :attr:`DeliveryResult.retry_after_s`).
+#: A caller that reads it as terminal abandons a space-sync catch-up over a
+#: few seconds of back-pressure, which is the bug it exists to prevent.
+#: The envelope is still parked in the durable outbox — a throttle costs a
+#: delay, never an event.
+DELIVERY_ERROR_RELAY_THROTTLED: str = "relay_throttled"
+
+#: :attr:`DeliveryResult.error` value meaning "this frame structurally
+#: cannot ride the connection-server relay". The relay body cap is a fixed
+#: 320 KiB and a media chunk is megabytes, so the refusal is *deterministic*
+#: — the identical envelope fails identically on every attempt. It is the
+#: opposite of :data:`DELIVERY_ERROR_RELAY_THROTTLED`: never retry it, or the
+#: outbox spends its whole attempt budget re-proving the same arithmetic and
+#: then reports a transient-looking failure for a permanent condition.
+DELIVERY_ERROR_RELAY_TOO_LARGE: str = "relay_too_large"
+
+
 #: :attr:`DeliveryResult.error` value meaning "enqueued to the durable
 #: ``federation_outbox`` for retry" — NOT a loss. ``send_event`` emits it
 #: only AFTER the envelope is queued, so the outbox drainer redelivers once

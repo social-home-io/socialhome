@@ -5,6 +5,8 @@ Thin handlers delegating to :class:`SpaceService`.
 
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
 from aiohttp.multipart import BodyPartReader
@@ -22,6 +24,7 @@ from ..app_keys import (
     online_status_service_key,
     presence_service_key,
     profile_picture_repo_key,
+    rate_limiter_key,
     space_bot_repo_key,
     space_cover_repo_key,
     space_icon_repo_key,
@@ -1197,12 +1200,19 @@ class SpaceInviteTokenView(BaseView):
         if ttl_raw is None:
             ttl_seconds = None
         else:
-            try:
-                ttl_seconds = int(ttl_raw)
-            except TypeError, ValueError:
+            # A JSON integer and nothing else. ``int()`` used to accept
+            # — and silently reinterpret — everything nearby: ``0.5``
+            # became ``0``, which this route maps to "never expires";
+            # ``True`` became one second; ``"60"`` worked by accident and
+            # taught callers a shape the API does not promise. An expiry
+            # is a number the owner chose, so a value that is not one is
+            # a client bug to report, not to guess at. ``bool`` is an
+            # ``int`` subclass in Python and is excluded explicitly.
+            if isinstance(ttl_raw, bool) or not isinstance(ttl_raw, int):
                 return error_response(
                     422, "UNPROCESSABLE", "ttl_seconds must be an integer"
                 )
+            ttl_seconds = ttl_raw
             if ttl_seconds < 0:
                 return error_response(
                     422, "UNPROCESSABLE", "ttl_seconds must not be negative"
@@ -1223,11 +1233,27 @@ class SpaceInviteTokenView(BaseView):
                 publish_to_gfs=str(publish_raw) if publish_raw else None,
             )
         except GfsConnectionError as exc:
-            # Non-standard code + the server's own sentence: "this
-            # connection server can't host invite links yet" is
-            # actionable, the blanket 422 body is not. Nothing was
-            # persisted — the publish runs before the row is written.
-            return error_response(422, "GFS_PUBLISH_FAILED", str(exc))
+            # Nothing was persisted — the publish runs before the row is
+            # written — so this is a clean "it didn't happen".
+            #
+            # The upstream's own words stay upstream. This used to answer
+            # ``str(exc)``, which put
+            # ``GFS rejected invite (HTTP 403): {"error": "not the owner
+            # of this space"}`` into a toast: not a sentence anybody can
+            # act on, and it binds our UI to another project's error
+            # vocabulary. Map the status CLASS to something a person can
+            # do, and keep the real text in the log where an operator
+            # will look for it.
+            log.warning(
+                "invite publish to a connection server failed for space %s: %s",
+                space_id,
+                exc,
+            )
+            return error_response(
+                422,
+                "GFS_PUBLISH_FAILED",
+                _gfs_publish_failure_message(exc.status),
+            )
         return web.json_response(link, status=201)
 
 
@@ -1502,6 +1528,82 @@ def _bootstrap_hint(
         expires_at=(str(body["expires_at"]) if body.get("expires_at") else None),
         gfs_url=str(gfs_raw).strip() if gfs_raw else "",
     )
+
+
+log = logging.getLogger(__name__)
+
+
+def _gfs_publish_failure_message(status: int | None) -> str:
+    """A sentence a person can act on for a failed invite publish.
+
+    One per status class, because that is the granularity at which the
+    advice differs. Anything else — 5xx, a timeout, TLS, an unreachable
+    host — collapses into "not now, try again", which is the honest
+    answer: there is nothing the owner can fix.
+    """
+    if status == 403:
+        return (
+            "The connection server didn't accept this space's owner key "
+            "— re-publish the space and try again"
+        )
+    if status == 429:
+        return (
+            "The connection server is rate-limiting this household — "
+            "try again in a minute"
+        )
+    return "The connection server couldn't publish the link right now"
+
+
+#: Per-IP budget for ``GET /api/invite-links/{token}/code``. The token is
+#: a uuid4 hex (128 bits), so this is not brute-force protection — nothing
+#: is guessable here. It is ordinary anonymous-endpoint shedding: the
+#: handler does two DB reads plus a signature-free payload build, and one
+#: visitor legitimately hits it exactly once per link they open.
+INVITE_CODE_RATE_LIMIT: int = 30
+INVITE_CODE_RATE_WINDOW_S: int = 60
+
+
+class InviteLinkCodeView(BaseView):
+    """``GET /api/invite-links/{token}/code`` — the pasteable code, public.
+
+    Answers ``{"code": "socialhome://invite#<blob>"}`` when ``token`` is a
+    still-redeemable invite link on this household, and a flat ``404``
+    for every other case — expired, exhausted, revoked, or never ours.
+    The four are deliberately indistinguishable: a differentiated answer
+    would turn this into a probe for which links a household has issued.
+
+    **No authentication, by design.** The token IS the credential:
+    whoever holds it can already redeem the link, so handing back the
+    code that belongs to it grants nothing further. What it buys is the
+    ``/join`` landing page's "wrong instance" fallback. An HTTPS invite
+    link shared in a chat lands the receiver on the ISSUER's instance,
+    where the redeem correctly refuses; the page then offers a code to
+    paste into their own home — but a code the page mints client-side
+    carries only the token, space id and issuer id, with none of the
+    issuer's keys or the connection-server URL, so the receiving
+    household cannot bootstrap a redeem with it. The fallback looked
+    helpful and dead-ended every time. This hands over the real thing.
+    """
+
+    async def get(self) -> web.Response:
+        limiter = self.request.app.get(rate_limiter_key)
+        if limiter is not None:
+            client_ip = self.request.remote or "unknown"
+            if not limiter.is_allowed(
+                f"invite-link-code:{client_ip}",
+                limit=INVITE_CODE_RATE_LIMIT,
+                window_s=INVITE_CODE_RATE_WINDOW_S,
+            ):
+                return error_response(
+                    429,
+                    "RATE_LIMITED",
+                    "Too many requests — wait a moment.",
+                )
+        token = self.match("token")
+        code = await self.svc(space_service_key).invite_code_for_token(token)
+        if code is None:
+            return error_response(404, "NOT_FOUND", "No such invite link.")
+        return web.json_response({"code": code})
 
 
 class SpaceJoinView(BaseView):

@@ -45,9 +45,19 @@ from aiohttp import ClientTimeout
 
 from . import app_framing
 from . import media_framing
+
+# Runtime import of two ints only — the relay transport class itself stays
+# behind TYPE_CHECKING, and this module is not imported by that one, so
+# there is no cycle to route around.
+from .gfs_relay_transport import (
+    RELAY_STATUS_THROTTLED,
+    RELAY_STATUS_TOO_LARGE,
+)
 from ..domain.events import PeerTransportChanged
 from ..exception_text import describe_exception
 from ..domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     DeliveryResult,
     FederationEventType,
     InstanceSource,
@@ -1473,6 +1483,28 @@ class _RtcPeer:
 # ─── Facade ────────────────────────────────────────────────────────────────
 
 
+def _relay_failure_reason(status: int | None) -> str:
+    """Name a relay failure so the caller can decide whether to retry.
+
+    Three outcomes hide behind one ``ok=False`` and they want opposite
+    handling, so the status the relay tier reported is classified once,
+    here, instead of at every call site:
+
+    * :data:`~.gfs_relay_transport.RELAY_STATUS_THROTTLED` — waitable.
+      Sleep the window out and send the SAME frame again.
+    * :data:`~.gfs_relay_transport.RELAY_STATUS_TOO_LARGE` — permanent.
+      The frame does not fit and never will; retrying burns the outbox
+      budget to re-derive the same arithmetic.
+    * anything else — the ordinary transient failure (relay unreachable,
+      malformed seal, no connection server), which keeps retrying.
+    """
+    if status == RELAY_STATUS_THROTTLED:
+        return DELIVERY_ERROR_RELAY_THROTTLED
+    if status == RELAY_STATUS_TOO_LARGE:
+        return DELIVERY_ERROR_RELAY_TOO_LARGE
+    return "gfs_relay_failed"
+
+
 @dataclass(slots=True, frozen=True)
 class _TransportSendResult:
     """What :meth:`FederationTransport.send` returns to the caller."""
@@ -1728,7 +1760,7 @@ class FederationTransport:
                 ok=ok,
                 via="gfs_relay",
                 status_code=status,
-                error=None if ok else "gfs_relay_failed",
+                error=None if ok else _relay_failure_reason(status),
             )
 
         peer = self._peers.get(instance.id)

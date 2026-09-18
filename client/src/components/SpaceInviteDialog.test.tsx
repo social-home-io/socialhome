@@ -522,3 +522,104 @@ describe('SpaceInviteDialog — revoke', () => {
       .not.toBeNull()
   })
 })
+
+describe('SpaceInviteDialog — Follower is off the table while publishing', () => {
+  const SERVERS = [{ id: 'gfs-1', display_name: 'Relay One', status: 'active' }]
+
+  async function openWithServerAndPublish() {
+    mockReads({ servers: SERVERS })
+    const result = await openDialog()
+    await waitFor(() => {
+      expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
+        .not.toBeNull()
+    })
+    await act(async () => {
+      fireEvent.click(result.container
+        .querySelector('[data-testid="invite-publish-toggle"]')!)
+    })
+    return result
+  }
+
+  it('disables the Follower role with the cross-household hint once publishing is on', async () => {
+    const result = await openWithServerAndPublish()
+    const follower = result.container
+      .querySelector('[data-testid="invite-role-subscriber"]') as HTMLInputElement
+    expect(follower.disabled).toBe(true)
+    expect(follower.closest('label')!.textContent).toContain(
+      "Followers can't join from another household yet",
+    )
+    // The other roles stay pickable.
+    expect((result.container
+      .querySelector('[data-testid="invite-role-member"]') as HTMLInputElement)
+      .disabled).toBe(false)
+  })
+
+  it('leaves Follower pickable while the link is not published', async () => {
+    mockReads({ servers: SERVERS })
+    const result = await openDialog()
+    const follower = result.container
+      .querySelector('[data-testid="invite-role-subscriber"]') as HTMLInputElement
+    expect(follower.disabled).toBe(false)
+    expect(follower.closest('label')!.textContent).not.toContain(
+      "Followers can't join from another household yet",
+    )
+  })
+
+  it('falls back to Member when publishing is switched on with Follower picked', async () => {
+    mockReads({ servers: SERVERS })
+    const result = await openDialog()
+    await waitFor(() => {
+      expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
+        .not.toBeNull()
+    })
+    await act(async () => {
+      fireEvent.click(result.container
+        .querySelector('[data-testid="invite-role-subscriber"]')!)
+    })
+    await act(async () => {
+      fireEvent.click(result.container
+        .querySelector('[data-testid="invite-publish-toggle"]')!)
+    })
+    expect((result.container
+      .querySelector('[data-testid="invite-role-member"]') as HTMLInputElement)
+      .checked).toBe(true)
+    // …and the impossible combination can never reach the backend.
+    await generate(result, makeRow({ role: 'member' }))
+    expect(api.post).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ role: 'member', publish_to_gfs: 'gfs-1' }),
+    )
+  })
+})
+
+describe('SpaceInviteDialog — a published never-expiring link', () => {
+  const GFS = {
+    gfs_id: 'gfs-1',
+    gfs_token: 'gt1',
+    url: 'https://relay.example.org/join/gt1',
+  }
+
+  it('qualifies "never lapses" with the 30-day cap on the web link', async () => {
+    const result = await openDialog()
+    await generate(result, makeRow({ expires_at: null, gfs: GFS }))
+    const hint = result.container
+      .querySelector('[data-testid="invite-published-never-hint"]')
+    expect(hint).not.toBeNull()
+    expect(hint!.textContent).toContain('30 days')
+    expect(hint!.textContent).toContain('The code below keeps')
+  })
+
+  it('omits the qualifier for a never-expiring link that was NOT published', async () => {
+    const result = await openDialog()
+    await generate(result, makeRow({ expires_at: null, gfs: null }))
+    expect(result.container
+      .querySelector('[data-testid="invite-published-never-hint"]')).toBeNull()
+  })
+
+  it('omits the qualifier for a published link that does expire', async () => {
+    const result = await openDialog()
+    await generate(result, makeRow({ gfs: GFS }))
+    expect(result.container
+      .querySelector('[data-testid="invite-published-never-hint"]')).toBeNull()
+  })
+})

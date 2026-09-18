@@ -259,6 +259,7 @@ from .spaces import (
     RemoteInviteCollectionView,
     RemoteInviteDecisionView,
     SpaceInviteTokenItemView,
+    InviteLinkCodeView,
     SpaceInviteTokenView,
     SpaceLinkCollectionView,
     SpaceLinkDetailView,
@@ -540,6 +541,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/spaces/{id}/invite-tokens/{token}",
         SpaceInviteTokenItemView,
     )
+    # Public (no auth): the token is the credential. Feeds the /join
+    # landing page's "wrong instance" fallback with a code that can
+    # actually bootstrap a redeem. See ``routes.spaces.InviteLinkCodeView``.
+    app.router.add_view("/api/invite-links/{token}/code", InviteLinkCodeView)
     app.router.add_view("/api/spaces/{id}/presence", SpacePresenceView)
     app.router.add_view("/api/spaces/{id}/zones", SpaceZonesCollectionView)
     app.router.add_view(

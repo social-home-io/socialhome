@@ -21,12 +21,15 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.gfs_relay_transport import (
     RELAY_KIND_ENVELOPE,
+    RELAY_STATUS_THROTTLED,
+    RELAY_STATUS_TOO_LARGE,
     RELAY_MAX_BODY_BYTES,
     RELAY_MAX_ENVELOPE_BYTES,
     GfsRelayTransport,
     is_relay_envelope_body,
     seal_relay_envelope,
 )
+from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
 from socialhome.federation.keywrap_seal import open_keywrap
 from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
 
@@ -209,7 +212,10 @@ def test_the_body_cap_matches_the_connection_server_contract():
 async def test_an_oversize_envelope_is_refused_here_not_at_the_relay(caplog):
     """A media chunk (512 KiB — 1 MiB, base64'd) cannot fit the relay.
     It is refused locally, loudly, so the failure names the real reason
-    instead of surfacing as "the connection server is unhappy"."""
+    instead of surfacing as "the connection server is unhappy" — and it
+    reports the status the relay itself would have answered, because the
+    refusal is DETERMINISTIC: the outbox above must drop it permanently
+    rather than spend five attempts re-deriving one length compare."""
     kp = generate_x25519_keypair()
     relay = _FakeRelay()
     oversize = {**ENVELOPE, "encrypted_payload": "x" * (RELAY_MAX_ENVELOPE_BYTES + 1)}
@@ -220,6 +226,38 @@ async def test_an_oversize_envelope_is_refused_here_not_at_the_relay(caplog):
             envelope_dict=oversize,
         )
 
-    assert (ok, status) == (False, None)
+    assert (ok, status) == (False, RELAY_STATUS_TOO_LARGE)
     assert relay.calls == []
     assert "relay body cap" in caplog.text
+
+
+async def test_a_throttled_relay_reports_a_waitable_status_not_a_bare_failure():
+    """The sender raises on ``429`` so this tier can tell back-pressure
+    apart from a broken relay. It must translate that into a *status* the
+    facade above can classify — otherwise the throttle arrives upstairs
+    as an ordinary ``(False, None)`` and the space-sync provider abandons
+    a catch-up over a busy minute."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay(raises=EnvelopeRelayThrottled("busy"))
+
+    ok, status = await GfsRelayTransport(relay_sender=relay).send(
+        instance=_instance(kp),
+        envelope_dict=ENVELOPE,
+    )
+
+    assert (ok, status) == (False, RELAY_STATUS_THROTTLED)
+
+
+async def test_a_configuration_refusal_is_still_a_plain_failure():
+    """The other exception the sender may raise — no reachable relay, or
+    one that cannot carry invite envelopes — is NOT waitable, and must
+    not be mistaken for a throttle by the catch-all below it."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay(raises=RuntimeError("no connection server"))
+
+    ok, status = await GfsRelayTransport(relay_sender=relay).send(
+        instance=_instance(kp),
+        envelope_dict=ENVELOPE,
+    )
+
+    assert (ok, status) == (False, None)

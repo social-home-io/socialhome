@@ -25,9 +25,12 @@ live inside the ciphertext.
 
 The answer is a uniform ``202 {"status": "accepted"}`` for anything
 well-formed: a household learns nothing about whether the recipient is
-online, known, or exists. ``400`` / ``413`` / ``429`` mean malformed,
-oversize or throttled. Every non-2xx is treated as a transport failure
-— logged at INFO with the server's name, never the blob.
+online, known, or exists. ``400`` / ``413`` mean malformed or
+oversize and are treated as transport failures — logged at INFO with
+the server's name, never the blob. ``429`` is different: it says the
+window is full, not that anything is wrong, so it raises
+:class:`~socialhome.federation.invite_bootstrap.EnvelopeRelayThrottled`
+and the caller waits it out and re-ships the same frame.
 
 ## Why the capability gate
 
@@ -50,6 +53,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from ..domain.federation import GfsConnection
+from ..federation.invite_bootstrap import EnvelopeRelayThrottled
 from ..domain.space import SpacePermissionError
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_connection_service import GfsConnectionService
@@ -128,7 +132,10 @@ class GfsEnvelopeSender:
         when the household has a single connection server.
 
         Raises :class:`EnvelopeRelayUnavailable` when no connection can
-        carry it; a reachable relay that refuses or errors is a plain
+        carry it and
+        :class:`~socialhome.federation.invite_bootstrap.EnvelopeRelayThrottled`
+        on a ``429`` (a *temporary* refusal the caller can wait out); a
+        reachable relay that refuses or errors any other way is a plain
         ``False``.
         """
         conn = await self._resolve_connection(gfs_url)
@@ -149,6 +156,18 @@ class GfsEnvelopeSender:
             ) as resp:
                 if resp.status < 300:
                     return True
+                if resp.status == 429:
+                    # Back-pressure, not a failure: the relay is up, the
+                    # blob is fine, we are simply over the per-minute
+                    # window. Raised rather than returned as ``False``
+                    # because the two want opposite handling — the relay
+                    # transport waits this out and re-ships the same
+                    # frame, where a plain ``False`` counted a strike and
+                    # (three of them in) abandoned a space-sync catch-up
+                    # over a few seconds of throttling.
+                    raise EnvelopeRelayThrottled(
+                        "the connection server is busy — try again in a moment",
+                    )
                 # Never log the body or the blob — a relay's rejection is
                 # about shape and budget, and the payload is somebody's
                 # invite. The server's name is what an operator needs.
@@ -200,6 +219,7 @@ class GfsEnvelopeSender:
 
 
 __all__ = [
+    "EnvelopeRelayThrottled",
     "EnvelopeRelayUnavailable",
     "GFS_ENVELOPE_PATH",
     "GFS_ENVELOPE_TIMEOUT_S",

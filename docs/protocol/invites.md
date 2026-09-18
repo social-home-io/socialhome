@@ -252,8 +252,8 @@ server being redeployed). It shows a space name it already publishes on
 asks.
 
 **It must never learn who redeemed.** `GET /join/{token}` writes
-*nothing*: no use counter, no fetch row, no log line naming the token or
-the visitor. `gfs_invite_tokens` has carried `uses` / `max_uses` columns
+*nothing* into the database: no use counter, no fetch row, nothing that
+outlives the request. `gfs_invite_tokens` has carried `uses` / `max_uses` columns
 since GFS migration `0001`; they stay dead forever, and the repo's SQL
 never names them (`tests/global_server/test_repositories.py` asserts
 that against the compiled statements, not the prose). Whether an invite
@@ -261,7 +261,23 @@ may still be redeemed is decided by the **issuing household** — the only
 party that can decide it without building a record of who joined what.
 The redeem itself is authorised end-to-end by that household anyway, so
 a server-side counter would buy nothing and cost the property the whole
-feature rests on. The HTTP access log is the accepted residual.
+feature rests on.
+
+**The access log is the honest residual, and it is not nothing.** The
+statement above is about what the *application* persists; it is not a
+statement about the socket. `GET /join/{token}` is an ordinary HTTP
+request, and aiohttp's access log records the request line — token and
+all — next to the visitor's IP and the timestamp. An operator willing to
+read their own access log can therefore recover *visitor IP → token →
+time*, which for a link shared with a handful of people is close to the
+record the database deliberately refuses to keep. This is the same shape
+of concession `POST /gfs/envelope` and `POST /gfs/publish` already make
+and has the same answer: closing it needs a mix/onion egress and is out
+of scope. It is signed off in
+[`../principles.md`](../principles.md) alongside those. **Operator
+note:** if this matters for your deployment, redact the path component
+of `/join/` lines at the front end (or drop them entirely) and keep
+access-log retention short — Social Home itself never needs them.
 
 **Nor may the blob carry an address.** The page is served to anyone with
 the link, so the payload holds public keys and ids only — the redeem
@@ -348,8 +364,23 @@ Response, always:
 the point of the relay is that neither household learns the other's
 address and the server learns neither's relationship to the other. There
 is no identity on the wire to authenticate, so a per-IP sliding window
-(`ENVELOPE_MAX_PER_MINUTE`, 30/min → 429) is the accountability handle,
+(`ENVELOPE_MAX_PER_MINUTE`, 600/min → 429) is the accountability handle,
 the same posture `POST /gfs/publish` takes.
+
+**Why 600 and not 30.** The first number treated this relay as a
+sideband for the redeem handshake. It is not: for a link-joined
+household it is the *only* transport, so every federation envelope to
+that peer rides it — each space post, each reaction, each calendar
+event, each sync chunk — and a single space catch-up backfill is
+hundreds of chunks on its own. At 30/min the relay throttled all of a
+household's federation traffic to a trickle and a first sync could not
+finish. 600/min is still a ceiling on what one household can push
+through a relay it does not own, and the durable cost stays bounded at
+the other end by the per-recipient queue caps below.
+
+**A 429 is a cooldown, not a verdict.** The requesting household treats
+it as back-off-and-retry rather than as a failed send, so a burst that
+brushes the window delays traffic instead of dropping it.
 
 **The 202 is uniform.** Recipient online, recipient offline, recipient
 not registered on that server at all — byte-identical response in every
@@ -708,6 +739,35 @@ can. Callers that mint their own short-lived tokens
 straight to `space_repo.create_invite_token` with an explicit
 `expires_at` and are unchanged.
 
+**A never-expiring link is not a never-expiring *web page*.** The two
+artifacts a link produces have different lifetimes, and a "never
+expires" choice only governs one of them:
+
+- The **pasteable code** — `socialhome://invite#<blob>` — keeps working
+  for as long as the local `space_invite_tokens` row is live (not
+  expired, not exhausted, not revoked). The issuing household decides
+  every redeem, so an immortal row means an immortal code.
+- The **published web link** — the `/join/{gfs_token}` page on the
+  connection server — expires after at most **30 days**. The blob is a
+  row on somebody else's disk, so the server caps how long it will hold
+  one (`global_server.invites.INVITE_MAX_TTL_SECONDS`) and the household
+  clamps its requested expiry to the same ceiling before asking
+  (`services.space_service.PUBLISHED_INVITE_MAX_TTL_SECONDS`). A link
+  minted with no expiry is published with the cap; one minted with a
+  shorter expiry is published with the shorter of the two.
+
+After those 30 days the /join page is gone and the local token is still
+live: the code still redeems, the URL does not. Re-publishing mints a
+new link.
+
+The household-side cap subtracts a **300 s safety margin** from the
+server's 30-day maximum. The two clocks are independent and the server's
+check is a strict `expires_at - now > INVITE_MAX_TTL_SECONDS`, so a
+household asking for exactly 30 days against a connection server whose
+clock is a second behind would be refused with a 422 for a link it
+considered perfectly legal. Shaving five minutes off makes that class of
+failure unreachable, at a cost no one can perceive.
+
 ### The role a link grants
 
 A link carries the seat the redeemer lands in — `member`, `subscriber` or
@@ -738,20 +798,53 @@ space setting: that setting governs people who walked up on their own,
 while an explicit invite is the owner deciding otherwise for one named
 link.
 
-An `admin` seat triggers exactly what a promotion triggers. For a remote
-redeemer on a `delegated_admin_authority`-ON space the issuer ships the
-space's Ed25519 signing seed to the new admin's household
-(`SpaceService.share_admin_seed_with_remote_admin` → the same
-`_share_admin_signing_seed` `set_remote_member_role` uses), fail-soft: a
-share that fails never un-seats the admin. A LOCAL admin seat needs no
-share — the seed already lives on this household.
+A LOCAL `admin` seat triggers exactly what a promotion triggers, and
+needs no key share — the seed already lives on this household.
 
-**Cross-household `subscriber` links fail closed.** `space_remote_members`
-admits `member` and `admin` only (migration 0009: a subscriber has no row
-there at all), so the §D2 / §D2b redeem of a subscriber link is DENIED
-with a reason rather than silently seating a reader as a writer. A
-subscriber link is redeemable on the issuing household today; a
-cross-household subscriber seat needs a shape of its own.
+#### An admin met through a link never holds the signing seed
+
+A household that redeems an invite link into an `admin` seat gets the
+ADMIN **role** and not the space's Ed25519 signing seed. This is settled,
+and it holds regardless of the space's `delegated_admin_authority`
+setting — the setting decides whether an admin the owner *knows* may
+hold authority, and a peer met through a public link is not that.
+
+Two reasons, either sufficient:
+
+- **The seed cannot be taken back.** The connection server pins a
+  space's `identity_public_key` TOFU-immutably on first publish: a later
+  publish offering a different key keeps the pinned one. So there is no
+  rotation available if a link-joined admin turns out to be hostile or
+  is simply kicked — the household would have to abandon the space's
+  published identity to change the key. A credential that cannot be
+  revoked must not be handed to someone whose only introduction was a
+  string anyone could have copied.
+- **A link is not an acquaintance.** An invite link is, by design,
+  redeemable by whoever holds it. The owner chose to open a seat, not to
+  vouch for the person who walked through it.
+
+Such an admin therefore manages the space exactly as a delegated admin
+*without* authority does: its moderation and roster actions go out as
+`SPACE_REMOTE_ADMIN_ACTION`, forwarded to the host, which checks them
+and signs on its own behalf. The admin experience is the same; only the
+key custody differs. An owner who later wants a link-joined admin to
+hold authority promotes them through the normal path, where the decision
+is about a household the owner can now name.
+
+**Cross-household Follower / `subscriber` links are not supported yet.**
+`space_remote_members.role` carries a CHECK admitting `member` and
+`admin` only (migration 0009: a subscriber has no row there at all), so
+the §D2 / §D2b redeem of a subscriber link is DENIED with a reason
+rather than silently seating a reader as a writer. A subscriber link is
+redeemable on the *issuing* household today; a cross-household
+subscriber seat needs a shape of its own, and that is a documented
+follow-up rather than a gap in this one.
+
+The denial **does not consume a use**. The seat check now runs before
+the counter is decremented, so a follower link published to the web can
+no longer be burned to zero by strangers redeeming it from their own
+households — an unsupported redeem costs the link nothing and the owner
+finds it intact.
 
 ### Listing and revoking links
 
@@ -904,11 +997,35 @@ invite token so the receiver can choose the easiest channel:
 - **QR** — encodes the `socialhome://invite#…` form. For same-room
   handoffs.
 
-The wire contract between client and server is unchanged: only
-`{token}` ever travels in the `POST /api/spaces/join` body. The
-metadata in the encoded JSON (space_id, space_display_hint,
-issuer_instance_url) is for client-side preview + wrong-instance
-detection only — the server never sees it.
+**What actually travels in the redeem.** `token` is the only required
+field, but it is no longer the only one. For a code minted on another
+household the SPA also sends `issuer_instance_id` — which is what turns
+a local `accept_invite_token` into a §D2 cross-instance redeem — and
+`space_id`. For a code from a household this one has never met, the §D2b
+bootstrap block rides along too: `issuer_identity_pk`,
+`issuer_keywrap_pk` and `issuer_keywrap_sig` (all three required for the
+block to count at all), `issuer_proto_version`, `expires_at`, and `gfs`,
+the base URL of the connection server that served the invite. Eight
+fields, and each one earns its place: the keys are what the redeem is
+sealed to and verified against, and `gfs` is the only address either
+side has. They are used **only** when neither a direct pairing nor a
+mesh route reaches the issuer — both are strictly better and are tried
+first. The remaining metadata in the encoded JSON
+(`space_display_hint`, `issuer_instance_url`) is for client-side preview
+and wrong-instance detection only, and is never sent.
+
+**The wrong-instance fallback fetches a complete code.** When the
+receiver opens a `/join` link while signed in to a different household,
+the landing page cannot redeem — but it can hand the receiver something
+their own home *can* act on. It calls the public
+`GET /api/invite-links/{token}/code` on the issuing household, which
+answers `200 {"code": "socialhome://invite#<blob>"}` for a live link and
+`404` for anything else, and renders that as copyable text + QR. The
+endpoint needs no auth because the token is already the credential —
+anyone holding it can redeem the link — and it is per-IP rate limited so
+the token space cannot be walked. Without it the fallback could only
+echo the bare token back, which carries no keys and no relay and is
+therefore a dead end for exactly the receiver who needs it most.
 
 ## Zero-leak guarantee (§D1b)
 

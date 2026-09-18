@@ -229,10 +229,13 @@ Tier 4 is a `TransportStrategy` like the others
 peer that has an address. Because the connection server is a third party
 — not a household — the whole §24.11 envelope (its routing fields are
 plaintext by construction) is sealed to the peer's static X25519 key-wrap
-key before the relay sees it, so the relay holds `(to_instance, time,
-size)` and nothing else. See
+key before the relay sees it, so the *wire* carries only `(to_instance,
+time, size)` — no sender, no space, no event type, no token. That is a
+statement about the request body, not about the socket: the sending
+household's IP is still in the connection server's HTTP access log. See
 [`protocol/invites.md`](./protocol/invites.md) for the wire shape and
-[`principles.md`](./principles.md) for the metadata that concedes.
+[`principles.md`](./principles.md) for that residual and the rest of the
+metadata this tier concedes.
 
 The Connections page renders the current per-peer transport tier as
 an inline glyph (⚡ for WebRTC, ☁ for HTTPS), updated live via the

@@ -1,4 +1,4 @@
--- 0050 — remote_keywrap_pk on remote_instances.
+-- 0052 — remote_keywrap_pk on remote_instances.
 --
 -- A household seated from an invite link (§D2b) has no address: both
 -- sides hold a ``source = 'space_session'`` row with an empty

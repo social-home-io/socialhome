@@ -52,6 +52,8 @@ from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
     DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     BroadcastResult,
     DeliveryResult,
@@ -65,6 +67,7 @@ from ..infrastructure.key_manager import KeyManager
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
 from .encoder import FederationEncoder
+from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
     SUPPORTED_APP_AEAD_SUITES,
@@ -924,17 +927,31 @@ class FederationService:
         was_unreachable = instance.unreachable_since is not None
 
         status_code: int | None = None
+        transport_error: str | None = None
         if self._transport is not None:
             result = await self._transport.send(
                 instance=instance,
                 envelope_dict=envelope_dict,
             )
             if result.ok:
-                await self._federation_repo.mark_reachable(to_instance_id)
-                if was_unreachable:
-                    await self._bus.publish(
-                        ConnectionReachable(instance_id=to_instance_id),
-                    )
+                # Reachability is only provable by DELIVERY. The
+                # connection-server relay answers a uniform 202 to every
+                # well-formed envelope — offline recipient, unknown
+                # recipient, recipient that is not even a client of that
+                # server — because any other answer would be a presence
+                # oracle. Marking the peer reachable on that 202 turned
+                # the SPA's dot green for a household that had not
+                # received a byte, and fired ConnectionReachable
+                # (which wakes resyncs) on nothing at all. A relay
+                # ``ok`` is an ACCEPTANCE; leave the reachability state
+                # exactly as it was and let a real inbound envelope from
+                # that household be what proves it is there.
+                if result.via != "gfs_relay":
+                    await self._federation_repo.mark_reachable(to_instance_id)
+                    if was_unreachable:
+                        await self._bus.publish(
+                            ConnectionReachable(instance_id=to_instance_id),
+                        )
                 return DeliveryResult(
                     instance_id=to_instance_id,
                     ok=True,
@@ -944,6 +961,7 @@ class FederationService:
                     via=result.via,
                 )
             status_code = result.status_code
+            transport_error = result.error
         else:
             try:
                 client = await self._get_http_client()
@@ -977,20 +995,55 @@ class FederationService:
                 )
                 status_code = None
 
-        # Delivery failed — mark and enqueue for retry.
-        await self._federation_repo.mark_unreachable(to_instance_id)
-        if not was_unreachable:
-            # reachable → unreachable edge only (mirrors the reachable
-            # publish above) so the SPA flips the dot red live.
-            await self._bus.publish(
-                ConnectionUnreachable(instance_id=to_instance_id),
+        if transport_error == DELIVERY_ERROR_RELAY_TOO_LARGE:
+            # Deterministic refusal: the frame is bigger than the relay's
+            # body cap and will be on every future attempt too. Neither
+            # marking the peer unreachable (it is our frame that is
+            # wrong, not their household) nor queueing it (five retries
+            # to re-derive the same arithmetic) is honest — the relay
+            # transport already logged the WARNING naming the peer, the
+            # event type and the size.
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                status_code=status_code if isinstance(status_code, int) else None,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+                via="gfs_relay",
             )
+
+        # Delivery failed — mark and enqueue for retry.
+        if transport_error != DELIVERY_ERROR_RELAY_THROTTLED:
+            # A relay 429 is back-pressure on US, not evidence about the
+            # peer: the relay is up and the blob is fine. Flipping the
+            # household to unreachable on it (and firing
+            # ConnectionUnreachable at the SPA) would paint a red dot
+            # for a household that is perfectly fine, on a busy minute.
+            await self._federation_repo.mark_unreachable(to_instance_id)
+            if not was_unreachable:
+                # reachable → unreachable edge only (mirrors the reachable
+                # publish above) so the SPA flips the dot red live.
+                await self._bus.publish(
+                    ConnectionUnreachable(instance_id=to_instance_id),
+                )
         await self._outbox_repo.enqueue(
             instance_id=to_instance_id,
             event_type=event_type,
             payload_json=_dumps(envelope_dict),
             msg_id=msg_id,
         )
+        if transport_error == DELIVERY_ERROR_RELAY_THROTTLED:
+            # Queued like any other failure — a throttle must never cost
+            # an event — but reported as the waitable window it is, so a
+            # caller with its own retry loop (the space-sync provider)
+            # sleeps and re-ships instead of abandoning the stream.
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                status_code=status_code if isinstance(status_code, int) else None,
+                error=DELIVERY_ERROR_RELAY_THROTTLED,
+                via="gfs_relay",
+                retry_after_s=RELAY_THROTTLE_COOLDOWN_S,
+            )
         return DeliveryResult(
             instance_id=to_instance_id,
             ok=False,
@@ -2706,6 +2759,22 @@ class FederationService:
             return
         session = self._sync_manager.get_session(sync_id)
         if session is None:
+            return
+        if getattr(session, "requester_instance_id", "") != event.from_instance:
+            # A session belongs to ONE household. ``sync_id`` is the only
+            # thing addressing it, so without this any peer that learns
+            # (or guesses) one could ask us to re-stream a space's
+            # history — and the provider ships to
+            # ``session.requester_instance_id``, never to the asker, so
+            # neither end would see anything odd. Same pin the sibling
+            # SPACE_SYNC_CHUNK handler has always had.
+            log.warning(
+                "SPACE_SYNC_REQUEST_MORE sync_id=%s from %s != session "
+                "requester %s — ignoring",
+                sync_id,
+                event.from_instance,
+                getattr(session, "requester_instance_id", ""),
+            )
             return
         asyncio.create_task(
             self._space_sync_service.stream_request_more(session, cleaned),

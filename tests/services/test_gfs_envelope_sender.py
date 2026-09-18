@@ -20,6 +20,8 @@ from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.federation import GfsConnection
 from socialhome.services.gfs_connection_service import GfsConnectionService
+from socialhome.domain.space import SpacePermissionError
+from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
 from socialhome.services.gfs_envelope_sender import (
     EnvelopeRelayUnavailable,
     GfsEnvelopeSender,
@@ -294,7 +296,7 @@ async def test_no_gfs_url_falls_back_to_the_single_connection(gfs, http_session)
 # ── Transport failures ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", [400, 413, 429, 500])
+@pytest.mark.parametrize("status", [400, 413, 500])
 async def test_non_2xx_is_a_transport_failure_not_an_exception(
     gfs,
     http_session,
@@ -343,3 +345,32 @@ async def test_an_envelope_with_no_seal_is_refused(gfs, http_session):
     )
     assert ok is False
     assert gfs.received == []
+
+
+async def test_a_throttled_relay_is_a_waitable_window_not_a_failure(
+    gfs,
+    http_session,
+):
+    """``429`` is the one non-2xx that means "nothing is wrong, come back
+    in a moment". Reporting it as a plain ``False`` made it
+    indistinguishable from a malformed blob or a dead server — so the
+    space-sync provider above counted it as a chunk failure and, after
+    three, abandoned a whole catch-up over a few seconds of
+    back-pressure. It is raised so the caller has to decide, and the
+    named exception is what lets the relay transport wait and re-ship
+    the same frame instead."""
+    gfs.envelope_status = 429
+    sender, conn = _wire(gfs, http_session)
+
+    with pytest.raises(EnvelopeRelayThrottled) as exc:
+        await sender.send_sealed_envelope(
+            to_instance_id="b" * 32,
+            envelope=ENVELOPE,
+            gfs_url=conn.inbox_url,
+        )
+
+    # It reaches a user as a sentence, not an opaque failure: it
+    # subclasses SpacePermissionError, which ``POST /api/spaces/join``
+    # answers 422 with.
+    assert isinstance(exc.value, SpacePermissionError)
+    assert "try again" in str(exc.value)

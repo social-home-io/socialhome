@@ -456,9 +456,25 @@ async def test_join_page_renders_the_exact_invite_code(client, owner):
 
 
 async def test_join_page_404s_for_unknown_token(client, owner):
+    """The dead-link page is a page, not a bare sentence on a blank
+    document. Whoever lands here followed a link somebody sent them and
+    has no idea what went wrong — so it says where they are, what
+    happened, and the one thing that helps (ask for a fresh link). It
+    still echoes NO token: the URL is in their address bar, but putting
+    it in the body invites copy-pasting a dead credential around."""
     resp = await client.get("/join/no-such-token")
     assert resp.status == 404
-    assert "expired or was revoked" in await resp.text()
+    text = await resp.text()
+    assert "expired or was revoked" in text
+    # The same styled shell as the 200 page…
+    assert "<h1>" in text
+    assert "Manrope" in text
+    # …named, so the visitor knows which server told them this…
+    assert "My Global Server" in text
+    # …with a next step.
+    assert "fresh link" in text
+    # …and never the token.
+    assert "no-such-token" not in text
 
 
 async def test_join_page_404s_after_expiry(client, owner):

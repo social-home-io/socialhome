@@ -878,7 +878,7 @@ def verify_user_identity_assertion(
 #: retry of a delivery whose 2xx ack was lost passes the §24.11 timestamp
 #: gate and relies SOLELY on this replay cache to be deduped. If the window
 #: were shorter than the retry cadence the receiver would apply the event
-#: twice. 24 h gives generous margin over the ~5.2 h ceiling.
+#: twice. Even 24 h would give generous margin over the ~5.2 h ceiling.
 #:
 #: The binding constraint is now the §D2b connection-server relay. That
 #: relay holds an envelope for an offline household for up to 24 h and the
@@ -903,7 +903,7 @@ class ReplayCache:
     replay. Entries older than ``window`` are pruned lazily on each check
     and on ``prune()``.
 
-    Production constructs this with :data:`REPLAY_CACHE_WINDOW` (24 h),
+    Production constructs this with :data:`REPLAY_CACHE_WINDOW` (25 h),
     which must outlast the federation outbox's max jittered redelivery
     interval (~5.2 h): redeliveries are re-signed with a fresh timestamp,
     so a retry of a lost-ack delivery passes the §24.11 timestamp gate and
@@ -927,7 +927,7 @@ class ReplayCache:
 
     def __init__(self, window: timedelta = timedelta(hours=1)) -> None:
         # The 1 h default is for ad-hoc / test construction only; production
-        # passes :data:`REPLAY_CACHE_WINDOW` (24 h) explicitly so the live
+        # passes :data:`REPLAY_CACHE_WINDOW` (25 h) explicitly so the live
         # window outlasts the outbox's re-signed redelivery cadence.
         self._window = window
         self._seen: dict[str, datetime] = {}

@@ -23,6 +23,8 @@ from socialhome.crypto import (
 )
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DeliveryResult,
     FederationEventType,
@@ -31,7 +33,10 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.events import ConnectionReachable
 from socialhome.federation import FederationService
+from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
+from socialhome.federation.transport import _TransportSendResult
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
@@ -3259,3 +3264,175 @@ async def test_broadcast_reaches_a_member_with_no_remote_instances_row():
     assert kwargs["target_eph_pk_b64"] == "target-eph-pk"
     assert kwargs["inner_event_type"] is FederationEventType.SPACE_MEMBER_ROLE_CHANGED
     assert kwargs["inner_payload"] == payload
+
+
+# ─── The connection-server relay tier: acceptance is not delivery ─────────
+
+
+class _RelayResultTransport:
+    """A transport facade that always answers as the ``gfs_relay`` tier."""
+
+    def __init__(self, result) -> None:
+        self._result = result
+        self.calls: list[str] = []
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls.append(instance.id)
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_a_relay_acceptance_never_marks_the_peer_reachable():
+    """The relay answers a uniform 202 whether the household is online,
+    offline or not even a client of that server — any other answer would
+    be a presence oracle. Reading that 202 as reachability turns the
+    SPA's dot green for a household that has received nothing, and fires
+    ConnectionReachable (which wakes resyncs) on no evidence at all."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    peer_kp = generate_identity_keypair()
+    inst, _ = _make_remote_instance(km, peer_kp=peer_kp)
+    inst = dataclasses.replace(inst, unreachable_since="2026-09-18T00:00:00+00:00")
+    await fed_repo.save_instance(inst)
+
+    bus = EventBus()
+    seen: list = []
+
+    async def _record(event):
+        seen.append(event)
+
+    bus.subscribe(ConnectionReachable, _record)
+
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km, bus=bus)
+    svc.attach_transport(
+        _RelayResultTransport(
+            _TransportSendResult(ok=True, via="gfs_relay", status_code=202),
+        ),
+    )
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert result.ok is True
+    assert result.via == "gfs_relay"
+    assert fed_repo.reachable_calls == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_an_rtc_success_still_marks_the_peer_reachable():
+    """Guard on the other side of the same branch — the relay carve-out
+    must not quietly stop a real delivery from proving reachability."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    peer_kp = generate_identity_keypair()
+    inst, _ = _make_remote_instance(km, peer_kp=peer_kp)
+    inst = dataclasses.replace(inst, unreachable_since="2026-09-18T00:00:00+00:00")
+    await fed_repo.save_instance(inst)
+
+    bus = EventBus()
+    seen: list = []
+
+    async def _record(event):
+        seen.append(event)
+
+    bus.subscribe(ConnectionReachable, _record)
+
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km, bus=bus)
+    svc.attach_transport(
+        _RelayResultTransport(_TransportSendResult(ok=True, via="rtc")),
+    )
+
+    await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert fed_repo.reachable_calls == [inst.id]
+    assert [type(e) for e in seen] == [ConnectionReachable]
+
+
+@pytest.mark.asyncio
+async def test_a_relay_throttle_queues_the_event_but_does_not_condemn_the_peer():
+    """429 is back-pressure on us, not evidence about them: the envelope
+    is still durable, the household is not painted unreachable, and the
+    caller is told the window is waitable."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    peer_kp = generate_identity_keypair()
+    inst, _ = _make_remote_instance(km, peer_kp=peer_kp)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+    )
+    svc.attach_transport(
+        _RelayResultTransport(
+            _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                status_code=429,
+                error=DELIVERY_ERROR_RELAY_THROTTLED,
+            ),
+        ),
+    )
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_RELAY_THROTTLED
+    assert result.retry_after_s == RELAY_THROTTLE_COOLDOWN_S
+    # Durable — a throttle costs a delay, never an event.
+    assert len(outbox_repo.enqueued) == 1
+    # …and the household keeps its reachability state.
+    assert fed_repo.unreachable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_frame_too_big_for_the_relay_is_not_queued_for_retry():
+    """The cap is arithmetic, not weather: five retries re-derive the
+    same refusal and then report it as a transient loss."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    peer_kp = generate_identity_keypair()
+    inst, _ = _make_remote_instance(km, peer_kp=peer_kp)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+    )
+    svc.attach_transport(
+        _RelayResultTransport(
+            _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                status_code=413,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+            ),
+        ),
+    )
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+        payload={"blob_id": "b1"},
+    )
+
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
+    assert outbox_repo.enqueued == []
+    assert fed_repo.unreachable_calls == []

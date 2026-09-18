@@ -78,6 +78,13 @@ _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
 #: prefix matcher from turning every URL public.
 _DEFAULT_PUBLIC_PATH_PATTERNS: tuple[str, ...] = (
     r"^/api/spaces/[^/]+/calendar/export\.ics$",
+    # The pasteable code for one invite link. The TOKEN is the
+    # credential — whoever holds it can already redeem the link — so
+    # there is no session to require, and the handler answers a uniform
+    # 404 for anything that is not a live link of ours. A regex, not a
+    # ``/api/invite-links/`` prefix, so nothing else under that path
+    # could ever become public by being added later.
+    r"^/api/invite-links/[^/]+/code$",
     # App bundle files bypass bearer-auth; the view self-authorizes via a
     # prefix HMAC signature (entry load) or a path-scoped cookie (sub-resources).
     # ``/runtime`` is intentionally NOT public — it requires a bearer token.

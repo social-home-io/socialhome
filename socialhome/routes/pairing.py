@@ -38,7 +38,11 @@ from ..app_keys import (
     platform_adapter_key,
     user_repo_key,
 )
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from ..security import error_response
 from ..services.peer_home_sharing_service import UnknownInstanceError
 from .base import BaseView
@@ -49,7 +53,7 @@ log = logging.getLogger(__name__)
 def _instance_dict(
     inst,
     *,
-    transport_state: Literal["rtc", "https"] | None = None,
+    transport_state: Literal["rtc", "https", "gfs_relay"] | None = None,
     queued_envelopes: int,
     dropped_envelopes: int,
 ) -> dict:
@@ -61,7 +65,9 @@ def _instance_dict(
 
     ``transport_state`` is the current federation transport for this
     peer: ``"rtc"`` (WebRTC DataChannel open), ``"https"`` (HTTPS
-    inbox fallback), or ``None`` (unreachable / pending — caller
+    inbox fallback), ``"gfs_relay"`` (a household seated from an invite
+    link, reachable only through the connection server that introduced
+    the pair), or ``None`` (unreachable / pending — caller
     short-circuits when reachability is False or status is not
     confirmed).
 
@@ -275,9 +281,19 @@ class PairingConnectionCollectionView(BaseView):
         outbox = self.svc(outbox_repo_key)
         rows = []
         for inst in instances:
-            ts: Literal["rtc", "https"] | None = None
+            ts: Literal["rtc", "https", "gfs_relay"] | None = None
             if inst.status is PairingStatus.CONFIRMED and inst.is_reachable():
-                if transport is not None and transport.is_ready(inst.id):
+                if inst.source is InstanceSource.SPACE_SESSION:
+                    # A household met through an invite link has no
+                    # address at all (``remote_inbox_url`` is empty by
+                    # design) and no RTC path — signalling itself would
+                    # need a relationship this pair does not have. Its
+                    # envelopes ride the connection-server relay, so
+                    # "https" was not a fallback, it was a transport that
+                    # cannot be used, and it pointed an operator at an
+                    # inbox that will never exist.
+                    ts = "gfs_relay"
+                elif transport is not None and transport.is_ready(inst.id):
                     ts = "rtc"
                 else:
                     ts = "https"

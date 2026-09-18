@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import aiohttp
@@ -1193,8 +1194,12 @@ async def test_client_attach_envelope_handler_late_binds(fake_gfs, http_session)
         await client.stop()
 
 
-async def test_on_text_drops_envelope_when_no_handler():
-    """No handler attached → the frame is dropped at DEBUG, not crashed."""
+async def test_on_text_drops_envelope_when_no_handler(caplog):
+    """No handler attached → the frame is dropped, not crashed — but
+    LOUDLY. The connection server deletes its queue row to hand us this
+    frame, so a drop here loses the envelope permanently (a redeem that
+    never completes, a space event that silently never lands). At DEBUG
+    that was invisible on any normal deployment."""
     seed, _pub = _gen_keypair()
     client = GfsWebSocketClient(
         gfs_url="https://gfs.test",
@@ -1203,7 +1208,11 @@ async def test_on_text_drops_envelope_when_no_handler():
         session_factory=lambda: None,
         on_relay=_sink_noop,
     )
-    await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
+    with caplog.at_level(logging.WARNING):
+        await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
+    assert any(
+        r.levelno == logging.WARNING and "no " in r.getMessage() for r in caplog.records
+    )
 
 
 async def test_on_text_swallows_envelope_handler_exception(caplog):

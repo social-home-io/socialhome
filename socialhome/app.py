@@ -41,7 +41,11 @@ from .exception_text import describe_exception
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
 from .db import AsyncDatabase
-from .domain.federation import FederationEventType, InstanceSource
+from .domain.federation import (
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
+    FederationEventType,
+    InstanceSource,
+)
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.sync_manager import SyncSessionManager
@@ -436,8 +440,23 @@ async def _redeliver_envelope(
             envelope_dict=orjson.loads(body),
         )
         if result.ok:
-            await federation_repo.mark_reachable(entry.instance_id)
+            # NO ``mark_reachable`` here. The relay answers a uniform 202
+            # to every well-formed envelope — recipient online, offline,
+            # or not a client of that server at all — because any other
+            # answer would be a presence oracle. That 202 is an
+            # ACCEPTANCE, not a delivery, so it cannot clear the
+            # household's ``unreachable_since``; an inbound envelope
+            # from them is what proves they are there.
             return DeliveryOutcome.SUCCESS
+        if result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
+            # Deterministic: the frame is over the relay's body cap and
+            # will be on every retry too (media does not ride this
+            # transport). Retrying spends the whole attempt budget
+            # re-deriving one length compare and then reports a
+            # permanent condition as a transient one. The transport
+            # already logged a WARNING naming the peer, event type and
+            # size, so this drop is not silent.
+            return DeliveryOutcome.PERMANENT
         return DeliveryOutcome.TRANSIENT
 
     try:
@@ -2579,12 +2598,6 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         invite_redeem_coordinator.attach_to(federation_service)
         real_space_service.attach_redeem_coordinator(invite_redeem_coordinator)
-        # An invite link that grants ADMIN seats a remote admin, which is
-        # a promotion — so it gets the delegated-admin signing-seed share
-        # a promotion gets (owner-only, opt-in, capability-gated inside).
-        invite_redeem_coordinator.attach_admin_seed_sharer(
-            real_space_service.share_admin_seed_with_remote_admin,
-        )
         # §D2b — redeeming an invite link from a household we have never
         # met. The sealed blob goes out through a connection server
         # addressed by instance id only; the key-wrap triple is this

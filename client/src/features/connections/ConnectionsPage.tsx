@@ -27,6 +27,7 @@ import {
   selfLat,
   selfLon,
   type Connection,
+  type TransportState,
 } from '@/store/connections'
 import {
   compatPeers,
@@ -152,6 +153,20 @@ function transportIcon(t: Connection['transport']) {
         <svg width="14" height="14" viewBox="0 0 24 24"
              fill="currentColor" aria-hidden="true">
           <path d="M19 18H6a4 4 0 010-8 5 5 0 019.6-2A4 4 0 0119 18z" />
+        </svg>
+      </span>
+    )
+  }
+  if (t === 'gfs_relay') {
+    return (
+      <span
+        class="sh-transport-icon sh-transport-icon--gfs-relay"
+        title="Via connection server relay"
+        aria-label="Via connection server relay"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24"
+             fill="currentColor" aria-hidden="true">
+          <path d="M4 7h10l-2-2 1.4-1.4L17.8 8l-4.4 4.4L12 11l2-2H4V7zm16 10H10l2 2-1.4 1.4L6.2 16l4.4-4.4L12 13l-2 2h10v2z" />
         </svg>
       </span>
     )
@@ -682,7 +697,7 @@ export default function ConnectionsPage() {
       if (currentUser.value?.is_admin) void loadAutoPairRequests()
     })
     const off4 = ws.on('peer.transport_changed', (msg) => {
-      const { instance_id, transport } = msg.data as { instance_id: string; transport: 'rtc' | 'https' }
+      const { instance_id, transport } = msg.data as { instance_id: string; transport: TransportState }
       connections.value = connections.value.map(c =>
         c.instance_id === instance_id
           ? { ...c, transport }

@@ -11,11 +11,14 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
 from socialhome.federation.federation_service import FederationService
+from socialhome.federation.transport import _TransportSendResult
 from socialhome.infrastructure import DeliveryOutcome, EventBus, KeyManager
 from socialhome.repositories import (
     SqliteFederationRepo,
@@ -711,3 +714,121 @@ async def test_redeliver_404_without_our_marker_blames_the_intermediary(env, cap
     assert "did not come from the peer's Social Home" in caplog.text
     # Must NOT send the operator off to re-pair — that isn't the fault.
     assert "re-pair" not in caplog.text
+
+
+# ─── The connection-server relay tier ────────────────────────────────────
+
+
+async def _seat_link_joined_peer(fed_repo, kek):
+    """A household seated from an invite link: no address, relay only."""
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x01" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="link-peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url="",
+        local_inbox_id="wh-link",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        relay_via="https://gfs.example.org",
+        remote_keywrap_pk="cc" * 32,
+    )
+    await fed_repo.save_instance(peer)
+    return peer
+
+
+class _RelayOnlyTransport:
+    """Stands in for the transport facade's relay tier."""
+
+    def __init__(self, result) -> None:
+        self._result = result
+        self.calls = 0
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls += 1
+        return self._result
+
+
+async def test_redeliver_over_the_relay_does_not_mark_the_peer_reachable(env):
+    """The relay's 202 is an ACCEPTANCE — it answers identically for an
+    offline household, so treating it as proof of reach lights the SPA's
+    dot green for a household that has received nothing."""
+    svc, fed_repo, kek = env
+    peer = await _seat_link_joined_peer(fed_repo, kek)
+    await fed_repo.mark_unreachable(peer.id)
+
+    svc.attach_transport(
+        _RelayOnlyTransport(
+            _TransportSendResult(ok=True, via="gfs_relay", status_code=202),
+        ),
+    )
+    entry = _OutboxEntry(
+        id="e-relay",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.SUCCESS
+    row = await fed_repo.get_instance(peer.id)
+    assert row is not None and row.unreachable_since is not None
+
+
+async def test_redeliver_of_a_frame_too_big_for_the_relay_is_permanent(env):
+    """The relay body cap is arithmetic: the identical frame fails the
+    identical compare on every attempt. Retrying spends the whole outbox
+    budget to re-learn that, then reports a permanent condition as a
+    transient one."""
+    svc, fed_repo, kek = env
+    peer = await _seat_link_joined_peer(fed_repo, kek)
+
+    svc.attach_transport(
+        _RelayOnlyTransport(
+            _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                status_code=413,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+            ),
+        ),
+    )
+    entry = _OutboxEntry(
+        id="e-big",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id, msg_id="m-big"),
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.PERMANENT
+
+
+async def test_redeliver_throttled_by_the_relay_stays_transient(env):
+    """The opposite case, pinned so the PERMANENT branch above can never
+    widen to swallow back-pressure: a 429 keeps its retry."""
+    svc, fed_repo, kek = env
+    peer = await _seat_link_joined_peer(fed_repo, kek)
+
+    svc.attach_transport(
+        _RelayOnlyTransport(
+            _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                status_code=429,
+                error=DELIVERY_ERROR_RELAY_THROTTLED,
+            ),
+        ),
+    )
+    entry = _OutboxEntry(
+        id="e-429",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id, msg_id="m-429"),
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.TRANSIENT

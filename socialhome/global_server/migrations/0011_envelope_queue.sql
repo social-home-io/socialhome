@@ -47,13 +47,18 @@
 --       index. No column added to, renamed in, or removed from any existing
 --       table; no backfill; no rewrite of a single existing row. Retention is
 --       enforced in code (``ENVELOPE_QUEUE_TTL_SECONDS`` swept by
---       ``GfsMaintenanceScheduler``, ``ENVELOPE_QUEUE_MAX_PER_RECIPIENT``
---       enforced on insert) rather than by a trigger, so the policy stays
---       visible next to the relay it bounds.
+--       ``GfsMaintenanceScheduler``; ``ENVELOPE_QUEUE_MAX_PER_RECIPIENT``
+--       and ``ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT`` enforced on insert,
+--       tail-dropping the NEW envelope at either ceiling) rather than by a
+--       trigger, so the policy stays visible next to the relay it bounds.
 --
 -- Value domain:
---   to_instance  recipient household instance id (≤128 chars, validated at
---                the route). NEVER a sender id — there is no sender field.
+--   to_instance  recipient household instance id. The route validates the
+--                exact identifier shape before anything is stored or
+--                logged — 32 lowercase base32 characters, anchored
+--                (``ENVELOPE_INSTANCE_ID_RE``), which is what
+--                ``derive_instance_id`` produces. NEVER a sender id —
+--                there is no sender field.
 --   sealed_json  the verbatim sealed dict as JSON. Opaque; never parsed,
 --                never logged.
 --   created_at   unix seconds, insertion order for the in-order drain.
@@ -70,6 +75,8 @@ CREATE TABLE IF NOT EXISTS gfs_envelope_queue (
 
 -- The drain reads one recipient's rows in insertion order; the sweep reads
 -- by expiry. The composite covers the first exactly and the second well
--- enough at this table's size (bounded by clients × 200 rows).
+-- enough at this table's size (bounded by clients ×
+-- ``ENVELOPE_QUEUE_MAX_PER_RECIPIENT`` rows, and by
+-- ``ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT`` bytes, whichever binds first).
 CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_to
     ON gfs_envelope_queue(to_instance, created_at);

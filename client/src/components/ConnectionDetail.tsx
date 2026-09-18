@@ -54,7 +54,7 @@ interface Connection {
   dropped_envelopes?: number
   /** Active federation transport for this peer. Shown read-only
    *  in the detail panel so the admin can see whether WebRTC is up. */
-  transport?: 'rtc' | 'https' | null
+  transport?: 'rtc' | 'https' | 'gfs_relay' | null
   /** Monotonic federation protocol version the peer last advertised via
    *  INSTANCE_CAPABILITIES_UPDATED. Shown read-only so an admin can spot a
    *  peer that's behind. Absent on old API responses (defaults to v1 there). */
@@ -337,6 +337,15 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
                 Direct channel unavailable — usually a NAT or firewall block.
                 Federation works, just at higher latency.
+              </span>
+            </dd></>
+          )}
+          {conn.transport === 'gfs_relay' && (
+            <><dt>Transport</dt><dd>
+              Via connection server relay
+              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
+                This household was seated from an invite link, so everything
+                reaches it through the connection server.
               </span>
             </dd></>
           )}

@@ -170,6 +170,7 @@ class AbstractSpaceRepo(Protocol):
         gfs_token: str | None = None,
         gfs_url: str | None = None,
     ) -> str: ...
+    async def get_live_invite_token(self, token: str) -> dict | None: ...
     async def consume_invite_token(
         self,
         token: str,
@@ -1252,6 +1253,60 @@ class SqliteSpaceRepo:
             ),
         )
         return token
+
+    async def get_live_invite_token(self, token: str) -> dict | None:
+        """One still-redeemable invite token by its string, or ``None``.
+
+        A **read**: it never touches ``uses_remaining``. Two callers need
+        to know something about a link before deciding to spend one of
+        its uses:
+
+        * the cross-household redeem, which must refuse a ``subscriber``
+          seat (``space_remote_members`` has no row shape for one) —
+          refusing *after* the atomic consume meant every stranger who
+          opened a published Follower link burned a use on their own
+          denial;
+        * ``GET /api/invite-links/{token}/code``, which hands back the
+          full pasteable code for a link that is still live.
+
+        "Live" is the same predicate :meth:`list_live_invite_tokens`
+        uses — uses left, and not past ``expires_at`` — with both sides of
+        the expiry comparison wrapped in SQLite's ``datetime()`` for the
+        reason spelled out on :meth:`consume_invite_token`. It is
+        deliberately NOT an authorization check: the row it returns still
+        has to go through the consume, whose single atomic UPDATE is what
+        actually holds the line against two redeems racing for the last
+        use.
+        """
+        row = await self._db.fetchone(
+            """
+            SELECT token, space_id, created_by, uses_remaining, created_at,
+                   expires_at, role, gfs_id, gfs_token, gfs_url, uses_total
+              FROM space_invite_tokens
+             WHERE token=?
+               AND uses_remaining > 0
+               AND (
+                    expires_at IS NULL
+                    OR datetime(expires_at) > datetime('now')
+               )
+            """,
+            (token,),
+        )
+        if row is None:
+            return None
+        return {
+            "token": row[0],
+            "space_id": row[1],
+            "created_by": row[2],
+            "uses_remaining": row[3],
+            "created_at": row[4],
+            "expires_at": row[5],
+            "role": row[6] or SpaceRole.MEMBER.value,
+            "gfs_id": row[7],
+            "gfs_token": row[8],
+            "gfs_url": row[9],
+            "uses_total": row[10],
+        }
 
     async def consume_invite_token(
         self,

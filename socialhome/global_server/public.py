@@ -931,19 +931,71 @@ def _render_invite_page(
     conclusion and renders the same code.
     """
     if space is None:
-        return (
-            "<!doctype html>"
-            "<style>body{font:15px/1.5 'Manrope',-apple-system,system-ui,sans-serif;"
-            "margin:0;padding:48px 24px;color:#1A1814;background:#F4ECE0}</style>"
-            "<p>This invite has expired or was revoked.</p>"
+        # A DEAD link still deserves a page. Whoever lands here followed
+        # something a friend sent them and has no idea what went wrong; a
+        # bare sentence on a blank document reads like a broken server,
+        # not an expired invite. Same shell as the 200 page, so it is
+        # obviously the same place — and it names no token: the URL is in
+        # the address bar already, and echoing a dead credential into the
+        # body only invites it being copy-pasted onward.
+        return _invite_page_html(
+            title=f"Invite unavailable \u2014 {_escape(server_name)}",
+            accent="#D2542A",
+            body=f"""    <div class="accent-bar"></div>
+    <h1>This invite has expired or was revoked</h1>
+    <p>on {_escape(server_name)}.</p>
+    <p>Invite links don't last forever \u2014 this one has run out of uses,
+    passed its expiry date, or was taken back by whoever created it.</p>
+    <p class="muted">Ask whoever shared it for a fresh link.</p>""",
         )
     accent = _escape(space.get("accent_color") or "#D2542A")
     icon_url = _escape(space.get("icon_url") or "")
+    return _invite_page_html(
+        title=f"Join {_escape(space.get('name') or '')} \u2014 {_escape(server_name)}",
+        accent=accent,
+        body=f"""    <div class="accent-bar"></div>
+    {'<img class="space-avatar" src="' + icon_url + '" alt="" />' if icon_url else ""}
+    <h1>You're invited to {_escape(space.get("name") or "")}</h1>
+    <p>on {_escape(server_name)}.</p>
+
+    <div class="handoff">
+      <img class="qr" src="{invite_qr_data_uri}" alt="Invite QR" />
+      <div>
+        <ol>
+          <li>Open <strong>your own</strong> Social Home</li>
+          <li>Spaces \u2192 Join with invite code</li>
+          <li>Scan the QR or paste the code below</li>
+        </ol>
+        <p><code class="copy-code" id="invite-code"
+                 >{_escape(invite_code)}</code></p>
+        <p>
+          <button type="button" class="copy-btn" id="copy-invite-btn"
+                  data-copy-target="invite-code"
+                  data-copied-label="Copied \u2713"
+                  data-default-label="Copy code">Copy code</button>
+        </p>
+      </div>
+    </div>
+{_copy_button_script("copy-invite-btn", "invite-code")}
+    <p class="muted">You join from your own household \u2014 this code is what
+    tells it where to knock.</p>""",
+    )
+
+
+def _invite_page_html(*, title: str, accent: str, body: str) -> str:
+    """The shared shell for both ``GET /join/{gfs_token}`` outcomes.
+
+    One shell, so "here is your code" and "this link is dead" are
+    visibly the same place rather than a designed page and a stack
+    trace's worth of plain text. ``title`` / ``accent`` / ``body``
+    arrive pre-escaped from the caller \u2014 the space name and the server
+    name are both operator- or owner-supplied.
+    """
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Join {_escape(space.get("name") or "")} — {_escape(server_name)}</title>
+  <title>{title}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -1004,32 +1056,7 @@ def _render_invite_page(
 </head>
 <body>
   <main>
-    <div class="accent-bar"></div>
-    {'<img class="space-avatar" src="' + icon_url + '" alt="" />' if icon_url else ""}
-    <h1>You're invited to {_escape(space.get("name") or "")}</h1>
-    <p>on {_escape(server_name)}.</p>
-
-    <div class="handoff">
-      <img class="qr" src="{invite_qr_data_uri}" alt="Invite QR" />
-      <div>
-        <ol>
-          <li>Open <strong>your own</strong> Social Home</li>
-          <li>Spaces → Join with invite code</li>
-          <li>Scan the QR or paste the code below</li>
-        </ol>
-        <p><code class="copy-code" id="invite-code"
-                 >{_escape(invite_code)}</code></p>
-        <p>
-          <button type="button" class="copy-btn" id="copy-invite-btn"
-                  data-copy-target="invite-code"
-                  data-copied-label="Copied ✓"
-                  data-default-label="Copy code">Copy code</button>
-        </p>
-      </div>
-    </div>
-{_copy_button_script("copy-invite-btn", "invite-code")}
-    <p class="muted">You join from your own household — this code is what
-    tells it where to knock.</p>
+{body}
   </main>
 </body>
 </html>
@@ -1153,13 +1180,22 @@ async def handle_space_page(request: web.Request) -> web.Response:
 async def handle_invite_page(request: web.Request) -> web.Response:
     """GET /join/{gfs_token} — invite-link landing.
 
-    A pure READ. This handler writes nothing at all: no use counter, no
-    fetch row, no log line naming the token or the visitor. That is the
-    privacy property the whole feature rests on — a connection server that
-    counted fetches would be a record of who opened whose invite, and the
-    access log is the accepted residual, not a licence to add more. The
-    ``uses`` / ``max_uses`` columns exist on the table and stay untouched
-    (``migrations/0012_gfs_invite_tokens_blob.sql``).
+    A pure READ. This handler writes nothing to the DATABASE: no use
+    counter, no fetch row, and it adds no log line of its own. That is
+    the privacy property the whole feature rests on — a connection server
+    that counted fetches would be a durable record of who opened whose
+    invite. The ``uses`` / ``max_uses`` columns exist on the table and
+    stay untouched (``migrations/0012_gfs_invite_tokens_blob.sql``).
+
+    **The residual is the access log.** aiohttp records the request line
+    — ``GET /join/<token>`` — with the visitor's IP and a timestamp, so
+    an operator who keeps access logs can reconstruct
+    ``visitor IP → token → time`` for anyone who opened a link. That is
+    signed off in ``docs/principles.md`` alongside the relay's own
+    IP residual, and it is the reason this handler adds nothing further:
+    the accepted cost is one line the HTTP server writes anyway, not a
+    licence to record more. Operators who care should redact the
+    ``/join/`` path at their front end and keep retention short.
 
     404 — rendering the same styled "expired or revoked" page — when the
     token is unknown, expired, or its space is no longer publicly listed

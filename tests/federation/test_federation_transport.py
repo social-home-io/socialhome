@@ -17,6 +17,8 @@ import aiolibdatachannel as rtc
 
 from socialhome.domain.events import PeerTransportChanged
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     DeliveryResult,
     FederationEventType,
     InstanceSource,
@@ -24,6 +26,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.federation import transport as transport_mod
+from socialhome.federation.gfs_relay_transport import RELAY_STATUS_TOO_LARGE
 from socialhome.federation.transport import (
     MAX_HANDSHAKE_RESTARTS,
     RTC_RETRY_BACKOFF_BASE_S,
@@ -2733,3 +2736,69 @@ async def test_relay_failure_is_a_transport_failure_not_a_raise():
     assert result.via == "gfs_relay"
     assert result.error == "gfs_relay_failed"
     assert https_inbox.calls == []
+
+
+class _ThrottlingRelay:
+    """A relay tier that reports the connection server's 429."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls.append(envelope_dict)
+        return False, 429
+
+
+class _OversizeRefusingRelay:
+    """A relay tier refusing a frame that structurally cannot fit."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls.append(envelope_dict)
+        return False, RELAY_STATUS_TOO_LARGE
+
+
+async def test_a_relay_throttle_is_a_waitable_window_not_a_generic_failure():
+    """A 429 says "come back in a moment", and the caller has to be able
+    to tell that apart from "this peer is not reachable" — otherwise a
+    space-sync catch-up abandons over a few seconds of back-pressure."""
+    relay = _ThrottlingRelay()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        gfs_relay=relay,
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-429"},
+    )
+
+    assert result.ok is False
+    assert result.via == "gfs_relay"
+    assert result.status_code == 429
+    assert result.error == DELIVERY_ERROR_RELAY_THROTTLED
+
+
+async def test_a_frame_too_big_for_the_relay_is_not_a_transient_failure():
+    """Media does not fit the relay body cap and never will, so the
+    refusal is deterministic — retrying it just burns the outbox budget."""
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        gfs_relay=_OversizeRefusingRelay(),
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-big"},
+    )
+
+    assert result.ok is False
+    assert result.via == "gfs_relay"
+    assert result.status_code == RELAY_STATUS_TOO_LARGE
+    assert result.error == DELIVERY_ERROR_RELAY_TOO_LARGE

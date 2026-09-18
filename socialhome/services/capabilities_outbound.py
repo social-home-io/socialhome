@@ -17,6 +17,12 @@ outbound fields on the version we actually run. Three trigger points:
 
 A failed send to a single peer lands in the outbox retry queue; we
 never raise.
+
+**Every CONFIRMED peer, not just the social ones.** A household seated
+from an invite link (``source = space_session``) is not a social peer —
+it gets no DMs, no roster, no presence — but it does receive space
+content, so it needs our version like anybody else. See
+:meth:`CapabilitiesOutbound.confirmed_peers`.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.events import PairingConfirmed
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEventType, PairingStatus
 from ..domain.federation_capabilities import OURS as OUR_PROTO_VERSION
 from .peer_outbound import ConfirmedPeerBroadcaster
 
@@ -58,6 +64,38 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._bus = bus
+
+    async def confirmed_peers(self) -> list:
+        """Every CONFIRMED peer — social **and** space-session.
+
+        Overrides :meth:`ConfirmedPeerBroadcaster.confirmed_peers`, which
+        reads the *social* list on purpose: DMs, the user roster,
+        presence and the friends constellation must not treat "we share
+        a space" as "we federate socially".
+
+        ``proto_version`` is the exception, because it is not a social
+        fact — it is the answer to "which optional fields may I put on
+        the wire for this peer?", and it is exchanged in exactly one
+        place: this event. A household seated from an invite link
+        receives space posts, comments, roster events and sync chunks
+        like any other peer, so leaving it off this fan-out froze its
+        version at whatever it advertised at seat time and made every
+        later ``peer_supports`` gate answer from stale data — silently
+        withholding fields the peer could parse perfectly well. The
+        event is already inbound-allow-listed for this source; the gap
+        was only outbound.
+
+        Fail-soft like the mixin it replaces: a repo error yields ``[]``
+        rather than breaking startup.
+        """
+        repo = self._federation_repo
+        try:
+            peers = await repo.list_instances(status=PairingStatus.CONFIRMED.value)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.debug("capabilities-outbound: list peers failed: %s", exc)
+            return []
+        own = getattr(self._federation, "own_instance_id", "")
+        return [p for p in peers if getattr(p, "id", None) and p.id != own]
 
     def wire(self) -> None:
         """Subscribe to :class:`PairingConfirmed` so new pairs get a

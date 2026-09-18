@@ -18,7 +18,7 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './FederationMap.css'
-import { connections, selfLat, selfLon } from '@/store/connections'
+import { connections, selfLat, selfLon, type TransportState } from '@/store/connections'
 import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
 
@@ -31,7 +31,7 @@ function _selfPinHtml(): string {
   return '<div class="sh-fed-pin sh-fed-pin--self">You</div>'
 }
 
-function _peerPinHtml(name: string | undefined, transport: 'rtc' | 'https' | null | undefined): string {
+function _peerPinHtml(name: string | undefined, transport: TransportState | undefined): string {
   const modifier = transport === 'https' ? ' sh-fed-pin--https' : ''
   const badge = transport === 'rtc'
     ? '<span class="sh-fed-pin-tx" aria-hidden="true">⚡</span>'
@@ -46,9 +46,10 @@ function _peerPinHtml(name: string | undefined, transport: 'rtc' | 'https' | nul
   )
 }
 
-function _transportLabel(transport: 'rtc' | 'https' | null | undefined): string {
+function _transportLabel(transport: TransportState | undefined): string {
   if (transport === 'rtc') return '⚡ Direct (WebRTC)'
   if (transport === 'https') return '☁ HTTPS (fallback)'
+  if (transport === 'gfs_relay') return '🔁 Via connection server relay'
   return 'Transport unknown'
 }
 
@@ -141,7 +142,7 @@ export default function FederationMap() {
     // Peer pins
     for (const peer of peers) {
       if (peer.home_lat == null || peer.home_lon == null) continue
-      const transport = (peer as { transport?: 'rtc' | 'https' | null }).transport ?? null
+      const transport = (peer as { transport?: TransportState }).transport ?? null
       const icon = L.divIcon({
         className: 'sh-fed-icon',
         html: _peerPinHtml(peer.display_name, transport),

@@ -112,19 +112,28 @@ ENVELOPE_MAX_BODY_BYTES: int = 320 * 1024
 #: so the client address is the only shedding handle, exactly as for
 #: ``/gfs/publish``.
 #:
-#: One invite redeem is two envelopes (sealed request, sealed reply), so 30
-#: per minute is ~15 complete redeems a minute from one address: far above a
-#: household accepting invite links, and still well above a household that
-#: also happens to be answering several. It is deliberately much tighter than
-#: ``/gfs/publish``'s 120 because an accepted envelope can cost a DB write of
-#: up to :data:`ENVELOPE_MAX_BODY_BYTES`, where a publish costs a fan-out and
-#: nothing durable. Worst case from one address is therefore ~9.4 MiB/min of
-#: queue writes, itself bounded per household by
-#: :data:`ENVELOPE_QUEUE_MAX_PER_RECIPIENT`.
+#: **This is not an invite-only path.** The relay started life carrying two
+#: envelopes per invite redeem, and 30/min was generous for that. It now also
+#: carries ALL ongoing federation for a household seated from an invite link
+#: (:mod:`socialhome.federation.gfs_relay_transport`): every space post,
+#: comment, reaction, roster change and — the big one — every space-sync
+#: catch-up chunk, of which one join is routinely several hundred. At 30/min a
+#: first catch-up took hours and the provider gave up after three consecutive
+#: 429s, so a link-joined household simply never received the space.
+#:
+#: 600/min (10/s) fits a real space's traffic and a catch-up backfill at the
+#: pace the sender can produce it, while still capping what ONE address can
+#: push through a relay it does not own: worst case ~187 MiB/min of queue
+#: writes from one address, itself bounded per household by
+#: :data:`ENVELOPE_QUEUE_MAX_PER_RECIPIENT` and
+#: :data:`ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT`, which are the caps that
+#: actually protect this server's disk. A sender that does hit the ceiling is
+#: no longer dead in the water either — a 429 reaches the household as a
+#: *cooldown*, waited out and retried, rather than a terminal chunk failure.
 #:
 #: Like every limiter in :mod:`.public` this sheds ONE noisy source; it is not
 #: DDoS protection (see ``RATE_LIMIT_MAX_TRACKED_IPS``).
-ENVELOPE_MAX_PER_MINUTE: int = 30
+ENVELOPE_MAX_PER_MINUTE: int = 600
 
 #: How long an undelivered envelope waits for its recipient, in seconds.
 #: 24 h: the issuing household of an invite link may simply be asleep, and an

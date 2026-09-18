@@ -187,12 +187,28 @@ MAX_POST_LENGTH = 10_000
 MAX_COMMENT_LENGTH = 2_000
 
 
+#: Safety margin between this household's cap and the connection
+#: server's, in seconds.
+#:
+#: The server's check is a strict ``expires_at - its_now > MAX`` against
+#: ITS clock, while the household computes ``our_now + cap`` against
+#: OURS. Setting the two numbers equal put every "never expires"
+#: published link exactly ON that boundary, so a server running a single
+#: second behind us answered 422 — and the owner, who had picked
+#: "Never", was told that "30 days" was too long. Five minutes is the
+#: same skew budget §24.11 already allows federation envelopes, so a
+#: clock sloppy enough to break this breaks federation first.
+PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS: int = 300
+
 #: Longest life a connection server will hold an invite blob for
-#: (``global_server.invites.INVITE_MAX_TTL_SECONDS``). A never-expiring
-#: local token is fine — the household decides every redeem — but the
-#: public blob is a row on somebody else's disk, so a published link is
-#: capped here rather than rejected by the server.
-PUBLISHED_INVITE_MAX_TTL_SECONDS: int = 30 * 24 * 3600
+#: (``global_server.invites.INVITE_MAX_TTL_SECONDS`` is 30 days), minus
+#: :data:`PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS`. A never-expiring local
+#: token is fine — the household decides every redeem — but the public
+#: blob is a row on somebody else's disk, so a published link is capped
+#: here rather than rejected by the server.
+PUBLISHED_INVITE_MAX_TTL_SECONDS: int = 30 * 24 * 3600 - (
+    PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS
+)
 
 
 def _invite_expiry_epoch(expires_at: str | None) -> int:
@@ -2881,6 +2897,55 @@ class SpaceService(SpaceMemberGuardMixin):
         )
         return self._invite_link_dict(space, row, gfs_base=gfs_base)
 
+    async def invite_code_for_token(self, token: str) -> str | None:
+        """The full ``socialhome://invite#…`` code for one live link.
+
+        ``None`` when ``token`` is not a still-redeemable invite link on
+        this household — expired, exhausted, revoked, or never ours.
+
+        **The token IS the credential**, which is what makes this
+        answerable without a session. Anyone holding it can already
+        redeem the link; handing back the code it belongs to grants
+        nothing further. What it fixes is the ``/join`` landing page's
+        "wrong instance" fallback: a visitor whose HTTPS link landed on
+        the ISSUER's instance gets a code to paste into their own home,
+        and a code minted client-side carries only the token, the space
+        id and the issuer id — no issuer keys, no connection-server URL,
+        so the receiving household cannot bootstrap a redeem with it and
+        the fallback always dead-ended. Built from the same
+        :meth:`_invite_payload` the mint and the admin list use, so the
+        three can never drift.
+
+        Deliberately answers ``None`` — a flat 404 at the route — for
+        every "no": an expired link and a token that was never ours must
+        be indistinguishable, or this becomes a probe for which links a
+        household has issued. Rate limiting lives at the route.
+        """
+        row = await self._spaces.get_live_invite_token(token)
+        if row is None:
+            return None
+        space = await self._spaces.get(str(row["space_id"]))
+        if space is None:
+            return None
+        gfs_base: str | None = None
+        gfs_id = row.get("gfs_id")
+        if gfs_id:
+            try:
+                gfs_base = await self._gfs_base_url(str(gfs_id))
+            except ValueError:
+                # Server unpaired since the link was minted. The code
+                # still works for a household that can reach the issuer
+                # another way; it just carries no relay hint.
+                gfs_base = None
+        return build_invite_code(
+            self._invite_payload(
+                space,
+                token=str(row["token"]),
+                expires_at=row.get("expires_at"),
+                gfs_url=gfs_base,
+            )
+        )
+
     async def list_invite_links(
         self,
         space_id: str,
@@ -3051,29 +3116,6 @@ class SpaceService(SpaceMemberGuardMixin):
                 else None
             ),
         }
-
-    async def share_admin_seed_with_remote_admin(
-        self,
-        space_id: str,
-        *,
-        instance_id: str,
-    ) -> None:
-        """Public seam for the invite-redeem coordinator: a household that
-        just seated a remote ADMIN via an invite link gets the same
-        treatment :meth:`set_remote_member_role` gives a promotion.
-
-        Same gates, same helper — delegated-admin opt-in ON, we are the
-        owner host, recipient advertises the capability
-        (:meth:`_share_admin_signing_seed` re-asserts the last two).
-        """
-        space = await self._spaces.get(space_id)
-        if space is None:
-            return
-        if not space.features.delegated_admin_authority:
-            return
-        if space.owner_instance_id != self._own_instance_id:
-            return
-        await self._share_admin_signing_seed(space, instance_id=instance_id)
 
     async def _send_invite_envelope(
         self,
@@ -3599,16 +3641,35 @@ class SpaceService(SpaceMemberGuardMixin):
         subscribe" setting says: that setting governs people who walked
         up on their own; this one was invited by name.
         """
-        row = await self._spaces.consume_invite_token(token)
+        # §13.7 rides INSIDE the atomic UPDATE (``redeemer_user_id``), the
+        # same way the cross-household redeem does it. Consuming first and
+        # checking the ban afterwards spent a use on every refusal and
+        # never refunded it, so a banned member could exhaust a twenty-use
+        # link in twenty clicks — and the differential answer told them
+        # their own ban status one attempt at a time.
+        row = await self._spaces.consume_invite_token(
+            token,
+            redeemer_user_id=user_id,
+        )
         if row is None:
+            # ``None`` is now ambiguous — dead token, or live token plus a
+            # banned redeemer — because neither moves the counter. The SPA
+            # renders the two differently ("this link is no longer valid"
+            # vs "you're banned from this space"), so resolve it with a
+            # read. No use was spent either way, and the answer is about
+            # the caller's own household, so it is not an oracle.
+            peek = await self._spaces.get_live_invite_token(token)
+            if peek is not None and await self._spaces.is_banned(
+                str(peek["space_id"]),
+                user_id,
+            ):
+                raise SpacePermissionError(
+                    "banned from this space",
+                    banned=True,
+                )
             raise KeyError("invite token invalid, expired, or exhausted")
         space_id = row["space_id"]
         seat = SpaceRole(row.get("role") or SpaceRole.MEMBER.value)
-        if await self._spaces.is_banned(space_id, user_id):
-            raise SpacePermissionError(
-                "banned from this space",
-                banned=True,
-            )
         # §CP.F1 — an invite link must not seat an under-age protected minor
         # in an age-restricted space. (The token is already consumed above;
         # a blocked minor burns one use, which beats letting them in.)

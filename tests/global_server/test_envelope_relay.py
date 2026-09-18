@@ -543,7 +543,7 @@ def test_constants_are_the_documented_values():
     """These numbers are quoted in ``docs/api.md`` and reasoned about in the
     migration header; a silent change here desynchronises both."""
     assert ENVELOPE_MAX_BODY_BYTES == 320 * 1024
-    assert ENVELOPE_MAX_PER_MINUTE == 30
+    assert ENVELOPE_MAX_PER_MINUTE == 600
     assert ENVELOPE_QUEUE_TTL_SECONDS == 86_400
     assert ENVELOPE_QUEUE_MAX_PER_RECIPIENT == 2000
     assert ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT == 64 * 1024 * 1024

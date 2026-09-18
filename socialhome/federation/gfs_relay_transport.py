@@ -37,7 +37,7 @@ once — is written up in ``docs/principles.md``.
 Outer (what the relay sees, built by
 :class:`~socialhome.services.gfs_envelope_sender.GfsEnvelopeSender`)::
 
-    {"to_instance": "<32 hex>",
+    {"to_instance": "<32-char base32 instance id>",
      "sealed": {"kem_suite": "x25519", "eph_pk": …, "ciphertext": …}}
 
 Inner (the sealed plaintext)::
@@ -73,7 +73,7 @@ from typing import Any
 import orjson
 
 from ..domain.federation import RemoteInstance
-from .invite_bootstrap import RelayEnvelopeSender
+from .invite_bootstrap import EnvelopeRelayThrottled, RelayEnvelopeSender
 from .keywrap_seal import seal_to_keywrap
 
 log = logging.getLogger(__name__)
@@ -99,6 +99,20 @@ RELAY_MAX_BODY_BYTES: int = 320 * 1024
 #: — anything that passes here is re-checked exactly against
 #: :data:`RELAY_MAX_BODY_BYTES` once sealed.
 RELAY_MAX_ENVELOPE_BYTES: int = (RELAY_MAX_BODY_BYTES * 3) // 4 - 8 * 1024
+
+#: Status this transport reports for a frame it refuses BEFORE the wire,
+#: because it cannot fit :data:`RELAY_MAX_BODY_BYTES`. It is the status the
+#: relay itself would have answered, so one number means one thing all the
+#: way up the stack — and the facade above turns it into
+#: :data:`~socialhome.domain.federation.DELIVERY_ERROR_RELAY_TOO_LARGE`, a
+#: PERMANENT outcome, rather than a retry that can only fail again.
+RELAY_STATUS_TOO_LARGE: int = 413
+
+#: Status the relay answers when the caller is over its per-minute window.
+#: Reported upward so the facade can mark the send *waitable* rather than
+#: failed — see
+#: :data:`~socialhome.domain.federation.DELIVERY_ERROR_RELAY_THROTTLED`.
+RELAY_STATUS_THROTTLED: int = 429
 
 
 def seal_relay_envelope(
@@ -135,10 +149,17 @@ class GfsRelayTransport:
     every other peer keeps the RTC-first / HTTPS-fallback path untouched.
 
     Never raises on a transport-level failure — like every transport it
-    answers ``(False, None)`` so the caller records the failure and
-    queues for retry. The one thing it refuses outright is an envelope
-    that cannot fit the relay (media), which is logged at WARNING naming
-    the peer and the size so a silent drop is impossible.
+    answers ``(False, status)`` so the caller records the failure and
+    queues for retry. Two failures carry a *status* rather than ``None``
+    because the caller must tell them apart from "this peer is not
+    reachable":
+
+    * :data:`RELAY_STATUS_TOO_LARGE` — an envelope that cannot fit the
+      relay (media). Refused outright, logged at WARNING naming the peer
+      and the size so a silent drop is impossible, and **permanent**: the
+      same frame fails the same arithmetic on every retry.
+    * :data:`RELAY_STATUS_THROTTLED` — the relay's per-minute window is
+      full. **Waitable**: the caller sleeps it out and retries.
     """
 
     __slots__ = ("_sender",)
@@ -194,7 +215,7 @@ class GfsRelayTransport:
                 instance.id,
                 RELAY_MAX_BODY_BYTES,
             )
-            return False, None
+            return False, RELAY_STATUS_TOO_LARGE
 
         try:
             sealed = seal_relay_envelope(
@@ -217,7 +238,7 @@ class GfsRelayTransport:
                 body_len,
                 RELAY_MAX_BODY_BYTES,
             )
-            return False, None
+            return False, RELAY_STATUS_TOO_LARGE
 
         try:
             ok = await self._sender.send_sealed_envelope(
@@ -230,6 +251,18 @@ class GfsRelayTransport:
                 # multi-server household answering where the peer listens.
                 gfs_url=instance.relay_via or "",
             )
+        except EnvelopeRelayThrottled:
+            # Back-pressure, not a failure: the relay is up and the blob
+            # is fine, we are simply over the window. Reported as its own
+            # status so the facade can mark the send waitable — a caller
+            # that read this as "peer unreachable" would abandon a
+            # space-sync catch-up over a few seconds of throttling.
+            log.info(
+                "gfs relay: throttled while sending to %s — the caller "
+                "will wait the window out and retry",
+                instance.id,
+            )
+            return False, RELAY_STATUS_THROTTLED
         except Exception as exc:
             # A *configuration* refusal (EnvelopeRelayUnavailable) is a
             # transport failure here, not a user-facing error: the send
@@ -249,6 +282,8 @@ __all__ = [
     "RELAY_KIND_ENVELOPE",
     "RELAY_MAX_BODY_BYTES",
     "RELAY_MAX_ENVELOPE_BYTES",
+    "RELAY_STATUS_THROTTLED",
+    "RELAY_STATUS_TOO_LARGE",
     "GfsRelayTransport",
     "is_relay_envelope_body",
     "seal_relay_envelope",

@@ -51,11 +51,15 @@ async def request_capability_resync_if_upgraded(
         return 0
 
     sent = 0
-    # Social peers only: a household seated from an invite link
-    # (``source = space_session``) shares a space with us, not a
-    # protocol relationship to renegotiate. Its capabilities travel on
-    # the startup ``INSTANCE_CAPABILITIES_UPDATED`` fan-out; asking it
-    # to re-advertise buys nothing and spends a relay envelope.
+    # Social peers only — and here that is genuinely enough. This asks a
+    # peer to re-advertise ITS capabilities to us; a household seated
+    # from an invite link (``source = space_session``) is reachable only
+    # through the connection-server relay, so the request and its answer
+    # would cost two relay envelopes to learn something we get for free:
+    # our own startup ``INSTANCE_CAPABILITIES_UPDATED`` fan-out DOES
+    # include space-session peers (see
+    # ``CapabilitiesOutbound.confirmed_peers``), and their announcement
+    # to us rides their fan-out in the same way.
     peers = await federation_repo.list_social_instances()
     for peer in peers:
         if not await federation.peer_supports(

@@ -466,8 +466,16 @@ class GfsWebSocketClient:
             return
         if frame_type == "envelope":
             if self._on_envelope is None:
-                log.debug(
-                    "gfs.ws.client: dropping envelope — no handler attached on %s",
+                # WARNING, not DEBUG: the relay DELETED its queue row to
+                # hand us this frame, so dropping it here loses the
+                # envelope for good — an invite redeem that never
+                # completes, or a space event that silently never
+                # arrives. A missing handler is a wiring bug on this
+                # household, and it has to be visible in an ordinary log.
+                log.warning(
+                    "gfs.ws.client: dropping a relayed envelope from %s — no "
+                    "handler is attached, so this frame is lost (the "
+                    "connection server has already dequeued it)",
                     self._gfs_url,
                 )
                 return

@@ -12,6 +12,14 @@
 import { signal } from '@preact/signals'
 import { ws } from '@/ws'
 
+/** Active federation transport for a peer.
+ *
+ *  ``gfs_relay`` marks a household that is only reachable through the
+ *  connection server relay (e.g. a peer seated from an invite link) — it
+ *  has no direct HTTPS inbox of ours to post to, so labelling it
+ *  ``https`` would be a lie. */
+export type TransportState = 'rtc' | 'https' | 'gfs_relay' | null
+
 export interface Connection {
   instance_id:   string
   /** The displayed name — local alias when set, else the peer's
@@ -45,7 +53,7 @@ export interface Connection {
    *  the UI never renders dropped messages as still-in-flight. Absent on
    *  older API responses. */
   dropped_envelopes?: number
-  transport?: 'rtc' | 'https' | null
+  transport?: TransportState
   /** Monotonic federation protocol version the peer last advertised via
    *  INSTANCE_CAPABILITIES_UPDATED. Defaults to 1 server-side when the peer
    *  has never announced capabilities. */

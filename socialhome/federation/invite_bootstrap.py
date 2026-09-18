@@ -58,7 +58,13 @@ seal.
 
 Outer (what the relay sees)::
 
-    {"to_instance": "<32 hex>", "sealed": {kem_suite, eph_pk, ciphertext}}
+    {"to_instance": "<32 lowercase base32 chars>",
+     "sealed": {kem_suite, eph_pk, ciphertext}}
+
+An instance id is what :func:`socialhome.crypto.derive_instance_id`
+produces: unpadded lowercase base32 of the first 20 bytes of the
+SHA-256 of the household's Ed25519 identity key — 32 characters from
+``[a-z2-7]``, not hex.
 
 Inner (the sealed plaintext — JSON, Ed25519-signed over its canonical
 bytes by the sender's *identity* key, TOFU-verified by the receiver)::
@@ -105,6 +111,7 @@ from ..crypto import (
     x25519_exchange,
 )
 from ..domain.federation import FederationEventType
+from ..domain.space import SpacePermissionError
 from ..utils.datetime import parse_iso8601_strict
 from .keywrap_seal import (
     UnsupportedKemSuite,
@@ -162,6 +169,33 @@ _KNOWN_KINDS: frozenset[str] = frozenset(
 #: with a pairing session key or a key-wrap key.
 _SESSION_INFO_REDEEMER_TO_ISSUER: bytes = b"socialhome/space_session/redeemer-to-issuer"
 _SESSION_INFO_ISSUER_TO_REDEEMER: bytes = b"socialhome/space_session/issuer-to-redeemer"
+
+
+#: How long a household waits out a relay's ``429`` before retrying the
+#: same envelope. The relay's window is a minute wide
+#: (:data:`~socialhome.global_server.envelope_relay.ENVELOPE_MAX_PER_MINUTE`)
+#: and it is a *sliding* window, so capacity returns continuously rather
+#: than at a tick — a few seconds is enough to get back under the line,
+#: and short enough that a sync stream waiting one out is not mistaken for
+#: a hung one.
+RELAY_THROTTLE_COOLDOWN_S: float = 5.0
+
+
+class EnvelopeRelayThrottled(SpacePermissionError):
+    """The connection server answered ``429`` — come back shortly.
+
+    The one *temporary* refusal a :class:`RelayEnvelopeSender` raises
+    rather than reporting as a plain ``False``. A throttle says nothing
+    about the recipient: the relay is up, the blob is well-formed, and
+    the same send will work in a few seconds. Callers that can wait
+    (:class:`~socialhome.federation.gfs_relay_transport.GfsRelayTransport`
+    and, above it, the space-sync provider) treat it as a cooldown and
+    retry the same frame; callers that cannot surface it to the user,
+    which is why it subclasses
+    :class:`~socialhome.domain.space.SpacePermissionError` and reaches
+    ``POST /api/spaces/join`` as a 422 with a sentence worth reading
+    instead of an opaque "could not deliver".
+    """
 
 
 class RelayEnvelopeSender(Protocol):
@@ -530,7 +564,9 @@ __all__ = [
     "KIND_REDEEM",
     "KIND_REDEEM_ACK",
     "KIND_REDEEM_DENY",
+    "EnvelopeRelayThrottled",
     "InviteBootstrapHint",
+    "RELAY_THROTTLE_COOLDOWN_S",
     "RelayEnvelopeSender",
     "canonical_signing_bytes",
     "sign_bootstrap_body",

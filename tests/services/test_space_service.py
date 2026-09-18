@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -6446,3 +6447,70 @@ async def test_an_explicit_none_ttl_never_expires(stack):
         ttl_seconds=0,
     )
     assert bounded["expires_at"] is not None
+
+
+# ─── Published invite blobs: the household cap must clear the server's ───
+
+
+def test_the_published_ttl_cap_clears_the_connection_server_boundary():
+    """The two caps used to be the SAME number, which put every
+    never-expiring published link exactly ON the server's reject
+    boundary: the household computes ``now + 30d`` from ITS clock and
+    the server checks ``expires_at - its_now > 30d``, so a connection
+    server running one second behind 422'd a link the household
+    considered perfectly legal — and an owner picking "Never" was told
+    "30 days" was too long. A margin, not a coincidence, keeps them apart.
+    """
+    from socialhome.global_server.invites import (
+        INVITE_MAX_TTL_SECONDS,
+        validate_expires_at,
+    )
+    from socialhome.services.space_service import (
+        PUBLISHED_INVITE_MAX_TTL_SECONDS,
+        PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS,
+        _invite_expiry_epoch,
+    )
+
+    assert PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS == 300
+    assert (
+        PUBLISHED_INVITE_MAX_TTL_SECONDS
+        == INVITE_MAX_TTL_SECONDS - PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS
+    )
+
+    # "Never expires" locally → the capped published expiry.
+    epoch = _invite_expiry_epoch(None)
+
+    # A connection server whose clock trails ours by the whole margin
+    # still accepts it — and so does one that is perfectly in sync.
+    for behind in (0, PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS):
+        server_now = int(time.time()) - behind
+        assert validate_expires_at(epoch, now=server_now) == epoch
+
+
+async def test_a_banned_local_redeemer_burns_no_uses(stack):
+    """The local redeem consumed first and checked the ban after, with no
+    refund — so a banned household member could exhaust a twenty-use
+    link in twenty clicks, and the differential answer told them their
+    own ban status one attempt at a time. The cross-household path
+    already folds §13.7 into the atomic UPDATE; this is the same fold on
+    the local one, and the SPA still gets ``banned=True`` rather than a
+    generic "invalid token"."""
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Banned")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        uses=5,
+    )
+    await stack.space_repo.ban_member(space.id, dave.user_id, "anna")
+
+    for _ in range(3):
+        with pytest.raises(SpacePermissionError) as exc:
+            await stack.space_svc.accept_invite_token(
+                link["token"], user_id=dave.user_id
+            )
+        assert exc.value.banned is True
+
+    live = await stack.space_repo.get_live_invite_token(link["token"])
+    assert live is not None and live["uses_remaining"] == 5
