@@ -2209,9 +2209,13 @@ async def test_invite_token_explicit_null_ttl_never_expires(client):
     assert await _token_expiry(client, (await resp.json())["token"]) is None
 
 
-@pytest.mark.parametrize("bad", [0, -1, "soon", [5]])
+@pytest.mark.parametrize("bad", [-1, "soon", [5]])
 async def test_invite_token_rejects_bad_ttl(client, bad):
-    """A non-positive or non-integer ``ttl_seconds`` is a 422."""
+    """A negative or non-integer ``ttl_seconds`` is a 422.
+
+    ``0`` is deliberately absent: the SPA's expiry picker sends it for
+    "Never", so the route maps it onto the service's ``None`` — see
+    :func:`test_ttl_seconds_zero_means_never_expires`."""
     sid = await _invite_space(client)
     resp = await client.post(
         f"/api/spaces/{sid}/invite-tokens",
@@ -2382,3 +2386,216 @@ async def test_join_relay_unavailable_maps_to_422(client, monkeypatch):
     body = await resp.json()
     assert body["error"]["code"] == "REDEEM_DENIED"
     assert "can't relay invites yet" in body["error"]["detail"]
+
+
+# ── Invite links: role, list, revoke ──────────────────────────────────
+
+
+async def _a_space(client, name: str) -> str:
+    r = await client.post(
+        "/api/spaces",
+        json={"name": name},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def test_mint_invite_link_returns_the_full_shape(client):
+    """201 carries everything the SPA renders: the seat, the counters,
+    and the ``socialhome://invite#…`` code."""
+    import base64
+    import json
+
+    sid = await _a_space(client, "LinkShape")
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "subscriber", "uses": 3},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    body = await resp.json()
+    assert body["role"] == "subscriber"
+    assert body["uses_remaining"] == 3
+    assert body["gfs"] is None
+    assert body["created_by"] and body["created_at"] and body["expires_at"]
+    blob = body["code"].split("#", 1)[1]
+    decoded = json.loads(base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
+    assert decoded["token"] == body["token"]
+    # The bootstrap block carries this household's REAL published
+    # identity triple — the same one /gfs/info serves — so a stranger
+    # can seal a redeem to us off a pasted code.
+    db = client.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key, keywrap_public_key, keywrap_sig "
+        "FROM instance_identity WHERE id='self'"
+    )
+    assert decoded["issuer_identity_pk"] == row["identity_public_key"]
+    assert decoded["issuer_keywrap_pk"] == row["keywrap_public_key"]
+    assert decoded["issuer_keywrap_sig"] == row["keywrap_sig"]
+
+
+async def test_mint_invite_link_defaults_to_member(client):
+    sid = await _a_space(client, "LinkDefault")
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    assert (await resp.json())["role"] == "member"
+
+
+async def test_mint_invite_link_rejects_owner_and_unknown_roles(client):
+    sid = await _a_space(client, "LinkBadRole")
+    for bad in ("owner", "superuser"):
+        resp = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"role": bad},
+            headers=_auth(client._admin_token),
+        )
+        assert resp.status == 422, bad
+
+
+async def test_list_invite_links_is_admin_only(client):
+    sid = await _a_space(client, "LinkList")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    assert listed.status == 200
+    assert [t["token"] for t in (await listed.json())["tokens"]] == [token]
+    # A plain member cannot read the space's bearer credentials.
+    denied = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._bob_token),
+    )
+    assert denied.status == 403
+
+
+async def test_revoke_invite_link_is_204_and_idempotent(client):
+    sid = await _a_space(client, "LinkRevoke")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    first = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    assert first.status == 204
+    second = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    assert second.status == 204
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    assert (await listed.json())["tokens"] == []
+
+
+async def test_a_revoked_link_no_longer_joins(client):
+    sid = await _a_space(client, "LinkDead")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    joined = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert joined.status == 404
+
+
+async def test_revoke_invite_link_is_admin_only(client):
+    sid = await _a_space(client, "LinkRevokeAuth")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    denied = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._bob_token),
+    )
+    assert denied.status == 403
+
+
+async def test_mint_invite_link_rejects_an_unknown_connection_server(client):
+    sid = await _a_space(client, "LinkNoGfs")
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"publish_to_gfs": "gfs-nope"},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    assert (await listed.json())["tokens"] == []
+
+
+async def test_mint_invite_link_reports_the_minted_total(client):
+    """ "3 of 10 left" needs the total: ``uses_remaining`` is decremented
+    in place, so it cannot be derived after the first redeem."""
+    sid = await _a_space(client, "LinkCounts")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 10},
+        headers=_auth(client._admin_token),
+    )
+    body = await r.json()
+    assert body["uses"] == 10
+    assert body["uses_remaining"] == 10
+    token = body["token"]
+    joined = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert joined.status == 200
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    row = (await listed.json())["tokens"][0]
+    assert row["uses"] == 10
+    assert row["uses_remaining"] == 9
+
+
+async def test_ttl_seconds_zero_means_never_expires(client):
+    """The SPA sends ``0`` for "Never"; omitting the field takes the
+    server default instead."""
+    sid = await _a_space(client, "LinkTtl")
+    never = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"ttl_seconds": 0},
+        headers=_auth(client._admin_token),
+    )
+    assert (await never.json())["expires_at"] is None
+    default = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert (await default.json())["expires_at"] is not None

@@ -84,6 +84,10 @@ async def stack(tmp_dir):
     # ``accept_remote_invite`` kicks a mesh catch-up sync via this helper
     # (no-op for a confirmed host); stub it so the ``await`` resolves.
     fed_svc.begin_mesh_catchup_sync = AsyncMock()
+    # Real bytes, not a MagicMock attribute: an invite code embeds this
+    # household's Ed25519 identity pubkey (the §D2b bootstrap block), and
+    # a mock would only prove the mock is JSON-hostile.
+    fed_svc.own_identity_pk = kp.public_key
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(
         return_value=RemoteInstance(

@@ -700,6 +700,98 @@ a stranger can. Callers that mint their own short-lived tokens
 (`invite_remote_user`, remote join-request approval: 5 minutes) pass an
 explicit `expires_at` and are unchanged.
 
+### The role a link grants
+
+A link carries the seat the redeemer lands in — `member`, `subscriber` or
+`admin` — stored on the `space_invite_tokens` row (migration 0053) and
+read back out of the atomic `consume_invite_token`. **The issuer's row
+decides.** The redeem request never names a role: the token is a bearer
+credential the redeemer holds and replays, so a role encoded in the token
+string, or asked for in the request, would be attacker-controlled input.
+Every redeem path reads the same column — the local `accept_invite_token`,
+the §D2 `_consume_seat_and_build_ack` (whose ACK carries `role`), and the
+§D2b bootstrap redeem, which shares that helper.
+
+Who may mint what:
+
+| Actor | `member` | `subscriber` | `admin` | `owner` |
+|---|---|---|---|---|
+| Owner | yes | yes | yes | never |
+| Admin | yes | yes | **no** (403) | never |
+| Member / subscriber | no | no | no | never |
+
+An admin minting an `admin` link would be self-service promotion by
+proxy, so that case re-checks with `_require_owner`. `owner` is never
+mintable at all (422) — ownership moves only through
+`transfer_ownership`.
+
+A `subscriber` link works regardless of any "strangers may subscribe"
+space setting: that setting governs people who walked up on their own,
+while an explicit invite is the owner deciding otherwise for one named
+link.
+
+An `admin` seat triggers exactly what a promotion triggers. For a remote
+redeemer on a `delegated_admin_authority`-ON space the issuer ships the
+space's Ed25519 signing seed to the new admin's household
+(`SpaceService.share_admin_seed_with_remote_admin` → the same
+`_share_admin_signing_seed` `set_remote_member_role` uses), fail-soft: a
+share that fails never un-seats the admin. A LOCAL admin seat needs no
+share — the seed already lives on this household.
+
+**Cross-household `subscriber` links fail closed.** `space_remote_members`
+admits `member` and `admin` only (migration 0009: a subscriber has no row
+there at all), so the §D2 / §D2b redeem of a subscriber link is DENIED
+with a reason rather than silently seating a reader as a writer. A
+subscriber link is redeemable on the issuing household today; a
+cross-household subscriber seat needs a shape of its own.
+
+### Listing and revoking links
+
+| Endpoint | Who | Notes |
+|---|---|---|
+| `GET /api/spaces/{id}/invite-tokens` | admin or owner | Live links only — expired and exhausted rows are excluded because they grant nothing. |
+| `DELETE /api/spaces/{id}/invite-tokens/{token}` | admin or owner | `204`, idempotent. Any admin may revoke any of the space's links: a link belongs to the space, not to its minter. |
+
+Revoke is total: the local row goes AND the blob comes down on the
+connection server the link was published to (the `gfs_id` / `gfs_token` /
+`gfs_url` triple on the row). The server leg is fail-soft — the local row
+is what actually decides a redeem, so a server that is down still leaves
+the link dead, with one WARNING naming it so an operator can retry.
+
+**Revoke never un-seats people who already joined.** Taking the door away
+is not the same decision as evicting the people who walked through it;
+that is member removal, with its own path and its own audit trail.
+
+### Publishing a link to a connection server
+
+`POST /api/spaces/{id}/invite-tokens` with `publish_to_gfs: <gfs_id>`
+parks the link's blob on that one paired server's bulletin board and
+returns its shareable `url`. One token, one server: the blob names the
+relay that serves it (`via_gfs`), so a copy on a second server would be a
+different blob and therefore a different token.
+
+The response's `gfs` block carries both URLs — `url`, the shareable
+/join page a person opens, and `gfs_url`, the server's base URL that the
+blob's `via_gfs` names — so a client never has to parse one out of the
+other.
+
+The mint is **publish-first**: the token string is minted, sealed into
+the blob, published, and only then persisted. A publish failure (an
+unpaired server, or one whose signed `/gfs/info` block lacks
+`invite_links`) leaves **no local row** — the owner is told the link does
+not exist rather than being shown one in the list that resolves to
+nothing. The inverse ordering's failure mode (a blob on a server with no
+local row) is inert anyway: the redeem denies on an unknown token and the
+server sweeps the blob at expiry.
+
+The blob and the `code` in the response come from **one builder**
+(`socialhome/federation/invite_code.py`), so the paste path and the
+browser /join path can never drift apart. Its fields are listed in that
+module and mirrored by `client/src/lib/spaceInviteCode.ts`; the §D2b
+bootstrap block rides on every code, published or not, so a code copied
+out of the SPA redeems through the relay just like one lifted off a
+/join page.
+
 ## Flow — private invite (paired peers)
 
 ```mermaid

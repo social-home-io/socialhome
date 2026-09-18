@@ -2333,6 +2333,13 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
         real_space_service.attach_gfs_space_mirror(gfs_space_mirror)
+        # Invite codes carry this household's published key-wrap triple
+        # (the §D2b bootstrap block) so a stranger can seal a redeem to
+        # us. Same key /gfs/info serves — never a fresh one.
+        real_space_service.attach_invite_identity(
+            keywrap_public_key=identity.keywrap_public_key,
+            keywrap_sig=identity.keywrap_sig,
+        )
         # ``attach_federation`` is deferred until just after
         # ``_wire_federation_stack`` returns the live ``federation_service``
         # (see below). Calling it here would bind ``_federation`` to the
@@ -2572,6 +2579,12 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         invite_redeem_coordinator.attach_to(federation_service)
         real_space_service.attach_redeem_coordinator(invite_redeem_coordinator)
+        # An invite link that grants ADMIN seats a remote admin, which is
+        # a promotion — so it gets the delegated-admin signing-seed share
+        # a promotion gets (owner-only, opt-in, capability-gated inside).
+        invite_redeem_coordinator.attach_admin_seed_sharer(
+            real_space_service.share_admin_seed_with_remote_admin,
+        )
         # §D2b — redeeming an invite link from a household we have never
         # met. The sealed blob goes out through a connection server
         # addressed by instance id only; the key-wrap triple is this

@@ -185,6 +185,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_key_manager",
         "_bootstrap_hints",
         "_rate_limiter",
+        "_admin_seed_sharer",
     )
 
     def __init__(
@@ -249,6 +250,23 @@ class SpaceInviteTokenRedeemCoordinator:
         #: blob advertised rather than trusting whatever comes back.
         self._bootstrap_hints: dict[str, InviteBootstrapHint] = {}
         self._rate_limiter: "RateLimiter | None" = None
+        #: Optional — ``SpaceService.share_admin_seed_with_remote_admin``.
+        #: Wired so seating a remote ADMIN off an invite link triggers the
+        #: same delegated-admin signing-seed share a promotion does.
+        #: Absent → the seat still happens, the admin just can't act with
+        #: the owner offline until a later share.
+        self._admin_seed_sharer: Any | None = None
+
+    def attach_admin_seed_sharer(self, sharer: Any) -> None:
+        """Wire the delegated-admin signing-seed share for admin seats.
+
+        ``sharer`` is an ``async (space_id, *, instance_id) -> None``
+        seam — in production ``SpaceService`` — which re-checks the
+        owner-only / opt-in / capability gates itself. Kept as a callable
+        rather than a service reference so the coordinator does not grow
+        a dependency on the whole space service.
+        """
+        self._admin_seed_sharer = sharer
 
     def attach_bootstrap(
         self,
@@ -784,6 +802,34 @@ class SpaceInviteTokenRedeemCoordinator:
             log.warning("invite redeem: consumed token row carried no space_id")
             return None, REDEEM_DENY_REASON
 
+        # The seat the ISSUER decided at mint time (migration 0053). The
+        # redeemer never gets to ask for a role, so this is read here and
+        # nowhere else.
+        seat = str(row.get("role") or SpaceRole.MEMBER.value)
+        if seat == SpaceRole.SUBSCRIBER.value:
+            # ``space_remote_members.role`` admits member|admin only
+            # (migration 0009: a subscriber has no row there at all).
+            # Seating a subscriber as a member would hand a cross-
+            # household reader write authority nobody granted, so this
+            # fails closed until subscriptions grow a cross-household
+            # shape of their own.
+            #
+            # This is the one denial that does NOT collapse to
+            # :data:`REDEEM_DENY_REASON`: it is reached only after the
+            # token already consumed successfully, so the caller has
+            # proved it holds a live link and learns nothing it did not
+            # already know — while a bare "denied" would leave the SPA
+            # unable to say why a link it legitimately holds refuses.
+            return None, (
+                "a subscriber invite link can only be redeemed on the "
+                "household that issued it"
+            )
+
+        # §13.7 needs no separate check here: the ban is folded into the
+        # same atomic UPDATE as the consume above (``redeemer_user_id``),
+        # so a banned redeemer never reaches this point and never moves
+        # the counter.
+
         # Seat the remote redeemer + register their instance so the
         # issuer's outbound fan-outs reach them.
         try:
@@ -794,6 +840,13 @@ class SpaceInviteTokenRedeemCoordinator:
                 user_pk=redeemer_pk,
                 display_name=redeemer_display,
             )
+            if seat != SpaceRole.MEMBER.value:
+                await self._remote_members.set_role(
+                    space_id,
+                    redeemer_instance_id,
+                    redeemer_user_id,
+                    seat,
+                )
             await self._spaces.add_space_instance(
                 space_id,
                 redeemer_instance_id,
@@ -808,6 +861,26 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return None, REDEEM_DENY_REASON
 
+        # An ADMIN seat gets exactly what a promotion gets: when the
+        # owner opted into delegated-admin authority, the space's signing
+        # seed goes to the new admin's household so it can act with the
+        # owner offline. Reuses the seam the role-change path uses —
+        # fail-soft, because a missed share must not un-seat an admin who
+        # legitimately redeemed (a later re-share fixes it).
+        if seat == SpaceRole.ADMIN.value and self._admin_seed_sharer is not None:
+            try:
+                await self._admin_seed_sharer(
+                    space_id,
+                    instance_id=redeemer_instance_id,
+                )
+            except Exception:
+                log.exception(
+                    "invite redeem: admin signing-seed share failed for "
+                    "space_id=%s instance=%s",
+                    space_id,
+                    redeemer_instance_id,
+                )
+
         # Pull the full space row so we can ship metadata + the member
         # roster back to the receiver. Without the meta the receiver's
         # stub card is blank; without the roster the receiver's Members
@@ -815,7 +888,7 @@ class SpaceInviteTokenRedeemCoordinator:
         space = await self._spaces.get(space_id)
         ack_body: dict = {
             "space_id": space_id,
-            "role": SpaceRole.MEMBER.value,
+            "role": seat,
         }
         if space is not None:
             ack_body["space_meta"] = await build_space_snapshot_for_federation(

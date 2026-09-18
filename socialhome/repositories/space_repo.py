@@ -38,6 +38,7 @@ from ..domain.space import (
     SpaceFeatures,
     SpaceMember,
     SpaceModerationItem,
+    SpaceRole,
     SpaceType,
 )
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
@@ -163,6 +164,11 @@ class AbstractSpaceRepo(Protocol):
         *,
         uses: int = 1,
         expires_at: str | None = None,
+        token: str | None = None,
+        role: str = SpaceRole.MEMBER.value,
+        gfs_id: str | None = None,
+        gfs_token: str | None = None,
+        gfs_url: str | None = None,
     ) -> str: ...
     async def consume_invite_token(
         self,
@@ -170,6 +176,8 @@ class AbstractSpaceRepo(Protocol):
         *,
         redeemer_user_id: str | None = None,
     ) -> dict | None: ...
+    async def list_live_invite_tokens(self, space_id: str) -> list[dict]: ...
+    async def delete_invite_token(self, space_id: str, token: str) -> dict | None: ...
 
     # ── Invitations ────────────────────────────────────────────────────
     async def save_invitation(
@@ -1193,8 +1201,13 @@ class SqliteSpaceRepo:
         *,
         uses: int = 1,
         expires_at: str | None = None,
+        token: str | None = None,
+        role: str = SpaceRole.MEMBER.value,
+        gfs_id: str | None = None,
+        gfs_token: str | None = None,
+        gfs_url: str | None = None,
     ) -> str:
-        """Mint an invite token.
+        """Mint one invite token and return it.
 
         ``expires_at`` is an optional UTC timestamp; ``None`` means the
         token never expires and only ``uses`` limits it. Every current
@@ -1203,15 +1216,40 @@ class SqliteSpaceRepo:
         :meth:`consume_invite_token` normalises with SQLite's
         ``datetime()`` so the naive ``"YYYY-MM-DD HH:MM:SS"`` shape is
         accepted too.
+
+        ``role`` is the seat the redeemer lands in (``member`` /
+        ``subscriber`` / ``admin``); the CHECK in migration 0053 is the
+        on-disk authority and ``owner`` is not in it. ``token`` lets the
+        caller supply the value it already put inside a published invite
+        blob — the GFS publish has to happen before the row exists (see
+        ``SpaceService.create_invite_link``), so the token string is
+        minted there and handed down rather than generated here.
+        ``gfs_*`` record the one connection server the blob was parked
+        on, so a later revoke can take it down.
         """
-        token = uuid.uuid4().hex
+        token = token or uuid.uuid4().hex
         await self._db.enqueue(
             """
             INSERT INTO space_invite_tokens(
-                token, space_id, created_by, uses_remaining, expires_at
-            ) VALUES(?, ?, ?, ?, ?)
+                token, space_id, created_by, uses_remaining, expires_at,
+                role, gfs_id, gfs_token, gfs_url, uses_total
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, space_id, created_by, uses, expires_at),
+            (
+                token,
+                space_id,
+                created_by,
+                uses,
+                expires_at,
+                role,
+                gfs_id,
+                gfs_token,
+                gfs_url,
+                # The minted total, kept because ``uses_remaining`` is
+                # decremented in place and the admin list wants
+                # "3 of 10 left".
+                uses,
+            ),
         )
         return token
 
@@ -1274,7 +1312,7 @@ class SqliteSpaceRepo:
                 return None
             row = conn.execute(
                 """
-                SELECT space_id, created_by, uses_remaining, expires_at
+                SELECT space_id, created_by, uses_remaining, expires_at, role
                   FROM space_invite_tokens WHERE token=?
                 """,
                 (token,),
@@ -1286,6 +1324,80 @@ class SqliteSpaceRepo:
                 "created_by": row[1],
                 "uses_remaining": row[2],
                 "expires_at": row[3],
+                # The seat the issuer decided on at mint time. Every
+                # redeem path (local accept, §D2 ACK, §D2b bootstrap)
+                # reads it from here — never from the redeem request.
+                "role": row[4] or SpaceRole.MEMBER.value,
+            }
+
+        return await self._db.transact(_run)
+
+    async def list_live_invite_tokens(self, space_id: str) -> list[dict]:
+        """Every still-redeemable invite token of ``space_id``, newest first.
+
+        Expired and exhausted tokens are excluded: they are not links any
+        more, and listing them would invite an owner to "revoke" rows that
+        already grant nothing. The expiry comparison wraps both sides in
+        ``datetime()`` for the same reason
+        :meth:`consume_invite_token` does — the two stored shapes
+        (``…T…+00:00`` and ``… …``) do not compare lexically.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT token, space_id, created_by, uses_remaining, created_at,
+                   expires_at, role, gfs_id, gfs_token, gfs_url, uses_total
+              FROM space_invite_tokens
+             WHERE space_id=?
+               AND uses_remaining > 0
+               AND (
+                    expires_at IS NULL
+                    OR datetime(expires_at) > datetime('now')
+               )
+             ORDER BY created_at DESC, token DESC
+            """,
+            (space_id,),
+        )
+        return rows_to_dicts(rows)
+
+    async def delete_invite_token(self, space_id: str, token: str) -> dict | None:
+        """Delete one invite token and return the row it deleted.
+
+        Scoped to ``space_id`` so an admin of one space can never revoke
+        another space's link by guessing a token. Returns ``None`` when
+        there was nothing to delete — that is what makes revoke
+        idempotent. The row comes back so the caller can take the blob
+        down on the connection server named in its ``gfs_*`` columns.
+        """
+
+        def _run(conn):
+            row = conn.execute(
+                """
+                SELECT token, space_id, created_by, uses_remaining, created_at,
+                       expires_at, role, gfs_id, gfs_token, gfs_url,
+                       uses_total
+                  FROM space_invite_tokens
+                 WHERE space_id=? AND token=?
+                """,
+                (space_id, token),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "DELETE FROM space_invite_tokens WHERE space_id=? AND token=?",
+                (space_id, token),
+            )
+            return {
+                "token": row[0],
+                "space_id": row[1],
+                "created_by": row[2],
+                "uses_remaining": row[3],
+                "created_at": row[4],
+                "expires_at": row[5],
+                "role": row[6] or SpaceRole.MEMBER.value,
+                "gfs_id": row[7],
+                "gfs_token": row[8],
+                "gfs_url": row[9],
+                "uses_total": row[10],
             }
 
         return await self._db.transact(_run)

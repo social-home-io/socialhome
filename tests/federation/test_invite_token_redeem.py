@@ -149,6 +149,8 @@ class _FakeSpaceRepo:
             "created_by": row["created_by"],
             "uses_remaining": row["uses_remaining"],
             "expires_at": row.get("expires_at"),
+            # Migration 0053 — the seat the issuer minted the link for.
+            "role": row.get("role", SpaceRole.MEMBER.value),
         }
 
     async def add_space_instance(self, space_id, instance_id):
@@ -175,9 +177,13 @@ class _FakeRemoteMemberRepo:
     def __init__(self):
         self.added: list[dict] = []
         self.removed: list[tuple[str, str, str]] = []
+        self.roles: list[tuple[str, str, str, str]] = []
 
     async def add(self, **kwargs):
         self.added.append(kwargs)
+
+    async def set_role(self, space_id, instance_id, user_id, role):
+        self.roles.append((space_id, instance_id, user_id, role))
 
     async def remove(self, space_id, instance_id, user_id):
         self.removed.append((space_id, instance_id, user_id))
@@ -1377,7 +1383,14 @@ def _hint_for(
     )
 
 
-def _bootstrap_pair(*, min_age=0, banned=False, token_uses=1, expired=False):
+def _bootstrap_pair(
+    *,
+    min_age=0,
+    banned=False,
+    token_uses=1,
+    expired=False,
+    role=SpaceRole.MEMBER.value,
+):
     """Wire a redeemer + an issuer coordinator over a fake relay."""
     relay = _RelayBus()
     redeemer_party = _Party("Redeemer household")
@@ -1395,6 +1408,7 @@ def _bootstrap_pair(*, min_age=0, banned=False, token_uses=1, expired=False):
         "created_by": "u-owner",
         "uses_remaining": token_uses,
         "expired": expired,
+        "role": role,
     }
     i_spaces.space_rows_for_get["space-1"] = _a_space(
         "space-1",
@@ -1409,11 +1423,12 @@ def _bootstrap_pair(*, min_age=0, banned=False, token_uses=1, expired=False):
         federation_repo=r_repo,
         space_repo=r_spaces,
     )
+    i_members = _FakeRemoteMemberRepo()
     issuer = _make_coordinator(
         federation=i_fed,
         federation_repo=i_repo,
         space_repo=i_spaces,
-        remote_members=_FakeRemoteMemberRepo(),
+        remote_members=i_members,
     )
     for coord, party in ((redeemer, redeemer_party), (issuer, issuer_party)):
         coord.attach_bootstrap(
@@ -1435,6 +1450,7 @@ def _bootstrap_pair(*, min_age=0, banned=False, token_uses=1, expired=False):
         issuer_repo=i_repo,
         redeemer_spaces=r_spaces,
         issuer_spaces=i_spaces,
+        issuer_members=i_members,
         hint=_hint_for(issuer_party),
     )
 
@@ -1842,3 +1858,147 @@ async def test_bootstrap_both_legs_travel_through_the_blob_s_server():
         bootstrap=hint,
     )
     assert env.relay.gfs_urls == ["https://relay-b.example"] * 2
+
+
+# ── Invite-link roles (migration 0053) ────────────────────────────────
+
+
+async def test_redeem_of_an_admin_link_seats_an_admin():
+    """The seat comes off the ISSUER's stored row. An ``admin`` link
+    lands the redeemer's household as an admin of the space — on the
+    issuer's roster and in the ACK the receiver mirrors."""
+    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-admin",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.ADMIN.value,
+        },
+    )
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.ADMIN.value
+    assert issuer_members.roles == [
+        ("sp-admin", "sender-1", "u-local", SpaceRole.ADMIN.value)
+    ]
+
+
+async def test_admin_seat_shares_the_delegated_admin_signing_seed():
+    """An admin seated by link gets what an admin seated by promotion
+    gets — the same seam ``set_remote_member_role`` uses, so the new
+    admin can act with the owner offline."""
+    sender, issuer, _sf, _if, _repo, _members = _wire_pair(
+        {
+            "space_id": "sp-seed",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.ADMIN.value,
+        },
+    )
+    shared: list[tuple[str, str]] = []
+
+    async def _share(space_id, *, instance_id):
+        shared.append((space_id, instance_id))
+
+    issuer.attach_admin_seed_sharer(_share)
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert shared == [("sp-seed", "sender-1")]
+
+
+async def test_member_seat_shares_no_signing_seed():
+    """The seed is an ADMIN-only consequence — a plain member link must
+    never trigger it."""
+    sender, issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-plain", "created_by": "owner", "uses_remaining": 1},
+    )
+    shared: list = []
+
+    async def _share(space_id, *, instance_id):
+        shared.append((space_id, instance_id))
+
+    issuer.attach_admin_seed_sharer(_share)
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert shared == []
+
+
+async def test_a_failing_seed_share_still_seats_the_admin():
+    """Fail-soft: a share that raises must not un-seat an admin who
+    legitimately redeemed."""
+    sender, issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-seed-fail",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.ADMIN.value,
+        },
+    )
+
+    async def _boom(space_id, *, instance_id):
+        raise RuntimeError("peer unreachable")
+
+    issuer.attach_admin_seed_sharer(_boom)
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.ADMIN.value
+    assert issuer_members.added
+
+
+async def test_subscriber_link_is_refused_across_households():
+    """``space_remote_members.role`` admits member|admin only (migration
+    0009 — a subscriber has no row there at all). Rather than silently
+    upgrading a reader to a writer, the cross-household redeem of a
+    subscriber link fails closed with a reason the SPA can render."""
+    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    with pytest.raises(SpacePermissionError) as exc:
+        await sender.request_redeem(
+            "good-token",
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
+    assert "household that issued it" in str(exc.value)
+    assert issuer_members.added == []
+
+
+async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
+    """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so
+    the role reaches a household that has never federated with us too."""
+    env = _bootstrap_pair(role=SpaceRole.ADMIN.value)
+    shared: list = []
+
+    async def _share(space_id, *, instance_id):
+        shared.append((space_id, instance_id))
+
+    env.issuer.attach_admin_seed_sharer(_share)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["role"] == SpaceRole.ADMIN.value
+    assert env.issuer_members.roles == [
+        ("space-1", env.redeemer_party.instance_id, "u-local", SpaceRole.ADMIN.value)
+    ]
+    assert shared == [("space-1", env.redeemer_party.instance_id)]

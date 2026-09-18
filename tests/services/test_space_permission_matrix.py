@@ -72,6 +72,9 @@ GATED_METHODS: frozenset[str] = frozenset(
         "ban",
         "unban",
         "create_invite_token",
+        "create_invite_link",
+        "list_invite_links",
+        "revoke_invite_link",
         "invite_remote_user",
         "remove_remote_member",
         "approve_join_request",
@@ -127,6 +130,12 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # sender, so a peer cannot use it to tear down a live seat.
         "revoke_space_session_if_orphaned",
         "apply_space_session_cleanup",
+        # Issuer-side consequence of a redeem that already passed the
+        # §D2 / §D2b gates: the invite-redeem coordinator calls it after
+        # seating a remote ADMIN. Re-checks owner-host + the
+        # delegated-admin opt-in itself; there is no actor-username to
+        # thread through.
+        "share_admin_seed_with_remote_admin",
         # Federation inbound hook — the actor's role is validated inside
         # the method itself by looking up ``space_remote_members.role``;
         # there is no actor-username to thread through ``_require_admin``.
@@ -310,6 +319,20 @@ async def stack(tmp_dir):
         (
             "create_invite_token",
             lambda s: s.space_svc.create_invite_token(s.space.id, actor_username="bob"),
+        ),
+        (
+            "create_invite_link",
+            lambda s: s.space_svc.create_invite_link(s.space.id, actor_username="bob"),
+        ),
+        (
+            "list_invite_links",
+            lambda s: s.space_svc.list_invite_links(s.space.id, actor_username="bob"),
+        ),
+        (
+            "revoke_invite_link",
+            lambda s: s.space_svc.revoke_invite_link(
+                s.space.id, "tok-x", actor_username="bob"
+            ),
         ),
     ],
 )

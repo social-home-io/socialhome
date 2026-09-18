@@ -40,6 +40,7 @@ from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SpaceFeatures,
     SpacePermissionError,
+    SpaceRole,
     SpaceZone,
 )
 from ..domain.space_proposal import ProposalAction
@@ -49,6 +50,7 @@ from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
+from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_service import (
     DEFAULT_INVITE_TOKEN_TTL_SECONDS,
     _UNSET_MEMBER_PROFILE,
@@ -1152,12 +1154,38 @@ class SpaceBanView(BaseView):
 
 
 class SpaceInviteTokenView(BaseView):
-    """POST /api/spaces/{id}/invite-tokens — create an invite token.
+    """``POST /api/spaces/{id}/invite-tokens`` — mint an invite link.
+    ``GET`` — list the space's live links (admin or owner).
 
-    Body: ``{uses?: int, ttl_seconds?: int | null}``. ``ttl_seconds``
-    defaults to :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS`; an explicit
-    ``null`` mints a token that never expires (uses-limited only).
+    POST body: ``{role?, uses?, ttl_seconds?: int | null, publish_to_gfs?}``.
+    ``role`` is the seat the redeemer lands in (``member`` — the default
+    — / ``subscriber`` / ``admin``) and is the ISSUER's decision: it is
+    stored on the token row and the redeemer never gets to ask for it.
+    Minting ``admin`` is owner-only, ``owner`` is never mintable.
+    ``publish_to_gfs`` is a paired connection server's id — the link's
+    blob is parked there and the response carries the shareable URL.
+
+    ``ttl_seconds`` bounds the link's lifetime and defaults to
+    :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS` when omitted. **Both
+    ``null`` and ``0`` mean "never expires"** (uses-limited only): the
+    service's own contract is ``None``, and the SPA's expiry picker
+    sends the integer ``0`` for its "Never" option, so the two spellings
+    are normalised here at the boundary rather than leaving one of them
+    to 422 on a perfectly reasonable request. Anything else must be a
+    positive integer.
+
+    GET returns only still-redeemable links: an expired or exhausted one
+    grants nothing, so there is nothing to show or revoke.
     """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        links = await svc.list_invite_links(
+            self.match("id"),
+            actor_username=ctx.username,
+        )
+        return web.json_response({"tokens": links})
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -1175,17 +1203,54 @@ class SpaceInviteTokenView(BaseView):
                 return error_response(
                     422, "UNPROCESSABLE", "ttl_seconds must be an integer"
                 )
-            if ttl_seconds < 1:
+            if ttl_seconds < 0:
                 return error_response(
-                    422, "UNPROCESSABLE", "ttl_seconds must be positive"
+                    422, "UNPROCESSABLE", "ttl_seconds must not be negative"
                 )
-        token = await svc.create_invite_token(
-            space_id,
+            if ttl_seconds == 0:
+                # The SPA's "Never" option sends 0; the service spells
+                # the same thing ``None``. Normalised here so one
+                # boundary owns the two spellings.
+                ttl_seconds = None
+        publish_raw = body.get("publish_to_gfs")
+        try:
+            link = await svc.create_invite_link(
+                space_id,
+                actor_username=ctx.username,
+                role=str(body.get("role") or SpaceRole.MEMBER.value),
+                uses=body.get("uses", 1),
+                ttl_seconds=ttl_seconds,
+                publish_to_gfs=str(publish_raw) if publish_raw else None,
+            )
+        except GfsConnectionError as exc:
+            # Non-standard code + the server's own sentence: "this
+            # connection server can't host invite links yet" is
+            # actionable, the blanket 422 body is not. Nothing was
+            # persisted — the publish runs before the row is written.
+            return error_response(422, "GFS_PUBLISH_FAILED", str(exc))
+        return web.json_response(link, status=201)
+
+
+class SpaceInviteTokenItemView(BaseView):
+    """``DELETE /api/spaces/{id}/invite-tokens/{token}`` — revoke a link.
+
+    Admin or owner; any admin of the space may revoke any of its links,
+    including one another admin minted — a link belongs to the space, not
+    to its minter. Idempotent (an unknown token still 204s), and total:
+    the local row goes AND the blob comes down on the connection server
+    it was published to. Revoking never un-seats anyone who already
+    redeemed — that is member removal.
+    """
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        await svc.revoke_invite_link(
+            self.match("id"),
+            self.match("token"),
             actor_username=ctx.username,
-            uses=body.get("uses", 1),
-            ttl_seconds=ttl_seconds,
         )
-        return web.json_response({"token": token}, status=201)
+        return web.Response(status=204)
 
 
 class SpaceRemoteInviteView(BaseView):
