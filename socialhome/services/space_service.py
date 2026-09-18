@@ -162,6 +162,19 @@ MAX_PUBLIC_SPACES = 5
 #: this service; they are imported above and re-exported for the existing
 #: ``services.space_service`` call sites (e.g. ``routes/spaces.py``).
 
+#: Default lifetime of an invite token minted through the API when the
+#: caller does not pass ``ttl_seconds``. An invite token grants *membership*
+#: of a space, so a link that never expires is a standing back door —
+#: anyone who ever saw it (chat scrollback, a screenshot, a forwarded
+#: mail) can still join months later. Seven days matches the TTL the
+#: space invitation and join-request rows already use
+#: (``space_repo.save_invitation(ttl_days=7)``) and is long enough to pass
+#: a link along out of band. Callers wanting the historical behaviour pass
+#: ``ttl_seconds=None``. The 5-minute federation tokens minted by
+#: ``invite_remote_user`` / remote join approval go through the repo
+#: directly and keep their own, much shorter, expiry.
+DEFAULT_INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
+
 #: Post content caps — matches FeedService values.
 MAX_POST_LENGTH = 10_000
 MAX_COMMENT_LENGTH = 2_000
@@ -2506,12 +2519,25 @@ class SpaceService(SpaceMemberGuardMixin):
         *,
         actor_username: str,
         uses: int = 1,
-        expires_at: str | None = None,
+        ttl_seconds: int | None = DEFAULT_INVITE_TOKEN_TTL_SECONDS,
     ) -> str:
+        """Mint a shareable invite token for ``space_id``.
+
+        ``ttl_seconds`` is a lifetime rather than an absolute
+        ``expires_at`` on purpose: the expiry is anchored on *our* clock,
+        so a wrong client clock can't mint a token that outlives its
+        intent. ``None`` restores the historical never-expires behaviour.
+        """
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         actor = await self._users.get(actor_username)
         assert actor is not None
+        expires_at: str | None = None
+        if ttl_seconds is not None:
+            ttl = max(1, int(ttl_seconds))
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=ttl)
+            ).isoformat()
         return await self._spaces.create_invite_token(
             space_id,
             created_by=actor.user_id,

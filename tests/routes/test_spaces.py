@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -1899,3 +1901,100 @@ async def test_subscribe_maps_gfs_outage_to_502(client):
     )
     assert r.status == 502, await r.text()
     assert (await r.json())["error"]["code"] == "GFS_UNAVAILABLE"
+
+
+# ── Invite-token TTL ───────────────────────────────────────────────────────
+
+
+async def _invite_space(client) -> str:
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "TtlSpace"},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def _token_expiry(client, token: str) -> str | None:
+    row = await client.app[_db_key].fetchone(
+        "SELECT expires_at FROM space_invite_tokens WHERE token=?", (token,)
+    )
+    return row["expires_at"]
+
+
+async def test_invite_token_gets_default_ttl(client):
+    """An invite token minted with no ``ttl_seconds`` expires by default."""
+    sid = await _invite_space(client)
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    raw = await _token_expiry(client, (await resp.json())["token"])
+    assert raw is not None
+    delta = datetime.fromisoformat(raw) - datetime.now(timezone.utc)
+    assert timedelta(days=6) < delta <= timedelta(days=7)
+
+
+async def test_invite_token_honours_ttl_seconds(client):
+    """An explicit ``ttl_seconds`` is anchored on the server clock."""
+    sid = await _invite_space(client)
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"ttl_seconds": 60},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    raw = await _token_expiry(client, (await resp.json())["token"])
+    delta = datetime.fromisoformat(raw) - datetime.now(timezone.utc)
+    assert timedelta(seconds=0) < delta <= timedelta(seconds=60)
+
+
+async def test_invite_token_explicit_null_ttl_never_expires(client):
+    """``ttl_seconds: null`` keeps the historical uses-only behaviour."""
+    sid = await _invite_space(client)
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 3, "ttl_seconds": None},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    assert await _token_expiry(client, (await resp.json())["token"]) is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, "soon", [5]])
+async def test_invite_token_rejects_bad_ttl(client, bad):
+    """A non-positive or non-integer ``ttl_seconds`` is a 422."""
+    sid = await _invite_space(client)
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"ttl_seconds": bad},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+
+
+async def test_expired_invite_token_cannot_be_redeemed(client):
+    """End-to-end: a token whose TTL has passed is refused at join time."""
+    sid = await _invite_space(client)
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"ttl_seconds": 300},
+        headers=_auth(client._admin_token),
+    )
+    token = (await resp.json())["token"]
+    # Pinned to the start of the current UTC day: expired for certain, and
+    # on the same calendar date as SQLite's ``datetime('now')`` — the only
+    # window where the old raw TEXT compare went wrong.
+    expired = f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+    await client.app[_db_key].enqueue(
+        "UPDATE space_invite_tokens SET expires_at=? WHERE token=?",
+        (expired, token),
+    )
+    join = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert join.status >= 400

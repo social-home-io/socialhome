@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -333,3 +334,62 @@ async def test_list_public_for_scopes_to_author(db, repo):
     await repo.save(_public_moment(id="m-b", author="u-b"))
     got = await repo.list_public_for("u-a")
     assert [m.id for m in got] == ["m-a"]
+
+
+# ── Same-day expiry (timestamp-shape regression) ───────────────────────────
+
+
+def _expired_today_iso() -> str:
+    """A tz-aware expiry at the very start of the current UTC day.
+
+    Always in the past, and always on the *same calendar date* as SQLite's
+    ``datetime('now')`` — the only window where a raw TEXT compare went
+    wrong ("T" 0x54 outranks " " 0x20 only once the date digits tie), so
+    the regression fires deterministically rather than only when the wall
+    clock happens to cooperate.
+    """
+    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+
+
+def _expiring(id: str, *, expired: bool) -> Moment:
+    """A moment that has just expired (same UTC day) or expires tomorrow."""
+    return replace(
+        _moment(id=id),
+        expires_at=(
+            _expired_today_iso()
+            if expired
+            else (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        ),
+    )
+
+
+async def test_expired_today_is_not_visible(db, repo):
+    """A moment that expired earlier today is already hidden.
+
+    Regression: ``moments.expires_at`` holds tz-aware ISO 8601 and was
+    compared as raw TEXT against SQLite's naive ``datetime('now')``.
+    ``"T"`` (0x54) sorts above ``" "`` (0x20), so an expired moment stayed
+    visible (and publicly exposed) until the UTC date rolled over.
+    """
+    await repo.save(_expiring("m-gone", expired=True))
+    await repo.save(_expiring("m-live", expired=False))
+    ids = {m.id for m in await repo.list_visible_to("u-viewer", limit=50)}
+    assert "m-gone" not in ids
+    assert "m-live" in ids
+
+
+async def test_expired_today_is_not_public(db, repo):
+    """The public-stream query hides a moment that expired earlier today."""
+    await repo.save(replace(_expiring("m-pub-gone", expired=True), is_public=True))
+    await repo.save(replace(_expiring("m-pub-live", expired=False), is_public=True))
+    ids = {m.id for m in await repo.list_public_for("u-author", limit=50)}
+    assert ids == {"m-pub-live"}
+
+
+async def test_prune_expired_collects_same_day_expiry(db, repo):
+    """The retention sweep reclaims a moment that expired earlier today."""
+    await repo.save(_expiring("m-prune", expired=True))
+    await repo.save(_expiring("m-keep", expired=False))
+    assert await repo.prune_expired() == 1
+    rows = await db.fetchall("SELECT id FROM moments")
+    assert {r["id"] for r in rows} == {"m-keep"}

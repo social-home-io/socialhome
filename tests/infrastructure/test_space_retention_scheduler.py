@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -101,3 +102,59 @@ async def test_scheduler_loop_ticks(env):
     await s.start()
     await asyncio.sleep(0.12)
     await s.stop()
+
+
+async def _seed_iso_post(db, post_id, *, created_at):
+    """Seed a post with the shape production actually writes: tz-aware ISO."""
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at) "
+        "VALUES(?, 'sp-1', 'u-author', 'text', 'hi', ?)",
+        (post_id, created_at),
+    )
+
+
+async def test_prune_handles_tz_aware_created_at_on_the_boundary_day(env):
+    """A post past retention is deleted even on the cutoff's own date.
+
+    Regression: ``space_posts.created_at`` is always written as tz-aware
+    ISO 8601 (``SpacePost.created_at`` → ``_iso_or_none``) while the sweep
+    builds a naive ``"%Y-%m-%d %H:%M:%S"`` cutoff. Compared as raw TEXT,
+    ``"T"`` (0x54) sorts above ``" "`` (0x20), so whenever the two dates
+    tied the post read as "not old enough" and never expired.
+    """
+    db = env
+    now = datetime.now(timezone.utc)
+    cutoff_day = (now - timedelta(days=7)).date().isoformat()
+    await _seed_iso_post(db, "old", created_at=f"{cutoff_day}T00:00:00.000001+00:00")
+    await _seed_iso_post(db, "fresh", created_at=now.isoformat())
+    n = await SpaceRetentionScheduler(db)._prune_once()
+    assert n == 1
+    rows = {
+        r["id"]: r["deleted"]
+        for r in await db.fetchall("SELECT id, deleted FROM space_posts")
+    }
+    assert rows == {"old": 1, "fresh": 0}
+
+
+async def test_prune_boundary_day_respects_exempt_types(env):
+    """The exempt-types branch normalises timestamps the same way."""
+    db = env
+    await db.enqueue(
+        "UPDATE spaces SET retention_exempt_json='[\"poll\"]' WHERE id='sp-1'"
+    )
+    now = datetime.now(timezone.utc)
+    cutoff_day = (now - timedelta(days=7)).date().isoformat()
+    stamp = f"{cutoff_day}T00:00:00.000001+00:00"
+    await _seed_iso_post(db, "old-text", created_at=stamp)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at) "
+        "VALUES('old-poll', 'sp-1', 'u-author', 'poll', 'hi', ?)",
+        (stamp,),
+    )
+    n = await SpaceRetentionScheduler(db)._prune_once()
+    assert n == 1
+    rows = {
+        r["id"]: r["deleted"]
+        for r in await db.fetchall("SELECT id, deleted FROM space_posts")
+    }
+    assert rows == {"old-text": 1, "old-poll": 0}

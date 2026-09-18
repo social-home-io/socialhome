@@ -102,10 +102,16 @@ class SqliteReportRepo:
         *,
         hours: int = 24,
     ) -> int:
+        # ``content_reports.created_at`` is written by the service as
+        # tz-aware ISO 8601 while ``datetime('now', ?)`` yields SQLite's
+        # naive shape; a raw TEXT compare ("T" 0x54 > " " 0x20) counted
+        # reports from *outside* the window whenever the calendar dates
+        # matched, falsely tripping the per-day report cap. Normalise both.
         return int(
             await self._db.fetchval(
                 "SELECT COUNT(*) FROM content_reports "
-                "WHERE reporter_user_id=? AND created_at > datetime('now', ?)",
+                "WHERE reporter_user_id=? "
+                "AND datetime(created_at) > datetime('now', ?)",
                 (reporter_user_id, f"-{int(hours)} hours"),
                 default=0,
             )

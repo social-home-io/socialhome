@@ -804,6 +804,14 @@ class SqliteSpaceCalendarRepo:
         Recurring events are emitted once with their RRULE — the
         receiver's existing inbound handler stores them as a single row
         and the per-occurrence expansion runs on read.
+
+        Shape invariant: ``space_calendar_events.updated_at`` is always
+        SQLite's naive ``datetime('now')`` (``save_event`` never passes a
+        Python value through its ``COALESCE``), and the only ``since``
+        supplied today is the epoch cursor. A caller mixing in a tz-aware
+        ISO cursor must wrap both sides in ``datetime()`` — a raw TEXT
+        compare sorts "T" (0x54) above " " (0x20) and would skip same-day
+        rows on resume.
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_calendar_events "

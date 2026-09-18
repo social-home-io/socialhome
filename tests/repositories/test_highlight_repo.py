@@ -381,3 +381,52 @@ async def test_list_published_for_filters_to_author_and_published(db, repo):
 
     out = await repo.list_published_for("u1")
     assert [s.id for s in out] == [s1.id]
+
+
+def _expired_today_iso() -> str:
+    """A tz-aware expiry at the very start of the current UTC day.
+
+    Always in the past, and always on the *same calendar date* as SQLite's
+    ``datetime('now')`` — the only window where a raw TEXT compare went
+    wrong ("T" 0x54 outranks " " 0x20 only once the date digits tie).
+    """
+    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+
+
+async def _dated_highlight(repo, *, date: str, expires_at: str):
+    return await repo.find_or_create_today(
+        author_user_id="u1",
+        audience_kind=HighlightAudience.ALL_PAIRED,
+        audience=(),
+        highlight_date=date,
+        expires_at=expires_at,
+    )
+
+
+async def test_highlight_expired_today_is_not_visible(db, repo):
+    """A highlight that expired earlier today is already hidden.
+
+    Regression: ``highlights.expires_at`` holds tz-aware ISO 8601 and was
+    compared as raw TEXT against SQLite's naive ``datetime('now')``, so an
+    expired highlight stayed visible until the UTC date rolled over.
+    """
+    await _seed_user(db)
+    gone = await _dated_highlight(
+        repo, date="2026-04-01", expires_at=_expired_today_iso()
+    )
+    live = await _dated_highlight(repo, date="2026-05-03", expires_at=_expires(7))
+    ids = {h.id for h in await repo.list_visible_to("u1")}
+    assert gone.id not in ids
+    assert live.id in ids
+
+
+async def test_highlight_expired_today_is_pruned(db, repo):
+    """The retention sweep reclaims a highlight that expired earlier today."""
+    await _seed_user(db)
+    gone = await _dated_highlight(
+        repo, date="2026-04-01", expires_at=_expired_today_iso()
+    )
+    live = await _dated_highlight(repo, date="2026-05-03", expires_at=_expires(7))
+    assert await repo.prune_expired() == 1
+    assert await repo.get_highlight(gone.id) is None
+    assert await repo.get_highlight(live.id) is not None

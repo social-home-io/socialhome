@@ -240,7 +240,7 @@ class SqliteMomentRepo:
                         AND followed_user_id = m.author_user_id
                  )
                )
-               AND m.expires_at > datetime('now')
+               AND datetime(m.expires_at) > datetime('now')
                AND m.hop_count <= ?
                AND (? IS NULL OR m.created_at < ?)
                AND (
@@ -324,7 +324,7 @@ class SqliteMomentRepo:
             """
             SELECT * FROM moments
              WHERE author_user_id = ? AND is_public = 1
-               AND expires_at > datetime('now')
+               AND datetime(expires_at) > datetime('now')
              ORDER BY created_at DESC
              LIMIT ?
             """,
@@ -488,7 +488,7 @@ class SqliteMomentRepo:
                         AND followed_user_id = m.author_user_id
                  )
                )
-               AND m.expires_at > datetime('now')
+               AND datetime(m.expires_at) > datetime('now')
              GROUP BY mh.tag
              ORDER BY n DESC, mh.tag ASC
              LIMIT ?
@@ -510,20 +510,22 @@ class SqliteMomentRepo:
         """
         rows = await self._db.fetchall(
             "SELECT media_url FROM moments "
-            "WHERE expires_at < datetime('now') AND media_url IS NOT NULL",
+            "WHERE datetime(expires_at) < datetime('now') "
+            "AND media_url IS NOT NULL",
         )
         return [r["media_url"] for r in rows_to_dicts(rows) if r.get("media_url")]
 
     async def prune_expired(self) -> int:
         """Drop rows past their absolute 7-day cap. Reactions cascade."""
         row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM moments WHERE expires_at < datetime('now')",
+            "SELECT COUNT(*) AS n FROM moments "
+            "WHERE datetime(expires_at) < datetime('now')",
         )
         n = int(row["n"]) if row else 0
         if n == 0:
             return 0
         await self._db.enqueue(
-            "DELETE FROM moments WHERE expires_at < datetime('now')",
+            "DELETE FROM moments WHERE datetime(expires_at) < datetime('now')",
         )
         return n
 

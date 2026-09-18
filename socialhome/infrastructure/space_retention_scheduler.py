@@ -91,6 +91,12 @@ class SpaceRetentionScheduler:
                 exempt = set(orjson.loads(s["retention_exempt_json"] or "[]"))
             except ValueError, TypeError:
                 exempt = set()
+            # ``space_posts.created_at`` is always written as tz-aware
+            # ISO 8601 (``SpacePost.created_at`` → ``_iso_or_none``), so
+            # every comparison below wraps both sides in ``datetime()``:
+            # SQLite compares TEXT lexicographically and "T" (0x54) sorts
+            # above " " (0x20), so a raw compare against this naive cutoff
+            # judged same-day posts "not old enough" and never expired them.
             cutoff = (
                 datetime.now(timezone.utc) - timedelta(days=int(s["retention_days"]))
             ).strftime("%Y-%m-%d %H:%M:%S")
@@ -102,7 +108,7 @@ class SpaceRetentionScheduler:
                     f"""
                     SELECT COUNT(*) AS n FROM space_posts
                      WHERE space_id=? AND deleted=0
-                       AND created_at < ?
+                       AND datetime(created_at) < datetime(?)
                        AND type NOT IN ({placeholders})
                     """,
                     (s["id"], cutoff, *exempt),
@@ -112,7 +118,7 @@ class SpaceRetentionScheduler:
                     UPDATE space_posts
                        SET deleted=1
                      WHERE space_id=? AND deleted=0
-                       AND created_at < ?
+                       AND datetime(created_at) < datetime(?)
                        AND type NOT IN ({placeholders})
                     """,
                     (s["id"], cutoff, *exempt),
@@ -122,7 +128,7 @@ class SpaceRetentionScheduler:
                     """
                     SELECT COUNT(*) AS n FROM space_posts
                      WHERE space_id=? AND deleted=0
-                       AND created_at < ?
+                       AND datetime(created_at) < datetime(?)
                     """,
                     (s["id"], cutoff),
                 )
@@ -130,7 +136,7 @@ class SpaceRetentionScheduler:
                     """
                     UPDATE space_posts SET deleted=1
                      WHERE space_id=? AND deleted=0
-                       AND created_at < ?
+                       AND datetime(created_at) < datetime(?)
                     """,
                     (s["id"], cutoff),
                 )

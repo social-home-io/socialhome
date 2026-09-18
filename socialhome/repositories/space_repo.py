@@ -1148,6 +1148,16 @@ class SqliteSpaceRepo:
         uses: int = 1,
         expires_at: str | None = None,
     ) -> str:
+        """Mint an invite token.
+
+        ``expires_at`` is an optional UTC timestamp; ``None`` means the
+        token never expires and only ``uses`` limits it. Every current
+        writer passes the tz-aware ISO 8601 shape
+        (``datetime.now(timezone.utc).isoformat()``), but
+        :meth:`consume_invite_token` normalises with SQLite's
+        ``datetime()`` so the naive ``"YYYY-MM-DD HH:MM:SS"`` shape is
+        accepted too.
+        """
         token = uuid.uuid4().hex
         await self._db.enqueue(
             """
@@ -1165,6 +1175,17 @@ class SqliteSpaceRepo:
         Returns ``None`` if the token does not exist, has expired, or has
         already been fully consumed. When it has uses left, decrements the
         counter atomically and returns the row as a dict.
+
+        Both sides of the expiry guard are wrapped in SQLite's
+        ``datetime()``. ``expires_at`` holds tz-aware ISO 8601
+        (``2026-09-18T14:52:14.331881+00:00``) while ``datetime('now')``
+        yields the naive ``2026-09-18 15:52:14`` shape — and SQLite
+        compares TEXT lexicographically, where ``"T"`` (0x54) sorts above
+        ``" "`` (0x20). A raw comparison therefore reported an *expired*
+        token as still valid for the whole UTC day it expired on.
+        ``datetime()`` parses both shapes, converts a non-UTC offset to
+        UTC, and returns the naive form, so the two sides are comparable.
+        An unparseable value yields NULL, which fails the guard closed.
         """
 
         def _run(conn):
@@ -1174,7 +1195,10 @@ class SqliteSpaceRepo:
                    SET uses_remaining = uses_remaining - 1
                  WHERE token=?
                    AND uses_remaining > 0
-                   AND (expires_at IS NULL OR expires_at > datetime('now'))
+                   AND (
+                        expires_at IS NULL
+                        OR datetime(expires_at) > datetime('now')
+                   )
                 """,
                 (token,),
             )
@@ -1446,7 +1470,8 @@ class SqliteSpaceRepo:
         rows = await self._db.fetchall(
             """
             SELECT * FROM space_join_requests
-             WHERE status='pending' AND expires_at < datetime('now')
+             WHERE status='pending'
+               AND datetime(expires_at) < datetime('now')
             """,
         )
         return rows_to_dicts(rows)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 
@@ -798,3 +800,80 @@ async def test_upsert_remote_rebinds_a_stale_natural_key_row(env):
     ]
     got = await env.user_repo.get_remote_by_member("peer-b", "admin")
     assert got is not None and got.user_id == "derivedadminid"
+
+
+# ── API-token expiry (timestamp-shape regression) ──────────────────────────
+
+
+def _expired_today_iso() -> str:
+    """A tz-aware timestamp at the very start of the current UTC day.
+
+    Always in the past, and always on the *same calendar date* as SQLite's
+    ``datetime('now')`` — the only window where a raw TEXT compare went
+    wrong ("T" 0x54 outranks " " 0x20 only once the date digits tie). Using
+    it makes the regression fire deterministically rather than only when
+    the wall clock happens to cooperate.
+    """
+    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+
+
+async def _token_for(env, expires_at):
+    """Provision a user and mint an API token with an exact expiry."""
+    await env.user_svc.provision(username="alice", display_name="Alice")
+    user = await env.user_repo.get("alice")
+    await env.user_repo.create_api_token(
+        user.user_id, "hash-exp", "test", expires_at=expires_at
+    )
+    return user
+
+
+async def test_expired_api_token_does_not_authenticate(env):
+    """A token that expired an hour ago must not resolve to its user.
+
+    Regression: ``api_tokens.expires_at`` is stored verbatim from the
+    ``POST /api/me/tokens`` body — tz-aware ISO 8601 — and was compared as
+    raw TEXT against SQLite's naive ``datetime('now')``. ``"T"`` (0x54)
+    sorts above ``" "`` (0x20), so an expired bearer token kept
+    authenticating for the rest of the UTC day it expired on.
+    """
+    await _token_for(env, _expired_today_iso())
+    assert await env.user_repo.get_user_by_token_hash("hash-exp") is None
+
+
+async def test_future_api_token_authenticates(env):
+    """A token with an expiry in the future still resolves."""
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    user = await _token_for(env, future)
+    got = await env.user_repo.get_user_by_token_hash("hash-exp")
+    assert got is not None
+    assert got.user_id == user.user_id
+
+
+async def test_api_token_without_expiry_authenticates(env):
+    """``expires_at IS NULL`` means the token never expires."""
+    user = await _token_for(env, None)
+    got = await env.user_repo.get_user_by_token_hash("hash-exp")
+    assert got is not None
+    assert got.user_id == user.user_id
+
+
+async def test_api_token_non_utc_offset_expiry_is_converted(env):
+    """A non-UTC offset is applied, not ignored.
+
+    The wall-clock digits read as the future; the instant is in the past.
+    """
+    plus2 = timezone(timedelta(hours=2))
+    past = datetime.fromisoformat(_expired_today_iso()).astimezone(plus2)
+    await _token_for(env, past.isoformat())
+    assert await env.user_repo.get_user_by_token_hash("hash-exp") is None
+
+
+async def test_api_token_with_unparseable_expiry_fails_closed(env):
+    """A malformed ``expires_at`` denies access rather than never expiring.
+
+    ``datetime('not-a-date')`` is NULL, which fails the guard — the raw
+    TEXT compare would have let any non-numeric string outrank
+    ``datetime('now')`` and authenticate forever.
+    """
+    await _token_for(env, "whenever")
+    assert await env.user_repo.get_user_by_token_hash("hash-exp") is None

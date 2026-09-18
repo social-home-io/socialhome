@@ -48,7 +48,11 @@ from ..domain.federation import PairingStatus
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
-from ..services.space_service import _UNSET_MEMBER_PROFILE, normalize_category
+from ..services.space_service import (
+    DEFAULT_INVITE_TOKEN_TTL_SECONDS,
+    _UNSET_MEMBER_PROFILE,
+    normalize_category,
+)
 from .base import BaseView
 from .media_status import READY, media_filename, video_poster_path
 
@@ -1129,17 +1133,38 @@ class SpaceBanView(BaseView):
 
 
 class SpaceInviteTokenView(BaseView):
-    """POST /api/spaces/{id}/invite-tokens — create an invite token."""
+    """POST /api/spaces/{id}/invite-tokens — create an invite token.
+
+    Body: ``{uses?: int, ttl_seconds?: int | null}``. ``ttl_seconds``
+    defaults to :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS`; an explicit
+    ``null`` mints a token that never expires (uses-limited only).
+    """
 
     async def post(self) -> web.Response:
         ctx = self.user
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         body = await self.body()
+        ttl_raw = body.get("ttl_seconds", DEFAULT_INVITE_TOKEN_TTL_SECONDS)
+        ttl_seconds: int | None
+        if ttl_raw is None:
+            ttl_seconds = None
+        else:
+            try:
+                ttl_seconds = int(ttl_raw)
+            except TypeError, ValueError:
+                return error_response(
+                    422, "UNPROCESSABLE", "ttl_seconds must be an integer"
+                )
+            if ttl_seconds < 1:
+                return error_response(
+                    422, "UNPROCESSABLE", "ttl_seconds must be positive"
+                )
         token = await svc.create_invite_token(
             space_id,
             actor_username=ctx.username,
             uses=body.get("uses", 1),
+            ttl_seconds=ttl_seconds,
         )
         return web.json_response({"token": token}, status=201)
 

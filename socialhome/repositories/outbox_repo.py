@@ -225,12 +225,21 @@ class SqliteOutboxRepo:
         sweep ticks instead of one writer-blocking transaction. Uses
         COALESCE(delivered_at, failed_at, created_at) so rows missing a
         terminal stamp (legacy) are still reclaimed by created_at.
+
+        The COALESCE'd value is mixed-shape by construction —
+        ``mark_failed`` writes SQLite's naive ``datetime('now')``,
+        ``expire_past_retention`` writes Python tz-aware ISO, and
+        ``created_at`` comes from the column DEFAULT — so both sides
+        go through ``datetime()``. A raw TEXT compare sorts a naive
+        same-day stamp below an ISO cutoff and would purge terminal
+        rows before their grace window elapsed.
         """
         before = await self._db.fetchval(
             """
             SELECT COUNT(*) FROM federation_outbox
              WHERE status IN ('delivered','failed')
-               AND COALESCE(delivered_at, failed_at, created_at) < ?
+               AND datetime(COALESCE(delivered_at, failed_at, created_at))
+                   < datetime(?)
             """,
             (cutoff_iso,),
             default=0,
@@ -243,7 +252,9 @@ class SqliteOutboxRepo:
                  WHERE id IN (
                      SELECT id FROM federation_outbox
                       WHERE status IN ('delivered','failed')
-                        AND COALESCE(delivered_at, failed_at, created_at) < ?
+                        AND datetime(
+                            COALESCE(delivered_at, failed_at, created_at)
+                        ) < datetime(?)
                       LIMIT ?
                  )
                 """,
