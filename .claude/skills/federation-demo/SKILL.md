@@ -346,7 +346,7 @@ Phases added after the initial publish are documented inline in
   identical inner event once; d applies the role. All three are hard
   assertions: d's ``space_members.role == 'admin'`` (polled ≤ 90 s),
   d's log carries ``no cached target_eph_priv … nacked to``, and c's
-  log carries ``rediscovered, retransmitted`` naming d's instance id —
+  log carries ``rediscovered, retransmitted`` naming d's instance id and the `space_member_role_changed` event (not just any retransmit to d) —
   preceded by ``invalidated`` (c's cache still held the dead key) or
   ``already rebuilt`` (d's catch-up ``SPACE_SYNC_BEGIN`` had refreshed
   it first); both are real recoveries and the step prints which fired.
