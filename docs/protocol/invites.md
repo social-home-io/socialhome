@@ -694,11 +694,19 @@ relay cap, and is deliberately out of scope here.
 
 Invite tokens minted through the SPA now carry a default expiry
 (`DEFAULT_INVITE_TOKEN_TTL_SECONDS`, 7 days) and the endpoint accepts
-`ttl_seconds` (`0` = never). Before this they were immortal until
-exhausted — tolerable when only a paired peer could redeem one, not when
-a stranger can. Callers that mint their own short-lived tokens
-(`invite_remote_user`, remote join-request approval: 5 minutes) pass an
-explicit `expires_at` and are unchanged.
+`ttl_seconds`. Omitting the field takes that default; **both an explicit
+`null` and `0` mean "never expires"** — `null` is the service's own
+spelling (`ttl_seconds=None`) and `0` is what the SPA's expiry picker
+sends, so `routes.spaces.SpaceInviteTokenView` normalises the two at the
+HTTP boundary. A negative or non-integer value is a 422. The lifetime is
+a TTL rather than an absolute instant on purpose: the expiry is anchored
+on the *issuer's* clock, so a wrong client clock cannot mint a link that
+outlives its intent. Before this, links were immortal until exhausted —
+tolerable when only a paired peer could redeem one, not when a stranger
+can. Callers that mint their own short-lived tokens
+(`invite_remote_user`, remote join-request approval: 5 minutes) go
+straight to `space_repo.create_invite_token` with an explicit
+`expires_at` and are unchanged.
 
 ### The role a link grants
 

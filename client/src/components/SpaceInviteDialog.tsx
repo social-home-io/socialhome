@@ -70,9 +70,11 @@ const EXPIRY_CHOICES = [
   { id: '1d', label: '1 day', ttl: 86_400 },
   { id: '7d', label: '7 days', ttl: 604_800 },
   { id: '30d', label: '30 days', ttl: 2_592_000 },
-  // ``0`` — not ``null`` — is the backend's "never expires"; ``null``
-  // means "apply the server default TTL", which is the opposite of what
-  // the user picked here.
+  // ``0`` is "never expires" — the route maps it onto the service's
+  // ``None`` precisely because this picker sends it. (An explicit
+  // ``null`` means the same thing; OMITTING the field is what takes the
+  // server's 7-day default, which is the opposite of what the user
+  // picked here.)
   { id: 'never', label: 'Never', ttl: 0 },
 ] as const
 
