@@ -281,13 +281,23 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
             else:
                 assert self._routed_handler is not None
+                assert self._route_service is not None
                 assert route_path is not None
                 assert target_eph_pk is not None
+                # Pin the issuer identity pk discovery verified, so the
+                # origin holds a SPACE_ROUTE_STALE nack for this send
+                # against the key WE checked (same shape as
+                # ``FederationService.send_with_mesh_fallback``).
+                pinned_pk = (
+                    self._route_service.cached_target_identity_pk(issuer_instance_id)
+                    or ""
+                )
                 await self._routed_handler.send_routed(
                     path=route_path,
                     target_eph_pk_b64=target_eph_pk,
                     inner_event_type=(FederationEventType.SPACE_INVITE_TOKEN_REDEEM),
                     inner_payload=payload,
+                    target_identity_pk=pinned_pk,
                 )
             try:
                 result = await asyncio.wait_for(fut, timeout=self._timeout)

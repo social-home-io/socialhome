@@ -119,6 +119,20 @@ async def test_inbound_rejects_unknown_event_type(fed):
         await fed["svc"].handle_inbound_envelope("wh-1", body)
 
 
+async def test_inbound_accepts_space_route_stale_event_type(fed):
+    """``space_route_stale`` is a known type — the §24.11 pipeline must
+    get past the event-type check and fail at the NEXT step (instance
+    lookup), never with ``Unknown event_type``."""
+    body = (
+        b'{"msg_id":"x","event_type":"space_route_stale",'
+        b'"from_instance":"a","to_instance":"b","timestamp":"2026-01-01T00:00:00+00:00",'
+        b'"encrypted_payload":"x:y","sig_suite":"ed25519",'
+        b'"signatures":{"ed25519":"z"}}'
+    )
+    with pytest.raises(ValueError, match="No instance found"):
+        await fed["svc"].handle_inbound_envelope("nonexistent-wh", body)
+
+
 async def test_inbound_rejects_unknown_inbox_id(fed):
     body = (
         b'{"msg_id":"x","event_type":"presence_updated",'

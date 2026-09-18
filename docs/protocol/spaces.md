@@ -70,9 +70,11 @@ approval" below.
 
 **Mesh routing (v_6+)**
 
-`SPACE_ROUTED`, `SPACE_FIND_ROUTE`, `SPACE_ROUTE_FOUND`. Generic
-source-routed envelope + the discovery probe that finds the path.
-See "Mesh routing (SPACE_ROUTED)" below.
+`SPACE_ROUTED`, `SPACE_FIND_ROUTE`, `SPACE_ROUTE_FOUND`,
+`SPACE_ROUTE_STALE` (v_28+). Generic source-routed envelope, the
+discovery probe that finds the path, and the signed nack a restarted
+target sends back so the origin re-discovers instead of waiting out its
+route cache. See "Mesh routing (SPACE_ROUTED)" below.
 
 **Space sync**
 
@@ -845,18 +847,25 @@ households, and the ordering between them is load-bearing:
 
 The origin's window MUST close first. `discover_route` is cache-first,
 so an origin whose window outlives the target's keeps re-sealing under
-a private half the target has already dropped — and the target's only
-recourse is to discard the envelope, silently: there is no NACK, and
-`send_with_mesh_fallback` reported `ok=True` the moment the first hop
-accepted the outer envelope. That is the mechanism behind #648. The
-origin TTL is derived from the target's rather than typed independently
-so the two cannot drift apart, and probe-start anchoring removes the
+a private half the target has already dropped. Pre-v_28 the target's
+only recourse was to discard the envelope, silently: there was no NACK,
+and `send_with_mesh_fallback` had reported `ok=True` the moment the
+first hop accepted the outer envelope. That is the mechanism behind
+#648. The TTL ordering remains the first line of defence: the origin
+TTL is derived from the target's rather than typed independently so the
+two cannot drift apart, and probe-start anchoring removes the
 discovery-latency overhang exactly.
 
 The private half also dies with the process, so a **restarted** target
-invalidates every pub an origin holds for it. Recovery is re-discovery
-(which rotates the ephemeral — the forward-secrecy-positive direction),
-never a longer-lived or use-extended key: a host admitting a
+invalidates every pub an origin holds for it — and no TTL ordering can
+see a restart coming. Since v_28 the target answers such an envelope
+with a signed `SPACE_ROUTE_STALE` nack; the origin verifies it against
+the identity key it pinned at discovery, invalidates the cached route,
+re-discovers and retransmits the inner event **once** (see "Route-stale
+nack" below), so a target restart costs one extra round trip instead of
+up to `ROUTE_CACHE_TTL_S` of silently lost sends. Recovery is always
+re-discovery (which rotates the ephemeral — the forward-secrecy-positive
+direction), never a longer-lived or use-extended key: a host admitting a
 `SPACE_SYNC_BEGIN` from a mesh-only requester calls
 `RouteDiscoveryService.invalidate()` for that requester before it starts
 streaming, so the stream is sealed under a key the requester's current
@@ -954,6 +963,163 @@ The wire shape of ``SPACE_ROUTED.payload``:
 }
 ```
 
+### Route-stale nack (v_28+)
+
+**Trigger.** On the forward leg the target looks up the ephemeral
+private half for `sealed.target_eph_pk`. That half lives only in RAM,
+so after a restart — or when an origin's cache has outlived the
+target's key — the lookup misses. Instead of dropping the envelope, the
+target signs `(route_id, stale_eph_pk)` with its Ed25519 **identity**
+key and sends a `SPACE_ROUTE_STALE` to the hop the envelope arrived from
+(`event.from_instance`, which `_on_routed` has already proved equals
+`path[position]`). If that hop is pre-v_28 the target drops exactly as
+before — a nack is never sent to a peer that cannot parse it.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A<br/>(origin)
+    participant B as HFS B<br/>(relay)
+    participant C as HFS C<br/>(target)
+    A->>B: SPACE_ROUTED<br/>(forward, position=0,<br/>sealed under C's OLD eph pk)
+    B->>C: SPACE_ROUTED<br/>(position=1)
+    Note over C: no eph priv for<br/>target_eph_pk (restarted);<br/>sign space-route-stale:v1:<br/>route_id:stale_eph_pk<br/>with identity key
+    C->>B: SPACE_ROUTE_STALE<br/>(route_id, path=[A,B,C],<br/>position=2, target_identity_pk,<br/>stale_eph_pk, sig, sig_suite)
+    Note over B: structural checks only,<br/>no sig verify; dedup;<br/>forward toward path[0]
+    B->>A: SPACE_ROUTE_STALE<br/>(position=1, fields opaque)
+    Note over A: pending record for route_id?<br/>verify sig vs pk pinned<br/>at discovery; invalidate route
+    A->>B: SPACE_FIND_ROUTE<br/>(fresh probe; C mints<br/>a NEW eph key)
+    B->>C: SPACE_FIND_ROUTE
+    C-->>A: SPACE_ROUTE_FOUND<br/>(via B)
+    A->>B: SPACE_ROUTED<br/>(same inner, new route_id,<br/>sealed under C's NEW eph pk)
+    B->>C: SPACE_ROUTED
+```
+
+The wire shape of `SPACE_ROUTE_STALE.payload`:
+
+```
+{
+  "route_id":           "<32 hex>",       # the SPACE_ROUTED send being nacked
+  "path":               ["a", "b", "c"],  # copied from that envelope
+  "position":           2,                # index of the hop that SENT this hop
+  "target_identity_pk": "<64 hex>",       # target's Ed25519 identity public key
+  "stale_eph_pk":       "<32 b64url>",    # the target_eph_pk nobody holds a priv for
+  "sig":                "<b64url>",       # Ed25519 over
+                                          #   b"space-route-stale:v1:" + route_id
+                                          #   + b":" + stale_eph_pk
+  "sig_suite":          "ed25519"
+}
+```
+
+The signing bytes are domain-separated from `space-route-found:v1:` so
+a captured `target_eph_sig` can never be replayed as a nack to tear
+down a live route, and route-scoped so one nack cannot be lifted onto
+another `route_id`. `sig_suite` follows the project-wide suite-tag rule
+(see [`crypto.md`](../crypto.md)); receivers reject unknown suites
+rather than falling back.
+
+**Hop-by-hop walk-back.** `position` names the hop that *sent* this
+nack hop (the target starts it at `len(path) - 1`, mirroring
+`SPACE_ROUTED`); a relay at index `i` receives `position == i + 1` and
+forwards to `path[i - 1]` with `position = i`. Each relay applies
+structural checks only, in order, each a fail-soft drop:
+
+1. well-formed payload, `len(path) ≤ 8` (the `SPACE_ROUTED` path cap);
+2. `1 ≤ position < len(path)`;
+3. `path[position] == event.from_instance` — the sender is the
+   §24.11-authenticated previous hop (anti-spoof);
+4. `path[position - 1] == self` — we really are the next hop;
+5. `derive_instance_id(target_identity_pk) == path[-1]` — the carried
+   key belongs to the instance the route ends at (§4.1.2);
+6. dedup on `route_id` — checked *after* the structural checks so a
+   malformed nack from a third party that knows the `route_id` cannot
+   burn the slot for the genuine one.
+
+Relays do **not** verify the signature. They hold nothing the origin
+lacks (the identity pk travels in the payload and is bound to
+`path[-1]` by step 5), the same bytes reach the origin either way, and a
+relay that verified would be deciding on the origin's behalf which nacks
+it gets to see. The forward to the next hop is gated on
+`peer_supports(min_version=28)`; an older next hop ends the nack there.
+
+**At the origin** (`position - 1 == 0`) the relay checks above have
+already run. The origin then applies, in order, each a fail-closed drop:
+
+1. `route_id` names a live pending record — one is kept per
+   `send_routed` (target, pinned identity pk, the ephemeral key sealed
+   under, the inner event) for the **route-cache window**
+   (`ROUTE_CACHE_TTL_S`, 270 s): the span during which the origin could
+   still be sealing under a stale key. Not the 60 s ephemeral window — a
+   relay's outbox retry ladder can deliver a stale-sealed envelope to a
+   rebooted target well after that, and its nack must still land on a
+   live record. A nack for a send we never made, or one past the window,
+   is a no-op;
+2. `path[-1]` is that record's target;
+3. `target_identity_pk` equals the identity pk the origin **pinned at
+   discovery** (`RouteDiscoveryService.cached_target_identity_pk`) — a
+   second, independent key binding on top of the relay-level derive
+   check (a send that predates the pin falls back to re-deriving against
+   the record's target; never to acceptance);
+4. `stale_eph_pk` equals the ephemeral key the origin **sealed under for
+   this `route_id`**. Without this the target is a signing oracle: an
+   on-path relay could forward the envelope with a garbage
+   `target_eph_pk`, collect the target's genuine signature over it, and
+   tear down a live route on demand. A nack the target signed for any
+   other key is rejected here;
+5. the signature verifies under that key and under a suite in
+   `SUPPORTED_ROUTE_STALE_SIG_SUITES` — unknown suite → hard reject;
+6. pop the pending record — one nack per envelope, consumed before the
+   first `await` so a concurrent duplicate finds nothing;
+7. `RouteDiscoveryService.invalidate_if_eph(target, stale_eph_pk)` — the
+   cached route is dropped only while it **still points at the stale
+   key**. After a reboot the nacks for every envelope sealed under the
+   old key trickle back one at a time; the first rebuilds the route, and
+   the rest must not evict it again (five envelopes, one flood, not five);
+8. rediscover (cache-first — a route already rebuilt by an earlier nack
+   is reused with no flood; otherwise a fresh `SPACE_FIND_ROUTE`, which
+   makes the target mint a new ephemeral) and `send_routed` the retained
+   inner event **once**, flagged as a retry.
+
+Step 8 is skipped — route invalidated, nothing resent — when the nacked
+send was itself the retry (a target that nacks twice gets one `INFO`
+line, not a loop) or when the inner exceeds 64 KiB (media chunks ride the
+durable `space_media_outbox`, which rediscovers on its own next attempt).
+When rediscovery finds **no route** the origin does not give up at once:
+the nack's own trigger is "the target just rebooted", and the two-second
+discovery window routinely closes before the target is back — its late
+`ROUTE_FOUND` is then cached but would otherwise resend nothing. So the
+origin defers **exactly one** more attempt until past the discovery
+negative cooldown (plus a 5 s margin); that attempt is cache-first, so a
+late answer that landed meanwhile costs no flood. A second miss gives
+up. The deferral is tracked apart from the pending record, which stays
+the sole authority on whether a nack refers to a live send — reusing the
+record would let a replayed nack match again. Success logs
+`SPACE_ROUTE_STALE route_id=…: route to <target> invalidated,
+rediscovered, retransmitted <event> as route_id=…` at `INFO` — with
+`already rebuilt` in place of `invalidated` when the conditional
+eviction found the cache no longer pointing at the nacked key (a sibling
+nack, or the rebooted target's own catch-up `SPACE_SYNC_BEGIN`, had
+already refreshed the route), so nothing was torn down and the retransmit
+rode the fresh route. The deferred attempt's success line carries the
+same core plus a `(deferred attempt)` suffix.
+
+**Amplification bounds.** Dedup per `route_id` at every hop (a nack
+visits each hop at most once; replays are no-ops); one retransmit per
+original send (the retry's pending record is flagged so its own nack
+cannot trigger another) plus at most one deferred re-attempt; a
+bounded pending table (2000 entries, oldest
+expiry evicted first, ≤ 64 KiB retained inner each); and
+`discover_route` single-flights per target and honours the negative
+cooldown, so a burst of nacks for one target costs one flood.
+
+**Older hops.** Every send of the nack — the target's and each relay's
+— is gated on the receiver being ≥ v_28. A sub-v_28 hop drops the nack
+(or never receives it) and the origin behaves exactly as before v_28: it
+keeps sealing under the dead key until `ROUTE_CACHE_TTL_S` expires and
+rediscovers naturally. The nack only shortens that outage; it never
+widens the trust surface (see
+[`capabilities.md`](./capabilities.md) for the v_28 row).
+
 ### What relays can and cannot see
 
 | Field                | Relay sees? | Notes                                          |
@@ -968,6 +1134,7 @@ The wire shape of ``SPACE_ROUTED.payload``:
 | `sealed.nonce`       | yes         |                                                |
 | `sealed.ciphertext`  | yes (bytes) | undecipherable without the matching priv half  |
 | **inner payload**    | **no**      | only the target can derive the seal key        |
+| `SPACE_ROUTE_STALE.*` (v_28+) | yes | `route_id` / `path` / `position` / `target_identity_pk` / `stale_eph_pk` / `sig` / `sig_suite` — routing + validation data the relay already saw on the forward leg (`target_eph_pk`) or the discovery leg (identity pk); the nack carries **no content** |
 
 For the discovery leg, relays also see ROUTE_FOUND's
 `target_identity_pk` + `target_eph_sig` (v_21+) — public key + a
@@ -992,12 +1159,19 @@ shape — no per-event-type `_ROUTED` variants are needed.
   mutations, permission guards.
 - `socialhome/federation/route_discovery.py` —
   `RouteDiscoveryService`: BFS-flooded probe + per-target ephemeral
-  caching + 5-min route cache.
+  caching + 5-min route cache; `cached_target_identity_pk` exposes the
+  identity pk pinned at discovery that a `SPACE_ROUTE_STALE` nack is
+  held against.
 - `socialhome/federation/routed_envelope.py` —
   `SpaceRoutedHandler`: forward / unwrap of `SPACE_ROUTED`; origin
-  + target ephemeral state machines.
+  + target ephemeral state machines. Route-stale nack (v_28+):
+  `_nack_stale_target_eph` (target), `_on_route_stale` (relay
+  walk-back), `_on_route_stale_at_origin` (verify → invalidate →
+  rediscover → retransmit once).
 - `socialhome/federation/routed_crypto.py` — directional
-  X25519+HKDF+AES-GCM seal/unseal primitives; KEM suite gating.
+  X25519+HKDF+AES-GCM seal/unseal primitives; KEM suite gating;
+  `sign_route_stale` / `verify_route_stale` (+
+  `SUPPORTED_ROUTE_STALE_SIG_SUITES`) for the nack signature.
 - `socialhome/federation/sync/space/` — space-level sync machinery
   (shared with [sync.md](./sync.md)).
 - `socialhome/services/federation_inbound/space_membership.py` —

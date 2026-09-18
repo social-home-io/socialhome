@@ -11,7 +11,9 @@ from __future__ import annotations
 import pytest
 from cryptography.exceptions import InvalidTag
 
+from socialhome.crypto import generate_identity_keypair
 from socialhome.federation import routed_crypto as rc
+from socialhome.federation.route_discovery import _route_found_signing_bytes
 
 
 # ── Round-trip ─────────────────────────────────────────────────────────
@@ -280,4 +282,137 @@ def test_unknown_kem_suite_rejected():
             origin_eph_priv_b64=o_priv,
             route_id="r-1",
             inner_event_type="t",
+        )
+
+
+# ── Route-stale nack signature ─────────────────────────────────────────
+
+
+def _identity() -> tuple[bytes, bytes]:
+    """``(seed, public_key)`` for a fresh Ed25519 identity."""
+    kp = generate_identity_keypair()
+    return kp.private_key, kp.public_key
+
+
+def test_route_stale_signing_bytes_exact_shape():
+    """The signed bytes are the documented ``space-route-stale:v1:``
+    domain tag + route_id + ``:`` + stale pub — nothing else, so an
+    independent implementation can reproduce them byte-for-byte."""
+    got = rc.route_stale_signing_bytes("r-1", "STALEPK")
+    assert got == b"space-route-stale:v1:r-1:STALEPK"
+
+
+def test_route_stale_signing_bytes_domain_separated_from_route_found():
+    """Same (id, pub) inputs must NOT collide with the ROUTE_FOUND
+    signing bytes — otherwise a captured ROUTE_FOUND signature could be
+    replayed as a route-stale nack (or vice versa)."""
+    stale = rc.route_stale_signing_bytes("r-1", "PK")
+    found = _route_found_signing_bytes("r-1", "PK")
+    assert stale != found
+    assert stale.startswith(b"space-route-stale:v1:")
+    assert found.startswith(b"space-route-found:v1:")
+
+
+def test_route_stale_sig_suite_constants():
+    assert rc.ROUTE_STALE_SIG_SUITE_ED25519 == "ed25519"
+    assert rc.SUPPORTED_ROUTE_STALE_SIG_SUITES == frozenset({"ed25519"})
+    assert issubclass(rc.UnsupportedRouteStaleSuite, ValueError)
+
+
+def test_sign_verify_route_stale_round_trip():
+    seed, pk = _identity()
+    sig = rc.sign_route_stale(seed=seed, route_id="r-1", stale_eph_pk_b64="PK")
+    assert isinstance(sig, str)
+    assert rc.verify_route_stale(
+        identity_pk=pk,
+        route_id="r-1",
+        stale_eph_pk_b64="PK",
+        sig_b64=sig,
+        sig_suite=rc.ROUTE_STALE_SIG_SUITE_ED25519,
+    )
+
+
+def test_verify_route_stale_wrong_key_false():
+    seed, _pk = _identity()
+    _other_seed, other_pk = _identity()
+    sig = rc.sign_route_stale(seed=seed, route_id="r-1", stale_eph_pk_b64="PK")
+    assert not rc.verify_route_stale(
+        identity_pk=other_pk,
+        route_id="r-1",
+        stale_eph_pk_b64="PK",
+        sig_b64=sig,
+        sig_suite="ed25519",
+    )
+
+
+def test_verify_route_stale_tampered_route_id_false():
+    seed, pk = _identity()
+    sig = rc.sign_route_stale(seed=seed, route_id="r-1", stale_eph_pk_b64="PK")
+    assert not rc.verify_route_stale(
+        identity_pk=pk,
+        route_id="r-2",
+        stale_eph_pk_b64="PK",
+        sig_b64=sig,
+        sig_suite="ed25519",
+    )
+
+
+def test_verify_route_stale_tampered_stale_pk_false():
+    seed, pk = _identity()
+    sig = rc.sign_route_stale(seed=seed, route_id="r-1", stale_eph_pk_b64="PK")
+    assert not rc.verify_route_stale(
+        identity_pk=pk,
+        route_id="r-1",
+        stale_eph_pk_b64="OTHER",
+        sig_b64=sig,
+        sig_suite="ed25519",
+    )
+
+
+@pytest.mark.parametrize("bad_sig", ["", "!!!not-b64!!!", "AAAA", "x" * 100])
+def test_verify_route_stale_malformed_sig_false_not_raise(bad_sig):
+    """Garbage / wrong-length signatures return False — matching
+    ``crypto.verify_ed25519``'s posture — never raise."""
+    _seed, pk = _identity()
+    assert (
+        rc.verify_route_stale(
+            identity_pk=pk,
+            route_id="r-1",
+            stale_eph_pk_b64="PK",
+            sig_b64=bad_sig,
+            sig_suite="ed25519",
+        )
+        is False
+    )
+
+
+def test_verify_route_stale_bad_identity_pk_false_not_raise():
+    seed, _pk = _identity()
+    sig = rc.sign_route_stale(seed=seed, route_id="r-1", stale_eph_pk_b64="PK")
+    assert (
+        rc.verify_route_stale(
+            identity_pk=b"short",
+            route_id="r-1",
+            stale_eph_pk_b64="PK",
+            sig_b64=sig,
+            sig_suite="ed25519",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("suite", ["", "ED25519", "ed25519+mldsa65", "rsa"])
+def test_verify_route_stale_unknown_suite_raises(suite):
+    """An unknown ``sig_suite`` is rejected outright — never verified
+    under a default algorithm — so a future PQ migration can't be
+    downgraded by a peer stripping the tag."""
+    seed, pk = _identity()
+    sig = rc.sign_route_stale(seed=seed, route_id="r-1", stale_eph_pk_b64="PK")
+    with pytest.raises(rc.UnsupportedRouteStaleSuite):
+        rc.verify_route_stale(
+            identity_pk=pk,
+            route_id="r-1",
+            stale_eph_pk_b64="PK",
+            sig_b64=sig,
+            sig_suite=suite,
         )

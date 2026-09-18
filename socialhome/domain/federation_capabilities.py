@@ -403,7 +403,20 @@ from __future__ import annotations
 #:   loss, no auto-follow). Per-user surface, not space-scoped — its lag affects
 #:   only the households tracking the moved user, so it is deliberately kept out
 #:   of the per-space compatibility banner.
-OURS: int = 27
+#: * **v_28** (2026-09-17) — mesh route-stale nack:
+#:   :data:`FederationEventType.SPACE_ROUTE_STALE`. A ``SPACE_ROUTED`` target
+#:   that has no cached ephemeral private half for the ``target_eph_pk`` an
+#:   envelope was sealed under (it restarted; the key lived only in RAM) signs
+#:   ``space-route-stale:v1:<route_id>:<stale_eph_pk>`` with its identity key
+#:   and sends the nack back along the reverse path; the origin verifies it,
+#:   drops the cached route, and retransmits once via fresh discovery. Hops
+#:   gate the forward / emit on :data:`FederationCapability.MIN_FOR_ROUTE_STALE_NACK`.
+#:   **Best-effort.** Older-peer fallback: a sub-v_28 hop drops the nack and
+#:   behaviour is today's — the origin keeps sealing under the dead key until
+#:   ``route_discovery.ROUTE_CACHE_TTL_S`` expires (#648 window). Space-scoped
+#:   (the stuck envelopes are space content), so it appears in the per-space
+#:   compatibility banner.
+OURS: int = 28
 
 
 class FederationCapability:
@@ -649,6 +662,19 @@ class FederationCapability:
     #: banner.
     MIN_FOR_USER_MOVE = 27
 
+    #: Minimum proto_version where a hop knows
+    #: :data:`FederationEventType.SPACE_ROUTE_STALE` — the signed nack a
+    #: ``SPACE_ROUTED`` target sends back along the reverse path when it
+    #: has no cached ephemeral private half for the pub an envelope was
+    #: sealed under (post-restart). A hop forwards / emits the nack only
+    #: to a peer ≥ v_28; a sub-v_28 hop drops it and behaviour is
+    #: today's — the origin keeps sealing under the stale key until
+    #: ``route_discovery.ROUTE_CACHE_TTL_S`` expires, then rediscovers.
+    #: Best-effort: the nack shortens the outage, its absence never
+    #: loses data. Space-scoped (the stuck envelopes carry space
+    #: content), so it appears in the per-space compatibility banner.
+    MIN_FOR_ROUTE_STALE_NACK = 28
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -713,6 +739,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_USER_MOVE,
         "User move-out link",
     ),
+    (
+        FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
+        "Mesh route-stale nack",
+    ),
 ]
 
 
@@ -762,6 +792,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE,
         FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP,
         FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS,
+        FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
     }
 )
 

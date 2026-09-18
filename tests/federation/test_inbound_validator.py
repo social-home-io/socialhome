@@ -74,6 +74,27 @@ async def test_parse_json_rejects_missing_fields():
         await step(ctx)
 
 
+async def test_parse_json_rejects_unknown_event_type():
+    step = make_parse_json(loads=_loads)
+    ctx = InboundContext(
+        raw_body=orjson.dumps(_minimal_envelope(event_type="not_a_real_event")),
+    )
+    with pytest.raises(ValueError, match="Unknown event_type"):
+        await step(ctx)
+
+
+async def test_parse_json_accepts_space_route_stale():
+    """The route-stale nack is a first-class ``FederationEventType`` —
+    the §24.11 parse step must let it through to instance lookup /
+    signature verify rather than rejecting it as unknown."""
+    step = make_parse_json(loads=_loads)
+    ctx = InboundContext(
+        raw_body=orjson.dumps(_minimal_envelope(event_type="space_route_stale")),
+    )
+    await step(ctx)
+    assert ctx.envelope["event_type"] == FederationEventType.SPACE_ROUTE_STALE
+
+
 # ─── Step 2: lookup_instance ─────────────────────────────────────────────
 
 

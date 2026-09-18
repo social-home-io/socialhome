@@ -784,7 +784,7 @@ async def test_on_route_found_resolved_pending_is_ignored():
     nodes = _build_mesh({"a": ["b"], "b": ["a"]})
     svc_a = nodes["a"].service
     loop = asyncio.get_event_loop()
-    fut: asyncio.Future[tuple[list[str], str] | None] = loop.create_future()
+    fut: asyncio.Future[tuple[list[str], str, str] | None] = loop.create_future()
     pending = _PendingDiscovery(future=fut, target="b")
     pending.resolved = True  # already decided
     svc_a._pending["rid-late"] = pending
@@ -875,10 +875,10 @@ async def test_resolve_after_window_no_responses_resolves_to_none():
     nodes = _build_mesh({"a": []}, discovery_timeout_s=0.01)
     svc_a = nodes["a"].service
     loop = asyncio.get_event_loop()
-    fut: asyncio.Future[tuple[list[str], str] | None] = loop.create_future()
+    fut: asyncio.Future[tuple[list[str], str, str] | None] = loop.create_future()
     pending = _PendingDiscovery(future=fut, target="t")
     # A single response without a target_eph_pk — gets filtered out.
-    pending.responses.append((["a", "t"], ""))
+    pending.responses.append((["a", "t"], "", "pk-t"))
     svc_a._pending["rid-empty"] = pending
     await svc_a._resolve_after_window("rid-empty")
     assert pending.resolved is True
@@ -901,10 +901,10 @@ async def test_resolve_after_window_skips_set_result_when_future_already_done():
     nodes = _build_mesh({"a": []}, discovery_timeout_s=0.01)
     svc_a = nodes["a"].service
     loop = asyncio.get_event_loop()
-    fut: asyncio.Future[tuple[list[str], str] | None] = loop.create_future()
+    fut: asyncio.Future[tuple[list[str], str, str] | None] = loop.create_future()
     fut.set_result(None)  # already done
     pending = _PendingDiscovery(future=fut, target="t")
-    pending.responses.append((["a", "b"], "pub-x"))
+    pending.responses.append((["a", "b"], "pub-x", "pk-b"))
     svc_a._pending["rid-done"] = pending
     # Should not raise even though the future is already done.
     await svc_a._resolve_after_window("rid-done")
@@ -918,11 +918,11 @@ async def test_resolve_after_window_no_valid_skips_set_result_when_done():
     nodes = _build_mesh({"a": []}, discovery_timeout_s=0.01)
     svc_a = nodes["a"].service
     loop = asyncio.get_event_loop()
-    fut: asyncio.Future[tuple[list[str], str] | None] = loop.create_future()
+    fut: asyncio.Future[tuple[list[str], str, str] | None] = loop.create_future()
     fut.set_result(None)  # already done
     pending = _PendingDiscovery(future=fut, target="t")
     # No valid responses (every response missing target_eph_pk).
-    pending.responses.append((["a", "t"], ""))
+    pending.responses.append((["a", "t"], "", "pk-t"))
     svc_a._pending["rid-novalid-done"] = pending
     await svc_a._resolve_after_window("rid-novalid-done")
     assert pending.resolved is True
@@ -942,10 +942,10 @@ async def test_prune_expired_drops_expired_entries():
     svc._caller_cache["old-call"] = ("peer", now - 1.0)
     svc._caller_cache["fresh-call"] = ("peer", now + 60.0)
     svc._route_cache["old-tgt"] = _CachedRoute(
-        path=["a"], target_eph_pk="x", expires_at=now - 1.0
+        path=["a"], target_eph_pk="x", target_identity_pk="pk-x", expires_at=now - 1.0
     )
     svc._route_cache["fresh-tgt"] = _CachedRoute(
-        path=["a"], target_eph_pk="y", expires_at=now + 60.0
+        path=["a"], target_eph_pk="y", target_identity_pk="pk-y", expires_at=now + 60.0
     )
     svc._target_eph_state["old-pub"] = ("priv-1", now - 1.0)
     svc._target_eph_state["fresh-pub"] = ("priv-2", now + 60.0)
@@ -1124,7 +1124,8 @@ async def test_legit_signed_route_found_is_accepted():
     """A ROUTE_FOUND genuinely signed by the target identity (whose
     ``derive_instance_id == target``) over THIS request, with
     ``path[-1] == target``, is collected and resolves to
-    ``(path, target_eph)``."""
+    ``(path, target_eph, target_identity_pk)`` — the pk the origin just
+    verified rides along so the cache can pin it."""
     nodes = _build_mesh({"origin": [], "target": []})
     origin = nodes["origin"]
     target = nodes["target"]
@@ -1142,7 +1143,11 @@ async def test_legit_signed_route_found_is_accepted():
     result = await _drive_origin_route_found(
         origin, target_instance_id=target_id, payload=legit
     )
-    assert result == ([origin.instance_id, target_id], target_eph)
+    assert result == (
+        [origin.instance_id, target_id],
+        target_eph,
+        target.fed.own_identity_pk.hex(),
+    )
 
 
 async def test_route_found_with_tampered_signature_is_dropped():
@@ -1614,6 +1619,51 @@ async def test_invalidate_if_older_than_lifts_the_cooldown_when_it_drops():
     assert target not in svc._negative_until
 
 
+async def test_invalidate_if_eph_drops_only_the_matching_key():
+    """The origin's SPACE_ROUTE_STALE handler invalidates conditionally: a
+    nack names the eph it was sealed under, and only a cache entry still
+    pointing at THAT key is stale. A route already rebuilt under a fresh
+    key survives a late nack for the old one (no re-flood)."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    target = nodes["b"].instance_id
+
+    assert await svc.discover_route(target) is not None
+    live_eph = svc._route_cache[target].target_eph_pk
+    _priv, other_eph = routed_crypto.generate_ephemeral_keypair()
+
+    # Names a key the cache does not point at → keep, report False.
+    assert await svc.invalidate_if_eph(target, target_eph_pk=other_eph) is False
+    assert target in svc._route_cache
+
+    # Names the live key → drop, report True.
+    assert await svc.invalidate_if_eph(target, target_eph_pk=live_eph) is True
+    assert target not in svc._route_cache
+
+
+async def test_invalidate_if_eph_is_a_noop_without_a_cached_route():
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    assert await svc.invalidate_if_eph("nobody", target_eph_pk="any") is False
+
+
+async def test_invalidate_if_eph_lifts_the_cooldown_when_it_drops():
+    """Same contract as ``invalidate`` / ``invalidate_if_older_than``: a drop
+    is an explicit "go look again", so the negative cooldown goes with it —
+    and a keep leaves it alone."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    target = nodes["b"].instance_id
+    assert await svc.discover_route(target) is not None
+    live_eph = svc._route_cache[target].target_eph_pk
+    svc._negative_until[target] = time.monotonic() + 60.0
+
+    assert await svc.invalidate_if_eph(target, target_eph_pk="stale") is False
+    assert target in svc._negative_until
+    assert await svc.invalidate_if_eph(target, target_eph_pk=live_eph) is True
+    assert target not in svc._negative_until
+
+
 async def test_cooldown_remaining_exposes_the_negative_window():
     """Callers need to tell "we didn't probe" apart from "we probed and
     failed".
@@ -1658,3 +1708,105 @@ async def test_cooldown_remaining_exposes_the_negative_window():
     # An expired window reads as zero.
     svc._negative_until[unknown] = time.monotonic() - 1.0
     assert svc.cooldown_remaining(unknown) == 0.0
+
+
+# ── Target identity pk pinned at discovery (route-stale nack, T3) ──────
+
+
+async def test_cached_route_pins_the_verified_target_identity_pk():
+    """The ``_CachedRoute`` written by a normal resolve carries the identity
+    pk the origin verified in ``_verify_route_found`` — the key a later
+    ``SPACE_ROUTE_STALE`` nack is checked against — and the pure accessor
+    exposes it."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    a, b = nodes["a"], nodes["b"]
+    assert await a.service.discover_route(b.instance_id) is not None
+    cached = a.service._route_cache[b.instance_id]
+    assert cached.target_identity_pk == b.fed.own_identity_pk.hex()
+    assert (
+        a.service.cached_target_identity_pk(b.instance_id)
+        == b.fed.own_identity_pk.hex()
+    )
+
+
+async def test_cached_target_identity_pk_is_none_without_a_live_entry():
+    """``None`` when nothing is cached, after ``invalidate``, and once the
+    entry has expired — and asking never mutates the cache."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    a, b = nodes["a"], nodes["b"]
+    assert a.service.cached_target_identity_pk(b.instance_id) is None
+    assert await a.service.discover_route(b.instance_id) is not None
+    assert a.service.cached_target_identity_pk(b.instance_id) is not None
+    await a.service.invalidate(b.instance_id)
+    assert a.service.cached_target_identity_pk(b.instance_id) is None
+    # Expired-but-not-yet-pruned entry reads as absent, and stays in place
+    # (the accessor is a pure read — pruning is ``_prune_expired``'s job).
+    a.service._route_cache[b.instance_id] = _CachedRoute(
+        path=[a.instance_id, b.instance_id],
+        target_eph_pk="eph",
+        target_identity_pk="pk",
+        expires_at=time.monotonic() - 1.0,
+    )
+    assert a.service.cached_target_identity_pk(b.instance_id) is None
+    assert b.instance_id in a.service._route_cache
+
+
+async def test_local_target_pins_own_identity_pk():
+    nodes = _build_mesh({"a": []})
+    a = nodes["a"]
+    assert await a.service.discover_route(a.instance_id) is not None
+    assert (
+        a.service.cached_target_identity_pk(a.instance_id)
+        == a.fed.own_identity_pk.hex()
+    )
+
+
+async def test_resolve_after_window_propagates_the_identity_pk_of_the_pick():
+    """The random shortest-path pick carries its own identity pk through
+    to the future — every candidate here has the same (verified) target,
+    so the pk is the same for all, but it must be the one that travelled
+    with the picked response, not a default."""
+    nodes = _build_mesh({"a": []}, discovery_timeout_s=0.01)
+    svc_a = nodes["a"].service
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future[tuple[list[str], str, str] | None] = loop.create_future()
+    pending = _PendingDiscovery(future=fut, target="t")
+    pending.responses.append((["a", "x", "t"], "eph-long", "pk-t"))
+    pending.responses.append((["a", "t"], "eph-short", "pk-t"))
+    svc_a._pending["rid-pk"] = pending
+    await svc_a._resolve_after_window("rid-pk")
+    assert fut.result() == (["a", "t"], "eph-short", "pk-t")
+
+
+async def test_late_route_found_pins_the_identity_pk_too():
+    """The late-answer path caches through the same ``_cache_route`` and
+    must pin the pk as well — otherwise a nack for a route learned late
+    would find an empty pin."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.01)
+    origin = nodes["a"].service
+    target_id = nodes["b"].instance_id
+    nodes["a"].fed.peers.clear()
+    assert await origin.discover_route(target_id) is None
+    request_id = list(origin._origin_requests)[0]
+    eph_pk = nodes["b"].service._generate_target_eph(time.monotonic())
+    payload = _signed_route_found_payload(
+        request_id=request_id,
+        path=[nodes["a"].instance_id, target_id],
+        target_eph_pk_b64=eph_pk,
+        signer_seed=nodes["b"].fed.own_identity_seed,
+        signer_pk=nodes["b"].fed.own_identity_pk,
+    )
+    await origin._on_route_found(
+        FederationEvent(
+            msg_id="late-pk",
+            event_type=FederationEventType.SPACE_ROUTE_FOUND,
+            from_instance=target_id,
+            to_instance=nodes["a"].instance_id,
+            timestamp="2026-05-22T00:00:00Z",
+            payload=payload,
+        )
+    )
+    assert (
+        origin.cached_target_identity_pk(target_id)
+        == nodes["b"].fed.own_identity_pk.hex()
+    )

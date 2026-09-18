@@ -1198,9 +1198,74 @@ def _make_mesh_pair(
     # the retry after a failed routed ship), so it must be an AsyncMock —
     # a bare MagicMock attribute would return a non-awaitable.
     route_service.invalidate = AsyncMock()
+    # Pure read of the identity pk pinned at discovery; ``send_routed`` gets
+    # it as ``target_identity_pk`` so a SPACE_ROUTE_STALE nack can be
+    # verified against the key WE verified. Default: nothing pinned.
+    route_service.cached_target_identity_pk = MagicMock(return_value=None)
     routed_handler = MagicMock()
     routed_handler.send_routed = send_routed
     return route_service, routed_handler, discover_route, send_routed
+
+
+@pytest.mark.asyncio
+async def test_attach_mesh_hands_the_route_service_to_the_routed_handler():
+    """``attach_mesh`` is the one place that holds both halves, so it wires
+    ``SpaceRoutedHandler.attach_route_service`` — no ``app.py`` change."""
+    km = _make_kek_manager()
+    svc, _ = _make_service(
+        federation_repo=InMemoryFederationRepo(),
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+    )
+    route_service, routed_handler, _d, _s = _make_mesh_pair()
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+    routed_handler.attach_route_service.assert_called_once_with(route_service)
+
+
+@pytest.mark.asyncio
+async def test_send_with_mesh_fallback_passes_the_pinned_target_identity_pk():
+    """Both routed sends (first attempt and the post-failure retry) carry
+    the pk ``cached_target_identity_pk`` returns — ``""`` when nothing is
+    pinned."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(inst, status=PairingStatus.PENDING_SENT)
+    await fed_repo.save_instance(inst)
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+    )
+    path = [svc.own_instance_id, "hop", inst.id]
+    route_service, routed_handler, _d, send_routed = _make_mesh_pair(
+        route=(path, "eph-pk-b64"),
+    )
+    route_service.cached_target_identity_pk = MagicMock(return_value="ab" * 32)
+    send_routed.side_effect = [RuntimeError("relay gone"), "route-id-2"]
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"post_id": "p1"},
+    )
+    assert result.ok is True
+    assert send_routed.await_count == 2
+    for call in send_routed.await_args_list:
+        assert call.kwargs["target_identity_pk"] == "ab" * 32
+    route_service.cached_target_identity_pk.assert_called_with(inst.id)
+
+    # Nothing pinned → empty string, never ``None``.
+    route_service.cached_target_identity_pk = MagicMock(return_value=None)
+    send_routed.side_effect = None
+    send_routed.reset_mock()
+    await svc.send_with_mesh_fallback(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"post_id": "p2"},
+    )
+    assert send_routed.await_args.kwargs["target_identity_pk"] == ""
 
 
 @pytest.mark.asyncio

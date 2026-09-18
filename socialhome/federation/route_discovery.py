@@ -146,6 +146,13 @@ def cap_by_expiry(
     return dict(sorted_items[:cap])
 
 
+#: Internal resolve shape: ``(path, target_eph_pk_b64, target_identity_pk)``.
+#: The public :meth:`RouteDiscoveryService.discover_route` return stays the
+#: two-tuple ``(path, target_eph_pk_b64)``; the identity pk travels only far
+#: enough to be pinned on the :class:`_CachedRoute`.
+_ResolvedRoute = tuple[list[str], str, str]
+
+
 @dataclass(slots=True)
 class _PendingDiscovery:
     """Origin-side bookkeeping for an in-flight discovery probe.
@@ -156,13 +163,15 @@ class _PendingDiscovery:
     single fast hop doesn't pay the full timeout window.
     """
 
-    future: asyncio.Future[tuple[list[str], str] | None]
+    future: asyncio.Future[_ResolvedRoute | None]
     target: str
-    #: Each response is ``(path, target_eph_pk_b64)``. The target
-    #: ephemeral pub is required to seal the inner payload before
-    #: the first SPACE_ROUTED hits the wire — see
-    #: :mod:`socialhome.federation.routed_crypto`.
-    responses: list[tuple[list[str], str]] = field(default_factory=list)
+    #: Each response is ``(path, target_eph_pk_b64, target_identity_pk)``.
+    #: The target ephemeral pub is required to seal the inner payload
+    #: before the first SPACE_ROUTED hits the wire — see
+    #: :mod:`socialhome.federation.routed_crypto`. The identity pk (hex)
+    #: is the one :meth:`RouteDiscoveryService._verify_route_found` just
+    #: checked; it rides along so the cache can pin it.
+    responses: list[_ResolvedRoute] = field(default_factory=list)
     # ``resolved`` flips True once the resolver task fires so a late
     # ROUTE_FOUND for an already-decided request is a no-op.
     resolved: bool = False
@@ -176,6 +185,13 @@ class _CachedRoute:
     #: just to refresh the encryption key — origin can re-seal under
     #: the same target pub for the duration of the cache window.
     target_eph_pk: str
+    #: Target's Ed25519 identity pk (hex) as verified by
+    #: ``_verify_route_found`` (``derive_instance_id(pk) == target`` +
+    #: eph-key signature). Pinned so the origin can check a later
+    #: ``SPACE_ROUTE_STALE`` nack against the key *it* verified, not
+    #: just the one the nack carries. For the local short-circuit it is
+    #: our own identity pk.
+    target_identity_pk: str
     expires_at: float
 
 
@@ -326,6 +342,7 @@ class RouteDiscoveryService:
             self._route_cache[target_instance_id] = _CachedRoute(
                 path=local_path,
                 target_eph_pk=target_eph_pk_b64,
+                target_identity_pk=self._federation.own_identity_pk.hex(),
                 expires_at=now + self._cache_ttl_s,
             )
             return list(local_path), target_eph_pk_b64
@@ -390,7 +407,7 @@ class RouteDiscoveryService:
 
         request_id = secrets.token_hex(16)
         loop = asyncio.get_event_loop()
-        fut: asyncio.Future[tuple[list[str], str] | None] = loop.create_future()
+        fut: asyncio.Future[_ResolvedRoute | None] = loop.create_future()
         self._pending[request_id] = _PendingDiscovery(
             future=fut,
             target=target_instance_id,
@@ -442,7 +459,7 @@ class RouteDiscoveryService:
         # responses come back (hop budget exhausted, every peer
         # unreachable), the hard cap is the only thing that resolves
         # the wait.
-        result: tuple[list[str], str] | None
+        result: _ResolvedRoute | None
         try:
             result = await asyncio.wait_for(
                 fut,
@@ -462,7 +479,7 @@ class RouteDiscoveryService:
                 time.monotonic() + ROUTE_NEGATIVE_COOLDOWN_S
             )
             return None
-        path, target_eph_pk_b64 = result
+        path, target_eph_pk_b64, target_identity_pk = result
         # Anchored on the moment the probe was SENT, not on resolution. The
         # target minted its ephemeral strictly after our probe left, so
         # probe-start anchoring removes the discovery-latency term exactly
@@ -471,9 +488,10 @@ class RouteDiscoveryService:
             target_instance_id=target_instance_id,
             path=path,
             target_eph_pk=target_eph_pk_b64,
+            target_identity_pk=target_identity_pk,
             anchored_at=now,
         )
-        return result
+        return path, target_eph_pk_b64
 
     def _cache_route(
         self,
@@ -481,9 +499,14 @@ class RouteDiscoveryService:
         target_instance_id: str,
         path: list[str],
         target_eph_pk: str,
+        target_identity_pk: str,
         anchored_at: float,
     ) -> None:
         """Store a discovered route, anchored on ``anchored_at``.
+
+        ``target_identity_pk`` is the hex identity pk the caller has
+        already verified against ``target_instance_id`` — this method
+        pins, it does not check.
 
         ``anchored_at`` must never be later than the moment the target
         minted the ephemeral, or our window could outlive its private half
@@ -494,9 +517,24 @@ class RouteDiscoveryService:
         self._route_cache[target_instance_id] = _CachedRoute(
             path=list(path),
             target_eph_pk=target_eph_pk,
+            target_identity_pk=target_identity_pk,
             expires_at=anchored_at + self._cache_ttl_s,
         )
         self._negative_until.pop(target_instance_id, None)
+
+    def cached_target_identity_pk(self, target_instance_id: str) -> str | None:
+        """Hex identity pk pinned on the live cached route to
+        ``target_instance_id``, or ``None`` when no unexpired entry exists.
+
+        Pure read — never prunes, probes, or extends anything. Read by
+        :meth:`FederationService.send_with_mesh_fallback` right after
+        :meth:`discover_route` so the routed send carries the key the
+        origin will hold a ``SPACE_ROUTE_STALE`` nack against.
+        """
+        cached = self._route_cache.get(target_instance_id)
+        if cached is None or cached.expires_at <= time.monotonic():
+            return None
+        return cached.target_identity_pk
 
     def cooldown_remaining(self, target_instance_id: str) -> float:
         """Seconds left on the negative cooldown for ``target_instance_id``.
@@ -555,6 +593,34 @@ class RouteDiscoveryService:
         if minted_at >= cutoff:
             # Minted after the cutoff, so it came from a probe this
             # requester's current process answered. Keep it.
+            return False
+        self._route_cache.pop(target_instance_id, None)
+        self._negative_until.pop(target_instance_id, None)
+        return True
+
+    async def invalidate_if_eph(
+        self,
+        target_instance_id: str,
+        *,
+        target_eph_pk: str,
+    ) -> bool:
+        """Drop the cached route only if it still points at ``target_eph_pk``.
+
+        The origin-side ``SPACE_ROUTE_STALE`` handler calls this with the
+        eph the nacked envelope was sealed under. A blanket
+        :meth:`invalidate` there is wrong once several envelopes were
+        sealed under the same dead key: the first nack rebuilds the route
+        under a fresh key, and every later nack for the OLD key would
+        evict that fresh route and re-flood — one flood per lost envelope
+        instead of one per restart. Only an entry whose ``target_eph_pk``
+        is the nacked key is stale; anything else is already the rebuilt
+        route and stays.
+
+        Returns True when the entry was dropped (the negative cooldown goes
+        with it, same as :meth:`invalidate`). Never probes.
+        """
+        cached = self._route_cache.get(target_instance_id)
+        if cached is None or cached.target_eph_pk != target_eph_pk:
             return False
         self._route_cache.pop(target_instance_id, None)
         self._negative_until.pop(target_instance_id, None)
@@ -740,7 +806,7 @@ class RouteDiscoveryService:
                 from_instance=event.from_instance,
             ):
                 return
-            pending.responses.append((path, target_eph_pk))
+            pending.responses.append((path, target_eph_pk, target_identity_pk))
             if len(pending.responses) == 1:
                 # First response — start the collection window.
                 asyncio.create_task(self._resolve_after_window(request_id))
@@ -775,6 +841,7 @@ class RouteDiscoveryService:
                     target_instance_id=target,
                     path=path,
                     target_eph_pk=target_eph_pk,
+                    target_identity_pk=target_identity_pk,
                     anchored_at=now,
                 )
                 log.info(
@@ -952,20 +1019,24 @@ class RouteDiscoveryService:
         pending.resolved = True
         # Defence in depth: drop responses that arrived without a
         # target_eph_pk (a sub-v_6 / malformed peer might ship one).
-        valid = [(p, k) for (p, k) in pending.responses if k]
+        valid = [r for r in pending.responses if r[1]]
         if not valid:
             if not pending.future.done():
                 pending.future.set_result(None)
             return
-        shortest = min(len(p) for (p, _k) in valid)
-        candidates = [(p, k) for (p, k) in valid if len(p) == shortest]
+        shortest = min(len(r[0]) for r in valid)
+        candidates = [r for r in valid if len(r[0]) == shortest]
         # ``secrets.choice`` provides the random tie-break per the
         # design — random rotation across candidates spreads load
         # across equally-short relays and avoids pinning every
-        # discovery on the lexicographically-first hop.
-        picked_path, picked_eph = secrets.choice(candidates)
+        # discovery on the lexicographically-first hop. The identity pk
+        # travels with the pick so the cache pins the key that came
+        # with THIS response.
+        picked_path, picked_eph, picked_identity_pk = secrets.choice(candidates)
         if not pending.future.done():
-            pending.future.set_result((list(picked_path), picked_eph))
+            pending.future.set_result(
+                (list(picked_path), picked_eph, picked_identity_pk)
+            )
 
     def _generate_target_eph(self, now: float) -> str:
         """Mint a fresh target-side ephemeral keypair, stash the priv

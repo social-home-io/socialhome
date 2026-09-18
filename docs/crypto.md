@@ -176,6 +176,18 @@ probe and ships the public via `SPACE_ROUTE_FOUND`; the origin
 generates its own ephemeral on `send_routed` and stashes the priv
 for the matching reply. Relays only ever see the opaque ciphertext.
 
+A target that cannot open a routed envelope (its private half died with
+a restart) answers with a `SPACE_ROUTE_STALE` nack whose `sig` is an
+Ed25519 signature by the target's **identity** key over
+``b"space-route-stale:v1:" + route_id + b":" + stale_eph_pk``
+(`routed_crypto.sign_route_stale` / `verify_route_stale`), tagged
+`sig_suite` (`ROUTE_STALE_SIG_SUITE_ED25519`; receivers check it against
+`SUPPORTED_ROUTE_STALE_SIG_SUITES` and reject anything unknown — no
+default). Like `target_eph_sig` on `SPACE_ROUTE_FOUND` and the per-user
+`user_sig_suite` binding it is Ed25519-only today even where
+`federation_sig_suite` runs the hybrid; the tag plus the hard reject make
+the `"ed25519+mldsa65"` sibling a drop-in.
+
 Both halves live **in memory only** and are bounded by
 `DEFAULT_TARGET_EPH_TTL_S` (300 s) measured from the moment the key is
 *minted* — never extended on use. That is a deliberate forward-secrecy
