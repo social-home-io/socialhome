@@ -34,9 +34,14 @@ Explicit non-goals:
 * **Deniability / OTR-style forward secrecy** — we don't rotate per-
   message keys. §12.5 DM relay is the closest thing to deniability.
 * **Hiding federation metadata from a global adversary** — the GFS
-  sees routing metadata by design, including `from_instance` on
-  GFS-relayed public/global-space events (it needs the sender to
-  authorize and route the relay). Content stays opaque to it.
+  necessarily sees `space_id` (to fan out), the subscriber set (it is the
+  directory), source IPs and timing. Content stays opaque to it. Hiding
+  the *relaying household's identity* from the GFS is **a goal, not a
+  non-goal**: `from_instance` is still sent in the clear on GFS-relayed
+  public/global-space events today, which is a known leak — the GFS does
+  not need it once a relay is authenticated by the space-authority
+  signature alone. Its removal is tracked as a follow-up to #675; do not
+  rely on the leak or document it as intended.
 * **Anonymity** — instance IDs are derived from identity public keys
   and are persistent. Users consent to this by accepting the pairing.
 
@@ -157,8 +162,13 @@ per author (`space_public_author.build_signed_author_inner`); the
 envelope around it is **space-authority-signed**
 (`authority_sig.sign_authority_event`) and relayed by the content-blind
 GFS, which verifies only that signature against the space pubkey it
-already pins. `from_instance` travels in the clear because the GFS needs
-it to authorize and route the relay. The earlier *sealed-sender*
+already pins. `from_instance` currently also travels in the clear — a
+known leak of the relayer's identity toward the GFS. It is *not* needed:
+the authority signature already authorizes the relay and `space_id`
+already routes it; the sender-exclusion on fan-out it enables is an
+optimisation the subscriber's post-id dedupe makes unnecessary. Removing
+it (authority-signature-only authentication of `/gfs/publish`) is the
+follow-up to #675. The earlier *sealed-sender*
 construction (`federation/sealed_sender.py` — sender id encrypted under
 the space key plus an identity-key `outer_signature`) is **not wired into
 any federation path**; the module remains as a standalone primitive with
