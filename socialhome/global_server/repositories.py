@@ -238,10 +238,11 @@ class SqliteGfsFederationRepo:
             INSERT INTO global_spaces(
                 space_id, owning_instance, name, description, about_markdown,
                 cover_url, icon_url, min_age, category, join_mode,
+                allow_subscribers,
                 accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
                 published_at, identity_public_key, withdrawn
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                      COALESCE(?, datetime('now')), ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
@@ -252,6 +253,7 @@ class SqliteGfsFederationRepo:
                 min_age = excluded.min_age,
                 category = excluded.category,
                 join_mode = excluded.join_mode,
+                allow_subscribers = excluded.allow_subscribers,
                 accent_color = excluded.accent_color,
                 primary_color = excluded.primary_color,
                 status = excluded.status,
@@ -280,6 +282,7 @@ class SqliteGfsFederationRepo:
                 space.min_age,
                 space.category,
                 normalize_join_mode(space.join_mode),
+                1 if space.allow_subscribers else 0,
                 space.accent_color,
                 space.primary_color,
                 space.status,
@@ -1156,8 +1159,12 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         min_age=int(row.get("min_age") or 0),
         category=row.get("category", "general"),
         # Fail-closed: a row written before 0009 (or by a cluster peer that
-        # sent no join mode) reads as invite-only — listed, not readable.
+        # sent no join mode) reads as invite-only — the narrowest way in.
         join_mode=normalize_join_mode(row.get("join_mode")),
+        # Fail-closed likewise: a row written before 0010 (or by a cluster
+        # peer that sent no flag) is NOT publicly readable until the owner's
+        # next signed publish says it is.
+        allow_subscribers=bool(row.get("allow_subscribers") or 0),
         accent_color=row.get("accent_color", "#6366f1"),
         primary_color=row.get("primary_color") or "#6366f1",
         status=row.get("status", "pending"),

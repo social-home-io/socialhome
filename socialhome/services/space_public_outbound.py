@@ -73,7 +73,7 @@ from ..authority_sig import (
     strip_authority_sig_fields,
 )
 from ..domain.events import SpacePostCreated
-from ..domain.space import PUBLIC_READABLE_JOIN_MODES, PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import (
     build_signed_author_inner,
@@ -162,14 +162,15 @@ class SpacePublicOutbound:
         space = await self._spaces.get(event.space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
             return
-        # An invite-only public/global space is LISTED in the GFS directory
-        # (discovery + invites) but is NOT publicly readable: only invited
-        # members get content. Stop the relay at the source — nothing of its
-        # content stream ever reaches the GFS.
-        if space.join_mode not in PUBLIC_READABLE_JOIN_MODES:
+        # Readability is an explicit admin opt-in, independent of join_mode: a
+        # public/global space with ``allow_subscribers`` OFF is LISTED in the
+        # GFS directory (discovery + invites) but is NOT publicly readable —
+        # only members get content. Stop the relay at the source, so nothing
+        # of its content stream ever reaches the GFS.
+        if not space.features.allow_subscribers:
             log.debug(
-                "space_public.outbound: space %s is invite_only — not publicly "
-                "readable, skipping relay",
+                "space_public.outbound: space %s does not allow subscribers — "
+                "not publicly readable, skipping relay",
                 event.space_id,
             )
             return
@@ -279,12 +280,12 @@ class SpacePublicOutbound:
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
             return
         # Same gate on the owner-offline path: a seed-holder must not launder
-        # another member's post into an invite-only space's (nonexistent)
-        # public stream.
-        if space.join_mode not in PUBLIC_READABLE_JOIN_MODES:
+        # another member's post into the (nonexistent) public stream of a
+        # space that admits no subscribers.
+        if not space.features.allow_subscribers:
             log.debug(
-                "space_public.outbound: space %s is invite_only — not publicly "
-                "readable, skipping remote-authored relay",
+                "space_public.outbound: space %s does not allow subscribers — "
+                "not publicly readable, skipping remote-authored relay",
                 event.space_id,
             )
             return

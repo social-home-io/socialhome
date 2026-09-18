@@ -102,6 +102,32 @@ async def test_save_and_get_space(env):
     assert fetched.name == "TestSpace"
 
 
+async def test_save_round_trips_allow_subscribers(env):
+    """Migration 0051's ``spaces.allow_subscribers`` persists through
+    ``save`` (both INSERT and the ON CONFLICT update) and comes back on
+    ``SpaceFeatures``. It defaults OFF — a space is private until its owner
+    says otherwise — and the column is stored as 0/1, not a bool."""
+    from dataclasses import replace
+
+    space = _space("sp-rd")
+    await env.repo.save(space)
+    got = await env.repo.get("sp-rd")
+    assert got is not None and got.features.allow_subscribers is False
+
+    await env.repo.save(replace(space, features=SpaceFeatures(allow_subscribers=True)))
+    got = await env.repo.get("sp-rd")
+    assert got is not None and got.features.allow_subscribers is True
+    row = await env.db.fetchone(
+        "SELECT allow_subscribers FROM spaces WHERE id=?", ("sp-rd",)
+    )
+    assert row["allow_subscribers"] == 1
+
+    # …and back off again, so the ON CONFLICT path is exercised both ways.
+    await env.repo.save(replace(space, features=SpaceFeatures()))
+    got = await env.repo.get("sp-rd")
+    assert got is not None and got.features.allow_subscribers is False
+
+
 async def test_set_and_get_space_seed_round_trips(env):
     """set_space_seed persists a non-NULL column; get_space_seed returns the
     original 32-byte seed; the stored column is KEK-wrapped (≠ plaintext)."""

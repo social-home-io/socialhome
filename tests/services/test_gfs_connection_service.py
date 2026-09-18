@@ -1164,9 +1164,58 @@ async def test_publish_body_carries_metadata_and_signature(env):
     # Phase 5a: the publish body ships the space's Ed25519 authority verify key
     # so the GFS can TOFU-pin it for space-authority-signed relays.
     assert body["identity_public_key"] == "aa" * 32
-    # The GFS needs the join mode to know whether the listing is publicly
-    # READABLE — an invite-only global space is listed but relays nothing.
+    # The membership gate travels so the directory can label the listing…
     assert body["join_mode"] == "open"
+    # …and the readability opt-in travels separately, because it — not the
+    # join mode — is what the GFS enforces on /gfs/subscribe. Off by default.
+    assert body["allow_subscribers"] is False
+    sig_b64 = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))
+
+
+async def test_publish_body_carries_allow_subscribers(env):
+    """The readability opt-in travels INSIDE the signed canonical body — the
+    GFS refuses a subscribe without it. Deliberately paired with
+    ``invite_only`` here: the two dials are independent, and this broadcast
+    shape (invited people post, anyone may follow) is exactly what the old
+    join-mode-as-readability model could not express."""
+    from socialhome.domain.space import (
+        JoinMode,
+        Space,
+        SpaceFeatures,
+        SpaceType,
+    )
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+    db, conn_repo = env
+    await conn_repo.save(_make_conn("gfs-rd", inbox_url="https://gfs.example"))
+    space_repo = SqliteSpaceRepo(db)
+    await space_repo.save(
+        Space(
+            id="sp-rd",
+            name="Broadcast",
+            owner_instance_id="alpha.home",
+            owner_username="alice",
+            identity_public_key="aa" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(allow_subscribers=True),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    kp = generate_identity_keypair()
+    session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
+    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=space_repo,
+        own_instance_id="alpha.home",
+        own_signing_key=kp.private_key,
+    )
+    await svc.publish_space("sp-rd", "gfs-rd")
+    body = session._last_body  # type: ignore[attr-defined]
+    assert body["allow_subscribers"] is True
+    assert body["join_mode"] == "invite_only"
     sig_b64 = body.pop("signature")
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig_b64))

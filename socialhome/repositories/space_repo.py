@@ -311,6 +311,7 @@ class SqliteSpaceRepo:
                 feature_stickies, feature_pages, feature_gallery, feature_bazaar,
                 posts_access, pages_access, stickies_access,
                 calendar_access, tasks_access,
+                allow_subscribers,
                 allow_subscriber_comment, allow_subscriber_react,
                 delegated_admin_authority,
                 allow_post_text, allow_post_image, allow_post_video,
@@ -321,7 +322,7 @@ class SqliteSpaceRepo:
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 55 placeholders, one per column listed above.
+                -- 56 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -331,6 +332,7 @@ class SqliteSpaceRepo:
                 ?, ?, ?, ?,                   -- feature_stickies, feature_pages, feature_gallery, feature_bazaar
                 ?, ?, ?,                      -- posts_access, pages_access, stickies_access
                 ?, ?,                         -- calendar_access, tasks_access
+                ?,                            -- allow_subscribers
                 ?, ?,                         -- allow_subscriber_comment, allow_subscriber_react
                 ?,                            -- delegated_admin_authority
                 ?, ?, ?,                      -- allow_post_text, allow_post_image, allow_post_video
@@ -366,6 +368,7 @@ class SqliteSpaceRepo:
                 stickies_access=excluded.stickies_access,
                 calendar_access=excluded.calendar_access,
                 tasks_access=excluded.tasks_access,
+                allow_subscribers=excluded.allow_subscribers,
                 allow_subscriber_comment=excluded.allow_subscriber_comment,
                 allow_subscriber_react=excluded.allow_subscriber_react,
                 delegated_admin_authority=excluded.delegated_admin_authority,
@@ -423,6 +426,7 @@ class SqliteSpaceRepo:
                 cols["stickies_access"],
                 cols["calendar_access"],
                 cols["tasks_access"],
+                cols["allow_subscribers"],
                 cols["allow_subscriber_comment"],
                 cols["allow_subscriber_react"],
                 cols["delegated_admin_authority"],

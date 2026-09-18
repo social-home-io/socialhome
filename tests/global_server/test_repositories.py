@@ -247,6 +247,42 @@ async def test_upsert_space_round_trips_join_mode(fed):
     assert (await fed.get_space("sp-jm2")).join_mode == "invite_only"
 
 
+async def test_upsert_space_round_trips_allow_subscribers(fed):
+    """The readability opt-in persists independently of ``join_mode``, and a
+    row written without it (migration 0010's default) reads as False."""
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="o2",
+            display_name="O",
+            public_key="aa" * 32,
+            inbox_url="http://o",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-rd",
+            owning_instance="o2",
+            status="active",
+            join_mode="invite_only",
+            allow_subscribers=True,
+        )
+    )
+    row = await fed.get_space("sp-rd")
+    assert row.allow_subscribers is True and row.join_mode == "invite_only"
+    # The dataclass default is the fail-closed one.
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-rd2",
+            owning_instance="o2",
+            status="active",
+            join_mode="open",
+        )
+    )
+    row2 = await fed.get_space("sp-rd2")
+    assert row2.allow_subscribers is False and row2.join_mode == "open"
+
+
 async def test_list_subscribers_with_keys_joins_client_instances(fed):
     """The reconcile query JOINs subscribers × client_instances so the
     seed-holder gets each subscriber's identity + key-wrap material to seal

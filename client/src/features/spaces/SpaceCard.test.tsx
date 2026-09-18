@@ -8,6 +8,10 @@ const baseEntry: DirectoryEntry = {
   host_display_name: 'Nabu Casa', host_is_paired: true,
   name: 'Chess Club', description: 'Weekly chess', emoji: '♟',
   member_count: 7, scope: 'global', join_mode: 'request',
+  // The host's readability opt-in, independent of join_mode. Concrete
+  // `false` here: a directory row always carries one (the mapper fails
+  // closed), and only the peer "From friends" tab leaves it undefined.
+  allow_subscribers: false,
   min_age: 0,
 }
 
@@ -154,25 +158,27 @@ describe('SpaceCard', () => {
   // ── Subscribe / unsubscribe ─────────────────────────────────────────
 
   // Subscribe is only meaningful where content actually reaches a
-  // non-member, i.e. join_mode 'open' (PUBLIC_READABLE_JOIN_MODES).
+  // non-member — i.e. where the owner opted into followers.
   it('renders a Subscribe button for LOCAL public / global non-members', () => {
     const { getByText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, host_instance_id: 'local', join_mode: 'open' }}
+        entry={{
+          ...baseEntry, host_instance_id: 'local', allow_subscribers: true,
+        }}
         onAction={() => {}}
       />,
     )
     expect(getByText(/Subscribe/)).toBeTruthy()
   })
 
-  it('hides Subscribe for an invite-only space this household hosts', () => {
-    // Invite-only publishes no content and hands out no content key, so a
-    // subscription would seat someone who never receives anything (the GFS
-    // refuses such a subscribe with a 403).
+  it('hides Subscribe when the space takes no followers', () => {
+    // With allow_subscribers off nothing is relayed and no content key is
+    // handed out, so a subscription would seat someone who never receives
+    // anything (both the backend and the GFS refuse such a subscribe).
     const { queryByText } = render(
       <SpaceCard
         entry={{
-          ...baseEntry, host_instance_id: 'local', join_mode: 'invite_only',
+          ...baseEntry, host_instance_id: 'local', allow_subscribers: false,
         }}
         onAction={() => {}}
       />,
@@ -180,43 +186,77 @@ describe('SpaceCard', () => {
     expect(queryByText(/Subscribe/)).toBeNull()
   })
 
-  it('says invite-only content is private, not just that joining needs an invite', () => {
+  it('says the content is private when the space takes no followers', () => {
     const { getByText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, join_mode: 'invite_only' }}
+        entry={{ ...baseEntry, allow_subscribers: false }}
         onAction={() => {}}
       />,
     )
     expect(getByText(/content is private/i)).toBeTruthy()
   })
 
-  it('hides Subscribe for an approval-required space this household hosts', () => {
-    // Only `open` makes a public / global space publicly readable (see
-    // PUBLIC_READABLE_JOIN_MODES in socialhome/domain/space.py). Until a
-    // member approves you, no content is relayed and no content key is
-    // sealed — so a subscription would seat someone who receives nothing.
-    const { queryByText } = render(
+  it('offers Subscribe on an INVITE-ONLY space that allows followers', () => {
+    // The two dials are independent: invite-only + followers-on is a
+    // broadcast space — invited people post, anyone may read along.
+    const { getByText } = render(
       <SpaceCard
         entry={{
-          ...baseEntry, host_instance_id: 'local', join_mode: 'request',
+          ...baseEntry,
+          host_instance_id: 'local',
+          join_mode:         'invite_only',
+          allow_subscribers: true,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(getByText(/Subscribe/)).toBeTruthy()
+    // …and it does NOT claim the content is private, because it isn't.
+    expect(getByText(/Invite-only/)).toBeTruthy()
+  })
+
+  it('hides Subscribe on an OPEN-to-join space that takes no followers', () => {
+    // The mirror image: anyone may join, but nobody may merely read.
+    const { queryByText, getByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          host_instance_id: 'local',
+          join_mode:         'open',
+          allow_subscribers: false,
         }}
         onAction={() => {}}
       />,
     )
     expect(queryByText(/Subscribe/)).toBeNull()
+    expect(getByText(/Open to join/)).toBeTruthy()
+    expect(getByText(/content is private/i)).toBeTruthy()
   })
 
-  it('says approval-required content is private too, but keeps the ask-to-join CTA', () => {
+  it('says nothing about readability when the flag is unknown', () => {
+    // The peer "From friends" directory does not carry the flag yet —
+    // claiming "content is private" for an open friend space would be a lie.
+    const { queryByText } = render(
+      <SpaceCard
+        entry={{ ...baseEntry, allow_subscribers: undefined }}
+        onAction={() => {}}
+      />,
+    )
+    expect(queryByText(/content is private/i)).toBeNull()
+    expect(queryByText(/Subscribe/)).toBeNull()
+  })
+
+  it('shows both chips on a private approval-required space, CTA still live', () => {
     const { getByText } = render(
       <SpaceCard
         entry={{ ...baseEntry, join_mode: 'request' }}
         onAction={() => {}}
       />,
     )
-    // Same readability story as invite-only…
+    // The private-content chip is independent of the join mode…
     expect(getByText(/content is private/i)).toBeTruthy()
-    // …but the two modes stay distinguishable: approval-required is
-    // self-service, so the CTA is live, not the disabled "Invite required".
+    // …and approval-required stays self-service, so the CTA is live, not
+    // the disabled "Invite required".
     const cta = getByText('Request to join') as HTMLButtonElement
     expect(cta.disabled).toBe(false)
     expect(getByText(/Approval required/)).toBeTruthy()
@@ -267,7 +307,7 @@ describe('SpaceCard', () => {
     let captured: { kind: string } | null = null
     const { getByText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, host_instance_id: 'local', join_mode: 'open' }}
+        entry={{ ...baseEntry, host_instance_id: 'local', allow_subscribers: true }}
         onAction={(_e, a) => { captured = a }}
       />,
     )
@@ -278,7 +318,7 @@ describe('SpaceCard', () => {
   it('disables Subscribe while the parent reports it busy', () => {
     const { getByLabelText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, host_instance_id: 'local', join_mode: 'open' }}
+        entry={{ ...baseEntry, host_instance_id: 'local', allow_subscribers: true }}
         onAction={() => {}}
         subscribeBusy={true}
       />,

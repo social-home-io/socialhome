@@ -92,6 +92,7 @@ async def env(tmp_dir):
         *,
         with_seed: bool,
         join_mode: JoinMode = JoinMode.OPEN,
+        allow_subscribers: bool = True,
     ):
         skp = generate_space_keypair()
         await space_repo.save(
@@ -102,7 +103,7 @@ async def env(tmp_dir):
                 owner_username="alice",
                 identity_public_key=skp.public_key.hex(),
                 config_sequence=0,
-                features=SpaceFeatures(),
+                features=SpaceFeatures(allow_subscribers=allow_subscribers),
                 space_type=stype,
                 join_mode=join_mode,
             )
@@ -522,14 +523,14 @@ async def test_space_service_created_global_space_can_relay(env):
         own_instance_id=env["own_iid"],
     )
     svc.attach_space_crypto_service(env["crypto"])
-    # ``join_mode`` defaults to ``invite_only``, which is deliberately NOT
-    # publicly readable (no GFS relay). This regression is about the content
-    # key existing at create time, so ask for the readable ``open`` mode.
+    # Readability is the ``allow_subscribers`` opt-in and it defaults OFF, so
+    # a freshly created space relays nothing. This regression is about the
+    # content key existing at create time, so opt in explicitly.
     space = await svc.create_space(
         owner_username="alice",
         name="World",
         space_type=_SpaceType.GLOBAL,
-        join_mode=JoinMode.OPEN,
+        features=SpaceFeatures(allow_subscribers=True),
     )
 
     await env["bus"].publish(
@@ -545,18 +546,18 @@ async def test_space_service_created_global_space_can_relay(env):
     assert json.loads(pt)["post_id"] == "post-1"
 
 
-# ─── invite_only: listed for discovery, never publicly readable ────────
+# ─── allow_subscribers OFF: listed for discovery, never publicly readable ──
 
 
-async def test_invite_only_global_space_post_not_relayed(env):
-    """A GLOBAL space whose ``join_mode`` is ``invite_only`` is discoverable
-    (its metadata is published to the GFS) but NOT publicly readable: no post
-    of it is ever relayed to the GFS subscribers."""
+async def test_global_space_without_subscribers_post_not_relayed(env):
+    """A GLOBAL space whose owner has NOT opted into subscribers is
+    discoverable (its metadata is published to the GFS) but NOT publicly
+    readable: no post of it is ever relayed to the GFS subscribers."""
     await env["make_space"](
         "sp-inv",
         SpaceType.GLOBAL,
         with_seed=True,
-        join_mode=JoinMode.INVITE_ONLY,
+        allow_subscribers=False,
     )
     await env["bus"].publish(
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-inv")
@@ -564,12 +565,12 @@ async def test_invite_only_global_space_post_not_relayed(env):
     assert env["gfs"].calls == []
 
 
-async def test_invite_only_public_space_post_not_relayed(env):
+async def test_public_space_without_subscribers_post_not_relayed(env):
     await env["make_space"](
         "sp-inv-pub",
         SpaceType.PUBLIC,
         with_seed=True,
-        join_mode=JoinMode.INVITE_ONLY,
+        allow_subscribers=False,
     )
     await env["bus"].publish(
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-inv-pub")
@@ -577,58 +578,73 @@ async def test_invite_only_public_space_post_not_relayed(env):
     assert env["gfs"].calls == []
 
 
-async def test_invite_only_remote_authored_post_not_relayed(env):
+async def test_remote_authored_post_not_relayed_without_subscribers(env):
     """The owner-offline remote-author relay is gated the same way — a
-    seed-holder must not launder another member's post into an invite-only
-    space's (nonexistent) public stream."""
+    seed-holder must not launder another member's post into the (nonexistent)
+    public stream of a space that takes no followers."""
     await env["make_space"](
         "sp-pub",
+        SpaceType.GLOBAL,
+        with_seed=True,
+        allow_subscribers=False,
+    )
+    _kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+# ─── the two dials are independent ────────────────────────────────────────
+
+
+async def test_invite_only_space_with_subscribers_on_still_relays(env):
+    """``invite_only`` + subscribers-ON is a legitimate BROADCAST space: only
+    invited people post, but anyone may follow. The join mode must not gate
+    the relay — that was the old, wrong model."""
+    await env["make_space"](
+        "sp-broadcast",
         SpaceType.GLOBAL,
         with_seed=True,
         join_mode=JoinMode.INVITE_ONLY,
+        allow_subscribers=True,
     )
-    _kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
-        SpacePostCreated(
-            post=_post(author_user_id),
-            space_id="sp-pub",
-            origin_instance_id="beta.home",
-            public_relay=relay,
-        )
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-broadcast")
     )
-    assert env["gfs"].calls == []
+    assert len(env["gfs"].calls) == 1
 
 
-async def test_request_join_mode_global_space_does_not_relay(env):
-    """``request`` is a MEMBERSHIP mode, not a read mode: a person must still
-    be admitted, so the space is listed for discovery but nothing of its
-    content stream is ever relayed. Only ``open`` is publicly readable."""
+async def test_request_join_mode_with_subscribers_on_still_relays(env):
     await env["make_space"](
-        "sp-req",
+        "sp-req-open",
         SpaceType.GLOBAL,
         with_seed=True,
         join_mode=JoinMode.REQUEST,
+        allow_subscribers=True,
     )
     await env["bus"].publish(
-        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-req")
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-req-open")
     )
-    assert env["gfs"].calls == []
+    assert len(env["gfs"].calls) == 1
 
 
-async def test_request_join_mode_remote_authored_does_not_relay(env):
+async def test_open_to_join_space_with_subscribers_off_does_not_relay(env):
+    """…and the mirror image: ``open`` says anyone may JOIN, not that anyone
+    may READ. With subscribers off the content stream stays dead."""
     await env["make_space"](
-        "sp-pub",
+        "sp-open-private",
         SpaceType.GLOBAL,
         with_seed=True,
-        join_mode=JoinMode.REQUEST,
+        join_mode=JoinMode.OPEN,
+        allow_subscribers=False,
     )
-    _kp, author_user_id, relay = _remote_relay()
     await env["bus"].publish(
-        SpacePostCreated(
-            post=_post(author_user_id),
-            space_id="sp-pub",
-            origin_instance_id="beta.home",
-            public_relay=relay,
-        )
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-open-private")
     )
     assert env["gfs"].calls == []

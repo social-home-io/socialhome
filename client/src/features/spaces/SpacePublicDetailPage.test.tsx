@@ -35,6 +35,9 @@ function entry(over: Partial<DirectoryEntry>): DirectoryEntry {
     member_count:       1,
     scope:              'public',
     join_mode:          'open',
+    // Readability opt-in — independent of join_mode. Concrete, because a
+    // directory row always carries one.
+    allow_subscribers:  true,
     min_age:            0,
     already_member:     false,
     already_subscribed: false,
@@ -100,18 +103,20 @@ describe('SpacePublicDetailPage onPrimary', () => {
     expect(container.querySelector('.sh-modal, [role="dialog"]')).toBeNull()
   })
 
-  it('INVITE-ONLY space says the content is private and offers no way in', async () => {
+  it('a space that takes no followers says the content is private', async () => {
+    // The readability claim is keyed on allow_subscribers, NOT on the join
+    // mode: this space is invite-only AND unreadable, and the page says both.
     cacheDirectoryEntries([
       entry({
-        host_instance_id: 'remote-1',
+        host_instance_id:  'remote-1',
         host_display_name: 'Friends',
-        scope:            'global',
-        join_mode:        'invite_only',
+        scope:             'global',
+        join_mode:         'invite_only',
+        allow_subscribers: false,
       }),
     ])
     const { getByText, getByRole } = await renderPage()
     await waitFor(() => getByText(/content is private/i))
-    // The chip is honest about readability, not just about joining…
     expect(getByText(/Only members can read this space/i)).toBeTruthy()
     expect(getByText(/A member has to invite you/i)).toBeTruthy()
     // …and the only CTA is disabled, so nothing can be sent.
@@ -119,17 +124,51 @@ describe('SpacePublicDetailPage onPrimary', () => {
     expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('APPROVAL-REQUIRED space says content is private but still lets you ask', async () => {
-    // Only `open` makes a public / global space publicly readable (see
-    // PUBLIC_READABLE_JOIN_MODES in socialhome/domain/space.py) — so the
-    // page must be as honest about `request` as it is about `invite_only`,
-    // while keeping the self-service way in.
+  it('an INVITE-ONLY space that allows followers is NOT called private', async () => {
+    // The broadcast shape: invited people post, anyone may read along. The
+    // old model would have wrongly called this private.
     cacheDirectoryEntries([
       entry({
-        host_instance_id: 'remote-1',
+        host_instance_id:  'remote-1',
         host_display_name: 'Friends',
-        scope:            'global',
-        join_mode:        'request',
+        scope:             'global',
+        join_mode:         'invite_only',
+        allow_subscribers: true,
+      }),
+    ])
+    const { getByText, queryByText } = await renderPage()
+    await waitFor(() => getByText(/Invite-only/))
+    expect(queryByText(/content is private/i)).toBeNull()
+    expect(queryByText(/Only members can read this space/i)).toBeNull()
+  })
+
+  it('an OPEN-to-join space with no followers IS called private', async () => {
+    // …and the mirror image: anyone may join, nobody may merely read.
+    cacheDirectoryEntries([
+      entry({
+        host_instance_id:  'remote-1',
+        host_display_name: 'Friends',
+        scope:             'global',
+        join_mode:         'open',
+        allow_subscribers: false,
+      }),
+    ])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText(/content is private/i))
+    expect(getByText(/Only members can read this space/i)).toBeTruthy()
+    expect(getByText(/Anyone can join this space/i)).toBeTruthy()
+    // Joining is still offered — readability never gated the CTA.
+    expect(getByText('Join space')).toBeTruthy()
+  })
+
+  it('APPROVAL-REQUIRED + private keeps the ask-to-join CTA live', async () => {
+    cacheDirectoryEntries([
+      entry({
+        host_instance_id:  'remote-1',
+        host_display_name: 'Friends',
+        scope:             'global',
+        join_mode:         'request',
+        allow_subscribers: false,
       }),
     ])
     const { getByText, getByRole } = await renderPage()

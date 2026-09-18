@@ -309,7 +309,8 @@ space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → replay`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
-``gfs-space-rotate`` / ``gfs-space-invite-only`` / ``gfs-down``) stays
+``gfs-space-rotate`` / ``gfs-space-no-subscribers`` / ``gfs-down``)
+stays
 opt-in — it spins up a
 separate GFS process and isn't required to validate the HFS↔HFS
 surface.
@@ -498,7 +499,7 @@ python .claude/skills/federation-demo/harness.py gfs-replay
 python .claude/skills/federation-demo/harness.py gfs-space-subscribe
 python .claude/skills/federation-demo/harness.py gfs-space-post
 python .claude/skills/federation-demo/harness.py gfs-space-rotate
-python .claude/skills/federation-demo/harness.py gfs-space-invite-only
+python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
@@ -562,12 +563,17 @@ with the right name + owning instance.
 Prerequisites: ``up`` + ``gfs-up`` + ``gfs-pair`` (Alpha must be
 a paired client of the GFS so the registration sig verifies).
 
-The create body passes ``join_mode="open"`` explicitly. The API default
-is ``invite_only``, which is listed for discovery but deliberately **not**
-publicly readable — no content relay, no content-key handoff — so the
-downstream readable chain (``gfs-space-subscribe`` → ``gfs-space-post``
-→ ``gfs-space-rotate``) would correctly relay nothing. The invite-only
-rule gets its own step: ``gfs-space-invite-only``.
+The step then PATCHes the space to turn ``features.allow_subscribers``
+**on**. That flag — not ``join_mode`` — is what makes a public/global
+space publicly readable, and it defaults **off**, so a fresh space relays
+nothing and seats no subscriber; the downstream readable chain
+(``gfs-space-subscribe`` → ``gfs-space-post`` → ``gfs-space-rotate``)
+would correctly relay nothing without it. ``POST /api/spaces`` takes no
+``features`` block, hence the PATCH — and since a PATCH replaces the whole
+features dict, the step reads the current one back first. The create body
+still passes ``join_mode="open"``, but that is now purely about who may
+JOIN. The not-readable rule gets its own step:
+``gfs-space-no-subscribers``.
 
 ### ``gfs-replay`` — owning-HFS downtime survives the publish
 
@@ -729,28 +735,39 @@ exactly what step 5 pins down.
 Delta still sees both posts, c still sees neither, and Delta's mirrored
 ``identity_public_key`` still matches Alpha's.
 
-### ``gfs-space-invite-only`` — listed for discovery, never relayed
+### ``gfs-space-no-subscribers`` — listed for discovery, never relayed
 
 Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` (independent of the readable
-chain above). A space's ``space_type`` (private / public / global) and its
-``join_mode`` (``invite_only`` / ``open`` / ``request``) are separate
-dials. The product rule: **a public/global space whose ``join_mode`` is
-``invite_only`` is listed in the GFS directory but is not publicly
-readable** — its content is never relayed to the GFS and its per-space
-content key is never sealed to a subscriber, so a stranger cannot read a
-group nobody invited them to. Members (including mesh-only remote
-members) are unaffected — they are fanned out over ``space_instances``.
+chain above). A space carries three independent dials: its ``space_type``
+(private / household / public / global), its ``join_mode``
+(``invite_only`` / ``open`` / ``request``) saying how a person becomes a
+posting **member**, and ``features.allow_subscribers`` saying whether
+**strangers** may follow it read-only. The product rule: **a public/global
+space with ``allow_subscribers`` off is listed in the GFS directory but is
+not publicly readable** — its content is never relayed to the GFS and its
+per-space content key is never sealed to a subscriber, so a stranger
+cannot read a group nobody let them into. Members (including mesh-only
+remote members) are unaffected — they are fanned out over
+``space_instances``.
 
-1. Alpha creates a second ``space_type=global`` space, this time
-   ``join_mode=invite_only``.
-2. Asserts the GFS directory LISTS it (``GET /gfs/spaces``). Listing is
-   how people discover the space and ask for an invite — a "fix" that
+The space in this step is deliberately ``join_mode=open``: anyone may
+**join** it, and that still buys them nothing to **read**. Under the old
+(wrong) model where ``open`` implied readable, this space would have
+relayed — so the step doubles as a guard against regressing to it.
+
+1. Alpha creates a second ``space_type=global`` space and leaves
+   ``allow_subscribers`` at its default (off).
+2. Asserts the GFS directory LISTS it (``GET /gfs/spaces``) and reports
+   ``allow_subscribers: false`` alongside ``join_mode: "open"``. Listing
+   is how people discover the space and ask for an invite — a "fix" that
    suppressed the metadata publish instead of the content fails here.
 3. Asserts Delta discovers it too (``POST /api/public_spaces/refresh``
-   then ``GET /api/public_spaces``).
-4. Delta asks to subscribe. Either answer is tolerated: the GFS does not
-   publish ``join_mode`` yet, so the subscriber side cannot tell — the
-   host-side gates are what stop the content.
+   then ``GET /api/public_spaces``), flag included, so Delta's browser
+   can suppress the Subscribe button.
+4. Delta asks to subscribe — and must be **refused**. This is a hard
+   assertion now: the mirrored stub carries the owner's truthful flag, so
+   Delta refuses locally, and the GFS 403s ``POST /gfs/subscribe``
+   independently.
 5. Alpha posts into the space; the step settles ~10 s (the readable
    equivalent in ``gfs-space-post`` lands well inside that window).
 6. Asserts Delta logged **no** ``gfs.relay.received: space=<id>`` record
@@ -760,9 +777,10 @@ The gates live on the host side: ``space_public_outbound`` (both the
 local-author and the owner-offline remote-author relay),
 ``space_subscriber_key_outbound`` (the ``new_subscriber`` handoff and
 every reconcile entry point) and ``space_post_outbound`` (the pre-signed
-``public_relay`` hint on the member broadcast). ``verify`` re-asserts the
-directory listing + the two no-content checks, gated on the
-``gfs_invite_only_space_id`` state key.
+``public_relay`` hint on the member broadcast) — plus
+``SpaceService.subscribe_to_space`` and the GFS's own subscribe refusal.
+``verify`` re-asserts the directory listing (with both dials), and the two
+no-content checks, gated on the ``gfs_no_subscribers_space_id`` state key.
 
 ### Bazaar / public moment over GFS (TODO)
 

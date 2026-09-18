@@ -219,7 +219,7 @@ async def household(tmp_dir):
             owner_username=AUTHOR_USERNAME,
             identity_public_key=space_kp.public_key.hex(),
             config_sequence=0,
-            features=SpaceFeatures(),
+            features=SpaceFeatures(allow_subscribers=True),
             space_type=SpaceType.GLOBAL,
             join_mode=JoinMode.OPEN,
         )
@@ -649,7 +649,7 @@ async def _make_subscriber_household(
             owner_username=AUTHOR_USERNAME,
             identity_public_key=space_public_key.hex(),
             config_sequence=0,
-            features=SpaceFeatures(),
+            features=SpaceFeatures(allow_subscribers=True),
             space_type=SpaceType.GLOBAL,
             join_mode=JoinMode.OPEN,
         )

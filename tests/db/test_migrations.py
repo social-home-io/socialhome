@@ -737,3 +737,44 @@ def _ensure_schema_version_for_test(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_0051_allow_subscribers_columns_default_closed(tmp_path):
+    """Migration 0051 adds ``allow_subscribers`` to ``spaces`` and to
+    ``public_space_cache``, NOT NULL and defaulting to **0**.
+
+    The default is the whole security property: every space that existed
+    before this migration stops being publicly readable until its owner opts
+    in. A default of 1 would silently keep relaying content under a model the
+    owner never agreed to, so it is asserted at the DDL level — a row written
+    without the column must read back as 0.
+    """
+    db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        for table in ("spaces", "public_space_cache"):
+            cols = {
+                r["name"]: r for r in await db.fetchall(f"PRAGMA table_info({table})")
+            }
+            assert "allow_subscribers" in cols, f"{table} missing allow_subscribers"
+            col = cols["allow_subscribers"]
+            assert col["notnull"] == 1, f"{table}.allow_subscribers must be NOT NULL"
+            assert str(col["dflt_value"]) == "0", (
+                f"{table}.allow_subscribers must default to 0 (fail-closed); "
+                f"got {col['dflt_value']!r}"
+            )
+
+        # …and the default really applies to a row inserted without it.
+        await db.enqueue(
+            "INSERT INTO public_space_cache(space_id, instance_id, name)"
+            " VALUES(?, ?, ?)",
+            ("sp-default", "inst-default", "Defaulted"),
+        )
+        row = await db.fetchone(
+            "SELECT allow_subscribers FROM public_space_cache WHERE space_id=?",
+            ("sp-default",),
+        )
+        assert row["allow_subscribers"] == 0
+    finally:
+        await db.shutdown()

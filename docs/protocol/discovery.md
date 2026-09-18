@@ -54,35 +54,43 @@ The Social Home ↔ GFS link is split by direction:
     Once every household ships `ts` it becomes mandatory. Withdrawal affects **discoverability only** — the space drops
     off `GET /gfs/spaces`, `GET /gfs/spaces/{id}` and the public pages, while
     the relay (`publish`) and existing subscribers are untouched.
-  - `spaces/{id}/publish` also carries the space's **`join_mode`**
-    (`invite_only` / `open` / `request`), inside the same signed canonical
-    body — so no on-path party can flip it. It tells the GFS whether the
-    listing is publicly **readable**, which is a separate question from
-    whether it is discoverable:
+  - `spaces/{id}/publish` also carries **two independent dials**, both inside
+    the same signed canonical body — so no on-path party can flip either:
 
-    | `join_mode` | Listed in the directory | Publicly readable |
+    | Field | What it governs | Values |
     |---|---|---|
-    | `open` / `request` | yes | yes — `POST /gfs/subscribe` seats the caller, content relays |
-    | `invite_only` | **yes** | **no** — subscribe is refused `403`, no content relay, no content key |
+    | `join_mode` | how a person becomes a **member who can post** | `invite_only` / `open` / `request` |
+    | `allow_subscribers` | whether **strangers may follow read-only** — i.e. whether the listing is publicly **readable** | `true` / `false` |
 
-    An invite-only global space is therefore an *advert*: people can find it
-    and ask for an invite, but nothing inside it is published. Enforcement
+    Readability is `allow_subscribers`, and *only* `allow_subscribers`. All
+    four combinations are meaningful: `invite_only` + `true` is a broadcast
+    space (invited people write, anyone may read), `open` + `false` is
+    joinable but not publicly readable.
+
+    | `allow_subscribers` | Listed in the directory | Publicly readable |
+    |---|---|---|
+    | `true` | yes | yes — `POST /gfs/subscribe` seats the caller, content relays |
+    | `false` | **yes** | **no** — subscribe is refused `403`, no content relay, no content key; any seats it already had are purged |
+
+    A space with followers off is therefore an *advert*: people can find it
+    and ask to be let in, but nothing inside it is published. Enforcement
     is symmetric on both sides of the wire — the host relays nothing, and
     the GFS refuses to seat a subscriber.
 
-    The field is **optional on the wire** for the mixed-version window and is
-    folded into the signed bytes only when present (an older household signs
-    a body without the key; stripping it in transit only moves the value
-    towards the *more* restrictive one). A missing or unknown value stores
-    the fail-closed `invite_only`, and so does the `0009` migration's column
-    default for rows published before the field existed. That is a
+    Both fields are **optional on the wire** for the mixed-version window and
+    each is folded into the signed bytes only when present (an older household
+    signs a body without the key; stripping either in transit only moves the value
+    towards the *more* restrictive one). A missing or unknown `join_mode`
+    stores the fail-closed `invite_only` and a missing `allow_subscribers`
+    stores the fail-closed `false`; so do the `0009` / `0010` migrations'
+    column defaults for rows published before each field existed. That is a
     deliberate choice over a backfill: an unreadable-but-listed space is the
     safe error, and the truth arrives by itself one reconnect later, because
     every GFS-WS (re)connect re-publishes the metadata of every space this
     household published to that server (the NULL-pin self-heal below).
-    When a publish stores `invite_only`, the GFS also **drops that space's
-    subscriber rows** (logged at INFO with the count): seats taken under the
-    earlier, join-mode-blind behaviour would otherwise linger forever on a
+    When a publish stores `allow_subscribers: false`, the GFS also **drops
+    that space's subscriber rows** (logged at INFO with the count): seats
+    taken while the space was readable would otherwise linger forever on a
     space that relays nothing.
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
@@ -246,8 +254,9 @@ The Social Home ↔ GFS link is split by direction:
     (un)subscribe **itself**, and a subscribe's target space must already
     be published — the GFS no longer mints a pending row from an
     (unauthenticated) subscribe. A subscribe also requires the target
-    space to be publicly readable: `join_mode == "invite_only"` → `403`
-    (`space is invite-only — not publicly readable`).
+    space to be publicly readable: `allow_subscribers == false` → `403`
+    (`space is not publicly readable`). Note this is **not** `join_mode` —
+    an `invite_only` space that allows subscribers seats them normally.
 - **GFS → SH** is a persistent WebSocket the SH opens to
   `wss://<gfs>/gfs/ws`. The first frame is a signed hello
   `{type:"hello", instance_id, ts, sig}`; once accepted the GFS pushes
@@ -276,9 +285,12 @@ space id.
 `services/gfs_space_mirror_service.py` closes that gap. On a subscribe to an
 id with no local row it walks the active GFS connections, fetches
 `GET {gfs}/gfs/spaces/{space_id}`, and seats a remote **stub** row via the
-shared `stub_space_from_metadata` helper (`space_type=global`,
-`join_mode=invite_only` — a mirror is not locally joinable; joining still
-goes through `POST /api/public_spaces/{id}/join-request`).
+shared `stub_space_from_metadata` helper (`space_type=global`, with the
+owner's real `join_mode` and `features.allow_subscribers` copied off the
+directory body — a mirror is not locally joinable; joining still goes through
+`POST /api/public_spaces/{id}/join-request`). Both are read strictly
+(`normalize_join_mode`; `is True` for the flag) so an older or hostile GFS
+cannot widen access through a missing field or Python truthiness.
 
 - **Fail-closed validation.** The listing must be `status: "active"` and must
   carry a well-formed 32-byte-hex `identity_public_key`; anything else is
@@ -325,19 +337,30 @@ goes through `POST /api/public_spaces/{id}/join-request`).
   purge would destroy content nobody asked us to forget. Without the
   evidence, only the local member row goes.
 
-### `join_mode: invite_only` — listed, never relayed
+### `allow_subscribers: false` — listed, never relayed
 
 Being listed in the directory and being publicly readable are two different
-things. A **public/global space whose `join_mode` is `invite_only` is
-published to the GFS directory but its content is never relayed to it, and
-its content key is never sealed to a subscriber.** The listing is deliberate:
-name, description and icon are how someone discovers the space and asks for
-an invite. Only the content stream stops.
+things, and so are being *joinable* and being *readable*. A **public/global
+space whose `features.allow_subscribers` is off is published to the GFS
+directory but its content is never relayed to it, and its content key is
+never sealed to a subscriber.** The listing is deliberate: name, description
+and icon are how someone discovers the space and asks to be let in. Only the
+content stream stops.
+
+`join_mode` has **no** say here. It answers a different question — how a
+person becomes a member who can post — and every combination is legitimate:
+
+| `join_mode` | `allow_subscribers` | What it is |
+|---|---|---|
+| `invite_only` | `true` | a broadcast space — invited people post, anyone may follow |
+| `invite_only` | `false` | a private group, listed so people can ask for an invite |
+| `open` | `false` | joinable by anyone, but readable only once you have joined |
+| `open` / `request` | `true` | today's public space |
 
 The gate is enforced **host-side**, at the two places where content would
 otherwise leave, plus the hint that enables the first:
 
-| Seam | Effect for an `invite_only` public/global space |
+| Seam | Effect when `allow_subscribers` is off |
 |---|---|
 | `services/space_public_outbound.py` | No `space_post_public` envelope is produced — neither for a locally-authored post nor on the owner-offline remote-author relay. |
 | `services/space_subscriber_key_outbound.py` | No content key is sealed to a subscriber — on the `new_subscriber` push and on every reconcile entry point (the gate sits *before* the subscriber-list round-trip, so the GFS is never even asked who subscribed). |
@@ -345,8 +368,14 @@ otherwise leave, plus the hint that enables the first:
 
 Two layers, both fail-closed: **no ciphertext** (nothing is relayed) and
 **no key** (nothing sealed), so even a subscriber that obtained a frame out
-of band holds an unopenable blob. `open` and `request` are unchanged —
-`request` gates *membership*, not *reading*.
+of band holds an unopenable blob.
+
+A third layer sits on the subscribe path itself:
+`SpaceService.subscribe_to_space` refuses locally
+(`this space does not allow subscribers`) and the GFS refuses
+`POST /gfs/subscribe` with a `403`. The household check is safe even on a
+GFS-discovered stub, because the mirror now carries the owner's truthful
+flag.
 
 **Members are unaffected.** Member households receive space content through
 `broadcast_to_space_members` over `space_instances` (mesh-only members via
@@ -354,10 +383,11 @@ of band holds an unopenable blob. `open` and `request` are unchanged —
 touches the GFS. The metadata publish path is likewise untouched: a space
 that disappears from the directory is a regression, not the rule.
 
-The GFS does not publish `join_mode` in its listings today, so a mirrored
-stub is seated with `join_mode=invite_only` locally
-(`gfs_space_mirror_service`) — the gates above are the host's, and the host
-is the only side that can apply them.
+**Changing the flag re-publishes.** Flipping `allow_subscribers` (or
+`join_mode`) on a global space re-publishes its metadata to every paired GFS
+immediately, rather than waiting for the owner's next WS reconnect — and a
+publish that lands the flag as off is what PURGES the seats taken while it
+was on.
 
 ### HFS producer + consumer for public space content (Phase 5a2)
 

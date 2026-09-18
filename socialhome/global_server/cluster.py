@@ -1009,10 +1009,12 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         "icon_url": s.icon_url,
         "min_age": s.min_age,
         "category": normalize_category(s.category),
-        # Travels with the gossip for the same reason ``withdrawn`` does:
-        # without it a peer sync would rebuild the row with the fail-closed
-        # default and silently make a readable space unreadable.
+        # Both directory dials travel with the gossip for the same reason
+        # ``withdrawn`` does: without them a peer sync would rebuild the row
+        # with the fail-closed defaults, mislabelling an open space as
+        # invite-only and silently making a readable space unreadable.
         "join_mode": normalize_join_mode(s.join_mode),
+        "allow_subscribers": s.allow_subscribers,
         "accent_color": s.accent_color,
         "primary_color": s.primary_color,
         "status": s.status,
@@ -1044,6 +1046,7 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         min_age=int(d.get("min_age") or 0),
         category=normalize_category(d.get("category")),
         join_mode=normalize_join_mode(d.get("join_mode")),
+        allow_subscribers=bool(d.get("allow_subscribers") or False),
         accent_color=str(d.get("accent_color") or "#6366f1"),
         primary_color=str(d.get("primary_color") or "#6366f1"),
         status=str(d.get("status") or "pending"),

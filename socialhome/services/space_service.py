@@ -1285,7 +1285,7 @@ class SpaceService(SpaceMemberGuardMixin):
             new_fields["emoji"] = emoji or None
             payload["emoji"] = new_fields["emoji"]
         location_mode_changed = False
-        join_mode_changed = False
+        directory_state_changed = False
         location_feature_just_enabled = False
         delegated_admin_just_enabled = False
         if features is not None:
@@ -1304,11 +1304,18 @@ class SpaceService(SpaceMemberGuardMixin):
                 not space.features.delegated_admin_authority
                 and features.delegated_admin_authority
             )
+            # Readability opt-in flipped either way — the GFS has to learn
+            # (see the re-publish block below).
+            directory_state_changed = (
+                features.allow_subscribers != space.features.allow_subscribers
+            )
             new_fields["features"] = features
             payload["features"] = features.to_wire_dict()
         if join_mode is not None:
             jmode = _coerce_join_mode(join_mode)
-            join_mode_changed = jmode is not space.join_mode
+            directory_state_changed = directory_state_changed or (
+                jmode is not space.join_mode
+            )
             new_fields["join_mode"] = jmode
             payload["join_mode"] = jmode.value
         if space_type is not None:
@@ -1391,20 +1398,24 @@ class SpaceService(SpaceMemberGuardMixin):
             is_global=will_be_global,
         )
         if (
-            join_mode_changed
+            directory_state_changed
             and was_global
             and will_be_global
             and self._gfs is not None
         ):
-            # The GFS stores ``join_mode`` and enforces it on ``/gfs/subscribe``
-            # — only an ``open`` space is publicly readable. Re-publish the
-            # metadata so the directory stops offering a space nobody may read
-            # any more; that publish also PURGES the subscriber seats taken
-            # while it was open, so nobody is left holding a subscription that
-            # can never deliver. Without this the truth would not reach the GFS
-            # until the owner's next WS reconnect (``heal_space_pins``). A type
-            # flip is already covered above, hence the was_global/will_be_global
-            # guard. Fail-soft: GfsConnectionService logs and never raises.
+            # Both dials the GFS directory stores — ``allow_subscribers``
+            # (readability, enforced on ``/gfs/subscribe``) and ``join_mode``
+            # (how people get in, shown on the listing) — are re-published on
+            # any change. One condition rather than two blocks: the action is
+            # identical, and forgetting to add the next directory field to a
+            # duplicated block is exactly how the GFS falls out of sync.
+            # Turning ``allow_subscribers`` OFF also PURGES the subscriber
+            # seats taken while it was on, so nobody is left holding a
+            # subscription that can never deliver. Without this the truth would
+            # not reach the GFS until the owner's next WS reconnect
+            # (``heal_space_pins``). A type flip is already covered above,
+            # hence the was_global/will_be_global guard. Fail-soft:
+            # GfsConnectionService logs and never raises.
             await self._gfs.publish_space_to_all(space_id)
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
@@ -3910,8 +3921,23 @@ class SpaceService(SpaceMemberGuardMixin):
             )
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is not None:
-            # Already a member (any role) — no-op. Never demote.
+            # Already a member (any role) — no-op. Never demote. Deliberately
+            # ahead of the readability gate below: an owner turning followers
+            # off must not turn an existing member's idempotent re-subscribe
+            # into an error (their seat is removed by the GFS purge, not here).
             return
+        # Readability is the owner's explicit opt-in. With it OFF nothing is
+        # relayed and no content key is ever sealed to a subscriber, so a NEW
+        # seat here would receive nothing forever — refuse it outright (the GFS
+        # refuses the matching ``POST /gfs/subscribe`` with a 403 for the same
+        # reason). Safe on a GFS-discovered stub too: the mirror now carries
+        # the owner's real flag off the directory body
+        # (``GfsSpaceMirrorService._meta_from_gfs_body``), failing closed when
+        # an older GFS reports none.
+        if not space.features.allow_subscribers:
+            raise SpacePermissionError(
+                "this space does not allow subscribers",
+            )
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
         # ORDER MATTERS: the GFS-side subscriber registration happens only

@@ -1684,14 +1684,57 @@ async def test_space_cover_non_admin_forbidden(client):
 
 async def _create_subscribable_space(client, name: str = "Global") -> str:
     """Create a space subscribers are allowed to join — ``global`` has no
-    lat/lon requirement so it's the cleanest fixture for these tests."""
+    lat/lon requirement so it's the cleanest fixture for these tests.
+
+    Readability is an explicit owner opt-in that defaults OFF, so the space
+    is PATCHed to turn ``allow_subscribers`` on; without it
+    ``POST /api/spaces/{id}/subscribe`` is refused.
+    """
     r = await client.post(
         "/api/spaces",
         json={"name": name, "space_type": "global"},
         headers=_auth(client._admin_token),
     )
     assert r.status == 201, await r.text()
-    return (await r.json())["id"]
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    return sid
+
+
+async def test_subscribe_refused_when_the_space_takes_no_followers(client):
+    """A freshly created global space has ``allow_subscribers`` OFF, so its
+    content is relayed nowhere and no content key is sealed to a follower —
+    a subscribe would seat someone who receives nothing forever."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Quiet Global", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 201
+    sid = (await r.json())["id"]
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
+    assert "does not allow subscribers" in (await r.text())
+
+
+async def test_subscribe_allowed_once_the_owner_opts_in(client):
+    """…and the same space accepts a subscriber the moment the owner flips
+    the switch — no join-mode change involved."""
+    sid = await _create_subscribable_space(client, name="Opened Up")
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await r.json())["subscribed"] is True
 
 
 async def test_subscribe_and_unsubscribe_space(client):
@@ -1878,6 +1921,10 @@ async def test_subscribe_maps_gfs_outage_to_502(client):
                     "name": "Outage Space",
                     "space_type": "global",
                     "join_mode": "invite_only",
+                    # Invite-only AND readable — the broadcast shape a GFS
+                    # directory really does list; the mirror carries the
+                    # owner's flag through so the local gate agrees.
+                    "features": {"allow_subscribers": True},
                     "identity_public_key": "ab" * 32,
                     "owner_username": "",
                 },

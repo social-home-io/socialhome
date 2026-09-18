@@ -348,6 +348,21 @@ class GfsSpaceMirrorService:
             # space from a closed one. Normalised, so a missing field (an
             # older GFS) or a hostile value fails closed to ``invite_only``.
             "join_mode": normalize_join_mode(body.get("join_mode")),
+            # The owner's readability opt-in, likewise straight off the
+            # directory body. It rides in the ``features`` block because that
+            # is where ``allow_subscribers`` lives on the space
+            # (``SpaceFeatures``), and ``stub_space_from_metadata`` feeds the
+            # block through ``SpaceFeatures.from_wire_dict``. Every other
+            # feature keeps its dataclass default, exactly as before this key
+            # existed. Fail-closed: an older GFS sends nothing ⇒ False ⇒
+            # ``subscribe_to_space`` refuses rather than seating a member on a
+            # space whose content can never arrive. Strict ``is True``, like
+            # every other read of this hostile body: a GFS that answers
+            # ``{"allow_subscribers": "nope"}`` must not widen access through
+            # Python truthiness.
+            "features": {
+                "allow_subscribers": body.get("allow_subscribers") is True,
+            },
             # The owning household's local username means nothing here (the
             # GFS listing carries no such field) — leave it empty.
             "owner_username": "",

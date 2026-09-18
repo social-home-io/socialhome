@@ -130,6 +130,7 @@ async def _publish_known_space(
     space_id: str,
     identity_public_key: str = "",
     join_mode: str = "open",
+    allow_subscribers: bool | None = True,
 ):
     """Publish a minimal active space so a subscribe target exists.
 
@@ -137,10 +138,14 @@ async def _publish_known_space(
     when supplied it is TOFU-pinned on the GFS row so authority-signed relays
     can be verified. Empty (default) mirrors an older HFS that ships none.
 
-    ``join_mode`` defaults to ``"open"`` because most of these tests need a
-    space that a household may actually subscribe to — an ``invite_only``
-    space is listed but NOT publicly readable, so the GFS refuses to seat a
-    subscriber on it.
+    ``allow_subscribers`` defaults to ``True`` because most of these tests
+    need a space a household may actually subscribe to — with the flag off
+    the space is listed but NOT publicly readable, so the GFS refuses to seat
+    a subscriber on it. ``None`` omits the key entirely (and from the signed
+    bytes), mirroring an older household.
+
+    ``join_mode`` is the orthogonal MEMBERSHIP gate; it no longer affects
+    whether a subscribe is accepted.
     """
     body = {
         "space_id": space_id,
@@ -157,6 +162,8 @@ async def _publish_known_space(
         "identity_public_key": identity_public_key,
         "join_mode": join_mode,
     }
+    if allow_subscribers is not None:
+        body["allow_subscribers"] = bool(allow_subscribers)
     sig = _sign(seed, body)
     await svc.publish_space(
         space_id=space_id,
@@ -165,6 +172,7 @@ async def _publish_known_space(
         signature=sig,
         identity_public_key=identity_public_key,
         join_mode=join_mode,
+        allow_subscribers=allow_subscribers,
     )
 
 
@@ -2809,7 +2817,7 @@ async def test_malformed_pinned_key_burns_a_dummy_verify(svc, verify_calls):
     assert len(verify_calls) == 1
 
 
-# ── join_mode gating on subscribe ─────────────────────────────────────────
+# ── allow_subscribers gating on subscribe ─────────────────────────────────
 
 
 async def _subscribe(svc, seed: bytes, *, instance_id: str, space_id: str) -> None:
@@ -2826,83 +2834,122 @@ async def _subscribe(svc, seed: bytes, *, instance_id: str, space_id: str) -> No
     await svc.subscribe(instance_id, space_id, ts, sig)
 
 
-@pytest.mark.security
-async def test_subscribe_refused_for_invite_only_space(svc):
-    """An invite-only space is LISTED for discovery but has no public
-    readership — the GFS must refuse to seat a subscriber on it."""
+async def _two_instances(svc, tag: str):
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
     await svc.register_instance(
-        "owner-inv", owner_pk.hex(), "http://inv.example.com/wh", auto_accept=True
+        f"owner-{tag}", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
     )
     await svc.register_instance(
-        "sub-inv", sub_pk.hex(), "http://sub.example.com/wh", auto_accept=True
+        f"sub-{tag}", sub_pk.hex(), "http://s.example.com/wh", auto_accept=True
     )
+    return owner_seed, sub_seed
+
+
+@pytest.mark.security
+async def test_subscribe_refused_when_subscribers_are_disabled(svc):
+    """A space whose owner has not opted into subscribers is LISTED for
+    discovery but has no public readership — the GFS must refuse to seat a
+    subscriber on it."""
+    owner_seed, sub_seed = await _two_instances(svc, "inv")
     await _publish_known_space(
         svc,
         owner_seed,
         owning_instance="owner-inv",
         space_id="sp-invite",
-        join_mode="invite_only",
+        allow_subscribers=False,
     )
     with pytest.raises(PermissionError, match="not publicly readable"):
         await _subscribe(svc, sub_seed, instance_id="sub-inv", space_id="sp-invite")
     assert await svc._repo.list_subscribers("sp-invite") == []
 
 
-async def test_subscribe_allowed_for_an_open_space(svc):
-    """``open`` is the ONLY publicly readable join mode — subscribing to such
-    a space is unchanged."""
-    mode = "open"
-    owner_seed, owner_pk = _make_keypair()
-    sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        f"owner-{mode}", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        f"sub-{mode}", sub_pk.hex(), "http://s.example.com/wh", auto_accept=True
-    )
+@pytest.mark.security
+async def test_subscribe_refused_when_the_publisher_sent_no_flag(svc):
+    """Mixed version, old household → new GFS: the publish body omits
+    ``allow_subscribers`` entirely, so the row stores the fail-closed False
+    and the subscribe is refused. It self-heals on the owner's next
+    ``heal_space_pins`` re-publish."""
+    owner_seed, sub_seed = await _two_instances(svc, "legacy")
     await _publish_known_space(
         svc,
         owner_seed,
-        owning_instance=f"owner-{mode}",
-        space_id=f"sp-{mode}",
+        owning_instance="owner-legacy",
+        space_id="sp-legacy",
+        allow_subscribers=None,
+    )
+    row = await svc._repo.get_space("sp-legacy")
+    assert row is not None and row.allow_subscribers is False
+    with pytest.raises(PermissionError, match="not publicly readable"):
+        await _subscribe(svc, sub_seed, instance_id="sub-legacy", space_id="sp-legacy")
+
+    # …and the heal: the same owner re-publishes carrying the flag.
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-legacy",
+        space_id="sp-legacy",
+        allow_subscribers=True,
+    )
+    await _subscribe(svc, sub_seed, instance_id="sub-legacy", space_id="sp-legacy")
+    subs = await svc._repo.list_subscribers("sp-legacy")
+    assert [x.instance_id for x in subs] == ["sub-legacy"]
+
+
+async def test_subscribe_allowed_when_subscribers_are_enabled(svc):
+    """The readable case — unchanged."""
+    owner_seed, sub_seed = await _two_instances(svc, "open")
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-open",
+        space_id="sp-open",
+        allow_subscribers=True,
+    )
+    await _subscribe(svc, sub_seed, instance_id="sub-open", space_id="sp-open")
+    subs = await svc._repo.list_subscribers("sp-open")
+    assert [x.instance_id for x in subs] == ["sub-open"]
+
+
+@pytest.mark.parametrize("mode", ["invite_only", "open", "request"])
+async def test_join_mode_does_not_gate_a_subscribe(svc, mode):
+    """The two dials are independent: with subscribers ON every join mode
+    accepts a subscriber (``invite_only`` + subscribers-on is a broadcast
+    space), and with subscribers OFF none of them does — including
+    ``open``."""
+    owner_seed, sub_seed = await _two_instances(svc, f"jm-{mode}")
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance=f"owner-jm-{mode}",
+        space_id=f"sp-jm-{mode}",
         join_mode=mode,
+        allow_subscribers=True,
     )
-    await _subscribe(svc, sub_seed, instance_id=f"sub-{mode}", space_id=f"sp-{mode}")
-    subs = await svc._repo.list_subscribers(f"sp-{mode}")
-    assert [s.instance_id for s in subs] == [f"sub-{mode}"]
+    await _subscribe(
+        svc, sub_seed, instance_id=f"sub-jm-{mode}", space_id=f"sp-jm-{mode}"
+    )
+    assert len(await svc._repo.list_subscribers(f"sp-jm-{mode}")) == 1
 
-
-async def test_subscribe_refused_for_a_request_space(svc):
-    """``request`` is a MEMBERSHIP mode, not a read mode: a person still has
-    to be admitted, so the space is listed for discovery but carries no
-    public readership and a subscribe seat must be refused — exactly as for
-    ``invite_only``."""
-    owner_seed, owner_pk = _make_keypair()
-    sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-req", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-req", sub_pk.hex(), "http://s.example.com/wh", auto_accept=True
-    )
+    owner2_seed, sub2_seed = await _two_instances(svc, f"jx-{mode}")
     await _publish_known_space(
         svc,
-        owner_seed,
-        owning_instance="owner-req",
-        space_id="sp-request",
-        join_mode="request",
+        owner2_seed,
+        owning_instance=f"owner-jx-{mode}",
+        space_id=f"sp-jx-{mode}",
+        join_mode=mode,
+        allow_subscribers=False,
     )
     with pytest.raises(PermissionError, match="not publicly readable"):
-        await _subscribe(svc, sub_seed, instance_id="sub-req", space_id="sp-request")
-    assert await svc._repo.list_subscribers("sp-request") == []
+        await _subscribe(
+            svc, sub2_seed, instance_id=f"sub-jx-{mode}", space_id=f"sp-jx-{mode}"
+        )
 
 
-async def test_publishing_invite_only_purges_existing_subscribers(svc, caplog):
-    """Seats taken under the old permissive behaviour (or before the owner
-    locked the space down) are dropped the moment the truthful ``join_mode``
-    arrives — a subscriber must never linger on an unreadable space."""
+async def test_publishing_with_subscribers_off_purges_existing_subscribers(svc, caplog):
+    """Seats taken while the space was readable are dropped the moment the
+    owner turns subscribers off — a subscriber must never linger on a space
+    nobody may read."""
     owner_seed, owner_pk = _make_keypair()
     a_seed, a_pk = _make_keypair()
     b_seed, b_pk = _make_keypair()
@@ -2928,7 +2975,7 @@ async def test_publishing_invite_only_purges_existing_subscribers(svc, caplog):
             owner_seed,
             owning_instance="owner-purge",
             space_id="sp-purge",
-            join_mode="invite_only",
+            allow_subscribers=False,
         )
     assert await svc._repo.list_subscribers("sp-purge") == []
     row = await svc._repo.get_space("sp-purge")
@@ -2938,7 +2985,7 @@ async def test_publishing_invite_only_purges_existing_subscribers(svc, caplog):
     )
 
 
-async def test_republishing_open_keeps_subscribers(svc):
+async def test_republishing_a_readable_space_keeps_subscribers(svc):
     """A re-publish that keeps the space publicly readable touches nobody."""
     owner_seed, owner_pk = _make_keypair()
     a_seed, a_pk = _make_keypair()

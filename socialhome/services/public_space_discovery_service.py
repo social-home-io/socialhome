@@ -291,12 +291,16 @@ class PublicSpaceDiscoveryService:
                         # raise on e.g. 15 — aborting the whole poll tick.
                         min_age=normalize_min_age(item.get("min_age")),
                         category=normalize_category(item.get("category")),
-                        # An ``invite_only`` listing is discoverable but NOT
-                        # publicly readable. Normalised, so an older GFS
-                        # (which sends no join mode) or a hostile value fails
-                        # closed rather than advertising a Subscribe button
-                        # for a space nobody may read.
+                        # The host's MEMBERSHIP gate. Normalised, so an older
+                        # GFS (which sends no join mode) or a hostile value
+                        # fails closed to ``invite_only``.
                         join_mode=normalize_join_mode(item.get("join_mode")),
+                        # …and the separate READABILITY opt-in. Strict
+                        # ``is True``: absent (an older GFS), false, or any
+                        # non-boolean a hostile directory made up ⇒ not
+                        # publicly readable, so the SPA never offers a
+                        # Subscribe button for a space nobody may read.
+                        allow_subscribers=item.get("allow_subscribers") is True,
                     )
                 )
             except KeyError, TypeError, ValueError:

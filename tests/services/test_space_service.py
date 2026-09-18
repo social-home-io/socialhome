@@ -1880,7 +1880,10 @@ async def test_subscribe_public_space_adds_subscriber_member(stack):
     owner = await stack.provision_user("owner1")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner1", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner1",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
 
@@ -1910,7 +1913,10 @@ async def test_subscribe_is_idempotent(stack):
     await stack.provision_user("owner3")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner3", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner3",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
     await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
@@ -1924,7 +1930,10 @@ async def test_subscribe_does_not_demote_existing_member(stack):
     await stack.provision_user("owner4")
     real = await stack.provision_user("real")
     space = await stack.space_svc.create_space(
-        owner_username="owner4", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner4",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     await stack.space_svc.add_member(
         space.id, actor_username="owner4", user_id=real.user_id
@@ -1943,7 +1952,10 @@ async def test_unsubscribe_removes_subscriber_only(stack):
     fan = await stack.provision_user("fan")
     real = await stack.provision_user("real")
     space = await stack.space_svc.create_space(
-        owner_username="owner5", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner5",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
     await stack.space_svc.add_member(
@@ -1965,10 +1977,16 @@ async def test_list_subscriptions_only_returns_subscribers(stack):
     await stack.provision_user("owner6")
     u = await stack.provision_user("multi")
     pub = await stack.space_svc.create_space(
-        owner_username="owner6", name="Pub", space_type=SpaceType.GLOBAL
+        owner_username="owner6",
+        name="Pub",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     mem_space = await stack.space_svc.create_space(
-        owner_username="owner6", name="Mem", space_type=SpaceType.GLOBAL
+        owner_username="owner6",
+        name="Mem",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     await stack.space_svc.subscribe_to_space(u.user_id, pub.id)
     await stack.space_svc.add_member(
@@ -1983,7 +2001,10 @@ async def test_subscriber_cannot_create_post(stack):
     await stack.provision_user("owner7")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner7", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner7",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
@@ -1999,7 +2020,10 @@ async def test_subscriber_cannot_comment(stack):
     await stack.provision_user("owner8")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner8", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner8",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     post = await stack.space_svc.create_post(
         space.id,
@@ -2018,7 +2042,10 @@ async def test_subscriber_cannot_react(stack):
     await stack.provision_user("owner9")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner9", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner9",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     post = await stack.space_svc.create_post(
         space.id,
@@ -2031,11 +2058,45 @@ async def test_subscriber_cannot_react(stack):
         await stack.space_svc.add_reaction(post.id, user_id=fan.user_id, emoji="👍")
 
 
+async def test_subscribe_no_ops_for_an_existing_member_after_followers_off(stack):
+    """An owner turning followers off must not turn an existing member's
+    idempotent re-subscribe into an error — the "never demote" no-op runs
+    ahead of the readability gate. Their GFS seat is dropped by the purge on
+    the re-publish, not by raising here."""
+    from dataclasses import replace
+
+    await stack.provision_user("owner_seated")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="owner_seated",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_repo.save(
+        replace(space, features=SpaceFeatures(allow_subscribers=False))
+    )
+
+    # No raise, and the existing subscriber row is untouched.
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    member = await stack.space_repo.get_member(space.id, fan.user_id)
+    assert member is not None and member.role == "subscriber"
+
+    # …but a NEW follower is refused.
+    newcomer = await stack.provision_user("newcomer")
+    with pytest.raises(SpacePermissionError, match="does not allow subscribers"):
+        await stack.space_svc.subscribe_to_space(newcomer.user_id, space.id)
+
+
 async def test_subscribe_banned_user_rejected(stack):
     await stack.provision_user("owner10")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner10", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner10",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     # Seed a ban row directly.
     await stack.space_repo.ban_member(
@@ -5127,6 +5188,10 @@ class _FakeGfsMirror:
                 "identity_public_key": _MIRROR_PIN,
                 "space_type": "global",
                 "join_mode": "invite_only",
+                # Invite-only AND readable — the two dials are independent,
+                # and this is exactly the broadcast shape a stranger
+                # subscribes to through a GFS directory.
+                "features": {"allow_subscribers": True},
                 "owner_username": "",
                 "min_age": self._min_age,
                 "category": "gaming",
@@ -5188,7 +5253,10 @@ async def test_subscribe_to_local_space_skips_the_mirror(stack):
     await stack.provision_user("owner_m")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner_m", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner_m",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
@@ -5281,7 +5349,10 @@ async def test_unsubscribe_never_purges_an_owned_space(stack):
     await stack.provision_user("owner_p")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
-        owner_username="owner_p", name="P", space_type=SpaceType.GLOBAL
+        owner_username="owner_p",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
     )
     mirror = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(mirror)
@@ -5333,6 +5404,7 @@ async def test_unsubscribe_leaves_a_non_global_remote_stub_alone(stack):
                 "identity_public_key": _MIRROR_PIN,
                 "space_type": "public",
                 "join_mode": "open",
+                "features": {"allow_subscribers": True},
                 "owner_username": "",
             },
         )

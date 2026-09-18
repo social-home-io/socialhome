@@ -56,13 +56,21 @@ class GlobalSpace:
     #: Discovery category (§23.50) — normalizes to ``"general"`` if unknown.
     category: str = "general"
     #: How the owning household lets people in — ``invite_only`` / ``open`` /
-    #: ``request``, straight off the owner's signed publish body. An
-    #: ``invite_only`` global space is LISTED here for discovery but is NOT
-    #: publicly readable: the GFS refuses a subscription for it and relays no
-    #: content key. Fail-closed default: a row published before this field
-    #: existed reads as ``invite_only`` until the owner's next publish
-    #: (which happens automatically on its next GFS-WS connect).
+    #: ``request``, straight off the owner's signed publish body. Purely a
+    #: MEMBERSHIP gate, surfaced on the directory listing; it says nothing
+    #: about readability (see ``allow_subscribers``). Fail-closed default: a
+    #: row published before this field existed reads as ``invite_only`` until
+    #: the owner's next publish (which happens automatically on its next
+    #: GFS-WS connect).
     join_mode: str = "invite_only"
+    #: The owner's readability opt-in, straight off the signed publish body.
+    #: When False this space is LISTED here for discovery but is NOT publicly
+    #: readable: the GFS refuses ``POST /gfs/subscribe`` for it, purges any
+    #: seats it already had, and the owner relays neither content nor content
+    #: key. Independent of ``join_mode`` — an ``invite_only`` space with this
+    #: ON is a broadcast space. Fail-closed default: a row published before
+    #: this field existed reads as False until the owner's next publish.
+    allow_subscribers: bool = False
     accent_color: str = "#6366f1"
     primary_color: str = "#6366f1"
     status: str = "pending"  # 'pending' | 'active' | 'banned'

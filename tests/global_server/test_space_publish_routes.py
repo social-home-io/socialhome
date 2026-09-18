@@ -1040,8 +1040,8 @@ async def test_publish_unknown_join_mode_falls_back_to_invite_only(gfs_client):
 
 async def test_publish_join_mode_is_covered_by_the_signature(gfs_client):
     """``join_mode`` rides INSIDE the signed canonical body — flipping it in
-    transit invalidates the signature (403), so a relay can't turn an
-    invite-only listing into a publicly readable one."""
+    transit invalidates the signature (403), so a relay can't widen a
+    listing's membership gate."""
     app = gfs_client.server.app
     seed, _pk = await _register_owner(app, instance_id="tamper.home")
     body = _sign_publish_body(
@@ -1063,4 +1063,102 @@ async def test_publish_join_mode_is_covered_by_the_signature(gfs_client):
     )
     body["join_mode"] = "open"
     resp = await gfs_client.post("/gfs/spaces/sp-jm-tamper/publish", json=body)
+    assert resp.status == 403
+
+
+# ── allow_subscribers on the publish body / directory row ────────────────
+
+
+async def test_publish_round_trips_allow_subscribers(gfs_client):
+    """A signed publish carrying ``allow_subscribers`` stores it and serves
+    it back on both directory reads — the GFS now KNOWS whether a listed
+    space is publicly READABLE, which ``join_mode`` never told it."""
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, instance_id="rd.home")
+    body = _sign_publish_body(
+        {
+            "space_id": "sp-readable",
+            "owning_instance": "rd.home",
+            "name": "Readable Space",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": "",
+            "icon_url": "",
+            "min_age": 0,
+            "category": "general",
+            "accent_color": "#D2542A",
+            "primary_color": "#D2542A",
+            # Invite-only AND readable: the broadcast shape the old model
+            # could not express at all.
+            "join_mode": "invite_only",
+            "allow_subscribers": True,
+        },
+        seed=seed,
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-readable/publish", json=body)
+    assert resp.status == 200
+    detail = await (await gfs_client.get("/gfs/spaces/sp-readable")).json()
+    assert detail["allow_subscribers"] is True
+    assert detail["join_mode"] == "invite_only"
+    listing = await (await gfs_client.get("/gfs/spaces")).json()
+    assert [s["allow_subscribers"] for s in listing["spaces"]] == [True]
+
+
+async def test_publish_without_allow_subscribers_is_not_readable(gfs_client):
+    """Mixed version, old household → new GFS: the body omits the flag, so
+    the GFS fails CLOSED and the listing is not publicly readable until the
+    owner's next publish (which ``heal_space_pins`` fires on reconnect)."""
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, instance_id="oldrd.home")
+    body = _sign_publish_body(
+        {
+            "space_id": "sp-rd-legacy",
+            "owning_instance": "oldrd.home",
+            "name": "Legacy",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": "",
+            "icon_url": "",
+            "min_age": 0,
+            "category": "general",
+            "accent_color": "#D2542A",
+            "primary_color": "#D2542A",
+            "join_mode": "open",
+        },
+        seed=seed,
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-rd-legacy/publish", json=body)
+    assert resp.status == 200
+    detail = await (await gfs_client.get("/gfs/spaces/sp-rd-legacy")).json()
+    # Open to JOIN, but nothing to read — the two dials really are separate.
+    assert detail["join_mode"] == "open"
+    assert detail["allow_subscribers"] is False
+
+
+async def test_publish_allow_subscribers_is_covered_by_the_signature(gfs_client):
+    """The flag rides INSIDE the signed canonical body — flipping it in
+    transit invalidates the signature (403), so a relay can't turn a private
+    space into a publicly readable one."""
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app, instance_id="rdtamper.home")
+    body = _sign_publish_body(
+        {
+            "space_id": "sp-rd-tamper",
+            "owning_instance": "rdtamper.home",
+            "name": "Tamper",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": "",
+            "icon_url": "",
+            "min_age": 0,
+            "category": "general",
+            "accent_color": "#D2542A",
+            "primary_color": "#D2542A",
+            "join_mode": "open",
+            "allow_subscribers": False,
+        },
+        seed=seed,
+    )
+    body["allow_subscribers"] = True
+    resp = await gfs_client.post("/gfs/spaces/sp-rd-tamper/publish", json=body)
     assert resp.status == 403

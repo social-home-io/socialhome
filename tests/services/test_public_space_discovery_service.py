@@ -333,6 +333,65 @@ async def test_poll_once_join_mode_fails_closed(env, item_extra):
     assert out[0].join_mode == "invite_only"
 
 
+async def test_poll_once_caches_allow_subscribers(env):
+    """The readability opt-in round-trips into the cache — it is what
+    ``GET /api/public_spaces`` uses to tell the browser whether to offer
+    Subscribe, and it is independent of the join mode."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {
+                "space_id": "sp-rd",
+                "instance_id": "inst-X",
+                "name": "Broadcast",
+                "join_mode": "invite_only",
+                "allow_subscribers": True,
+            },
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert out[0].allow_subscribers is True
+    assert out[0].join_mode == "invite_only"
+
+
+@pytest.mark.parametrize(
+    "item_extra",
+    [{}, {"allow_subscribers": 0}, {"allow_subscribers": "yes"}],
+)
+async def test_poll_once_allow_subscribers_fails_closed(env, item_extra):
+    """An older GFS sends no flag, a falsy one means off, and a hostile one
+    may send a truthy non-boolean. All three cache as not-readable, so the
+    SPA never offers a Subscribe that 403s."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {
+                "space_id": "sp-rd2",
+                "instance_id": "inst-X",
+                "name": "Unknown",
+                "join_mode": "open",
+                **item_extra,
+            },
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body=body),
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert out[0].allow_subscribers is False
+
+
 async def test_poll_once_skips_blocked_instances(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))

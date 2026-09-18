@@ -78,12 +78,14 @@ class PublicSpaceCollectionView(BaseView):
                     "member_count": lst.member_count,
                     "min_age": lst.min_age,
                     "category": normalize_category(lst.category),
-                    # The host's real join mode. ``invite_only`` means the
-                    # listing is discoverable but the content is NOT publicly
-                    # readable — the SPA must not offer Subscribe for it.
-                    # Before this field existed the client fabricated
-                    # ``'request'`` for every global listing.
+                    # The host's real join mode — how someone becomes a
+                    # posting member. Before this field existed the client
+                    # fabricated ``'request'`` for every global listing.
                     "join_mode": normalize_join_mode(lst.join_mode),
+                    # The host's readability opt-in. False means the listing
+                    # is discoverable but its content is NOT publicly readable
+                    # — the SPA must not offer Subscribe for it.
+                    "allow_subscribers": bool(lst.allow_subscribers),
                 }
                 for lst in listings
             ]

@@ -473,6 +473,43 @@ async def test_ensure_mirror_carries_the_real_join_mode(env):
     assert stored.join_mode is JoinMode.OPEN
 
 
+async def test_ensure_mirror_carries_allow_subscribers(env):
+    """The stub carries the owner's readability opt-in off the directory
+    body, in the ``features`` block where ``allow_subscribers`` lives on a
+    Space. Without it ``SpaceService.subscribe_to_space`` would refuse every
+    GFS-discovered subscription."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                # Invite-only AND readable — the broadcast shape.
+                _gfs_space_body(join_mode="invite_only", allow_subscribers=True),
+            ),
+        },
+    )
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.features.allow_subscribers is True
+    assert stored.join_mode is JoinMode.INVITE_ONLY
+
+
+@pytest.mark.parametrize("hostile", [None, "nope", 0, [], {}])
+async def test_ensure_mirror_allow_subscribers_fails_closed(env, hostile):
+    """A missing (older GFS) or falsy/hostile flag reads as not-readable —
+    never as something more permissive."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    body = _gfs_space_body(join_mode="open")
+    if hostile is not None:
+        body["allow_subscribers"] = hostile
+    session = _StubSession({"https://gfs.test/gfs/spaces/sp-1": (200, body)})
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.features.allow_subscribers is False
+
+
 @pytest.mark.parametrize("hostile", [None, "wide-open", 7, [1], {"a": 1}])
 async def test_ensure_mirror_join_mode_fails_closed(env, hostile):
     """A missing (older GFS) or hostile join mode reads as invite-only —

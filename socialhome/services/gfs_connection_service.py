@@ -711,14 +711,19 @@ class GfsConnectionService:
             "icon_url": icon_uri,
             "min_age": 0,
             "category": normalize_category(space.category),
-            # The GFS needs the join mode to know whether this listing is
-            # publicly READABLE: an ``invite_only`` global space is listed for
-            # discovery but relays no content and seats no subscriber. Inside
-            # the already-signed canonical body — no new signing step, and a
-            # relay can't flip it in transit.
+            # How people become MEMBERS. Shown on the directory listing so a
+            # browser can say "open to join" / "ask to join" / "invite only";
+            # it says nothing about readability. Inside the already-signed
+            # canonical body — no new signing step, and a relay can't flip it
+            # in transit.
             "join_mode": normalize_join_mode(
                 getattr(space, "join_mode", None),
             ),
+            # The readability opt-in. OFF ⇒ this listing is discoverable but
+            # not publicly readable: the GFS refuses ``POST /gfs/subscribe``
+            # for it and purges any seat it already had. Signed alongside
+            # ``join_mode`` so a relay cannot flip a private space open.
+            "allow_subscribers": bool(space.features.allow_subscribers),
             "accent_color": accent,
             "primary_color": primary,
             # Phase 5a: ship the space's Ed25519 authority verify key so the GFS

@@ -440,8 +440,8 @@ class SpacePublishView(GfsBaseView):
     space metadata so this GFS can list it on ``/gfs/spaces``.
 
     Body: ``{owning_instance, name, description?, about_markdown?,
-    cover_url?, min_age?, category?, join_mode?, accent_color?, ts?,
-    signature}``.
+    cover_url?, min_age?, category?, join_mode?, allow_subscribers?,
+    accent_color?, ts?, signature}``.
     The Ed25519 signature is verified against the registered
     ``ClientInstance.public_key`` (so a paired-but-malicious peer
     can't masquerade as another household's space owner). ``ts``, when
@@ -474,6 +474,15 @@ class SpacePublishView(GfsBaseView):
                 # ``GfsFederationService.publish_space``. Absent/unknown ⇒
                 # stored as the fail-closed ``invite_only``.
                 join_mode=str(body.get("join_mode") or ""),
+                # Likewise optional, and tri-state on purpose: ``None`` means
+                # "the household sent no such key" (so it signed a body
+                # without it), which is distinct from an explicit ``false``.
+                # Absent ⇒ stored as the fail-closed "not publicly readable".
+                allow_subscribers=(
+                    bool(body["allow_subscribers"])
+                    if "allow_subscribers" in body
+                    else None
+                ),
                 accent_color=str(body.get("accent_color") or "#D2542A"),
                 primary_color=str(body.get("primary_color") or "#D2542A"),
                 identity_public_key=str(body.get("identity_public_key") or ""),

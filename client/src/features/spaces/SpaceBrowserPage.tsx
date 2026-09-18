@@ -89,6 +89,8 @@ async function loadAll() {
         member_count:       0,
         scope:              s.space_type as 'household' | 'public',
         join_mode:          s.join_mode,
+        // Readability lives on the space's features, not on its join mode.
+        allow_subscribers:  !!s.features?.allow_subscribers,
         min_age:            0,
         category:           s.category,
         already_member:     realMemberIds.has(s.id),
@@ -107,9 +109,12 @@ async function loadAll() {
       scope: 'global' as const,
       // /api/public_spaces now carries the host's real join_mode (it used to
       // omit it, and this defaulted to 'request' — which advertised a join
-      // path, and a Subscribe button, for spaces that are not publicly
-      // readable at all). Fail closed if an older backend still omits it.
+      // path that may not exist). Fail closed if an older backend omits it.
       join_mode:          e.join_mode || 'invite_only',
+      // …and its readability opt-in, which is what decides whether Subscribe
+      // is offered at all. Absent ⇒ false ⇒ no Subscribe button, rather than
+      // one that 403s.
+      allow_subscribers:  !!e.allow_subscribers,
       already_subscribed: subIds.has(e.space_id),
       already_member:     realMemberIds.has(e.space_id),
       request_pending:    pendingIds.has(e.space_id),
