@@ -5391,7 +5391,9 @@ def cmd_admin_promote_kick() -> None:
     - d's post-respawn log carries the nack emission
       (``no cached target_eph_priv … nacked to <b>``).
     - c's log, from the PATCH on, carries the origin's recovery line
-      ``rediscovered, retransmitted`` naming d's instance id. The word
+      ``rediscovered, retransmitted`` naming d's instance id **and**
+      ``space_member_role_changed`` (c may retransmit other envelopes to d in
+      the same window — only the role change proves the step). The word
       before it is ``invalidated`` (c's cache still pointed at the dead
       key and was dropped) or ``already rebuilt`` (``invalidate_if_eph``
       found the route refreshed already — the respawned d's catch-up
@@ -5550,10 +5552,14 @@ def cmd_admin_promote_kick() -> None:
         for line in _log_lines_matching("d", stale_at_target)
         if "nacked to" not in line
     ]
+    # The retransmit line must name BOTH d's instance id AND the role-change
+    # event. c may legitimately retransmit other envelopes to d in this window
+    # (run 3 of #673 matched a ``space_sync_direct_failed`` retransmit first),
+    # and a line for any other event proves nothing about the role change.
     recovered = [
         line
         for line in _log_lines_matching("c", nack_recovered, offset=c_log_mark)
-        if d["instance_id"] in line
+        if d["instance_id"] in line and "space_member_role_changed" in line
     ]
 
     def _dump_evidence() -> None:
