@@ -179,12 +179,18 @@ authorizes, is never forwarded and is never logged. Receivers take
 attribution (`origin_instance_id`) from the encrypted, authority-signed
 inner only; an outer `from_instance` from an old GFS is never read.
 
+The `space_subscriber_key_handoff` payload is identity-free too: it is
+exactly `{space_id, sealed, authority_sig, authority_sig_suite}` and names
+neither the relaying household nor the household being onboarded. The
+**seal is the gate** — the GFS fans the same bytes to every subscriber and
+only the one holding the matching key-wrap private key can `open_keywrap`
+it; everyone else drops it quietly at DEBUG. Receivers still accept the
+legacy `target_instance_id`-bearing shape from an older seed-holder (the
+explicit gate then applies), so nobody is stranded.
+
 The residual limits, stated plainly: the GFS still sees `space_id`,
 `event_type`, payload size and timing; it can correlate a publish with a
-household's own authenticated WebSocket session by IP/timing; the
-`space_subscriber_key_handoff` payload still carries `target_instance_id`
-in the clear (Phase B removes it once receivers at or above this version
-are deployed — they already treat the seal itself as the gate); and a
+household's own authenticated WebSocket session by IP/timing; and a
 per-instance GFS ban cannot gate an anonymous relay, so the space-level
 ban is the only moderation lever on the relay path.
 

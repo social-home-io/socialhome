@@ -423,10 +423,12 @@ names anybody, receivers derive everything from the sealed inner:
   echo arriving after a local delete would otherwise resurrect the post from
   our own copy.
 - **Seal-as-gate for a key handoff.** A `space_subscriber_key_handoff`
-  carrying **no** `target_instance_id` is gated by the seal itself: if
-  `open_keywrap` fails, the frame was not for us and is dropped quietly.
-  One that still carries the field keeps the explicit gate. This is what
-  makes Phase B (dropping `target_instance_id`) a producer-only change.
+  carries **no** `target_instance_id` and is gated by the seal itself: if
+  `open_keywrap` fails, the frame was not for us and is dropped quietly at
+  DEBUG (every subscriber sees every other subscriber's handoff, so anything
+  louder would be pure noise). A legacy frame from an older seed-holder that
+  still carries the field keeps the explicit gate — which is why dropping it
+  was a producer-only change.
 
 ### What the GFS does and does not learn
 
@@ -438,10 +440,12 @@ State this precisely; do not soften it:
    authenticated WebSocket to the same server from the same IP, so an
    operator can correlate a publish's source IP, timing and size with that
    session. No protocol change closes that short of a mix/onion egress.
-2. **`target_instance_id` is still in the clear** on a
-   `space_subscriber_key_handoff` — the GFS and every subscriber learn which
-   household is being onboarded. Phase B stops sending it once receivers at
-   or above this version are deployed; the receivers are ready now.
+2. **A key handoff names nobody.** A `space_subscriber_key_handoff` is
+   exactly `{space_id, sealed, authority_sig, authority_sig_suite}` — the GFS
+   and the other subscribers it is fanned out to learn neither the relaying
+   household nor the one being onboarded. The seal is the gate. (A legacy
+   sender's `target_instance_id` is still accepted by receivers, so no
+   deployment is stranded.)
 3. **Per-instance GFS bans cannot gate an anonymous relay.** The
    space-level ban (`status='banned'`) is the only moderation lever left on
    the relay path.
@@ -480,21 +484,25 @@ deliveries — is **Phase 5b-c**, below):
    rotated_by}}` meta (the same shape `apply_space_content_key_from_metadata`
    consumes), **seals** it to the verified key-wrap pubkey
    (`seal_to_keywrap` → `{kem_suite, eph_pk, ciphertext}`), wraps
-   `{space_id, target_instance_id, sealed}` and **authority-signs** it with the
+   `{space_id, sealed}` and **authority-signs** it with the
    space seed under `space_subscriber_key_handoff`, and relays it through the
    content-blind GFS (`publish_space_event`). **No plaintext key ever leaves
    the household** — only the sealed ciphertext travels; the GFS authorizes the
    relay by the space-authority signature (same path as `space_post_public`)
-   and fans it out. Non-target subscribers it reaches drop it
-   (`target_instance_id` ≠ self, and they can't `open_keywrap` it anyway).
+   and fans it out. The envelope is **identity-free** — the target household
+   is used locally to pick and verify the key-wrap key, never put on the
+   wire — so the non-target subscribers it reaches simply can't
+   `open_keywrap` it and drop it quietly.
 3. **Subscriber unseals + imports**
    (`services/space_subscriber_key_inbound.py`). On the relayed
-   `space_subscriber_key_handoff` frame: drop unless `target_instance_id` is
-   us; **re-verify** the space-authority signature against the
+   `space_subscriber_key_handoff` frame: **re-verify** the space-authority
+   signature against the
    locally-mirrored `spaces.identity_public_key` (never trust the relay/GFS) —
    a forged signature → drop, no import; `open_keywrap` with our key-wrap
-   private key (a payload sealed to a different key → `InvalidTag` → dropped
-   gracefully); parse the meta and `apply_space_content_key_from_metadata`
+   private key — this is the gate, a payload sealed to a different key →
+   `InvalidTag` → dropped quietly at DEBUG (a legacy frame that names a
+   `target_instance_id` other than us is still dropped by the explicit gate,
+   before any unseal); parse the meta and `apply_space_content_key_from_metadata`
    (idempotent per epoch — a double delivery imports once). After the import
    the subscriber can decrypt the Phase-5a relay (a later relay/backfill
    decodes; backfill is out of scope).

@@ -31,12 +31,15 @@ Pipeline (fail-closed at every step):
    §D1b / rekey distribution shape).
 4. **Seal** the meta to the verified key-wrap pubkey
    (:func:`seal_to_keywrap`) → ``{kem_suite, eph_pk, ciphertext}``.
-5. **Wrap + authority-sign** ``{space_id, target_instance_id, sealed}`` with
-   the space seed under ``space_subscriber_key_handoff`` and relay via the
-   existing GFS publish path. The GFS authorizes it against the TOFU-pinned
-   space pubkey (same authority-relay path as ``space_post_public``); the
-   non-target subscribers it fans out to drop it (``target_instance_id`` ≠
-   self, and they can't ``open_keywrap`` it anyway).
+5. **Wrap + authority-sign** ``{space_id, sealed}`` with the space seed under
+   ``space_subscriber_key_handoff`` and relay via the existing GFS publish
+   path. The GFS authorizes it against the TOFU-pinned space pubkey (same
+   authority-relay path as ``space_post_public``). The envelope is
+   **identity-free**: it does NOT name the target household, so neither the
+   GFS nor the other subscribers it is fanned out to learn who is being
+   onboarded — the **seal is the gate**, and a household that can't
+   ``open_keywrap`` it drops it quietly. (Receivers still accept the legacy
+   ``target_instance_id``-bearing shape from an older seed-holder.)
 
 Phase 5b-c adds the owner-offline RECONCILE (:meth:`reconcile`): on each GFS-WS
 (re)connect, a seed-holder pulls the GFS subscriber list for every local
@@ -237,9 +240,15 @@ class SpaceSubscriberKeyOutbound:
             recipient_keywrap_pub=keywrap_pub,
             plaintext=json.dumps(meta).encode("utf-8"),
         )
+        # IDENTITY-FREE WIRE SHAPE: the envelope names nobody. The target is
+        # used locally (to pick + verify the key-wrap key we seal to, and for
+        # our own logging) but never travels: the SEAL is the gate, so only
+        # the household holding the matching key-wrap private key can open it.
+        # Shipping ``target_instance_id`` would tell the GFS — and every other
+        # subscriber the GFS fans this out to — which household is being
+        # onboarded to which space.
         envelope: dict = {
             "space_id": space_id,
-            "target_instance_id": target_instance_id,
             "sealed": sealed,
         }
         sig = sign_authority_event(

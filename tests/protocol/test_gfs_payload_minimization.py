@@ -26,6 +26,7 @@ shape is the one below.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,6 +67,9 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_outbound import SpacePublicOutbound
+from socialhome.services.space_subscriber_key_inbound import (
+    SpaceSubscriberKeyInbound,
+)
 from socialhome.services.space_subscriber_key_outbound import (
     SpaceSubscriberKeyOutbound,
 )
@@ -113,16 +117,15 @@ POST_PUBLIC_CLEARTEXT_KEYS: frozenset[str] = frozenset(
 
 #: The cleartext keys of a ``space_subscriber_key_handoff`` relay payload
 #: (``SpaceSubscriberKeyOutbound``). ``sealed`` is the X25519-sealed content
-#: key. ``target_instance_id`` is the ONE identity-bearing cleartext field
-#: still on the wire — the GFS and every subscriber learn which household is
-#: being onboarded. Documented as the Phase-B follow-up: receivers already
-#: accept a handoff without it (the seal itself is the gate), so once
-#: receivers at or above this version are deployed the producer stops
-#: sending it and this assertion tightens to "no identity-bearing field".
+#: key. NO identity-bearing field is left on the wire: the producer does not
+#: ship ``target_instance_id``, so neither the GFS nor a non-target
+#: subscriber learns which household is being onboarded — the **seal itself
+#: is the gate** (a receiver that can't ``open_keywrap`` the envelope drops
+#: it quietly). Receivers still accept the legacy targeted shape from an
+#: older seed-holder; this set pins what THIS build emits.
 KEY_HANDOFF_CLEARTEXT_KEYS: frozenset[str] = frozenset(
     {
         "space_id",
-        "target_instance_id",
         "sealed",
         "authority_sig",
         "authority_sig_suite",
@@ -278,31 +281,40 @@ async def post_payload(household):
 
 
 @pytest.fixture
-async def key_handoff_payload(household):
-    """The REAL ``space_subscriber_key_handoff`` payload, built by sealing the
-    live content key to a real subscriber key-wrap keypair."""
+def subscriber_keys():
+    """A real subscriber's identity + key-wrap keypairs (the material the GFS
+    serves to the seed-holder in a ``new_subscriber`` frame)."""
     id_kp = generate_identity_keypair()
     kw_kp = generate_x25519_keypair()
-    subscriber_instance_id = derive_instance_id(id_kp.public_key)
+    return {
+        "id_kp": id_kp,
+        "kw_kp": kw_kp,
+        "instance_id": derive_instance_id(id_kp.public_key),
+        "keywrap_sig": b64url_encode(sign_ed25519(id_kp.private_key, kw_kp.public_key)),
+    }
+
+
+@pytest.fixture
+async def key_handoff_payload(household, subscriber_keys):
+    """The REAL ``space_subscriber_key_handoff`` payload, built by sealing the
+    live content key to a real subscriber key-wrap keypair."""
     await household["key_producer"].handle(
         {
             "type": "new_subscriber",
             "space_id": SPACE_ID,
             "subscriber": {
-                "instance_id": subscriber_instance_id,
-                "identity_public_key": id_kp.public_key.hex(),
-                "keywrap_public_key": kw_kp.public_key.hex(),
+                "instance_id": subscriber_keys["instance_id"],
+                "identity_public_key": subscriber_keys["id_kp"].public_key.hex(),
+                "keywrap_public_key": subscriber_keys["kw_kp"].public_key.hex(),
                 "kem_suite": "x25519",
-                "keywrap_sig": b64url_encode(
-                    sign_ed25519(id_kp.private_key, kw_kp.public_key)
-                ),
+                "keywrap_sig": subscriber_keys["keywrap_sig"],
             },
         }
     )
     calls = household["gfs"].calls
     assert len(calls) == 1
     assert calls[0]["event_type"] == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
-    return calls[0]["payload"], subscriber_instance_id
+    return calls[0]["payload"], subscriber_keys["instance_id"]
 
 
 # ─── Fixtures: the real GFS ──────────────────────────────────────────────
@@ -568,17 +580,17 @@ async def test_key_handoff_cleartext_keys_are_exactly_the_documented_set(
     assert set(payload["sealed"]) == {"kem_suite", "eph_pk", "ciphertext"}
 
 
-async def test_key_handoff_only_identity_field_is_target_instance_id(
+async def test_key_handoff_carries_no_identity_bearing_field(
     tmp_dir, household, key_handoff_payload
 ):
-    """``target_instance_id`` is the ONE identity-bearing cleartext field left
-    on the handoff wire — pinned here as the documented **Phase B** follow-up
-    (receivers already treat the seal itself as the gate, so once receivers at
-    or above this version are deployed the producer stops sending it and this
-    assertion tightens to "no identity-bearing field at all").
+    """The handoff wire carries NO household identity at all — not the
+    relaying household, not the target subscriber, not a space member.
 
-    Everything else — the relaying household, the content key, the space
-    members — stays absent. Guards: the old body also named the *publisher*.
+    Guards two behaviours at once: the old body named the *publisher*, and
+    until this change it named the *target* in the clear, so the GFS and every
+    other subscriber learned which household was being onboarded. Receivers
+    already treat the seal itself as the gate, so the producer simply stops
+    sending it.
     """
     payload, target = key_handoff_payload
     body = await _publish_anonymously(
@@ -587,14 +599,11 @@ async def test_key_handoff_only_identity_field_is_target_instance_id(
     assert set(body) == {"space_id", "event_type", "payload"}
     blob = json.dumps(body)
     _assert_no_identity_or_content(blob, author_user_id=household["author_user_id"])
-    # The target IS present — that is the known, documented residual leak.
-    assert target in blob
-    # …and it is the only identity in the clear: remove it and no instance id
-    # survives anywhere in the envelope.
-    without_target = json.dumps(
-        {k: v for k, v in payload.items() if k != "target_instance_id"}
-    )
-    assert target not in without_target
+    # The target household is gone from the wire — as a value AND as a key
+    # (a regression shipping ``target_instance_id: ""`` would pass a pure
+    # substring check on the value).
+    assert target not in blob
+    assert "instance_id" not in blob
 
 
 async def test_key_handoff_relays_through_the_gfs_identity_free(
@@ -611,3 +620,108 @@ async def test_key_handoff_relays_through_the_gfs_identity_free(
     assert set(frame) == {"type", "space_id", "event_type", "payload"}
     assert frame["payload"] == payload
     assert PUBLISHER_INSTANCE not in json.dumps(frame)
+
+
+# ─── End-to-end: seal → GFS → unseal, with no household id on the wire ────
+
+
+async def _make_subscriber_household(
+    tmp_dir, *, name: str, space_public_key: bytes, keywrap_private_key: bytes
+):
+    """Boot a real subscriber household: its own SQLite + KEK, a mirrored
+    (seedless) space row pinning the space authority key, and the production
+    :class:`SpaceSubscriberKeyInbound` wired to its key-wrap private key."""
+    data_dir = tmp_dir / name
+    data_dir.mkdir()
+    db = AsyncDatabase(data_dir / "hfs.db", batch_timeout_ms=10)
+    await db.startup()
+    kek = KeyManager.from_data_dir(data_dir)
+    space_repo = SqliteSpaceRepo(db, key_manager=kek)
+    instance_id = f"{name}-household.example"
+    crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(db), kek, own_instance_id=instance_id
+    )
+    await space_repo.save(
+        Space(
+            id=SPACE_ID,
+            name="Minimization",
+            owner_instance_id=PUBLISHER_INSTANCE,
+            owner_username=AUTHOR_USERNAME,
+            identity_public_key=space_public_key.hex(),
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    inbound = SpaceSubscriberKeyInbound(space_repo=space_repo, space_crypto=crypto)
+    inbound.attach_identity(
+        own_instance_id=instance_id,
+        keywrap_private_key=keywrap_private_key,
+    )
+    return db, crypto, inbound
+
+
+async def test_e2e_untargeted_handoff_reaches_only_the_household_it_was_sealed_to(
+    tmp_dir, gfs, household, subscriber_keys, key_handoff_payload, caplog
+):
+    """Full path with real crypto on both ends: ``new_subscriber`` → seal →
+    ``publish_space_event`` → the real GFS ``publish_event`` → fan-out frame →
+    :meth:`SpaceSubscriberKeyInbound.handle`.
+
+    The frame names no household at all, so the GFS fans the SAME bytes to
+    every subscriber. The target unseals and imports; a bystander subscriber
+    fails the unseal and drops quietly at DEBUG.
+    """
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    svc, ws = gfs
+    payload, target_instance_id = key_handoff_payload
+
+    delivered = await svc.publish_event(
+        SPACE_ID, AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF, payload
+    )
+    assert delivered == [SUBSCRIBER_INSTANCE_NAME]
+    _iid, frame = ws.sent[0]
+    blob = json.dumps(frame)
+    _assert_no_identity_or_content(blob, author_user_id=household["author_user_id"])
+    assert target_instance_id not in blob
+    assert "instance_id" not in blob
+
+    target_db, target_crypto, target_inbound = await _make_subscriber_household(
+        tmp_dir,
+        name="target",
+        space_public_key=household["space_pk"],
+        keywrap_private_key=subscriber_keys["kw_kp"].private_key,
+    )
+    (
+        bystander_db,
+        bystander_crypto,
+        bystander_inbound,
+    ) = await _make_subscriber_household(
+        tmp_dir,
+        name="bystander",
+        space_public_key=household["space_pk"],
+        keywrap_private_key=generate_x25519_keypair().private_key,
+    )
+    try:
+        await target_inbound.handle(frame)
+        await bystander_inbound.handle(frame)
+
+        # The target imported the host's live content key…
+        host_key = await household["crypto"].export_current_key(SPACE_ID)
+        assert host_key is not None
+        assert await target_crypto.export_current_key(SPACE_ID) == host_key
+        # …and the bystander, given the identical bytes, got nothing.
+        assert await bystander_crypto.export_current_key(SPACE_ID) is None
+        # The bystander's drop is quiet — every subscriber sees every other
+        # subscriber's handoff, so anything above DEBUG would be pure noise.
+        noisy = [
+            r
+            for r in caplog.records
+            if r.name.startswith("socialhome.services.space_subscriber_key_inbound")
+            and r.levelno > logging.INFO
+        ]
+        assert noisy == [], [(r.levelname, r.getMessage()) for r in noisy]
+    finally:
+        await target_db.shutdown()
+        await bystander_db.shutdown()

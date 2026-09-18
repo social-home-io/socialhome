@@ -8,8 +8,11 @@ previously couldn't.
 
 Security invariants under test:
 
-* ``target_instance_id`` ≠ us → dropped (the GFS fans the handoff to ALL
-  subscribers; only the target may import);
+* the current (untargeted) shape is gated by the SEAL alone — sealed to us →
+  imported, sealed to another household → dropped quietly at DEBUG (the GFS
+  fans the handoff to ALL subscribers, so every household sees the others');
+* the LEGACY targeted shape from an older seed-holder is still accepted, and
+  a ``target_instance_id`` ≠ us still drops before any unseal;
 * a forged authority signature → dropped, NO import (the relay/GFS is never
   trusted — re-verify against the local pinned pubkey);
 * sealed to a DIFFERENT key-wrap key (we can't open) → InvalidTag → dropped
@@ -312,7 +315,8 @@ async def _sealed_meta(env, *, recipient_pub, epoch=0, raw_key=bytes(range(32)))
 
 
 async def test_targeted_handoff_for_us_still_imports(env):
-    """``target_instance_id`` present and equal to us → unchanged behaviour."""
+    """LEGACY sender shape: ``target_instance_id`` present and equal to us →
+    still imported, so a pre-untargeted seed-holder can still onboard us."""
     space_id = "sp-targeted-us"
     await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
     sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
@@ -330,7 +334,7 @@ async def test_targeted_handoff_for_us_still_imports(env):
 
 
 async def test_targeted_handoff_for_someone_else_still_dropped(env):
-    """``target_instance_id`` present and NOT us → unchanged behaviour: the
+    """LEGACY sender shape: ``target_instance_id`` present and NOT us → the
     explicit gate still short-circuits before any unseal."""
     space_id = "sp-targeted-other"
     await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
@@ -348,8 +352,9 @@ async def test_targeted_handoff_for_someone_else_still_dropped(env):
 
 
 async def test_untargeted_handoff_sealed_to_us_imports(env):
-    """No ``target_instance_id`` on the wire (nothing identifies the recipient
-    to the GFS) → the unseal itself is the gate; sealed to us → imported."""
+    """The CURRENT sender shape: no ``target_instance_id`` on the wire
+    (nothing identifies the recipient to the GFS) → the unseal itself is the
+    gate; sealed to us → imported."""
     space_id = "sp-untargeted-us"
     await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
     sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
