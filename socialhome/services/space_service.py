@@ -1209,6 +1209,19 @@ class SpaceService(SpaceMemberGuardMixin):
             != space.features.delegated_admin_authority
         ):
             await self._require_owner(space, actor_username)
+        # SECURITY: so is turning public readability on or off.
+        # ``allow_subscribers`` decides whether STRANGERS on a connection
+        # server may read this space — its posts relay, its content key is
+        # sealed to subscribers. A delegated remote admin holds the space seed
+        # for day-to-day config while the owner is offline; exposing (or
+        # withdrawing) the space's content to the public is the owner's call,
+        # exactly like ``delegated_admin_authority`` above, so the same
+        # owner-only gate runs before any local-or-forwarded path.
+        if (
+            features is not None
+            and features.allow_subscribers != space.features.allow_subscribers
+        ):
+            await self._require_owner(space, actor_username)
 
         # Delegated-admin authoritative path (v_24): when this space has
         # ``delegated_admin_authority`` ON and THIS household holds the space
@@ -1298,8 +1311,10 @@ class SpaceService(SpaceMemberGuardMixin):
             new_fields["emoji"] = emoji or None
             payload["emoji"] = new_fields["emoji"]
         location_mode_changed = False
+        directory_state_changed = False
         location_feature_just_enabled = False
         delegated_admin_just_enabled = False
+        subscribers_just_disabled = False
         if features is not None:
             location_mode_changed = (
                 features.location_mode != space.features.location_mode
@@ -1316,10 +1331,22 @@ class SpaceService(SpaceMemberGuardMixin):
                 not space.features.delegated_admin_authority
                 and features.delegated_admin_authority
             )
+            # Readability opt-in flipped either way — the GFS has to learn
+            # (see the re-publish block below).
+            directory_state_changed = (
+                features.allow_subscribers != space.features.allow_subscribers
+            )
+            # Track ON→OFF so we can drop our local followers after the write.
+            subscribers_just_disabled = (
+                space.features.allow_subscribers and not features.allow_subscribers
+            )
             new_fields["features"] = features
             payload["features"] = features.to_wire_dict()
         if join_mode is not None:
             jmode = _coerce_join_mode(join_mode)
+            directory_state_changed = directory_state_changed or (
+                jmode is not space.join_mode
+            )
             new_fields["join_mode"] = jmode
             payload["join_mode"] = jmode.value
         if space_type is not None:
@@ -1401,6 +1428,38 @@ class SpaceService(SpaceMemberGuardMixin):
             was_global=was_global,
             is_global=will_be_global,
         )
+        if (
+            directory_state_changed
+            and was_global
+            and will_be_global
+            and self._gfs is not None
+        ):
+            # Both dials the GFS directory stores — ``allow_subscribers``
+            # (readability, enforced on ``/gfs/subscribe``) and ``join_mode``
+            # (how people get in, shown on the listing) — are re-published on
+            # any change. One condition rather than two blocks: the action is
+            # identical, and forgetting to add the next directory field to a
+            # duplicated block is exactly how the GFS falls out of sync.
+            # Turning ``allow_subscribers`` OFF also PURGES the subscriber
+            # seats taken while it was on, so nobody is left holding a
+            # subscription that can never deliver. Without this the truth would
+            # not reach the GFS until the owner's next WS reconnect
+            # (``heal_space_pins``). A type flip is already covered above,
+            # hence the was_global/will_be_global guard. Fail-soft:
+            # GfsConnectionService logs and never raises.
+            await self._gfs.publish_space_to_all(space_id)
+        if subscribers_just_disabled:
+            # The owner just withdrew public readability, and our local
+            # ``role='subscriber'`` rows are EXACTLY the readers withdrawn
+            # from: nothing is relayed to them any more and no content key is
+            # sealed to them, so a row left behind is a follower reading the
+            # space out of the local DB forever with no way to notice. Drop
+            # them (they can subscribe again if the owner turns it back on) —
+            # real members are untouched, since ``unsubscribe_from_space``
+            # refuses to demote anything but a subscriber.
+            for member in await self._spaces.list_members(space_id):
+                if member.role == SpaceRole.SUBSCRIBER:
+                    await self.unsubscribe_from_space(member.user_id, space_id)
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
             # privacy tier within seconds rather than waiting for the
@@ -2066,17 +2125,33 @@ class SpaceService(SpaceMemberGuardMixin):
                 kwargs = {k: v for k, v in p.items() if k in self._REMOTE_CONFIG_FIELDS}
                 feats = kwargs.get("features")
                 if feats is not None:
-                    new_features = SpaceFeatures.from_wire_dict(feats)
-                    # delegated_admin_authority is OWNER-ONLY: a remote-forwarded
-                    # config edit must never change it (otherwise an approved /
-                    # self-authorized edit could grant or revoke delegation
-                    # itself). Pin it to the space's current value regardless of
-                    # the wire.
+                    # A forwarded edit is an EDIT of an existing space, so an
+                    # absent key means "leave it alone" — merge onto the
+                    # space's current features rather than the class defaults
+                    # (which would reset every key the forwarder didn't send).
+                    new_features = SpaceFeatures.from_wire_dict(
+                        feats,
+                        defaults=space.features,
+                    )
+                    # Two flags are OWNER-ONLY and a remote-forwarded config
+                    # edit must never change either — this runs AS THE OWNER, so
+                    # the ``_require_owner`` gates inside ``update_config`` pass
+                    # trivially and are no defence here. Pin both to the space's
+                    # current value regardless of the wire:
+                    #
+                    # * ``delegated_admin_authority`` — otherwise an approved /
+                    #   self-authorized edit could grant or revoke delegation
+                    #   itself.
+                    # * ``allow_subscribers`` — otherwise a delegated remote
+                    #   admin could expose the space's content to every stranger
+                    #   on a connection server (or withdraw it), which is the
+                    #   owner's call alone.
                     kwargs["features"] = replace(
                         new_features,
                         delegated_admin_authority=(
                             space.features.delegated_admin_authority
                         ),
+                        allow_subscribers=space.features.allow_subscribers,
                     )
                 await self.update_config(space_id, actor_username=owner, **kwargs)
             case "archive":
@@ -3918,8 +3993,23 @@ class SpaceService(SpaceMemberGuardMixin):
             )
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is not None:
-            # Already a member (any role) — no-op. Never demote.
+            # Already a member (any role) — no-op. Never demote. Deliberately
+            # ahead of the readability gate below: an owner turning followers
+            # off must not turn an existing member's idempotent re-subscribe
+            # into an error (their seat is removed by the GFS purge, not here).
             return
+        # Readability is the owner's explicit opt-in. With it OFF nothing is
+        # relayed and no content key is ever sealed to a subscriber, so a NEW
+        # seat here would receive nothing forever — refuse it outright (the GFS
+        # refuses the matching ``POST /gfs/subscribe`` with a 403 for the same
+        # reason). Safe on a GFS-discovered stub too: the mirror now carries
+        # the owner's real flag off the directory body
+        # (``GfsSpaceMirrorService._meta_from_gfs_body``), failing closed when
+        # an older GFS reports none.
+        if not space.features.allow_subscribers:
+            raise SpacePermissionError(
+                "this space does not allow subscribers",
+            )
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
         # ORDER MATTERS: the GFS-side subscriber registration happens only

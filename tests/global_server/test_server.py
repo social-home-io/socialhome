@@ -347,7 +347,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _register_and_publish(gfs_client, *, instance_id, space_id, client_ip):
+async def _register_and_publish(
+    gfs_client,
+    *,
+    instance_id,
+    space_id,
+    client_ip,
+    join_mode="open",
+    allow_subscribers=True,
+):
     """Register a real-keyed instance (auto-accept) + publish a known space.
 
     Returns the instance's private seed so the caller can sign requests.
@@ -377,6 +385,10 @@ async def _register_and_publish(gfs_client, *, instance_id, space_id, client_ip)
         "icon_url": "",
         "min_age": 0,
         "category": "general",
+        "join_mode": join_mode,
+        # Subscribable ⇒ the space must be publicly readable. This flag — not
+        # the join mode — is what decides that.
+        "allow_subscribers": allow_subscribers,
         "accent_color": "#D2542A",
         "primary_color": "#D2542A",
     }
@@ -418,6 +430,43 @@ async def test_subscribe_returns_subscribed(gfs_client):
     assert resp.status == 200
     body = await resp.json()
     assert body["status"] == "subscribed"
+
+
+async def test_subscribe_space_without_subscribers_403(gfs_client):
+    """A perfectly-signed subscribe for a space whose owner has not opted
+    into subscribers is refused: the space is listed for discovery but is NOT
+    publicly readable, so there is no readership to seat a subscriber in.
+    Note the join mode here is ``open`` — anyone may JOIN this space; that is
+    a different question from whether a stranger may READ it."""
+    seed = await _register_and_publish(
+        gfs_client,
+        instance_id="inst-inv",
+        space_id="space-inv",
+        client_ip="127.0.0.40",
+        join_mode="open",
+        allow_subscribers=False,
+    )
+    ts = _now_iso()
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": "inst-inv",
+            "space_id": "space-inv",
+            "ts": ts,
+        },
+    )
+    resp = await gfs_client.post(
+        "/gfs/subscribe",
+        json={
+            "instance_id": "inst-inv",
+            "space_id": "space-inv",
+            "ts": ts,
+            "signature": sig,
+        },
+    )
+    assert resp.status == 403
+    assert "not publicly readable" in (await resp.json())["error"]
 
 
 async def test_subscribe_unsigned_rejected(gfs_client):

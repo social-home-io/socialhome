@@ -89,7 +89,9 @@ class SpaceRole(StrEnum):
     not a row in an ACL table. The four roles below are a social-layer
     distinction: ``OWNER`` and ``ADMIN`` are programmatically identical
     at the signing level, ``MEMBER`` is the regular participant, and
-    ``SUBSCRIBER`` is the read-only follower of public/global spaces.
+    ``SUBSCRIBER`` is the read-only follower of public/global spaces —
+    which exist only while the space's ``SpaceFeatures.allow_subscribers``
+    opt-in is ON.
     Adding a fifth role, custom per-space roles, or per-user permission
     bitfields would break the federation model — extend
     :class:`SpaceFeatures` with a new feature gate instead.
@@ -184,12 +186,29 @@ class SpaceFeatures:
     calendar_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
     tasks_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
 
+    #: Admin opt-in: may STRANGERS follow this space read-only at all?
+    #: This — not :class:`JoinMode` — is what makes a public / global space
+    #: publicly READABLE. When OFF (the default) the space may still be
+    #: LISTED in a directory, but no post is relayed to a GFS, the per-space
+    #: content key is never sealed to a subscriber, and a subscribe is
+    #: refused on both the household and the GFS side. When ON, the
+    #: :class:`SpaceRole.SUBSCRIBER` audience the other two flags describe
+    #: can exist. Orthogonal to ``join_mode``, which governs how someone
+    #: becomes a MEMBER who can post: ``invite_only`` + subscribers-on is a
+    #: broadcast space (invited people write, anyone may read); ``open`` +
+    #: subscribers-off is joinable but not publicly readable. Defaults OFF
+    #: for the same reason its two siblings do — a space is private until
+    #: its owner says otherwise.
+    allow_subscribers: bool = False
+
     #: Subscriber-engagement opt-ins (§23.49).  Subscribers
     #: (``role='subscriber'``) are read-only by default — the
     #: historical contract.  Admins flip these flags when they want
     #: a follower-style audience to be able to leave a comment or a
     #: reaction without being promoted to a full member.  Posting
-    #: top-level content stays member-only regardless.
+    #: top-level content stays member-only regardless.  Meaningful only
+    #: while ``allow_subscribers`` is ON — without it there is no
+    #: subscriber to engage.
     allow_subscriber_comment: bool = False
     allow_subscriber_react: bool = False
 
@@ -278,6 +297,7 @@ class SpaceFeatures:
             stickies_access=SpaceFeatureAccess(row.get("stickies_access", "open")),
             calendar_access=SpaceFeatureAccess(row.get("calendar_access", "open")),
             tasks_access=SpaceFeatureAccess(row.get("tasks_access", "open")),
+            allow_subscribers=bool(row.get("allow_subscribers", 0)),
             allow_subscriber_comment=bool(row.get("allow_subscriber_comment", 0)),
             allow_subscriber_react=bool(row.get("allow_subscriber_react", 0)),
             delegated_admin_authority=bool(row.get("delegated_admin_authority", 0)),
@@ -299,6 +319,7 @@ class SpaceFeatures:
             "stickies_access": self.stickies_access.value,
             "calendar_access": self.calendar_access.value,
             "tasks_access": self.tasks_access.value,
+            "allow_subscribers": int(self.allow_subscribers),
             "allow_subscriber_comment": int(self.allow_subscriber_comment),
             "allow_subscriber_react": int(self.allow_subscriber_react),
             "delegated_admin_authority": int(self.delegated_admin_authority),
@@ -333,6 +354,7 @@ class SpaceFeatures:
             "stickies_access": self.stickies_access.value,
             "calendar_access": self.calendar_access.value,
             "tasks_access": self.tasks_access.value,
+            "allow_subscribers": self.allow_subscribers,
             "allow_subscriber_comment": self.allow_subscriber_comment,
             "allow_subscriber_react": self.allow_subscriber_react,
             "delegated_admin_authority": self.delegated_admin_authority,
@@ -340,18 +362,34 @@ class SpaceFeatures:
         }
 
     @classmethod
-    def from_wire_dict(cls, raw: dict) -> "SpaceFeatures":
+    def from_wire_dict(
+        cls,
+        raw: dict,
+        *,
+        defaults: "SpaceFeatures | None" = None,
+    ) -> "SpaceFeatures":
         """Faithful inverse of :meth:`to_wire_dict`.
 
         The single canonical wire-dict → :class:`SpaceFeatures` parser:
         the route PATCH body, federation receive (remote-space stub
         builder), and the cross-household admin-action host dispatcher
         (``SPACE_REMOTE_ADMIN_ACTION``) all rebuild features through here.
-        Each field falls back to the class default when absent so a
-        partial / older-shaped dict still produces a valid object.
+        Each field falls back to *defaults* when absent so a partial /
+        older-shaped dict still produces a valid object.
         Unknown access levels fall back to ``OPEN`` rather than raising.
+
+        ``defaults`` is what an ABSENT key means. Pass the space's CURRENT
+        features whenever the dict is an EDIT of an existing space (a PATCH
+        body, a forwarded ``update_config``) — then "absent" reads as "leave
+        it alone", which is what a partial body means. Omitting it falls back
+        to the class defaults, i.e. "absent means the factory setting", which
+        is right only when there is no prior state to preserve (building a
+        brand-new remote stub). Getting this wrong is not cosmetic: a partial
+        ``{"bazaar": false}`` PATCH would otherwise reset ``allow_subscribers``
+        to its OFF default and silently withdraw the space's public
+        readability.
         """
-        defaults = cls()
+        defaults = defaults if defaults is not None else cls()
 
         def access(name: str, default: SpaceFeatureAccess) -> SpaceFeatureAccess:
             v = raw.get(name)
@@ -386,6 +424,9 @@ class SpaceFeatures:
             stickies_access=access("stickies_access", defaults.stickies_access),
             calendar_access=access("calendar_access", defaults.calendar_access),
             tasks_access=access("tasks_access", defaults.tasks_access),
+            allow_subscribers=bool(
+                raw.get("allow_subscribers", defaults.allow_subscribers)
+            ),
             allow_subscriber_comment=bool(
                 raw.get("allow_subscriber_comment", defaults.allow_subscriber_comment)
             ),
@@ -641,9 +682,36 @@ PUBLIC_SPACE_TIERS: frozenset["SpaceType"] = frozenset(
 
 
 class JoinMode(StrEnum):
+    """How a person becomes a MEMBER (someone who can post) of a space.
+
+    Purely a membership gate: ``invite_only`` needs an invite, ``request``
+    needs a member's approval, ``open`` lets anyone in. It says NOTHING about
+    whether strangers may READ the space — that is the independent
+    ``SpaceFeatures.allow_subscribers`` opt-in, and both combinations are
+    meaningful (``invite_only`` + subscribers-on is a broadcast space;
+    ``open`` + subscribers-off is joinable but not publicly readable).
+    """
+
     INVITE_ONLY = "invite_only"
     OPEN = "open"
     REQUEST = "request"
+
+
+def normalize_join_mode(value: object) -> str:
+    """Map any stored/received join mode to a known value.
+
+    Fails CLOSED: anything unknown (missing, misspelled, hostile, a non-string
+    a remote directory made up) becomes ``"invite_only"`` — the narrowest way
+    in. Used wherever a join mode crosses a trust boundary (the GFS publish
+    body, a GFS directory listing mirrored onto a local stub) so an
+    unparseable value can never widen the membership gate.
+
+    The join mode says nothing about READABILITY — that is the separate
+    ``SpaceFeatures.allow_subscribers`` opt-in.
+    """
+    if isinstance(value, str) and value in tuple(JoinMode):
+        return str(value)
+    return str(JoinMode.INVITE_ONLY)
 
 
 @dataclass(slots=True, frozen=True)

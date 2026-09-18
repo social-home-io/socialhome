@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -2430,6 +2432,7 @@ def _signed_cfg_event(
     config_hlc=None,
     tamper=False,
     bad_sig=False,
+    features=None,
 ):
     """Build a SPACE_CONFIG_CHANGED whose ``space_meta`` is authority-signed
     with the space seed. ``author`` records the config_author_instance carried
@@ -2450,7 +2453,9 @@ def _signed_cfg_event(
         "config_author_instance": author,
         "space_type": "private",
         "join_mode": "invite_only",
-        "features": {
+        "features": features
+        if features is not None
+        else {
             "calendar": True,
             "todo": True,
             "location": False,
@@ -2518,6 +2523,106 @@ async def test_config_from_nonowner_authority_signed_applies(db, bus, inbound):
     assert row["name"] == "RenamedByAdmin"
     assert row["config_sequence"] == 6
     assert row["config_author_instance"] == "admin-i"
+
+
+def _own_instance(inbound, instance_id):
+    """Give the inbound service an ``own_instance_id`` the handlers can read.
+
+    Mirrors what ``attach_to`` stashes at runtime (``_federation_service``),
+    without standing up a whole FederationService."""
+
+    inbound._federation_service = SimpleNamespace(own_instance_id=instance_id)
+
+
+_OWNER_ONLY_FEATURES_ON = {
+    "calendar": True,
+    "todo": True,
+    "location": True,
+    "location_mode": "gps",
+    "stickies": True,
+    "pages": True,
+    "gallery": True,
+    "allow_subscribers": True,
+    "delegated_admin_authority": True,
+}
+
+
+@pytest.mark.security
+async def test_config_changed_cannot_flip_owner_only_flags_on_the_host(
+    db, bus, inbound, caplog
+):
+    """F2 SECURITY: the authority-signed v_24 path accepts a whole ``features``
+    block from ANY seed holder. On the household that HOSTS the space that
+    would let a delegated admin expose the space publicly (``allow_subscribers``)
+    or grant itself delegation — writing over the owner's own row. Both
+    owner-only flags stay pinned to the stored values; every other field in the
+    block still applies."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-host",
+        owner_instance="own-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    _own_instance(inbound, "own-i")  # we HOST this space
+    with caplog.at_level(logging.INFO):
+        await inbound._on_space_config_changed(
+            _signed_cfg_event(
+                space_id="sp-host",
+                from_instance="admin-i",  # a seed-holding delegated admin
+                owner_instance="own-i",
+                sequence=9,
+                name="RenamedByAdmin",
+                seed=kp.private_key,
+                features=_OWNER_ONLY_FEATURES_ON,
+            )
+        )
+    space = await SqliteSpaceRepo(db).get("sp-host")
+    assert space.features.allow_subscribers is False
+    assert space.features.delegated_admin_authority is False
+    # …the rest of the signed block still applied.
+    assert space.name == "RenamedByAdmin"
+    assert space.features.location is True
+    assert space.config_sequence == 9
+    assert "owner-only" in caplog.text
+
+
+async def test_config_changed_applies_owner_only_flags_on_a_member_household(
+    db, bus, inbound
+):
+    """F2 counterpart: a household that merely MIRRORS the space is not the
+    authority for it — the owner's (or an authorised seed holder's) value for
+    the owner-only flags is exactly what it should mirror. Pin only where we
+    host."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-mirror",
+        owner_instance="owner-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    _own_instance(inbound, "own-i")  # we are NOT the host
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-mirror",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=9,
+            name="OwnerOpenedIt",
+            seed=kp.private_key,
+            features=_OWNER_ONLY_FEATURES_ON,
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-mirror")
+    assert space.features.allow_subscribers is True
+    assert space.features.delegated_admin_authority is True
+    assert space.name == "OwnerOpenedIt"
 
 
 @pytest.mark.security

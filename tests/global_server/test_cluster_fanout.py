@@ -479,6 +479,11 @@ async def test_wire_helpers_roundtrip_client_space_report():
         icon_url="I",
         min_age=13,
         category="gaming",
+        # Both directory dials travel: without them a peer sync rebuilds the
+        # row with the fail-closed defaults and silently makes a readable
+        # space unreadable.
+        join_mode="request",
+        allow_subscribers=True,
         accent_color="#abcdef",
         primary_color="#123456",
         status="active",

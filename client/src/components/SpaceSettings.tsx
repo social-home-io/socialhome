@@ -186,6 +186,14 @@ export function SpaceSettings({
   const featureStickies = useSignal(space.features?.stickies ?? true)
   const featureGallery = useSignal(space.features?.gallery ?? true)
   const featureBazaar = useSignal(space.features?.bazaar ?? true)
+  // The readability opt-in. OFF by default: with it off the space is
+  // listed in a directory but nothing of its content is published — no GFS
+  // relay, no content key for a follower, no subscribe accepted. It is
+  // independent of the join mode above (invite-only + followers-on is a
+  // broadcast space).
+  const allowSubscribers = useSignal(
+    Boolean(space.features?.allow_subscribers),
+  )
   // Subscriber-engagement opt-ins (§23.49) — admins flip these when
   // they want followers to be able to react / comment without being
   // promoted to full members.  Posts always remain member-only.
@@ -278,6 +286,7 @@ export function SpaceSettings({
           bazaar: featureBazaar.value,
           location: locationEnabled.value,
           location_mode: locationMode.value,
+          allow_subscribers: allowSubscribers.value,
           allow_subscriber_comment: allowSubscriberComment.value,
           allow_subscriber_react: allowSubscriberReact.value,
           delegated_admin_authority: delegatedAdminAuthority.value,
@@ -562,20 +571,34 @@ export function SpaceSettings({
           </p>
         </fieldset>
 
-        {/* Followers (subscribers) are read-only by default. Admins can
-         *  open one or both engagement paths so a follower-shaped
-         *  audience (extended family, alumni, peers) can leave a 👍 or
-         *  drop a comment without being promoted to a full member.
-         *  Posting top-level content stays member-only. */}
+        {/* Followers (subscribers). The first switch decides whether they
+         *  may exist at ALL — it is what makes a public / global space
+         *  publicly readable, independently of the join mode. The two
+         *  below loosen what an existing follower may do. Posting
+         *  top-level content stays member-only either way. */}
         <fieldset class="sh-form-fieldset">
           <legend>🔔 Followers</legend>
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            Anyone who follows this space sees new posts but is read-only
-            by default. Loosen that here without making them full members.
+            Off by default: this space is listed in the directory, but
+            nothing posted here is published and nobody outside can follow
+            it. Turning it on lets anyone follow along read-only — separate
+            from who may join and post.
           </p>
           <label>
             <input
               type="checkbox"
+              checked={allowSubscribers.value}
+              onChange={(e) => {
+                allowSubscribers.value =
+                  (e.target as HTMLInputElement).checked
+              }}
+            />
+            Let anyone follow this space (makes its posts public)
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              disabled={!allowSubscribers.value}
               checked={allowSubscriberReact.value}
               onChange={(e) => {
                 allowSubscriberReact.value =
@@ -587,6 +610,7 @@ export function SpaceSettings({
           <label>
             <input
               type="checkbox"
+              disabled={!allowSubscribers.value}
               checked={allowSubscriberComment.value}
               onChange={(e) => {
                 allowSubscriberComment.value =
@@ -596,7 +620,9 @@ export function SpaceSettings({
             Let followers comment on posts
           </label>
           <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-            Posting (text, images, polls, etc.) always stays member-only.
+            {allowSubscribers.value
+              ? 'Posting (text, images, polls, etc.) always stays member-only.'
+              : 'Turn on following above to let followers react or comment.'}
           </p>
         </fieldset>
 

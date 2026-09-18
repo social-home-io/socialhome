@@ -111,6 +111,7 @@ class AbstractSpaceRepo(Protocol):
         picture_hash: str | None | object = None,
     ) -> None: ...
     async def list_local_member_user_ids(self, space_id: str) -> list[str]: ...
+    async def list_subscribed_space_ids(self) -> list[str]: ...
 
     # ── Instances that mirror this space ───────────────────────────────
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
@@ -311,6 +312,7 @@ class SqliteSpaceRepo:
                 feature_stickies, feature_pages, feature_gallery, feature_bazaar,
                 posts_access, pages_access, stickies_access,
                 calendar_access, tasks_access,
+                allow_subscribers,
                 allow_subscriber_comment, allow_subscriber_react,
                 delegated_admin_authority,
                 allow_post_text, allow_post_image, allow_post_video,
@@ -321,7 +323,7 @@ class SqliteSpaceRepo:
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 55 placeholders, one per column listed above.
+                -- 56 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -331,6 +333,7 @@ class SqliteSpaceRepo:
                 ?, ?, ?, ?,                   -- feature_stickies, feature_pages, feature_gallery, feature_bazaar
                 ?, ?, ?,                      -- posts_access, pages_access, stickies_access
                 ?, ?,                         -- calendar_access, tasks_access
+                ?,                            -- allow_subscribers
                 ?, ?,                         -- allow_subscriber_comment, allow_subscriber_react
                 ?,                            -- delegated_admin_authority
                 ?, ?, ?,                      -- allow_post_text, allow_post_image, allow_post_video
@@ -366,6 +369,7 @@ class SqliteSpaceRepo:
                 stickies_access=excluded.stickies_access,
                 calendar_access=excluded.calendar_access,
                 tasks_access=excluded.tasks_access,
+                allow_subscribers=excluded.allow_subscribers,
                 allow_subscriber_comment=excluded.allow_subscriber_comment,
                 allow_subscriber_react=excluded.allow_subscriber_react,
                 delegated_admin_authority=excluded.delegated_admin_authority,
@@ -423,6 +427,7 @@ class SqliteSpaceRepo:
                 cols["stickies_access"],
                 cols["calendar_access"],
                 cols["tasks_access"],
+                cols["allow_subscribers"],
                 cols["allow_subscriber_comment"],
                 cols["allow_subscriber_react"],
                 cols["delegated_admin_authority"],
@@ -691,6 +696,27 @@ class SqliteSpaceRepo:
             {"space_id": r["space_id"], "subscribed_at": r["subscribed_at"]}
             for r in rows
         ]
+
+    async def list_subscribed_space_ids(self) -> list[str]:
+        """Return every space id this HOUSEHOLD holds a subscription on.
+
+        Household-wide (any local user with ``role='subscriber'``), unlike
+        :meth:`list_subscriptions_for_user` which answers per user. The GFS
+        seat is registered once per household, not per user, so the reconnect
+        self-heal (``GfsSpaceMirrorService.resubscribe_all``) needs the
+        household view. Dissolved spaces excluded.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT DISTINCT m.space_id AS space_id
+              FROM space_members m
+              JOIN spaces s ON s.id = m.space_id
+             WHERE m.role = 'subscriber'
+               AND s.dissolved = 0
+             ORDER BY m.space_id
+            """,
+        )
+        return [r["space_id"] for r in rows]
 
     async def list_all(self) -> list[Space]:
         """Return every active space hosted on this instance (admin).

@@ -1,0 +1,47 @@
+-- Teach the GFS a published space's ``join_mode``.
+--
+-- A global space with ``join_mode='invite_only'`` is listed in the directory
+-- for DISCOVERY but is not publicly readable: no content relay, no content key
+-- for subscribers. Until now the publish body carried no join mode at all, so
+-- the GFS seated a subscriber on any published space and every mirrored stub
+-- on the household side hardcoded ``invite_only``.
+--
+-- FAIL-CLOSED DEFAULT, on purpose: every pre-existing row reads as
+-- ``invite_only`` — "not publicly readable" — until the truth arrives. It
+-- arrives by itself: ``GfsConnectionService.heal_space_pins`` re-publishes the
+-- metadata of every space this household published to a GFS on each GFS-WS
+-- (re)connect, and that body now carries the real ``join_mode``. So the window
+-- is one reconnect long, and it errs towards privacy rather than towards
+-- exposing a space nobody may read. (This is also why the subscriber purge for
+-- invite-only spaces lives in the publish handler, not here: at migration time
+-- EVERY row would look invite-only, and a blanket DELETE would evict every
+-- legitimate subscriber on the server.)
+--
+-- Audit per the CLAUDE.md "Before adding a SQL migration" rule:
+--
+-- 1. Existing code paths touching this data: the owner's signed publish body
+--    (``services/gfs_connection_service._build_publish_body`` →
+--    ``POST /gfs/spaces/{id}/publish`` → ``federation.publish_space`` →
+--    ``repositories.upsert_space``), the directory reads
+--    (``GET /gfs/spaces``, ``GET /gfs/spaces/{id}``, the public SSR pages),
+--    cluster gossip (``cluster._space_to_wire`` / ``_wire_to_space``), and the
+--    subscribe seat (``federation.subscribe`` → ``space_subscribers``).
+--    None of them knew the join mode; the household-side mirror
+--    (``services/gfs_space_mirror_service``) papered over the gap with a
+--    hardcoded ``"invite_only"``, and the SPA fabricated ``'request'``.
+-- 2. Non-migration alternatives considered and rejected: (a) derive it from
+--    an existing column — nothing on ``global_spaces`` encodes readership
+--    (``status`` is the moderation verdict, ``withdrawn`` the owner's
+--    retraction, ``min_age`` the age gate); (b) ask the owning household at
+--    subscribe time — the GFS has no synchronous back-channel to a household
+--    that may be offline, and it would make every subscribe depend on the
+--    owner's liveness; (c) keep it only in the signed publish body without
+--    storing it — the value is needed on a later, unrelated request
+--    (``POST /gfs/subscribe``) and on every directory read, so it has to be
+--    persisted with the row it describes.
+-- 3. Minimality: one additive ``ADD COLUMN`` with a NOT NULL default. No
+--    backfill, no rewrite of existing rows, no table rebuild, no index (the
+--    column is only ever read through an already-indexed ``space_id`` lookup
+--    or a full directory listing).
+
+ALTER TABLE global_spaces ADD COLUMN join_mode TEXT NOT NULL DEFAULT 'invite_only';

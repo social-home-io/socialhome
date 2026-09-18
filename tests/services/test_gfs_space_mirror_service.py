@@ -454,6 +454,77 @@ async def test_ensure_mirror_refuses_non_string_identity_fields(env, hostile, fi
     assert await env.spaces.get("sp-1") is None
 
 
+async def test_ensure_mirror_carries_the_real_join_mode(env):
+    """The stub reflects what the GFS directory says, instead of the
+    hardcoded ``invite_only`` that used to stand in for a field that never
+    arrived — a household could not tell an open space from a closed one."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                _gfs_space_body(join_mode="open"),
+            ),
+        },
+    )
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.join_mode is JoinMode.OPEN
+
+
+async def test_ensure_mirror_carries_allow_subscribers(env):
+    """The stub carries the owner's readability opt-in off the directory
+    body, in the ``features`` block where ``allow_subscribers`` lives on a
+    Space. Without it ``SpaceService.subscribe_to_space`` would refuse every
+    GFS-discovered subscription."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    session = _StubSession(
+        {
+            "https://gfs.test/gfs/spaces/sp-1": (
+                200,
+                # Invite-only AND readable — the broadcast shape.
+                _gfs_space_body(join_mode="invite_only", allow_subscribers=True),
+            ),
+        },
+    )
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.features.allow_subscribers is True
+    assert stored.join_mode is JoinMode.INVITE_ONLY
+
+
+@pytest.mark.parametrize("hostile", [None, "nope", 0, [], {}])
+async def test_ensure_mirror_allow_subscribers_fails_closed(env, hostile):
+    """A missing (older GFS) or falsy/hostile flag reads as not-readable —
+    never as something more permissive."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    body = _gfs_space_body(join_mode="open")
+    if hostile is not None:
+        body["allow_subscribers"] = hostile
+    session = _StubSession({"https://gfs.test/gfs/spaces/sp-1": (200, body)})
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.features.allow_subscribers is False
+
+
+@pytest.mark.parametrize("hostile", [None, "wide-open", 7, [1], {"a": 1}])
+async def test_ensure_mirror_join_mode_fails_closed(env, hostile):
+    """A missing (older GFS) or hostile join mode reads as invite-only —
+    never as something more permissive."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    body = _gfs_space_body()
+    if hostile is not None:
+        body["join_mode"] = hostile
+    session = _StubSession({"https://gfs.test/gfs/spaces/sp-1": (200, body)})
+    assert await _mirror(env, session).ensure_mirror("sp-1") is not None
+    stored = await env.spaces.get("sp-1")
+    assert stored is not None
+    assert stored.join_mode is JoinMode.INVITE_ONLY
+
+
 @pytest.mark.parametrize("hostile", [[1, 2, 3], {"a": 1}, "nonsense"])
 @pytest.mark.parametrize("field", ["min_age", "category"])
 async def test_ensure_mirror_normalises_hostile_enum_fields(env, hostile, field):
@@ -533,3 +604,102 @@ async def test_was_gfs_listed_follows_the_public_space_cache(env):
 
     assert await svc.was_gfs_listed("sp-1") is True
     assert await svc.was_gfs_listed("sp-other") is False
+
+
+# ─── resubscribe_all (F4b — seats restored on GFS reconnect) ─────────────
+
+
+async def _seat_subscription(env, space_id: str, *, listed: bool = True):
+    """A local ``role='subscriber'`` row on a GFS-mirrored global stub."""
+    from socialhome.domain.space import SpaceMember, SpaceRole
+
+    await env.spaces.save(
+        Space(
+            id=space_id,
+            name="Mirrored",
+            owner_instance_id="remote-host",
+            owner_username="them",
+            identity_public_key="",
+            config_sequence=0,
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.OPEN,
+            features=SpaceFeatures(allow_subscribers=True),
+        )
+    )
+    await env.spaces.save_member(
+        SpaceMember(
+            space_id=space_id,
+            user_id="u-local",
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2025-01-01T00:00:00+00:00",
+        )
+    )
+    repo = SqlitePublicSpaceRepo(env.db)
+    if listed:
+        await repo.upsert(
+            PublicSpaceListing(
+                space_id=space_id,
+                instance_id="remote-host",
+                name="Mirrored",
+                description=None,
+                emoji=None,
+                lat=None,
+                lon=None,
+                radius_km=None,
+                member_count=1,
+            )
+        )
+    return repo
+
+
+async def test_resubscribe_all_restores_a_purged_seat(env):
+    """F4b: the GFS seat is registered only on the FIRST-ever subscribe, so a
+    seat the GFS purged (owner turned readability off, then back on) is never
+    re-taken — the household shows "subscribed" forever and receives nothing.
+    A (re)connect re-POSTs ``/gfs/subscribe`` for every local subscription."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    repo = await _seat_subscription(env, "sp-sub")
+    gfs = _StubGfs()
+    svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+
+    assert await svc.resubscribe_all("gfs-1") == 1
+    assert gfs.subscribes == [("sp-sub", "gfs-1")]
+
+
+async def test_resubscribe_all_skips_spaces_no_gfs_ever_listed(env):
+    """A public/global stub learned from a direct peer is nobody's mirror —
+    re-registering it would disclose the relationship to a GFS operator who
+    never knew about the space."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    repo = await _seat_subscription(env, "sp-peer", listed=False)
+    gfs = _StubGfs()
+    svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+
+    assert await svc.resubscribe_all("gfs-1") == 0
+    assert gfs.subscribes == []
+
+
+async def test_resubscribe_all_swallows_a_refusal_per_space(env, caplog):
+    """The owner may have turned readability off for good: the GFS answers 403
+    and that is an expected outcome, not an incident — DEBUG, fail-soft, and
+    the remaining spaces are still attempted."""
+    import logging
+
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    repo = await _seat_subscription(env, "sp-403")
+    await _seat_subscription(env, "sp-ok")
+
+    class _Refusing(_StubGfs):
+        async def subscribe_to_gfs_space(self, space_id: str, gfs_id: str) -> str:
+            if space_id == "sp-403":
+                raise GfsConnectionError(
+                    "GFS rejected subscribe (HTTP 403): space is not publicly readable"
+                )
+            return await super().subscribe_to_gfs_space(space_id, gfs_id)
+
+    gfs = _Refusing()
+    svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+    with caplog.at_level(logging.WARNING):
+        assert await svc.resubscribe_all("gfs-1") == 1
+    assert gfs.subscribes == [("sp-ok", "gfs-1")]
+    assert caplog.text == ""

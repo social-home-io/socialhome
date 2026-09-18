@@ -2731,6 +2731,15 @@ def create_app(config: Config | None = None) -> web.Application:
             # published again. Re-publish each space we published to this GFS
             # — idempotent (the pin is immutable once set) and fail-soft.
             await gfs_connection_service.heal_space_pins(gfs_id)
+            # Self-heal our SUBSCRIBER seats on the GFS, the mirror image of
+            # the pin heal above. ``subscribe_to_space`` POSTs
+            # ``/gfs/subscribe`` only on the first-ever mirror, while the GFS
+            # drops seats on its own (a publish that withdraws readability
+            # purges them) — so a household can sit on a local subscription
+            # that the GFS no longer knows about and receive nothing forever.
+            # The GFS-side subscribe is an upsert, so re-POSTing is free.
+            # Fail-soft per space (never raises).
+            await gfs_space_mirror.resubscribe_all(gfs_id)
             # Self-heal the household name on the GFS: a rename is pushed only
             # best-effort on edit (and never re-pushed), so a GFS that was down
             # at rename time — or that re-created our client row — keeps showing

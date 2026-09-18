@@ -44,6 +44,14 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path("/tmp/sh-demo")
+
+#: Upper bound for :func:`cmd_replay`'s poll. The outbox schedule is
+#: ``(5, 10, 20, 40, …)`` s with ±30 % jitter and nothing flushes early on a
+#: peer's return, so the first retry that finds Carol alive lands within
+#: 6.5 + 13 + 26 = 45.5 s of the highlight in the worst case; add Carol's
+#: respawn (~3–8 s) and headroom. Anything past this means the 3rd attempt
+#: failed against a LIVE Carol — a delivery bug, not a timing artefact.
+REPLAY_REDELIVERY_BOUND_S = 60
 STATE_PATH = ROOT / "state.json"
 
 # Each instance: (label, port, username, password, household_name).
@@ -660,11 +668,30 @@ def cmd_gfs_traffic() -> None:
             "name": space_name,
             "description": "harness end-to-end probe for GFS publish",
             "space_type": "global",
+            # Open to JOIN. Says nothing about readability any more — that is
+            # the separate ``allow_subscribers`` opt-in, PATCHed in below.
+            "join_mode": "open",
         },
     )
     body = _must("create-global-space", s, body, ok=(201,))
     space_id = body["id"]
     print(f"  a: created global space {space_id}")
+
+    # Readability is an explicit owner opt-in and it defaults OFF, so a fresh
+    # space relays nothing and seats no subscriber. The whole downstream chain
+    # (``gfs-space-subscribe`` → ``gfs-space-post`` → ``gfs-space-rotate``)
+    # proves the READABLE path, so turn followers on. ``POST /api/spaces``
+    # takes no ``features`` block, so this is a PATCH — a partial one, which
+    # merges onto the space's current features and leaves every other flag
+    # alone.
+    s, patched = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"allow_subscribers": True}},
+    )
+    _must("enable-subscribers-on-global-space", s, patched, ok=(200,))
+    print("  a: followers enabled — the space is now publicly readable")
     state.setdefault("gfs", {})["global_space_id"] = space_id
     _save(state)
 
@@ -1598,6 +1625,247 @@ def cmd_gfs_space_rotate() -> None:
     state["gfs_space_rotated_post_content"] = content
     _save(state)
     print("gfs-space-rotate: ok (epoch rotation re-keys GFS subscribers)")
+
+
+def cmd_gfs_space_no_subscribers() -> None:
+    """A space that takes no followers is LISTED but never publicly readable.
+
+    A space carries a ``space_type`` (private / public / global), a
+    ``join_mode`` (``invite_only`` / ``open`` / ``request``) telling people how
+    to become a posting MEMBER, and — independently — an ``allow_subscribers``
+    opt-in saying whether STRANGERS may follow it read-only. The product rule:
+    with ``allow_subscribers`` off, the space is published to the GFS
+    directory — that is how people discover it and get invited — but its
+    CONTENT never leaves the member households. No post is relayed to the GFS,
+    and the per-space content key is never sealed to a subscriber, so a
+    stranger cannot read a group nobody let them into.
+
+    The space here is deliberately ``join_mode=open``: anyone may JOIN it, and
+    that still buys them nothing to read. Under the old (wrong) model, where
+    ``open`` implied readable, this space would have relayed — so this step
+    also guards against a regression back to that model.
+
+    Prereqs (chain via ``up`` → ``gfs-up`` → ``gfs-pair``): a and d are active
+    GFS clients. Independent of the readable-space chain — ``gfs-traffic``
+    turns followers ON for its space precisely so that chain keeps proving the
+    relay works.
+
+    Sequence:
+    1. Alpha creates a SECOND global space and leaves ``allow_subscribers``
+       off (the default). ``_auto_publish_on_type`` publishes its METADATA to
+       every paired GFS exactly as before.
+    2. Assert the GFS directory lists it — ``GET /gfs/spaces`` — and reports
+       ``allow_subscribers: false``. The metadata path is deliberately
+       untouched by the content gate; a regression that "fixes" the leak by
+       refusing to publish would hide the space from the people meant to
+       request an invite, and fails here.
+    3. Assert d DISCOVERS it too (``POST /api/public_spaces/refresh`` then
+       ``GET /api/public_spaces``) — discovery is the whole point of listing —
+       and that the listing carries the flag so d's browser can suppress
+       Subscribe.
+    4. Waits for d's SH↔GFS WebSocket to be registered (a relay frame would be
+       fanned out over exactly that socket, so the negative assertion in
+       step 6 is only meaningful once it is up), then d tries to subscribe.
+       It must be REFUSED — the GFS 403s ``POST /gfs/subscribe`` for a space
+       with the flag off, and d's own ``subscribe_to_space`` refuses before
+       that on the mirrored stub, which now carries the truthful flag.
+    5. Alpha posts into the space.
+    6. Assert d got NO relay frame for that space (no ``gfs.relay.received:
+       space=<id>`` in d's log since the bookmark) and holds no
+       ``space_posts`` row / feed entry for the post. c — non-member,
+       non-subscriber, not GFS-paired — must not hold it either.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    if not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' first")
+    pairings = (state.get("gfs") or {}).get("pairings") or {}
+    if "a" not in pairings or "d" not in pairings:
+        raise SystemExit("run 'gfs-pair' first — a and d must be GFS clients")
+
+    a = state["instances"]["a"]
+    c = state["instances"]["c"]
+    d = state["instances"]["d"]
+    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
+
+    # 1. A global space anyone may JOIN but nobody may merely READ.
+    space_name = f"No Followers Global Space — {time.time_ns()}"
+    s, body = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": space_name,
+            "description": "harness probe: listed for discovery, never relayed",
+            "space_type": "global",
+            # Open to join — and STILL unreadable, because the readability
+            # opt-in below is off. That pairing is the point of this step.
+            "join_mode": "open",
+        },
+    )
+    body = _must("create-no-subscribers-global-space", s, body, ok=(201,))
+    space_id = body["id"]
+    print(f"  a: created global space {space_id} with followers OFF")
+
+    # 2. The GFS directory must LIST it — metadata publish is unaffected —
+    #    and must report the flag truthfully.
+    deadline = time.monotonic() + 30.0
+    listing: list[dict] = []
+    row: dict | None = None
+    while time.monotonic() < deadline:
+        s, payload = _request(f"{gfs_url}/gfs/spaces")
+        if s == 200:
+            listing = payload.get("spaces", []) if isinstance(payload, dict) else []
+            row = next(
+                (sp for sp in listing if sp["space_id"] == space_id), None
+            )
+            if row is not None:
+                break
+        time.sleep(1.0)
+    if row is None:
+        raise SystemExit(
+            f"gfs-space-no-subscribers: {space_id} never appeared on GET "
+            f"/gfs/spaces within 30 s — a space with followers off must still "
+            f"be LISTED for discovery. Listing was {listing!r}",
+        )
+    if row.get("allow_subscribers") is not False:
+        raise SystemExit(
+            "gfs-space-no-subscribers: the GFS reports allow_subscribers="
+            f"{row.get('allow_subscribers')!r} for {space_id}, expected False "
+            "— the owner never opted into followers",
+        )
+    if row.get("join_mode") != "open":
+        raise SystemExit(
+            "gfs-space-no-subscribers: the GFS reports join_mode="
+            f"{row.get('join_mode')!r}, expected 'open' — the membership gate "
+            "and the readability flag are independent and both must travel",
+        )
+    print(f"  the GFS lists '{space_name}' as open-to-join, not readable ✓")
+
+    # 3. d discovers it through the directory poll, flag included.
+    s, refreshed = _request(
+        f"http://127.0.0.1:{d['port']}/api/public_spaces/refresh",
+        token=d["token"],
+        method="POST",
+    )
+    _must("d: POST /api/public_spaces/refresh", s, refreshed, ok=(202,))
+    deadline = time.monotonic() + 20.0
+    entry: dict | None = None
+    d_listing: list[dict] = []
+    while time.monotonic() < deadline:
+        s, payload = _request(
+            f"http://127.0.0.1:{d['port']}/api/public_spaces",
+            token=d["token"],
+        )
+        if s == 200 and isinstance(payload, list):
+            d_listing = payload
+            entry = next(
+                (r for r in d_listing if r.get("space_id") == space_id),
+                None,
+            )
+            if entry is not None:
+                break
+        time.sleep(1.0)
+    if entry is None:
+        raise SystemExit(
+            f"gfs-space-no-subscribers: {space_id} never appeared on d's "
+            f"/api/public_spaces within 20 s — the space is not discoverable. "
+            f"Listing was {d_listing!r}",
+        )
+    if entry.get("allow_subscribers") is not False:
+        raise SystemExit(
+            "gfs-space-no-subscribers: d's directory row reports "
+            f"allow_subscribers={entry.get('allow_subscribers')!r}, expected "
+            "False — the browser would offer a Subscribe button that 403s",
+        )
+    print(f"  d discovers '{entry.get('name')}' and sees it is not readable ✓")
+
+    # d's SH↔GFS WebSocket must be REGISTERED before the negative assertion
+    # means anything: a relay frame, had one been produced, is fanned out over
+    # exactly that socket. Same wait as ``gfs-space-subscribe``.
+    _wait_for_gfs_ws(d["instance_id"], timeout=60.0)
+    print("  d's SH↔GFS WebSocket is registered on the GFS ✓")
+
+    # 4. d asks to subscribe — and must be refused. Unlike the earlier
+    #    join-mode attempt this is a hard assertion: the mirrored stub now
+    #    carries the owner's truthful flag, so d refuses locally, and the GFS
+    #    403s the same request independently.
+    s, sub = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/subscribe",
+        token=d["token"],
+        method="POST",
+    )
+    if s == 200:
+        raise SystemExit(
+            "gfs-space-no-subscribers: d's subscribe SUCCEEDED for a space "
+            f"with followers off ({space_id}) — both the household and the "
+            "GFS must refuse it",
+        )
+    print(f"  d's subscribe was refused (HTTP {s}) ✓")
+
+    # Bookmark d's log AFTER the subscribe so step 6 only scans what the post
+    # produced. (``_spawn`` truncates log.txt on respawn — read at step time.)
+    d_off = _log_size("d")
+
+    # 5. Alpha posts into the space.
+    content = f"Members-only content that must never leave — {time.time_ns()}"
+    s, post = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    _must("a posts in the no-followers global space", s, post, ok=(201,))
+    post_id = post["id"]
+    print(f"  a posted in the space → id={post_id}")
+
+    # Settle: long enough that a relay, had one been produced, would have been
+    # encrypted, authority-signed, POSTed to the GFS and fanned out to d.
+    # ``gfs-space-post`` sees the readable equivalent land well inside this.
+    time.sleep(10)
+
+    # 6a. d saw no relay frame for this space at all.
+    relay_lines = [
+        line
+        for line in _log_lines_matching("d", "gfs.relay.received:", offset=d_off)
+        if f"space={space_id}" in line
+    ]
+    if relay_lines:
+        raise SystemExit(
+            "gfs-space-no-subscribers: d received a GFS relay frame for "
+            f"{space_id} — its content stream must be dead. "
+            f"Lines: {relay_lines!r}",
+        )
+    print("  d received no relay frame for the space ✓")
+
+    # 6b. …and holds none of its content, by row and by feed.
+    for label, inst in (("d", d), ("c", c)):
+        if _rows(label, "SELECT id FROM space_posts WHERE id = ?", (post_id,)):
+            raise SystemExit(
+                f"gfs-space-no-subscribers: {label} holds post {post_id} from "
+                "a space that allows no followers (§ hard rule violated).",
+            )
+        s, feed = _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/feed",
+            token=inst["token"],
+        )
+        if s == 200:
+            rows = feed if isinstance(feed, list) else (feed.get("posts") or [])
+            if any(p.get("id") == post_id for p in rows):
+                raise SystemExit(
+                    f"gfs-space-no-subscribers: {label}'s feed for {space_id} "
+                    f"exposes {post_id}",
+                )
+    print("  neither d nor c can see the post ✓")
+
+    state["gfs_no_subscribers_space_id"] = space_id
+    state["gfs_no_subscribers_post_id"] = post_id
+    _save(state)
+    print(
+        "gfs-space-no-subscribers: ok (listed for discovery, content never "
+        "relayed)"
+    )
 
 
 def cmd_gfs_down() -> None:
@@ -3224,6 +3492,53 @@ def cmd_verify() -> None:
             "'gfs-space-post' / 'gfs-space-rotate' to exercise"
         )
 
+    # 13f. A global space with followers OFF (``gfs-space-no-subscribers``):
+    #    still LISTED in the GFS directory, still unreadable by everyone else,
+    #    and still reported as not-readable on the wire. Gated on the step
+    #    having run — the whole gfs-* chain is opt-in.
+    if "gfs_no_subscribers_space_id" in state:
+        io_space_id = state["gfs_no_subscribers_space_id"]
+        io_post_id = state.get("gfs_no_subscribers_post_id")
+        s, payload = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/spaces")
+        if s != 200:
+            failures.append(f"GFS: GET /gfs/spaces failed: HTTP {s}")
+        else:
+            rows = payload.get("spaces", []) if isinstance(payload, dict) else []
+            row = next(
+                (sp for sp in rows if sp.get("space_id") == io_space_id), None
+            )
+            if row is None:
+                failures.append(
+                    f"GFS: space {io_space_id} dropped out of the directory — "
+                    "a space with followers off must stay listed so people can "
+                    "discover it and ask for an invite",
+                )
+            elif row.get("allow_subscribers") is not False:
+                failures.append(
+                    f"GFS: space {io_space_id} now reports allow_subscribers="
+                    f"{row.get('allow_subscribers')!r} — nobody turned it on",
+                )
+            elif row.get("join_mode") != "open":
+                failures.append(
+                    f"GFS: space {io_space_id} reports join_mode="
+                    f"{row.get('join_mode')!r}, expected 'open' — the two "
+                    "directory dials are independent and both must round-trip",
+                )
+            else:
+                print("  the GFS still lists it, open-to-join and unreadable ✓")
+        if io_post_id:
+            for label in ("d", "c"):
+                if _rows(
+                    label, "SELECT id FROM space_posts WHERE id = ?", (io_post_id,)
+                ):
+                    failures.append(
+                        f"{label}: holds post {io_post_id} — content of a "
+                        "space that allows no followers reached a household "
+                        "that was never let in",
+                    )
+                else:
+                    print(f"  {label} still cannot see that post ✓")
+
     # 13b. admin-promote-kick durability — dave's promotion on d must
     #    still read 'admin' after everything that ran since (app-session,
     #    remote-invite-decline, replay's c restart). Gated because ``all``
@@ -4194,10 +4509,18 @@ def cmd_replay() -> None:
        to ``unreachable`` status.
     4. Respawn Carol on the same port; wait for ``/api/instance/config``
        to answer 200.
-    5. Settle the outbox redelivery window (default 30s exponential
-       backoff; the harness sleeps 25 s which crosses the second
-       backoff slot).
-    6. Assert Carol's ``/api/highlights`` now contains the new caption.
+    5. Poll Carol's ``/api/highlights`` until the caption lands, bounded
+       by the outbox's REAL worst case. ``BACKOFF_SECONDS`` starts
+       ``(5, 10, 20, 40, …)`` with ``JITTER_RATIO = 0.30`` and there is no
+       "peer is back → flush now" fast path, so the retry that first
+       finds Carol alive lands anywhere from ~10 s (2nd slot, low jitter)
+       to ~45 s (3rd slot, high jitter) after the highlight. A fixed
+       35 s sleep — tuned for an older ``{0, 5, 30, …}`` schedule — missed
+       the high-jitter tail roughly one run in four; the poll asserts the
+       same property (redelivery within the schedule) without guessing.
+       The elapsed time is printed so a regression in the schedule is
+       visible in the step output.
+    6. Assert Carol received the caption within that bound.
 
     Run this *after* :func:`cmd_pair` so the a↔c link is confirmed
     (``cmd_traffic`` is optional — the test only depends on the
@@ -4259,23 +4582,37 @@ def cmd_replay() -> None:
     _wait_ready(c["port"])
     print(f"  c respawned: pid={new_pid} ready=200")
 
-    # 5. Outbox redelivery window. The default backoff schedule is
-    #    {0, 5, 30, 120, 600}s; we already burned the immediate slot
-    #    in step 3, so we sleep across the 30s slot to give the
-    #    second attempt a chance to land.
-    settle = 35
-    print(f"  waiting {settle}s for outbox redelivery to flush…")
-    time.sleep(settle)
+    # 5. Outbox redelivery window. ``BACKOFF_SECONDS`` is (5, 10, 20, 40,
+    #    …) with ±30 % jitter and NO reconnect-triggered flush, so the retry
+    #    that first finds Carol alive lands ~10–45 s after the highlight
+    #    (2nd slot low-jitter … 3rd slot high-jitter). Poll until it lands
+    #    instead of sleeping a fixed 35 s — that fixed window missed the
+    #    high-jitter tail about one run in four. The bound covers the 3rd
+    #    slot's worst case plus Carol's respawn with headroom; the 4th slot
+    #    (≥ 52 s after the 3rd) would mean the 3rd attempt ALSO failed
+    #    against a live Carol, which is a real bug, not timing.
+    deadline = time.monotonic() + REPLAY_REDELIVERY_BOUND_S
+    started = time.monotonic()
+    print(
+        f"  polling c for the replayed highlight (bound {REPLAY_REDELIVERY_BOUND_S}s, "
+        f"outbox slots 5/10/20 s ±30 %)…"
+    )
+    captions: set[str] = set()
+    while time.monotonic() < deadline:
+        captions = _highlight_captions(state, "c")
+        if caption in captions:
+            break
+        time.sleep(2)
+    elapsed = time.monotonic() - started
 
     # 6. Carol should now have Alpha's highlight despite having been
     #    down at the moment Alpha posted it.
-    captions = _highlight_captions(state, "c")
     if caption in captions:
-        print(f"  c received the replayed highlight ✓")
+        print(f"  c received the replayed highlight after {elapsed:.0f}s ✓")
     else:
         raise SystemExit(
-            f"replay: Carol did not receive {caption!r} after redelivery "
-            f"window — captions seen: {sorted(captions)!r}",
+            f"replay: Carol did not receive {caption!r} within "
+            f"{REPLAY_REDELIVERY_BOUND_S}s — captions seen: {sorted(captions)!r}",
         )
 
     state["replay_ran"] = True

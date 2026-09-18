@@ -325,6 +325,153 @@ async def test_patch_sets_delegated_admin_authority(client):
     assert body["features"]["delegated_admin_authority"] is True
 
 
+async def _promote_bob_to_admin(client, sid: str) -> None:
+    """Seat bob on *sid* and promote him to space ADMIN (not owner)."""
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.patch(
+        f"/api/spaces/{sid}/members/{client._bob_uid}",
+        json={"role": "admin"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+
+
+async def test_partial_features_patch_leaves_allow_subscribers_alone(client):
+    """F3: a PATCH body carrying only SOME feature keys must merge onto the
+    space's current features, not onto the class defaults.
+
+    Before the fix, ``{"features": {"bazaar": false}}`` silently turned
+    ``allow_subscribers`` back OFF — withdrawing the space's public readability
+    (and purging its connection-server seats) on an edit that never mentioned it.
+    """
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Partial", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"bazaar": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is True
+    assert body["features"]["bazaar"] is False
+
+
+async def test_partial_features_patch_by_an_admin_is_not_an_owner_gate(client):
+    """F3: a non-owner ADMIN editing an unrelated feature must not trip the
+    owner-only ``allow_subscribers`` gate — before the fix the missing key read
+    as the class default, so the gate saw a change the admin never made."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "AdminPartial", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    await _promote_bob_to_admin(client, sid)
+
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"bazaar": False}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is True
+    assert body["features"]["bazaar"] is False
+
+
+async def test_explicit_allow_subscribers_false_still_turns_it_off_for_the_owner(
+    client,
+):
+    """F3: merging onto the current features must not make the flag
+    un-clearable — an EXPLICIT ``false`` from the owner still withdraws
+    readability."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "OwnerOff", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is False
+
+
+async def test_explicit_allow_subscribers_change_by_an_admin_is_still_forbidden(client):
+    """F3: the owner-only gate still bites when the admin actually asks for the
+    change — the merge narrows the gate to real edits, it does not remove it."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "AdminOff", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    await _promote_bob_to_admin(client, sid)
+
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": False}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["allow_subscribers"] is True
+
+
+def test_features_from_body_merges_onto_supplied_defaults():
+    """Unit: with ``defaults`` given, an absent key takes the CURRENT space's
+    value; a present key still wins (including an explicit ``False``)."""
+    current = SpaceFeatures(allow_subscribers=True, bazaar=True, location=True)
+    merged = _features_from_body({"bazaar": False}, defaults=current)
+    assert merged.allow_subscribers is True
+    assert merged.location is True
+    assert merged.bazaar is False
+    off = _features_from_body({"allow_subscribers": False}, defaults=current)
+    assert off.allow_subscribers is False
+
+
 def test_features_from_body_carries_delegated_admin_authority():
     """Unit: _features_from_body rehydrates delegated_admin_authority from the
     PATCH body (True when set, False when omitted)."""
@@ -1686,14 +1833,57 @@ async def test_space_cover_non_admin_forbidden(client):
 
 async def _create_subscribable_space(client, name: str = "Global") -> str:
     """Create a space subscribers are allowed to join — ``global`` has no
-    lat/lon requirement so it's the cleanest fixture for these tests."""
+    lat/lon requirement so it's the cleanest fixture for these tests.
+
+    Readability is an explicit owner opt-in that defaults OFF, so the space
+    is PATCHed to turn ``allow_subscribers`` on; without it
+    ``POST /api/spaces/{id}/subscribe`` is refused.
+    """
     r = await client.post(
         "/api/spaces",
         json={"name": name, "space_type": "global"},
         headers=_auth(client._admin_token),
     )
     assert r.status == 201, await r.text()
-    return (await r.json())["id"]
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    return sid
+
+
+async def test_subscribe_refused_when_the_space_takes_no_followers(client):
+    """A freshly created global space has ``allow_subscribers`` OFF, so its
+    content is relayed nowhere and no content key is sealed to a follower —
+    a subscribe would seat someone who receives nothing forever."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Quiet Global", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 201
+    sid = (await r.json())["id"]
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
+    assert "does not allow subscribers" in (await r.text())
+
+
+async def test_subscribe_allowed_once_the_owner_opts_in(client):
+    """…and the same space accepts a subscriber the moment the owner flips
+    the switch — no join-mode change involved."""
+    sid = await _create_subscribable_space(client, name="Opened Up")
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await r.json())["subscribed"] is True
 
 
 async def test_subscribe_and_unsubscribe_space(client):
@@ -1880,6 +2070,10 @@ async def test_subscribe_maps_gfs_outage_to_502(client):
                     "name": "Outage Space",
                     "space_type": "global",
                     "join_mode": "invite_only",
+                    # Invite-only AND readable — the broadcast shape a GFS
+                    # directory really does list; the mirror carries the
+                    # owner's flag through so the local gate agrees.
+                    "features": {"allow_subscribers": True},
                     "identity_public_key": "ab" * 32,
                     "owner_username": "",
                 },

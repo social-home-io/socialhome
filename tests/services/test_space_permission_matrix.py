@@ -32,6 +32,7 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.post import PostType
 from socialhome.domain.space import (
+    SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
@@ -217,6 +218,9 @@ async def stack(tmp_dir):
         owner_username="anna",
         name="P",
         space_type=SpaceType.PUBLIC,
+        # Readability is an explicit opt-in that defaults OFF; the subscriber
+        # rows this matrix exercises can only exist once it is ON.
+        features=SpaceFeatures(allow_subscribers=True),
         lat=47.5,
         lon=8.5,
         radius_km=5.0,

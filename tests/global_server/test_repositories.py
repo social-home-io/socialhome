@@ -188,6 +188,101 @@ async def test_remove_subscriber_updates_count(fed):
     assert sp.subscriber_count == 0
 
 
+async def test_purge_subscribers_drops_every_seat_and_zeroes_the_count(fed):
+    """``purge_subscribers`` is the repair the publish handler runs when a
+    space turns out to be invite-only: every seat goes, the count follows,
+    and the number removed comes back for the log line."""
+    for iid in ("po", "ps1", "ps2"):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=iid,
+                display_name=iid,
+                public_key="aa" * 32,
+                inbox_url=f"http://{iid}",
+                status="active",
+            )
+        )
+    await fed.upsert_space(
+        GlobalSpace(space_id="sp-p", owning_instance="po", status="active")
+    )
+    await fed.add_subscriber(space_id="sp-p", instance_id="ps1")
+    await fed.add_subscriber(space_id="sp-p", instance_id="ps2")
+    assert await fed.purge_subscribers("sp-p") == 2
+    assert await fed.list_subscribers("sp-p") == []
+    sp = await fed.get_space("sp-p")
+    assert sp is not None and sp.subscriber_count == 0
+    # Idempotent: a second purge (or one on a space with no seats) is a no-op.
+    assert await fed.purge_subscribers("sp-p") == 0
+
+
+async def test_upsert_space_round_trips_join_mode(fed):
+    """``join_mode`` persists, and an unknown value normalises to the
+    fail-closed ``invite_only`` on the way in."""
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="o",
+            display_name="O",
+            public_key="aa" * 32,
+            inbox_url="http://o",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-jm",
+            owning_instance="o",
+            status="active",
+            join_mode="open",
+        )
+    )
+    assert (await fed.get_space("sp-jm")).join_mode == "open"
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-jm2",
+            owning_instance="o",
+            status="active",
+            join_mode="whatever",
+        )
+    )
+    assert (await fed.get_space("sp-jm2")).join_mode == "invite_only"
+
+
+async def test_upsert_space_round_trips_allow_subscribers(fed):
+    """The readability opt-in persists independently of ``join_mode``, and a
+    row written without it (migration 0010's default) reads as False."""
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="o2",
+            display_name="O",
+            public_key="aa" * 32,
+            inbox_url="http://o",
+            status="active",
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-rd",
+            owning_instance="o2",
+            status="active",
+            join_mode="invite_only",
+            allow_subscribers=True,
+        )
+    )
+    row = await fed.get_space("sp-rd")
+    assert row.allow_subscribers is True and row.join_mode == "invite_only"
+    # The dataclass default is the fail-closed one.
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-rd2",
+            owning_instance="o2",
+            status="active",
+            join_mode="open",
+        )
+    )
+    row2 = await fed.get_space("sp-rd2")
+    assert row2.allow_subscribers is False and row2.join_mode == "open"
+
+
 async def test_list_subscribers_with_keys_joins_client_instances(fed):
     """The reconcile query JOINs subscribers × client_instances so the
     seed-holder gets each subscriber's identity + key-wrap material to seal

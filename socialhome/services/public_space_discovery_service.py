@@ -18,7 +18,11 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
-from ..domain.space import normalize_category, normalize_min_age
+from ..domain.space import (
+    normalize_category,
+    normalize_join_mode,
+    normalize_min_age,
+)
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.public_space_repo import (
     AbstractPublicSpaceRepo,
@@ -287,6 +291,16 @@ class PublicSpaceDiscoveryService:
                         # raise on e.g. 15 — aborting the whole poll tick.
                         min_age=normalize_min_age(item.get("min_age")),
                         category=normalize_category(item.get("category")),
+                        # The host's MEMBERSHIP gate. Normalised, so an older
+                        # GFS (which sends no join mode) or a hostile value
+                        # fails closed to ``invite_only``.
+                        join_mode=normalize_join_mode(item.get("join_mode")),
+                        # …and the separate READABILITY opt-in. Strict
+                        # ``is True``: absent (an older GFS), false, or any
+                        # non-boolean a hostile directory made up ⇒ not
+                        # publicly readable, so the SPA never offers a
+                        # Subscribe button for a space nobody may read.
+                        allow_subscribers=item.get("allow_subscribers") is True,
                     )
                 )
             except KeyError, TypeError, ValueError:

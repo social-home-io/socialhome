@@ -15,10 +15,17 @@ never sees the content key.
 
 Pipeline (fail-closed at every step):
 
-1. **Gate on seed + tier.** Act only if this household holds the space seed
-   (``get_space_seed`` non-None → owner or delegated admin) and the space is
-   PUBLIC/GLOBAL. A non-seed-holder can't authority-sign; a private/household
-   space is never GFS-discoverable, so its key must never leave via the GFS.
+1. **Gate on seed + tier + readability.** Act only if this household holds the
+   space seed (``get_space_seed`` non-None → owner or delegated admin), the
+   space is PUBLIC/GLOBAL, and its ``features.allow_subscribers`` is ON. A
+   non-seed-holder can't authority-sign; a private/household space is never
+   GFS-discoverable, so its key must never leave via the GFS; and a
+   public/global space with followers OFF is *listed* for discovery but is
+   **not publicly readable** — only members get content, so its key is never
+   sealed to a mere subscriber. The readability flag is NOT ``join_mode`` (an
+   ``invite_only`` space with followers on is a broadcast space), and it is
+   the OWNER's alone — a seed-holding delegated admin can sign a config edit
+   but cannot flip this one.
 2. **Verify the key-wrap binding (anti-substitution).** The key-wrap pubkey
    is learned *from the GFS*; a malicious GFS could substitute one it
    controls and read the sealed key. ``verify_keywrap_binding`` binds the
@@ -134,6 +141,19 @@ class SpaceSubscriberKeyOutbound:
 
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # A public/global space with ``allow_subscribers`` OFF is LISTED in
+        # the GFS directory (that's how people discover it and get invited)
+        # but is NOT publicly readable: only members get content. Never seal
+        # the content key to a mere subscriber — no key ⇒ the relayed
+        # ciphertext (which is itself suppressed, see space_public_outbound)
+        # is unopenable.
+        if not space.features.allow_subscribers:
+            log.debug(
+                "space_subscriber_key.outbound: space %s does not allow "
+                "subscribers — not publicly readable, skipping handoff",
+                space_id,
+            )
             return
         # Only a seed-holder (owner or delegated admin) can authority-sign.
         seed = await self._spaces.get_space_seed(space_id)
@@ -382,6 +402,16 @@ class SpaceSubscriberKeyOutbound:
             return
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # Subscribers off ⇒ listed for discovery but not publicly readable.
+        # Gated here (before the subscriber-list round-trip) so we never even
+        # ask the GFS who subscribed to a space whose content nobody may read.
+        if not space.features.allow_subscribers:
+            log.debug(
+                "space_subscriber_key.reconcile: space %s does not allow "
+                "subscribers — not publicly readable, skipping",
+                space_id,
+            )
             return
         seed = await self._spaces.get_space_seed(space_id)
         if seed is None:

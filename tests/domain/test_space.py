@@ -6,11 +6,13 @@ import pytest
 
 from socialhome.domain.space import (
     HouseholdFeatures,
+    JoinMode,
     RemoteAdminOutcome,
     SpaceConfigGapError,
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
+    normalize_join_mode,
     normalize_min_age,
 )
 
@@ -179,3 +181,69 @@ def test_normalize_min_age_passes_allowed_values(value):
 def test_normalize_min_age_clamps_everything_else(value):
     """Anything outside {0,13,16,18} falls back to 0 (fail-soft default)."""
     assert normalize_min_age(value) == 0
+
+
+def test_allow_subscribers_defaults_off_and_is_independent_of_join_mode():
+    """Readability is its own switch, not a property of ``JoinMode``.
+
+    ``allow_subscribers`` defaults OFF, exactly like the two sibling
+    subscriber flags it sits beside — a space is private until its owner says
+    otherwise. And because it is a separate dial, BOTH cross-combinations are
+    expressible: ``invite_only`` + subscribers-on (a broadcast space: invited
+    people post, anyone may follow) and ``open`` + subscribers-off (joinable,
+    but not publicly readable).
+    """
+    assert SpaceFeatures().allow_subscribers is False
+    assert SpaceFeatures().allow_subscriber_comment is False
+    assert SpaceFeatures().allow_subscriber_react is False
+    # No join mode implies anything about readability any more — the enum
+    # carries exactly three membership gates and nothing else.
+    assert set(JoinMode) == {
+        JoinMode.INVITE_ONLY,
+        JoinMode.OPEN,
+        JoinMode.REQUEST,
+    }
+    broadcast = SpaceFeatures(allow_subscribers=True)
+    assert broadcast.allow_subscribers is True
+    assert broadcast.to_wire_dict()["allow_subscribers"] is True
+
+
+def test_allow_subscribers_round_trips_through_every_boundary():
+    """Row → dataclass → columns → wire → dataclass, all four directions."""
+    on = SpaceFeatures(allow_subscribers=True)
+    assert on.to_columns()["allow_subscribers"] == 1
+    assert SpaceFeatures().to_columns()["allow_subscribers"] == 0
+    assert SpaceFeatures.from_row({"allow_subscribers": 1}).allow_subscribers is True
+    assert SpaceFeatures.from_row({"allow_subscribers": 0}).allow_subscribers is False
+    # A row written before migration 0051 has no such column — fail closed.
+    assert SpaceFeatures.from_row({}).allow_subscribers is False
+    assert SpaceFeatures.from_wire_dict(on.to_wire_dict()).allow_subscribers is True
+    # An older peer's SPACE_SYNC_BEGIN omits the key ⇒ not readable.
+    assert SpaceFeatures.from_wire_dict({}).allow_subscribers is False
+
+
+# ─── normalize_join_mode ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("value", ["invite_only", "open", "request"])
+def test_normalize_join_mode_passes_known_values(value):
+    """Every known join mode round-trips as a plain ``str``."""
+    got = normalize_join_mode(value)
+    assert got == value
+    assert type(got) is str
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "Open", "public", 7, 1.5, ["open"], {"open": 1}, object()],
+)
+def test_normalize_join_mode_fails_closed(value):
+    """Anything unknown — missing, misspelled, hostile, non-string — becomes
+    ``invite_only``, the mode that grants no public readership."""
+    assert normalize_join_mode(value) == "invite_only"
+
+
+def test_normalize_join_mode_accepts_the_enum_member():
+    """A :class:`JoinMode` member (a ``StrEnum``) normalises to its value, so
+    callers can pass the domain object straight through."""
+    assert normalize_join_mode(JoinMode.OPEN) == "open"

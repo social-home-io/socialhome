@@ -1,0 +1,72 @@
+-- Teach the GFS a published space's ``allow_subscribers`` opt-in.
+--
+-- Migration 0009 added ``join_mode`` and the code briefly treated it as the
+-- readability gate. That was the wrong model: ``join_mode`` governs how
+-- someone becomes a MEMBER who can post, and readability is a separate,
+-- explicit opt-in on the space (``SpaceFeatures.allow_subscribers``). The two
+-- are independent — an ``invite_only`` space with subscribers ON is a
+-- legitimate broadcast space, and an ``open`` space with subscribers OFF is
+-- joinable but not publicly readable. ``join_mode`` stays (the directory
+-- shows it, and it is the true membership gate); this column is what
+-- ``POST /gfs/subscribe`` now enforces.
+--
+-- FAIL-CLOSED DEFAULT, on purpose: every pre-existing row reads as 0 — "not
+-- publicly readable" — until the owner's signed publish body says otherwise.
+-- It self-heals without operator action: ``GfsConnectionService.heal_space_pins``
+-- re-publishes the metadata of every space a household published to a GFS on
+-- each GFS-WS (re)connect, and that body now carries the flag. So the window
+-- is one reconnect long, and it errs towards privacy. (Same reason the
+-- subscriber purge for a non-readable space lives in the publish handler
+-- rather than here: at migration time EVERY row looks non-readable, and a
+-- blanket DELETE would evict every legitimate subscriber on the server.)
+--
+-- ROLLOUT BEHAVIOUR, precisely, because gate and purge are NOT the same
+-- statement:
+--
+--   * ABSENT key on a publish (an un-upgraded household) => GATE ONLY. The
+--     row stores 0 so ``POST /gfs/subscribe`` refuses every NEW subscribe,
+--     but the existing ``space_subscribers`` seats are KEPT. Absent means
+--     "this household does not know the field", not "the owner withdrew
+--     readability" — purging on it would mass-evict every reader on this
+--     server the moment one old household re-published, and the reader gets
+--     no signal that it happened.
+--   * EXPLICIT ``allow_subscribers: false`` => GATE AND PURGE. That is the
+--     owner actually withdrawing readability, so the seats go.
+--
+-- A purged reader is not stranded either: every household re-POSTs
+-- ``/gfs/subscribe`` for its local subscriptions on each GFS-WS (re)connect
+-- (``GfsSpaceMirrorService.resubscribe_all``, the subscriber-side mirror of
+-- ``heal_space_pins``), and ``add_subscriber`` is an upsert — so turning the
+-- flag back on restores the readership without operator action.
+--
+-- Audit per the CLAUDE.md "Before adding a SQL migration" rule:
+--
+-- 1. Existing code paths touching this data, all read: the owner's signed
+--    publish body (``services/gfs_connection_service._build_publish_body`` →
+--    ``POST /gfs/spaces/{id}/publish`` → ``federation.publish_space`` →
+--    ``repositories.upsert_space``), the directory reads (``GET /gfs/spaces``,
+--    ``GET /gfs/spaces/{id}``, the public SSR pages — all of which serialise
+--    ``GlobalSpace`` wholesale via ``asdict``), cluster gossip
+--    (``cluster._space_to_wire`` / ``_wire_to_space``), and the subscribe seat
+--    (``federation.subscribe`` → ``space_subscribers``). None of them could
+--    express "listed but not readable" other than by overloading
+--    ``join_mode``, which 0009 did and this migration corrects.
+-- 2. Non-migration alternatives considered and rejected: (a) keep using
+--    ``join_mode`` — that is the model error being fixed, and it makes
+--    invite-only-but-readable unexpressible; (b) derive it from an existing
+--    column — nothing on ``global_spaces`` encodes readership (``status`` is
+--    the moderation verdict, ``withdrawn`` the owner's retraction, ``min_age``
+--    the age gate); (c) ask the owning household at subscribe time — the GFS
+--    has no synchronous back-channel to a household that may be offline, and
+--    it would make every subscribe depend on the owner's liveness; (d) keep it
+--    only inside the signed publish body without storing it — the value is
+--    needed on a later, unrelated request (``POST /gfs/subscribe``) and on
+--    every directory read, so it has to be persisted with the row it
+--    describes.
+-- 3. Smallest possible change: one additive ``ADD COLUMN`` with a NOT NULL
+--    default. No backfill, no rewrite of existing rows, no table rebuild, no
+--    index (the column is only ever read through an already-indexed
+--    ``space_id`` lookup or a full directory listing).
+
+ALTER TABLE global_spaces
+    ADD COLUMN allow_subscribers INTEGER NOT NULL DEFAULT 0;

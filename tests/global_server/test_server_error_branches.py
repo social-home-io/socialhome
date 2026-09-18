@@ -133,6 +133,9 @@ async def _publish_known_space(
         "icon_url": "",
         "min_age": 0,
         "category": "general",
+        "join_mode": "open",
+        # Subscribable ⇒ publicly readable; this flag is what says so.
+        "allow_subscribers": True,
         "accent_color": "#D2542A",
         "primary_color": "#D2542A",
         "identity_public_key": identity_public_key,
@@ -741,6 +744,9 @@ async def test_fan_out_delivers_to_real_subscriber_inbox(
                 "icon_url": "",
                 "min_age": 0,
                 "category": "general",
+                "join_mode": "open",
+                # Subscribable ⇒ publicly readable; this flag says so.
+                "allow_subscribers": True,
                 "accent_color": "#D2542A",
                 "primary_color": "#D2542A",
             }

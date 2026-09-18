@@ -188,11 +188,18 @@ class SpacePostOutbound:
         # Attach a pre-signed relay hint so a seed-holding member can forward this
         # public/global post to the GFS subscribers even when the owner is offline
         # (remote-author relay). Built only for a public/global space + a local
-        # author we can sign for; private spaces never relay to the GFS.
+        # author we can sign for; private spaces never relay to the GFS. A
+        # public/global space that allows no subscribers is listed for
+        # discovery but is NOT publicly readable, so its GFS relay is dead
+        # (see ``space_public_outbound``) — don't sign or ship a hint nothing
+        # may use. Members are unaffected: they are fanned out below over
+        # ``space_instances`` by ``broadcast_to_space_members``, which never
+        # consults the hint.
         space = await self._spaces.get(event.space_id)
         if (
             space is not None
             and space.space_type in PUBLIC_SPACE_TIERS
+            and space.features.allow_subscribers
             and self._own_instance_id
             and self._own_instance_pk
             and self._own_identity_seed

@@ -333,9 +333,16 @@ export interface SpaceFeatures {
    *  hidden and new listings are rejected; existing listings remain. */
   bazaar?: boolean
   posts_access: 'open' | 'moderated' | 'admin_only'
+  /** Admin opt-in: may strangers follow this space read-only at all?
+   *  This — not `join_mode` — is what makes a public / global space
+   *  publicly readable. Off by default: nothing is relayed, no content
+   *  key is sealed to a follower, and Subscribe is refused. Absent →
+   *  treat as false. */
+  allow_subscribers?: boolean
   /** Subscriber-engagement opt-ins (§23.49). Subscribers are
    *  read-only by default; admins flip these to let followers leave
-   *  reactions / comments without promoting them to full members. */
+   *  reactions / comments without promoting them to full members.
+   *  Only meaningful while `allow_subscribers` is on. */
   allow_subscriber_comment?: boolean
   allow_subscriber_react?: boolean
   /** Owner opt-in (delegated-admin epic, Phase 1a). When true the owner
@@ -603,7 +610,14 @@ export interface DirectoryEntry {
   /** Local/household spaces use the same shape — scope tells us which
    *  browser tab / chip to surface the card in. */
   scope: 'household' | 'public' | 'global'
+  /** How a person becomes a posting MEMBER. Says nothing about whether
+   *  the content is readable — see `allow_subscribers`. */
   join_mode: 'invite_only' | 'open' | 'request'
+  /** The host's readability opt-in. False/absent ⇒ the listing is
+   *  discoverable but its content is private: no Subscribe button, and the
+   *  "content is private" note shows. Fail closed on absent so an older
+   *  backend never advertises a Subscribe that 403s. */
+  allow_subscribers?: boolean
   min_age: number
   /** Discovery category (e.g. ``'gaming'``). ``'general'``/absent =
    *  unspecified — the card surfaces no category chip in that case. */

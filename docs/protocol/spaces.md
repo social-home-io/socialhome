@@ -114,6 +114,64 @@ sequenceDiagram
     Note over A,B: both sides ready to<br/>exchange encrypted content
 ```
 
+## `allow_subscribers` gates public readability
+
+A space carries three independent dials:
+
+| Dial | Question it answers | Values |
+|---|---|---|
+| `space_type` | where may this space be listed? | `private` / `household` / `public` / `global` |
+| `join_mode` | how does a newcomer become a **member who can post**? | `invite_only` / `open` / `request` |
+| `features.allow_subscribers` | may **strangers follow it read-only**? | off (default) / on |
+
+`join_mode` has nothing to do with readability. That is `allow_subscribers`,
+an explicit admin opt-in living on `SpaceFeatures` beside its two siblings
+`allow_subscriber_comment` / `allow_subscriber_react` — the flags that say
+what a follower may *do* once one exists. It federates with the rest of the
+features block (`space_meta.features`, `SPACE_SYNC_BEGIN`), rides in the
+signed space-config event, and is set through the ordinary
+`PATCH /api/spaces/{id}` `features` path. The column default
+(`0051_space_allow_subscribers.sql`) and the dataclass default are both
+**off**.
+
+**A public/global space with `allow_subscribers` off is listed for discovery
+but is not publicly readable.** Its metadata (name, description, icon) is
+still published to every paired connection server — that listing is how
+people find the space and ask to be let in — but its **content stream stops
+at the member households**:
+
+- no post is relayed to the GFS (`services/space_public_outbound.py`, both
+  the local-author and the owner-offline remote-author paths);
+- the per-space AES-256 content key is never sealed to a GFS subscriber
+  (`services/space_subscriber_key_outbound.py`, the `new_subscriber` handoff
+  and every reconcile entry point), so a subscriber cannot open even a
+  ciphertext it obtained some other way;
+- the pre-signed `public_relay` hint is not attached to the member broadcast
+  (`services/space_post_outbound.py`) — it exists only to let a seed-holding
+  member run the GFS relay, which is dead for this space;
+- `SpaceService.subscribe_to_space` refuses outright
+  (`this space does not allow subscribers`), and so does the connection
+  server's `POST /gfs/subscribe` (`403`).
+
+Because the two dials are independent, all four combinations are meaningful
+— an `invite_only` space with followers **on** is a legitimate broadcast
+space (invited people post, anyone may read along), and an `open` space with
+followers **off** is joinable by anyone but readable only once you have
+joined.
+
+Changing the flag on a **global** space re-publishes its metadata to every
+paired connection server immediately, so the directory learns at once rather
+than at the owner's next reconnect; a publish that lands the flag as off also
+purges the subscriber seats taken while it was on.
+
+**Members are unaffected.** Space content reaches member households through
+`broadcast_to_space_members` over `space_instances`, which is independent of
+the GFS relay and of the `public_relay` hint — including mesh-only remote
+members reached via `SPACE_ROUTED`. Turning followers off removes the public
+audience, never the federation.
+
+See [`discovery.md`](./discovery.md) for the GFS-side view.
+
 ## Dissolution (host hard-deletes; members keep a read-only archive)
 
 Dissolving a space is asymmetric: a **permanent removal** on the owner

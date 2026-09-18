@@ -4,6 +4,7 @@
  *
  * Surfaces a scope chip (🏠 household / 🤝 public / 🌐 global),
  * a join-mode chip (🔓 Open / ✉ Approval required / 🎟 Invite-only),
+ * a 🔒 "Content is private" chip when the space takes no followers,
  * an optional age chip (13+ / 16+ / 18+), the "Hosted by …" line for
  * remote spaces, and routes the action button between states:
  *
@@ -17,7 +18,9 @@
  *
  * Public + global spaces also surface a secondary "🔔 Subscribe" button
  * in the non-member states — subscription = read-only member (no post
- * / comment / react). Private household spaces do not show Subscribe.
+ * / comment / react). Private household spaces do not show Subscribe,
+ * and neither do spaces whose owner has not opted into followers (see
+ * {@link contentIsGated}).
  */
 import { Button } from '@/components/Button'
 import { categoryLabel, SPACE_CATEGORIES } from '@/components/spaceModeOptions'
@@ -60,14 +63,65 @@ function scopeChip(scope: DirectoryEntry['scope']) {
   }
 }
 
-function joinModeChip(mode: DirectoryEntry['join_mode']) {
+/**
+ * Whether this space is KNOWN to withhold its content from non-members.
+ *
+ * Keyed on `allow_subscribers` — the owner's explicit readability opt-in
+ * (`SpaceFeatures.allow_subscribers` in `socialhome/domain/space.py`), NOT
+ * on the join mode. The two are independent dials: an invite-only space with
+ * followers enabled is a broadcast space (invited people post, anyone may
+ * read), and an open-to-join space with followers disabled is joinable but
+ * not publicly readable. With the flag off nothing is relayed and no content
+ * key is sealed to a subscriber, so there is nothing to subscribe to.
+ *
+ * Strict `=== false`, deliberately: the "Your household" and "Global
+ * directory" tabs always map a concrete boolean (`/api/spaces` ships the
+ * space's features, `/api/public_spaces` the GFS's flag — each failing
+ * closed to `false` at the mapper), while the peer "From friends" directory
+ * does not carry the flag yet. Claiming "content is private" for an
+ * open friend-hosted space would be a lie; saying nothing is honest, and
+ * costs nothing — a peer-hosted space is never subscribable from here
+ * anyway (see {@link subscribableScope}, which requires an explicit `true`).
+ *
+ * Public/global scope only. A `household` space is private by definition —
+ * never published, never relayed, never subscribable — so the flag carries no
+ * information there, and the "Your household" tab maps it off every local
+ * space's features. Without this check every private space on that tab wore a
+ * 🔒 "Content is private" chip, announcing the default on every card and
+ * teaching the reader to ignore the one place it matters.
+ */
+export function contentIsGated(entry: DirectoryEntry): boolean {
+  return entry.scope !== 'household' && entry.allow_subscribers === false
+}
+
+/** The 🔒 chip that says so, rendered only when {@link contentIsGated}. */
+export const GATED_CHIP = {
+  cls:   'sh-join-mode-chip sh-join-mode-chip--private',
+  icon:  '🔒',
+  label: 'Content is private',
+}
+
+/**
+ * The join-mode chip is pure MEMBERSHIP information: how a person becomes
+ * someone who can post here. Readability is a separate chip (see
+ * {@link GATED_CHIP}), because the two no longer imply each other.
+ */
+export function joinModeChip(mode: DirectoryEntry['join_mode']) {
   switch (mode) {
     case 'open':
       return { cls: 'sh-join-mode-chip sh-join-mode-chip--open', icon: '🔓', label: 'Open to join' }
     case 'request':
-      return { cls: 'sh-join-mode-chip sh-join-mode-chip--request', icon: '✉', label: 'Approval required' }
+      return {
+        cls: 'sh-join-mode-chip sh-join-mode-chip--request',
+        icon: '✉',
+        label: 'Approval required',
+      }
     case 'invite_only':
-      return { cls: 'sh-join-mode-chip sh-join-mode-chip--invite', icon: '🎟', label: 'Invite-only' }
+      return {
+        cls: 'sh-join-mode-chip sh-join-mode-chip--invite',
+        icon: '🎟',
+        label: 'Invite-only',
+      }
   }
 }
 
@@ -95,9 +149,16 @@ function subscribableScope(entry: DirectoryEntry): boolean {
   // works for spaces this household hosts. Remote (friends/global) spaces
   // have no remote-subscribe federation path — showing the button there
   // just 404s; they're joined via the request flow instead.
+  //
+  // A space whose owner has not opted into followers is never subscribable,
+  // local or not: it publishes no content and hands out no content key, so a
+  // subscriber would sit on a seat that never receives anything (both
+  // `/api/spaces/{id}/subscribe` and the GFS refuse such a subscribe).
   return (
     entry.host_instance_id === 'local'
     && (entry.scope === 'public' || entry.scope === 'global')
+    // Explicit `true` — an absent flag is never enough to offer Subscribe.
+    && entry.allow_subscribers === true
     && !entry.already_member
   )
 }
@@ -199,6 +260,14 @@ export function SpaceCard({
         <span class={jmode.cls} title={jmode.label}>
           <span aria-hidden="true">{jmode.icon}</span> {jmode.label}
         </span>
+        {contentIsGated(entry) && (
+          <span
+            class={GATED_CHIP.cls}
+            title="Only members can read this space — nothing posted here is published"
+          >
+            <span aria-hidden="true">{GATED_CHIP.icon}</span> {GATED_CHIP.label}
+          </span>
+        )}
         {entry.min_age > 0 && (
           <span class="sh-age-chip" title={`Minimum age ${entry.min_age}`}>
             {entry.min_age}+

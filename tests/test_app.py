@@ -296,6 +296,36 @@ async def test_gfs_space_mirror_wired_into_space_service(tmp_dir):
         assert mirror._gfs is app[gfs_connection_service_key]  # noqa: SLF001
 
 
+async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
+    """F4b: the GFS-WS (re)connect hook re-registers this household's
+    subscriber seats beside the space-pin heal.
+
+    Without the hook a seat the GFS purged is never re-taken — the local row
+    says "subscribed" forever while nothing is delivered.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from socialhome.app_keys import gfs_ws_supervisor_key
+    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
+
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        on_connected = app[gfs_ws_supervisor_key]._on_connected  # noqa: SLF001
+        assert on_connected is not None
+        with patch.object(
+            GfsSpaceMirrorService, "resubscribe_all", new_callable=AsyncMock
+        ) as resub:
+            await on_connected("gfs-1")
+        resub.assert_awaited_once_with("gfs-1")
+
+
 # ── GFS relay fan-out dispatch (identity-free frame) ──────────────────────
 
 

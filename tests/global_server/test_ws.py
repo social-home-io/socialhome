@@ -163,6 +163,9 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
             "icon_url": "",
             "min_age": 0,
             "category": "general",
+            "join_mode": "open",
+            # Subscribable ⇒ publicly readable; this flag is what says so.
+            "allow_subscribers": True,
             "accent_color": "#D2542A",
             "primary_color": "#D2542A",
             "identity_public_key": space_pub_hex,
@@ -176,6 +179,8 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
             name="Space One",
             signature=b64url_encode(sign_ed25519(other_seed, pub_canonical)),
             identity_public_key=space_pub_hex,
+            join_mode="open",
+            allow_subscribers=True,
         )
         sub_ts = _now_iso()
         sub_canonical = json.dumps(
@@ -329,6 +334,9 @@ async def _publish_and_subscribe_peer(
         "icon_url": "",
         "min_age": 0,
         "category": "general",
+        "join_mode": "open",
+        # Subscribable ⇒ publicly readable; this flag is what says so.
+        "allow_subscribers": True,
         "accent_color": "#D2542A",
         "primary_color": "#D2542A",
         "identity_public_key": "",
@@ -341,6 +349,8 @@ async def _publish_and_subscribe_peer(
         owning_instance=owner_id,
         name="Space One",
         signature=b64url_encode(sign_ed25519(owner_seed, pub_canonical)),
+        join_mode="open",
+        allow_subscribers=True,
     )
     sub_ts = _now_iso()
     sub_canonical = json.dumps(

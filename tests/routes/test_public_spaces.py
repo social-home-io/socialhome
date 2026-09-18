@@ -18,6 +18,8 @@ async def _seed(
     space_id: str = "sp-1",
     instance_id: str = "remote-1",
     member_count: int = 5,
+    join_mode: str = "invite_only",
+    allow_subscribers: bool = False,
 ):
     repo = SqlitePublicSpaceRepo(client._db)
     await repo.upsert(
@@ -26,8 +28,65 @@ async def _seed(
             instance_id=instance_id,
             name=f"Space {space_id}",
             member_count=member_count,
+            join_mode=join_mode,
+            allow_subscribers=allow_subscribers,
         )
     )
+
+
+async def test_list_returns_the_real_join_mode(client):
+    """The directory now carries the host's real ``join_mode`` — the SPA used
+    to fabricate ``'request'`` for every listing because the field was absent,
+    and so offered Subscribe on spaces nobody may read."""
+    await _seed(client, space_id="sp-open", join_mode="open")
+    await _seed(client, space_id="sp-inv", join_mode="invite_only")
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    modes = {s["space_id"]: s["join_mode"] for s in await r.json()}
+    assert modes["sp-open"] == "open"
+    assert modes["sp-inv"] == "invite_only"
+
+
+async def test_list_join_mode_fails_closed_for_an_unknown_value(client):
+    """A directory row whose join mode is unknown (an older GFS, a hostile
+    one) reads as invite-only — never as something more permissive."""
+    await _seed(client, space_id="sp-weird", join_mode="everyone")
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    entry = next(s for s in await r.json() if s["space_id"] == "sp-weird")
+    assert entry["join_mode"] == "invite_only"
+
+
+async def test_list_returns_allow_subscribers(client):
+    """The browser needs the host's readability opt-in BEFORE any local row
+    for the space exists — it is what decides whether Subscribe is offered.
+    Note ``sp-broadcast`` is invite-only AND readable: the two dials are
+    independent."""
+    await _seed(
+        client,
+        space_id="sp-broadcast",
+        join_mode="invite_only",
+        allow_subscribers=True,
+    )
+    await _seed(
+        client,
+        space_id="sp-open-private",
+        join_mode="open",
+        allow_subscribers=False,
+    )
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    rows = {s["space_id"]: s for s in await r.json()}
+    assert rows["sp-broadcast"]["allow_subscribers"] is True
+    assert rows["sp-broadcast"]["join_mode"] == "invite_only"
+    assert rows["sp-open-private"]["allow_subscribers"] is False
+    assert rows["sp-open-private"]["join_mode"] == "open"
+
+
+async def test_list_allow_subscribers_defaults_closed(client):
+    """A row cached before migration 0051 (or by an older GFS that reports
+    no flag) reads as not-readable — never as something more permissive."""
+    await _seed(client, space_id="sp-nodata")
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    entry = next(s for s in await r.json() if s["space_id"] == "sp-nodata")
+    assert entry["allow_subscribers"] is False
 
 
 # ─── List ────────────────────────────────────────────────────────────────

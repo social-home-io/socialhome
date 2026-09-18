@@ -15340,6 +15340,13 @@ a.sh-welcome-card:hover {
   background: color-mix(in srgb, var(--sh-muted) 18%, transparent);
   color: var(--sh-muted);
 }
+/* Readability, not membership: shown whenever the space takes no followers.
+   Slate-blue so it reads as a separate statement from the join-mode chip
+   sitting next to it. */
+.sh-join-mode-chip--private {
+  background: color-mix(in srgb, #64748b 18%, transparent);
+  color: #334155;
+}
 .sh-age-chip {
   background: color-mix(in srgb, #ef4444 14%, transparent);
   color: #991b1b;

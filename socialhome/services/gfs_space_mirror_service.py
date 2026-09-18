@@ -71,7 +71,7 @@ import re
 
 import aiohttp
 
-from ..domain.space import Space
+from ..domain.space import Space, normalize_join_mode
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -342,7 +342,27 @@ class GfsSpaceMirrorService:
             # space: joining still goes through
             # ``POST /api/public_spaces/{id}/join-request``.
             "space_type": "global",
-            "join_mode": "invite_only",
+            # The owner's real join mode, as the GFS directory reports it —
+            # this used to be hardcoded ``invite_only`` because the field
+            # never arrived, which left the household unable to tell an open
+            # space from a closed one. Normalised, so a missing field (an
+            # older GFS) or a hostile value fails closed to ``invite_only``.
+            "join_mode": normalize_join_mode(body.get("join_mode")),
+            # The owner's readability opt-in, likewise straight off the
+            # directory body. It rides in the ``features`` block because that
+            # is where ``allow_subscribers`` lives on the space
+            # (``SpaceFeatures``), and ``stub_space_from_metadata`` feeds the
+            # block through ``SpaceFeatures.from_wire_dict``. Every other
+            # feature keeps its dataclass default, exactly as before this key
+            # existed. Fail-closed: an older GFS sends nothing ⇒ False ⇒
+            # ``subscribe_to_space`` refuses rather than seating a member on a
+            # space whose content can never arrive. Strict ``is True``, like
+            # every other read of this hostile body: a GFS that answers
+            # ``{"allow_subscribers": "nope"}`` must not widen access through
+            # Python truthiness.
+            "features": {
+                "allow_subscribers": body.get("allow_subscribers") is True,
+            },
             # The owning household's local username means nothing here (the
             # GFS listing carries no such field) — leave it empty.
             "owner_username": "",
@@ -382,6 +402,62 @@ class GfsSpaceMirrorService:
         (banned / under-age) never reaches the GFS.
         """
         await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
+
+    async def resubscribe_all(self, gfs_id: str) -> int:
+        """Re-register every local subscription on *gfs_id*. Returns the count
+        the GFS accepted.
+
+        ``SpaceService.subscribe_to_space`` POSTs ``/gfs/subscribe`` only on
+        the FIRST-ever mirror (it returns early once a local member row
+        exists), so a seat the GFS dropped is never re-taken: the household
+        keeps showing "subscribed" while receiving nothing, forever. The GFS
+        drops seats on its own — a publish that withdraws readability purges
+        them — so the local row and the remote seat do drift apart in normal
+        operation. Re-POSTing on every GFS-WS (re)connect closes that gap; the
+        GFS's ``add_subscriber`` is an upsert, so a seat we already hold is a
+        no-op.
+
+        Scoped by mirror provenance (:meth:`was_gfs_listed`) for the same
+        reason :meth:`SpaceService._maybe_purge_gfs_mirror` is: a public/global
+        stub learned from a direct peer is nobody's mirror, and a signed,
+        identity-bound subscribe would disclose our interest in a space to a
+        GFS operator who never knew it existed.
+
+        Fail-soft per space: this is a background self-heal, so one space's
+        failure must never skip the rest or break the caller's reconnect
+        sequence.
+        """
+        restored = 0
+        for space_id in await self._spaces.list_subscribed_space_ids():
+            if not await self.was_gfs_listed(space_id):
+                continue
+            try:
+                await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
+            except GfsConnectionError as exc:
+                # A 403 is an EXPECTED outcome, not an incident: the space may
+                # not live on this GFS at all, or its owner may have withdrawn
+                # readability for good. Either way there is nothing to fix and
+                # nothing an operator should act on — keep it out of the
+                # warning log, which would otherwise fill up once per reconnect
+                # per space. ``GfsConnectionError`` carries no status field, so
+                # match the message ``subscribe_to_gfs_space`` formats.
+                if "HTTP 403" in str(exc):
+                    log.debug(
+                        "gfs_space_mirror: GFS %s refused re-subscribe of %s: %s",
+                        gfs_id,
+                        space_id,
+                        exc,
+                    )
+                else:
+                    log.warning(
+                        "gfs_space_mirror: re-subscribe of %s on GFS %s failed: %s",
+                        space_id,
+                        gfs_id,
+                        exc,
+                    )
+                continue
+            restored += 1
+        return restored
 
     async def unsubscribe(self, space_id: str) -> None:
         """Best-effort removal from every paired GFS's subscriber set.

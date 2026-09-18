@@ -106,6 +106,67 @@ describe('SpaceSettings', () => {
     expect(body.retention_days).toBe(0)
   })
 
+  it('offers the followers switch, OFF by default, gating the two engagement boxes', () => {
+    // ``allow_subscribers`` is the readability opt-in — it is what makes a
+    // public / global space publicly readable, independently of join_mode.
+    // Defaults OFF, and while it is off "let followers react / comment" are
+    // meaningless, so they are disabled.
+    const space = makeSpace()
+    const { getByLabelText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const follow = getByLabelText(/Let anyone follow this space/) as HTMLInputElement
+    expect(follow.checked).toBe(false)
+    expect(
+      (getByLabelText(/Let followers leave reactions/) as HTMLInputElement).disabled,
+    ).toBe(true)
+    expect(
+      (getByLabelText(/Let followers comment on posts/) as HTMLInputElement).disabled,
+    ).toBe(true)
+  })
+
+  it('sends allow_subscribers in the PATCH features block when turned on', async () => {
+    apiMock.patch.mockResolvedValue({})
+    const space = makeSpace()
+    const { getByLabelText, getByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const follow = getByLabelText(/Let anyone follow this space/) as HTMLInputElement
+    fireEvent.click(follow)
+    // The engagement boxes come alive once followers may exist.
+    expect(
+      (getByLabelText(/Let followers leave reactions/) as HTMLInputElement).disabled,
+    ).toBe(false)
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
+    const [, body] = apiMock.patch.mock.calls[0]
+    expect(body.features.allow_subscribers).toBe(true)
+    // …and the join mode is untouched: the two dials are independent.
+    expect(body.join_mode).toBe('invite_only')
+  })
+
+  it('reflects an already-on allow_subscribers from the space payload', () => {
+    const space = makeSpace({
+      features: {
+        calendar: true, todo: true, location: false,
+        stickies: false, pages: true, gallery: true,
+        posts_access: 'open', pages_access: 'open',
+        stickies_access: 'open', calendar_access: 'open',
+        tasks_access: 'open',
+        allow_subscribers: true,
+      },
+    })
+    const { getByLabelText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    expect(
+      (getByLabelText(/Let anyone follow this space/) as HTMLInputElement).checked,
+    ).toBe(true)
+    expect(
+      (getByLabelText(/Let followers comment on posts/) as HTMLInputElement).disabled,
+    ).toBe(false)
+  })
+
   it('renders the Features fieldset with six toggle checkboxes', () => {
     const space = makeSpace()
     const { getByTestId } = render(
