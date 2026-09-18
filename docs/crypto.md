@@ -307,10 +307,28 @@ delegation enabled, and only when the b64url payload decodes to
 exactly 32 bytes. See `_share_admin_signing_seed` (sender) /
 `PrivateSpaceInviteHandler._on_admin_key_share` (receiver).
 
+**GFS capability block** (`capabilities_sig.py`) — `GET
+/gfs/info` is unauthenticated, so the capability that decides whether a
+household may relay identity-free (`anonymous_publish`) is signed with the
+GFS's own Ed25519 identity key, whose public half the household pinned at
+pair time (TOFU) and which the same response publishes as `public_key`. No
+new key is minted. Wire fields: `capabilities` (the map), `capabilities_sig`
+(b64url Ed25519) and `capabilities_sig_suite`
+(`CAPS_SIG_SUITE_ED25519 = "ed25519"`, validated against
+`SUPPORTED_CAPS_SIG_SUITES`; unknown → `UnsupportedCapsSigSuite`, never a
+default). Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
+(`sort_keys`, compact separators) of `{gfs_instance_id, capabilities}` — the
+instance id inside the signed bytes stops a block from being replayed by
+another server, the prefix stops it from being lifted onto another statement
+that key signs. The household additionally **ratchets** a verified `true`
+(in-process) so a stripped-on-path response can't downgrade it back to the
+identified relay body.
+
 The suite-tag retrofit promised in earlier revisions of this doc is
 shipped — every cryptographic wire format in the federation surface
 carries a ``*_suite`` identifier (signatures, mesh KEM, key-wrap KEM,
-content-key delivery). A future ChaCha20-Poly1305 or PQ-protected variant
+content-key delivery, GFS capability block). A future ChaCha20-Poly1305 or
+PQ-protected variant
 is therefore a wire-additive change. (An earlier *sealed-sender*
 primitive carried its own ``aead_suite``; it was never wired into any
 federation path and has been deleted — the shipped GFS relay is the

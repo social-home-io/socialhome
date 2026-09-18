@@ -7,6 +7,11 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.global_server import create_gfs_app, server
+from socialhome.capabilities_sig import (
+    CAPS_SIG_SUITE_ED25519,
+    UnsupportedCapsSigSuite,
+    verify_capabilities,
+)
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
 from socialhome.global_server.app_keys import gfs_fed_repo_key
 from socialhome.global_server.domain import ClientInstance
@@ -214,6 +219,54 @@ async def test_gfs_info_advertises_anonymous_publish(gfs_client):
     resp = await gfs_client.get("/gfs/info")
     assert resp.status == 200
     assert (await resp.json())["anonymous_publish"] is True
+
+
+async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client):
+    """The capability that matters is SIGNED with the GFS's own identity key —
+    the one already published as ``public_key`` and pinned by every household
+    at pair time. A household trusts ``anonymous_publish`` only through this
+    block, so an on-path attacker can no longer strip the flag and force the
+    identified (household-signed, third-party-provable) legacy body."""
+    resp = await gfs_client.get("/gfs/info")
+    body = await resp.json()
+    assert body["capabilities"] == {"anonymous_publish": True}
+    assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
+    assert verify_capabilities(
+        body["public_key"],
+        body["gfs_instance_id"],
+        body["capabilities"],
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+
+
+async def test_gfs_info_capability_signature_covers_every_signed_field(gfs_client):
+    """Tampering with the capability map, or replaying the block under another
+    GFS instance id, breaks verification — and an unknown suite is rejected
+    outright rather than defaulted."""
+    body = await (await gfs_client.get("/gfs/info")).json()
+    assert not verify_capabilities(
+        body["public_key"],
+        body["gfs_instance_id"],
+        {"anonymous_publish": False},
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+    assert not verify_capabilities(
+        body["public_key"],
+        "some-other-gfs",
+        body["capabilities"],
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+    with pytest.raises(UnsupportedCapsSigSuite):
+        verify_capabilities(
+            body["public_key"],
+            body["gfs_instance_id"],
+            body["capabilities"],
+            body["capabilities_sig"],
+            "ed25519+mldsa65",
+        )
 
 
 async def test_publish_endpoint_is_rate_limited_per_ip(gfs_client):

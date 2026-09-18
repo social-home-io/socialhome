@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+import sys
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -26,9 +29,15 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.global_server import create_gfs_app
 from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.capabilities_sig import (
+    CAPS_SIG_SUITE_ED25519,
+    sign_capabilities,
+)
 from socialhome.global_server.domain import ClientInstance
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.services import gfs_connection_service
 from socialhome.services.gfs_connection_service import (
+    GFS_INFO_NEGATIVE_TTL_S,
     MAX_REMOTE_DETAIL_CHARS,
     GfsConnectionError,
     GfsConnectionService,
@@ -141,17 +150,24 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
+#: The GFS identity keypair the anonymous-publish tests pretend a household
+#: pinned at pair time. The capability block on ``/gfs/info`` is signed with
+#: it, and the household trusts the capability only through that signature.
+_GFS_KP = generate_identity_keypair()
+
+
 def _make_conn(
     gfs_id: str = "gfs-1",
     *,
     status: str = "active",
     inbox_url: str = "https://gfs.example.com",
+    public_key: str = "pubkey-hex",
 ) -> GfsConnection:
     return GfsConnection(
         id=gfs_id,
         gfs_instance_id=f"inst-{gfs_id}",
         display_name=f"GFS {gfs_id}",
-        public_key="pubkey-hex",
+        public_key=public_key,
         inbox_url=inbox_url,
         status=status,
         paired_at="2025-01-01T00:00:00+00:00",
@@ -784,6 +800,80 @@ async def test_pair_missing_own_identity(env):
             own_public_key_hex="ab",
             own_inbox_url="https://x",
         )
+
+
+@pytest.mark.parametrize(
+    "gfs_url",
+    [
+        "http://gfs.example.com",
+        "HTTP://Gfs.Example.Com",
+        "http://8.8.8.8:9000",
+        "http://gfs.example.com:8080/base",
+        "ftp://gfs.example.com",
+        "gfs.example.com",
+    ],
+)
+async def test_pair_rejects_a_public_gfs_url_without_tls(env, gfs_url):
+    """A GFS reachable over plain ``http://`` on the public internet is an
+    on-path attacker's dream: ``/gfs/info`` is unauthenticated at the
+    transport layer, so stripping the signed capability block (or swapping the
+    pinned key on the very first TOFU fetch) is trivial. Refuse at pair time —
+    before a single byte is sent — rather than pinning a downgradeable peer."""
+    _, repo = env
+    session = _StubSession(method_responses={"GET": (200, {})})
+    svc = GfsConnectionService(repo, http_client=session)
+    with pytest.raises(GfsConnectionError, match="https"):
+        await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
+    # Nothing left the household — the URL never reached the network.
+    assert session.calls == []
+    assert await repo.list_all() == []
+
+
+@pytest.mark.parametrize(
+    "gfs_url",
+    [
+        "http://127.0.0.1:8081",
+        "http://localhost:9000",
+        "http://[::1]:9000",
+        "http://192.168.1.5",
+        "http://10.0.0.7:8080",
+        "http://172.16.4.2",
+        "http://[fe80::1]:9000",
+        "http://[fd00::5]",
+    ],
+)
+async def test_pair_allows_plain_http_on_loopback_or_a_private_network(env, gfs_url):
+    """A GFS on the LAN (or on the developer's loopback, which is how the
+    federation demo harness pairs) has no public path to attack and often no
+    certificate to serve, so plain ``http://`` stays allowed there."""
+    _, repo = env
+    session = _StubSession(
+        method_responses={
+            "GET": (
+                200,
+                {"gfs_instance_id": "lan-gfs", "public_key": "bb" * 32},
+            ),
+            "POST": (200, {"status": "registered"}),
+        },
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    conn = await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
+    assert conn.gfs_instance_id == "lan-gfs"
+
+
+async def test_pair_rejects_a_public_plain_http_own_inbox_url(env):
+    """The household's own federation base travels to the GFS as the address
+    peers will POST to — a public plain-http inbox is the same downgrade
+    surface from the other side."""
+    _, repo = env
+    session = _StubSession(method_responses={"GET": (200, {})})
+    svc = GfsConnectionService(repo, http_client=session)
+    with pytest.raises(GfsConnectionError, match="https"):
+        await svc.pair(
+            {"gfs_url": "https://gfs.example.com", "token": "tok"},
+            **{**_OWN_PAIR_KW, "own_inbox_url": "http://alpha.example/federation"},
+        )
+    assert session.calls == []
 
 
 async def test_pair_gfs_info_unreachable(env):
@@ -1563,7 +1653,15 @@ async def _publish_event_svc(env, session, *, space_id: str, gfs_ids: list[str])
     each of *gfs_ids* (so ``list_gfs_for_space`` returns them)."""
     db, conn_repo = env
     for gid in gfs_ids:
-        await conn_repo.save(_make_conn(gid, inbox_url=f"https://{gid}.example"))
+        await conn_repo.save(
+            _make_conn(
+                gid,
+                inbox_url=f"https://{gid}.example",
+                # The GFS identity key this household pinned at pair time —
+                # the only key a capability block may be verified against.
+                public_key=_GFS_KP.public_key.hex(),
+            )
+        )
         await conn_repo.publish_space(space_id, gid)
     kp = generate_identity_keypair()
     svc = GfsConnectionService(conn_repo, http_client=session)
@@ -1741,6 +1839,41 @@ async def test_remote_error_detail_bounds_the_read():
 # ─── Anonymous publish (the GFS must not learn WHICH household relayed) ───
 
 
+def _signed_info(
+    *,
+    gfs_instance_id: str = "inst-g1",
+    capabilities: dict | None = None,
+    kp=None,
+    server_name: str = "GFS g1",
+    suite: str = CAPS_SIG_SUITE_ED25519,
+) -> dict:
+    """The ``/gfs/info`` body a CURRENT connection server serves.
+
+    The capability map travels with a signature made by the GFS identity key
+    the household pinned at pair time — that signature is the ONLY thing the
+    household may act on. The top-level ``anonymous_publish`` mirror stays for
+    readability and is deliberately ignored by the client.
+    """
+    caps = {"anonymous_publish": True} if capabilities is None else capabilities
+    sig, _real_suite = sign_capabilities(
+        (kp or _GFS_KP).private_key, gfs_instance_id, caps
+    )
+    return {
+        "server_name": server_name,
+        "anonymous_publish": bool(caps.get("anonymous_publish")),
+        "capabilities": caps,
+        "capabilities_sig": sig,
+        "capabilities_sig_suite": suite,
+    }
+
+
+def _stripped_info(server_name: str = "GFS g1") -> dict:
+    """What an on-path attacker leaves behind: the unauthenticated flag still
+    says ``true`` but the signed block is gone. Indistinguishable on the wire
+    from an older GFS — and treated the same way (legacy body + a warning)."""
+    return {"server_name": server_name, "anonymous_publish": True}
+
+
 class _AnonSession:
     """aiohttp-session stub with a scriptable ``GET /gfs/info``.
 
@@ -1776,12 +1909,57 @@ class _AnonSession:
         return _StubResp(self._status, {"status": "published"})
 
 
+def _freeze_clock(monkeypatch, clock: list[float]) -> None:
+    """Drive the service's negative-TTL clock from *clock[0]*.
+
+    Only the service module's own ``time`` binding is swapped — patching the
+    real :func:`time.monotonic` would also freeze asyncio's event-loop clock
+    and hang every timeout in the process.
+    """
+    monkeypatch.setattr(
+        gfs_connection_service,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0]),
+    )
+
+
+def test_the_service_does_not_import_the_gfs_server_package():
+    """The household verifies capability blocks with
+    :mod:`socialhome.capabilities_sig`, which lives at the package top level
+    exactly so importing this service does NOT drag the GFS server package
+    into every HFS process."""
+    code = (
+        "import sys; import socialhome.services.gfs_connection_service; "
+        "print('socialhome.global_server' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.strip() == "False", out.stdout
+
+
+def _info_probes(session) -> int:
+    return len([u for u in session.gets if u.endswith("/gfs/info")])
+
+
+def _warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and r.name == "socialhome.services.gfs_connection_service"
+    ]
+
+
 async def test_publish_space_event_omits_identity_for_anonymous_gfs(env):
-    """A GFS advertising ``anonymous_publish`` gets the identity-free body:
-    exactly ``{space_id, event_type, payload}`` — no ``from_instance``, no
-    household transport ``signature``, no ``ts``, and this household's own
-    instance id nowhere in the serialized bytes."""
-    session = _AnonSession(info={"anonymous_publish": True})
+    """A GFS whose SIGNED capability block advertises ``anonymous_publish``
+    gets the identity-free body: exactly ``{space_id, event_type, payload}`` —
+    no ``from_instance``, no household transport ``signature``, no ``ts``, and
+    this household's own instance id nowhere in the serialized bytes."""
+    session = _AnonSession(info=_signed_info())
     svc, _kp = await _publish_event_svc(
         env, session, space_id="sp-anon", gfs_ids=["g1"]
     )
@@ -1831,18 +2009,190 @@ async def test_publish_space_event_legacy_body_warns_once_per_connection(env, ca
     signed = {k: v for k, v in body.items() if k != "signature"}
     canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(body["signature"]))
-    # Exactly one warning across the three publishes, naming the connection.
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    msg = warnings[0].getMessage()
-    assert "GFS g1" in msg or "https://g1.example" in msg
-    assert "sp-legacy" not in msg
+    # One downgrade warning + one "no signed capability block" warning, each
+    # emitted exactly once across the three publishes, naming the connection
+    # and never the space.
+    msgs = _warnings(caplog)
+    assert len(msgs) == 2
+    assert all("sp-legacy" not in m for m in msgs)
+    assert all("g1" in m or "https://g1.example" in m for m in msgs)
+    assert any("no signed capability block" in m for m in msgs)
+
+
+async def test_stripped_capability_block_is_not_trusted(env, caplog):
+    """THE downgrade attack: an on-path attacker strips the signed block from
+    ``/gfs/info`` while leaving the bare ``anonymous_publish: true`` flag. The
+    household must NOT act on the unauthenticated flag — trusting it would be
+    a no-op for the attacker, who instead wants the opposite: forcing the
+    legacy body (a household-signed, third-party-provable "household X relayed
+    into space Y" artefact) is what stripping buys them. Either way the flag
+    alone decides nothing; only the signature does."""
+    session = _AnonSession(info=_stripped_info())
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-strip", gfs_ids=["g1"]
+    )
+    logger = "socialhome.services.gfs_connection_service"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        await svc.publish_space_event(
+            space_id="sp-strip",
+            event_type="space_post_public",
+            payload={"space_id": "sp-strip"},
+            from_instance="alpha.home",
+        )
+    _url, body = session.posts[0]
+    assert body["from_instance"] == "alpha.home"
+    assert any("no signed capability block" in m for m in _warnings(caplog))
+
+
+async def test_capability_block_signed_by_the_wrong_key_is_rejected(env, caplog):
+    """A block signed by ANY key but the pinned one is tampering, and the
+    warning says so — an operator has to be able to tell "old GFS" (no block)
+    from "someone is rewriting my /gfs/info" (a block that fails)."""
+    attacker = generate_identity_keypair()
+    session = _AnonSession(info=_signed_info(kp=attacker))
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-evil", gfs_ids=["g1"]
+    )
+    logger = "socialhome.services.gfs_connection_service"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        await svc.publish_space_event(
+            space_id="sp-evil",
+            event_type="space_post_public",
+            payload={"space_id": "sp-evil"},
+            from_instance="alpha.home",
+        )
+    assert session.posts[0][1]["from_instance"] == "alpha.home"
+    msgs = _warnings(caplog)
+    assert any("FAILED verification" in m for m in msgs)
+    assert not any("no signed capability block" in m for m in msgs)
+
+
+async def test_capability_block_bound_to_another_gfs_is_rejected(env, caplog):
+    """The signature covers the GFS instance id, so a block lifted verbatim
+    from another (legitimately signed) server does not authenticate this one —
+    even when the attacker owns that other server's key."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-somewhere-else"))
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-lift", gfs_ids=["g1"]
+    )
+    logger = "socialhome.services.gfs_connection_service"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        await svc.publish_space_event(
+            space_id="sp-lift",
+            event_type="space_post_public",
+            payload={"space_id": "sp-lift"},
+            from_instance="alpha.home",
+        )
+    assert session.posts[0][1]["from_instance"] == "alpha.home"
+    assert any("FAILED verification" in m for m in _warnings(caplog))
+
+
+async def test_unknown_capability_suite_is_unverifiable_not_fatal(env, caplog):
+    """A suite this build doesn't know is rejected (no default fallback) — but
+    it must never raise out of a best-effort fetch: the publish still goes out
+    on the legacy path and the operator gets a warning naming the suite."""
+    session = _AnonSession(info=_signed_info(suite="ed25519+mldsa65"))
+    svc, _kp = await _publish_event_svc(env, session, space_id="sp-pq", gfs_ids=["g1"])
+    logger = "socialhome.services.gfs_connection_service"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        delivered = await svc.publish_space_event(
+            space_id="sp-pq",
+            event_type="space_post_public",
+            payload={"space_id": "sp-pq"},
+            from_instance="alpha.home",
+        )
+    assert delivered == 1
+    assert session.posts[0][1]["from_instance"] == "alpha.home"
+    assert any("ed25519+mldsa65" in m for m in _warnings(caplog))
+
+
+async def test_signed_block_denying_the_capability_is_not_tamper_flagged(env, caplog):
+    """A VALIDLY signed ``anonymous_publish: false`` is a GFS honestly saying
+    it can't do the anonymous relay. Legacy body, yes — but no tampering /
+    missing-block warning, or the honest answer would look like an attack."""
+    session = _AnonSession(info=_signed_info(capabilities={"anonymous_publish": False}))
+    svc, _kp = await _publish_event_svc(env, session, space_id="sp-no", gfs_ids=["g1"])
+    logger = "socialhome.services.gfs_connection_service"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        await svc.publish_space_event(
+            space_id="sp-no",
+            event_type="space_post_public",
+            payload={"space_id": "sp-no"},
+            from_instance="alpha.home",
+        )
+    assert session.posts[0][1]["from_instance"] == "alpha.home"
+    msgs = _warnings(caplog)
+    assert not any("FAILED verification" in m for m in msgs)
+    assert not any("no signed capability block" in m for m in msgs)
+
+
+async def test_verified_capability_cannot_be_downgraded_in_process(env, caplog):
+    """In-process ratchet: once a connection has been seen advertising
+    ``anonymous_publish`` under a VALID signature, a later fetch that lacks it
+    does NOT flip the cache back. A GFS cannot legitimately lose the
+    capability, so a mid-life downgrade is an attack (or a broken proxy) — the
+    household keeps relaying identity-free and logs the attempt."""
+    session = _AnonSession(info=_signed_info())
+    svc, _kp = await _publish_event_svc(env, session, space_id="sp-rat", gfs_ids=["g1"])
+    await svc.publish_space_event(
+        space_id="sp-rat",
+        event_type="space_post_public",
+        payload={"space_id": "sp-rat"},
+        from_instance="alpha.home",
+    )
+    assert set(session.posts[0][1]) == {"space_id", "event_type", "payload"}
+    # The block disappears (attacker on-path, or a proxy eating the field).
+    session.info = _stripped_info()
+    logger = "socialhome.services.gfs_connection_service"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        await svc.refresh_connection_metadata("g1")
+        await svc.publish_space_event(
+            space_id="sp-rat",
+            event_type="space_post_public",
+            payload={"space_id": "sp-rat"},
+            from_instance="alpha.home",
+        )
+    assert set(session.posts[1][1]) == {"space_id", "event_type", "payload"}
+    assert any("downgrade ignored" in m for m in _warnings(caplog))
+
+
+async def test_the_ratchet_does_not_survive_a_restart(env):
+    """The ratchet is RAM-only: a fresh process starts from "unknown" and has
+    to learn the capability again from a signed block. (Persisting it would
+    pin a remote server's build state in this household's database.)"""
+    session = _AnonSession(info=_signed_info())
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-boot", gfs_ids=["g1"]
+    )
+    await svc.publish_space_event(
+        space_id="sp-boot",
+        event_type="space_post_public",
+        payload={"space_id": "sp-boot"},
+        from_instance="alpha.home",
+    )
+    assert set(session.posts[0][1]) == {"space_id", "event_type", "payload"}
+
+    _db, conn_repo = env
+    session.info = _stripped_info()
+    restarted = GfsConnectionService(conn_repo, http_client=session)
+    restarted.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=generate_identity_keypair().private_key,
+    )
+    await restarted.publish_space_event(
+        space_id="sp-boot",
+        event_type="space_post_public",
+        payload={"space_id": "sp-boot"},
+        from_instance="alpha.home",
+    )
+    assert session.posts[1][1]["from_instance"] == "alpha.home"
 
 
 async def test_publish_space_event_fetches_info_once_on_cold_cache(env):
     """The flag is unknown on the first publish after boot → /gfs/info is
     fetched ONCE on demand and the answer cached for later publishes."""
-    session = _AnonSession(info={"anonymous_publish": True})
+    session = _AnonSession(info=_signed_info())
     svc, _kp = await _publish_event_svc(
         env, session, space_id="sp-cold", gfs_ids=["g1"]
     )
@@ -1853,16 +2203,21 @@ async def test_publish_space_event_fetches_info_once_on_cold_cache(env):
             payload={"space_id": "sp-cold"},
             from_instance="alpha.home",
         )
-    assert len([u for u in session.gets if u.endswith("/gfs/info")]) == 1
+    assert _info_probes(session) == 1
     assert all(
         set(b) == {"space_id", "event_type", "payload"} for _u, b in session.posts
     )
 
 
-async def test_publish_space_event_info_failure_falls_back_and_retries(env):
+async def test_publish_space_event_info_failure_falls_back_and_retries(
+    env, monkeypatch
+):
     """An unreachable /gfs/info downgrades THIS publish to the legacy body
-    (which both an old and a new GFS accept) and is NOT cached — the next
-    publish retries the probe and upgrades once it answers."""
+    (which both an old and a new GFS accept). The failure is NOT cached as a
+    capability — only as a short retry suppression — so once the TTL passes
+    the next publish probes again and upgrades."""
+    clock = [1000.0]
+    _freeze_clock(monkeypatch, clock)
     session = _AnonSession(raise_on_get=True)
     svc, _kp = await _publish_event_svc(
         env, session, space_id="sp-retry", gfs_ids=["g1"]
@@ -1874,17 +2229,49 @@ async def test_publish_space_event_info_failure_falls_back_and_retries(env):
         from_instance="alpha.home",
     )
     assert session.posts[0][1]["from_instance"] == "alpha.home"
-    # The GFS comes back and answers the probe on the next publish.
+    # The GFS comes back; after the negative TTL the probe is retried.
     session.raise_on_get = False
-    session.info = {"anonymous_publish": True}
+    session.info = _signed_info()
+    clock[0] += GFS_INFO_NEGATIVE_TTL_S + 0.1
     await svc.publish_space_event(
         space_id="sp-retry",
         event_type="space_post_public",
         payload={"space_id": "sp-retry"},
         from_instance="alpha.home",
     )
-    assert len([u for u in session.gets if u.endswith("/gfs/info")]) == 2
+    assert _info_probes(session) == 2
     assert set(session.posts[1][1]) == {"space_id", "event_type", "payload"}
+
+
+async def test_failed_info_probe_is_negative_cached_for_the_ttl(env, monkeypatch):
+    """A GFS whose ``/gfs/info`` is down but whose ``/gfs/publish`` is up used
+    to cost a full 10 s connect timeout on EVERY publish (the answer is
+    deliberately never cached as ``False``). A short negative TTL keeps the
+    privacy property — the household still re-probes and upgrades — while
+    collapsing a burst of publishes onto one probe."""
+    clock = [500.0]
+    _freeze_clock(monkeypatch, clock)
+    session = _AnonSession(raise_on_get=True)
+    svc, _kp = await _publish_event_svc(env, session, space_id="sp-ttl", gfs_ids=["g1"])
+
+    async def _publish() -> None:
+        await svc.publish_space_event(
+            space_id="sp-ttl",
+            event_type="space_post_public",
+            payload={"space_id": "sp-ttl"},
+            from_instance="alpha.home",
+        )
+
+    await _publish()
+    clock[0] += GFS_INFO_NEGATIVE_TTL_S - 0.1
+    await _publish()
+    await _publish()
+    assert _info_probes(session) == 1
+    # Past the TTL the household probes again (no permanent downgrade).
+    clock[0] += 0.2
+    await _publish()
+    assert _info_probes(session) == 2
+    assert all("from_instance" in b for _u, b in session.posts)
 
 
 async def test_ws_reconnect_refresh_upgrades_the_publish_body(env):
@@ -1902,7 +2289,7 @@ async def test_ws_reconnect_refresh_upgrades_the_publish_body(env):
     )
     assert "from_instance" in session.posts[0][1]
     # Operator upgrades the GFS; the next reconnect refresh learns the flag.
-    session.info = {"server_name": "GFS g1", "anonymous_publish": True}
+    session.info = _signed_info()
     await svc.refresh_connection_metadata("g1")
     await svc.publish_space_event(
         space_id="sp-up",
@@ -1912,7 +2299,86 @@ async def test_ws_reconnect_refresh_upgrades_the_publish_body(env):
     )
     assert set(session.posts[1][1]) == {"space_id", "event_type", "payload"}
     # Only the two reconnect refreshes hit /gfs/info — no on-demand probe.
-    assert len([u for u in session.gets if u.endswith("/gfs/info")]) == 2
+    assert _info_probes(session) == 2
+
+
+async def test_pair_seeds_the_capability_only_from_a_verified_block(env):
+    """At pair time the household verifies the block against the ``public_key``
+    in the SAME response — the one it is about to pin (TOFU). A verified block
+    seeds the cache, so the first relay to a freshly-paired GFS is already
+    identity-free without a second round-trip."""
+    _db, repo = env
+    gfs_kp = generate_identity_keypair()
+    info = {
+        "gfs_instance_id": "fresh-gfs",
+        "public_key": gfs_kp.public_key.hex(),
+        "server_name": "Fresh GFS",
+        **_signed_info(gfs_instance_id="fresh-gfs", kp=gfs_kp),
+    }
+    session = _StubSession(
+        method_responses={
+            "GET": (200, info),
+            "POST": (200, {"status": "registered"}),
+        },
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=generate_identity_keypair().private_key,
+    )
+    conn = await svc.pair(
+        {"gfs_url": "https://fresh.example", "token": "tok"}, **_OWN_PAIR_KW
+    )
+    await repo.publish_space("sp-fresh", conn.id)
+    await svc.publish_space_event(
+        space_id="sp-fresh",
+        event_type="space_post_public",
+        payload={"space_id": "sp-fresh"},
+        from_instance="alpha.home",
+    )
+    # No extra /gfs/info probe, and the very first relay is identity-free.
+    assert [m for m, _u in session.calls].count("GET") == 1
+    assert set(session._last_body or {}) == {"space_id", "event_type", "payload"}
+
+
+async def test_pair_does_not_seed_the_capability_from_an_unsigned_flag(env):
+    """Pairing over a stripped (or simply older) ``/gfs/info`` seeds the cache
+    with ``False`` — the bare flag proves nothing, so the first relay carries
+    the identified legacy body until a signed block shows up."""
+    _db, repo = env
+    gfs_kp = generate_identity_keypair()
+    session = _StubSession(
+        method_responses={
+            "GET": (
+                200,
+                {
+                    "gfs_instance_id": "fresh-gfs",
+                    "public_key": gfs_kp.public_key.hex(),
+                    "server_name": "Fresh GFS",
+                    "anonymous_publish": True,
+                },
+            ),
+            "POST": (200, {"status": "registered"}),
+        },
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=generate_identity_keypair().private_key,
+    )
+    conn = await svc.pair(
+        {"gfs_url": "https://fresh.example", "token": "tok"}, **_OWN_PAIR_KW
+    )
+    await repo.publish_space("sp-fresh", conn.id)
+    await svc.publish_space_event(
+        space_id="sp-fresh",
+        event_type="space_post_public",
+        payload={"space_id": "sp-fresh"},
+        from_instance="alpha.home",
+    )
+    assert (session._last_body or {})["from_instance"] == "alpha.home"
 
 
 # ─── heal_space_pins (self-heal a NULL authority pin on WS connect) ────────

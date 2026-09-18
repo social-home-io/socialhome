@@ -52,6 +52,16 @@ class GfsInfoView(GfsBaseView):
     ``proto_version`` negotiation: ``anonymous_publish`` tells a household
     that ``POST /gfs/publish`` authorizes on the space-authority signature
     alone, so it can stop sending ``from_instance``.
+
+    That capability ships SIGNED (``capabilities`` + ``capabilities_sig`` +
+    ``capabilities_sig_suite``, see :mod:`socialhome.capabilities_sig`) with the same
+    identity key this response publishes as ``public_key`` and every paired
+    household pinned at pair time. The signature is what a household trusts —
+    an unauthenticated flag on an unauthenticated endpoint could be stripped
+    on-path, forcing every relay back to the identified legacy body, which is
+    precisely the third-party-provable artefact the anonymous relay exists to
+    avoid. The top-level ``anonymous_publish`` stays for readability and for
+    older households, but it is INFORMATIONAL only.
     """
 
     async def get(self) -> web.Response:
@@ -59,15 +69,26 @@ class GfsInfoView(GfsBaseView):
         cluster = self.svc(K.gfs_cluster_key)
         admin_repo = self.svc(K.gfs_admin_repo_key)
         server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
-        return web.json_response(
-            {
-                "gfs_instance_id": cfg.instance_id,
-                "public_key": cluster.own_public_key_hex,
-                "server_name": server_name,
-                "base_url": cfg.base_url,
-                "anonymous_publish": True,
-            }
-        )
+        capabilities = {"anonymous_publish": True}
+        sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
+        body = {
+            "gfs_instance_id": cfg.instance_id,
+            "public_key": cluster.own_public_key_hex,
+            "server_name": server_name,
+            "base_url": cfg.base_url,
+            "anonymous_publish": True,
+            "capabilities": capabilities,
+        }
+        if sig:
+            body["capabilities_sig"] = sig
+            body["capabilities_sig_suite"] = suite
+        else:
+            log.warning(
+                "GET /gfs/info: no cluster signing key wired — serving an "
+                "UNSIGNED capability block; paired households will keep "
+                "sending the identified (legacy) relay body",
+            )
+        return web.json_response(body)
 
 
 class RegisterView(GfsBaseView):

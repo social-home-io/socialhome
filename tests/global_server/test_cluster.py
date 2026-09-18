@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.crypto import generate_identity_keypair
+from socialhome.capabilities_sig import (
+    CAPS_SIG_SUITE_ED25519,
+    verify_capabilities,
+)
 from socialhome.global_server.cluster import (
     MAX_SIGNALING_SESSIONS,
     ClusterService,
@@ -428,3 +433,30 @@ async def test_heartbeat_start_is_idempotent(enabled_cluster):
     await enabled_cluster.start()
     assert enabled_cluster._heartbeat_task is first_task
     await enabled_cluster.stop()
+
+
+async def test_sign_capabilities_block_signs_with_the_published_identity(gfs_db):
+    """The capability block ``GET /gfs/info`` serves is signed with the SAME
+    key whose public half that response publishes (and every household pins at
+    pair time) — no capability-specific key is minted, and the seed never
+    leaves this service."""
+    kp = generate_identity_keypair()
+    svc = ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        signing_key=kp.private_key,
+        own_public_key_hex=kp.public_key.hex(),
+    )
+    caps = {"anonymous_publish": True}
+    sig, suite = svc.sign_capabilities_block("gfs-1", caps)
+    assert suite == CAPS_SIG_SUITE_ED25519
+    assert verify_capabilities(svc.own_public_key_hex, "gfs-1", caps, sig, suite)
+
+
+async def test_sign_capabilities_block_without_a_key_signs_nothing(cluster):
+    """No identity wired → no signature rather than an unverifiable one; the
+    route then omits the block and households keep the legacy relay body."""
+    assert cluster.sign_capabilities_block("gfs-1", {"anonymous_publish": True}) == (
+        "",
+        "",
+    )

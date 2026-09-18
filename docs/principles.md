@@ -70,10 +70,25 @@ floor, no exceptions for "trusted" peers.
 The Global Federation Server (GFS) sees **routing metadata only** —
 which space an event belongs to, which peer is online for push fan-out,
 which SDP/ICE candidates need relaying. It never sees plaintext content,
-votes, names, or messages, and it cannot impersonate a household because
-every payload is signed with the originating instance's Ed25519 key (with
-optional ML-DSA-65 hybrid). A compromised or malicious GFS can disrupt
-discovery and push, but cannot read or forge content.
+votes, names, or messages, and it cannot forge content, because every payload
+it relays is signed by a key it does not hold and every receiver re-verifies
+that signature itself. A compromised or malicious GFS can disrupt discovery
+and push, but cannot read or forge content.
+
+*Which* key signs depends on the path, and the difference matters:
+
+- **Household-to-household** federation envelopes are signed with the
+  **originating instance's** Ed25519 key (optional ML-DSA-65 hybrid), so the
+  GFS cannot impersonate a household there.
+- **`POST /gfs/publish`** carries **no originating-instance signature at all**
+  — that is the point of the identity-free relay below. Forgery is prevented
+  by the **space-authority** signature sealed inside the payload: only a
+  holder of the space seed can mint one, and every subscriber verifies it
+  against the space public key it already mirrors. A GFS that fabricated a
+  relay would have to forge that signature, which it cannot. What the GFS
+  *can* do on this path is relay a captured payload again (the relay is
+  deliberately at-least-once; subscriber-side `post_id` dedupe is the
+  backstop) — it cannot author one.
 
 **Strengthened:** the GFS no longer learns *which household relayed* a
 public/global space event either. `POST /gfs/publish` carries exactly
@@ -81,6 +96,14 @@ public/global space event either. `POST /gfs/publish` carries exactly
 space-authority signature sealed inside the opaque payload; the fan-out
 frame to subscribers is identity-free too. The relaying household's
 identity is not **required, stored, logged or forwarded**.
+
+The fallback to the older identified body is itself authenticated away: a
+household relays identity-free only while the GFS's `GET /gfs/info`
+capability block verifies against the GFS identity key that household pinned
+at pair time, the answer **ratchets** (a capability cannot be un-advertised
+mid-life), and a public GFS URL must be `https://`. Stripping the capability
+on-path would otherwise force the identified body back — whose household
+signature is exactly the third-party-provable artefact this section removes.
 
 The honest residual: this is not "the GFS cannot learn it". A household
 normally holds an authenticated WebSocket to the same server from the same

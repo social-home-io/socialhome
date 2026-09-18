@@ -20,26 +20,48 @@ Relaying space content (:meth:`GfsConnectionService.publish_space_event`) is
 **identity-free by default**: a connection server must not learn WHICH
 household relayed a public/global-space event. ``GET /gfs/info`` is the
 capability channel for the GFS↔HFS leg (it has no ``proto_version``
-negotiation), so a GFS advertising ``anonymous_publish: true`` receives
+negotiation), so a GFS advertising ``anonymous_publish`` receives
 ``{space_id, event_type, payload}`` and authorizes the relay purely on the
 space-authority signature inside the opaque payload. A GFS that did not
 advertise it — an older build, or one whose ``/gfs/info`` was unreachable —
 still gets the legacy identified body, once per connection with a WARNING:
 unknown → legacy is the safe default, because the legacy body is accepted by
 both an old and a new GFS while the identity-free one would 403 on an old one.
+
+That fallback is also the attack surface, so the capability must be
+*authenticated*, not merely read:
+
+* **Only a signed block counts.** The capability is trusted only when
+  ``capabilities`` + ``capabilities_sig`` + ``capabilities_sig_suite`` verify
+  against the GFS identity key this household pinned at pair time
+  (:mod:`socialhome.capabilities_sig`). The bare top-level
+  ``anonymous_publish`` mirror is informational — acting on it would let an
+  on-path attacker strip the flag and force the legacy body, whose household
+  transport signature is a third-party-provable "household X relayed into
+  space Y" artefact.
+* **The cache ratchets up.** Once verified, a later fetch without the block
+  does not downgrade it for the rest of the process — a GFS cannot lose a
+  capability its build has.
+* **https:// at pair time.** A GFS URL must be ``https://`` unless its host is
+  loopback / RFC1918 / link-local, so the pinning fetch itself can't be
+  rewritten on-path.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import aiohttp
 
+from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.space import normalize_category
@@ -60,6 +82,15 @@ MAX_REMOTE_DETAIL_CHARS = 200
 #: Bytes read from a remote error body at all. Beyond this even the log
 #: line is not worth the memory.
 _REMOTE_DETAIL_READ_BYTES = 8192
+
+#: How long a FAILED ``GET /gfs/info`` probe suppresses the next one, in
+#: seconds. The answer itself is still never cached as ``False`` — the privacy
+#: reasoning holds: an unreachable descriptor must not downgrade a household
+#: to the identified relay body for the rest of the process. This TTL only
+#: stops the *stall*: a GFS whose ``/gfs/info`` is down while ``/gfs/publish``
+#: is up otherwise cost a full 10 s connect timeout on EVERY publish. Short
+#: enough that a GFS coming back is picked up within seconds.
+GFS_INFO_NEGATIVE_TTL_S: float = 30.0
 
 
 async def _remote_detail(resp, *, context: str) -> str:
@@ -93,6 +124,52 @@ class GfsConnectionError(Exception):
     __slots__ = ()
 
 
+def _is_private_host(host: str) -> bool:
+    """Whether *host* is loopback / link-local / RFC1918-private.
+
+    A literal IP is classified by :mod:`ipaddress`; the bare name
+    ``localhost`` counts as loopback. Everything else — every DNS name — is
+    treated as public. DNS is deliberately NOT resolved: a resolver answer is
+    attacker-influenced and would turn a TLS check into a rebinding oracle.
+    """
+    name = host.strip("[]").lower()
+    if name in {"localhost", "localhost."}:
+        return True
+    try:
+        addr = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
+
+
+def _require_secure_url(url: str, *, field: str) -> None:
+    """Reject a GFS-facing URL that is neither ``https://`` nor LAN-local.
+
+    ``GET /gfs/info`` carries the signed capability block and the TOFU-pinned
+    GFS public key; ``POST /gfs/publish`` carries space content. Over plain
+    ``http://`` on the public internet an on-path attacker can strip the
+    capability block (forcing every relay back to the identified body, which
+    carries a household-signed "household X relayed into space Y" artefact)
+    or swap the pinned key on the first fetch. A LAN / loopback GFS — how the
+    federation demo harness and most home deployments run — keeps plain HTTP:
+    there is no public path to sit on and usually no certificate to serve.
+
+    Raises :class:`GfsConnectionError`, which the pairing route maps to a 4xx
+    with this message.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return
+    if scheme == "http" and _is_private_host(parsed.hostname or ""):
+        return
+    raise GfsConnectionError(
+        f"{field} must use https:// — {url!r} is not. Plain http:// is only "
+        "allowed for a GFS on loopback or a private network (RFC1918, "
+        "fc00::/7, fe80::/10, localhost).",
+    )
+
+
 class GfsConnectionService:
     """Service for managing GFS connections and space publications."""
 
@@ -107,6 +184,8 @@ class GfsConnectionService:
         "_own_signing_key",
         "_anon_publish",
         "_anon_warned",
+        "_caps_warned",
+        "_info_failed_at",
     )
 
     def __init__(
@@ -131,14 +210,24 @@ class GfsConnectionService:
         # NOT persisted: ``anonymous_publish`` is a property of the REMOTE
         # server's build, not of this household's data, so a column would
         # go stale the moment an operator upgrades their GFS. It is
-        # (re)learned from ``GET /gfs/info`` at pair time and on every GFS-WS
-        # (re)connect, plus once on demand when a publish finds it unknown.
-        # Missing key = unknown → the legacy body, which BOTH an old and a
-        # new GFS accept, so the safe default can never strand a household.
+        # (re)learned from the SIGNED capability block on ``GET /gfs/info``
+        # at pair time and on every GFS-WS (re)connect, plus once on demand
+        # when a publish finds it unknown. Missing key = unknown → the legacy
+        # body, which BOTH an old and a new GFS accept, so the safe default
+        # can never strand a household. Once ``True`` under a verified
+        # signature the entry RATCHETS (see :meth:`_apply_capability`).
         self._anon_publish: dict[str, bool] = {}
         # Connections already warned about the privacy downgrade — one
         # WARNING per connection per process, not one per publish.
         self._anon_warned: set[str] = set()
+        # Same one-shot discipline for the capability-block warning (missing
+        # block / failed verification / unknown suite): a household publishing
+        # fifty times must not emit fifty copies.
+        self._caps_warned: set[str] = set()
+        # ``time.monotonic()`` of the last FAILED ``/gfs/info`` probe per
+        # connection — the negative TTL (:data:`GFS_INFO_NEGATIVE_TTL_S`).
+        # Cleared on the next successful fetch.
+        self._info_failed_at: dict[str, float] = {}
 
     def attach_publish_context(
         self,
@@ -214,6 +303,12 @@ class GfsConnectionService:
                 "own_instance_id, own_public_key_hex, and own_inbox_url"
                 " are required for GFS registration",
             )
+        # Transport check BEFORE the first byte leaves: over public plain
+        # HTTP the signed capability block below can be stripped on-path and
+        # the TOFU key swapped, so there is nothing to pin. LAN / loopback is
+        # still fine (the demo harness pairs ``http://127.0.0.1:<port>``).
+        _require_secure_url(gfs_url, field="gfs_url")
+        _require_secure_url(own_inbox_url, field="own_inbox_url")
 
         client = self._client()
 
@@ -303,24 +398,28 @@ class GfsConnectionService:
         await self._repo.save(conn)
         # Seed the capability cache from the descriptor we already fetched, so
         # the very first relay to a freshly-paired GFS is identity-free without
-        # a second round-trip.
-        self._anon_publish[conn.id] = bool(info.get("anonymous_publish"))
+        # a second round-trip. The block is verified against the key from that
+        # SAME response — the one being pinned right now (TOFU, exactly as the
+        # key itself is trusted); an unsigned or bad block seeds ``False``.
+        self._record_capabilities(conn, info)
         return conn
 
-    async def _fetch_gfs_info(self, gfs_id: str, inbox_url: str) -> dict | None:
-        """``GET {inbox_url}/gfs/info``, or ``None`` on any failure.
+    async def _fetch_gfs_info(self, conn: GfsConnection) -> dict | None:
+        """``GET {conn.inbox_url}/gfs/info``, or ``None`` on any failure.
 
         Never raises — every caller is on a best-effort path (a reconnect
         hook or a relay fan-out). A successful fetch refreshes the RAM-only
-        ``anonymous_publish`` capability cache for *gfs_id*; a failure caches
-        NOTHING, so the next publish probes again rather than downgrading
-        this household's privacy forever on one blip.
+        ``anonymous_publish`` capability cache for *conn* (from the SIGNED
+        block only, see :meth:`_record_capabilities`); a failure records only
+        a short retry suppression (:data:`GFS_INFO_NEGATIVE_TTL_S`), never a
+        capability answer, so one blip can't downgrade this household's
+        privacy for the rest of the process.
         """
         try:
             client = self._client()
         except RuntimeError:
             return None
-        info_url = f"{inbox_url}/gfs/info"
+        info_url = f"{conn.inbox_url}/gfs/info"
         try:
             async with client.get(
                 info_url,
@@ -329,37 +428,149 @@ class GfsConnectionService:
                 if resp.status != 200:
                     log.debug(
                         "GFS %s /gfs/info returned HTTP %d — skipping",
-                        gfs_id,
+                        conn.id,
                         resp.status,
                     )
+                    self._info_failed_at[conn.id] = time.monotonic()
                     return None
                 info = await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             log.debug(
                 "GFS %s unreachable during /gfs/info fetch: %s",
-                gfs_id,
+                conn.id,
                 exc,
             )
+            self._info_failed_at[conn.id] = time.monotonic()
             return None
         if not isinstance(info, dict):
+            self._info_failed_at[conn.id] = time.monotonic()
             return None
-        self._anon_publish[gfs_id] = bool(info.get("anonymous_publish"))
+        self._info_failed_at.pop(conn.id, None)
+        self._record_capabilities(conn, info)
         return info
 
+    def _record_capabilities(self, conn: GfsConnection, info: dict) -> None:
+        """Update the capability cache for *conn* from a ``/gfs/info`` body.
+
+        The bare top-level ``anonymous_publish`` flag is IGNORED: it rides an
+        unauthenticated endpoint, so acting on it would let an on-path
+        attacker strip it and force every relay back to the identified legacy
+        body — the household-signed, third-party-provable artefact the
+        anonymous relay exists to avoid. Only the signed block counts.
+        """
+        self._apply_capability(conn, self._verified_anonymous_publish(conn, info))
+
+    def _verified_anonymous_publish(self, conn: GfsConnection, info: dict) -> bool:
+        """Whether *info* carries a VALID capability block granting anonymous
+        publish, verified against the GFS key pinned for *conn*.
+
+        Returns ``False`` — with one WARNING per connection — for a missing
+        block, a bad signature, or a suite this build can't verify. The
+        warning text distinguishes them so an operator can tell "old GFS"
+        from "someone is rewriting my /gfs/info".
+        """
+        caps = info.get("capabilities")
+        sig = info.get("capabilities_sig")
+        suite = info.get("capabilities_sig_suite")
+        if (
+            not isinstance(caps, dict)
+            or not isinstance(sig, str)
+            or not sig
+            or not isinstance(suite, str)
+        ):
+            self._warn_capabilities(
+                conn,
+                "served no signed capability block on /gfs/info — it is "
+                "either an older build or its response was stripped in "
+                "transit",
+            )
+            return False
+        try:
+            ok = verify_capabilities(
+                conn.public_key, conn.gfs_instance_id, caps, sig, suite
+            )
+        except UnsupportedCapsSigSuite:
+            self._warn_capabilities(
+                conn,
+                f"signed its capability block with the unknown suite {suite!r},"
+                " which this build cannot verify",
+            )
+            return False
+        if not ok:
+            self._warn_capabilities(
+                conn,
+                "served a capability block that FAILED verification against "
+                "the pinned key — that is tampering or a key mismatch, not "
+                "an old build",
+            )
+            return False
+        return caps.get("anonymous_publish") is True
+
+    def _apply_capability(self, conn: GfsConnection, verified: bool) -> None:
+        """Write the verified capability into the cache, ratcheting UP only.
+
+        A GFS cannot legitimately lose ``anonymous_publish`` — the capability
+        is a property of its build, and builds don't travel backwards. So once
+        a connection has been seen advertising it under a VALID signature,
+        a later fetch that lacks it is an attack (or a broken proxy) and is
+        ignored for the rest of the process rather than silently downgrading
+        every future relay to the identified body. The ratchet is RAM-only:
+        a restart legitimately starts from "unknown" again.
+        """
+        if verified:
+            self._anon_publish[conn.id] = True
+            return
+        if self._anon_publish.get(conn.id) is True:
+            log.warning(
+                "GFS %r (%s) previously advertised anonymous_publish under a "
+                "valid signature and no longer does — capability downgrade "
+                "ignored, relays stay identity-free. A connection server "
+                "cannot lose this capability, so suspect tampering or a "
+                "proxy rewriting /gfs/info.",
+                conn.display_name,
+                conn.inbox_url,
+            )
+            return
+        self._anon_publish[conn.id] = False
+
+    def _warn_capabilities(self, conn: GfsConnection, detail: str) -> None:
+        """WARN once per connection about an untrusted capability block.
+
+        Names the connection (label + URL) and the consequence, never the
+        space or its content — an operator needs to know WHICH server to look
+        at, not what was posted to it.
+        """
+        if conn.id in self._caps_warned:
+            return
+        self._caps_warned.add(conn.id)
+        log.warning(
+            "GFS %r (%s) %s. Relays to it keep carrying this household's "
+            "instance id until a verifiable capability block appears.",
+            conn.display_name,
+            conn.inbox_url,
+            detail,
+        )
+
     async def _anonymous_publish_supported(self, conn: GfsConnection) -> bool:
-        """Whether *conn*'s GFS advertised ``anonymous_publish`` on /gfs/info.
+        """Whether *conn*'s GFS proved ``anonymous_publish`` on /gfs/info.
 
         Answers from the cache when it is warm (filled at pair time and on
         every WS reconnect). On a cold miss — the first publish after a boot
         that hasn't seen a reconnect yet — probe ``/gfs/info`` ONCE rather
         than spuriously downgrading to the identified body. An unreachable
-        GFS leaves the cache empty and answers ``False`` for this publish
-        only.
+        GFS answers ``False`` for this publish only, and its failure is
+        suppressed for :data:`GFS_INFO_NEGATIVE_TTL_S` so a burst of publishes
+        doesn't pay the connect timeout each time.
         """
         cached = self._anon_publish.get(conn.id)
         if cached is not None:
             return cached
-        await self._fetch_gfs_info(conn.id, conn.inbox_url)
+        failed_at = self._info_failed_at.get(conn.id)
+        if failed_at is not None and time.monotonic() - failed_at < (
+            GFS_INFO_NEGATIVE_TTL_S
+        ):
+            return False
+        await self._fetch_gfs_info(conn)
         return self._anon_publish.get(conn.id, False)
 
     async def refresh_connection_metadata(self, gfs_id: str) -> None:
@@ -368,7 +579,7 @@ class GfsConnectionService:
 
         Two things ride the descriptor: the operator-settable ``server_name``
         (persisted as the connection's ``display_name`` when it changed) and
-        the ``anonymous_publish`` capability (RAM-only — see
+        the signed ``anonymous_publish`` capability (RAM-only — see
         :meth:`_fetch_gfs_info`). Best-effort: a transport error / missing
         field is logged and ignored (the next reconnect retries). Called on
         each GFS WS (re)connect, so an operator's rename — and an operator's
@@ -377,7 +588,7 @@ class GfsConnectionService:
         conn = await self._repo.get(gfs_id)
         if conn is None:
             return
-        info = await self._fetch_gfs_info(gfs_id, conn.inbox_url)
+        info = await self._fetch_gfs_info(conn)
         if info is None:
             return
 

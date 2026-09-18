@@ -96,21 +96,70 @@ The Social Home ↔ GFS link is split by direction:
     honours `X-Forwarded-For` only from trusted proxies, and caps the request
     body. The exact limits and setting names live in
     [`docs/api.md`](../api.md).
-  - **Capability discovery.** The GFS↔HFS leg has no `proto_version`
-    negotiation, so capabilities ride `GET /gfs/info`: a server that
-    understands the anonymous relay advertises `anonymous_publish: true`.
-    The household caches that per connection (RAM only — it is a property of
-    the remote server's build, so a column would go stale the moment an
-    operator upgrades), refreshing it at pair time, on every GFS-WS reconnect,
-    and once on demand when a publish finds it unknown. Unknown → legacy is
-    the safe default, because the legacy body is accepted by **both** an old
-    and a new GFS while the identity-free one would `403` on an old one. The
-    rollout matrix:
+  - **Capability discovery — signed.** The GFS↔HFS leg has no `proto_version`
+    negotiation, so capabilities ride `GET /gfs/info`. That endpoint is
+    unauthenticated, so the capability itself is **signed**: the response
+    carries
 
-    | | **New GFS** (`anonymous_publish: true`) | **Old GFS** |
+    ```json
+    {"capabilities": {"anonymous_publish": true},
+     "capabilities_sig": "<b64url Ed25519>",
+     "capabilities_sig_suite": "ed25519"}
+    ```
+
+    signed with the GFS's **own identity key** — the one already published in
+    the same response as `public_key` and pinned (TOFU) by every paired
+    household. Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
+    (`sort_keys`, compact separators) of
+    `{"gfs_instance_id": …, "capabilities": {…}}`, so a block can't be lifted
+    onto another server or another statement that key signs
+    (`socialhome/capabilities_sig.py`; suite tag per the
+    crypto-suite rule, unknown suite → rejected, never defaulted). The
+    top-level `anonymous_publish` mirror stays for readability and is
+    **informational only**.
+
+    **Why signed:** without it the capability bit is strip-able on-path, and
+    stripping it doesn't fail closed — it forces the household back to the
+    legacy identified body, whose household transport signature is a
+    third-party-provable "household X relayed into space Y" artefact. The
+    downgrade *is* the attack, so it has to be authenticated away.
+
+    The household caches the verified answer per connection (RAM only — it is
+    a property of the remote server's build, so a column would go stale the
+    moment an operator upgrades), refreshing it at pair time, on every GFS-WS
+    reconnect, and once on demand when a publish finds it unknown. Three rules
+    guard the cache:
+
+    - **Only a verified block sets it.** Missing block, bad signature or an
+      unknown suite → `False` (legacy body) plus **one** WARNING per
+      connection, worded so an operator can tell "older GFS / stripped in
+      transit" from "block FAILED verification against the pinned key".
+    - **It ratchets up.** Once seen `true` under a valid signature, a later
+      fetch without it does **not** downgrade it for the rest of the process:
+      "capability downgrade ignored" is logged and relays stay identity-free.
+      A GFS cannot legitimately lose a capability its build has. The ratchet
+      is RAM-only — a restart starts from unknown again.
+    - **A failed probe is negative-cached for 30 s**
+      (`GFS_INFO_NEGATIVE_TTL_S`) — never as `False`, only as "don't re-probe
+      yet", so a GFS whose `/gfs/info` is down while `/gfs/publish` is up
+      costs one 10 s timeout per 30 s instead of one per publish.
+
+    Unknown → legacy is the safe default, because the legacy body is accepted
+    by **both** an old and a new GFS while the identity-free one would `403`
+    on an old one. The rollout matrix:
+
+    | | **New GFS** (signed `anonymous_publish`) | **Old GFS** |
     |---|---|---|
     | **New household** | identity-free body; nothing to learn | legacy body + **one** WARNING per connection naming the *server* (never the space) |
     | **Old household** | legacy body accepted: verified, then discarded | legacy body, as before |
+  - **`https://` at pair time.** A GFS URL (from the QR or pasted) and the
+    household's own federation base must be `https://` unless the host is
+    loopback, `localhost`, RFC1918, `fc00::/7` or `fe80::/10` — a LAN or
+    demo-harness GFS on `http://127.0.0.1:<port>` stays allowed, a public one
+    must be TLS. Enforced before the first byte leaves
+    (`GfsConnectionService.pair`); DNS is never resolved, so the check can't
+    be turned into a rebinding oracle. Without it the very fetch that pins the
+    key and reads the signed block is rewritable on-path.
   - **NULL-pin self-heal.** A space whose GFS row pinned no authority key
     `403`s every relay, and nothing else re-publishes its metadata. So on
     every GFS-WS (re)connect the household re-publishes the metadata of each
@@ -336,8 +385,11 @@ names anybody, receivers derive everything from the sealed inner:
   from the decrypted, authority-signed inner payload. An outer
   `from_instance` from an old GFS is never read and never logged.
 - **Self-echo guard.** The GFS fans out to every subscriber including the
-  publisher, so a household drops its own post — matched on `post_id` —
-  before any write.
+  publisher, so a household drops its own post — matched on the inner
+  `origin_instance_id` (our own id), at DEBUG, before any write. The
+  `post_id` dedupe is a *separate*, later step and would not cover this: an
+  echo arriving after a local delete would otherwise resurrect the post from
+  our own copy.
 - **Seal-as-gate for a key handoff.** A `space_subscriber_key_handoff`
   carrying **no** `target_instance_id` is gated by the seal itself: if
   `open_keywrap` fails, the frame was not for us and is dropped quietly.
