@@ -11,10 +11,12 @@ from ..db import AsyncDatabase
 from .admin_service import GfsAdminService
 from .cluster import ClusterService
 from .config import GfsConfig
+from .envelope_relay import GfsEnvelopeRelay
 from .federation import GfsFederationService
 from .repositories import (
     AbstractClusterRepo,
     AbstractGfsAdminRepo,
+    AbstractGfsEnvelopeQueueRepo,
     AbstractGfsFederationRepo,
     AbstractGfsHighlightPublicationRepo,
     AbstractGfsHighlightTokenRepo,
@@ -73,3 +75,10 @@ gfs_moment_public_registry_key: AppKey[MomentPublicRegistry] = AppKey(
 gfs_user_picture_repo_key: AppKey[AbstractGfsUserPictureRepo] = AppKey(
     "gfs_user_picture_repo"
 )
+
+#: Store-and-forward queue backing ``POST /gfs/envelope`` (§D2b).
+gfs_envelope_queue_repo_key: AppKey[AbstractGfsEnvelopeQueueRepo] = AppKey(
+    "gfs_envelope_queue_repo"
+)
+#: Deliver-or-queue relay for opaque household-to-household envelopes.
+gfs_envelope_relay_key: AppKey[GfsEnvelopeRelay] = AppKey("gfs_envelope_relay")

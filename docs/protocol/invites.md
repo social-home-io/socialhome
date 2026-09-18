@@ -9,8 +9,10 @@ without ever seeing which space, which user, or which household.
 
 - **HFS**: mints invite tokens, stores pending invitations, handles
   accept/decline, publishes the resulting `SPACE_MEMBER_JOINED` event.
-- **GFS**: only acts as an opaque relay for `_VIA` events between
-  instances that are not yet directly paired.
+- **GFS**: only acts as an opaque relay between instances that are not
+  yet directly paired — `POST /gfs/envelope` for the built §D2b
+  bootstrap path (see [The relay leg](#the-relay-leg--post-gfsenvelope)),
+  and the documented-but-unbuilt `_VIA` events it supersedes.
 
 ## Event types
 
@@ -191,6 +193,80 @@ controls. `routed_crypto.py`'s sealing is the wrong tool here: it
 negotiates a *target ephemeral* key over an online `SPACE_FIND_ROUTE`
 round-trip, and there is no mesh path to run one over.
 
+### The relay leg — `POST /gfs/envelope`
+
+The connection server half of the transport above. It is what the
+`_VIA` relay design at the top of this page described but never built,
+and it **supersedes** it: `SPACE_INVITE_VIA` /
+`SPACE_JOIN_REQUEST_VIA` / `SPACE_JOIN_REQUEST_REPLY_VIA` wrapped a
+§24.11 envelope (with its `from_instance`) in a GFS hop; this carries an
+end-to-end sealed blob whose routing envelope names **only the
+recipient**. New work uses this leg; the `_VIA` event types stay
+documented and unimplemented.
+
+Request:
+
+```json
+POST /gfs/envelope
+{"to_instance": "<instance id>",
+ "sealed": {"kem_suite": "x25519", "eph_pk": "…", "ciphertext": "…"}}
+```
+
+Response, always:
+
+```json
+202 {"status": "accepted"}
+```
+
+**Unauthenticated on purpose.** The sender is deliberately anonymous —
+the point of the relay is that neither household learns the other's
+address and the server learns neither's relationship to the other. There
+is no identity on the wire to authenticate, so a per-IP sliding window
+(`ENVELOPE_MAX_PER_MINUTE`, 30/min → 429) is the accountability handle,
+the same posture `POST /gfs/publish` takes.
+
+**The 202 is uniform.** Recipient online, recipient offline, recipient
+not registered on that server at all — byte-identical response in every
+case. Anything else would be a presence/existence oracle: an anonymous
+caller could walk instance ids and learn which households use the server
+and which are awake. An envelope for an unknown, pending or banned
+recipient is dropped server-side, logged at DEBUG, and stored nowhere.
+Malformed bodies are a 400 and anything over
+`ENVELOPE_MAX_BODY_BYTES` (320 KiB, sized from the ACK's `space_meta`
+under the household's own 256 KiB sealed-blob cap) a 413 — both are
+about the bytes the caller sent, so neither says anything about the
+recipient.
+
+**Store and forward.** A live `/gfs/ws` socket receives
+`{"type": "envelope", "sealed": {…}}` and nothing else. Otherwise the
+blob waits in `gfs_envelope_queue` for `ENVELOPE_QUEUE_TTL_SECONDS`
+(24 h — an issuer household may simply be asleep overnight, and dropping
+would make an invite link fail for exactly that reason), capped at
+`ENVELOPE_QUEUE_MAX_PER_RECIPIENT` (200, oldest evicted), and is drained
+in order on that household's next authenticated hello, each row deleted
+only after its frame went out. Expired rows are swept by the GFS
+maintenance loop.
+
+**What the server must never do**, and what its tests pin: parse or log
+the sealed content, store or log any sender attribute (there is none),
+return anything that distinguishes one recipient from another, or
+forward a frame to anybody but `to_instance`. The `sealed` dict is
+checked for exactly its three non-empty string keys — an extra key is a
+400, so no routing hint or sender id rides along — and the suite tag is
+never validated server-side, since it is the recipient's to enforce and
+a relay that gated on it would have to be redeployed before households
+could move to the Phase-2 hybrid suite.
+
+A household discovers the leg from the **signed** capability block on
+`GET /gfs/info` (`"envelope_relay": true`, verified against the GFS key
+it pinned at pair time), so it only attempts a bootstrap redeem against
+a server that proved it can carry one.
+
+Implementation: `global_server/envelope_relay.py` (constants,
+validation, deliver-or-queue), `global_server/routes/envelope.py` (the
+HTTP surface), `global_server/routes/ws.py` (the drain on hello),
+`global_server/migrations/0011_envelope_queue.sql`.
+
 ### Fail-closed order (issuer side)
 
 Cheapest check first; every rung has its own regression test.
@@ -280,17 +356,17 @@ sequenceDiagram
     Note over R: opens the public invite link,<br/>reads the blob
     R->>R: verify_keywrap_binding(issuer keys)
     R->>R: sign body (own identity key),<br/>seal to issuer key-wrap key
-    R->>G: {to_instance: I, sealed}
-    G->>I: {sealed}
+    R->>G: POST /gfs/envelope<br/>{to_instance: I, sealed}
+    G->>I: ws {type: envelope, sealed}<br/>(queued up to 24 h if offline)
     Note over I: unseal → anti-tamper → signature →<br/>ts → replay → token → ban
     alt token valid
         I->>I: consume token, seat remote member,<br/>space_instances, space_session row
-        I->>G: {to_instance: R, sealed ACK + space_meta}
-        G->>R: {sealed}
+        I->>G: POST /gfs/envelope<br/>{to_instance: R, sealed ACK + space_meta}
+        G->>R: ws {type: envelope, sealed}
         Note over R: §CP.F1 age gate, §D1b anti-hijack,<br/>then seat stub + key + roster
     else denied
-        I->>G: {to_instance: R, sealed DENY + reason}
-        G->>R: {sealed}
+        I->>G: POST /gfs/envelope<br/>{to_instance: R, sealed DENY + reason}
+        G->>R: ws {type: envelope, sealed}
     end
 ```
 

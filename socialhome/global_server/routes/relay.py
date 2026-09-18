@@ -69,7 +69,12 @@ class GfsInfoView(GfsBaseView):
         cluster = self.svc(K.gfs_cluster_key)
         admin_repo = self.svc(K.gfs_admin_repo_key)
         server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
-        capabilities = {"anonymous_publish": True}
+        # ``envelope_relay``: this GFS carries ``POST /gfs/envelope``, the
+        # opaque household-to-household relay the §D2b invite bootstrap needs.
+        # It ships inside the SIGNED block for the same reason
+        # ``anonymous_publish`` does — an on-path stripper must not be able to
+        # push a household back onto a path that reveals more.
+        capabilities = {"anonymous_publish": True, "envelope_relay": True}
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
             "gfs_instance_id": cfg.instance_id,

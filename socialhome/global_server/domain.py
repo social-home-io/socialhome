@@ -287,6 +287,25 @@ class GfsMomentFollow:
     created_at: int
 
 
+@dataclass(slots=True, frozen=True)
+class GfsQueuedEnvelope:
+    """One sealed household-to-household envelope waiting for its recipient.
+
+    Written by ``POST /gfs/envelope`` when the addressed household has no
+    live ``/gfs/ws`` socket, drained in insertion order on its next
+    authenticated hello. ``sealed`` is the verbatim
+    ``{kem_suite, eph_pk, ciphertext}`` dict the sender produced — opaque to
+    this server, never parsed and never logged. There is deliberately no
+    sender field: the routing envelope names only the recipient.
+    """
+
+    id: int
+    to_instance: str
+    sealed: dict[str, str]
+    created_at: int
+    expires_at: int
+
+
 # Backwards-compatible aliases for the pre-spec stub names so existing
 # tests / imports keep working through the transition.
 GfsInstance = ClientInstance

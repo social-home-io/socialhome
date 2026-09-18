@@ -33,6 +33,7 @@ from .domain import (
     GfsHighlightPublication,
     GfsHighlightToken,
     GfsMomentFollow,
+    GfsQueuedEnvelope,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -1740,3 +1741,154 @@ class SqliteGfsUserPictureRepo:
             digest=d["digest"],
             updated_at=int(d["updated_at"]),
         )
+
+
+# ─── Envelope relay queue ────────────────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsEnvelopeQueueRepo(Protocol):
+    """Store-and-forward queue for sealed household-to-household envelopes."""
+
+    async def enqueue(
+        self,
+        to_instance: str,
+        sealed_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+    ) -> None: ...
+
+    async def list_for(
+        self,
+        to_instance: str,
+        *,
+        now: int,
+    ) -> list[GfsQueuedEnvelope]: ...
+
+    async def delete(self, envelope_id: int) -> int: ...
+
+    async def prune_expired(self, now: int) -> int: ...
+
+    async def count_for(self, to_instance: str) -> int: ...
+
+
+class SqliteGfsEnvelopeQueueRepo:
+    """SQLite-backed :class:`AbstractGfsEnvelopeQueueRepo`.
+
+    The GFS is blind to what it stores here: ``sealed_json`` is written and
+    read back verbatim and never parsed. No sender column exists — the
+    routing envelope carries none.
+    """
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def enqueue(
+        self,
+        to_instance: str,
+        sealed_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+    ) -> None:
+        """Append one envelope, evicting this recipient's OLDEST overflow.
+
+        Insert + evict run in one transaction so the per-recipient cap is a
+        real bound rather than a best effort: two concurrent relays to the
+        same offline household can't leave the queue over the cap. Oldest-out
+        is the right eviction order — a queued redeem that has already sat
+        through its TTL window is the one least likely to still matter, and
+        keeping it would let an early flood block every later envelope.
+        """
+
+        def _run(conn) -> None:
+            conn.execute(
+                "INSERT INTO gfs_envelope_queue("
+                "to_instance, sealed_json, created_at, expires_at"
+                ") VALUES(?,?,?,?)",
+                (to_instance, sealed_json, created_at, expires_at),
+            )
+            conn.execute(
+                "DELETE FROM gfs_envelope_queue WHERE to_instance=? AND id NOT IN ("
+                "SELECT id FROM gfs_envelope_queue WHERE to_instance=? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?)",
+                (to_instance, to_instance, max_per_recipient),
+            )
+
+        await self._db.transact(_run)
+
+    async def list_for(
+        self,
+        to_instance: str,
+        *,
+        now: int,
+    ) -> list[GfsQueuedEnvelope]:
+        """Unexpired envelopes for *to_instance*, oldest first.
+
+        Expired rows are skipped here as well as swept by the maintenance
+        loop: a household reconnecting between two sweeps must not receive a
+        blob whose TTL has already run out.
+        """
+        rows = await self._db.fetchall(
+            "SELECT id, to_instance, sealed_json, created_at, expires_at "
+            "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ? "
+            "ORDER BY created_at ASC, id ASC",
+            (to_instance, now),
+        )
+        out: list[GfsQueuedEnvelope] = []
+        for row in rows:
+            d = _as_dict(row)
+            if not d:
+                continue
+            try:
+                sealed = orjson.loads(d["sealed_json"])
+            except orjson.JSONDecodeError:
+                # Unreachable through the route (the dict is serialised from a
+                # validated shape), but a corrupt row must not wedge the whole
+                # drain — skip it and let the TTL sweep collect it.
+                continue
+            if not isinstance(sealed, dict):
+                continue
+            out.append(
+                GfsQueuedEnvelope(
+                    id=int(d["id"]),
+                    to_instance=d["to_instance"],
+                    sealed=sealed,
+                    created_at=int(d["created_at"]),
+                    expires_at=int(d["expires_at"]),
+                )
+            )
+        return out
+
+    async def delete(self, envelope_id: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_envelope_queue WHERE id=?",
+                (envelope_id,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def prune_expired(self, now: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_envelope_queue WHERE expires_at <= ?",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def count_for(self, to_instance: str) -> int:
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM gfs_envelope_queue WHERE to_instance=?",
+            (to_instance,),
+        )
+        d = _as_dict(row)
+        return int(d["n"]) if d else 0

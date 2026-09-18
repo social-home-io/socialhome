@@ -45,6 +45,7 @@ from .admin import (
     AdminSpaceCollectionView,
     AdminUiIndexView,
 )
+from .envelope import EnvelopeRelayView
 from .cluster import (
     ClusterHealthView,
     ClusterSignalingBeginView,
@@ -150,6 +151,10 @@ def register_routes(
     # stay open. The protocol is otherwise identical to the WS frames.
     app.router.add_view("/gfs/publish", PublishView)
     app.router.add_view("/gfs/subscribe", SubscribeView)
+    # Opaque household-to-household relay (§D2b invite bootstrap). Anonymous
+    # by design: the body names only the recipient, the payload is sealed
+    # end-to-end, and every well-formed request gets the same 202.
+    app.router.add_view("/gfs/envelope", EnvelopeRelayView)
     app.router.add_view("/gfs/report", ReportView)
     app.router.add_view("/gfs/appeal", AppealView)
     app.router.add_view("/gfs/spaces", SpacesListView)

@@ -40,6 +40,7 @@ from . import app_keys as K
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .cluster import ClusterService
+from .envelope_relay import GfsEnvelopeRelay, build_envelope_rate_limit
 from .config import (
     DEFAULT_CONFIG_FILENAME,
     GfsConfig,
@@ -58,6 +59,7 @@ from .public import (
 from .repositories import (
     SqliteClusterRepo,
     SqliteGfsAdminRepo,
+    SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
@@ -272,6 +274,7 @@ class GfsApp:
             moment_public_users=SqliteGfsUserRegistrationRepo(db),
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
+            envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
         )
 
     def _build_services(
@@ -328,12 +331,22 @@ class GfsApp:
             repos.moment_public_follows,
             ws_registry,
         )
+        # Opaque household-to-household envelope relay (§D2b): pushes a
+        # sealed blob to the addressed household's live socket, or queues it
+        # until its next hello. Content-blind — it never opens the box.
+        envelope_relay = GfsEnvelopeRelay(
+            fed_repo=repos.federation,
+            queue_repo=repos.envelope_queue,
+            ws_registry=ws_registry,
+        )
         # Periodic retention sweep — purges expired admin sessions, expired
-        # highlight publications, and aged pair tokens (the GFS otherwise has
-        # no recurring cleanup loop; these tables would grow without bound).
+        # highlight publications, aged pair tokens, and envelopes whose TTL
+        # ran out (the GFS otherwise has no recurring cleanup loop; these
+        # tables would grow without bound).
         maintenance = GfsMaintenanceScheduler(
             admin_repo=repos.admin,
             highlight_repo=repos.highlight_pubs,
+            envelope_queue_repo=repos.envelope_queue,
         )
         return SimpleNamespace(
             federation=federation,
@@ -347,6 +360,7 @@ class GfsApp:
             ws_registry=ws_registry,
             highlight_pubs=highlight_pubs,
             moment_public=moment_public,
+            envelope_relay=envelope_relay,
         )
 
     def _build_app(self) -> web.Application:
@@ -355,6 +369,7 @@ class GfsApp:
             build_listing_rate_limit(self.client_ip),
             build_public_rtc_rate_limit(self.client_ip),
             build_publish_rate_limit(self.client_ip),
+            build_envelope_rate_limit(self.client_ip),
         ]
         return web.Application(middlewares=middlewares)
 
@@ -382,6 +397,8 @@ class GfsApp:
         a[K.gfs_moment_public_follow_repo_key] = self.repos.moment_public_follows
         a[K.gfs_moment_public_registry_key] = self.services.moment_public
         a[K.gfs_user_picture_repo_key] = self.repos.moment_public_pictures
+        a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
+        a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         # Non-typed helpers the admin module reads directly.
         a["admin_auth"] = self.services.admin_auth
         a["gfs_token_service"] = self.services.tokens
