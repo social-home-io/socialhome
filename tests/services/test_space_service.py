@@ -2672,6 +2672,56 @@ async def test_archive_federates_via_space_meta(stack):
     assert stub.archived is True
 
 
+async def test_allow_subscribers_flip_is_owner_only(stack):
+    """Turning public readability on or off is OWNER-only, like
+    ``delegated_admin_authority``: ``allow_subscribers`` decides whether
+    strangers on a connection server may read the space, so a non-owner admin
+    (local or a seed-holding remote one) must not be able to expose — or
+    withdraw — the content. Other feature edits by that admin still work."""
+    from socialhome.domain.space import SpaceRole
+
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Broadcast", space_type=SpaceType.GLOBAL
+    )
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=bob.user_id, role=SpaceRole.ADMIN
+    )
+
+    # Admin bob may edit a non-readability feature…
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="bob",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    # …but must NOT be able to open the space to the public.
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="bob",
+            features=SpaceFeatures(allow_subscribers=True),
+        )
+    reloaded = await stack.space_repo.get(space.id)
+    assert reloaded is not None
+    assert reloaded.features.allow_subscribers is False
+
+    # The owner can; and once on, the admin must not be able to turn it OFF
+    # either (withdrawing the public stream is the owner's call too).
+    await stack.space_svc.update_config(
+        space.id, actor_username="anna", features=SpaceFeatures(allow_subscribers=True)
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="bob",
+            features=SpaceFeatures(allow_subscribers=False),
+        )
+
+
 async def test_delegated_admin_authority_federates_via_space_meta(stack):
     """The owner's delegated_admin_authority opt-in rides the federation
     metadata snapshot AND a joiner's stub carries it locally.

@@ -1196,6 +1196,19 @@ class SpaceService(SpaceMemberGuardMixin):
             != space.features.delegated_admin_authority
         ):
             await self._require_owner(space, actor_username)
+        # SECURITY: so is turning public readability on or off.
+        # ``allow_subscribers`` decides whether STRANGERS on a connection
+        # server may read this space — its posts relay, its content key is
+        # sealed to subscribers. A delegated remote admin holds the space seed
+        # for day-to-day config while the owner is offline; exposing (or
+        # withdrawing) the space's content to the public is the owner's call,
+        # exactly like ``delegated_admin_authority`` above, so the same
+        # owner-only gate runs before any local-or-forwarded path.
+        if (
+            features is not None
+            and features.allow_subscribers != space.features.allow_subscribers
+        ):
+            await self._require_owner(space, actor_username)
 
         # Delegated-admin authoritative path (v_24): when this space has
         # ``delegated_admin_authority`` ON and THIS household holds the space
