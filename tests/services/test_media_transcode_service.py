@@ -14,8 +14,9 @@ directly so the test never waits on the periodic tick.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiofiles
 import aiofiles.os
@@ -24,6 +25,7 @@ import pytest
 from socialhome.domain.events import MediaTranscodeFailed, MediaTranscodeReady
 from socialhome.domain.media_transcode import MediaTranscodeJob
 from socialhome.services.media_transcode_service import (
+    BACKOFF_BASE_SECONDS,
     MAX_ATTEMPTS,
     MediaTranscodeService,
 )
@@ -287,6 +289,49 @@ async def test_processor_error_reschedules_then_fails_after_max_attempts(tmp_pat
     assert failed[0].output_filename == "out.webm"
     assert failed[0].owner_user_id == "user-1"
     assert not any(isinstance(e, MediaTranscodeReady) for e in bus.published)
+
+
+async def test_reschedule_backs_off_even_on_the_unluckiest_jitter(
+    tmp_path, monkeypatch
+):
+    """A failed transcode is never due again on the next tick.
+
+    Regression: ``_fail`` used full jitter (``random.uniform(0, window)``),
+    so ~1 first retry in 30 drew a sub-second delay. ``next_attempt_at``
+    is stored at one-second granularity and ``list_due`` picks rows with
+    ``<= now``, so that row came straight back — a failing video
+    re-transcoded on every tick with no backoff at all. ``random.uniform``
+    is pinned to its minimum here, which is exactly that worst case.
+    """
+    monkeypatch.setattr(random, "uniform", lambda lo, _hi: lo)
+    repo = FakeTranscodeRepo()
+    processor = StubProcessor()
+    processor.raise_on_process = True
+    bus = FakeBus()
+    src = await _write_source(tmp_path)
+    repo.add(
+        _Row(
+            output_filename="out.webm",
+            source_path=str(src),
+            thumbnail_filename="out.webp",
+        )
+    )
+    svc = _make_service(tmp_path, repo, processor, bus)
+
+    assert await svc.flush_once() == 0
+
+    row = repo.rows["out.webm"]
+    assert row.attempts == 1
+    # Half the 30 s first window — pinned, not "some time in the future".
+    expected = datetime.now(timezone.utc) + timedelta(seconds=BACKOFF_BASE_SECONDS / 2)
+    assert row.next_attempt_at <= expected.strftime("%Y-%m-%d %H:%M:%S")
+    assert row.next_attempt_at > datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    # The contract that actually matters: not due on the next tick.
+    assert await repo.list_due() == []
+    assert await svc.flush_once() == 0
+    assert repo.rows["out.webm"].attempts == 1
 
 
 async def test_start_reclaims_and_stop_is_clean(tmp_path):
