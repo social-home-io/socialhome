@@ -14,7 +14,7 @@ inbound handler can authenticate the event without ever holding the seed.
 This module depends ONLY on :mod:`socialhome.crypto` (Ed25519 sign/verify +
 base64url helpers) so it can be imported by the content-blind GFS process
 (:mod:`socialhome.global_server.federation`) WITHOUT dragging in the HFS
-federation/crypto stack (sealed_sender, AESGCM). The HFS-side
+federation/crypto stack (AESGCM, KeyManager). The HFS-side
 :mod:`socialhome.services.space_crypto_service` re-exports every name here, so
 existing importers keep working unchanged.
 """

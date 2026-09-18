@@ -90,6 +90,35 @@ async def test_shared_http_session_lifecycle(tmp_dir):
     assert session.closed is True
 
 
+async def test_cleanup_stops_the_routed_handler(tmp_dir):
+    """``_on_cleanup`` awaits ``SpaceRoutedHandler.stop()`` so a deferred
+    mesh retransmit parked across shutdown is cancelled rather than left to
+    die with the loop (or wake after the transport is gone)."""
+    import asyncio
+
+    from socialhome.app_keys import federation_service_key
+
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        await tc.get("/healthz")
+        handler = app[federation_service_key]._routed_handler  # noqa: SLF001
+        assert handler is not None
+        # Park a stand-in for a deferred retransmit sleeping out its delay.
+        parked = asyncio.create_task(asyncio.sleep(3600))
+        handler._deferred_retransmits["route-under-test"] = parked  # noqa: SLF001
+
+    # After the TestClient context exits, cleanup hooks have run.
+    assert parked.cancelled(), "cleanup did not stop the routed handler"
+    assert handler._deferred_retransmits == {}  # noqa: SLF001
+
+
 async def test_create_app_without_config_uses_env_defaults():
     """create_app(None) falls back to Config.from_env() — doesn't raise."""
     import os

@@ -34,8 +34,14 @@ Explicit non-goals:
 * **Deniability / OTR-style forward secrecy** — we don't rotate per-
   message keys. §12.5 DM relay is the closest thing to deniability.
 * **Hiding federation metadata from a global adversary** — the GFS
-  sees routing metadata by design; only `sealed_sender` hides the
-  sender identity from the GFS.
+  necessarily sees `space_id` (to fan out), the subscriber set (it is the
+  directory), source IPs and timing. Content stays opaque to it. Hiding
+  the *relaying household's identity* from the GFS is **a goal, not a
+  non-goal**: `from_instance` is still sent in the clear on GFS-relayed
+  public/global-space events today, which is a known leak — the GFS does
+  not need it once a relay is authenticated by the space-authority
+  signature alone. Its removal is tracked as a follow-up to #675; do not
+  rely on the leak or document it as intended.
 * **Anonymity** — instance IDs are derived from identity public keys
   and are persistent. Users consent to this by accepting the pairing.
 
@@ -50,7 +56,7 @@ addresses. See the last section of this document.
 | Identity signatures | Ed25519 | 256-bit | Federation envelopes, user-identity assertions, space config, SDP | `socialhome/crypto.py` |
 | Identity signatures (PQ, optional) | ML-DSA-65 (FIPS 204) | 1952-byte pk / 4032-byte sk | Hybrid signature when suite is `ed25519+mldsa65` | `socialhome/federation/pq_signer.py` |
 | Key agreement | X25519 (ECDH) | 256-bit | Pairing-time session key derivation | `socialhome/federation/pairing_coordinator.py` |
-| Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, sealed sender, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
+| Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing | `hashlib.sha256` |
 | MAC | HMAC-SHA256 | 256-bit | Relay path selection (`keyed_hash`) | `socialhome/crypto.py` |
@@ -149,23 +155,24 @@ removed ex-member can't hijack the content key. An authority-signed rekey
 with a blank `rotated_by` is rejected (the smallest-wins tiebreak compares
 only authenticated, non-empty minter ids).
 
-**Sealed sender** (`federation/sealed_sender.py`) — for GFS-routed
-events the sender's instance ID is separately encrypted under the
-space key, so a passive GFS operator sees `space_id` + `epoch` for
-routing and nothing else. Because a public/global space's content key
-is shared widely, encryption alone proves only that the sealer held
-the key — not *who* sealed it. So every envelope also carries an
-`outer_signature`: the sender Ed25519-signs a canonical,
-domain-separated message binding `space_id` + `epoch` + both
-ciphertexts + `aead_suite`, using its **identity** seed (never the
-shared space key). The recipient resolves the decrypted
-`sender_instance_id` to that instance's registered identity pubkey,
-checks `derive_instance_id(pubkey) == sender_instance_id` (binds
-key↔id, 160-bit, mirrors the #596 mesh-route fix), then verifies the
-signature. A key-holder forging content as another member, or a GFS
-substituting/dropping a sealed blob, is detected and rejected
-(`SealedSenderAuthError`); an envelope with no `outer_signature` is
-rejected by `from_dict` (fail-closed — no unauthenticated path).
+**GFS-relayed public/global content** (`services/space_public_outbound.py`
+/ `space_public_inbound.py`) — the post inner is encrypted under the
+space's epoch content key (`SpaceContentEncryption.encrypt`) and signed
+per author (`space_public_author.build_signed_author_inner`); the
+envelope around it is **space-authority-signed**
+(`authority_sig.sign_authority_event`) and relayed by the content-blind
+GFS, which verifies only that signature against the space pubkey it
+already pins. `from_instance` currently also travels in the clear — a
+known leak of the relayer's identity toward the GFS. It is *not* needed:
+the authority signature already authorizes the relay and `space_id`
+already routes it; the sender-exclusion on fan-out it enables is an
+optimisation the subscriber's post-id dedupe makes unnecessary. Removing
+it (authority-signature-only authentication of `/gfs/publish`) is the
+follow-up to #675. The earlier *sealed-sender*
+construction (`federation/sealed_sender.py` — sender id encrypted under
+the space key plus an identity-key `outer_signature`) is **not wired into
+any federation path**; the module remains as a standalone primitive with
+its own tests. See `docs/protocol/discovery.md` for the shipped flow.
 
 **Routed-envelope seal** (`federation/routed_crypto.py`) — for
 multi-hop `SPACE_ROUTED` events the inner payload is sealed with a
@@ -282,14 +289,14 @@ delegation enabled, and only when the b64url payload decodes to
 exactly 32 bytes. See `_share_admin_signing_seed` (sender) /
 `PrivateSpaceInviteHandler._on_admin_key_share` (receiver).
 
-**Sealed-sender envelope** (`federation/sealed_sender.py`) wears the
-``aead_suite`` field (today only ``"aesgcm-256"``) on its wire shape;
-receivers reject unknown values via ``UnsupportedAeadSuite``. The
-suite-tag retrofit promised in earlier revisions of this doc is now
-shipped — every cryptographic wire format in the federation surface
-carries a ``*_suite`` identifier (signatures, mesh KEM, content-key
-delivery, sealed-sender AEAD). A future ChaCha20-Poly1305 or
-PQ-protected variant is a wire-additive change.
+**Sealed-sender envelope** (`federation/sealed_sender.py`, an unwired
+primitive — see above) wears the ``aead_suite`` field (today only
+``"aesgcm-256"``) on its wire shape; receivers reject unknown values via
+``UnsupportedAeadSuite``. The suite-tag retrofit promised in earlier
+revisions of this doc is now shipped — every cryptographic wire format in
+the federation surface carries a ``*_suite`` identifier (signatures, mesh
+KEM, content-key delivery). A future ChaCha20-Poly1305 or PQ-protected
+variant is a wire-additive change.
 
 **Per-user identity binding** (`crypto.py`, independent user identity
 Phase 1) — each household member has an Ed25519 **user** key separate

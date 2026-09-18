@@ -5,15 +5,11 @@ from __future__ import annotations
 import pytest
 
 from socialhome.crypto import (
-    derive_instance_id,
     derive_space_id,
-    generate_identity_keypair,
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.federation import RemoteInstance
 from socialhome.infrastructure.key_manager import KeyManager
-from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.space_key_repo import (
     SqliteSpaceKeyRepo,
 )
@@ -89,36 +85,8 @@ async def crypto_env(tmp_dir):
     )
     repo = SqliteSpaceKeyRepo(db)
     kek = KeyManager.from_data_dir(tmp_dir)
-    # The sealed-sender outer_signature is signed with this instance's
-    # identity seed and verified against the sender's registered pubkey.
-    # Register THIS instance's identity as a confirmed member of sp-1 so
-    # unseal_from_gfs can resolve its own sealed sender out of the box.
-    kp = generate_identity_keypair()
-    seed, pub = kp.private_key, kp.public_key
-    sender_iid = derive_instance_id(pub)
-    fed_repo = SqliteFederationRepo(db)
-    await fed_repo.save_instance(
-        RemoteInstance(
-            id=sender_iid,
-            display_name="Sender",
-            remote_identity_pk=pub.hex(),
-            key_self_to_remote="x",
-            key_remote_to_self="y",
-            remote_inbox_url="https://peer.example/inbox",
-            local_inbox_id="local-inbox-1",
-        )
-    )
-    await db.enqueue(
-        "INSERT INTO space_instances(space_id, instance_id) VALUES('sp-1', ?)",
-        (sender_iid,),
-    )
-    crypto = SpaceContentEncryption(
-        repo,
-        kek,
-        identity_seed=seed,
-        federation_repo=fed_repo,
-    )
-    yield crypto, repo, sender_iid
+    crypto = SpaceContentEncryption(repo, kek)
+    yield crypto, repo
     await db.shutdown()
 
 
@@ -128,7 +96,7 @@ async def test_export_current_key_returns_unwrapped_bytes_and_epoch(crypto_env):
     so they can decrypt subsequent SPACE_POST_CREATED events. The
     returned bytes are the *unwrapped* AES-256 key — the federation
     layer is responsible for the secrecy of the envelope they go in."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     result = await crypto.export_current_key("sp-1")
     assert result is not None
@@ -141,7 +109,7 @@ async def test_export_current_key_returns_unwrapped_bytes_and_epoch(crypto_env):
 async def test_export_current_key_returns_none_when_uninitialised(crypto_env):
     """A space with no epoch key yet exports ``None`` — caller
     skips shipping the field rather than synthesising garbage."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     # sp-1 exists as a parent row from the fixture but has no
     # epoch key until ``initialise_for_space`` runs.
     assert await crypto.export_current_key("sp-1") is None
@@ -152,7 +120,7 @@ async def test_import_key_then_decrypt_smoke(crypto_env):
     raw key → import (simulating receiver-side persistence) →
     decrypt under the imported key. The at-rest KEK wrap is
     re-applied on import so the row matches the local invariant."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     epoch, ct = await crypto.encrypt("sp-1", b"hello space")
     exported = await crypto.export_current_key("sp-1")
@@ -167,7 +135,7 @@ async def test_import_key_then_decrypt_smoke(crypto_env):
 
 
 async def test_import_key_rejects_wrong_length(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     with pytest.raises(ValueError):
         await crypto.import_key("sp-1", 0, b"too short")
 
@@ -200,7 +168,7 @@ async def test_import_key_collision_smaller_rotated_by_wins_both_orders(
     """Two admins rotate to the SAME epoch with DIFFERENT keys. Every receiver
     must converge to the lexicographically-smallest ``rotated_by``'s key,
     regardless of arrival order — so the space doesn't diverge."""
-    crypto, _, _ = crypto_env
+    crypto, _ = crypto_env
     key_lo = b"L" * 32  # from instance "aaa" (smaller)
     key_hi = b"H" * 32  # from instance "zzz" (larger)
 
@@ -213,7 +181,7 @@ async def test_import_key_collision_smaller_rotated_by_wins_both_orders(
 async def test_import_key_collision_low_then_high_keeps_low(crypto_env):
     """Reverse arrival order converges to the same winner — low arrives
     first, the later high-``rotated_by`` import must NOT clobber it."""
-    crypto, _, _ = crypto_env
+    crypto, _ = crypto_env
     key_lo = b"L" * 32
     key_hi = b"H" * 32
     await crypto.import_key("sp-1", 5, key_lo, rotated_by="aaa")
@@ -225,7 +193,7 @@ async def test_import_key_null_rotated_by_does_not_clobber_existing(crypto_env):
     """Back-compat: an incoming key with NO ``rotated_by`` (older peer) must
     NOT overwrite an existing row that DOES carry one — otherwise an older
     peer's blind upsert would re-introduce the divergence this fixes."""
-    crypto, _, _ = crypto_env
+    crypto, _ = crypto_env
     key_known = b"K" * 32
     key_anon = b"A" * 32
     await crypto.import_key("sp-1", 5, key_known, rotated_by="aaa")
@@ -238,7 +206,7 @@ async def test_import_key_null_rotated_by_applies_when_existing_also_null(
 ):
     """When neither side carries ``rotated_by`` the behaviour degrades to
     today's last-writer-wins (the pre-Phase-4b contract for legacy peers)."""
-    crypto, _, _ = crypto_env
+    crypto, _ = crypto_env
     await crypto.import_key("sp-1", 5, b"1" * 32, rotated_by=None)
     await crypto.import_key("sp-1", 5, b"2" * 32, rotated_by=None)
     assert (await crypto.export_current_key("sp-1")) == (5, b"2" * 32)
@@ -254,7 +222,7 @@ async def test_apply_space_content_key_rejects_unknown_suite(crypto_env):
         apply_space_content_key_from_metadata,
     )
 
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     bad_meta = {
         "space_content_key": {
             "epoch": 0,
@@ -282,7 +250,7 @@ async def test_apply_space_content_key_accepts_default_suite_when_missing(
         apply_space_content_key_from_metadata,
     )
 
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     raw = b"x" * 32
     meta = {
         "space_content_key": {
@@ -302,20 +270,20 @@ async def test_apply_space_content_key_accepts_default_suite_when_missing(
 
 
 async def test_initialise_for_space_creates_epoch_zero(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     epoch = await crypto.initialise_for_space("sp-1")
     assert epoch == 0
 
 
 async def test_initialise_is_idempotent(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     e1 = await crypto.initialise_for_space("sp-1")
     e2 = await crypto.initialise_for_space("sp-1")
     assert e1 == e2 == 0
 
 
 async def test_rotate_epoch_increments_version(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     new_epoch = await crypto.rotate_epoch("sp-1")
     assert new_epoch == 1
@@ -324,7 +292,7 @@ async def test_rotate_epoch_increments_version(crypto_env):
 
 
 async def test_encrypt_decrypt_roundtrip(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     epoch, ct = await crypto.encrypt("sp-1", b"the-payload-bytes")
     assert epoch == 0
@@ -334,13 +302,13 @@ async def test_encrypt_decrypt_roundtrip(crypto_env):
 
 async def test_encrypt_without_init_raises_per_encryption_first_rule(crypto_env):
     """CLAUDE.md: never silently fall back to plaintext."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     with pytest.raises(RuntimeError):
         await crypto.encrypt("sp-1", b"data")
 
 
 async def test_decrypt_with_unknown_epoch_raises(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     _, ct = await crypto.encrypt("sp-1", b"data")
     with pytest.raises(RuntimeError):
@@ -349,7 +317,7 @@ async def test_decrypt_with_unknown_epoch_raises(crypto_env):
 
 async def test_decrypt_old_epoch_still_works_after_rotation(crypto_env):
     """Old epoch keys are kept indefinitely so historical content stays readable."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     epoch0, ct0 = await crypto.encrypt("sp-1", b"epoch-0-content")
     await crypto.rotate_epoch("sp-1")
@@ -361,149 +329,22 @@ async def test_decrypt_old_epoch_still_works_after_rotation(crypto_env):
 
 
 async def test_decrypt_rejects_malformed_ciphertext(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     with pytest.raises(ValueError):
         await crypto.decrypt("sp-1", 0, "no-colon-in-here")
 
 
 async def test_get_current_epoch_when_uninitialised(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     assert await crypto.get_current_epoch("sp-1") is None
 
 
 async def test_get_current_epoch_returns_latest(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     await crypto.rotate_epoch("sp-1")
     assert await crypto.get_current_epoch("sp-1") == 1
-
-
-# ─── seal_for_gfs / unseal_from_gfs (§24.10) ──────────────────────────────
-
-
-async def test_seal_for_gfs_roundtrip(crypto_env):
-    """Sender + payload encrypt under the per-epoch key, are signed with
-    this instance's identity seed, and decrypt + authenticate back. The
-    sender is the fixture's registered member so unseal resolves its
-    pubkey out of the box."""
-    crypto, _, sender_iid = crypto_env
-    await crypto.initialise_for_space("sp-1")
-    sealed = await crypto.seal_for_gfs(
-        space_id="sp-1",
-        sender_instance_id=sender_iid,
-        payload_json='{"hello":"world"}',
-    )
-    assert sealed.space_id == "sp-1"
-    assert sealed.epoch == 0
-    assert sealed.outer_signature  # signed
-    # GFS sees only ciphertext for sender + payload.
-    assert sender_iid not in sealed.encrypted_sender
-    assert "hello" not in sealed.encrypted_payload
-
-    unsealed = await crypto.unseal_from_gfs(sealed)
-    assert unsealed.sender_instance_id == sender_iid
-    assert unsealed.payload == {"hello": "world"}
-
-
-async def test_seal_for_gfs_uses_latest_epoch(crypto_env):
-    """After rotate_epoch, seal_for_gfs picks the new key."""
-    crypto, _, sender_iid = crypto_env
-    await crypto.initialise_for_space("sp-1")
-    await crypto.rotate_epoch("sp-1")
-    sealed = await crypto.seal_for_gfs(
-        space_id="sp-1",
-        sender_instance_id=sender_iid,
-        payload_json='{"x":1}',
-    )
-    assert sealed.epoch == 1
-
-
-async def test_seal_for_gfs_requires_identity_seed(crypto_env):
-    """Without an identity seed the service can't sign the
-    outer_signature, so it MUST refuse to seal rather than emit an
-    unauthenticated envelope (fail-closed)."""
-    _crypto, repo, _sender_iid = crypto_env
-    # A service constructed without identity_seed (legacy/test shape).
-    kek = _crypto._kek  # reuse the same KEK so the epoch key unwraps
-    unsigned_svc = SpaceContentEncryption(repo, kek)
-    await unsigned_svc.initialise_for_space("sp-1")
-    with pytest.raises(RuntimeError, match="no identity_seed"):
-        await unsigned_svc.seal_for_gfs(
-            space_id="sp-1",
-            sender_instance_id="whoever",
-            payload_json="{}",
-        )
-
-
-async def test_unseal_from_gfs_rejects_forged_sender(crypto_env):
-    """A key-holder forges an envelope claiming to be the registered
-    member but signs with a DIFFERENT seed. unseal_from_gfs resolves
-    the claimed member's real pubkey and the signature fails → raises."""
-    from socialhome.federation.sealed_sender import (
-        SealedSenderAuthError,
-        seal_envelope,
-    )
-
-    crypto, _, sender_iid = crypto_env
-    await crypto.initialise_for_space("sp-1")
-    _epoch, raw_key = await crypto.export_current_key("sp-1")  # type: ignore[misc]
-    attacker = generate_identity_keypair()
-    forged = seal_envelope(
-        space_id="sp-1",
-        epoch=0,
-        sender_instance_id=sender_iid,  # claim to be the member
-        payload_json='{"text":"forged"}',
-        space_content_key=raw_key,
-        signer_seed=attacker.private_key,  # but sign with attacker's key
-    )
-    with pytest.raises(SealedSenderAuthError):
-        await crypto.unseal_from_gfs(forged)
-
-
-async def test_unseal_from_gfs_uses_explicit_lookup_override(crypto_env):
-    """A caller may supply an explicit sender_pk_lookup (e.g. for a
-    sender not yet in remote_instances)."""
-    crypto, _, sender_iid = crypto_env
-    await crypto.initialise_for_space("sp-1")
-    sealed = await crypto.seal_for_gfs(
-        space_id="sp-1",
-        sender_instance_id=sender_iid,
-        payload_json='{"k":"v"}',
-    )
-    # Resolve via the fixture instance's pubkey, supplied explicitly.
-    inst = await crypto._fed_repo.get_instance(sender_iid)
-    pub = bytes.fromhex(inst.remote_identity_pk)
-    out = await crypto.unseal_from_gfs(
-        sealed,
-        sender_pk_lookup=lambda iid: pub if iid == sender_iid else None,
-    )
-    assert out.payload == {"k": "v"}
-
-
-async def test_seal_for_gfs_unknown_space_raises(crypto_env):
-    crypto, _, _sender_iid = crypto_env
-    with pytest.raises(RuntimeError, match="no epoch key"):
-        await crypto.seal_for_gfs(
-            space_id="missing",
-            sender_instance_id="me",
-            payload_json="{}",
-        )
-
-
-async def test_unseal_unknown_epoch_raises(crypto_env):
-    from socialhome.federation.sealed_sender import SealedEnvelope
-
-    crypto, _, _sender_iid = crypto_env
-    fake = SealedEnvelope(
-        space_id="sp-1",
-        epoch=99,
-        encrypted_sender="a:b",
-        encrypted_payload="a:b",
-        outer_signature="sig",
-    )
-    with pytest.raises(RuntimeError, match="missing epoch"):
-        await crypto.unseal_from_gfs(fake)
 
 
 # ─── Sync chunks (§25.6 direct space sync) ────────────────────────────────
@@ -512,7 +353,7 @@ async def test_unseal_unknown_epoch_raises(crypto_env):
 async def test_encrypt_decrypt_chunk_roundtrip(crypto_env):
     """A sync chunk AAD-binds to ``space_id:epoch:sync_id`` so it can
     only be decrypted with the matching tuple."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     epoch, ciphertext = await crypto.encrypt_chunk(
         space_id="sp-1",
@@ -532,7 +373,7 @@ async def test_encrypt_decrypt_chunk_roundtrip(crypto_env):
 async def test_encrypt_chunk_without_init_raises(crypto_env):
     """Per the encryption-first rule, encrypt_chunk must NOT silently
     fall back to plaintext when no key has been minted."""
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     with pytest.raises(RuntimeError, match="no key for space"):
         await crypto.encrypt_chunk(
             space_id="missing",
@@ -542,7 +383,7 @@ async def test_encrypt_chunk_without_init_raises(crypto_env):
 
 
 async def test_decrypt_chunk_unknown_epoch_raises(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     with pytest.raises(RuntimeError, match="missing epoch"):
         await crypto.decrypt_chunk(
@@ -554,7 +395,7 @@ async def test_decrypt_chunk_unknown_epoch_raises(crypto_env):
 
 
 async def test_decrypt_chunk_rejects_malformed_ciphertext(crypto_env):
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     with pytest.raises(ValueError, match="Malformed space ciphertext"):
         await crypto.decrypt_chunk(
@@ -570,7 +411,7 @@ async def test_decrypt_chunk_rejects_wrong_sync_id(crypto_env):
     different sync_id must fail the tag check (§25.8.18)."""
     from cryptography.exceptions import InvalidTag
 
-    crypto, _, _sender_iid = crypto_env
+    crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
     epoch, ciphertext = await crypto.encrypt_chunk(
         space_id="sp-1",
