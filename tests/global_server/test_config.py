@@ -218,3 +218,85 @@ def test_set_password_in_toml_updates_admin_section(tmp_dir):
     set_password_in_toml(target, "$2b$12$somehash")
     cfg = GfsConfig.from_toml(target)
     assert cfg.admin_password_hash == "$2b$12$somehash"
+
+
+# ─── Trusted proxies ─────────────────────────────────────────────────
+
+
+def test_trusted_proxies_default_is_loopback_and_private():
+    """The default keeps existing docker / reverse-proxy deployments (proxy on
+    the same host or private network) doing per-client rate limiting with no
+    configuration, while an internet-facing peer can never spoof."""
+    cfg = GfsConfig()
+    assert "127.0.0.0/8" in cfg.trusted_proxies
+    assert "::1/128" in cfg.trusted_proxies
+    assert "10.0.0.0/8" in cfg.trusted_proxies
+    assert "172.16.0.0/12" in cfg.trusted_proxies
+    assert "192.168.0.0/16" in cfg.trusted_proxies
+    assert "fc00::/7" in cfg.trusted_proxies
+
+
+def test_from_toml_parses_trusted_proxies(tmp_dir):
+    p = Path(tmp_dir) / "gfs.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://x.example"\n'
+        'trusted_proxies = ["203.0.113.7", "198.51.100.0/24"]\n',
+        encoding="utf-8",
+    )
+    cfg = GfsConfig.from_toml(p)
+    assert cfg.trusted_proxies == ("203.0.113.7", "198.51.100.0/24")
+
+
+def test_from_toml_empty_trusted_proxies_disables_forwarded_for(tmp_dir):
+    """An explicit empty list must stay empty — not fall back to the default."""
+    p = Path(tmp_dir) / "gfs-none.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://x.example"\ntrusted_proxies = []\n',
+        encoding="utf-8",
+    )
+    assert GfsConfig.from_toml(p).trusted_proxies == ()
+
+
+def test_env_overrides_trusted_proxies(monkeypatch):
+    monkeypatch.setenv("GFS_TRUSTED_PROXIES", "203.0.113.7, 198.51.100.0/24")
+    cfg = GfsConfig.from_env_fallback()
+    assert cfg.trusted_proxies == ("203.0.113.7", "198.51.100.0/24")
+
+
+def test_env_can_clear_trusted_proxies(monkeypatch):
+    """``GFS_TRUSTED_PROXIES=""`` is the internet-facing posture."""
+    monkeypatch.setenv("GFS_TRUSTED_PROXIES", "")
+    assert GfsConfig.from_env_fallback().trusted_proxies == ()
+
+
+def test_example_toml_documents_trusted_proxies():
+    from socialhome.global_server.config import EXAMPLE_TOML
+
+    assert "trusted_proxies" in EXAMPLE_TOML
+
+
+def test_signing_seed_hex_loads_from_toml(tmp_dir):
+    """Operators who manage secrets externally pin the GFS identity seed in
+    ``[server] signing_seed_hex`` instead of letting the data dir own it."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f'[server]\nbase_url = "https://g.example"\nsigning_seed_hex = "{"ab" * 32}"\n'
+    )
+    assert GfsConfig.from_toml(p).signing_seed_hex == "ab" * 32
+
+
+def test_signing_seed_hex_defaults_to_empty(tmp_dir):
+    """No key in the file → empty, i.e. "use the persisted seed file"."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text('[server]\nbase_url = "https://g.example"\n')
+    assert GfsConfig.from_toml(p).signing_seed_hex == ""
+
+
+def test_gfs_signing_seed_env_overrides_the_file(tmp_dir, monkeypatch):
+    """``GFS_SIGNING_SEED`` wins over the file, like every other [server] key."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f'[server]\nbase_url = "https://g.example"\nsigning_seed_hex = "{"ab" * 32}"\n'
+    )
+    monkeypatch.setenv("GFS_SIGNING_SEED", "cd" * 32)
+    assert GfsConfig.load(p).signing_seed_hex == "cd" * 32

@@ -25,6 +25,7 @@ import aiohttp
 
 from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from ..domain.space import normalize_category
+from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 
 if TYPE_CHECKING:
@@ -167,6 +168,27 @@ class ClusterService:
         process.
         """
         return self._own_pk_hex
+
+    def sign_capabilities_block(
+        self,
+        gfs_instance_id: str,
+        capabilities: dict,
+    ) -> tuple[str, str]:
+        """Sign this GFS's capability block with its own identity key.
+
+        Returns ``(signature_b64url, suite)``, or ``("", "")`` when no signing
+        key is wired — a build with no identity can't authenticate anything,
+        so ``GET /gfs/info`` omits the block rather than shipping an
+        unverifiable one, and paired households keep the (safe, identified)
+        legacy relay body.
+
+        The seed stays inside this service — it already owns the GFS identity
+        keypair whose public half ``own_public_key_hex`` publishes and every
+        household pins at pair time. No new key is minted for capabilities.
+        """
+        if not self._signing_key:
+            return "", ""
+        return sign_capabilities(self._signing_key, gfs_instance_id, capabilities)
 
     # ─── Node registry API ────────────────────────────────────────────
 

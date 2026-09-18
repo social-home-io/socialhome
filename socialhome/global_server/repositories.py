@@ -117,12 +117,7 @@ class AbstractGfsFederationRepo(Protocol):
         space_id: str,
         instance_id: str,
     ) -> None: ...
-    async def list_subscribers(
-        self,
-        space_id: str,
-        *,
-        exclude: str = "",
-    ) -> list[GfsSubscriber]: ...
+    async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
     async def list_subscribers_with_keys(
         self,
         space_id: str,
@@ -422,21 +417,15 @@ class SqliteGfsFederationRepo:
             (space_id, space_id),
         )
 
-    async def list_subscribers(
-        self,
-        space_id: str,
-        *,
-        exclude: str = "",
-    ) -> list[GfsSubscriber]:
+    async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]:
         rows = await self._db.fetchall(
             """
             SELECT ci.instance_id, ci.inbox_url
             FROM space_subscribers ss
             JOIN client_instances ci USING (instance_id)
-            WHERE ss.space_id = ? AND ci.instance_id != ?
-              AND ci.status = 'active'
+            WHERE ss.space_id = ? AND ci.status = 'active'
             """,
-            (space_id, exclude),
+            (space_id,),
         )
         return [
             GfsSubscriber(

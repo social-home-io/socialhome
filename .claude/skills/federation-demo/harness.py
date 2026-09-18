@@ -488,11 +488,21 @@ def cmd_gfs_up() -> None:
     # ``python -m`` imports the module without calling ``main()``. Use
     # ``-c`` to invoke ``main()`` directly. ``sys.argv`` inside the
     # subprocess starts with ``-c`` then our forwarded args.
+    #
+    # The ``basicConfig`` call runs FIRST on purpose: ``main()`` calls
+    # ``logging.basicConfig(level=INFO)``, which is a no-op once the root
+    # logger already has a handler, so this is the only way to run the GFS at
+    # DEBUG without a production knob. ``cmd_gfs_space_post`` needs it — the
+    # GFS's relay bookkeeping (``GFS: relaying <event> for space <id> to N
+    # subscriber(s)``) is DEBUG, and at INFO the "no relaying household id on
+    # any relay line" assertion would have no relay line to scan.
     p = subprocess.Popen(
         [
             sys.executable,
             "-u",
             "-c",
+            "import logging; logging.basicConfig(level=logging.DEBUG, "
+            'format="%(asctime)s %(levelname)-8s %(name)s: %(message)s"); '
             "from socialhome.global_server.server import main; main()",
             "--config",
             str(config_path),
@@ -862,6 +872,39 @@ def _gfs_rows(sql: str, params: tuple = ()) -> list[tuple]:
         return list(conn.execute(sql, params))
     finally:
         conn.close()
+
+
+def _gfs_log_size() -> int:
+    """Byte length of the GFS process log right now (0 if absent).
+
+    Bookmark for :func:`_gfs_log_lines_matching`, same contract as
+    :func:`_log_size` — the GFS log spans the whole ``gfs-*`` chain, so an
+    unscoped grep would match evidence produced by an earlier step.
+    """
+    try:
+        return (GFS_DIR / "log.txt").stat().st_size
+    except OSError:
+        return 0
+
+
+def _gfs_log_lines_matching(needle: str, *, offset: int = 0) -> list[str]:
+    """Lines of the GFS process log containing ``needle``, from byte ``offset``.
+
+    Same file :func:`_wait_for_gfs_ws` polls (``cmd_gfs_up`` writes it),
+    sliced on bytes so an offset from :func:`_gfs_log_size` lines up.
+    """
+    path = GFS_DIR / "log.txt"
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    return [
+        line
+        for line in raw[offset:].decode("utf-8", errors="replace").splitlines()
+        if needle in line
+    ]
 
 
 def _wait_for_gfs_ws(instance_id: str, *, timeout: float = 60.0) -> None:
@@ -1251,6 +1294,13 @@ def cmd_gfs_space_post() -> None:
        nothing, QR-paired with a but not a member of this space — must NOT
        hold EITHER post. This is the §"non-member households MUST NOT see
        space content" hard rule from CLAUDE.md, asserted on the real wire.
+    6. Anonymity: the GFS relay is identity-free. The GFS log names a's
+       instance id on no relay line and never mentions ``from_instance``; d's
+       ``gfs.relay.received`` records carry ``space=`` + ``event=`` and no
+       ``from=``; and a never logged the legacy identified-publish downgrade
+       ("does not advertise anonymous_publish"). This is the live proof of
+       "the GFS does not require, store, log or forward which household
+       relayed a public-space event".
     """
     state = _load()
     if not state:
@@ -1271,6 +1321,11 @@ def cmd_gfs_space_post() -> None:
         display_name="Erin",
     )
     state["gfs_space_author_user_id"] = author_id
+
+    # Bookmarks for the step-6 anonymity assertions: everything the GFS, d and
+    # a log from here on is what THIS publish produced.
+    gfs_off = _gfs_log_size()
+    d_off = _log_size("d")
 
     # Marker keeps the step re-runnable against a live sandbox.
     content = f"Global space post over the GFS — {time.time_ns()}"
@@ -1356,6 +1411,86 @@ def cmd_gfs_space_post() -> None:
             )
     print("  c (non-member, non-subscriber) sees neither post ✓")
 
+    # 6. ANONYMITY — the property the identity-free relay exists for. The
+    #    ``POST /gfs/publish`` body is ``{space_id, event_type, payload}`` and
+    #    the fan-out frame is ``{type, space_id, event_type, payload}``: the
+    #    relaying household's id is on neither. Asserted on the three logs
+    #    where a regression would actually show up.
+    a_inst = a["instance_id"]
+
+    # 6a. The GFS wrote a's instance id on NO publish/relay line. Scoped on
+    #     purpose: the GFS legitimately knows a's id from other surfaces — the
+    #     ``/gfs/register`` handshake, the authenticated ``/gfs/ws`` hello
+    #     (``gfs.ws.register: instance=…``) and the space DIRECTORY listing,
+    #     whose ``owning_instance`` is public by design ("GFS: published space
+    #     … (owner=…)", written back in ``gfs-traffic``). The claim is about
+    #     the CONTENT-relay path only, so the scan covers the lines this step
+    #     produced and flags one only if it also mentions relaying.
+    relay_terms = (
+        "relay",
+        "space_post_public",
+        "space_subscriber_key_handoff",
+        "/gfs/publish",
+    )
+    leaky = [
+        line
+        for line in _gfs_log_lines_matching(a_inst, offset=gfs_off)
+        if any(term in line for term in relay_terms)
+    ]
+    if leaky:
+        raise SystemExit(
+            "gfs-space-post: the GFS logged a's instance id on a relay line — "
+            f"the relay is no longer identity-free. Lines: {leaky!r}",
+        )
+    # ``from_instance`` is the legacy identity field. A household that talks to
+    # an ``anonymous_publish`` GFS omits it, so it must not appear anywhere in
+    # the GFS log (unscoped — a legacy-downgrade regression could log it at
+    # registration or publish time alike).
+    legacy = _gfs_log_lines_matching("from_instance")
+    if legacy:
+        raise SystemExit(
+            "gfs-space-post: 'from_instance' appears in the GFS log — the "
+            f"legacy identified-publish path was taken. Lines: {legacy!r}",
+        )
+    print("  the GFS logged no relaying-household id for either post ✓")
+
+    # 6b. d's receive record names the space + event and NOTHING else.
+    #     ``dispatch_gfs_relay_frame`` used to log ``from=%s``; a frame that
+    #     carries (or a receiver that re-reads) the outer identity shows up as
+    #     a ``from=`` on exactly this line.
+    relay_lines = [
+        line
+        for line in _log_lines_matching("d", "gfs.relay.received:", offset=d_off)
+        if f"space={space_id}" in line and "event=space_post_public" in line
+    ]
+    if not relay_lines:
+        raise SystemExit(
+            f"gfs-space-post: d logged no 'gfs.relay.received: space={space_id} "
+            "event=space_post_public' record for this step — the frames landed "
+            f"some other way. Check {_log_path('d')}.",
+        )
+    identified = [line for line in relay_lines if "from=" in line]
+    if identified:
+        raise SystemExit(
+            "gfs-space-post: d's relay record carries a 'from=' — the fan-out "
+            f"frame is identity-bearing again. Lines: {identified!r}",
+        )
+    print(f"  d's {len(relay_lines)} relay record(s) carry no 'from=' ✓")
+
+    # 6c. a took the anonymous path. ``GfsConnectionService`` warns once per
+    #     connection when the GFS did NOT advertise ``anonymous_publish`` and
+    #     falls back to the legacy identified body; against this build's own
+    #     GFS that downgrade must never fire. (``verify``'s log audit would
+    #     also fail on the un-allow-listed WARNING — this names the cause.)
+    downgrade = _log_lines_matching("a", "does not advertise anonymous_publish")
+    if downgrade:
+        raise SystemExit(
+            "gfs-space-post: a logged the legacy identified-publish downgrade "
+            "against a GFS that does advertise anonymous_publish. Lines: "
+            f"{downgrade!r}",
+        )
+    print("  a never fell back to the legacy identified publish ✓")
+
     state["gfs_space_post_id"] = post_id
     state["gfs_space_post_content"] = content
     state["gfs_space_admin_post_id"] = admin_post_id
@@ -1363,7 +1498,7 @@ def cmd_gfs_space_post() -> None:
     _save(state)
     print(
         "gfs-space-post: ok (relay + authority sig + key handoff + decrypt, "
-        "both author shapes)"
+        "both author shapes, identity-free relay)"
     )
 
 
@@ -3052,6 +3187,37 @@ def cmd_verify() -> None:
                 )
             else:
                 print("  c still does not hold the setup-admin GFS post ✓")
+
+        # 13e. The relay is IDENTITY-FREE (``gfs-space-post`` step 6). Re-read
+        #      from d's own log: every ``gfs.relay.received`` record for this
+        #      space must name the space + event and nothing else. A ``from=``
+        #      back on that line means either the GFS started stamping the
+        #      relaying household onto the fan-out frame again or the receiver
+        #      started reading (and logging) the outer identity.
+        if "gfs_space_post_id" in state:
+            relay_lines = [
+                line
+                for line in _log_lines_matching("d", "gfs.relay.received:")
+                if f"space={gfs_space_id}" in line
+            ]
+            if not relay_lines:
+                failures.append(
+                    f"d: no 'gfs.relay.received: space={gfs_space_id}' record "
+                    "in d's log (note: _spawn truncates log.txt, so a step "
+                    "that respawned d since gfs-space-post wipes the evidence)",
+                )
+            else:
+                identified = [line for line in relay_lines if "from=" in line]
+                if identified:
+                    failures.append(
+                        "d: GFS relay record carries a 'from=' — the fan-out "
+                        f"frame is identity-bearing again: {identified!r}",
+                    )
+                else:
+                    print(
+                        f"  ✓ GFS relay identity-free ({len(relay_lines)} "
+                        "relay record(s) on d, none with 'from=')"
+                    )
     else:
         print(
             "  GFS public-space content skipped — run 'gfs-space-subscribe' / "
@@ -3181,6 +3347,17 @@ _LOG_BENIGN: tuple[str, ...] = (
     # harness audit. A different webrtc_ice WARNING (e.g. ICE
     # gathering failure, bad TURN credentials) would still surface.
     "WebRTC: no TURN server configured",
+    # The harness's OWN negative control in the ``gfs-*`` chain. Both
+    # ``cmd_gfs_space_post`` step 5 and ``cmd_verify`` 13c ask **c** — a
+    # household that is deliberately not a member, not a subscriber and not
+    # GFS-paired — for the global space's feed, to prove the §"non-member
+    # households MUST NOT see space content" rule on the real wire. c does not
+    # hold that space, so ``SpaceFeedView`` maps a ``KeyError`` to 404 and
+    # ``BaseView`` logs the mapping at WARNING. The 404 IS the expected
+    # outcome; the assertion that matters (c holds no ``space_posts`` row and
+    # its feed exposes neither post) runs regardless. Only fires when the
+    # opt-in GFS chain is run in the same session as ``verify``.
+    "SpaceFeedView: KeyError surfaced from handler",
     # Earlier entries removed because the underlying conditions
     # were fixed upstream (instead of permanently allowlisted):
     # * ``FederationEventType.FEDERATION_RTC_ICE`` /

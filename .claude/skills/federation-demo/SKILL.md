@@ -519,6 +519,13 @@ the local sandbox, seeds a bcrypt admin-password hash, and spawns
 ``python -c "from socialhome.global_server.server import main; main()"``
 under the hood. Verifies the GFS is reachable by polling ``/healthz``.
 
+The subprocess calls ``logging.basicConfig(level=DEBUG)`` **before**
+``main()`` (whose own ``basicConfig(level=INFO)`` is then a no-op), so the
+GFS runs at DEBUG. ``gfs-space-post``'s anonymity assertion needs it: the
+GFS's relay bookkeeping (``GFS: relaying <event> for space <id> to N
+subscriber(s)``) is a DEBUG record, and at INFO there would be no relay
+line to scan for a leaked household id.
+
 State is persisted under ``/tmp/sh-demo/gfs/`` (same parent as the
 HFS sandboxes); ``gfs-down`` (or the broader ``down``) tears it down.
 
@@ -671,6 +678,15 @@ signature that no longer verifies against the mirrored pin; a
 and drops everything with "no key for epoch"); a broken author
 self-cert; and — on the c side — any regression that fans space content
 at non-member households.
+
+The step also asserts the relay is **identity-free** (the "the GFS must not
+see who relayed" property): the GFS log names Alpha's instance id on no
+relay line (scoped to relay lines — the GFS legitimately knows that id from
+``/gfs/register``, the ``/gfs/ws`` hello and the public directory listing's
+``owning_instance``) and never mentions ``from_instance`` at all; Delta's
+``gfs.relay.received: space=… event=space_post_public`` records carry no
+``from=``; and Alpha never logged the legacy downgrade WARNING ("does not
+advertise anonymous_publish"). ``verify`` re-checks Delta's log-line shape.
 
 ### ``gfs-space-rotate`` — a key rotation must not cut subscribers off
 

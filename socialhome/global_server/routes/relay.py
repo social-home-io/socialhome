@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 
@@ -9,6 +10,7 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
+from ..public import PUBLISH_MAX_BODY_BYTES
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -16,6 +18,25 @@ log = logging.getLogger(__name__)
 #: The only actions ``POST /gfs/subscribe`` accepts. Anything else is a 400 —
 #: a typo'd action must never silently fall through to a subscribe.
 _SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
+
+#: Upper bound on the identifier-shaped wire fields ``/gfs/publish`` binds into
+#: SQL (``space_id``) or matches against the allow-set (``event_type``). Mirrors
+#: the household-side ``_SAFE_SPACE_ID`` guard. Without it a JSON list/dict
+#: reached the SQLite bind and produced a 500 + ERROR traceback on every
+#: unauthenticated hit — a log-volume DoS.
+_MAX_WIRE_ID_CHARS = 128
+
+#: Read granularity for the bounded ``/gfs/publish`` body read. Large enough
+#: that a legitimate payload is a handful of chunks, small enough that an
+#: oversized body is refused within one chunk of the cap.
+_BODY_CHUNK_BYTES = 64 * 1024
+
+
+def _require_short_str(value: object, field: str) -> str:
+    """Return *value* as a non-empty, bounded ``str`` or raise ``400``."""
+    if not isinstance(value, str) or not value or len(value) > _MAX_WIRE_ID_CHARS:
+        raise web.HTTPBadRequest(reason=f"Invalid field: {field}")
+    return value
 
 
 class GfsInfoView(GfsBaseView):
@@ -26,6 +47,21 @@ class GfsInfoView(GfsBaseView):
     carries ``{base_url, token}``) can fetch the public key it needs to
     pin before sending its registration. Unauthenticated by design —
     the public key is, well, public.
+
+    Also the capability channel for the GFS↔HFS leg, which has no
+    ``proto_version`` negotiation: ``anonymous_publish`` tells a household
+    that ``POST /gfs/publish`` authorizes on the space-authority signature
+    alone, so it can stop sending ``from_instance``.
+
+    That capability ships SIGNED (``capabilities`` + ``capabilities_sig`` +
+    ``capabilities_sig_suite``, see :mod:`socialhome.capabilities_sig`) with the same
+    identity key this response publishes as ``public_key`` and every paired
+    household pinned at pair time. The signature is what a household trusts —
+    an unauthenticated flag on an unauthenticated endpoint could be stripped
+    on-path, forcing every relay back to the identified legacy body, which is
+    precisely the third-party-provable artefact the anonymous relay exists to
+    avoid. The top-level ``anonymous_publish`` stays for readability and for
+    older households, but it is INFORMATIONAL only.
     """
 
     async def get(self) -> web.Response:
@@ -33,14 +69,26 @@ class GfsInfoView(GfsBaseView):
         cluster = self.svc(K.gfs_cluster_key)
         admin_repo = self.svc(K.gfs_admin_repo_key)
         server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
-        return web.json_response(
-            {
-                "gfs_instance_id": cfg.instance_id,
-                "public_key": cluster.own_public_key_hex,
-                "server_name": server_name,
-                "base_url": cfg.base_url,
-            }
-        )
+        capabilities = {"anonymous_publish": True}
+        sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
+        body = {
+            "gfs_instance_id": cfg.instance_id,
+            "public_key": cluster.own_public_key_hex,
+            "server_name": server_name,
+            "base_url": cfg.base_url,
+            "anonymous_publish": True,
+            "capabilities": capabilities,
+        }
+        if sig:
+            body["capabilities_sig"] = sig
+            body["capabilities_sig_suite"] = suite
+        else:
+            log.warning(
+                "GET /gfs/info: no cluster signing key wired — serving an "
+                "UNSIGNED capability block; paired households will keep "
+                "sending the identified (legacy) relay body",
+            )
+        return web.json_response(body)
 
 
 class RegisterView(GfsBaseView):
@@ -138,25 +186,60 @@ class InstanceUpdateView(GfsBaseView):
 
 
 class PublishView(GfsBaseView):
-    """``POST /gfs/publish`` — relay an event to a space's subscribers.
+    """``POST /gfs/publish`` — relay an event to a space's subscribers
+    **without the relaying household's identity**.
 
-    The Ed25519 signature is mandatory and verified against the
-    ``from_instance``'s registered ``public_key``; unknown instance,
-    missing / malformed / invalid signature all map to ``403``.
+    Canonical body: ``{space_id, event_type, payload}``. Authorization is the
+    space-authority signature inside the opaque ``payload`` alone (verified
+    against the space's TOFU-pinned key), so the GFS does not REQUIRE, STORE,
+    LOG or FORWARD which household relayed the event. That is the guarantee —
+    not that the operator *cannot* learn it: the same household usually holds
+    an authenticated ``/gfs/ws`` socket from the same IP, so network-level
+    correlation (source address, timing, body size) remains available to
+    whoever runs the server. See :meth:`GfsFederationService.publish_event`.
+
+    Because the caller is anonymous, instance-level moderation
+    (``client_instances.status = 'banned'``) CANNOT gate this path — a banned
+    household simply omits the legacy fields. The **space**-level ban is the
+    only moderation lever on the relay.
+
+    ``from_instance`` / ``signature`` (+ ``ts``) from an older household are
+    accepted but never trusted: the transport signature is still verified when
+    present (a bogus legacy field is a ``403``), then discarded.
+
+    The response reports only the NUMBER of subscribers reached. The authority
+    signature carries no nonce or timestamp, so a captured relay frame stays
+    valid forever and anyone who saw one can re-POST it. What bounds that is a
+    content-blind replay dedupe: this node remembers the digest of each
+    accepted payload for ``PUBLISH_REPLAY_TTL_S`` (5 minutes) and answers an
+    identical body with ``delivered_to: 0`` and no fan-out. The cache is
+    in-memory and PER NODE — a restart, or a sibling node in a cluster, forgets
+    — so it bounds the burst one captured frame can drive, and SUBSCRIBER-side
+    dedupe by the post id inside the payload stays the standing backstop (see
+    ``_authorize_authority_relay``). Returning the roster would hand an
+    anonymous replayer exactly the data ``GET /gfs/spaces/{id}/subscribers``
+    gates behind a replay-guarded authority query.
+
+    Every authorization failure returns ONE uniform ``403`` body — distinct
+    messages would let an unauthenticated caller enumerate space existence,
+    moderation status and pin status. The precise reason is logged at DEBUG.
     """
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_federation_key)
         session = self.request.app.get(K.gfs_http_session_key)
-        body = await self.body_or_400()
+        body = await self._bounded_body()
         try:
             space_id = body["space_id"]
             event_type = body["event_type"]
             payload = body["payload"]
-            from_instance = body["from_instance"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        signature = body.get("signature", "")
+        space_id = _require_short_str(space_id, "space_id")
+        event_type = _require_short_str(event_type, "event_type")
+        # Legacy fields — tolerated, verified, never trusted (see the service).
+        from_instance = str(body.get("from_instance") or "")
+        signature = str(body.get("signature") or "")
         try:
             delivered = await svc.publish_event(
                 space_id,
@@ -167,10 +250,50 @@ class PublishView(GfsBaseView):
                 session=session,
             )
         except PermissionError as exc:
-            return web.json_response({"error": str(exc)}, status=403)
+            # DEBUG only, and never the legacy ``from_instance``: the caller
+            # gets one uniform body so the endpoint is not an oracle.
+            log.debug("GFS publish refused for space %s: %s", space_id, exc)
+            return web.json_response(
+                {"error": "not authorized to relay for this space"},
+                status=403,
+            )
         return web.json_response(
-            {"status": "published", "delivered_to": delivered},
+            {"status": "published", "delivered_to": len(delivered)},
         )
+
+    async def _bounded_body(self) -> dict:
+        """Read + parse the JSON body under :data:`PUBLISH_MAX_BODY_BYTES`.
+
+        The endpoint is unauthenticated until the authority signature inside
+        the payload verifies, so the bytes are bounded BEFORE they are buffered
+        or parsed: a declared ``Content-Length`` over the cap is refused
+        outright, and the read itself is capped so a chunked body (which
+        declares no length at all) cannot exceed it either.
+        """
+        declared = self.request.content_length
+        if declared is not None and declared > PUBLISH_MAX_BODY_BYTES:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=PUBLISH_MAX_BODY_BYTES,
+                actual_size=declared,
+            )
+        raw = bytearray()
+        # ``StreamReader.read(n)`` returns only what is buffered, so the cap is
+        # enforced by accumulating chunk by chunk and bailing the moment the
+        # total crosses it — the rest of the body is never buffered.
+        async for chunk in self.request.content.iter_chunked(_BODY_CHUNK_BYTES):
+            raw += chunk
+            if len(raw) > PUBLISH_MAX_BODY_BYTES:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=PUBLISH_MAX_BODY_BYTES,
+                    actual_size=len(raw),
+                )
+        try:
+            parsed = json.loads(raw)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(reason=f"Invalid JSON body: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise web.HTTPBadRequest(reason="Invalid JSON body: expected an object")
+        return parsed
 
 
 class SubscribeView(GfsBaseView):

@@ -7,8 +7,10 @@ Loaded with layered precedence:
    landing_markdown, header_image_file, auto_accept_clients,
    auto_accept_spaces, fraud_threshold, admin_password_hash).
 2. **Environment variables** (``GFS_HOST``, ``GFS_PORT``, ``GFS_BASE_URL``,
-   ``GFS_DATA_DIR``, ``GFS_DB_PATH``, ``GFS_INSTANCE_ID``) — override the
-   matching ``[server]`` key when set, so an orchestrator can retarget a
+   ``GFS_DATA_DIR``, ``GFS_DB_PATH``, ``GFS_INSTANCE_ID``,
+   ``GFS_SIGNING_SEED`` — 64 hex chars, the Ed25519 identity seed;
+   ``GFS_TRUSTED_PROXIES`` — comma-separated IPs/CIDRs, empty to clear)
+   — override the matching ``[server]`` key when set, so an orchestrator can retarget a
    single value (e.g. a per-instance port) without rewriting the file.
    This mirrors :class:`socialhome.config.Config` (env > file > defaults).
    Only ``[server]`` scalars have env bindings; branding/policy/webrtc/
@@ -39,6 +41,36 @@ from pathlib import Path
 DEFAULT_DATA_DIR = "/var/lib/sh-gfs"
 DEFAULT_CONFIG_FILENAME = "global_server.toml"
 
+#: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
+#: loopback, the RFC1918 private ranges and the IPv6 unique-local block. A GFS
+#: is almost always reached through a reverse proxy / ingress container that
+#: sits on the same host or private network, so this default keeps per-client
+#: rate limiting working with no configuration — while a peer connecting
+#: straight from the internet can never spoof its own client IP. Operators who
+#: expose the GFS directly (or whose proxy lives on a public address) set
+#: ``[server] trusted_proxies`` / ``GFS_TRUSTED_PROXIES`` explicitly; an empty
+#: list means "never believe the header".
+#:
+#: Two limits this default does NOT cover, both documented in
+#: :class:`~socialhome.global_server.public.ClientIpResolver` and
+#: ``docs/api.md``:
+#:
+#: * The proxy must OVERWRITE ``X-Forwarded-For``. An L4/TCP proxy (or an L7
+#:   one configured to append) passes the client's own header through, so the
+#:   last entry is attacker-chosen again and a single source mints unlimited
+#:   rate-limit buckets. With such a front end the only safe value is ``[]``.
+#: * Only the LAST entry is read (single-hop assumption). A chain of two or
+#:   more trusted proxies resolves to the inner hop — the outer proxy, not the
+#:   client — so every client behind the chain shares one bucket.
+DEFAULT_TRUSTED_PROXIES: tuple[str, ...] = (
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7",
+)
+
 
 @dataclass(slots=True, frozen=True)
 class GfsConfig:
@@ -50,6 +82,13 @@ class GfsConfig:
     base_url: str = ""  # public URL, e.g. "https://gfs.example.com"
     data_dir: str = DEFAULT_DATA_DIR
     instance_id: str = "gfs-node-0"
+    #: Optional 64-hex-char (32-byte) override for this GFS's Ed25519 identity
+    #: seed, for operators who inject secrets from a vault instead of letting
+    #: the data dir own the key. Empty (the default) means "use the random seed
+    #: persisted in the data dir". Never logged — it IS the private key.
+    signing_seed_hex: str = ""
+    # IPs / CIDRs of reverse proxies whose ``X-Forwarded-For`` is believed.
+    trusted_proxies: tuple[str, ...] = DEFAULT_TRUSTED_PROXIES
 
     # [branding] — start values; admin portal overrides via DB.
     server_name: str = "My Global Server"
@@ -112,6 +151,14 @@ class GfsConfig:
             base_url=str(server.get("base_url") or ""),
             data_dir=str(server.get("data_dir") or DEFAULT_DATA_DIR),
             instance_id=str(server.get("instance_id") or "gfs-node-0"),
+            signing_seed_hex=str(server.get("signing_seed_hex") or ""),
+            # An explicitly EMPTY list must stay empty (the internet-facing
+            # posture) — only a missing key falls back to the default.
+            trusted_proxies=(
+                tuple(str(x) for x in server["trusted_proxies"])
+                if "trusted_proxies" in server
+                else DEFAULT_TRUSTED_PROXIES
+            ),
             server_name=str(branding.get("server_name") or "My Global Server"),
             landing_markdown=str(branding.get("landing_markdown") or ""),
             header_image_file=str(branding.get("header_image_file") or ""),
@@ -150,6 +197,14 @@ class GfsConfig:
         # over GFS_DATA_DIR, mirroring the historical fallback order.
         if "GFS_DB_PATH" in env:
             data_dir = str(Path(env["GFS_DB_PATH"]).resolve().parent)
+        trusted_proxies = self.trusted_proxies
+        if "GFS_TRUSTED_PROXIES" in env:
+            # Comma-separated IPs / CIDRs; an empty value clears the list.
+            trusted_proxies = tuple(
+                part.strip()
+                for part in env["GFS_TRUSTED_PROXIES"].split(",")
+                if part.strip()
+            )
         return replace(
             self,
             host=env.get("GFS_HOST", self.host),
@@ -157,6 +212,8 @@ class GfsConfig:
             base_url=env.get("GFS_BASE_URL", self.base_url),
             data_dir=data_dir,
             instance_id=env.get("GFS_INSTANCE_ID", self.instance_id),
+            signing_seed_hex=env.get("GFS_SIGNING_SEED", self.signing_seed_hex),
+            trusted_proxies=trusted_proxies,
         )
 
     @classmethod
@@ -209,12 +266,29 @@ EXAMPLE_TOML: str = """\
 [server]
 # These apply as written. To retarget a single instance without editing
 # the file, set the matching env var (env > file): GFS_HOST, GFS_PORT,
-# GFS_BASE_URL, GFS_DATA_DIR, GFS_INSTANCE_ID.
+# GFS_BASE_URL, GFS_DATA_DIR, GFS_INSTANCE_ID, GFS_SIGNING_SEED.
 host     = "0.0.0.0"
 port     = 8765
 base_url = "https://gfs.example.com"
 data_dir = "/var/lib/sh-gfs"
 instance_id = "gfs-node-0"
+# This server's Ed25519 identity seed, 64 hex chars (32 bytes). Leave empty and
+# the GFS mints a random seed on first boot and persists it as
+# <data_dir>/gfs_identity.seed (0600) — that is the key every paired household
+# pins, so keep the data dir with the deployment. Set it only if you inject
+# secrets from a vault (env override: GFS_SIGNING_SEED). Treat it as a private
+# key: anyone holding it can impersonate this connection server.
+signing_seed_hex = ""
+# Reverse proxies whose X-Forwarded-For header is believed when deciding the
+# client IP for rate limiting. Defaults to loopback + the private ranges, which
+# covers the usual "proxy container on the same host/network" deployment. Set
+# to [] if the GFS is reachable directly from the internet, or list your
+# proxy's public address(es) if it is not on a private network. Env override:
+# GFS_TRUSTED_PROXIES="203.0.113.7,198.51.100.0/24" (empty string = []).
+trusted_proxies = [
+  "127.0.0.0/8", "::1/128", "10.0.0.0/8",
+  "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+]
 
 [branding]
 server_name       = "My Global Server"

@@ -22,8 +22,9 @@ Console-script entry point: ``socialhome-global-server``. Sub-commands:
 from __future__ import annotations
 
 import getpass
-import hashlib
 import logging
+import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -48,9 +49,11 @@ from .config import (
 from .federation import GfsFederationService
 from .maintenance import GfsMaintenanceScheduler
 from .public import (
+    ClientIpResolver,
     PairingTokenService,
     build_listing_rate_limit,
     build_public_rtc_rate_limit,
+    build_publish_rate_limit,
 )
 from .repositories import (
     SqliteClusterRepo,
@@ -71,9 +74,119 @@ from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
 
+#: Filename of the persisted Ed25519 identity seed, kept in the GFS data dir
+#: next to ``gfs.db``. This 32-byte file IS the server's private identity: it
+#: signs cluster gossip and the ``/gfs/info`` capability block, and its public
+#: half is what every paired household pins. It used to be DERIVED from
+#: ``sha256("gfs-cluster-" + instance_id)`` — and ``instance_id`` is served in
+#: the clear by ``/gfs/info``, so anyone could recompute the private key and
+#: forge a capability block. It is now random per deployment and persisted
+#: here, mode 0600. Back it up with the database; losing it means every paired
+#: household must re-pair.
+SIGNING_SEED_FILENAME = "gfs_identity.seed"
+
+#: Length of the identity seed in bytes (Ed25519 private keys are 32 bytes).
+SIGNING_SEED_BYTES = 32
+
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
 _PUBLIC_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def load_or_create_signing_seed(
+    data_dir: str | Path,
+    *,
+    override_hex: str = "",
+) -> bytes:
+    """Return this GFS's Ed25519 identity seed, minting it on first boot.
+
+    Resolution order:
+
+    1. *override_hex* (``[server] signing_seed_hex`` / ``GFS_SIGNING_SEED``) for
+       operators who inject secrets from a vault. Must be exactly
+       ``SIGNING_SEED_BYTES`` bytes of hex; anything else raises
+       :class:`ValueError` rather than falling back — a typo'd secret must stop
+       the boot, not silently mint a different identity. The value never
+       reaches a log line or an exception message.
+    2. ``<data_dir>/gfs_identity.seed`` when it exists (the normal restart
+       path). A file of the wrong size raises — it is not this server's key,
+       and guessing would break every pinned household.
+    3. Otherwise a fresh :func:`secrets.token_bytes` seed, written 0600 and
+       returned, with ONE warning: a deployment upgrading from the derived-seed
+       build changes identity here, so previously paired households must
+       re-pair before they can verify its signed capability block (until then
+       they fall back to the identified legacy publish body, which is safe —
+       just less private — and warn on their own side).
+
+    Synchronous on purpose: this runs once, during ``GfsApp`` construction,
+    before the event loop is serving — plain :mod:`pathlib` I/O is correct here
+    (the ``aiofiles`` rule governs ``async def``).
+    """
+    if override_hex:
+        cleaned = override_hex.strip()
+        try:
+            seed = bytes.fromhex(cleaned)
+        except ValueError:
+            raise ValueError(
+                "GFS signing seed override is not valid hex — expected "
+                f"{SIGNING_SEED_BYTES * 2} hex characters "
+                "([server] signing_seed_hex / GFS_SIGNING_SEED)",
+            ) from None
+        if len(seed) != SIGNING_SEED_BYTES:
+            raise ValueError(
+                "GFS signing seed override has the wrong length — expected "
+                f"{SIGNING_SEED_BYTES * 2} hex characters "
+                "([server] signing_seed_hex / GFS_SIGNING_SEED)",
+            )
+        return seed
+
+    path = Path(data_dir) / SIGNING_SEED_FILENAME
+    if path.is_file():
+        seed = path.read_bytes()
+        if len(seed) != SIGNING_SEED_BYTES:
+            raise ValueError(
+                f"GFS identity seed at {path} is {len(seed)} bytes, expected "
+                f"{SIGNING_SEED_BYTES} — refusing to start with an identity "
+                "this server cannot prove. Restore the file from backup, or "
+                "delete it to mint a new identity (every paired household "
+                "then has to re-pair).",
+            )
+        return seed
+
+    seed = secrets.token_bytes(SIGNING_SEED_BYTES)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # O_EXCL: if another process won the race to mint the identity, take
+        # THEIR seed rather than overwriting it — two halves of one deployment
+        # must not end up with different identities.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, seed)
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        return load_or_create_signing_seed(data_dir)
+    except OSError as exc:
+        log.warning(
+            "GFS: could not persist the identity seed at %s (%s) — this boot "
+            "uses an EPHEMERAL identity key, so every restart changes the key "
+            "households pin and they all have to re-pair. Make the data dir "
+            "writable, or set [server] signing_seed_hex / GFS_SIGNING_SEED.",
+            path,
+            exc,
+        )
+        return seed
+    log.warning(
+        "GFS: minted a new random identity key and stored it at %s (mode "
+        "0600). If this server was previously running a build that DERIVED "
+        "its key from the instance id, the identity just changed: already "
+        "paired households must re-pair before they can verify this server's "
+        "signed capability block, and until then they keep relaying with the "
+        "identified (legacy) publish body. Back this file up with the "
+        "database — losing it forces a re-pair of every household.",
+        path,
+    )
+    return seed
 
 
 # ─── Application factory ───────────────────────────────────────────────
@@ -93,9 +206,12 @@ class GfsApp:
 
     __slots__ = (
         "config",
+        "data_dir",
         "db",
+        "signing_seed",
         "repos",
         "services",
+        "client_ip",
         "app",
     )
 
@@ -106,9 +222,22 @@ class GfsApp:
         db_path_override: str | Path | None = None,
     ) -> None:
         self.config = config
+        # The data dir is wherever the SQLite DB lives — the identity seed is
+        # stored beside it, so a test/override db path keeps both together.
+        self.data_dir = (
+            Path(db_path_override) if db_path_override else Path(config.db_path)
+        ).parent
         self.db = self._build_db(db_path_override)
+        self.signing_seed = load_or_create_signing_seed(
+            self.data_dir,
+            override_hex=config.signing_seed_hex,
+        )
         self.repos = self._build_repos(self.db)
         self.services = self._build_services(config, self.repos)
+        # ONE resolver for the whole server: the trusted-proxy CIDRs are parsed
+        # here, never per request, and every limiter plus every handler agrees
+        # on what "the client" is.
+        self.client_ip = ClientIpResolver(config.trusted_proxies)
         self.app = self._build_app()
         self._wire_app_keys()
         self._register_routes()
@@ -163,15 +292,13 @@ class GfsApp:
             fraud_threshold=config.fraud_threshold,
             ws_registry=ws_registry,
         )
-        # Cluster mode (spec §24.10). Signing key derived deterministically
-        # from the config's instance_id hash so every start is stable
-        # without touching disk. Operators who need a persistent key
-        # across hostname changes can override via [cluster] signing_key_hex
-        # (future — not in this pass).
-        seed = hashlib.sha256(
-            f"gfs-cluster-{config.instance_id}".encode("utf-8"),
-        ).digest()
-        signing_key = seed  # Ed25519 private key is 32 bytes
+        # This node's Ed25519 identity key (spec §24.10): signs cluster gossip
+        # AND the ``/gfs/info`` capability block, and its public half is what
+        # households pin at pair time. The seed is random per deployment and
+        # persisted in the data dir (see ``load_or_create_signing_seed``) —
+        # never derived from public config, which would let anyone who read
+        # ``/gfs/info`` recompute it.
+        signing_key = self.signing_seed  # Ed25519 private key is 32 bytes
         pk_obj = ed25519.Ed25519PrivateKey.from_private_bytes(signing_key).public_key()
         own_pk_hex = pk_obj.public_bytes(
             encoding=_ser.Encoding.Raw,
@@ -225,8 +352,9 @@ class GfsApp:
     def _build_app(self) -> web.Application:
         middlewares = [
             build_admin_middleware(self.services.admin_auth),
-            build_listing_rate_limit(),
-            build_public_rtc_rate_limit(),
+            build_listing_rate_limit(self.client_ip),
+            build_public_rtc_rate_limit(self.client_ip),
+            build_publish_rate_limit(self.client_ip),
         ]
         return web.Application(middlewares=middlewares)
 
@@ -236,6 +364,7 @@ class GfsApp:
         a = self.app
         a[K.gfs_db_key] = self.db
         a[K.gfs_config_key] = self.config
+        a[K.gfs_client_ip_key] = self.client_ip
         a[K.gfs_fed_repo_key] = self.repos.federation
         a[K.gfs_admin_repo_key] = self.repos.admin
         a[K.gfs_cluster_repo_key] = self.repos.cluster

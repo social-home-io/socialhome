@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 
 import pytest
 
@@ -111,12 +112,16 @@ def _content_key_meta(epoch, raw_key):
     }
 
 
-def _handoff_frame(space_id, *, target, sealed, space_seed):
-    envelope = {
-        "space_id": space_id,
-        "target_instance_id": target,
-        "sealed": sealed,
-    }
+def _handoff_frame(space_id, *, target, sealed, space_seed, from_instance="host.home"):
+    """Build a handoff frame. ``target=None`` omits ``target_instance_id``
+    entirely — the identity-free shape, where the seal is the only gate."""
+    envelope: dict = {"space_id": space_id, "sealed": sealed}
+    if target is not None:
+        envelope = {
+            "space_id": space_id,
+            "target_instance_id": target,
+            "sealed": sealed,
+        }
     envelope.update(
         sign_authority_event(
             event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
@@ -125,13 +130,15 @@ def _handoff_frame(space_id, *, target, sealed, space_seed):
             space_seed=space_seed,
         )
     )
-    return {
+    frame = {
         "type": "relay",
         "event_type": AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
         "space_id": space_id,
-        "from_instance": "host.home",
         "payload": envelope,
     }
+    if from_instance is not None:
+        frame["from_instance"] = from_instance
+    return frame
 
 
 async def test_valid_handoff_imports_key_and_enables_decrypt(env):
@@ -292,3 +299,102 @@ async def test_non_handoff_frame_ignored(env):
         {"type": "relay", "event_type": "space_post_public", "payload": {}}
     )
     await env["svc"].handle({"type": "relay", "event_type": "other"})
+
+
+# ── Identity-free fan-out: the seal is the gate ───────────────────────────
+
+
+async def _sealed_meta(env, *, recipient_pub, epoch=0, raw_key=bytes(range(32))):
+    return seal_to_keywrap(
+        recipient_keywrap_pub=recipient_pub,
+        plaintext=json.dumps(_content_key_meta(epoch, raw_key)).encode("utf-8"),
+    )
+
+
+async def test_targeted_handoff_for_us_still_imports(env):
+    """``target_instance_id`` present and equal to us → unchanged behaviour."""
+    space_id = "sp-targeted-us"
+    await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
+    sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
+    await env["svc"].handle(
+        _handoff_frame(
+            space_id,
+            target=env["own_iid"],
+            sealed=sealed,
+            space_seed=env["skp"].private_key,
+        )
+    )
+    got = await env["crypto"].export_current_key(space_id)
+    assert got is not None
+    assert got[1] == bytes(range(32))
+
+
+async def test_targeted_handoff_for_someone_else_still_dropped(env):
+    """``target_instance_id`` present and NOT us → unchanged behaviour: the
+    explicit gate still short-circuits before any unseal."""
+    space_id = "sp-targeted-other"
+    await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
+    # Sealed to US — so only the target gate can be what drops it.
+    sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
+    await env["svc"].handle(
+        _handoff_frame(
+            space_id,
+            target="someone-else.home",
+            sealed=sealed,
+            space_seed=env["skp"].private_key,
+        )
+    )
+    assert await env["crypto"].export_current_key(space_id) is None
+
+
+async def test_untargeted_handoff_sealed_to_us_imports(env):
+    """No ``target_instance_id`` on the wire (nothing identifies the recipient
+    to the GFS) → the unseal itself is the gate; sealed to us → imported."""
+    space_id = "sp-untargeted-us"
+    await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
+    sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
+    frame = _handoff_frame(
+        space_id,
+        target=None,
+        sealed=sealed,
+        space_seed=env["skp"].private_key,
+        from_instance=None,
+    )
+    assert set(frame) == {"type", "event_type", "space_id", "payload"}
+    assert "target_instance_id" not in frame["payload"]
+
+    await env["svc"].handle(frame)
+
+    got = await env["crypto"].export_current_key(space_id)
+    assert got is not None
+    assert got[1] == bytes(range(32))
+
+
+async def test_untargeted_handoff_for_someone_else_dropped_quietly(env, caplog):
+    """A handoff sealed to ANOTHER household (including one we produced
+    ourselves) reaches every subscriber. With no target field the unseal
+    failure is the "not for us" signal — drop at DEBUG, never WARNING: in a
+    space with N subscribers every household sees N-1 of these."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    space_id = "sp-untargeted-other"
+    await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
+    other_kw = generate_x25519_keypair()  # not ours
+    sealed = await _sealed_meta(env, recipient_pub=other_kw.public_key)
+
+    await env["svc"].handle(
+        _handoff_frame(
+            space_id,
+            target=None,
+            sealed=sealed,
+            space_seed=env["skp"].private_key,
+            from_instance=None,
+        )
+    )
+
+    assert await env["crypto"].export_current_key(space_id) is None
+    noisy = [
+        r
+        for r in caplog.records
+        if r.name.startswith("socialhome") and r.levelno > logging.DEBUG
+    ]
+    assert noisy == [], [(r.levelname, r.getMessage()) for r in noisy]

@@ -28,14 +28,14 @@ The Social Home ↔ GFS link is split by direction:
 - **SH → GFS** is plain HTTPS REST under `/gfs/*` (`register`,
   `publish`, `subscribe`, `report`, `appeal`, `spaces`). Synchronous
   request / response with explicit status codes; no shared session
-  state. **Every mutating call is Ed25519-signed by the originating
-  instance and verified against its registered public key** — there is
-  no unsigned path:
-  - `publish` (relay event) and `spaces/{id}/publish` (space metadata)
-    require a mandatory household signature over their canonical body; an
-    empty / malformed / invalid signature is rejected with `403`, so a
-    registered peer can never overwrite another household's listing or fan
-    out under its name.
+  state. **Every mutating call that names a household is Ed25519-signed by
+  that household and verified against its registered public key** — there is
+  no unsigned path. The one deliberate exception is the content relay
+  `publish`, which names no household at all (see below):
+  - `spaces/{id}/publish` (space metadata) requires a mandatory household
+    signature over its canonical body; an empty / malformed / invalid
+    signature is rejected with `403`, so a registered peer can never
+    overwrite another household's listing.
   - `spaces/{id}/unpublish` is the **owner's withdrawal** of a listing and is
     signed the same way (`{action: "unpublish", owning_instance, space_id, ts}`,
     ±300 s replay guard). The signature proves *which* household is calling, so
@@ -58,34 +58,156 @@ The Social Home ↔ GFS link is split by direction:
     **authority** verify key (`identity_public_key`, hex). The GFS
     **TOFU-pins** it on the first publish and holds it immutable — a later
     publish offering a different key keeps the pinned one.
-  - `publish` (relay) is authorized by **either** the owner path
-    (`from_instance` == the space's owning instance) **or** a valid
-    **space-authority signature** carried in `payload` (`authority_sig` +
-    `authority_sig_suite`) verified against the pinned `identity_public_key`.
-    Because any seed-holder — the owner or a delegated admin — can produce that
-    signature, a space keeps relaying while its owner is offline (the
-    owner-offline-spaces epic). The GFS stays blind to space content: it
-    verifies the signature over the opaque `payload` and fans out, never
-    decrypting. The authority path authorizes a fixed set of event types
-    (`AUTHORITY_RELAY_EVENT_TYPES`): `space_post_public` (Phase 5a) and
-    `space_subscriber_key_handoff` (Phase 5b-b — see below); the signature is
-    always verified under the caller's **wire** `event_type`, which must be in
-    that set, so a payload signed for one type can't be replayed under another.
-    Fail-closed — a present-but-invalid authority sig, an unknown suite, a
-    non-owner relaying a space with no pinned pubkey, **or a non-owner whose
-    wire `event_type` is not in the authorized set** are each rejected with
-    `403`. The owner path is exempt and may relay any `event_type`.
+  - `publish` (relay) is **anonymous**. The canonical body is exactly
+    `{space_id, event_type, payload}` — no household identity — and the only
+    authenticator is the **space-authority signature** carried inside the
+    opaque `payload` (`authority_sig` + `authority_sig_suite`), verified
+    against the TOFU-pinned `identity_public_key`. A connection server must
+    not learn WHICH household relayed a public/global-space event, and it
+    does not need to: the signature authorizes the relay and `space_id`
+    routes it. Because any seed-holder — the owner or a delegated admin —
+    can produce that signature, a space keeps relaying while its owner is
+    offline (the owner-offline-spaces epic). The GFS stays blind to the
+    content: it verifies a signature over opaque bytes and fans out, never
+    decrypting.
+
+    The **owner path is gone** — there is no longer a
+    `from_instance == owning_instance` shortcut that relays any unsigned
+    `event_type`. The authorized event types are exactly
+    `AUTHORITY_RELAY_EVENT_TYPES`: `space_post_public` (Phase 5a) and
+    `space_subscriber_key_handoff` (Phase 5b-b — see below). The signature
+    is always verified under the caller's **wire** `event_type`, which must
+    be in that set, so a payload signed for one type can't be replayed under
+    another. Fail-closed — a missing / present-but-invalid authority sig, an
+    unknown suite, an unpublished or banned space, a space with no pinned
+    pubkey, or a wire `event_type` outside the set are each rejected.
+
+    **Legacy bodies are tolerated, never trusted.** An older household still
+    POSTs `{…, from_instance, signature}`. When either field is present the
+    household transport signature is verified exactly as before (a bogus
+    legacy field must not be a free pass) and the identity is then
+    *discarded*: it authorizes nothing, never enters the fan-out frame, and
+    is never logged.
+
+    A sibling hardening pass makes the response `{"status":"published",
+    "delivered_to": <count>}` (no subscriber ids), collapses every
+    authorization failure into one uniform `403` body so the endpoint is not
+    a space-existence / ban / pin oracle, adds a per-IP rate limiter that
+    honours `X-Forwarded-For` only from trusted proxies, and caps the request
+    body. The exact limits and setting names live in
+    [`docs/api.md`](../api.md).
+  - **Capability discovery — signed.** The GFS↔HFS leg has no `proto_version`
+    negotiation, so capabilities ride `GET /gfs/info`. That endpoint is
+    unauthenticated, so the capability itself is **signed**: the response
+    carries
+
+    ```json
+    {"capabilities": {"anonymous_publish": true},
+     "capabilities_sig": "<b64url Ed25519>",
+     "capabilities_sig_suite": "ed25519"}
+    ```
+
+    signed with the GFS's **own identity key** — the one already published in
+    the same response as `public_key` and pinned (TOFU) by every paired
+    household. That key is random per deployment: the GFS mints a 32-byte seed
+    on first boot and persists it as `<data_dir>/gfs_identity.seed` (0600), or
+    takes `[server] signing_seed_hex` / `GFS_SIGNING_SEED` when an operator
+    manages the secret externally. It used to be *derived* from
+    `gfs_instance_id`, which `/gfs/info` serves in the clear — anyone could
+    recompute the private key and sign their own capability block, so the
+    signature proved nothing. Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
+    (`sort_keys`, compact separators) of
+    `{"gfs_instance_id": …, "capabilities": {…}}`, so a block can't be lifted
+    onto another server or another statement that key signs
+    (`socialhome/capabilities_sig.py`; suite tag per the
+    crypto-suite rule, unknown suite → rejected, never defaulted). The
+    top-level `anonymous_publish` mirror stays for readability and is
+    **informational only**.
+
+    **Why signed:** without it the capability bit is strip-able on-path, and
+    stripping it doesn't fail closed — it forces the household back to the
+    legacy identified body, whose household transport signature is a
+    third-party-provable "household X relayed into space Y" artefact. The
+    downgrade *is* the attack, so it has to be authenticated away.
+
+    **What signing buys, precisely: detection and a ratchet — not
+    fail-closed.** On a COLD cache the household cannot tell a stripping MITM
+    from an old GFS, because both look identical: no verifiable block. So the
+    first `/gfs/info` after an HFS boot — and the one at pair time — still
+    falls back to the legacy identified body plus a WARNING, exactly as it
+    would against a genuinely older server. The signature makes the strip
+    *visible* (an operator sees the warning, and a tampered-but-present block
+    is named as tampering rather than age) and makes it *un-repeatable* (once
+    a valid `true` is seen, it latches — see the ratchet below). It does not
+    make a stripped response fail closed.
+
+    A GFS **rollback** to a pre-capability build interacts with that latch the
+    other way: a household that already latched `true` keeps sending the
+    identity-free body, which the rolled-back server `403`s, until that
+    household's process restarts (the ratchet is RAM-only). Rolling a GFS
+    backwards is therefore a breaking change for latched households, not a
+    graceful degrade.
+
+    The household caches the verified answer per connection (RAM only — it is
+    a property of the remote server's build, so a column would go stale the
+    moment an operator upgrades), refreshing it at pair time, on every GFS-WS
+    reconnect, and once on demand when a publish finds it unknown. Three rules
+    guard the cache:
+
+    - **Only a verified block sets it.** Missing block, bad signature or an
+      unknown suite → `False` (legacy body) plus **one** WARNING per
+      connection, worded so an operator can tell "older GFS / stripped in
+      transit" from "block FAILED verification against the pinned key".
+    - **It ratchets up.** Once seen `true` under a valid signature, a later
+      fetch without it does **not** downgrade it for the rest of the process:
+      "capability downgrade ignored" is logged and relays stay identity-free.
+      A GFS cannot legitimately lose a capability its build has. The ratchet
+      is RAM-only — a restart starts from unknown again.
+    - **A failed probe is negative-cached for 30 s**
+      (`GFS_INFO_NEGATIVE_TTL_S`) — never as `False`, only as "don't re-probe
+      yet", so a GFS whose `/gfs/info` is down while `/gfs/publish` is up
+      costs one 10 s timeout per 30 s instead of one per publish.
+
+    Unknown → legacy is the safe default, because the legacy body is accepted
+    by **both** an old and a new GFS while the identity-free one would `403`
+    on an old one. The rollout matrix:
+
+    | | **New GFS** (signed `anonymous_publish`) | **Old GFS** |
+    |---|---|---|
+    | **New household** | identity-free body; nothing to learn | legacy body + **one** WARNING per connection naming the *server* (never the space) |
+    | **Old household** | legacy body accepted: verified, then discarded | legacy body, as before |
+  - **`https://` at pair time.** A GFS URL (from the QR or pasted) and the
+    household's own federation base must be `https://` unless the host is
+    loopback, `localhost`, RFC1918, `fc00::/7` or `fe80::/10` — a LAN or
+    demo-harness GFS on `http://127.0.0.1:<port>` stays allowed, a public one
+    must be TLS. Enforced before the first byte leaves
+    (`GfsConnectionService.pair`); DNS is never resolved, so the check can't
+    be turned into a rebinding oracle. Without it the very fetch that pins the
+    key and reads the signed block is rewritable on-path.
+  - **NULL-pin self-heal.** A space whose GFS row pinned no authority key
+    `403`s every relay, and nothing else re-publishes its metadata. So on
+    every GFS-WS (re)connect the household re-publishes the metadata of each
+    space it has published to that server. This is idempotent (the pin is
+    immutable once set), sequential, and fail-soft per space.
   - **Replay / dedupe contract.** The authority signature binds the space id
-    and the (opaque) `payload`, but **no timestamp, nonce, or epoch**, and the
-    GFS keeps **no replay cache**, so `publish` relay is idempotent /
-    at-least-once: a captured authority-signed payload can be re-POSTed and
-    re-fanned-out (a property the owner relay already had under #598, widened
-    by the non-owner authority path). The GFS deliberately adds **no** replay
-    machinery — it is content-blind and can't read the post id inside the
-    encrypted payload. The content-layer backstop is **subscriber-side dedupe
-    by the post id** carried inside the payload, enforced by the HFS
-    `space_public_inbound` consumer (the same way moments dedupe by
-    `moment_id`).
+    and the (opaque) `payload`, but **no timestamp, nonce, or epoch**, so a
+    captured authority-signed payload stays valid forever and anyone who saw
+    one can re-POST it. The GFS bounds the resulting burst with a
+    **content-blind dedupe**: it remembers a BLAKE2b digest of each authorized
+    payload — over the same canonical JSON the authority signature covers — for
+    **5 minutes**, and answers a byte-identical re-POST with `200` /
+    `delivered_to: 0` and no fan-out. It still can't dedupe on the post id:
+    that lives inside the encrypted payload.
+
+    That cache is in-memory and **per GFS node**, so it is a burst bound, not
+    a content-id store. Past the TTL, after a restart, or on a sibling node the
+    same bytes fan out once more — in a cluster of N nodes behind one address a
+    replay burst is suppressed only **1-in-N**, since each node must see the
+    bytes once before it starts suppressing them. The standing content-layer
+    backstop is therefore still **subscriber-side dedupe by the post id**
+    carried inside the payload, enforced by the HFS `space_public_inbound`
+    consumer (the same way moments dedupe by `moment_id`), and the relay stays
+    at-least-once.
   - `subscribe` and `unsubscribe` each require a signature over
     `{action, instance_id, space_id, ts}` (replay-guarded ±300 s on `ts`).
     The `action` is inside the signed bytes (domain separation), so a
@@ -97,10 +219,13 @@ The Social Home ↔ GFS link is split by direction:
 - **GFS → SH** is a persistent WebSocket the SH opens to
   `wss://<gfs>/gfs/ws`. The first frame is a signed hello
   `{type:"hello", instance_id, ts, sig}`; once accepted the GFS pushes
-  `{type:"relay", space_id, event_type, payload, from_instance}`
-  frames as fan-out happens. When no WebSocket is open the GFS falls
-  back to an HTTPS POST callback to the instance's registered
-  `inbox_url`. The GFS also pushes a `{type:"new_subscriber", space_id,
+  `{type:"relay", space_id, event_type, payload}` frames as fan-out
+  happens — **four keys, no `from_instance` and no GFS-added target id**.
+  The frame goes to **every** subscriber: having never learned who
+  published, the GFS can no longer exclude the publisher, and a household
+  that gets its own post back drops it on the self-echo guard. When no
+  WebSocket is open the GFS falls back to an HTTPS POST callback to the
+  instance's registered `inbox_url` with the same body minus `type`. The GFS also pushes a `{type:"new_subscriber", space_id,
   subscriber:{instance_id, identity_public_key, keywrap_public_key,
   kem_suite, keywrap_sig}}` frame to a space **owner** when a household
   subscribes, so a seed-holder can hand the new subscriber the content key
@@ -274,9 +399,9 @@ sequenceDiagram
     AUTH->>SH: SPACE_POST_CREATED broadcast<br/>(public_relay hint attached; fail-soft)
     SH->>SH: verify author_sig + self-cert + space_id binding
     SH->>SH: encrypt inner under space content key + authority-sign envelope
-    SH->>G: publish space_post_public<br/>(authority-signed; ciphertext only)
-    G->>G: verify authority sig vs pinned pubkey
-    G->>SUB: relay space_post_public
+    SH->>G: POST /gfs/publish {space_id, event_type, payload}<br/>(no from_instance; authority-signed ciphertext)
+    G->>G: verify authority sig vs pinned pubkey<br/>(the ONLY authenticator)
+    G->>SUB: {type:"relay", space_id, event_type, payload}<br/>(to every subscriber)
     SUB->>SUB: re-verify authority sig + decrypt + self-cert + author_sig
     SUB->>SUB: dedupe by post_id, persist
 ```
@@ -284,6 +409,49 @@ sequenceDiagram
 The HTTPS-inbox fallback for relayed `space_post_public` events is a
 follow-up; today the consumer is wired on the WebSocket path (mirroring
 the public-moments inbound).
+
+**Receiver rules for an identity-free relay.** Since the frame no longer
+names anybody, receivers derive everything from the sealed inner:
+
+- **Attribution comes from the inner only.** `origin_instance_id` is read
+  from the decrypted, authority-signed inner payload. An outer
+  `from_instance` from an old GFS is never read and never logged.
+- **Self-echo guard.** The GFS fans out to every subscriber including the
+  publisher, so a household drops its own post — matched on the inner
+  `origin_instance_id` (our own id), at DEBUG, before any write. The
+  `post_id` dedupe is a *separate*, later step and would not cover this: an
+  echo arriving after a local delete would otherwise resurrect the post from
+  our own copy.
+- **Seal-as-gate for a key handoff.** A `space_subscriber_key_handoff`
+  carrying **no** `target_instance_id` is gated by the seal itself: if
+  `open_keywrap` fails, the frame was not for us and is dropped quietly.
+  One that still carries the field keeps the explicit gate. This is what
+  makes Phase B (dropping `target_instance_id`) a producer-only change.
+
+### What the GFS does and does not learn
+
+State this precisely; do not soften it:
+
+1. **The guarantee is "does not require, store, log or forward".** The GFS
+   never receives the relaying household's identity on `/gfs/publish`. It is
+   **not** "the GFS cannot learn it": a household normally holds an
+   authenticated WebSocket to the same server from the same IP, so an
+   operator can correlate a publish's source IP, timing and size with that
+   session. No protocol change closes that short of a mix/onion egress.
+2. **`target_instance_id` is still in the clear** on a
+   `space_subscriber_key_handoff` — the GFS and every subscriber learn which
+   household is being onboarded. Phase B stops sending it once receivers at
+   or above this version are deployed; the receivers are ready now.
+3. **Per-instance GFS bans cannot gate an anonymous relay.** The
+   space-level ban (`status='banned'`) is the only moderation lever left on
+   the relay path.
+4. **The GFS still sees `space_id`, `event_type`, payload size and timing**,
+   plus the subscriber set — it is the directory.
+
+The whole shape is pinned by the §27.9 release blocker
+`tests/protocol/test_gfs_payload_minimization.py`, which drives the real
+producers, the real sender and the real GFS with real crypto and asserts the
+exact cleartext key set of each payload.
 
 ### Subscriber content-key handoff (Phase 5b-b)
 

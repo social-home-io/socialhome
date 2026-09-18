@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import aiohttp
 from aiohttp.web import AppKey
 
@@ -27,8 +29,15 @@ from .highlight_publications import HighlightPublicationRegistry
 from .moment_public_registry import MomentPublicRegistry
 from .ws_registry import GfsWebSocketRegistry
 
+if TYPE_CHECKING:
+    # ``public`` imports this module, so the resolver type is annotation-only.
+    from .public import ClientIpResolver
+
 gfs_db_key: AppKey[AsyncDatabase] = AppKey("gfs_db")
 gfs_config_key: AppKey[GfsConfig] = AppKey("gfs_config")
+#: Resolves a request's client IP under the configured trusted-proxy policy.
+#: One parsed instance per server — never build one per request.
+gfs_client_ip_key: "AppKey[ClientIpResolver]" = AppKey("gfs_client_ip")
 gfs_federation_key: AppKey[GfsFederationService] = AppKey("gfs_federation")
 gfs_fed_repo_key: AppKey[AbstractGfsFederationRepo] = AppKey("gfs_fed_repo")
 gfs_admin_repo_key: AppKey[AbstractGfsAdminRepo] = AppKey("gfs_admin_repo")

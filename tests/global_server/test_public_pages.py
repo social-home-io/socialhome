@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import SimpleNamespace
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -9,8 +12,14 @@ from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
 )
-from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.config import DEFAULT_TRUSTED_PROXIES, GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.public import (
+    PUBLISH_MAX_PER_MINUTE,
+    RATE_LIMIT_MAX_TRACKED_IPS,
+    ClientIpResolver,
+    SlidingWindowCounter,
+)
 from socialhome.global_server.server import create_gfs_app
 
 
@@ -468,3 +477,232 @@ async def test_landing_pair_code_carries_token_in_data_attr(client):
     resp = await client.get("/")
     text = await resp.text()
     assert "data-pair-token=" in text
+
+
+# ─── Client-IP resolution / trusted proxies ──────────────────────────
+
+
+def _fake_request(peer: str, xff: str | None = None):
+    """Minimal stand-in for ``web.Request`` — headers + transport peername."""
+    headers: dict[str, str] = {} if xff is None else {"X-Forwarded-For": xff}
+    return SimpleNamespace(
+        headers=headers,
+        transport=SimpleNamespace(get_extra_info=lambda _k: (peer, 40000)),
+        remote=peer,
+    )
+
+
+def test_client_ip_ignores_forwarded_for_from_untrusted_peer():
+    """A direct internet peer can rotate ``X-Forwarded-For`` freely — believing
+    it would let one attacker mint an unlimited number of rate-limit buckets."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("203.0.113.9", "1.2.3.4")) == "203.0.113.9"
+
+
+def test_client_ip_uses_last_forwarded_entry_from_trusted_peer():
+    """Behind a trusted proxy the LAST entry is the one that proxy appended —
+    every entry to its left was supplied by the client and is forgeable."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    req = _fake_request("127.0.0.1", "9.9.9.9, 198.51.100.7")
+    assert resolve(req) == "198.51.100.7"
+
+
+def test_client_ip_ignores_client_supplied_forwarded_prefix():
+    """A client that pre-seeds its own ``X-Forwarded-For`` before hitting a
+    trusted proxy gains nothing: the proxy appends the real peer, and the last
+    entry wins."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    a = resolve(_fake_request("127.0.0.1", "evil, 198.51.100.7"))
+    b = resolve(_fake_request("127.0.0.1", "other, other2, 198.51.100.7"))
+    assert a == b == "198.51.100.7"
+
+
+def test_client_ip_default_trusts_private_and_loopback_peers():
+    """Docker / reverse-proxy deployments (proxy on the same host or private
+    network) keep per-client limiting with no configuration."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    for peer in ("127.0.0.1", "10.1.2.3", "172.16.4.5", "192.168.1.1", "::1"):
+        assert resolve(_fake_request(peer, "1.2.3.4")) == "1.2.3.4", peer
+    assert resolve(_fake_request("fd00::1", "1.2.3.4")) == "1.2.3.4"
+
+
+def test_client_ip_empty_trusted_list_never_honours_forwarded_for():
+    """``trusted_proxies = []`` is the internet-facing posture."""
+    resolve = ClientIpResolver(())
+    assert resolve(_fake_request("127.0.0.1", "1.2.3.4")) == "127.0.0.1"
+
+
+def test_client_ip_honours_an_explicitly_configured_proxy():
+    resolve = ClientIpResolver(("198.51.100.0/24",))
+    assert resolve(_fake_request("198.51.100.1", "1.2.3.4")) == "1.2.3.4"
+    assert resolve(_fake_request("203.0.113.1", "1.2.3.4")) == "203.0.113.1"
+
+
+def test_client_ip_falls_back_to_peer_on_garbage_forwarded_for():
+    """A malformed last entry is not an IP — fall back to the real peer rather
+    than tracking an attacker-chosen string."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("127.0.0.1", "not-an-ip")) == "127.0.0.1"
+    assert resolve(_fake_request("127.0.0.1", "")) == "127.0.0.1"
+
+
+def test_client_ip_without_transport_is_unknown():
+    req = SimpleNamespace(headers={}, transport=None, remote=None)
+    assert ClientIpResolver(DEFAULT_TRUSTED_PROXIES)(req) == "unknown"
+
+
+def test_client_ip_unmaps_ipv4_mapped_loopback_peer():
+    """A dual-stack listener reports a local proxy as ``::ffff:127.0.0.1``.
+    Without unmapping that is an unrecognised IPv6 address, the proxy is not
+    trusted, ``X-Forwarded-For`` is ignored — and EVERY client behind that
+    proxy shares one bucket, so the whole deployment 429s after one client's
+    quota."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("::ffff:127.0.0.1", "1.2.3.4")) == "1.2.3.4"
+    assert resolve(_fake_request("::ffff:10.0.0.5", "1.2.3.4")) == "1.2.3.4"
+
+
+def test_client_ip_unmaps_ipv4_mapped_untrusted_peer_to_one_bucket():
+    """``::ffff:203.0.113.9`` and ``203.0.113.9`` are the SAME host — they must
+    share a rate-limit bucket, or an attacker doubles its quota by switching
+    address family."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("::ffff:203.0.113.9")) == "203.0.113.9"
+    assert resolve(_fake_request("203.0.113.9")) == "203.0.113.9"
+
+
+def test_client_ip_unmaps_ipv4_mapped_forwarded_entry():
+    """A proxy that appends ``::ffff:198.51.100.7`` keys the same bucket as one
+    that appends the dotted-quad form."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    mapped = resolve(_fake_request("127.0.0.1", "::ffff:198.51.100.7"))
+    plain = resolve(_fake_request("127.0.0.1", "198.51.100.7"))
+    assert mapped == plain == "198.51.100.7"
+
+
+def test_client_ip_strips_an_ipv6_zone_from_a_forwarded_entry():
+    """``2001:db8::1%eth0`` is the same host as ``2001:db8::1`` — the zone is a
+    local interface label, not part of the address. ``_peer_ip`` already
+    stripped it; the forwarded branch did not, so every zone spelling minted a
+    fresh rate-limit bucket for one source."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    plain = resolve(_fake_request("127.0.0.1", "2001:db8::1"))
+    assert plain == "2001:db8::1"
+    for zone in ("eth0", "1", "A" * 4096):
+        assert resolve(_fake_request("127.0.0.1", f"2001:db8::1%{zone}")) == plain
+
+
+def test_client_ip_key_length_is_bounded_by_the_address_not_the_zone():
+    """An unbounded zone string must not grow the bucket KEY — otherwise one
+    source both multiplies buckets and inflates each one's memory cost."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    key = resolve(_fake_request("127.0.0.1", "2001:db8::1%" + "z" * 10_000))
+    assert len(key) < 64
+
+
+def test_client_ip_resolver_parses_cidrs_once():
+    """The middleware must not re-parse CIDRs per request."""
+    resolve = ClientIpResolver(("10.0.0.0/8", "bogus-entry"))
+    # The bogus entry is dropped at construction, not re-evaluated per call.
+    assert resolve(_fake_request("10.0.0.5", "1.2.3.4")) == "1.2.3.4"
+    assert resolve(_fake_request("203.0.113.5", "1.2.3.4")) == "203.0.113.5"
+
+
+# ─── Rate-limit counter bounds ───────────────────────────────────────
+
+
+def test_rate_limit_counter_is_bounded():
+    """The counter key is attacker-influenced (one bucket per source IP), so
+    an unbounded dict is a slow memory exhaustion."""
+    counter = SlidingWindowCounter(limit=5)
+    for i in range(20_000):
+        counter.allow(f"198.51.{i // 256 % 256}.{i % 256}:{i}")
+    assert len(counter) <= RATE_LIMIT_MAX_TRACKED_IPS
+
+
+def test_rate_limit_counter_drops_expired_hits():
+    """A key whose window has rolled over starts fresh rather than growing."""
+    counter = SlidingWindowCounter(limit=2)
+    assert counter.allow("a", now=1000.0)
+    assert counter.allow("a", now=1000.1)
+    assert not counter.allow("a", now=1000.2)
+    # 61 s later the window has rolled over.
+    assert counter.allow("a", now=1061.0)
+
+
+def test_rate_limit_counter_evicts_least_recent_first():
+    counter = SlidingWindowCounter(limit=5, max_keys=3)
+    for key in ("a", "b", "c"):
+        counter.allow(key, now=1000.0)
+    counter.allow("a", now=1000.5)  # refresh recency of "a"
+    counter.allow("d", now=1001.0)
+    assert len(counter) == 3
+    assert "b" not in counter
+
+
+async def test_publish_limiter_cannot_be_bypassed_by_spoofed_forwarded_for(
+    tmp_dir,
+):
+    """The end-to-end bypass: an internet-facing GFS (no trusted proxies) must
+    shed a flood even when every request carries a fresh ``X-Forwarded-For``."""
+    cfg = replace(_config(tmp_dir), trusted_proxies=())
+    app = create_gfs_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        body = {
+            "space_id": "sp-spoof",
+            "event_type": "space_post_public",
+            "payload": {"authority_sig": "x"},
+        }
+        statuses = []
+        for i in range(PUBLISH_MAX_PER_MINUTE + 5):
+            resp = await tc.post(
+                "/gfs/publish",
+                json=body,
+                headers={"X-Forwarded-For": f"10.9.{i // 256}.{i % 256}"},
+            )
+            statuses.append(resp.status)
+        assert 429 in statuses
+        assert statuses[-1] == 429
+
+
+async def test_publish_limiter_buckets_per_client_behind_a_trusted_proxy(
+    tmp_dir,
+):
+    """With the loopback TestServer peer trusted, each distinct LAST entry is
+    its own bucket — a real reverse-proxy deployment keeps per-client limits."""
+    app = create_gfs_app(_config(tmp_dir))
+    async with TestClient(TestServer(app)) as tc:
+        body = {
+            "space_id": "sp-proxy",
+            "event_type": "space_post_public",
+            "payload": {"authority_sig": "x"},
+        }
+        for _ in range(PUBLISH_MAX_PER_MINUTE):
+            resp = await tc.post(
+                "/gfs/publish",
+                json=body,
+                headers={"X-Forwarded-For": "198.51.100.1"},
+            )
+            assert resp.status != 429
+        # Same client → shed.
+        resp = await tc.post(
+            "/gfs/publish",
+            json=body,
+            headers={"X-Forwarded-For": "198.51.100.1"},
+        )
+        assert resp.status == 429
+        # A DIFFERENT client behind the same proxy is unaffected.
+        resp = await tc.post(
+            "/gfs/publish",
+            json=body,
+            headers={"X-Forwarded-For": "198.51.100.2"},
+        )
+        assert resp.status != 429
+        # A client-supplied prefix does not buy a fresh bucket — the proxy's
+        # appended last entry is what counts.
+        resp = await tc.post(
+            "/gfs/publish",
+            json=body,
+            headers={"X-Forwarded-For": "1.1.1.1, 198.51.100.1"},
+        )
+        assert resp.status == 429

@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import stat
+
 import pytest
 from aiohttp import web
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.global_server import create_gfs_app, server
-from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.capabilities_sig import (
+    CAPS_SIG_SUITE_ED25519,
+    UnsupportedCapsSigSuite,
+    verify_capabilities,
+)
+from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
+from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
+from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 
 
@@ -204,6 +217,82 @@ async def test_gfs_info_returns_public_key(gfs_client):
     assert body["public_key"]
     assert len(body["public_key"]) == 64  # Ed25519 hex
     assert body["server_name"]
+
+
+async def test_gfs_info_advertises_anonymous_publish(gfs_client):
+    """``/gfs/info`` is the capability channel for the GFS↔HFS leg (no
+    proto_version negotiation there): ``anonymous_publish`` tells a household
+    it may drop ``from_instance`` from its ``/gfs/publish`` bodies."""
+    resp = await gfs_client.get("/gfs/info")
+    assert resp.status == 200
+    assert (await resp.json())["anonymous_publish"] is True
+
+
+async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client):
+    """The capability that matters is SIGNED with the GFS's own identity key —
+    the one already published as ``public_key`` and pinned by every household
+    at pair time. A household trusts ``anonymous_publish`` only through this
+    block, so an on-path attacker can no longer strip the flag and force the
+    identified (household-signed, third-party-provable) legacy body."""
+    resp = await gfs_client.get("/gfs/info")
+    body = await resp.json()
+    assert body["capabilities"] == {"anonymous_publish": True}
+    assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
+    assert verify_capabilities(
+        body["public_key"],
+        body["gfs_instance_id"],
+        body["capabilities"],
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+
+
+async def test_gfs_info_capability_signature_covers_every_signed_field(gfs_client):
+    """Tampering with the capability map, or replaying the block under another
+    GFS instance id, breaks verification — and an unknown suite is rejected
+    outright rather than defaulted."""
+    body = await (await gfs_client.get("/gfs/info")).json()
+    assert not verify_capabilities(
+        body["public_key"],
+        body["gfs_instance_id"],
+        {"anonymous_publish": False},
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+    assert not verify_capabilities(
+        body["public_key"],
+        "some-other-gfs",
+        body["capabilities"],
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+    with pytest.raises(UnsupportedCapsSigSuite):
+        verify_capabilities(
+            body["public_key"],
+            body["gfs_instance_id"],
+            body["capabilities"],
+            body["capabilities_sig"],
+            "ed25519+mldsa65",
+        )
+
+
+async def test_publish_endpoint_is_rate_limited_per_ip(gfs_client):
+    """``POST /gfs/publish`` sheds a per-IP flood with 429. The relay is
+    authorized by the space-authority signature alone, so the GFS cannot
+    identify the caller — the IP window is the only shedding handle."""
+    body = {"space_id": "sp-rl", "event_type": "space_post_public", "payload": {}}
+    allowed = 0
+    for _ in range(PUBLISH_MAX_PER_MINUTE + 1):
+        resp = await gfs_client.post("/gfs/publish", json=body)
+        if resp.status == 429:
+            assert resp.headers.get("Retry-After") == "60"
+            break
+        # Un-relayable (no such space) but past the limiter — 403, not 429.
+        assert resp.status == 403
+        allowed += 1
+    else:  # pragma: no cover - limiter never fired
+        pytest.fail("/gfs/publish was never rate-limited")
+    assert allowed == PUBLISH_MAX_PER_MINUTE
 
 
 async def test_admin_static_index_served(gfs_client):
@@ -732,3 +821,89 @@ def test_main_env_overrides_config_host_port(tmp_path, monkeypatch):
     )
     server.main()
     assert captured == {"host": "127.0.0.1", "port": 5555}
+
+
+# ─── GFS identity seed (random, persisted, never derivable) ─────────────
+
+
+def _identity_pubkey_hex(seed: bytes) -> str:
+    return (
+        ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        .hex()
+    )
+
+
+def _boot(data_dir, **overrides) -> str:
+    """Boot a GFS rooted at *data_dir* and return its served identity key."""
+    cfg = GfsConfig(
+        base_url="http://127.0.0.1:8765",
+        data_dir=str(data_dir),
+        **overrides,
+    )
+    app = create_gfs_app(cfg)
+    return app[gfs_cluster_key].own_public_key_hex
+
+
+def test_identity_seed_is_persisted_and_stable_across_boots(tmp_path):
+    """The GFS identity key is minted ONCE per data dir and read back after
+    that — restarting must not change the key households pinned at pair."""
+    first = _boot(tmp_path)
+    seed_file = tmp_path / server.SIGNING_SEED_FILENAME
+    assert seed_file.is_file()
+    assert _boot(tmp_path) == first
+
+
+def test_identity_seed_differs_per_data_dir(tmp_path):
+    """Two deployments are two identities — nothing about the key is derived
+    from public config, so two nodes with the same instance_id differ."""
+    a = _boot(tmp_path / "a")
+    b = _boot(tmp_path / "b")
+    assert a != b
+
+
+def test_identity_seed_is_not_derivable_from_public_config(tmp_path):
+    """Regression for the seed derived as sha256("gfs-cluster-" + instance_id):
+    ``instance_id`` is served in the clear by ``/gfs/info``, so anyone could
+    recompute the private key and forge a signed capability block."""
+    derived = hashlib.sha256(b"gfs-cluster-gfs-node-0").digest()
+    assert _boot(tmp_path) != _identity_pubkey_hex(derived)
+
+
+def test_identity_seed_file_is_owner_only(tmp_path):
+    """The seed is the GFS's private key — 0600, never group/world readable."""
+    _boot(tmp_path)
+    mode = (tmp_path / server.SIGNING_SEED_FILENAME).stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_identity_seed_first_boot_warns_about_re_pairing(tmp_path, caplog):
+    """An existing deployment upgrading into this code mints a fresh identity;
+    the operator gets exactly one WARNING saying households must re-pair."""
+    with caplog.at_level(logging.WARNING, logger="socialhome.global_server.server"):
+        _boot(tmp_path)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "re-pair" in warnings[0].getMessage()
+
+
+def test_signing_seed_override_is_honoured(tmp_path):
+    """Operators managing secrets externally pin the seed via config/env; the
+    file is then never written (there is nothing to persist)."""
+    seed = bytes(range(32))
+    served = _boot(tmp_path, signing_seed_hex=seed.hex())
+    assert served == _identity_pubkey_hex(seed)
+    assert not (tmp_path / server.SIGNING_SEED_FILENAME).exists()
+
+
+@pytest.mark.parametrize("bad", ["ab" * 16, "zz" * 32, "not-hex"])
+def test_bad_signing_seed_override_is_rejected(tmp_path, bad):
+    """A wrong-length or non-hex override fails the boot rather than silently
+    falling back — and the value itself never reaches the message."""
+    with pytest.raises(ValueError) as exc:
+        _boot(tmp_path, signing_seed_hex=bad)
+    assert bad not in str(exc.value)
