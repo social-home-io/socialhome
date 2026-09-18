@@ -43,8 +43,9 @@ Design:
   member acceptance / re-acceptance).
 
 Forward-compat: once a future PR moves additional content paths under
-``SpaceContentEncryption`` (currently §25.6 sync + sealed-sender GFS
-are the only callers), the cache accepts them without modification —
+``SpaceContentEncryption`` (currently §25.6 sync + the Phase-5a
+public-relay path are the callers), the cache accepts them without
+modification —
 they just become more producers of ``stash`` calls.
 """
 

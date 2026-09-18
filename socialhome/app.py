@@ -2285,14 +2285,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_key_repo,
             key_manager,
             bus=bus,
-            # ``identity_seed`` signs the sealed-sender ``outer_signature``
-            # so a GFS-relayed public/global-space event is authenticated
-            # to the recipient; ``federation_repo`` resolves a decrypted
-            # sender_instance_id → its registered Ed25519 pubkey to verify
-            # that signature. Both wired so the GFS path is secure out of
-            # the box (no unauthenticated sealed sender).
-            identity_seed=identity_seed,
-            federation_repo=federation_repo,
             # Phase 4b — stamp every locally-minted epoch with this household's
             # id so concurrent delegated-admin rotations converge deterministically.
             own_instance_id=identity.instance_id,

@@ -377,10 +377,13 @@ comments, reactions, calendar events, location pins…):
 - **Mesh-routed → end-to-end sealed:** when a path crosses a non-member relay,
   wrap with `SPACE_ROUTED` so the relay sees only ciphertext sealed under the
   target's ephemeral X25519 pub (`socialhome/federation/routed_crypto.py`);
-  the relay can't derive the shared secret. GFS-relayed public/global content
-  uses `seal_for_gfs`.
+  the relay can't derive the shared secret. That sealing is for the mesh, not
+  the GFS. GFS-relayed public/global content is encrypted under the space
+  content key (`SpaceContentEncryption.encrypt`) inside a space-authority-
+  signed envelope the content-blind GFS relays as-is
+  (`services/space_public_outbound.py` / `space_public_inbound.py`).
 - **Content key is membership-gated:** the per-space AES-256 content key
-  (`SpaceContentEncryption` / sealed-sender) is delivered to a new member via
+  (`SpaceContentEncryption`) is delivered to a new member via
   the §D1b key handoff (`apply_space_content_key_from_metadata`), never to a
   relay. Removed members lose access at the next epoch rotation (forward
   secrecy).
