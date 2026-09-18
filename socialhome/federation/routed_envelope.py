@@ -305,6 +305,37 @@ class SpaceRoutedHandler:
         ``SPACE_ROUTE_STALE`` nack can invalidate + rediscover the route."""
         self._route_service = route_service
 
+    # ── Lifecycle ──────────────────────────────────────────────────────
+
+    async def stop(self) -> None:
+        """Cancel every pending deferred retransmit and wait for the tasks
+        to finish. Idempotent: a second call, or one with nothing pending,
+        is a no-op.
+
+        There is no long-running loop to drain here — only the ad-hoc,
+        self-popping tasks :meth:`_schedule_deferred_retransmit` arms — so
+        this is a plain cancel-and-gather rather than the
+        ``_stop: asyncio.Event`` lifecycle scheduler loops follow (template:
+        ``infrastructure/replay_cache_scheduler.py``). App cleanup awaits it
+        before closing the transport a waking task would otherwise try to
+        send through.
+        """
+        tasks = [t for t in self._deferred_retransmits.values() if not t.done()]
+        if not tasks:
+            self._deferred_retransmits.clear()
+            return
+        for task in tasks:
+            task.cancel()
+        # ``_run_deferred_retransmit`` lets CancelledError through (its
+        # fail-soft ``except Exception`` never sees a BaseException), so
+        # every task here settles as cancelled and gather returns promptly.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._deferred_retransmits.clear()
+        log.debug(
+            "SPACE_ROUTED: cancelled %d pending deferred retransmit(s) on stop",
+            len(tasks),
+        )
+
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry  # noqa: SLF001
         registry.register(
@@ -1348,14 +1379,15 @@ class SpaceRoutedHandler:
             is_retry=True,
         )
 
-    def _deferred_retransmit_delay_s(self, target: str) -> float:
+    @staticmethod
+    def _deferred_retransmit_delay_s(
+        target: str, route_service: "RouteDiscoveryService"
+    ) -> float:
         """Seconds until the deferred attempt may plausibly find a route:
-        whatever is left of the discovery service's negative cooldown for
+        whatever is left of ``route_service``'s negative cooldown for
         ``target`` (inside it ``discover_route`` answers ``None`` without
         probing) plus :data:`_DEFERRED_RETRANSMIT_DELAY_S`."""
-        cooldown = 0.0
-        if self._route_service is not None:
-            cooldown = max(self._route_service.cooldown_remaining(target), 0.0)
+        cooldown = max(route_service.cooldown_remaining(target), 0.0)
         return cooldown + _DEFERRED_RETRANSMIT_DELAY_S
 
     def _schedule_deferred_retransmit(
@@ -1364,8 +1396,8 @@ class SpaceRoutedHandler:
         route_id: str,
         pending: _PendingRouted,
         route_service: "RouteDiscoveryService",
-        state: str = "invalidated",
-        reason: str = "no route on rediscovery",
+        state: str,
+        reason: str,
     ) -> None:
         """Arm the ONE deferred retransmit for ``route_id`` (the original
         send's id). Idempotent per route_id: a second call while the first
@@ -1383,7 +1415,7 @@ class SpaceRoutedHandler:
             # Callers filter oversized inners before reaching here; keep
             # the invariant local so the task never has to re-check.
             return
-        delay_s = self._deferred_retransmit_delay_s(target)
+        delay_s = self._deferred_retransmit_delay_s(target, route_service)
         task = asyncio.create_task(
             self._run_deferred_retransmit(
                 route_id=route_id,
@@ -1425,7 +1457,9 @@ class SpaceRoutedHandler:
         late ROUTE_FOUND cached meanwhile costs zero floods), retransmit
         once. A miss or a failure here is terminal; the retransmit itself
         is ``is_retry`` so a nack for it never comes back through here.
-        Never raises out of the task."""
+        Never raises out of the task — except ``CancelledError`` from
+        :meth:`stop`, which the fail-soft ``except Exception`` below must
+        keep letting through so the shutdown gather settles."""
         target = pending.target_instance_id
         try:
             await asyncio.sleep(delay_s)

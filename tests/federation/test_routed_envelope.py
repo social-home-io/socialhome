@@ -2347,13 +2347,15 @@ async def test_deferred_retransmit_waits_out_the_negative_cooldown():
     )
     await _settle()
     try:
-        assert a.handler._deferred_retransmit_delay_s(c.instance_id) == (
-            12.5 + _DEFERRED_RETRANSMIT_DELAY_S
-        )
+        assert a.handler._deferred_retransmit_delay_s(
+            c.instance_id,
+            rs,  # type: ignore[arg-type]
+        ) == (12.5 + _DEFERRED_RETRANSMIT_DELAY_S)
         rs.cooldown = 0.0
-        assert a.handler._deferred_retransmit_delay_s(c.instance_id) == (
-            _DEFERRED_RETRANSMIT_DELAY_S
-        )
+        assert a.handler._deferred_retransmit_delay_s(
+            c.instance_id,
+            rs,  # type: ignore[arg-type]
+        ) == (_DEFERRED_RETRANSMIT_DELAY_S)
         assert route_id in a.handler._deferred_retransmits
     finally:
         _cancel_deferred(a)
@@ -2519,18 +2521,124 @@ async def test_deferred_retransmit_is_scheduled_at_most_once_per_route_id():
             route_id=route_id,
             pending=pending,
             route_service=rs,  # type: ignore[arg-type]
+            state="invalidated",
+            reason="no route on rediscovery",
         )
         first = a.handler._deferred_retransmits[route_id]
         a.handler._schedule_deferred_retransmit(
             route_id=route_id,
             pending=pending,
             route_service=rs,  # type: ignore[arg-type]
+            state="invalidated",
+            reason="no route on rediscovery",
         )
         assert list(a.handler._deferred_retransmits) == [route_id]
         assert a.handler._deferred_retransmits[route_id] is first
         assert not first.done()
     finally:
         _cancel_deferred(a)
+
+
+# ── stop(): app-cleanup lifecycle for the deferred tasks ───────────────────
+
+
+async def _two_pending_deferrals(
+    a: _Node, b: _Node, c: _Node
+) -> tuple[list[str], list[asyncio.Task[None]]]:
+    """Two sends under dead keys, both nacked into an empty rediscovery →
+    two live deferred tasks (one per route_id)."""
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    pin = c.fed.own_identity_pk.hex()
+    r1, _d1, _ = await _send_under_dead_key(a, path, pin=pin)
+    r2, _d2, _ = await _send_under_dead_key(
+        a, path, payload={"post_id": "p2", "n": 2}, pin=pin
+    )
+    await _settle()
+    assert set(a.handler._deferred_retransmits) == {r1, r2}
+    tasks = [a.handler._deferred_retransmits[r] for r in (r1, r2)]
+    assert not any(t.done() for t in tasks)
+    return [r1, r2], tasks
+
+
+async def test_stop_cancels_every_pending_deferred_retransmit(caplog):
+    """App cleanup awaits ``stop()``: both parked tasks are cancelled and
+    awaited (they end ``cancelled()``, not as WARNING-logged failures), the
+    slot map is empty afterwards and nothing was retransmitted."""
+    a, b, c, _rs = _origin_with_route_service(discovery=None)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        _ids, tasks = await _two_pending_deferrals(a, b, c)
+        await a.handler.stop()
+    assert all(t.done() and t.cancelled() for t in tasks)
+    assert a.handler._deferred_retransmits == {}
+    assert len(_routed_sends(a)) == 2, "only the two originals, no retransmit"
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert any(
+        r.levelno == logging.DEBUG and "cancelled 2" in r.message
+        for r in caplog.records
+    )
+
+
+async def test_stop_twice_is_a_noop():
+    """A second ``stop()`` after the first drained everything is a no-op."""
+    a, b, c, _rs = _origin_with_route_service(discovery=None)
+    _ids, tasks = await _two_pending_deferrals(a, b, c)
+    await a.handler.stop()
+    await a.handler.stop()
+    assert a.handler._deferred_retransmits == {}
+    assert all(t.cancelled() for t in tasks)
+
+
+async def test_stop_with_nothing_pending_is_a_noop(caplog):
+    a, _b, _c, _rs = _origin_with_route_service(discovery=None)
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await a.handler.stop()
+    assert a.handler._deferred_retransmits == {}
+    assert not any("cancelled" in r.message for r in caplog.records)
+
+
+async def test_stop_leaves_an_already_completed_deferral_alone():
+    """A deferred task that ran to completion before ``stop()`` is neither
+    cancelled nor re-run; ``stop()`` only touches live tasks."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with _short_deferral():
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+        task = a.handler._deferred_retransmits[route_id]
+        await _await_deferred(a, route_id)
+    assert task.done() and not task.cancelled()
+    discover_calls_before = list(rs.discover_calls)
+    await a.handler.stop()
+    assert task.done() and not task.cancelled()
+    assert rs.discover_calls == discover_calls_before
+    assert a.handler._deferred_retransmits == {}
+
+
+async def test_run_deferred_retransmit_lets_cancellation_through(caplog):
+    """Cancelling a parked deferred task must surface as ``CancelledError``
+    to whoever awaits it — the fail-soft ``except`` in the task body must
+    not swallow it (else ``stop()`` would await a task that quietly runs
+    its retransmit anyway) and must not log it as a WARNING failure."""
+    a, b, c, rs = _origin_with_route_service(discovery=None)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a, path, pin=c.fed.own_identity_pk.hex()
+        )
+        await _settle()
+        task = a.handler._deferred_retransmits[route_id]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _settle()
+    assert task.cancelled()
+    # The done-callback popped its own slot; no second discovery ran.
+    assert route_id not in a.handler._deferred_retransmits
+    assert rs.discover_calls == [c.instance_id]
+    assert len(_routed_sends(a)) == 1
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
 async def test_deferred_retransmit_failure_is_a_warning_not_a_crash(caplog):

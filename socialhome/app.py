@@ -1970,6 +1970,7 @@ def create_app(config: Config | None = None) -> web.Application:
     outbox_processor: OutboxProcessor | None = None
     stale_call_scheduler: StaleCallCleanupScheduler | None = None
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
+    routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     app_pending_session_scheduler: AppPendingSessionPruneScheduler | None = None
     audio_transcript_scheduler: AudioTranscriptScheduler | None = None
@@ -2467,6 +2468,7 @@ def create_app(config: Config | None = None) -> web.Application:
             max_hops=config.max_route_hops,
         )
         route_discovery.attach_to(federation_service)
+        nonlocal routed_handler
         routed_handler = SpaceRoutedHandler(
             federation_service=federation_service,
             federation_repo=federation_repo,
@@ -3088,6 +3090,11 @@ def create_app(config: Config | None = None) -> web.Application:
         await bazaar_expiry_scheduler.stop()
         await highlight_retention_scheduler.stop()
         await moment_retention_scheduler.stop()
+        # Cancel any deferred mesh retransmit parked in the routed-envelope
+        # handler BEFORE the transport below closes — a task waking after
+        # that would only fail its send against a torn-down channel.
+        if routed_handler is not None:
+            await routed_handler.stop()
         # Close all RTC DataChannels so the peers see a clean EOF.
         fed_svc = app.get(K.federation_service_key)
         if fed_svc is not None and getattr(fed_svc, "_transport", None) is not None:
