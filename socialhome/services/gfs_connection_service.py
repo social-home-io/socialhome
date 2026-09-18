@@ -186,6 +186,7 @@ class GfsConnectionService:
         "_anon_warned",
         "_caps_warned",
         "_info_failed_at",
+        "_envelope_relay",
     )
 
     def __init__(
@@ -228,6 +229,14 @@ class GfsConnectionService:
         # connection — the negative TTL (:data:`GFS_INFO_NEGATIVE_TTL_S`).
         # Cleared on the next successful fetch.
         self._info_failed_at: dict[str, float] = {}
+        # Same RAM-only, ratchet-up discipline as ``_anon_publish``, for
+        # the ``envelope_relay`` capability the §D2b invite bootstrap
+        # needs (:class:`socialhome.services.gfs_envelope_sender
+        # .GfsEnvelopeSender`). A build cannot lose the capability, so a
+        # verified ``True`` sticks for the process; anything else stays
+        # unknown and is re-probed on the next attempt rather than
+        # cached as a permanent "no".
+        self._envelope_relay: dict[str, bool] = {}
 
     def attach_publish_context(
         self,
@@ -264,6 +273,16 @@ class GfsConnectionService:
         """
         if self._http_client is None:
             self._http_client = session
+
+    def client(self) -> aiohttp.ClientSession:
+        """The shared session, for the sibling services that relay through a
+        GFS (:mod:`socialhome.services.gfs_envelope_sender`).
+
+        Handing out this one session — rather than letting each service
+        build its own — keeps every GFS-facing call on the same connection
+        pool and the same lifecycle as the rest of the app.
+        """
+        return self._client()
 
     def _client(self) -> aiohttp.ClientSession:
         if self._http_client is None:
@@ -469,6 +488,17 @@ class GfsConnectionService:
         warning text distinguishes them so an operator can tell "old GFS"
         from "someone is rewriting my /gfs/info".
         """
+        caps = self._verified_capabilities(conn, info)
+        return caps is not None and caps.get("anonymous_publish") is True
+
+    def _verified_capabilities(self, conn: GfsConnection, info: dict) -> dict | None:
+        """The capability block from *info*, or ``None`` if it isn't trustworthy.
+
+        One verification for every capability this household reads off
+        ``/gfs/info`` — the signature discipline (and its warnings) must not
+        drift between ``anonymous_publish`` and later additions such as
+        ``envelope_relay``.
+        """
         caps = info.get("capabilities")
         sig = info.get("capabilities_sig")
         suite = info.get("capabilities_sig_suite")
@@ -484,7 +514,7 @@ class GfsConnectionService:
                 "either an older build or its response was stripped in "
                 "transit",
             )
-            return False
+            return None
         try:
             ok = verify_capabilities(
                 conn.public_key, conn.gfs_instance_id, caps, sig, suite
@@ -495,7 +525,7 @@ class GfsConnectionService:
                 f"signed its capability block with the unknown suite {suite!r},"
                 " which this build cannot verify",
             )
-            return False
+            return None
         if not ok:
             self._warn_capabilities(
                 conn,
@@ -503,8 +533,8 @@ class GfsConnectionService:
                 "the pinned key — that is tampering or a key mismatch, not "
                 "an old build",
             )
-            return False
-        return caps.get("anonymous_publish") is True
+            return None
+        return caps
 
     def _apply_capability(self, conn: GfsConnection, verified: bool) -> None:
         """Write the verified capability into the cache, ratcheting UP only.
@@ -572,6 +602,37 @@ class GfsConnectionService:
             return False
         await self._fetch_gfs_info(conn)
         return self._anon_publish.get(conn.id, False)
+
+    async def envelope_relay_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``envelope_relay`` on /gfs/info.
+
+        The §D2b invite bootstrap hands a connection server an opaque
+        household-to-household blob (``POST /gfs/envelope``). A server that
+        doesn't carry those has no such route, so the sender asks here first
+        and fails the redeem with a sentence a human can act on instead of a
+        404 behind a ten-second timeout.
+
+        Same shape as :meth:`_anonymous_publish_supported`: answered from the
+        RAM cache when warm, probed once on a cold miss, and suppressed for
+        :data:`GFS_INFO_NEGATIVE_TTL_S` after an unreachable probe. Only a
+        ``True`` under a VALID signature is cached — an unsigned or stripped
+        block is "unknown", re-probed next time, never a sticky "no".
+        """
+        if self._envelope_relay.get(conn.id):
+            return True
+        failed_at = self._info_failed_at.get(conn.id)
+        if failed_at is not None and time.monotonic() - failed_at < (
+            GFS_INFO_NEGATIVE_TTL_S
+        ):
+            return False
+        info = await self._fetch_gfs_info(conn)
+        if info is None:
+            return False
+        caps = self._verified_capabilities(conn, info)
+        if caps is None or caps.get("envelope_relay") is not True:
+            return False
+        self._envelope_relay[conn.id] = True
+        return True
 
     async def refresh_connection_metadata(self, gfs_id: str) -> None:
         """Re-fetch the GFS descriptor from GET /gfs/info and refresh what

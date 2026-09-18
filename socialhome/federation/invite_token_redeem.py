@@ -901,6 +901,10 @@ class SpaceInviteTokenRedeemCoordinator:
             delivered = await self._relay_sender.send_sealed_envelope(
                 to_instance_id=hint.instance_id,
                 envelope=envelope,
+                # The blob was minted on (and served by) this connection
+                # server, so it is the one relay we know reaches the
+                # issuer — never fan the request out to the others.
+                gfs_url=hint.gfs_url,
             )
             if not delivered:
                 raise SpacePermissionError(
@@ -917,8 +921,17 @@ class SpaceInviteTokenRedeemCoordinator:
             self._pending.pop(nonce, None)
             self._bootstrap_hints.pop(nonce, None)
 
-    async def handle_relayed_envelope(self, envelope: dict) -> dict:
+    async def handle_relayed_envelope(
+        self,
+        envelope: dict,
+        *,
+        gfs_url: str = "",
+    ) -> dict:
         """Inbound entry point for one relayed §D2b envelope.
+
+        ``gfs_url`` is the connection server the blob arrived on; the
+        reply leg goes back out the same way, so a household paired with
+        several servers answers on the one the requester can hear.
 
         The relay hands us an opaque blob with no idea which leg it is
         (that is the point — it is identity-free), so this one entry
@@ -971,10 +984,10 @@ class SpaceInviteTokenRedeemCoordinator:
             raise ValueError(f"Replay detected: bootstrap nonce={nonce!r}")
 
         if body["kind"] == KIND_REDEEM:
-            return await self._handle_bootstrap_redeem(body)
+            return await self._handle_bootstrap_redeem(body, gfs_url=gfs_url)
         return await self._handle_bootstrap_reply(body)
 
-    async def _handle_bootstrap_redeem(self, body: dict) -> dict:
+    async def _handle_bootstrap_redeem(self, body: dict, *, gfs_url: str = "") -> dict:
         """Issuer-side: authorize a stranger's sealed redeem, reply sealed.
 
         Every gate above this point (shape caps, ``derive_instance_id``
@@ -1048,6 +1061,7 @@ class SpaceInviteTokenRedeemCoordinator:
         await self._send_bootstrap_reply(
             body,
             {"kind": KIND_REDEEM_ACK, "redeem_nonce": nonce, **ack_body},
+            gfs_url=gfs_url,
         )
         return {"ok": True, "space_id": ack_body["space_id"]}
 
@@ -1091,6 +1105,8 @@ class SpaceInviteTokenRedeemCoordinator:
         request_body: dict,
         nonce: str,
         reason: str,
+        *,
+        gfs_url: str = "",
     ) -> None:
         """Best-effort sealed DENY back to the redeemer.
 
@@ -1106,11 +1122,18 @@ class SpaceInviteTokenRedeemCoordinator:
                     "redeem_nonce": nonce,
                     "reason": reason,
                 },
+                gfs_url=gfs_url,
             )
         except Exception:
             log.exception("invite bootstrap: DENY ship-back failed")
 
-    async def _send_bootstrap_reply(self, request_body: dict, reply: dict) -> None:
+    async def _send_bootstrap_reply(
+        self,
+        request_body: dict,
+        reply: dict,
+        *,
+        gfs_url: str = "",
+    ) -> None:
         """Seal ``reply`` to the requester's key-wrap key and relay it."""
         assert self._relay_sender is not None
         local = await self._federation_repo.get_local_identity()
@@ -1134,6 +1157,7 @@ class SpaceInviteTokenRedeemCoordinator:
         await self._relay_sender.send_sealed_envelope(
             to_instance_id=str(request_body["instance_id"]),
             envelope=envelope,
+            gfs_url=gfs_url,
         )
 
     async def _seat_space_session_instance(

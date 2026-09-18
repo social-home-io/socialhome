@@ -89,10 +89,37 @@ export function SpaceJoinByCodeDialog() {
       // instance + bare-token pastes use the original local path
       // (issuer_instance_id omitted).
       const issuer = crossInstanceIssuer(payload)
-      const body: { token: string; issuer_instance_id?: string } = {
+      const body: {
+        token: string
+        issuer_instance_id?: string
+        space_id?: string
+        issuer_identity_pk?: string
+        issuer_keywrap_pk?: string
+        issuer_keywrap_sig?: string
+        issuer_proto_version?: number
+        expires_at?: string
+        gfs?: string
+      } = {
         token: payload.token,
       }
       if (issuer) body.issuer_instance_id = issuer
+      // §D2b — a code from a household we have never met carries the
+      // issuer's public keys and the connection server that serves the
+      // blob. Forwarded only alongside an issuer id; the backend uses
+      // them solely when neither a direct pairing nor a mesh route
+      // reaches the issuer.
+      if (issuer && payload.issuer_identity_pk && payload.issuer_keywrap_pk
+          && payload.issuer_keywrap_sig) {
+        body.issuer_identity_pk = payload.issuer_identity_pk
+        body.issuer_keywrap_pk = payload.issuer_keywrap_pk
+        body.issuer_keywrap_sig = payload.issuer_keywrap_sig
+        if (payload.space_id) body.space_id = payload.space_id
+        if (payload.issuer_proto_version) {
+          body.issuer_proto_version = payload.issuer_proto_version
+        }
+        if (payload.expires_at) body.expires_at = payload.expires_at
+        if (payload.via_gfs?.gfs_url) body.gfs = payload.via_gfs.gfs_url
+      }
       const r = await api.post('/api/spaces/join', body) as {
         space_id: string
       }

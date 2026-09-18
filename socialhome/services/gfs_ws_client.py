@@ -90,6 +90,7 @@ class GfsWebSocketClient:
         "_on_moment_public",
         "_on_follow_changed",
         "_on_new_subscriber",
+        "_on_envelope",
         "_on_connected",
         "_reconnect_delays",
         "_stop",
@@ -111,6 +112,7 @@ class GfsWebSocketClient:
         on_moment_public: Callable[[dict], Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
         on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
+        on_envelope: Callable[[dict], Awaitable[None]] | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         reconnect_delays: tuple[float, ...] = RECONNECT_DELAYS,
     ) -> None:
@@ -124,6 +126,7 @@ class GfsWebSocketClient:
         self._on_moment_public = on_moment_public
         self._on_follow_changed = on_follow_changed
         self._on_new_subscriber = on_new_subscriber
+        self._on_envelope = on_envelope
         self._on_connected = on_connected
         self._reconnect_delays = reconnect_delays
         self._stop = asyncio.Event()
@@ -199,6 +202,23 @@ class GfsWebSocketClient:
         this lets startup attach the handler without re-creating the client.
         """
         self._on_new_subscriber = handler
+
+    def attach_envelope_handler(
+        self,
+        handler: Callable[[dict], Awaitable[None]],
+    ) -> None:
+        """Late-bound wiring for the §D2b invite-bootstrap inbound leg.
+
+        The GFS pushes an ``envelope`` frame when another household sealed a
+        blob addressed to this one — an invite redeem from a stranger, or the
+        issuer's sealed reply. The frame carries only ``{type, sealed}``: the
+        relay knows the recipient and nothing else, and everything the
+        handler needs (who sent it, which space, which token) is inside the
+        ciphertext. The :class:`~socialhome.federation.invite_token_redeem
+        .SpaceInviteTokenRedeemCoordinator` is wired after the WS client, so
+        this lets startup attach it without re-creating the client.
+        """
+        self._on_envelope = handler
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -440,6 +460,24 @@ class GfsWebSocketClient:
             except Exception as exc:  # defensive
                 log.warning(
                     "gfs.ws.client: on_new_subscriber handler raised for %s: %s",
+                    self._gfs_url,
+                    exc,
+                )
+            return
+        if frame_type == "envelope":
+            if self._on_envelope is None:
+                log.debug(
+                    "gfs.ws.client: dropping envelope — no handler attached on %s",
+                    self._gfs_url,
+                )
+                return
+            try:
+                await self._on_envelope(frame)
+            except Exception as exc:  # defensive
+                # The message names the rejection ("replay detected",
+                # "signature verification failed"), never the blob.
+                log.warning(
+                    "gfs.ws.client: on_envelope handler raised for %s: %s",
                     self._gfs_url,
                     exc,
                 )

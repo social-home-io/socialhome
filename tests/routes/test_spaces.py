@@ -1181,7 +1181,9 @@ async def test_join_forwards_issuer_instance_id_to_service(client, monkeypatch):
 
     captured: dict = {}
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         captured["token"] = token
         captured["user_id"] = user_id
         captured["issuer_instance_id"] = issuer_instance_id
@@ -1208,7 +1210,9 @@ async def test_join_remote_redeem_denied_maps_to_422(client, monkeypatch):
     from socialhome.domain.space import SpacePermissionError
     from socialhome.services.space_service import SpaceService
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         raise SpacePermissionError(
             "invite token invalid, expired, or exhausted",
         )
@@ -1229,7 +1233,9 @@ async def test_join_remote_redeem_timeout_maps_to_504(client, monkeypatch):
     """A ``TimeoutError`` (issuer didn't ACK / DENY in time) maps to 504."""
     from socialhome.services.space_service import SpaceService
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         raise TimeoutError("issuer did not respond")
 
     monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
@@ -1250,7 +1256,9 @@ async def test_join_local_ban_still_maps_to_403(client, monkeypatch):
     from socialhome.domain.space import SpacePermissionError
     from socialhome.services.space_service import SpaceService
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         raise SpacePermissionError("banned from this space", banned=True)
 
     monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
@@ -2274,3 +2282,103 @@ async def test_list_spaces_includes_features_block(client):
     # …and the block is the full detail shape, not a one-key special case.
     r = await client.get(f"/api/spaces/{open_sid}", headers=_auth(client._admin_token))
     assert rows[open_sid]["features"] == (await r.json())["features"]
+
+
+async def test_join_builds_a_bootstrap_hint_from_an_invite_link(client, monkeypatch):
+    """§D2b — a code minted for a stranger carries the issuer's public keys
+    and the connection server that served it; the view turns those into the
+    hint the service falls back to when no pairing and no mesh route
+    reaches the issuer."""
+    from socialhome.services.space_service import SpaceService
+
+    captured: dict = {}
+
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
+        captured["bootstrap"] = bootstrap
+        return {"space_id": "sp-remote", "role": "member"}
+
+    monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={
+            "token": "tkn",
+            "space_id": "sp-remote",
+            "issuer_instance_id": "issuer-abc",
+            "issuer_identity_pk": "aa" * 32,
+            "issuer_keywrap_pk": "bb" * 32,
+            "issuer_keywrap_sig": "c2ln",
+            "issuer_proto_version": 29,
+            "expires_at": "2026-12-01T00:00:00+00:00",
+            "gfs": "https://relay.example.org",
+        },
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    hint = captured["bootstrap"]
+    assert hint is not None
+    assert hint.instance_id == "issuer-abc"
+    assert hint.invite_token == "tkn"
+    assert hint.space_id == "sp-remote"
+    assert hint.identity_pk == "aa" * 32
+    assert hint.keywrap_pk == "bb" * 32
+    assert hint.keywrap_sig == "c2ln"
+    assert hint.proto_version == 29
+    assert hint.expires_at == "2026-12-01T00:00:00+00:00"
+    assert hint.gfs_url == "https://relay.example.org"
+
+
+async def test_join_without_the_key_block_sends_no_hint(client, monkeypatch):
+    """An older code (or one missing any of the three key fields) redeems
+    over the direct / mesh paths exactly as before — there is nothing to
+    seal to, so no hint is built."""
+    from socialhome.services.space_service import SpaceService
+
+    captured: dict = {}
+
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
+        captured["bootstrap"] = bootstrap
+        return {"space_id": "sp-remote", "role": "member"}
+
+    monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={
+            "token": "tkn",
+            "issuer_instance_id": "issuer-abc",
+            # key-wrap signature missing → not enough to seal safely
+            "issuer_identity_pk": "aa" * 32,
+            "issuer_keywrap_pk": "bb" * 32,
+        },
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    assert captured["bootstrap"] is None
+
+
+async def test_join_relay_unavailable_maps_to_422(client, monkeypatch):
+    """No connection server can carry the sealed blob → the user reads the
+    reason, not a ten-second timeout."""
+    from socialhome.services.gfs_envelope_sender import EnvelopeRelayUnavailable
+    from socialhome.services.space_service import SpaceService
+
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
+        raise EnvelopeRelayUnavailable(
+            "this connection server can't relay invites yet",
+        )
+
+    monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={"token": "tkn", "issuer_instance_id": "issuer-abc"},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 422
+    body = await resp.json()
+    assert body["error"]["code"] == "REDEEM_DENIED"
+    assert "can't relay invites yet" in body["error"]["detail"]

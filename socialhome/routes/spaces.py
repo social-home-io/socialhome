@@ -45,6 +45,7 @@ from ..domain.space import (
 from ..domain.space_proposal import ProposalAction
 from ..domain.user import SYSTEM_AUTHOR
 from ..domain.federation import PairingStatus
+from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
@@ -1395,6 +1396,49 @@ class RemoteInviteDecisionView(BaseView):
         return web.Response(status=204)
 
 
+def _bootstrap_hint(
+    body: dict,
+    *,
+    issuer_instance_id: str,
+    token: str,
+) -> InviteBootstrapHint | None:
+    """Build the §D2b hint from a pasted invite code, or ``None``.
+
+    An invite link minted for a stranger carries the issuer's public key
+    material alongside the token — the Ed25519 identity key its instance
+    id derives from, the static X25519 key-wrap key, and the signature
+    binding the two. All three are mandatory: without them there is
+    nothing to seal to and nothing to check a substitution against, so a
+    partial set yields ``None`` and the redeem falls back to the
+    direct-peer / mesh paths (which is also what an older code does).
+
+    ``gfs`` is the base URL of the connection server that served the
+    blob — the one relay known to reach the issuer.
+    """
+    identity_pk = str(body.get("issuer_identity_pk") or "").strip()
+    keywrap_pk = str(body.get("issuer_keywrap_pk") or "").strip()
+    keywrap_sig = str(body.get("issuer_keywrap_sig") or "").strip()
+    if not (identity_pk and keywrap_pk and keywrap_sig):
+        return None
+    try:
+        proto_version = int(body.get("issuer_proto_version") or 1)
+    except TypeError, ValueError:
+        proto_version = 1
+    gfs_raw = body.get("gfs")
+    return InviteBootstrapHint(
+        invite_token=token,
+        space_id=str(body.get("space_id") or "").strip(),
+        instance_id=issuer_instance_id,
+        identity_pk=identity_pk,
+        keywrap_pk=keywrap_pk,
+        keywrap_sig=keywrap_sig,
+        proto_version=proto_version,
+        display_hint=str(body.get("space_display_hint") or ""),
+        expires_at=(str(body["expires_at"]) if body.get("expires_at") else None),
+        gfs_url=str(gfs_raw).strip() if gfs_raw else "",
+    )
+
+
 class SpaceJoinView(BaseView):
     """POST /api/spaces/join — accept an invite token.
 
@@ -1405,6 +1449,14 @@ class SpaceJoinView(BaseView):
 
     * 422 — issuer not paired / token denied (``SpacePermissionError``)
     * 504 — issuer didn't respond within the timeout (``TimeoutError``)
+
+    A code pasted from a household we have never met carries the
+    issuer's public keys too (``issuer_identity_pk``,
+    ``issuer_keywrap_pk``, ``issuer_keywrap_sig``,
+    ``issuer_proto_version``, ``gfs``, ``expires_at``). Those build the
+    §D2b bootstrap hint, which the service uses **only** when neither a
+    direct pairing nor a mesh route reaches the issuer — both are
+    strictly better and are tried first.
     """
 
     async def post(self) -> web.Response:
@@ -1413,11 +1465,21 @@ class SpaceJoinView(BaseView):
         body = await self.body()
         issuer_raw = body.get("issuer_instance_id") if isinstance(body, dict) else None
         issuer_instance_id = str(issuer_raw).strip() if issuer_raw else None
+        bootstrap = (
+            _bootstrap_hint(
+                body,
+                issuer_instance_id=issuer_instance_id,
+                token=body["token"],
+            )
+            if isinstance(body, dict) and issuer_instance_id
+            else None
+        )
         try:
             result = await svc.redeem_invite_token(
                 body["token"],
                 user_id=ctx.user_id,
                 issuer_instance_id=issuer_instance_id or None,
+                bootstrap=bootstrap,
             )
         except TimeoutError as exc:
             return error_response(504, "ISSUER_TIMEOUT", str(exc))

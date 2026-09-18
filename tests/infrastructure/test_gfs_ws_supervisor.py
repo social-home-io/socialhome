@@ -463,3 +463,69 @@ async def test_connection_health_reflects_live_client(http_session):
             }
         finally:
             await supervisor.stop()
+
+
+async def test_supervisor_binds_envelope_handler_per_connection(http_session):
+    """Each client's §D2b envelope handler carries its own connection
+    server's URL, so the issuer's sealed reply goes back out the server the
+    request arrived on rather than whichever pairing came first."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def on_envelope(frame: dict, *, gfs_url: str = "") -> None:
+        seen.append((frame["sealed"]["ciphertext"], gfs_url))
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, on_envelope=None, **_kwargs):
+            self.gfs_url = gfs_url
+            captured[gfs_url] = on_envelope
+
+        def is_alive(self) -> bool:
+            return True
+
+        def attach_envelope_handler(self, handler):
+            captured[self.gfs_url] = handler
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            on_envelope=on_envelope,
+            reconcile_interval_seconds=0.05,
+        )
+        await supervisor.start()
+        try:
+            await captured["http://gfs1.test"]({"sealed": {"ciphertext": "one"}})
+            await captured["http://gfs2.test"]({"sealed": {"ciphertext": "two"}})
+            assert seen == [
+                ("one", "http://gfs1.test"),
+                ("two", "http://gfs2.test"),
+            ]
+            # Late binding (startup wires the coordinator after the
+            # supervisor) re-binds every running client to its own URL.
+            late: list[tuple[str, str]] = []
+
+            async def later(frame: dict, *, gfs_url: str = "") -> None:
+                late.append((frame["sealed"]["ciphertext"], gfs_url))
+
+            supervisor.attach_envelope_handler(later)
+            await captured["http://gfs2.test"]({"sealed": {"ciphertext": "three"}})
+            assert late == [("three", "http://gfs2.test")]
+        finally:
+            await supervisor.stop()

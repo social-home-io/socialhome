@@ -2850,3 +2850,71 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
             assert svc._anon_publish[conn.id] is True  # noqa: SLF001
     finally:
         await db.shutdown()
+
+
+# ── envelope_relay capability (§D2b invite bootstrap) ──────────────────────
+
+
+async def test_envelope_relay_supported_reads_the_signed_block(env):
+    """Only the SIGNED capability block grants the relay — the same rule
+    ``anonymous_publish`` follows, for the same reason."""
+    _db, repo = env
+    conn = _make_conn("er-1", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True, "envelope_relay": True},
+        ),
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is True
+    # Cached after the first probe — a redeem must not re-fetch /gfs/info.
+    assert await svc.envelope_relay_supported(conn) is True
+    assert len(session.gets) == 1
+
+
+async def test_envelope_relay_absent_from_the_block_is_false(env):
+    _db, repo = env
+    conn = _make_conn("er-2", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True},
+        ),
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is False
+
+
+async def test_envelope_relay_from_a_stripped_block_is_false(env):
+    """An unsigned flag is an on-path attacker's, not a capability."""
+    _db, repo = env
+    conn = _make_conn("er-3", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(info={"server_name": "x", "envelope_relay": True})
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is False
+
+
+async def test_envelope_relay_unreachable_gfs_is_false_and_suppressed(env):
+    """An unreachable probe answers ``False`` for this attempt and is not
+    re-tried until the negative TTL lapses."""
+    _db, repo = env
+    conn = _make_conn("er-4", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(raise_on_get=True)
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is False
+    assert await svc.envelope_relay_supported(conn) is False
+    assert len(session.gets) == 1
+
+
+async def test_client_exposes_the_shared_session(env):
+    """Sibling GFS-facing services borrow this session rather than opening
+    a second connection pool."""
+    _db, repo = env
+    session = _AnonSession()
+    svc = GfsConnectionService(repo, http_client=session)
+    assert svc.client() is session

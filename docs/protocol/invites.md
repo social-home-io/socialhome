@@ -135,16 +135,48 @@ to strangers. Neither side ever learns the other's address on this path.
 
 The blob carries `{invite_token, space_id, display_hint,
 issuer_instance_id, issuer_identity_pk, issuer_keywrap_pk,
-issuer_keywrap_sig, issuer_proto_version, expires_at}`. The two key
-fields are public keys, not addresses: the Ed25519 identity key that the
-instance id is derived from, and the static X25519 **key-wrap** key with
-its self-signature under that identity.
+issuer_keywrap_sig, issuer_proto_version, expires_at}` plus the base URL
+of the connection server that serves it (`via_gfs.gfs_url` in the
+`socialhome://invite#…` code). The two key fields are public keys, not
+addresses: the Ed25519 identity key that the instance id is derived from,
+and the static X25519 **key-wrap** key with its self-signature under that
+identity.
 
 The redeeming household seals its request to that key-wrap key and hands
 the ciphertext to the GFS addressed to `issuer_instance_id`; the GFS
 pushes it to that household over its existing socket. The issuer opens
 it, validates, and replies through the same relay, sealed to the
 redeemer's key-wrap key — which rode *inside* the request.
+
+### Client leg — the household side of the relay
+
+- **Out:** `POST {gfs_base}/gfs/envelope` with exactly
+  `{"to_instance", "sealed"}` (`services/gfs_envelope_sender.py`). The body
+  is rebuilt from the recipient id + the sealed box rather than forwarded,
+  so no caller can add a third field; there is no `from_instance` and no
+  household transport signature, the same identity-free discipline
+  `POST /gfs/publish` follows. The answer is a uniform
+  `202 {"status":"accepted"}` for anything well-formed — a sender learns
+  nothing about the recipient — with `400` / `413` / `429` for malformed,
+  oversize or throttled. Every non-2xx is a transport failure, logged at
+  INFO with the server's name and never the blob.
+- **In:** the GFS pushes `{"type":"envelope","sealed":{…}}` on `/gfs/ws`;
+  `services/gfs_ws_client.py` routes it to
+  `SpaceInviteTokenRedeemCoordinator.handle_relayed_envelope`, which opens
+  and validates it (the fail-closed order below). Unknown frame types keep
+  being ignored at DEBUG.
+- **Which server:** the blob is minted per connection server, so the
+  redeemer hands its request to the one that served the invite
+  (`InviteBootstrapHint.gfs_url`) and the issuer answers on the one the
+  request arrived on — a household paired with several servers never
+  replies somewhere the requester isn't listening.
+- **Capability gate:** the household relays only through a server whose
+  **signed** `/gfs/info` capability block (verified against the key pinned
+  for that pairing) carries `envelope_relay: true`. An older server has no
+  such route, so the redeem fails immediately with *"this connection server
+  can't relay invites yet"* instead of a 404 behind a ten-second timeout.
+  A server the redeeming household isn't connected to at all fails the same
+  way, naming that instead.
 
 ### Wire shape
 
@@ -354,9 +386,12 @@ sequenceDiagram
     participant G as GFS (relay)
     participant I as HFS I (issuer)
     Note over R: opens the public invite link,<br/>reads the blob
+    R->>G: GET /gfs/info (signed capabilities)
+    G-->>R: envelope_relay: true
     R->>R: verify_keywrap_binding(issuer keys)
     R->>R: sign body (own identity key),<br/>seal to issuer key-wrap key
     R->>G: POST /gfs/envelope<br/>{to_instance: I, sealed}
+    G-->>R: 202 accepted (uniform — online, offline or unknown)
     G->>I: ws {type: envelope, sealed}<br/>(queued up to 24 h if offline)
     Note over I: unseal → anti-tamper → signature →<br/>ts → replay → token → ban
     alt token valid
@@ -382,7 +417,8 @@ burning a timeout on a household that has no handler for the envelope.
 
 ### Open: reaching a bootstrap member afterwards
 
-Seating works; **ongoing delivery does not, yet**. Neither household
+Seating works; **ongoing delivery does not, yet**. The relay above carries
+the redeem handshake only — nothing re-uses it for space traffic. Neither household
 holds an address for the other (by design — the blob is public), and a
 `space_session` peer may have no mesh path either, so
 `remote_inbox_url` is empty and the direct transports have nothing to

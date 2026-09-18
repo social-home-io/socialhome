@@ -33,9 +33,11 @@ users, the nonce and the signature all live inside the ciphertext, so
 the GFS sees a recipient id, a blob size and a timing — nothing else.
 
 This module owns the household side only: the sealing/unsealing, the
-signature discipline, and the fail-closed validation. The GFS endpoint
-and the ``/gfs/ws`` frame that carry the blob are a separate task and
-plug into :class:`RelayEnvelopeSender`.
+signature discipline, and the fail-closed validation. Carrying the blob
+is somebody else's job, behind :class:`RelayEnvelopeSender` —
+in production :class:`socialhome.services.gfs_envelope_sender
+.GfsEnvelopeSender` (``POST {gfs}/gfs/envelope`` out, the ``envelope``
+frame on ``/gfs/ws`` back in).
 
 ## Why ``keywrap_seal`` and not ``routed_crypto``
 
@@ -169,8 +171,19 @@ class RelayEnvelopeSender(Protocol):
     goes out over the household's existing ``/gfs/ws`` socket addressed
     to ``to_instance_id``. Tests wire an in-process fake pair.
 
+    ``gfs_url`` names the connection server to hand the blob to: the
+    redeemer passes the base URL the invite blob was served from
+    (:attr:`InviteBootstrapHint.gfs_url`), and the issuer passes the one
+    the request arrived on, so a household paired with several servers
+    answers on the one that carried the request. Empty means "any relay
+    this household can use".
+
     Returns ``True`` when the relay accepted the blob for delivery.
-    Implementations never raise — a transport failure is ``False``.
+    A transport failure is ``False``, never an exception. The one
+    exception implementations may raise is a *configuration* refusal —
+    no reachable relay, or one that cannot carry invite envelopes —
+    which the redeem surfaces to the user as a named reason rather than
+    a ten-second timeout.
     """
 
     async def send_sealed_envelope(
@@ -178,6 +191,7 @@ class RelayEnvelopeSender(Protocol):
         *,
         to_instance_id: str,
         envelope: dict[str, Any],
+        gfs_url: str = "",
     ) -> bool: ...
 
 
@@ -194,6 +208,12 @@ class InviteBootstrapHint:
     bound to ``instance_id`` before any seal (see
     :func:`~socialhome.federation.keywrap_seal.verify_keywrap_binding`),
     so a malicious connection server cannot substitute a key it holds.
+
+    ``gfs_url`` is the base URL of the connection server that served
+    the blob. The blob is minted per connection server (the issuer
+    publishes it there), so it is also the one relay known to reach the
+    issuer — the redeemer hands its sealed request to exactly that
+    server rather than guessing among its own pairings.
     """
 
     invite_token: str
@@ -205,6 +225,7 @@ class InviteBootstrapHint:
     proto_version: int = 1
     display_hint: str = ""
     expires_at: str | None = None
+    gfs_url: str = ""
 
 
 def canonical_signing_bytes(body: dict[str, Any]) -> bytes:

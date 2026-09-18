@@ -286,6 +286,7 @@ from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
+from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.map_tile_service import MapTileService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
@@ -2544,6 +2545,26 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         invite_redeem_coordinator.attach_to(federation_service)
         real_space_service.attach_redeem_coordinator(invite_redeem_coordinator)
+        # §D2b — redeeming an invite link from a household we have never
+        # met. The sealed blob goes out through a connection server
+        # addressed by instance id only; the key-wrap triple is this
+        # household's OWN published static X25519 key + its binding
+        # signature (the same material ``/gfs/info`` serves and the
+        # subscriber key handoff uses — never a fresh keypair), so the
+        # issuer can seal its reply back and both sides derive matching
+        # space-session keys. The inbound leg is attached to the GFS
+        # socket further down (``attach_envelope_handler``).
+        invite_redeem_coordinator.attach_bootstrap(
+            relay_sender=GfsEnvelopeSender(
+                gfs_service=gfs_connection_service,
+                gfs_repo=repos.gfs_connection,
+            ),
+            keywrap_private_key=identity.keywrap_private_key,
+            keywrap_public_key=identity.keywrap_public_key,
+            keywrap_sig=identity.keywrap_sig,
+            key_manager=key_manager,
+            rate_limiter=limiter,
+        )
         # #117 followup — federate SPACE_POST_CREATED outbound so
         # remote members on other households actually receive posts
         # in spaces they belong to. The inbound side was already
@@ -2719,6 +2740,19 @@ def create_app(config: Config | None = None) -> web.Application:
                 space_subscriber_key_inbound=space_subscriber_key_inbound,
             )
 
+        # §D2b inbound leg — the GFS pushes ``{type:"envelope", sealed}``
+        # when another household sealed a blob addressed to this one (an
+        # invite redeem from a stranger, or the issuer's sealed reply).
+        # The frame carries nothing else: every check the coordinator runs
+        # reads material from inside the ciphertext. ``gfs_url`` is bound
+        # per connection by the supervisor so the reply goes back out the
+        # server the request arrived on.
+        async def _on_gfs_envelope(frame: dict, *, gfs_url: str = "") -> None:
+            await invite_redeem_coordinator.handle_relayed_envelope(
+                {"sealed": frame.get("sealed")},
+                gfs_url=gfs_url,
+            )
+
         # Re-fetch the GFS's current server_name on each WS (re)connect and
         # refresh the stored display_name if the operator renamed the
         # server (a rename typically restarts the GFS → forces a reconnect).
@@ -2776,6 +2810,7 @@ def create_app(config: Config | None = None) -> web.Application:
             on_moment_signal=moment_public_signaling_handler.handle_signal,
             on_moment_public=moment_public_inbound.handle,
             on_new_subscriber=space_subscriber_key_outbound.handle,
+            on_envelope=_on_gfs_envelope,
             on_connected=_on_gfs_connected,
         )
         await gfs_ws_supervisor.start()

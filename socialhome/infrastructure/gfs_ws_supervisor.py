@@ -46,9 +46,11 @@ class GfsWebSocketSupervisor:
         "_on_moment_public",
         "_on_follow_changed",
         "_on_new_subscriber",
+        "_on_envelope",
         "_on_connected",
         "_interval",
         "_clients",
+        "_client_urls",
         "_lock",
         "_stop",
         "_task",
@@ -67,6 +69,7 @@ class GfsWebSocketSupervisor:
         on_moment_public: Callable[..., Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
         on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
+        on_envelope: Callable[..., Awaitable[None]] | None = None,
         on_connected: Callable[[str], Awaitable[None]] | None = None,
         reconcile_interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS,
     ) -> None:
@@ -80,9 +83,14 @@ class GfsWebSocketSupervisor:
         self._on_moment_public = on_moment_public
         self._on_follow_changed = on_follow_changed
         self._on_new_subscriber = on_new_subscriber
+        self._on_envelope = on_envelope
         self._on_connected = on_connected
         self._interval = reconcile_interval_seconds
         self._clients: dict[str, GfsWebSocketClient] = {}
+        #: ``gfs_id`` → that client's base URL, so a late-bound handler can
+        #: be re-bound per connection server (see
+        #: :meth:`attach_envelope_handler`).
+        self._client_urls: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -129,6 +137,24 @@ class GfsWebSocketSupervisor:
         self._on_new_subscriber = handler
         for client in list(self._clients.values()):
             client.attach_new_subscriber_handler(handler)
+
+    def attach_envelope_handler(
+        self,
+        handler: Callable[..., Awaitable[None]],
+    ) -> None:
+        """Late-bound — attaches the §D2b invite-bootstrap inbound leg to
+        every running client and to clients started later.
+
+        The handler must accept ``(frame, *, gfs_url)``; this method binds
+        the right URL per client, so the issuer's sealed reply goes back out
+        the same connection server the request arrived on rather than
+        whichever one happens to be first.
+        """
+        self._on_envelope = handler
+        for gfs_id, client in list(self._clients.items()):
+            client.attach_envelope_handler(
+                _bind_gfs_url(handler, self._client_urls.get(gfs_id, "")),
+            )
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -250,11 +276,17 @@ class GfsWebSocketSupervisor:
             on_moment_public=wrapped_moment_public,
             on_follow_changed=self._on_follow_changed,
             on_new_subscriber=self._on_new_subscriber,
+            on_envelope=(
+                _bind_gfs_url(self._on_envelope, conn.inbox_url)
+                if self._on_envelope is not None
+                else None
+            ),
             on_connected=wrapped_on_connected,
         )
         async with self._lock:
             existing = self._clients.get(conn.id)
             self._clients[conn.id] = client
+            self._client_urls[conn.id] = conn.inbox_url
         if existing is not None:
             await existing.stop()
         await client.start()
@@ -267,9 +299,27 @@ class GfsWebSocketSupervisor:
     async def _stop_client(self, gfs_id: str) -> None:
         async with self._lock:
             client = self._clients.pop(gfs_id, None)
+            self._client_urls.pop(gfs_id, None)
         if client is not None:
             await client.stop()
             log.info("gfs.ws.supervisor: stopped client gfs_id=%s", gfs_id)
+
+
+def _bind_gfs_url(
+    handler: Callable[..., Awaitable[None]],
+    gfs_url: str,
+) -> Callable[[dict], Awaitable[None]]:
+    """Return a per-frame wrapper that injects ``gfs_url`` into the call.
+
+    The §D2b inbound leg replies through the same connection server the
+    blob arrived on — a household paired with several servers must not
+    answer on one the requester isn't listening to.
+    """
+
+    async def _wrapped(frame: dict) -> None:
+        await handler(frame, gfs_url=gfs_url)
+
+    return _wrapped
 
 
 def _bind_gfs_id(

@@ -1209,20 +1209,34 @@ class _RelayBus:
     def __init__(self) -> None:
         self.coordinators: dict = {}
         self.envelopes: list[tuple[str, dict]] = []
+        #: The connection server each blob was addressed through — the
+        #: redeemer hands its request to the server that served the
+        #: invite blob, the issuer answers on the one it arrived on.
+        self.gfs_urls: list[str] = []
         self.deliver = True
 
     def sender_for(self, _from_instance: str):
         bus = self
 
         class _Sender:
-            async def send_sealed_envelope(self, *, to_instance_id, envelope):
+            async def send_sealed_envelope(
+                self,
+                *,
+                to_instance_id,
+                envelope,
+                gfs_url="",
+            ):
                 bus.envelopes.append((to_instance_id, envelope))
+                bus.gfs_urls.append(gfs_url)
                 if not bus.deliver:
                     return False
                 target = bus.coordinators.get(to_instance_id)
                 if target is None:
                     return False
-                await target.handle_relayed_envelope(envelope)
+                # A real connection server pushes the blob down the
+                # socket it holds, so the receiver learns which server
+                # carried it — and answers on that one.
+                await target.handle_relayed_envelope(envelope, gfs_url=gfs_url)
                 return True
 
         return _Sender()
@@ -1266,8 +1280,16 @@ class _BootstrapFederationRepo(_FakeFederationRepo):
         self._instances[instance.id] = instance
 
 
-def _hint_for(party: _Party, *, space_id="space-1", token="tok-1", proto=OURS):
+def _hint_for(
+    party: _Party,
+    *,
+    space_id="space-1",
+    token="tok-1",
+    proto=OURS,
+    gfs_url="https://gfs.example.org",
+):
     return InviteBootstrapHint(
+        gfs_url=gfs_url,
         invite_token=token,
         space_id=space_id,
         instance_id=party.instance_id,
@@ -1728,3 +1750,19 @@ async def test_bootstrap_inbound_is_rate_limited_per_sender():
         await env.issuer.handle_relayed_envelope(envelope)
     # Throttled before the token was touched.
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 5
+
+
+async def test_bootstrap_both_legs_travel_through_the_blob_s_server():
+    """The redeemer hands its request to the connection server that served
+    the invite blob, and the issuer answers on the same one — a household
+    paired with several servers must not reply somewhere the requester
+    isn't listening."""
+    env = _bootstrap_pair()
+    hint = _hint_for(env.issuer_party, gfs_url="https://relay-b.example")
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=hint,
+    )
+    assert env.relay.gfs_urls == ["https://relay-b.example"] * 2

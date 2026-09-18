@@ -163,6 +163,65 @@ describe('SpaceJoinByCodeDialog', () => {
     })
   })
 
+  it('forwards the bootstrap block for a code from a household we never met', async () => {
+    api.post.mockResolvedValueOnce({ space_id: 'space-uuid-boot' })
+    // §D2b — the issuer's public keys plus the connection server that
+    // served the blob. The backend uses them only when neither a
+    // pairing nor a mesh route reaches the issuer.
+    const code = buildInviteCode({
+      token: 'a1b2c3d4e5f60718',
+      space_id: 'space-uuid-boot',
+      issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+      issuer_identity_pk: 'aa'.repeat(32),
+      issuer_keywrap_pk: 'bb'.repeat(32),
+      issuer_keywrap_sig: 'c2ln',
+      issuer_proto_version: 29,
+      expires_at: '2026-12-01T00:00:00+00:00',
+      via_gfs: { gfs_url: 'https://relay.example.org', gfs_space_id: 'g-1' },
+    })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.input(input, { target: { value: code } })
+    })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith('/api/spaces/join', {
+        token: 'a1b2c3d4e5f60718',
+        issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+        space_id: 'space-uuid-boot',
+        issuer_identity_pk: 'aa'.repeat(32),
+        issuer_keywrap_pk: 'bb'.repeat(32),
+        issuer_keywrap_sig: 'c2ln',
+        issuer_proto_version: 29,
+        expires_at: '2026-12-01T00:00:00+00:00',
+        gfs: 'https://relay.example.org',
+      })
+    })
+  })
+
+  it('sends no bootstrap block when the code carries an incomplete key set', async () => {
+    api.post.mockResolvedValueOnce({ space_id: 'space-uuid-part' })
+    const code = buildInviteCode({
+      token: 'a1b2c3d4e5f60718',
+      issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+      issuer_identity_pk: 'aa'.repeat(32),
+      // key-wrap key + signature missing — nothing safe to seal to.
+    })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.input(input, { target: { value: code } })
+    })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith('/api/spaces/join', {
+        token: 'a1b2c3d4e5f60718',
+        issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+      })
+    })
+  })
+
   it('joins when given a bare hex token (back-compat)', async () => {
     api.post.mockResolvedValueOnce({ space_id: 'space-bare' })
     const { container, getByText } = await renderAndOpen()

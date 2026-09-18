@@ -27,6 +27,17 @@
  *  - ``via_gfs`` — for GFS-published spaces, the GFS reference the
  *    receiver can use to redeem if their household is paired with
  *    that GFS. Optional; ``null`` for private peer-to-peer spaces.
+ *  - ``issuer_identity_pk`` / ``issuer_keywrap_pk`` /
+ *    ``issuer_keywrap_sig`` / ``issuer_proto_version`` /
+ *    ``expires_at`` — the §D2b bootstrap block, present on a code
+ *    minted for someone the issuing household has never federated
+ *    with. Public keys only, never an address: the identity key the
+ *    instance id derives from, the static X25519 key-wrap key, and
+ *    the signature binding the two. The receiver seals its redeem to
+ *    that key-wrap key and relays the blob by instance id through the
+ *    connection server named in ``via_gfs``. All optional — an older
+ *    code simply has none of them and redeems over the direct /
+ *    mesh paths as before.
  *
  * Backend redeems travel through the §24.11 federation pipeline
  * (``SPACE_INVITE_TOKEN_REDEEM`` family) when issuer ≠ receiver.
@@ -46,6 +57,20 @@ export interface SpaceInvitePayload {
   space_display_hint?: string | null
   issuer_instance_id?: string | null
   via_gfs?: SpaceInviteGfsRef | null
+  /** Issuer's Ed25519 identity public key (hex) — its instance id derives
+   *  from this, so a substituted key can't keep the advertised id. */
+  issuer_identity_pk?: string | null
+  /** Issuer's static X25519 key-wrap public key (hex) — what the redeem
+   *  request is sealed to. */
+  issuer_keywrap_pk?: string | null
+  /** base64url signature binding ``issuer_keywrap_pk`` to
+   *  ``issuer_identity_pk``; verified before anything is sealed. */
+  issuer_keywrap_sig?: string | null
+  /** Issuer's advertised federation protocol version — there is no peer
+   *  row to ask, so the blob carries it. */
+  issuer_proto_version?: number | null
+  /** When the invite stops being redeemable (tz-aware ISO-8601). */
+  expires_at?: string | null
 }
 
 export function buildInviteCode(payload: SpaceInvitePayload): string {

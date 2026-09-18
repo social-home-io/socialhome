@@ -85,3 +85,25 @@ describe('spaceInviteCode', () => {
     })
   })
 })
+
+describe('bootstrap block (§D2b)', () => {
+  it('round-trips the issuer key material and the connection server', () => {
+    const payload = {
+      token: 'a1b2c3d4e5f60718',
+      space_id: 'sp-1',
+      issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+      issuer_identity_pk: 'aa'.repeat(32),
+      issuer_keywrap_pk: 'bb'.repeat(32),
+      issuer_keywrap_sig: 'c2ln',
+      issuer_proto_version: 29,
+      expires_at: '2026-12-01T00:00:00+00:00',
+      via_gfs: { gfs_url: 'https://relay.example.org', gfs_space_id: 'g-1' },
+    }
+    expect(decodeInviteCode(buildInviteCode(payload))).toEqual(payload)
+  })
+
+  it('still decodes a code minted before the block existed', () => {
+    const old = { token: 'a1b2c3d4e5f60718', space_id: 'sp-1' }
+    expect(decodeInviteCode(buildInviteCode(old))).toEqual(old)
+  })
+})
