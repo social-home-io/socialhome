@@ -182,19 +182,6 @@ MAX_POST_LENGTH = 10_000
 MAX_COMMENT_LENGTH = 2_000
 
 
-#: Default lifetime of an invite token minted through the SPA. Seven days
-#: is long enough to hand a link to somebody in person, message it, and
-#: have them get round to it over a weekend — and short enough that a
-#: link leaked into a chat backup, a screenshot or a browser history
-#: stops working before it can be crawled. Before this, a SPA-minted
-#: token carried no expiry at all and stayed live until its uses ran
-#: out; the §D2b bootstrap redeem makes such a link redeemable by a
-#: complete stranger, so an unbounded lifetime is no longer defensible.
-#: Callers can still override per token (``expires_at`` / ``ttl_seconds``,
-#: ``0`` meaning "never").
-DEFAULT_INVITE_TOKEN_TTL_SECONDS: int = 7 * 24 * 3600
-
-
 class SpaceService(SpaceMemberGuardMixin):
     """Orchestrates space lifecycle + member + post flows."""
 
