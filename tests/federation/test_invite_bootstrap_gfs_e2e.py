@@ -1243,3 +1243,44 @@ async def test_the_gps_fanout_skips_a_link_joined_seat_even_with_share_home_on(
 
     assert gfs.mailbox == [], "home GPS was relayed to a link-joined household"
     assert a.received == []
+
+
+async def test_both_households_log_the_successful_redeem(households, gfs, caplog):
+    """A link redeem that WORKS leaves a record on both sides.
+
+    Every failing outcome on this path already logs (a DENY, a rejected
+    relay envelope, a refused seal), so before these two lines the
+    success was the only silent one: an operator asking "did that invite
+    link work?" had nothing to read in either household's log. The
+    routing facts only — who, which space, which seat — never the token,
+    which is a live bearer credential, and never the space name.
+    """
+    a, b = households
+    space, hint = await _mint_invite(b, gfs.url)
+
+    with caplog.at_level(
+        logging.INFO, logger="socialhome.federation.invite_token_redeem"
+    ):
+        await a.space_service.redeem_invite_token(
+            TOKEN_MARKER,
+            user_id=a.user_id,
+            issuer_instance_id=b.instance_id,
+            bootstrap=hint,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    issuer_line = [
+        m for m in messages if "seated" in m and "over the connection-server relay" in m
+    ]
+    redeemer_line = [m for m in messages if "acked our redeem" in m]
+    assert issuer_line, f"issuer logged no seat record: {messages!r}"
+    assert redeemer_line, f"redeemer logged no ACK record: {messages!r}"
+    assert a.instance_id in issuer_line[0]
+    assert space.id in issuer_line[0]
+    assert "member" in issuer_line[0]
+    assert b.instance_id in redeemer_line[0]
+    assert space.id in redeemer_line[0]
+    # The bearer credential and the space's human name stay out of both.
+    for line in issuer_line + redeemer_line:
+        assert TOKEN_MARKER not in line
+        assert SPACE_NAME not in line

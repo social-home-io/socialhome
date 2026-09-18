@@ -1350,6 +1350,20 @@ class SpaceInviteTokenRedeemCoordinator:
             {"kind": KIND_REDEEM_ACK, "redeem_nonce": nonce, **ack_body},
             gfs_url=gfs_url,
         )
+        # The ONE operator-visible record that a stranger joined through a
+        # public link. Every other outcome on this path is already
+        # observable (a DENY, a rejected relay envelope, a failed seal),
+        # so without this the SUCCESS was the only silent one — an
+        # operator asking "did that link work?" had nothing to read. The
+        # routing facts only: who was seated, where, in what seat. Never
+        # the token (a live bearer credential) and never the space name.
+        log.info(
+            "invite bootstrap: seated %s in space %s as %s — the redeem "
+            "arrived over the connection-server relay",
+            redeemer_instance_id,
+            ack_body["space_id"],
+            ack_body.get("role") or SpaceRole.MEMBER.value,
+        )
         return {"ok": True, "space_id": ack_body["space_id"]}
 
     async def _handle_bootstrap_reply(self, body: dict) -> dict:
@@ -1384,10 +1398,24 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             fut.set_exception(SpacePermissionError(BOOTSTRAP_DENY_CLIENT_MESSAGE))
             return {"ok": True, "denied": True}
+        space_id = str(body.get("space_id") or "")
+        role = str(body.get("role") or SpaceRole.MEMBER.value)
+        # The redeemer's half of the pair of records above: a DENY is
+        # logged, so an ACK has to be too, or the only visible outcome of
+        # a link redeem is the failing one. Logged before the Future
+        # resolves so the line is ordered ahead of whatever the awaiting
+        # handler goes on to do with the snapshot.
+        log.info(
+            "invite bootstrap: %s acked our redeem for space %s (seat %s) "
+            "over the connection-server relay",
+            hint.instance_id,
+            space_id,
+            role,
+        )
         fut.set_result(
             {
-                "space_id": str(body.get("space_id") or ""),
-                "role": str(body.get("role") or SpaceRole.MEMBER.value),
+                "space_id": space_id,
+                "role": role,
                 "space_meta": body.get("space_meta"),
             }
         )

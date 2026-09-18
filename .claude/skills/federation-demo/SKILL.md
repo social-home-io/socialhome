@@ -1,6 +1,6 @@
 ---
 name: federation-demo
-description: Boots four Social Home households (a / b / c / d) on adjacent ports, walks the §11 QR handshake (a↔b, b↔c, a↔c, b↔d) plus the §11 simple-pairing trust-relay flow (a auto-pairs with d via b without a QR scan), exercises the federation surface end-to-end (profile sync, posts, moments, highlights, cross-household DMs, multi-household space with remote invites, space-calendar event + cross-household RSVP) under the real WebRTC transport, and asserts that every household sees the others' federated content. Use when validating an end-to-end federation change, smoke-testing a new ``aiolibdatachannel`` release, or reproducing a multi-household sync bug.
+description: Boots five Social Home households (a / b / c / d / e) on adjacent ports, walks the §11 QR handshake (a↔b, b↔c, a↔c, b↔d) plus the §11 simple-pairing trust-relay flow (a auto-pairs with d via b without a QR scan), exercises the federation surface end-to-end (profile sync, posts, moments, highlights, cross-household DMs, multi-household space with remote invites, space-calendar event + cross-household RSVP) under the real WebRTC transport, and asserts that every household sees the others' federated content. The fifth household, e, is paired with nobody but the connection server, so the opt-in gfs-* chain can prove the §D2b invite-link bootstrap redeem and the GFS-relay delivery tier on the real wire. Use when validating an end-to-end federation change, smoke-testing a new ``aiolibdatachannel`` release, or reproducing a multi-household sync bug.
 ---
 
 ## When to invoke this skill
@@ -23,19 +23,20 @@ OpenSSL combination; rebuild it from source (``pip install -e
 ## Topology
 
 ```
-            ┌──── a ────┐
+            ┌──── a ────┐                     e
             │           │      a ↔ d is *not* a QR handshake — it is
             │           │      established via the §11 trust-relay
             b ◄───────► c       flow ("simple pairing" via b).
             │
-            │
-            d
+            │                  e is paired with NOBODY — its only
+            d                  link is to the connection server.
 ```
 
 - **a** — Alpha House @ ``127.0.0.1:18001`` (admin: ``alice``)
 - **b** — Beta House  @ ``127.0.0.1:18002`` (admin: ``bob``)
 - **c** — Gamma House @ ``127.0.0.1:18003`` (admin: ``carol``)
 - **d** — Delta House @ ``127.0.0.1:18004`` (admin: ``dave``)
+- **e** — Epsilon House @ ``127.0.0.1:18005`` (admin: ``emma``)
 
 The inner ring (a / b / c) is fully connected via the §11 QR
 handshake. **d is deliberately not paired with a directly** — only
@@ -43,6 +44,19 @@ b↔d is a QR pair. The skill then exercises the §11 simple-pairing /
 trust-relay flow: Alpha asks Beta to vouch for an introduction to
 Delta, Delta's admin one-clicks "accept", and the a ↔ d pair lands
 without anyone scanning a QR code.
+
+**e is the stranger.** It is paired with nobody: no QR handshake in
+``pair``, no introduction in ``relay-pair``, and therefore no mesh
+route either (route discovery only walks CONFIRMED peers). Its single
+federation relationship is with the GFS, wired in ``gfs-pair``. That
+isolation is the whole point of it: a / b / c / d are all
+mesh-reachable from one another, so a token redeem between any two of
+them takes the ordinary direct or ``SPACE_ROUTED`` path and the §D2b
+**bootstrap** path (sealed redeem via ``POST /gfs/envelope``, a
+``space_session`` seat, ``GfsRelayTransport`` for everything after)
+never runs. e is the only household that can prove it — see
+``gfs-invite-link``. Pair e with anyone and that step silently stops
+testing what it is named after.
 
 ## Prereqs
 
@@ -52,7 +66,11 @@ without anyone scanning a QR code.
   aiolibdatachannel._core import PeerConnection;
   PeerConnection(ice_servers=['stun:stun.l.google.com:19302'])"``
   succeeds without segfaulting.
-- Ports ``18001`` / ``18002`` / ``18003`` / ``18004`` must be free.
+- Ports ``18001`` / ``18002`` / ``18003`` / ``18004`` / ``18005``
+  (households) and ``18765`` (GFS) must be free. Kill a squatter **by
+  port** (``lsof -ti :18005 | xargs -r kill -9``) — never
+  ``pkill -f socialhome``, which takes out every unrelated checkout on
+  the box too.
 - ``/tmp/sh-demo`` will be wiped and re-created.
 
 ## Run it
@@ -65,11 +83,12 @@ That single command runs the full sequence:
 
 1. ``up`` — wipe ``/tmp/sh-demo``, write per-instance ``socialhome.toml``
    (configures ``[standalone].external_url`` so peers can reach each
-   other), launch all four backends, and walk the
+   other), launch all five backends, and walk the
    ``/api/setup/standalone`` wizard so each gets a bearer token.
 2. ``pair`` — four QR handshakes (a↔b, b↔c, a↔c, b↔d). After this
    ``/api/pairing/connections`` returns the expected confirmed-peer
-   counts on each instance (a:2, b:3, c:2, d:1).
+   counts on each instance (a:2, b:3, c:2, d:1, **e:0** — e stays
+   unpaired on purpose; see Topology).
 3. ``relay-pair`` — §11 simple-pairing dry run.
    - ``POST /api/pairing/auto-pair-via {via_instance_id, target_instance_id}``
      on Alpha asks Beta to vouch for an introduction to Delta. Beta
@@ -127,7 +146,17 @@ That single command runs the full sequence:
 
 4. ``verify`` — assertions across all three households:
    - Every confirmed peer advertises the build's current ``OURS``
-     ``proto_version`` (the capability-bump tripwire — now v_24, which makes
+     ``proto_version``, **and** — when the ``gfs-invite-link`` chain has run
+     — both §D2b ``space_session`` seats carry at least
+     ``FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM`` (v_29). That
+     second assertion exists because v_29 is the one capability that does
+     NOT ride ``INSTANCE_CAPABILITIES_UPDATED``: on the bootstrap path
+     there is no peer row to read it off, which is exactly why the invite
+     blob carries ``issuer_proto_version`` (what the redeemer gates its
+     attempt on) and the sealed redeem body carries the redeemer's (what
+     the issuer stamps on the seat). Both land on the seats, so the seats
+     are where the round-trip is provable.
+     (The capability-bump tripwire — v_24, which makes
      ``SPACE_CONFIG_CHANGED`` space-authority-signed so a seed-holding delegated
      admin can change a space's config with the owner offline and every member
      household (incl. the offline owner on reconnect) accepts it by verifying
@@ -487,31 +516,45 @@ reliably.
 
 The skill also wires up the **GFS** path as a separate, opt-in flow
 on top of the canonical HFS-only ``all`` run. Boot a GFS, pair Alpha
-+ Delta with it, and tear down — the full HFS↔GFS pair handshake
-runs end-to-end against a real GFS process.
++ Delta + Epsilon with it, and tear down — the full HFS↔GFS pair
+handshake runs end-to-end against a real GFS process.
+
+The canonical chain, in order:
 
 ```bash
 python .claude/skills/federation-demo/harness.py up
+python .claude/skills/federation-demo/harness.py pair
+python .claude/skills/federation-demo/harness.py traffic
 python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic
-python .claude/skills/federation-demo/harness.py gfs-replay
 python .claude/skills/federation-demo/harness.py gfs-space-subscribe
 python .claude/skills/federation-demo/harness.py gfs-space-post
 python .claude/skills/federation-demo/harness.py gfs-space-rotate
 python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
+python .claude/skills/federation-demo/harness.py gfs-invite-link
+python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
-``gfs-replay`` is optional in that chain (it restarts Alpha); the
-content steps only need ``gfs-traffic`` to have published the space.
-The topology is what makes the content steps meaningful: ``gfs-pair``
-pairs **a** and **d** with the GFS, and a and d are **not** QR-paired
-with each other (d pairs only with b; a↔d exists only after the
-separate ``relay-pair`` step, which is not part of this chain). So
-anything d receives from a's space can only have travelled through the
-GFS. **c** is paired with neither and is the negative control.
+``gfs-replay`` slots in anywhere after ``gfs-traffic`` and is optional
+(it restarts Alpha); the content steps only need ``gfs-traffic`` to
+have published the space.
+
+The topology is what makes the content steps meaningful:
+
+- ``gfs-pair`` pairs **a**, **d** and **e** with the GFS. a and d are
+  **not** QR-paired with each other (d pairs only with b; a↔d exists
+  only after the separate ``relay-pair`` step, which is not part of
+  this chain), so anything d receives from a's space can only have
+  travelled through the GFS. **c** is paired with neither and is the
+  negative control.
+- **e** is paired with *nobody* — not even by mesh. It is the only
+  household for which the §D2b bootstrap redeem and the
+  ``GfsRelayTransport`` delivery tier are the ONLY way to reach a's
+  space, which is what ``gfs-invite-link`` /
+  ``gfs-invite-link-content`` exercise.
 
 ### ``gfs-up``
 
@@ -534,8 +577,10 @@ HFS sandboxes); ``gfs-down`` (or the broader ``down``) tears it down.
 
 ### ``gfs-pair``
 
-Walks the §24 GFS pairing handshake for Alpha and Delta against the
-running GFS:
+Walks the §24 GFS pairing handshake for Alpha, Delta and Epsilon
+against the running GFS (Epsilon's only federation relationship of any
+kind — same three calls, because a household that joined a space from
+a public link is not a special kind of client):
 
 1. Mint a one-time pair token via the GFS landing page (the QR
    token; rendered as ``data-pair-token`` on the ``<code>`` element
@@ -544,7 +589,7 @@ running GFS:
    ``GET {gfs_url}/gfs/info`` to pull the GFS's Ed25519 ``public_key``
    and ``POST /gfs/register`` with the SH's ``{instance_id,
    public_key, inbox_url, token}`` body.
-3. Assert both households now show the GFS connection as
+3. Assert all three households now show the GFS connection as
    ``status="active"`` (auto-accept is on by default for fresh
    deployments).
 
@@ -781,6 +826,105 @@ every reconcile entry point) and ``space_post_outbound`` (the pre-signed
 ``SpaceService.subscribe_to_space`` and the GFS's own subscribe refusal.
 ``verify`` re-asserts the directory listing (with both dials), and the two
 no-content checks, gated on the ``gfs_no_subscribers_space_id`` state key.
+
+### ``gfs-invite-link`` — a stranger joins from a published link (§D2b)
+
+Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` + ``gfs-traffic``.
+
+The live proof of the §D2b **bootstrap** redeem — the path taken when
+the redeeming household has no relationship with the issuer at all.
+**e** is the only household that can prove it: a / b / c / d are all
+mesh-reachable from one another, so a redeem between any two of them
+takes the direct or ``SPACE_ROUTED`` branch and the bootstrap code
+never executes outside its unit tests.
+
+1. **Mint.** a mints a ``member`` link with
+   ``publish_to_gfs`` — the blob is parked on the connection server's
+   bulletin board and the response carries the shareable ``gfs.url``.
+2. **The public page.** The harness fetches that URL with a plain HTTP
+   client, exactly as a visitor's browser would: 200, the space's
+   name, the ``socialhome://invite#…`` code — and **not** a's
+   ``inbox_url``. The page is public, so a household address on it
+   would publish a network location to strangers.
+3. **The blob.** Decoded (base64url JSON) and asserted to hold public
+   keys and ids ONLY — no ``inbox``, no household port, no
+   ``external_url``. The only URL in it is ``via_gfs.gfs_url``, the
+   relay the redeemer hands its sealed request to.
+4. **The redeem.** e posts the decoded fields to its own
+   ``POST /api/spaces/join`` — the exact body
+   ``client/src/features/spaces/SpaceJoinByCodeDialog.tsx`` sends, so
+   the step walks the path a person actually walks.
+5. **The seat**, asserted on BOTH sides' ``remote_instances`` rows:
+   ``source='space_session'``, an EMPTY ``remote_inbox_url`` (neither
+   household learns the other's address, by design), CONFIRMED, and a
+   pinned ``remote_keywrap_pk`` (migration 0050 — without it the pair
+   is seated but mute). Plus e's ``space_members`` row at role
+   ``member``, the seat the ISSUER's token row decided, and the local
+   stub the ACK's ``space_meta`` seeded.
+6. **The relay stayed a relay** (#677): the GFS log (DEBUG, see
+   ``gfs-up``) shows envelopes moving, and **no** line names both
+   households, the invite token, or the space name. The routing
+   envelope is ``{to_instance, sealed}`` — one id and a ciphertext.
+7. **Both households logged it.** a: ``invite bootstrap: seated <e> in
+   space <id> as member — the redeem arrived over the connection-server
+   relay``. e: ``invite bootstrap: <a> acked our redeem …``. Those two
+   INFO lines were added with this step: every FAILING outcome on this
+   path already logged, so success was the one thing that left an
+   operator nothing to read.
+8. **Revoke.** a ``DELETE``s the link; the ``/join`` page becomes the
+   styled 404 ("This invite has expired or was revoked") which must
+   **not** echo the dead token back, and a fresh redeem of the same
+   code is refused (422). e, who already walked through the door,
+   keeps its seat — revoke is not eviction.
+9. **An ``admin`` link**, minted by the owner on a SECOND space and
+   redeemed by e into an ``admin`` seat — with **no** space signing
+   seed (``spaces.identity_private_key`` stays NULL and a ships no
+   ``SPACE_ADMIN_KEY_SHARE``). A connection server pins a space's
+   identity key TOFU-immutably, so that credential could never be
+   taken back from a household whose only introduction was a public
+   string.
+
+Failure modes this catches: a blob that grows an address field; a
+``/join`` page that stops handing over a code; a relay that starts
+logging the pair; a redeem that seats a full social peer instead of a
+space-scoped one (which would then join every DM / presence / moment
+fan-out); a revoked link that still resolves; and a link-joined admin
+handed the space authority seed.
+
+### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
+
+Prereqs: ``gfs-invite-link``.
+
+Seating the pair is half the job. e and a hold matching directional
+session keys but **no address for each other** and no mesh path, so
+every §24.11 envelope between them is sealed a second time to the
+peer's key-wrap key and handed to the same ``POST /gfs/envelope``
+relay the redeem used (``GfsRelayTransport``, selected in
+``federation/transport.py`` for ``source = space_session``).
+
+1. a posts in the space; e sees it **decrypted** in its feed and
+   holds the ``space_posts`` row. One assertion over the seal, the
+   relay, the §24.11 pipeline under the wider relay timestamp window,
+   the pair key and the content key e got in the ACK's ``space_meta``.
+2. The GFS carried envelopes addressed to e while that happened — the
+   honest form of "it really was relayed": a count and a recipient,
+   because the blob itself is opaque.
+3. e posts; a receives it. The reply leg is the half that breaks if
+   only the host knows how to reach the other side.
+4. a removes a member, rotating the per-space content key, and posts
+   again — e must decrypt the NEW epoch. A re-key that skips
+   link-joined members leaves them dark at the first roster change.
+5. ``GET /api/connections`` on e labels a ``source=space_session``
+   with transport ``gfs_relay``. ``https`` in particular would be a
+   lie: there is no inbox URL to fall back to.
+
+``verify`` re-asserts the durable half of both steps (gated on the
+``gfs_invite_space_id`` state key, so it self-skips when the chain was
+not run): the addressless ``space_session`` seat on both sides, the
+relayed posts still present on e, the revoked ``/join`` page still a
+token-free 404, and e's link-admin seat still without a signing seed.
+``verify``'s capability block additionally asserts **v_29** round-trips
+on the one wire that cannot fall back to a peer row — see below.
 
 ### Bazaar / public moment over GFS (TODO)
 

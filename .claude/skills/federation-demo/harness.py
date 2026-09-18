@@ -29,6 +29,7 @@ run independently. ``all`` is the canonical invocation.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -42,6 +43,22 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+#: The checkout this harness lives in — ``<repo>/.claude/skills/federation-demo``.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Read the SAME source tree the backends run. ``_spawn`` launches
+# ``python -m socialhome`` with the repo root as cwd, so the households
+# execute THIS checkout; the harness itself is run by path, so its
+# ``sys.path[0]`` is the script's own directory and a bare
+# ``import socialhome`` would resolve to whatever is installed in the
+# venv instead — typically another worktree. That split is invisible
+# until an assertion reads a constant (``OURS``,
+# ``FederationCapability``) and silently compares the households under
+# test against a different branch's protocol version. Prepending the
+# repo root makes the two agree by construction.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 ROOT = Path("/tmp/sh-demo")
 
@@ -64,6 +81,18 @@ INSTANCES: tuple[tuple[str, int, str, str, str], ...] = (
     ("b", 18002, "bob", "beta-pw", "Beta House"),
     ("c", 18003, "carol", "gamma-pw", "Gamma House"),
     ("d", 18004, "dave", "delta-pw", "Delta House"),
+    # ``e`` is the STRANGER. It is paired with nobody: no QR handshake in
+    # ``cmd_pair``, no trust-relay introduction in ``cmd_relay_pair``, and
+    # no mesh path to anyone (mesh routing only walks confirmed peers).
+    # Its single relationship is with the connection server, wired in
+    # ``cmd_gfs_pair``. That isolation is the whole point: it is the only
+    # topology in which ``request_redeem`` cannot take the direct or mesh
+    # branch, so the §D2b bootstrap path — sealed redeem through
+    # ``POST /gfs/envelope``, a ``space_session`` seat, every later
+    # envelope on ``GfsRelayTransport`` — is the only way e can join
+    # anything. Pair e with anybody and ``gfs-invite-link`` silently
+    # stops testing what it is named after.
+    ("e", 18005, "emma", "epsilon-pw", "Epsilon House"),
 )
 
 
@@ -270,6 +299,12 @@ def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
         stdout=log,
         stderr=subprocess.STDOUT,
         env=env,
+        # ``-m`` puts the cwd first on ``sys.path``, so this is what
+        # decides WHICH checkout the household runs. Pinned rather than
+        # inherited: run the harness from anywhere else and the backends
+        # would quietly boot the venv's installed copy instead of the
+        # tree being tested.
+        cwd=str(REPO_ROOT),
         start_new_session=True,
     )
     return p.pid
@@ -312,6 +347,7 @@ _SEED_COORDS: dict[str, tuple[float, float]] = {
     "b": (53.5500, 9.9900),  # Hamburg (Beta House)
     "c": (50.1100, 8.6800),  # Frankfurt (Gamma House)
     "d": (48.1350, 11.5820),  # Munich  (Delta House)
+    "e": (50.9375, 6.9603),  # Cologne (Epsilon House)
 }
 
 
@@ -359,9 +395,7 @@ def cmd_up() -> None:
     # 404s instead of the page under test. Probe the static dir before
     # we spawn anything so a missing build doesn't leave orphan
     # backends behind for the next ``up`` to trip over.
-    static_index = (
-        Path(__file__).resolve().parents[3] / "socialhome" / "static" / "index.html"
-    )
+    static_index = REPO_ROOT / "socialhome" / "static" / "index.html"
     if not static_index.is_file():
         raise SystemExit(
             f"SPA bundle missing at {static_index} — run "
@@ -517,6 +551,9 @@ def cmd_gfs_up() -> None:
         ],
         stdout=log,
         stderr=subprocess.STDOUT,
+        # Same reason as ``_spawn``: run the connection server out of the
+        # checkout under test, not whatever the venv has installed.
+        cwd=str(REPO_ROOT),
         start_new_session=True,
     )
     deadline = time.monotonic() + 30.0
@@ -587,7 +624,7 @@ def _gfs_mint_pair_token() -> str:
 
 
 def cmd_gfs_pair() -> None:
-    """Pair Alpha + Delta with the GFS.
+    """Pair Alpha + Delta + Epsilon with the GFS.
 
     Walk the §24 GFS pairing flow end-to-end:
 
@@ -597,10 +634,15 @@ def cmd_gfs_pair() -> None:
        :meth:`GfsConnectionService.pair` (fetch ``GET /gfs/info``,
        then ``POST /gfs/register`` with Alpha's identity + the
        token).
-    3. Repeat for Delta with a fresh token.
-    4. Assert both households now show the GFS connection as
+    3. Repeat for Delta and Epsilon, each with a fresh token.
+    4. Assert all three households now show the GFS connection as
        ``status="active"`` (auto-accept is on by default for fresh
        deployments).
+
+    Epsilon is here for ``gfs-invite-link``: this is its ONLY federation
+    relationship, so the connection server is the only thing it can talk
+    through. Same three calls as Alpha and Delta — a household that
+    joined a space from a public link is not a special kind of client.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -608,11 +650,12 @@ def cmd_gfs_pair() -> None:
 
     a = state["instances"]["a"]
     d = state["instances"]["d"]
+    e = state["instances"]["e"]
     gfs_url = f"http://127.0.0.1:{GFS_PORT}"
 
     state.setdefault("gfs", {})
     state["gfs"]["pairings"] = {}
-    for label, info in (("a", a), ("d", d)):
+    for label, info in (("a", a), ("d", d), ("e", e)):
         token = _gfs_mint_pair_token()
         s, resp = _request(
             f"http://127.0.0.1:{info['port']}/api/gfs/connections",
@@ -635,7 +678,7 @@ def cmd_gfs_pair() -> None:
                 f" {resp['status']!r}",
             )
     _save(state)
-    print("gfs-pair: ok (a + d connected to GFS)")
+    print("gfs-pair: ok (a + d + e connected to GFS)")
 
 
 def cmd_gfs_traffic() -> None:
@@ -1868,6 +1911,785 @@ def cmd_gfs_space_no_subscribers() -> None:
     )
 
 
+# ─── Step: gfs-invite-link ─────────────────────────────────────────────────
+
+
+def _http_get_text(url: str, *, timeout: float = 10.0) -> tuple[int, str]:
+    """Plain GET returning ``(status, body_text)`` — no auth, no JSON.
+
+    :func:`_request` decodes JSON and carries a bearer token; the
+    connection server's ``/join/{gfs_token}`` page is HTML served to
+    anyone, and reading it exactly as a visitor's browser would is the
+    point of the assertion.
+    """
+    req = urllib.request.Request(url, headers={"Accept": "text/html"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace")
+
+
+def _decode_invite_blob(code: str) -> dict:
+    """``socialhome://invite#<base64url(JSON)>`` → the payload dict.
+
+    Mirrors ``client/src/lib/spaceInviteCode.ts`` (and
+    ``federation/invite_code.py`` on the mint side): the blob is
+    UNPADDED base64url, so the padding has to be put back before
+    decoding. A harness that silently accepted a malformed blob would
+    turn a wire regression into a confusing join failure three
+    assertions later.
+    """
+    marker = "socialhome://invite#"
+    if not code.startswith(marker):
+        raise SystemExit(f"not an invite code: {code[:60]!r}")
+    blob = code[len(marker) :].strip()
+    padded = blob + "=" * (-len(blob) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except Exception as exc:
+        raise SystemExit(
+            f"invite blob did not decode as base64url(JSON): {exc!r} "
+            f"(blob was {blob[:80]!r}…)",
+        ) from exc
+
+
+def _join_body_from_blob(payload: dict) -> dict:
+    """The ``POST /api/spaces/join`` body the SPA sends for a pasted code.
+
+    Mirrors ``client/src/features/spaces/SpaceJoinByCodeDialog.tsx`` field
+    for field, deliberately: the harness is proving the path a person
+    actually walks, and a body the SPA would never send (say, one that
+    forgot ``gfs``) would prove a path nothing takes. The §D2b block
+    rides only when all three key fields are present, which is the same
+    all-or-nothing rule ``routes/spaces.py::_bootstrap_hint`` applies.
+    """
+    body: dict = {"token": payload["token"]}
+    issuer = str(payload.get("issuer_instance_id") or "")
+    if issuer:
+        body["issuer_instance_id"] = issuer
+    if issuer and all(
+        payload.get(k)
+        for k in ("issuer_identity_pk", "issuer_keywrap_pk", "issuer_keywrap_sig")
+    ):
+        body["issuer_identity_pk"] = payload["issuer_identity_pk"]
+        body["issuer_keywrap_pk"] = payload["issuer_keywrap_pk"]
+        body["issuer_keywrap_sig"] = payload["issuer_keywrap_sig"]
+        if payload.get("space_id"):
+            body["space_id"] = payload["space_id"]
+        if payload.get("issuer_proto_version"):
+            body["issuer_proto_version"] = payload["issuer_proto_version"]
+        if payload.get("expires_at"):
+            body["expires_at"] = payload["expires_at"]
+        via = payload.get("via_gfs") or {}
+        if via.get("gfs_url"):
+            body["gfs"] = via["gfs_url"]
+    return body
+
+
+def _instance_row(label: str, instance_id: str) -> dict | None:
+    """One ``remote_instances`` row on ``label`` as a dict, or ``None``.
+
+    The seat a §D2b redeem creates is not visible through
+    ``/api/pairing/connections`` in enough detail (``remote_inbox_url``
+    and ``remote_keywrap_pk`` are deliberately not in the public shape —
+    see ``routes/pairing.py::_instance_dict``), so the two assertions
+    that matter most read the row itself.
+    """
+    rows = _rows(
+        label,
+        "SELECT source, remote_inbox_url, proto_version, remote_keywrap_pk, "
+        "relay_via, status FROM remote_instances WHERE id = ?",
+        (instance_id,),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "source": r[0],
+        "remote_inbox_url": r[1],
+        "proto_version": int(r[2] or 1),
+        "remote_keywrap_pk": r[3],
+        "relay_via": r[4],
+        "status": r[5],
+    }
+
+
+def _assert_space_session_seat(label: str, peer_label: str, state: dict) -> dict:
+    """Assert ``label`` holds a §D2b ``space_session`` seat for ``peer_label``.
+
+    The same four facts on both sides — the seat is symmetric by
+    construction and a one-sided check would miss the half that breaks.
+    Returns the row so a caller can assert further on it.
+    """
+    peer_id = state["instances"][peer_label]["instance_id"]
+    row = _instance_row(label, peer_id)
+    if row is None:
+        raise SystemExit(
+            f"{label}: no remote_instances row for {peer_label} "
+            f"({peer_id[:8]}…) — the bootstrap redeem seated nothing.",
+        )
+    if row["source"] != "space_session":
+        raise SystemExit(
+            f"{label}: the row for {peer_label} has source={row['source']!r}, "
+            "expected 'space_session' — a link-joined household must be a "
+            "space-scoped seat, not a social peer (it would then be in every "
+            "DM / presence / moment fan-out).",
+        )
+    if row["remote_inbox_url"]:
+        raise SystemExit(
+            f"{label}: the {peer_label} seat carries remote_inbox_url="
+            f"{row['remote_inbox_url']!r} — a household met through a public "
+            "invite link must never learn the other's address (§D2b).",
+        )
+    if row["status"] != "confirmed":
+        raise SystemExit(
+            f"{label}: the {peer_label} seat is status={row['status']!r}, "
+            "expected 'confirmed' — the space cannot federate against an "
+            "unkeyed row.",
+        )
+    if not row["remote_keywrap_pk"]:
+        raise SystemExit(
+            f"{label}: the {peer_label} seat has no remote_keywrap_pk — "
+            "every later envelope is sealed to that key, so the pair is "
+            "seated but mute (migration 0050).",
+        )
+    print(
+        f"  {label}: {peer_label} seated as space_session, no address, "
+        f"key-wrap pinned, proto_version={row['proto_version']} ✓"
+    )
+    return row
+
+
+def cmd_gfs_invite_link() -> None:
+    """§D2b: a total stranger joins a space from a published invite link.
+
+    THE topology this step exists for: **e** is paired with nobody. No QR
+    handshake, no trust-relay introduction, and therefore no mesh route
+    (discovery only walks CONFIRMED peers). Its one relationship is with
+    the connection server. So when e redeems a's link,
+    ``request_redeem`` cannot take the direct branch or the mesh branch,
+    and the §D2b bootstrap path is the only thing left: a sealed redeem
+    through ``POST /gfs/envelope``, a ``space_session`` seat on both
+    sides, and ``GfsRelayTransport`` for everything after. a / b / c / d
+    are all mesh-reachable from one another, which is exactly why none of
+    them can prove this — a redeem between any two of them silently takes
+    the ordinary ``SPACE_INVITE_TOKEN_REDEEM`` path.
+
+    Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` + ``gfs-traffic`` (a owns
+    the published global space and both a and e are clients of the GFS).
+
+    Sequence:
+    1. a mints a PUBLISHED ``member`` link —
+       ``POST /api/spaces/{id}/invite-tokens {role, publish_to_gfs}`` —
+       and the response carries the shareable ``gfs.url``.
+    2. Fetch that URL from the connection server with a plain HTTP client,
+       exactly as a visitor's browser would: 200, the space's name, the
+       ``socialhome://invite#…`` code — and **not** a's inbox URL. The
+       page is public, so an address on it would publish a household's
+       network location to strangers.
+    3. Decode the blob (base64url JSON) and assert the same thing
+       structurally: no address field anywhere in the payload. Public keys
+       and ids only.
+    4. e pastes it: ``POST /api/spaces/join`` with the body
+       ``SpaceJoinByCodeDialog.tsx`` sends (:func:`_join_body_from_blob`).
+    5. Assert the seat on BOTH sides: ``source='space_session'``, empty
+       ``remote_inbox_url``, CONFIRMED, key-wrap key pinned. Plus e's
+       ``space_members`` row at role ``member`` (the seat the ISSUER's
+       token row decided) and the named stub on e's ``/api/spaces``,
+       which is what the ACK's ``space_meta`` seeded.
+    6. Assert the relay stayed a relay. The GFS log (booted at DEBUG, see
+       ``cmd_gfs_up``) shows envelopes moving, and **no** line names both
+       households together, the invite token, or the space's name — the
+       #677 property the identity-free routing envelope exists for.
+    7. Assert both households logged the redeem: a seated e "over the
+       connection-server relay", e got the ACK. Before these lines a
+       successful link redeem was the one outcome on this path that left
+       no record at all.
+    8. Revoke: a ``DELETE``s the link, the ``/join`` page turns 404 (the
+       styled "expired or revoked" page, which must not echo the dead
+       token back), and a fresh redeem of the same code is refused —
+       while e, who already walked through the door, keeps its seat.
+    9. Roles: a (the owner) mints an ``admin`` link on a SECOND space and
+       e redeems it into an admin seat — with no space signing seed, which
+       a link-joined admin must never hold (the connection server pins a
+       space's identity key TOFU-immutably, so that credential could never
+       be taken back).
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'up' + 'gfs-up' + 'gfs-pair' + 'gfs-traffic' first")
+    space_id = (state.get("gfs") or {}).get("global_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-traffic' first (no published global space)")
+    gfs_conn_id = ((state.get("gfs") or {}).get("pairings") or {}).get("a", {}).get(
+        "id"
+    )
+    if not gfs_conn_id:
+        raise SystemExit("run 'gfs-pair' first (a is not a client of the GFS)")
+
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+    space_name = "Global Test Space"
+
+    # Bookmarks: everything the three logs get from here on is what THIS
+    # redeem produced. a's and the GFS's logs already span the whole run.
+    gfs_off = _gfs_log_size()
+    a_off = _log_size("a")
+    e_off = _log_size("e")
+
+    # 0. Pre-condition, asserted rather than assumed: e must not already
+    #    know a. If some earlier step paired them the redeem below would
+    #    take the direct branch and this step would pass while testing
+    #    nothing.
+    if _instance_row("e", a["instance_id"]) is not None:
+        raise SystemExit(
+            "gfs-invite-link: e already holds a remote_instances row for a — "
+            "e is supposed to be paired with NOBODY, so the bootstrap path "
+            "would not be exercised. Re-run from a clean 'up'.",
+        )
+
+    # 1. Mint a published member link.
+    s, link = _request(
+        f"{a_base}/api/spaces/{space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 2, "publish_to_gfs": gfs_conn_id},
+    )
+    link = _must("a mints a published invite link", s, link, ok=(201,))
+    gfs_block = link.get("gfs") or {}
+    join_url = gfs_block.get("url")
+    if not join_url:
+        raise SystemExit(
+            "gfs-invite-link: the mint response carries no gfs.url — the blob "
+            f"was never parked on the bulletin board. Response: {link!r}",
+        )
+    invite_token = link["token"]
+    print(f"  a minted a member link, published at {join_url}")
+
+    # 2. The public page, read exactly as a visitor's browser reads it.
+    s, html = _http_get_text(join_url)
+    if s != 200:
+        raise SystemExit(
+            f"gfs-invite-link: GET {join_url} answered HTTP {s}, expected 200",
+        )
+    if "socialhome://invite#" not in html:
+        raise SystemExit(
+            "gfs-invite-link: the /join page carries no socialhome://invite# "
+            "code — there is nothing for a visitor to copy.",
+        )
+    if space_name not in html:
+        raise SystemExit(
+            f"gfs-invite-link: the /join page never names {space_name!r} — a "
+            "visitor cannot tell what they are being invited to.",
+        )
+    a_inbox = f"http://127.0.0.1:{a['port']}"
+    if a_inbox in html:
+        raise SystemExit(
+            f"gfs-invite-link: the /join page leaks a's address ({a_inbox}) — "
+            "the page is public, so a household's network location must never "
+            "appear on it (§D2b: the redeem travels by instance id).",
+        )
+    print("  the /join page shows the space + a code, and no household address ✓")
+
+    # 3. Same claim, structurally: decode the blob and look for an address.
+    start = html.index("socialhome://invite#")
+    end = min(
+        (i for i in (html.find("<", start), html.find("&", start)) if i > 0),
+        default=len(html),
+    )
+    payload = _decode_invite_blob(html[start:end].strip())
+    flat = json.dumps(payload)
+    # ``127.0.0.1:1800`` catches every household port in this sandbox
+    # (18001-18005) without catching the connection server's own 18765,
+    # which the blob legitimately names in ``via_gfs``.
+    for needle in ("inbox", "external_url", "127.0.0.1:1800"):
+        if needle in flat:
+            raise SystemExit(
+                f"gfs-invite-link: the invite blob carries {needle!r} — it "
+                "holds public keys and ids ONLY, because the page that serves "
+                f"it is public. Payload: {flat[:300]}",
+            )
+    if payload.get("issuer_instance_id") != a["instance_id"]:
+        raise SystemExit(
+            "gfs-invite-link: the blob names issuer_instance_id="
+            f"{payload.get('issuer_instance_id')!r}, expected a's "
+            f"{a['instance_id']!r}",
+        )
+    via = payload.get("via_gfs") or {}
+    if via.get("gfs_url") != f"http://127.0.0.1:{GFS_PORT}":
+        raise SystemExit(
+            f"gfs-invite-link: the blob's via_gfs is {via!r} — without the "
+            "connection server's base URL the redeemer has nowhere to hand "
+            "its sealed request.",
+        )
+    print(f"  the blob carries keys + ids only ({sorted(payload)}) ✓")
+
+    # 4. e pastes the code into its OWN household.
+    join_body = _join_body_from_blob(payload)
+    s, joined = _request(
+        f"{e_base}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=join_body,
+        # The handler awaits the sealed ACK on a nonce-keyed Future; the
+        # round-trip is two relay hops plus the issuer's whole fail-closed
+        # ladder, so give it more than the default read timeout.
+        timeout=40.0,
+    )
+    joined = _must("e redeems the published link", s, joined, ok=(200, 201))
+    if joined.get("space_id") != space_id:
+        raise SystemExit(
+            f"gfs-invite-link: e's join returned space_id="
+            f"{joined.get('space_id')!r}, expected {space_id!r}",
+        )
+    print(f"  e joined {space_id} as {joined.get('role')!r} through the relay ✓")
+
+    # 5. The seat, on both sides, plus e's own view of the space.
+    _assert_space_session_seat("a", "e", state)
+    e_seat = _assert_space_session_seat("e", "a", state)
+    if e_seat["relay_via"] != f"http://127.0.0.1:{GFS_PORT}":
+        raise SystemExit(
+            f"gfs-invite-link: e's seat for a has relay_via="
+            f"{e_seat['relay_via']!r} — without the introducing server's URL "
+            "every later envelope has nowhere to go.",
+        )
+    member_rows = _rows(
+        "e",
+        "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+        (space_id, e["user_id"]),
+    )
+    if not member_rows or member_rows[0][0] != "member":
+        raise SystemExit(
+            f"gfs-invite-link: e's space_members row for {space_id} is "
+            f"{member_rows!r}, expected one row with role 'member' — the seat "
+            "the ISSUER's token row decided.",
+        )
+    s, spaces = _request(f"{e_base}/api/spaces", token=e["token"])
+    _must("e: GET /api/spaces", s, spaces)
+    rows = spaces if isinstance(spaces, list) else (spaces.get("spaces") or [])
+    mine = next((sp for sp in rows if sp.get("id") == space_id), None)
+    if mine is None:
+        raise SystemExit(
+            f"gfs-invite-link: e's /api/spaces does not list {space_id} — the "
+            f"ACK's space_meta never seated a local stub. Got {rows!r}",
+        )
+    if mine.get("name") != space_name:
+        raise SystemExit(
+            f"gfs-invite-link: e's stub is named {mine.get('name')!r}, expected "
+            f"{space_name!r} — the ACK's space_meta did not seat the config.",
+        )
+    # The seat itself is asserted on ``space_members`` just above, not
+    # here: ``/api/spaces`` returns the SPACE's shape and carries no
+    # per-user role field, so reading one off it is always ``None``.
+    print(f"  e's /api/spaces shows {mine.get('name')!r} (role member) ✓")
+
+    # 6. The relay stayed a relay (#677). The routing envelope is
+    #    ``{to_instance, sealed}`` — one id and a ciphertext — so the
+    #    server cannot log the pair, the token or the space even if it
+    #    tried. Asserted on the GFS's own DEBUG log, which is where a
+    #    regression would show up first.
+    env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+    if not env_lines:
+        raise SystemExit(
+            "gfs-invite-link: the GFS logged no 'gfs.envelope:' record for "
+            "this redeem — the sealed legs went somewhere else. Check "
+            f"{GFS_DIR / 'log.txt'}.",
+        )
+    both = [
+        line
+        for line in _gfs_log_lines_matching("", offset=gfs_off)
+        if a["instance_id"] in line and e["instance_id"] in line
+    ]
+    if both:
+        raise SystemExit(
+            "gfs-invite-link: a GFS log line names BOTH households — the "
+            "relay learned the relationship the identity-free envelope "
+            f"exists to withhold. Lines: {both!r}",
+        )
+    leaked = [
+        line
+        for line in _gfs_log_lines_matching(invite_token, offset=gfs_off)
+    ] + [
+        line
+        for line in _gfs_log_lines_matching(space_name, offset=gfs_off)
+        if "gfs.envelope" in line
+    ]
+    if leaked:
+        raise SystemExit(
+            "gfs-invite-link: the GFS log carries the invite token or the "
+            f"space name on a relay line: {leaked!r}",
+        )
+    print(
+        f"  the GFS moved {len(env_lines)} envelope(s) and logged no pair, "
+        "no token, no space name ✓"
+    )
+
+    # 7. Both households recorded the redeem. A success that logs nothing
+    #    is un-diagnosable — the operator asking "did that link work?"
+    #    reads these two lines.
+    a_seated = [
+        line
+        for line in _log_lines_matching("a", "invite bootstrap: seated", offset=a_off)
+        if e["instance_id"] in line and "connection-server relay" in line
+    ]
+    if not a_seated:
+        raise SystemExit(
+            "gfs-invite-link: a logged no 'invite bootstrap: seated … over the "
+            f"connection-server relay' line naming e. Check {_log_path('a')}.",
+        )
+    e_acked = [
+        line
+        for line in _log_lines_matching("e", "acked our redeem", offset=e_off)
+        if a["instance_id"] in line
+    ]
+    if not e_acked:
+        raise SystemExit(
+            "gfs-invite-link: e logged no ACK line for a's reply. Check "
+            f"{_log_path('e')}.",
+        )
+    # Print from the message marker, not a tail slice: the instance id
+    # sits at the FRONT of these messages and is the whole point of
+    # quoting them.
+    for who, line in (("a", a_seated[0]), ("e", e_acked[0])):
+        msg = line[line.index("invite bootstrap:") :].strip()
+        print(f"  {who}: {msg}")
+
+    state["gfs_invite_space_id"] = space_id
+    state["gfs_invite_token"] = invite_token
+    state["gfs_invite_join_url"] = join_url
+    state["gfs_invite_code_payload"] = payload
+    _save(state)
+
+    # 8. Revoke. The link dies, the page dies, the SEAT does not — taking
+    #    the door away is not the same decision as evicting the people who
+    #    already walked through it.
+    s, body = _request(
+        f"{a_base}/api/spaces/{space_id}/invite-tokens/{invite_token}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("a revokes the link", s, body, ok=(204,))
+    s, dead_html = _http_get_text(join_url)
+    if s != 404:
+        raise SystemExit(
+            f"gfs-invite-link: GET {join_url} after the revoke answered HTTP "
+            f"{s}, expected 404 — the blob is still on the bulletin board.",
+        )
+    if "This invite has expired or was revoked" not in dead_html:
+        raise SystemExit(
+            "gfs-invite-link: the 404 is not the styled page — a dead link "
+            "still deserves one. Body starts: " + dead_html[:200],
+        )
+    if invite_token in dead_html:
+        raise SystemExit(
+            "gfs-invite-link: the revoked page echoes the dead token back — "
+            "it invites the credential being copy-pasted onward.",
+        )
+    print("  revoked: the /join page is a styled 404 that names no token ✓")
+    s, denied = _request(
+        f"{e_base}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=join_body,
+        timeout=40.0,
+    )
+    if s != 422:
+        raise SystemExit(
+            f"gfs-invite-link: a second redeem of the REVOKED code answered "
+            f"HTTP {s} (expected 422): {denied!r}",
+        )
+    print("  a fresh redeem of the revoked code is refused (422) ✓")
+    if _instance_row("e", a["instance_id"]) is None:
+        raise SystemExit(
+            "gfs-invite-link: revoking the link tore down e's seat — revoke "
+            "must never un-seat somebody who already joined.",
+        )
+    print("  e keeps the seat it already had ✓")
+
+    # 9. An ``admin`` link, on a second space, into an admin seat WITHOUT
+    #    the space's signing seed.
+    admin_space_name = f"Link-admin space {time.time_ns()}"
+    s, admin_space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": admin_space_name,
+            "description": "second space — the admin-link seat",
+            "space_type": "global",
+            "join_mode": "invite_only",
+        },
+    )
+    admin_space = _must("a creates the admin-link space", s, admin_space, ok=(201,))
+    admin_space_id = admin_space["id"]
+    # A mint is refused unless the space is LISTED and active on that
+    # server — an invite link is a standing public URL, so the server
+    # will not park one for a listing it does not have. The publish is
+    # fired by ``_auto_publish_on_type`` on create, i.e. asynchronously,
+    # so wait for the directory rather than racing it.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        s, payload = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/spaces")
+        rows = payload.get("spaces", []) if isinstance(payload, dict) else []
+        if any(sp.get("space_id") == admin_space_id for sp in rows):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"gfs-invite-link: the admin-link space {admin_space_id} never "
+            "appeared in the GFS directory — a link cannot be published for "
+            "an unlisted space.",
+        )
+    s, admin_link = _request(
+        f"{a_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "admin", "uses": 1, "publish_to_gfs": gfs_conn_id},
+    )
+    admin_link = _must("a mints an admin link", s, admin_link, ok=(201,))
+    admin_payload = _decode_invite_blob(admin_link["code"])
+    s, admin_joined = _request(
+        f"{e_base}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=_join_body_from_blob(admin_payload),
+        timeout=40.0,
+    )
+    admin_joined = _must("e redeems the admin link", s, admin_joined, ok=(200, 201))
+    if admin_joined.get("role") != "admin":
+        raise SystemExit(
+            f"gfs-invite-link: e's admin redeem returned role="
+            f"{admin_joined.get('role')!r}, expected 'admin' — the seat is the "
+            "ISSUER's row, read out of the atomic consume.",
+        )
+    admin_rows = _rows(
+        "e",
+        "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+        (admin_space_id, e["user_id"]),
+    )
+    if not admin_rows or admin_rows[0][0] != "admin":
+        raise SystemExit(
+            f"gfs-invite-link: e's space_members row for the admin space is "
+            f"{admin_rows!r}, expected role 'admin'",
+        )
+    # …and NOT the signing seed. An admin met through a public link
+    # manages the space through SPACE_REMOTE_ADMIN_ACTION; the seed is a
+    # credential nobody could take back, because the connection server
+    # pins a space's identity key TOFU-immutably on first publish.
+    seed_rows = _rows(
+        "e",
+        "SELECT identity_private_key FROM spaces WHERE id = ?",
+        (admin_space_id,),
+    )
+    if seed_rows and seed_rows[0][0]:
+        raise SystemExit(
+            "gfs-invite-link: e holds the space SIGNING SEED for the "
+            "admin-link space — a household that walked in off a public link "
+            "must never get authority that cannot be revoked.",
+        )
+    shared = _log_lines_matching(
+        "a", "space_admin_key_share", offset=a_off
+    ) + _log_lines_matching("a", "SPACE_ADMIN_KEY_SHARE", offset=a_off)
+    if shared:
+        raise SystemExit(
+            f"gfs-invite-link: a shipped a seed share on this path: {shared!r}",
+        )
+    print("  e is admin on the second space and holds NO signing seed ✓")
+
+    state["gfs_invite_admin_space_id"] = admin_space_id
+    _save(state)
+    print(
+        "gfs-invite-link: ok (published link → stranger joins over the relay → "
+        "revoke → admin seat without the seed)"
+    )
+
+
+# ─── Step: gfs-invite-link-content ─────────────────────────────────────────
+
+
+def cmd_gfs_invite_link_content() -> None:
+    """A link-joined household is a full member on the wire, both ways.
+
+    Prereqs: ``gfs-invite-link`` (e holds a ``space_session`` seat in a's
+    global space and nothing else).
+
+    Seating the pair is only half the job: e and a hold matching
+    directional session keys but **no address for each other**, by
+    design, and no mesh path either. So every §24.11 envelope between
+    them is sealed a second time to the peer's key-wrap key and handed to
+    the same ``POST /gfs/envelope`` relay the redeem used
+    (``GfsRelayTransport``, selected in ``federation/transport.py`` for
+    ``source = space_session``). This step is the live proof that the
+    ordinary space vocabulary flows over it.
+
+    Sequence:
+    1. a posts in the space; e must see it DECRYPTED in
+       ``GET /api/spaces/{id}/feed`` and hold the ``space_posts`` row.
+       That single assertion covers the seal, the relay, the §24.11
+       pipeline under the wider relay timestamp window, the pair key and
+       the content key e got in the ACK's ``space_meta``.
+    2. The GFS moved envelopes addressed to e while that happened — the
+       delivery really was relayed and not some other transport that
+       quietly worked.
+    3. e posts; a must see it. The reply leg is the one that would break
+       if only the host knew how to reach the other side.
+    4. a rotates the per-space content key (removing a member, as
+       ``gfs-space-rotate`` does) and posts again. e must decrypt the
+       NEW epoch — the re-key has to reach a link-joined member like any
+       other, or e goes dark at the first roster change.
+    5. ``GET /api/connections`` on e labels a ``source=space_session``
+       with transport ``gfs_relay``. Anything else (``https`` in
+       particular) points an operator at an inbox URL that will never
+       exist.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-invite-link' first")
+    space_id = state.get("gfs_invite_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-invite-link' first")
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+
+    gfs_off = _gfs_log_size()
+
+    # 1. Host → link-joined member.
+    content = f"Post to a household that joined from a link — {time.time_ns()}"
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post = _must("a posts in the link-joined space", s, post, ok=(201,))
+    post_id = post["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(
+            f"gfs-invite-link-content: e decrypted {seen.get('content')!r}, "
+            f"expected {content!r}",
+        )
+    print("  e received a's post over the relay, decrypted ✓")
+
+    # 1b. …and it is PERSISTED, not merely rendered once. Read the row
+    #     rather than a second endpoint: ``/api/spaces/{id}/posts`` is
+    #     POST-only (``SpacePostCollectionView``), ``/feed`` above is the
+    #     read surface, and the row is the stronger claim anyway.
+    if not _rows("e", "SELECT id FROM space_posts WHERE id = ?", (post_id,)):
+        raise SystemExit(
+            f"gfs-invite-link-content: e's feed showed {post_id} but no "
+            "space_posts row survives — the relayed envelope was rendered "
+            "without being stored.",
+        )
+
+    # 2. It really went through the relay: the GFS carried envelopes
+    #    addressed to e in that window. (The blob is opaque, so this is
+    #    the honest form of the claim — a count and a recipient.)
+    to_e = [
+        line
+        for line in _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+        if e["instance_id"] in line
+    ]
+    if not to_e:
+        raise SystemExit(
+            "gfs-invite-link-content: the GFS relayed nothing to e while a's "
+            "post was delivered — it arrived by some transport a link-joined "
+            f"peer should not have. Check {GFS_DIR / 'log.txt'}.",
+        )
+    print(f"  the GFS carried {len(to_e)} envelope(s) addressed to e ✓")
+
+    # 3. Link-joined member → host. The reply leg.
+    reply = f"Reply from the link-joined household — {time.time_ns()}"
+    s, e_post = _request(
+        f"{e_base}/api/spaces/{space_id}/posts",
+        token=e["token"],
+        method="POST",
+        body={"type": "text", "content": reply},
+    )
+    e_post = _must("e posts in the space", s, e_post, ok=(201,))
+    a_seen = _await_space_post(state, "a", space_id, e_post["id"])
+    if a_seen.get("content") != reply:
+        raise SystemExit(
+            f"gfs-invite-link-content: a decrypted {a_seen.get('content')!r}, "
+            f"expected {reply!r}",
+        )
+    print("  a received e's reply over the relay ✓")
+
+    # 4. An epoch rotation must re-key a link-joined member too.
+    victim_id, _victim_token = _seat_local_member(
+        state,
+        "a",
+        space_id,
+        username="gina",
+        password="gina-pw-demo",
+        display_name="Gina",
+    )
+    s, removed = _request(
+        f"{a_base}/api/spaces/{space_id}/members/{victim_id}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("a: remove gina", s, removed, ok=(200,))
+    print("  a removed gina → content-key epoch rotation")
+    # Settle: rotate → re-seal to every member household, e's share of
+    # which rides the relay like everything else.
+    time.sleep(10)
+    rotated = f"Post under the rotated key — {time.time_ns()}"
+    s, post2 = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": rotated},
+    )
+    post2 = _must("a posts after the rotation", s, post2, ok=(201,))
+    seen2 = _await_space_post(state, "e", space_id, post2["id"])
+    if seen2.get("content") != rotated:
+        raise SystemExit(
+            f"gfs-invite-link-content: e decrypted {seen2.get('content')!r} "
+            f"after the rotation, expected {rotated!r} — the re-key never "
+            "reached a link-joined member.",
+        )
+    print("  e decrypts the post-rotation post — the re-key rode the relay ✓")
+
+    # 5. The operator-facing label.
+    s, conns = _request(f"{e_base}/api/connections", token=e["token"])
+    _must("e: GET /api/connections", s, conns)
+    row = next(
+        (c for c in conns if c.get("instance_id") == a["instance_id"]), None
+    )
+    if row is None:
+        raise SystemExit(
+            f"gfs-invite-link-content: e's /api/connections does not list a — "
+            f"got {conns!r}",
+        )
+    if row.get("source") != "space_session":
+        raise SystemExit(
+            f"gfs-invite-link-content: e labels a source={row.get('source')!r}, "
+            "expected 'space_session'",
+        )
+    if row.get("transport") != "gfs_relay":
+        raise SystemExit(
+            f"gfs-invite-link-content: e labels a transport="
+            f"{row.get('transport')!r}, expected 'gfs_relay'. 'https' in "
+            "particular is a lie — there is no inbox URL to fall back to.",
+        )
+    print("  e's /api/connections labels a: space_session over gfs_relay ✓")
+
+    state["gfs_invite_post_id"] = post_id
+    state["gfs_invite_post_content"] = content
+    state["gfs_invite_rotated_post_id"] = post2["id"]
+    _save(state)
+    print(
+        "gfs-invite-link-content: ok (space content both ways over the relay, "
+        "survives a key rotation)"
+    )
+
+
 def cmd_gfs_down() -> None:
     """Stop the GFS started by :func:`cmd_gfs_up` (idempotent)."""
     state = _load()
@@ -1943,6 +2765,12 @@ def cmd_pair() -> None:
         "b": 3,  # a, c, d
         "c": 2,  # a, b
         "d": 1,  # b only — a-via-relay lands later
+        # e pairs with NOBODY. Not an omission: the §D2b bootstrap redeem
+        # in ``gfs-invite-link`` only runs when neither a direct pair nor
+        # a mesh route reaches the issuer, and a mesh route is a chain of
+        # CONFIRMED peers. One QR handshake here and that step quietly
+        # degrades into the ordinary ``SPACE_INVITE_TOKEN_REDEEM`` path.
+        "e": 0,
     }
     for label, info in state["instances"].items():
         s, conns = _request(
@@ -1957,7 +2785,7 @@ def cmd_pair() -> None:
                 f"got {len(confirmed)} "
                 f"({[c['display_name'] for c in conns]})"
             )
-    print("pair: ok (a↔b, b↔c, a↔c, b↔d)")
+    print("pair: ok (a↔b, b↔c, a↔c, b↔d; e stays unpaired by design)")
 
 
 def cmd_relay_pair() -> None:
@@ -2556,8 +3384,28 @@ def cmd_verify() -> None:
     #    a host only sends the reconnect-reconcile reply to a peer it sees at
     #    >= v_20, so this same tripwire guards that the backstop round-trips
     #    (a sub-v_20 peer silently falls back to the SPACE_DISSOLVED path).
-    from socialhome.domain.federation_capabilities import OURS as _OURS
+    #    Latest gated event: v_29 (MIN_FOR_INVITE_BOOTSTRAP_REDEEM) — a
+    #    redeemer refuses to attempt a §D2b bootstrap redeem against an
+    #    issuer advertising less, because a sub-v_29 issuer has no handler
+    #    for the envelope and the attempt would only burn a timeout. That
+    #    one does NOT ride INSTANCE_CAPABILITIES_UPDATED: there is no peer
+    #    row to read it off, which is exactly why the invite blob carries
+    #    ``issuer_proto_version`` and the sealed redeem body carries the
+    #    redeemer's. Block 0c below asserts that wire, on the seats the
+    #    bootstrap actually created.
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
 
+    # ``/api/pairing/*`` is rate limited to 5 calls per 60 s per instance
+    # (``app.py``), and verify used to spend that budget re-fetching the
+    # SAME list three times over — here, for the resync target, and again
+    # in block 7 — which left ``share_home``'s two PATCHes to 429 on a
+    # fast run. One fetch, reused by every reader that only needs the
+    # snapshot; the polls that genuinely need fresh data (the transport
+    # probe) still fetch their own.
+    _conns: dict[str, list] = {}
     for viewer in ("a", "b", "c"):
         v = state["instances"][viewer]
         s, conns = _request(
@@ -2566,6 +3414,7 @@ def cmd_verify() -> None:
         )
         if s != 200 or not isinstance(conns, list):
             continue
+        _conns[viewer] = conns
         for row in conns:
             if row.get("status") != "confirmed":
                 continue
@@ -2580,25 +3429,73 @@ def cmd_verify() -> None:
             else:
                 print(f"  {viewer} sees {peer} at proto_version={pv} (>= {_OURS}) ✓")
 
+    # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
+    #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a
+    #     peer row — and on this path there is no peer row yet, by
+    #     definition. So v_29 rides two other fields instead: the invite
+    #     blob's ``issuer_proto_version`` (which is what the redeemer gates
+    #     its attempt on) and the sealed redeem body's ``proto_version``
+    #     (which the issuer stamps on the seat it creates). Both land on the
+    #     ``space_session`` rows, so asserting those two rows carry >= v_29
+    #     is the tripwire for a bump that lands the constant but never
+    #     reaches the one wire that cannot fall back to a peer row. Gated on
+    #     ``gfs-invite-link`` having run.
+    if state.get("gfs_invite_space_id"):
+        _min_bootstrap = int(_Cap.MIN_FOR_INVITE_BOOTSTRAP_REDEEM)
+        for holder, peer in (("a", "e"), ("e", "a")):
+            try:
+                _seat = _instance_row(
+                    holder, state["instances"][peer]["instance_id"]
+                )
+            except Exception as exc:
+                failures.append(f"{holder}: space_session row read failed: {exc!r}")
+                continue
+            if _seat is None:
+                failures.append(
+                    f"{holder}: the space_session seat for {peer} is gone — "
+                    "gfs-invite-link seated it",
+                )
+            elif _seat["proto_version"] < _min_bootstrap:
+                failures.append(
+                    f"{holder}: the {peer} bootstrap seat reads proto_version="
+                    f"{_seat['proto_version']} (< v_{_min_bootstrap}) — the "
+                    "version did not ride the §D2b wire, so the redeemer's "
+                    "MIN_FOR_INVITE_BOOTSTRAP_REDEEM gate is running on a "
+                    "default rather than on what the issuer advertised",
+                )
+            elif _seat["proto_version"] < _OURS:
+                failures.append(
+                    f"{holder}: the {peer} bootstrap seat reads proto_version="
+                    f"{_seat['proto_version']}, this build is at OURS={_OURS} "
+                    "— the seat was stamped from a stale constant",
+                )
+            else:
+                print(
+                    f"  {holder}'s bootstrap seat for {peer} carries "
+                    f"proto_version={_seat['proto_version']} "
+                    f"(>= v_{_min_bootstrap}, == OURS) ✓"
+                )
+    else:
+        print("  (v_29 bootstrap wire skipped — run 'gfs-invite-link')")
+
     # 0b. INSTANCE_RESYNC_REQUEST round-trip (v_19, #319 ¶6) — ask a confirmed
     #     v_19+ peer to re-advertise its capabilities via the operator
     #     endpoint and assert it's accepted. Proves the new event type +
     #     POST /api/admin/federation/resync + peer_supports(v_19) gate are
     #     wired end-to-end; a sub-v_19 peer would 409 (PEER_TOO_OLD).
     va = state["instances"]["a"]
-    s, conns = _request(
-        f"http://127.0.0.1:{va['port']}/api/pairing/connections",
-        token=va["token"],
-    )
     resync_target = ""
-    if s == 200 and isinstance(conns, list):
-        for row in conns:
-            if (
-                row.get("status") == "confirmed"
-                and int(row.get("proto_version") or 1) >= _OURS
-            ):
-                resync_target = str(row.get("instance_id") or "")
-                break
+    for row in _conns.get("a", []):
+        if (
+            row.get("status") == "confirmed"
+            and int(row.get("proto_version") or 1) >= _OURS
+            # Never a link-joined seat: ``INSTANCE_RESYNC_REQUEST`` is
+            # outside ``SPACE_SESSION_ALLOWED_EVENT_TYPES``, so aiming the
+            # probe at e would assert a refusal we deliberately built.
+            and row.get("source") != "space_session"
+        ):
+            resync_target = str(row.get("instance_id") or "")
+            break
     if resync_target:
         s, body = _request(
             f"http://127.0.0.1:{va['port']}/api/admin/federation/resync",
@@ -3016,13 +3913,17 @@ def cmd_verify() -> None:
     #    most likely the outbound didn't fire or the inbound handler is
     #    not registered. The harness asserts the round-trip so future
     #    additive-but-not-fail-soft features have a safety net.
+    #
+    #    Reads block 0's snapshot rather than re-fetching: block 0 already
+    #    asserted the STRICTLY STRONGER ``>= OURS`` on that same list, so a
+    #    second fetch could never fail here on its own — it only spent a
+    #    slot of the 5-per-60 s ``/api/pairing/*`` budget that
+    #    ``share_home`` below then 429'd on.
     for viewer in ("a", "b", "c"):
-        info = state["instances"][viewer]
-        s, conns = _request(
-            f"http://127.0.0.1:{info['port']}/api/pairing/connections",
-            token=info["token"],
-        )
-        _must(f"connections({viewer})", s, conns)
+        conns = _conns.get(viewer)
+        if conns is None:
+            failures.append(f"{viewer}: no pairing-connections snapshot")
+            continue
         peers_by_id = {c["instance_id"]: c for c in conns}
         for other in ("a", "b", "c"):
             if other == viewer:
@@ -3057,10 +3958,10 @@ def cmd_verify() -> None:
     #    pass.
     d_iid = state["instances"]["d"]["instance_id"]
 
-    def _check_transports() -> tuple[list[str], list[str]]:
+    def _check_transports() -> tuple[list[str], list[str], bool]:
         """Probe every inner-ring confirmed peer's transport once.
 
-        Returns ``(success_lines, warning_lines)``: a peer that hasn't
+        Returns ``(success_lines, warning_lines, throttled)``. A peer that hasn't
         flipped to ``rtc`` yet emits a *warning* (not a failure) —
         WebRTC peer-connections legitimately don't establish reliably
         on loopback because perfect-negotiation glare aborts one side
@@ -3069,6 +3970,14 @@ def cmd_verify() -> None:
         assertions earlier in this function are what actually pin
         delivery. The transport probe is informational — useful to
         see at a glance which pairs flipped — but not a gate.
+
+        ``throttled`` says the ``/api/pairing/*`` bucket (5 per 60 s per
+        instance) ran dry mid-probe. That HAS to be a signal rather than
+        a ``_must`` abort: verify already spends 3 of the 5 on a before
+        it gets here, so a slow RTC settle reaches the cap on the third
+        poll and used to take the WHOLE verify down with a 429 — an
+        informational probe failing the run it was only meant to
+        annotate. The caller stops polling and prints what it has.
         """
         ok_lines: list[str] = []
         warn_lines: list[str] = []
@@ -3078,6 +3987,8 @@ def cmd_verify() -> None:
                 f"http://127.0.0.1:{info['port']}/api/pairing/connections",
                 token=info["token"],
             )
+            if s == 429:
+                return ok_lines, warn_lines, True
             _must(f"connections({src})", s, conns)
             for row in conns:
                 if row.get("status") != "confirmed":
@@ -3086,6 +3997,12 @@ def cmd_verify() -> None:
                 # only paired with b in the demo, so the channel may
                 # or may not have flipped to RTC by verify time.
                 if row["instance_id"] == d_iid:
+                    continue
+                # A link-joined seat can NEVER be ``rtc``: RTC signalling
+                # travels over the peer relationship this pair does not
+                # have, which is why the row reads ``gfs_relay``. Warning
+                # about it would report the design as a failure to settle.
+                if row.get("source") == "space_session":
                     continue
                 transport = row.get("transport") or "https"
                 if transport == "rtc":
@@ -3099,7 +4016,7 @@ def cmd_verify() -> None:
                         "loopback glare; content delivery still verified"
                         " above)"
                     )
-        return ok_lines, warn_lines
+        return ok_lines, warn_lines, False
 
     # The ``/api/pairing/*`` bucket is 5 calls per 60s per instance,
     # and we already spent the budget in earlier verify steps and
@@ -3110,7 +4027,14 @@ def cmd_verify() -> None:
     ok_lines: list[str] = []
     warn_lines: list[str] = []
     for attempt in range(3):
-        ok_lines, warn_lines = _check_transports()
+        pass_ok, pass_warn, throttled = _check_transports()
+        if throttled:
+            print(
+                "  (transport probe: /api/pairing/* bucket empty — reporting "
+                "the last complete pass; RTC convergence is informational)"
+            )
+            break
+        ok_lines, warn_lines = pass_ok, pass_warn
         if not warn_lines:
             break
         if attempt < 2:
@@ -3538,6 +4462,92 @@ def cmd_verify() -> None:
                     )
                 else:
                     print(f"  {label} still cannot see that post ✓")
+
+    # 13g. §D2b invite-link durability (``gfs-invite-link`` /
+    #    ``gfs-invite-link-content``). Everything the two steps proved has
+    #    to still be true at the end of the run: the pair is a
+    #    space-scoped seat with no address on both sides, the content that
+    #    crossed the relay is still there, and the revoked /join page is
+    #    still dead. Gated on the steps having run — the whole gfs-* chain
+    #    is opt-in.
+    if state.get("gfs_invite_space_id"):
+        il_space = state["gfs_invite_space_id"]
+        for holder, peer in (("a", "e"), ("e", "a")):
+            try:
+                row = _instance_row(holder, state["instances"][peer]["instance_id"])
+            except Exception as exc:
+                failures.append(f"{holder}: seat re-check failed: {exc!r}")
+                continue
+            if row is None:
+                failures.append(
+                    f"{holder}: the space_session seat for {peer} is gone",
+                )
+            elif row["source"] != "space_session":
+                failures.append(
+                    f"{holder}: the {peer} seat drifted to source="
+                    f"{row['source']!r} — a link-joined household must never "
+                    "become a social peer (it would join every DM / presence "
+                    "/ moment fan-out)",
+                )
+            elif row["remote_inbox_url"]:
+                failures.append(
+                    f"{holder}: the {peer} seat acquired remote_inbox_url="
+                    f"{row['remote_inbox_url']!r} — neither household may "
+                    "learn the other's address on this path",
+                )
+            else:
+                print(f"  {holder} still holds {peer} as an addressless seat ✓")
+        il_post = state.get("gfs_invite_post_id")
+        if il_post:
+            if _rows("e", "SELECT id FROM space_posts WHERE id = ?", (il_post,)):
+                print("  e still holds the post that came over the relay ✓")
+            else:
+                failures.append(
+                    f"e: post {il_post} is gone — it arrived over the "
+                    "connection-server relay and should persist like any other",
+                )
+        il_rotated = state.get("gfs_invite_rotated_post_id")
+        if il_rotated and not _rows(
+            "e", "SELECT id FROM space_posts WHERE id = ?", (il_rotated,)
+        ):
+            failures.append(
+                f"e: the post-rotation post {il_rotated} is gone — the re-key "
+                "reached e once and then the row was lost",
+            )
+        il_url = state.get("gfs_invite_join_url")
+        if il_url:
+            s, dead = _http_get_text(il_url)
+            if s != 404:
+                failures.append(
+                    f"GFS: the revoked /join page answers HTTP {s}, expected "
+                    "404 — a revoked link must stay a dead link",
+                )
+            elif state.get("gfs_invite_token", "") in dead:
+                failures.append(
+                    "GFS: the revoked /join page echoes the dead token back",
+                )
+            else:
+                print("  the revoked /join page is still a token-free 404 ✓")
+        il_admin = state.get("gfs_invite_admin_space_id")
+        if il_admin:
+            seed = _rows(
+                "e", "SELECT identity_private_key FROM spaces WHERE id = ?",
+                (il_admin,),
+            )
+            if seed and seed[0][0]:
+                failures.append(
+                    f"e: holds the signing seed for {il_admin} — an admin met "
+                    "through a public link must never hold space authority",
+                )
+            else:
+                print("  e's link-admin seat still carries no signing seed ✓")
+        if not il_space:
+            failures.append("gfs-invite-link state is incoherent (no space id)")
+    else:
+        print(
+            "  §D2b invite-link skipped — run 'gfs-invite-link' / "
+            "'gfs-invite-link-content' to exercise"
+        )
 
     # 13b. admin-promote-kick durability — dave's promotion on d must
     #    still read 'admin' after everything that ran since (app-session,
