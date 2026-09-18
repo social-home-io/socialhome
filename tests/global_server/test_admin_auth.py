@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -11,6 +13,7 @@ from socialhome.global_server.admin import (
     hash_password,
     verify_password,
 )
+from socialhome.global_server.app_keys import gfs_admin_repo_key
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.server import create_gfs_app
 
@@ -31,8 +34,6 @@ async def client(tmp_dir):
     async with TestClient(TestServer(app)) as tc:
         # Seed the admin password via the already-wired admin repo —
         # equivalent to `socialhome-global-server --set-password`.
-        from socialhome.global_server.app_keys import gfs_admin_repo_key
-
         await app[gfs_admin_repo_key].set_config(
             "admin_password_hash",
             hash_password("test-pw-123"),
@@ -74,6 +75,62 @@ async def test_brute_force_lockout(client):
     resp = await client.post("/admin/login", json={"password": "nope"})
     assert resp.status == 429
     assert "Retry-After" in resp.headers
+
+
+async def test_brute_force_lockout_survives_a_rotating_forwarded_for(tmp_dir):
+    """An internet-facing GFS (no trusted proxies) must not hand an attacker a
+    fresh throttle bucket per request just because they rotate a header they
+    control — that would make the 5-attempt lockout unlimited."""
+    app = create_gfs_app(replace(_test_config(tmp_dir), trusted_proxies=()))
+    async with TestClient(TestServer(app)) as tc:
+        await app[gfs_admin_repo_key].set_config(
+            "admin_password_hash",
+            hash_password("test-pw-123"),
+        )
+        statuses = []
+        for i in range(BRUTE_FORCE_MAX_ATTEMPTS + 1):
+            resp = await tc.post(
+                "/admin/login",
+                json={"password": "nope"},
+                headers={"X-Forwarded-For": f"203.0.113.{i}"},
+            )
+            statuses.append(resp.status)
+        assert statuses[:BRUTE_FORCE_MAX_ATTEMPTS] == [401] * BRUTE_FORCE_MAX_ATTEMPTS
+        assert statuses[-1] == 429
+
+
+async def test_brute_force_buckets_per_client_behind_a_trusted_proxy(client):
+    """The loopback TestServer peer is trusted by default, so each distinct
+    LAST entry is its own bucket — a real reverse-proxy deployment still locks
+    out one attacker without locking out everyone behind the proxy."""
+    for _ in range(BRUTE_FORCE_MAX_ATTEMPTS):
+        resp = await client.post(
+            "/admin/login",
+            json={"password": "nope"},
+            headers={"X-Forwarded-For": "198.51.100.7"},
+        )
+        assert resp.status == 401
+    resp = await client.post(
+        "/admin/login",
+        json={"password": "nope"},
+        headers={"X-Forwarded-For": "198.51.100.7"},
+    )
+    assert resp.status == 429
+    # A client-supplied prefix does not buy a fresh bucket — the proxy's
+    # appended last entry is what counts.
+    resp = await client.post(
+        "/admin/login",
+        json={"password": "nope"},
+        headers={"X-Forwarded-For": "1.1.1.1, 198.51.100.7"},
+    )
+    assert resp.status == 429
+    # A different client behind the same proxy is unaffected.
+    resp = await client.post(
+        "/admin/login",
+        json={"password": "nope"},
+        headers={"X-Forwarded-For": "198.51.100.8"},
+    )
+    assert resp.status == 401
 
 
 async def test_admin_api_requires_cookie(client):
