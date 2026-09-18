@@ -16,9 +16,11 @@ import asyncio
 import base64
 import html as _html
 import io
+import ipaddress
 import logging
 import secrets
 import time
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 import qrcode  # type: ignore[import-untyped]
@@ -26,6 +28,7 @@ from aiohttp import web
 
 from ..domain.space import SPACE_CATEGORIES
 from . import app_keys as K
+from .config import DEFAULT_TRUSTED_PROXIES
 from .markdown_lite import render_markdown
 
 if TYPE_CHECKING:
@@ -50,14 +53,167 @@ LISTING_MAX_PER_MINUTE: int = 30
 PUBLIC_RTC_MAX_PER_MINUTE: int = 20
 
 #: Per-IP/minute cap on ``POST /gfs/publish``. Since the relay is authorized by
-#: the space-authority signature alone, the GFS deliberately cannot identify
-#: the caller — the client IP is the only handle left for shedding a flood, so
+#: the space-authority signature alone, the request carries no household
+#: identity — the client IP is the only handle left for shedding a flood, so
 #: this limiter replaces the per-instance accountability the old
 #: ``from_instance`` check implied. 120/min = 2/s sustained per IP: orders of
 #: magnitude above a real household (one publish per public post or subscriber
 #: key handoff, per GFS) while still bounding how much unauthenticated
 #: signature-verification + fan-out work one source can force.
 PUBLISH_MAX_PER_MINUTE: int = 120
+
+#: Hard cap on how many client IPs a rate-limit window tracks at once. The key
+#: is attacker-influenced (one bucket per source address, and a botnet or an
+#: IPv6 /64 supplies effectively unlimited distinct ones), so an unbounded dict
+#: is a slow memory exhaustion. 10 000 buckets is far more concurrent clients
+#: than a GFS sees in a 60-second window while costing well under a megabyte;
+#: past the cap the least-recently-seen buckets are evicted, which is also the
+#: correct eviction order (their windows are the closest to expiring).
+RATE_LIMIT_MAX_TRACKED_IPS: int = 10_000
+
+#: Sliding-window length for every per-IP limiter in this module, in seconds.
+RATE_LIMIT_WINDOW_SECONDS: float = 60.0
+
+#: Hard body cap on ``POST /gfs/publish`` — the endpoint is unauthenticated
+#: until the authority signature inside the payload is verified, so the bytes
+#: must be bounded BEFORE they are buffered or parsed. Sized from the largest
+#: legitimate relay payload: a ``space_post_public`` envelope carries one
+#: AES-GCM ciphertext over a single post (``MAX_POST_LENGTH`` is 10 000 chars
+#: → ≤ 40 KiB UTF-8, plus author signature, media references and an optional
+#: 4-decimal location; media bytes ride separate blobs, never this body) and a
+#: ``space_subscriber_key_handoff`` is a few hundred bytes of sealed key. Even
+#: base64-expanded that is ~55 KiB, so 256 KiB leaves ~5× headroom while
+#: keeping a flood's per-request memory cost trivial.
+PUBLISH_MAX_BODY_BYTES: int = 256 * 1024
+
+
+# ─── Client IP resolution ───────────────────────────────────────────────
+
+
+class ClientIpResolver:
+    """Resolve the address a request should be rate-limited under.
+
+    ``X-Forwarded-For`` is client-supplied data. Believing it unconditionally
+    means an attacker rotates the header and mints a fresh rate-limit bucket
+    per request, so no per-IP limiter on this server ever fires. It is honoured
+    only when the TCP peer is itself a trusted proxy, and then only its LAST
+    entry is used — that is the hop the trusted proxy appended; everything to
+    its left was written by whoever was upstream of it (the client included).
+
+    The trusted set is parsed into :mod:`ipaddress` networks ONCE, at
+    construction, so the middleware never re-parses CIDRs per request.
+    Unparseable entries are dropped at construction (an operator typo must not
+    turn into a per-request exception on the hot path).
+    """
+
+    __slots__ = ("_networks",)
+
+    def __init__(self, trusted_proxies: Iterable[str] = DEFAULT_TRUSTED_PROXIES):
+        networks = []
+        for entry in trusted_proxies:
+            try:
+                networks.append(ipaddress.ip_network(entry.strip(), strict=False))
+            except ValueError:
+                log.warning(
+                    "GFS: ignoring unparseable trusted_proxies entry %r",
+                    entry,
+                )
+        self._networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+            tuple(networks)
+        )
+
+    def __call__(self, request: web.Request) -> str:
+        peer = self._peer_ip(request)
+        if peer is None:
+            return "unknown"
+        if not self._is_trusted(peer):
+            return str(peer)
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        last = forwarded.rsplit(",", 1)[-1].strip()
+        try:
+            return str(ipaddress.ip_address(last))
+        except ValueError:
+            # No header, or a malformed last hop — fall back to the real peer
+            # rather than keying the limiter on an attacker-chosen string.
+            return str(peer)
+
+    @staticmethod
+    def _peer_ip(
+        request: web.Request,
+    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        transport = request.transport
+        peername = transport.get_extra_info("peername") if transport else None
+        raw = peername[0] if peername else request.remote
+        if not raw:
+            return None
+        try:
+            # A link-local peer arrives as "fe80::1%eth0"; the zone is not part
+            # of the address for matching purposes.
+            return ipaddress.ip_address(str(raw).split("%", 1)[0])
+        except ValueError:  # pragma: no cover - a UNIX socket path, etc.
+            return None
+
+    def _is_trusted(
+        self,
+        peer: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    ) -> bool:
+        return any(peer in net for net in self._networks)
+
+
+# ─── Sliding-window rate-limit counter ──────────────────────────────────
+
+
+class SlidingWindowCounter:
+    """Per-key sliding-window hit counter with a bounded key space.
+
+    Shared by every per-IP limiter in this module (listing, public RTC entry
+    points, ``/gfs/publish``) — they differ only in which paths they gate and
+    how many hits they allow.
+
+    Two bounds keep an anonymous flood from growing the process: the hit list
+    for a key is pruned to the current window on every touch (so an idle key
+    holds nothing), and the key space itself is capped at *max_keys* with
+    least-recently-seen eviction. ``dict`` preserves insertion order and each
+    allowed hit re-inserts its key, so iteration order IS recency order.
+    """
+
+    __slots__ = ("_limit", "_max_keys", "_hits")
+
+    def __init__(
+        self,
+        limit: int,
+        *,
+        max_keys: int = RATE_LIMIT_MAX_TRACKED_IPS,
+    ) -> None:
+        self._limit = limit
+        self._max_keys = max_keys
+        self._hits: dict[str, list[float]] = {}
+
+    def allow(self, key: str, *, now: float | None = None) -> bool:
+        """Record a hit for *key* and return whether it is within the window."""
+        stamp = time.monotonic() if now is None else now
+        previous = self._hits.pop(key, ())
+        hits = [t for t in previous if stamp - t < RATE_LIMIT_WINDOW_SECONDS]
+        if len(hits) >= self._limit:
+            self._hits[key] = hits
+            return False
+        hits.append(stamp)
+        self._hits[key] = hits
+        self._evict()
+        return True
+
+    def _evict(self) -> None:
+        overflow = len(self._hits) - self._max_keys
+        if overflow <= 0:
+            return
+        for key in list(self._hits)[:overflow]:
+            del self._hits[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._hits
+
+    def __len__(self) -> int:
+        return len(self._hits)
 
 
 # ─── Token service ──────────────────────────────────────────────────────
@@ -89,37 +245,39 @@ class PairingTokenService:
         return await self._admin_repo.consume_pair_token(token)
 
 
-# ─── Listing rate-limit middleware ─────────────────────────────────────
+# ─── Per-IP rate-limit middlewares ─────────────────────────────────────
 
 
-def build_listing_rate_limit():
-    """Simple in-memory per-IP rate limiter for the public listing.
+def _build_window_limiter(
+    resolver: ClientIpResolver,
+    limit: int,
+    applies: Callable[[str], bool],
+):
+    """Build a middleware that sheds >*limit* hits/minute per client IP.
 
-    Spec §24.7.3: 30 GETs per minute on ``/`` and ``/spaces/{id}``.
+    One implementation for all three limiters below: they differ only in which
+    paths they gate (*applies*) and the *limit*. The client address comes from
+    *resolver*, which is the only component allowed to look at
+    ``X-Forwarded-For`` (see :class:`ClientIpResolver`).
     """
-    counters: dict[str, list[float]] = {}
+    counter = SlidingWindowCounter(limit)
 
     @web.middleware
     async def _rate_limit(request: web.Request, handler):
-        # Only gate the public HTML pages.
-        path = request.rel_url.path
-        if not (path == "/" or path.startswith("/spaces/")):
+        if not applies(request.rel_url.path):
             return await handler(request)
-        now = time.monotonic()
-        ip = _client_ip(request)
-        hits = [t for t in counters.get(ip, []) if now - t < 60.0]
-        if len(hits) >= LISTING_MAX_PER_MINUTE:
-            resp = web.json_response(
-                {"error": "rate_limited"},
-                status=429,
-            )
+        if not counter.allow(resolver(request)):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
             return resp
-        hits.append(now)
-        counters[ip] = hits
         return await handler(request)
 
     return _rate_limit
+
+
+def _is_public_listing(path: str) -> bool:
+    """The public HTML pages — the landing page and the per-space pages."""
+    return path == "/" or path.startswith("/spaces/")
 
 
 def _is_public_rtc_entry(path: str) -> bool:
@@ -133,67 +291,49 @@ def _is_public_rtc_entry(path: str) -> bool:
     )
 
 
-def build_public_rtc_rate_limit():
+def build_listing_rate_limit(resolver: ClientIpResolver):
+    """Simple in-memory per-IP rate limiter for the public listing.
+
+    Spec §24.7.3: 30 GETs per minute on ``/`` and ``/spaces/{id}``.
+    """
+    return _build_window_limiter(resolver, LISTING_MAX_PER_MINUTE, _is_public_listing)
+
+
+def build_public_rtc_rate_limit(resolver: ClientIpResolver):
     """Per-IP rate limiter for the anonymous public-content RTC entry
     points. Each offer/relay request pushes a WS frame to the author, so a
-    flood is an amplification vector; cap it per IP. Mirrors
-    :func:`build_listing_rate_limit`'s in-memory sliding window."""
-    counters: dict[str, list[float]] = {}
-
-    @web.middleware
-    async def _rate_limit(request: web.Request, handler):
-        if not _is_public_rtc_entry(request.rel_url.path):
-            return await handler(request)
-        now = time.monotonic()
-        ip = _client_ip(request)
-        hits = [t for t in counters.get(ip, []) if now - t < 60.0]
-        if len(hits) >= PUBLIC_RTC_MAX_PER_MINUTE:
-            resp = web.json_response({"error": "rate_limited"}, status=429)
-            resp.headers["Retry-After"] = "60"
-            return resp
-        hits.append(now)
-        counters[ip] = hits
-        return await handler(request)
-
-    return _rate_limit
+    flood is an amplification vector; cap it per IP."""
+    return _build_window_limiter(
+        resolver,
+        PUBLIC_RTC_MAX_PER_MINUTE,
+        _is_public_rtc_entry,
+    )
 
 
-def build_publish_rate_limit():
+def build_publish_rate_limit(resolver: ClientIpResolver):
     """Per-IP rate limiter for ``POST /gfs/publish``.
 
     The relay is authorized by the space-authority signature alone, so the GFS
     cannot (and must not) identify the publishing household — per-IP is the
-    only rate handle available. Mirrors
-    :func:`build_public_rtc_rate_limit`'s in-memory sliding window."""
-    counters: dict[str, list[float]] = {}
-
-    @web.middleware
-    async def _rate_limit(request: web.Request, handler):
-        if request.rel_url.path != "/gfs/publish":
-            return await handler(request)
-        now = time.monotonic()
-        ip = _client_ip(request)
-        hits = [t for t in counters.get(ip, []) if now - t < 60.0]
-        if len(hits) >= PUBLISH_MAX_PER_MINUTE:
-            resp = web.json_response({"error": "rate_limited"}, status=429)
-            resp.headers["Retry-After"] = "60"
-            return resp
-        hits.append(now)
-        counters[ip] = hits
-        return await handler(request)
-
-    return _rate_limit
+    only rate handle available."""
+    return _build_window_limiter(
+        resolver,
+        PUBLISH_MAX_PER_MINUTE,
+        lambda path: path == "/gfs/publish",
+    )
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 
 
 def _client_ip(request: web.Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    peer = request.transport.get_extra_info("peername") if request.transport else None
-    return str(peer[0]) if peer else "unknown"
+    """The client address for this request, per the app's trusted-proxy policy.
+
+    Handlers (unlike the middlewares, which close over the resolver) read it
+    off the app so there is exactly ONE parsed trusted-proxy set per server.
+    """
+    resolver: ClientIpResolver = request.app[K.gfs_client_ip_key]
+    return resolver(request)
 
 
 def _escape(value: object | None) -> str:

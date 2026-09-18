@@ -48,6 +48,7 @@ from .config import (
 from .federation import GfsFederationService
 from .maintenance import GfsMaintenanceScheduler
 from .public import (
+    ClientIpResolver,
     PairingTokenService,
     build_listing_rate_limit,
     build_public_rtc_rate_limit,
@@ -97,6 +98,7 @@ class GfsApp:
         "db",
         "repos",
         "services",
+        "client_ip",
         "app",
     )
 
@@ -110,6 +112,10 @@ class GfsApp:
         self.db = self._build_db(db_path_override)
         self.repos = self._build_repos(self.db)
         self.services = self._build_services(config, self.repos)
+        # ONE resolver for the whole server: the trusted-proxy CIDRs are parsed
+        # here, never per request, and every limiter plus every handler agrees
+        # on what "the client" is.
+        self.client_ip = ClientIpResolver(config.trusted_proxies)
         self.app = self._build_app()
         self._wire_app_keys()
         self._register_routes()
@@ -226,9 +232,9 @@ class GfsApp:
     def _build_app(self) -> web.Application:
         middlewares = [
             build_admin_middleware(self.services.admin_auth),
-            build_listing_rate_limit(),
-            build_public_rtc_rate_limit(),
-            build_publish_rate_limit(),
+            build_listing_rate_limit(self.client_ip),
+            build_public_rtc_rate_limit(self.client_ip),
+            build_publish_rate_limit(self.client_ip),
         ]
         return web.Application(middlewares=middlewares)
 
@@ -238,6 +244,7 @@ class GfsApp:
         a = self.app
         a[K.gfs_db_key] = self.db
         a[K.gfs_config_key] = self.config
+        a[K.gfs_client_ip_key] = self.client_ip
         a[K.gfs_fed_repo_key] = self.repos.federation
         a[K.gfs_admin_repo_key] = self.repos.admin
         a[K.gfs_cluster_repo_key] = self.repos.cluster

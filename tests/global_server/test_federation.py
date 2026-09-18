@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from socialhome.global_server import federation as federation_mod
+from socialhome.global_server.domain import GfsSubscriber
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
 
@@ -2434,3 +2435,49 @@ async def test_publish_event_legacy_from_instance_never_logged(gfs_db, caplog):
         and "admin-a" in rec.getMessage()
     ]
     assert leaked == [], f"relaying household id leaked into logs: {leaked}"
+
+
+# ── Fan-out concurrency ────────────────────────────────────────────────────────
+
+
+class _SlowWsRegistry:
+    """A ws-registry stub whose ``send`` takes *delay* seconds, recording the
+    peak number of concurrently in-flight deliveries."""
+
+    def __init__(self, delay: float = 0.05) -> None:
+        self.delay = delay
+        self.in_flight = 0
+        self.peak = 0
+        self.sent: list[str] = []
+
+    async def send(self, instance_id: str, frame: dict) -> bool:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay)
+            self.sent.append(instance_id)
+            return True
+        finally:
+            self.in_flight -= 1
+
+
+async def test_fan_out_is_bounded_concurrent(gfs_db):
+    """Sequential delivery let ONE accepted publish pin a request handler for
+    N × the per-target timeout — an amplification handle for an anonymous
+    caller. Delivery is concurrent, but bounded so a huge subscriber list can't
+    open unbounded sockets."""
+    ws = _SlowWsRegistry(delay=0.05)
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    subs = [
+        GfsSubscriber(instance_id=f"sub-{i}", inbox_url=f"http://s{i}/inbox")
+        for i in range(24)
+    ]
+    started = asyncio.get_running_loop().time()
+    delivered = await svc._fan_out(subs, {"space_id": "sp", "event_type": "e"}, None)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert delivered == [s.instance_id for s in subs]
+    assert ws.peak <= federation_mod.FAN_OUT_CONCURRENCY
+    assert ws.peak > 1, "delivery is still sequential"
+    # 24 targets at 50 ms each: sequential is ≥ 1.2 s, bounded-concurrent ≈ 0.15 s.
+    assert elapsed < 0.6, elapsed

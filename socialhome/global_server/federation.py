@@ -50,6 +50,28 @@ MAX_ABOUT_MARKDOWN_CHARS: int = 8000
 #: the household-name bound on the HFS side.
 MAX_DISPLAY_NAME_CHARS: int = 80
 
+#: Max simultaneous in-flight subscriber deliveries for ONE relayed event.
+#: Sequential fan-out let a single accepted (and anonymously replayable)
+#: publish pin a request handler for ``len(subscribers) ×
+#: FAN_OUT_TIMEOUT_SECONDS``; unbounded concurrency would instead let it open a
+#: socket per subscriber. 8 keeps a large space's fan-out an order of magnitude
+#: faster than sequential while capping the sockets and memory one publish can
+#: claim.
+FAN_OUT_CONCURRENCY: int = 8
+
+#: Per-target delivery timeout for the HTTPS-inbox fallback (seconds).
+FAN_OUT_TIMEOUT_SECONDS: int = 10
+
+#: Verify key used on the unknown-instance branch of the LEGACY transport-
+#: signature check so that branch does the same Ed25519 verification work as
+#: the registered-instance branch — otherwise an unknown instance returns
+#: measurably sooner and the endpoint becomes a timing oracle for "is this
+#: household registered here?". The Ed25519 public key for the all-zero seed;
+#: nothing is ever signed with it, and a signature can never verify under it.
+_TIMING_UNIFORM_DUMMY_KEY_HEX: str = (
+    "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+)
+
 #: Freshness window for the signed instance-update timestamp (seconds). A
 #: ``ts`` further than this from now is treated as a replay and rejected —
 #: same ±300 s tolerance the §24.11 inbound pipeline uses.
@@ -139,10 +161,27 @@ class GfsFederationService:
         """Relay an event to all subscribers of *space_id* — **anonymously**.
 
         The canonical request body is ``{space_id, event_type, payload}``: the
-        GFS must never learn WHICH household relayed a public/global space
-        event, so the relaying identity is not part of the contract. The only
-        authenticator is the **space-authority signature** carried inside the
-        (opaque) ``payload`` and verified against the space's TOFU-pinned
+        relaying identity is not part of the contract, so the GFS does not
+        REQUIRE, STORE, LOG or FORWARD which household relayed a public/global
+        space event.
+
+        That is the honest scope of the guarantee — it is NOT "the GFS cannot
+        learn it". A household that relays here usually also holds an
+        authenticated ``/gfs/ws`` socket to the same server from the same
+        address, so network-level correlation (source IP, timing, body size)
+        stays available to whoever operates the GFS. Removing the identity from
+        the protocol removes it from the GFS's records and from anything the
+        GFS forwards to subscribers; it does not anonymise the TCP connection.
+
+        A second consequence of the anonymity: INSTANCE-level moderation
+        (``client_instances.status = 'banned'``) cannot gate this path at all —
+        a banned household simply omits the legacy fields and is
+        indistinguishable from any other caller. The SPACE-level ban checked
+        below is the only moderation lever on the relay path; per-IP shedding
+        (``build_publish_rate_limit``) is the only other handle.
+
+        The only authenticator is the **space-authority signature** carried
+        inside the (opaque) ``payload``, verified against the space's TOFU-pinned
         ``identity_public_key`` — see :meth:`_authorize_authority_relay`. Any
         seed-holder (owner OR delegated admin) can produce one, so the space
         keeps working while the owner is offline, and the GFS stays blind to
@@ -229,13 +268,17 @@ class GfsFederationService:
         supplied without the other, the named instance is unregistered or
         banned, or the signature is malformed / doesn't verify. Every failure
         raises the SAME message and never echoes *from_instance*, so the
-        endpoint is not an instance-existence oracle.
+        endpoint is not an instance-existence oracle by MESSAGE. It is not an
+        oracle by TIMING either: the unknown / banned-instance branch verifies
+        the supplied signature against a fixed dummy key
+        (:data:`_TIMING_UNIFORM_DUMMY_KEY_HEX`) so it performs the same one DB
+        read plus one Ed25519 verification as the registered-instance branch,
+        instead of returning as soon as the lookup misses.
         """
         if not from_instance or not signature:
             raise PermissionError("Invalid Ed25519 signature")
         inst = await self._repo.get_instance(from_instance)
-        if inst is None or inst.status == "banned":
-            raise PermissionError("Invalid Ed25519 signature")
+        known = inst is not None and inst.status != "banned"
         canonical = json.dumps(
             {
                 "space_id": space_id,
@@ -246,14 +289,20 @@ class GfsFederationService:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
+        key_hex = (
+            inst.public_key
+            if known and inst is not None
+            else _TIMING_UNIFORM_DUMMY_KEY_HEX
+        )
         try:
             # A malformed stored pubkey is unverifiable — fail closed as a
             # 403 rather than escaping the handler as a 500.
-            raw_key = bytes.fromhex(inst.public_key)
+            raw_key = bytes.fromhex(key_hex)
             raw_sig = b64url_decode(signature)
         except (ValueError, TypeError) as exc:
             raise PermissionError("Invalid Ed25519 signature") from exc
-        if not verify_ed25519(raw_key, canonical, raw_sig):
+        verified = verify_ed25519(raw_key, canonical, raw_sig)
+        if not known or not verified:
             raise PermissionError("Invalid Ed25519 signature")
 
     def _authorize_authority_relay(
@@ -992,58 +1041,75 @@ class GfsFederationService:
         Tries the SH↔GFS WebSocket first (push frame ``{type:"relay", ...}``).
         If no socket is registered for the subscriber or the send fails,
         falls back to an HTTPS POST to the subscriber's inbox URL.
+
+        Delivery is CONCURRENT but bounded by :data:`FAN_OUT_CONCURRENCY`.
+        Sequentially, one accepted publish held its request handler for up to
+        ``len(subscribers) × FAN_OUT_TIMEOUT_SECONDS`` — an amplification
+        handle for an anonymous caller — while unbounded concurrency would let
+        one publish open a socket per subscriber. Returns the ids actually
+        reached, in subscriber order.
         """
         own_session = session is None
         active: aiohttp.ClientSession = (
             session if session is not None else aiohttp.ClientSession()
         )
         push_frame = {"type": "relay", **event_body}
-        try:
-            delivered: list[str] = []
-            for sub in subscribers:
-                # WebSocket push first.
-                if self._ws_registry is not None and await self._ws_registry.send(
-                    sub.instance_id,
-                    push_frame,
-                ):
-                    delivered.append(sub.instance_id)
-                    continue
+        limit = asyncio.Semaphore(FAN_OUT_CONCURRENCY)
 
-                # HTTPS-inbox fallback.
-                try:
-                    async with active.post(
-                        sub.inbox_url,
-                        json=event_body,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status < 400:
-                            delivered.append(sub.instance_id)
-                        else:
-                            # DEBUG, not WARNING, on purpose: a household's
-                            # registered ``inbox_url`` is ``<base>/federation/
-                            # inbox`` while its actual route is
-                            # ``/federation/inbox/{inbox_id}``, and the body
-                            # posted here is a bare relay frame rather than a
-                            # signed §24.11 envelope — so this fallback is
-                            # STRUCTURALLY guaranteed to 401/404 for an offline
-                            # subscriber. Keeping it at WARNING spammed
-                            # operator logs with a non-actionable error on every
-                            # offline peer. The fallback itself stays (other
-                            # inbox shapes do accept it); fixing the URL /
-                            # envelope mismatch is a separate design change.
-                            log.debug(
-                                "GFS fan-out: %s returned HTTP %s "
-                                "(subscriber likely offline)",
-                                sub.inbox_url,
-                                resp.status,
-                            )
-                except Exception as exc:
-                    log.warning(
-                        "GFS fan-out: failed to deliver to %s: %s",
-                        sub.inbox_url,
-                        exc,
-                    )
-            return delivered
+        async def _deliver(sub: GfsSubscriber) -> str | None:
+            async with limit:
+                return await self._deliver_one(sub, push_frame, event_body, active)
+
+        try:
+            results = await asyncio.gather(*(_deliver(s) for s in subscribers))
+            return [instance_id for instance_id in results if instance_id is not None]
         finally:
             if own_session:
                 await active.close()
+
+    async def _deliver_one(
+        self,
+        sub: GfsSubscriber,
+        push_frame: dict,
+        event_body: dict,
+        session: aiohttp.ClientSession,
+    ) -> str | None:
+        """Deliver to ONE subscriber; return its id iff it was reached."""
+        # WebSocket push first.
+        if self._ws_registry is not None and await self._ws_registry.send(
+            sub.instance_id,
+            push_frame,
+        ):
+            return sub.instance_id
+
+        # HTTPS-inbox fallback.
+        try:
+            async with session.post(
+                sub.inbox_url,
+                json=event_body,
+                timeout=aiohttp.ClientTimeout(total=FAN_OUT_TIMEOUT_SECONDS),
+            ) as resp:
+                if resp.status < 400:
+                    return sub.instance_id
+                # DEBUG, not WARNING, on purpose: a household's registered
+                # ``inbox_url`` is ``<base>/federation/inbox`` while its actual
+                # route is ``/federation/inbox/{inbox_id}``, and the body posted
+                # here is a bare relay frame rather than a signed §24.11
+                # envelope — so this fallback is STRUCTURALLY guaranteed to
+                # 401/404 for an offline subscriber. Keeping it at WARNING
+                # spammed operator logs with a non-actionable error on every
+                # offline peer. The fallback itself stays (other inbox shapes do
+                # accept it); fixing the URL / envelope mismatch is a separate
+                # design change.
+                log.debug(
+                    "GFS fan-out: %s returned HTTP %s (subscriber likely offline)",
+                    sub.inbox_url,
+                    resp.status,
+                )
+        except Exception as exc:
+            log.warning(
+                "GFS fan-out: failed to deliver to %s: %s",
+                sub.inbox_url,
+                exc,
+            )
+        return None
