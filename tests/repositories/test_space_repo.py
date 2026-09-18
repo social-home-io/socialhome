@@ -998,3 +998,51 @@ async def test_list_expired_join_requests_sees_same_day_expiry(env):
     )
     rows = await env.repo.list_expired_join_requests()
     assert [r["id"] for r in rows] == [rid]
+
+
+async def test_a_banned_redeemer_consumes_nothing(env):
+    """§13.7 folded into the consume.
+
+    It used to be a separate query run AFTER the UPDATE, with no refund,
+    so a banned household could spend a twenty-use invite link in twenty
+    requests — and the differential answer told it its own ban status.
+    """
+    await env.repo.save(_space("sp-banned"))
+    token = await env.repo.create_invite_token("sp-banned", "uid-alice", uses=20)
+    await env.repo.ban_member("sp-banned", "uid-bob", "uid-alice")
+
+    for _ in range(3):
+        assert (
+            await env.repo.consume_invite_token(
+                token,
+                redeemer_user_id="uid-bob",
+            )
+            is None
+        )
+
+    # Not one use burned — the next honest redeemer still gets all twenty.
+    row = await env.repo.consume_invite_token(token, redeemer_user_id="uid-carol")
+    assert row is not None
+    assert row["uses_remaining"] == 19
+
+
+async def test_a_ban_in_another_space_does_not_block_this_token(env):
+    """The ban subquery is correlated on the token's OWN space."""
+    await env.repo.save(_space("sp-one"))
+    await env.repo.save(_space("sp-two"))
+    await env.repo.ban_member("sp-two", "uid-bob", "uid-alice")
+    token = await env.repo.create_invite_token("sp-one", "uid-alice", uses=1)
+
+    row = await env.repo.consume_invite_token(token, redeemer_user_id="uid-bob")
+    assert row is not None
+    assert row["space_id"] == "sp-one"
+
+
+async def test_consume_without_a_redeemer_id_ignores_bans(env):
+    """The local ``accept_invite_token`` path passes no redeemer and keeps
+    its own ban check — the new argument must stay opt-in."""
+    await env.repo.save(_space("sp-opt-in"))
+    await env.repo.ban_member("sp-opt-in", "uid-bob", "uid-alice")
+    token = await env.repo.create_invite_token("sp-opt-in", "uid-alice", uses=1)
+
+    assert await env.repo.consume_invite_token(token) is not None

@@ -304,7 +304,7 @@ def test_replay_cache_dedupes_lost_ack_retry_within_window():
     assert rc.seen("m", from_instance="p", now=t0 + timedelta(hours=5)) is True
     # Well past the window: pruned, so a brand-new event with the same id
     # is no longer falsely deduped.
-    assert rc.seen("m", from_instance="p", now=t0 + timedelta(hours=25)) is False
+    assert rc.seen("m", from_instance="p", now=t0 + timedelta(hours=26)) is False
 
 
 def test_crypto_helpers_random_token():

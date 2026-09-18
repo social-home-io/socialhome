@@ -91,7 +91,7 @@ async def gfs(tmp_dir):
     async with TestClient(TestServer(app)) as tc:
         await app[gfs_fed_repo_key].upsert_instance(
             ClientInstance(
-                instance_id="recipient.home",
+                instance_id="recipient2home2222222222222222aa",
                 display_name="Recipient",
                 public_key=pub_hex,
                 inbox_url="http://recipient.home/wh",
@@ -117,10 +117,12 @@ async def _wait_connected(app, instance_id: str) -> None:
 
 async def test_online_recipient_receives_exactly_type_and_sealed(gfs):
     async with gfs.ws_connect("/gfs/ws") as ws:
-        await ws.send_json(_hello("recipient.home", gfs._seed))
-        await _wait_connected(gfs._app, "recipient.home")
+        await ws.send_json(_hello("recipient2home2222222222222222aa", gfs._seed))
+        await _wait_connected(gfs._app, "recipient2home2222222222222222aa")
 
-        resp = await gfs.post("/gfs/envelope", json=_envelope("recipient.home"))
+        resp = await gfs.post(
+            "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+        )
         assert resp.status == 202
 
         frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
@@ -131,27 +133,30 @@ async def test_online_recipient_receives_exactly_type_and_sealed(gfs):
 async def test_offline_recipient_is_queued_then_drained_in_order_on_hello(gfs):
     for i in range(3):
         resp = await gfs.post(
-            "/gfs/envelope", json=_envelope("recipient.home", f"ct-{i}")
+            "/gfs/envelope",
+            json=_envelope("recipient2home2222222222222222aa", f"ct-{i}"),
         )
         assert resp.status == 202
 
     queue_repo = gfs._app[gfs_envelope_queue_repo_key]
-    assert await queue_repo.count_for("recipient.home") == 3
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 3
 
     async with gfs.ws_connect("/gfs/ws") as ws:
-        await ws.send_json(_hello("recipient.home", gfs._seed))
+        await ws.send_json(_hello("recipient2home2222222222222222aa", gfs._seed))
         frames = [
             await asyncio.wait_for(ws.receive_json(), timeout=5) for _ in range(3)
         ]
 
     assert [f["sealed"]["ciphertext"] for f in frames] == ["ct-0", "ct-1", "ct-2"]
     assert all(set(f) == {"type", "sealed"} for f in frames)
-    assert await queue_repo.count_for("recipient.home") == 0
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
 
 
 @pytest.mark.security
 async def test_unknown_recipient_is_accepted_and_stores_nothing(gfs):
-    resp = await gfs.post("/gfs/envelope", json=_envelope("stranger.home"))
+    resp = await gfs.post(
+        "/gfs/envelope", json=_envelope("stranger2home2222222222222222abc")
+    )
     assert resp.status == 202
 
     rows = await gfs._app[gfs_db_key].fetchall("SELECT * FROM gfs_envelope_queue", ())
@@ -166,16 +171,22 @@ async def test_response_is_byte_identical_online_offline_and_unknown(gfs):
     """Any variation here is a presence/existence oracle: an anonymous caller
     could walk instance ids and learn which households use this server and
     which are awake."""
-    offline = await gfs.post("/gfs/envelope", json=_envelope("recipient.home"))
+    offline = await gfs.post(
+        "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+    )
     offline_body = await offline.read()
 
-    unknown = await gfs.post("/gfs/envelope", json=_envelope("stranger.home"))
+    unknown = await gfs.post(
+        "/gfs/envelope", json=_envelope("stranger2home2222222222222222abc")
+    )
     unknown_body = await unknown.read()
 
     async with gfs.ws_connect("/gfs/ws") as ws:
-        await ws.send_json(_hello("recipient.home", gfs._seed))
-        await _wait_connected(gfs._app, "recipient.home")
-        online = await gfs.post("/gfs/envelope", json=_envelope("recipient.home"))
+        await ws.send_json(_hello("recipient2home2222222222222222aa", gfs._seed))
+        await _wait_connected(gfs._app, "recipient2home2222222222222222aa")
+        online = await gfs.post(
+            "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+        )
         online_body = await online.read()
 
     assert online.status == offline.status == unknown.status == 202
@@ -190,15 +201,18 @@ async def test_response_is_byte_identical_online_offline_and_unknown(gfs):
     "body",
     [
         {},
-        {"to_instance": "recipient.home"},
+        {"to_instance": "recipient2home2222222222222222aa"},
         {"sealed": _sealed()},
         {"to_instance": "", "sealed": _sealed()},
         {"to_instance": "x" * 129, "sealed": _sealed()},
-        {"to_instance": ["recipient.home"], "sealed": _sealed()},
-        {"to_instance": "recipient.home", "sealed": "opaque"},
-        {"to_instance": "recipient.home", "sealed": {"kem_suite": "x25519"}},
+        {"to_instance": ["recipient2home2222222222222222aa"], "sealed": _sealed()},
+        {"to_instance": "recipient2home2222222222222222aa", "sealed": "opaque"},
         {
-            "to_instance": "recipient.home",
+            "to_instance": "recipient2home2222222222222222aa",
+            "sealed": {"kem_suite": "x25519"},
+        },
+        {
+            "to_instance": "recipient2home2222222222222222aa",
             "sealed": {**_sealed(), "from_instance": "sender.home"},
         },
     ],
@@ -221,7 +235,7 @@ async def test_json_array_body_is_400(gfs):
 async def test_oversize_body_is_413(gfs):
     oversized = json.dumps(
         {
-            "to_instance": "recipient.home",
+            "to_instance": "recipient2home2222222222222222aa",
             "sealed": {
                 "kem_suite": "x25519",
                 "eph_pk": EPH_PK,
@@ -240,7 +254,9 @@ async def test_oversize_body_is_413(gfs):
 async def test_rate_limiter_sheds_a_flood_from_one_ip(gfs):
     statuses = []
     for _ in range(ENVELOPE_MAX_PER_MINUTE + 1):
-        resp = await gfs.post("/gfs/envelope", json=_envelope("recipient.home"))
+        resp = await gfs.post(
+            "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+        )
         statuses.append(resp.status)
     assert statuses[:ENVELOPE_MAX_PER_MINUTE] == [202] * ENVELOPE_MAX_PER_MINUTE
     assert statuses[-1] == 429
@@ -252,10 +268,14 @@ async def test_rate_limiter_sheds_a_flood_from_one_ip(gfs):
 @pytest.mark.security
 async def test_no_log_record_carries_the_sealed_material(gfs, caplog):
     with caplog.at_level(logging.DEBUG):
-        await gfs.post("/gfs/envelope", json=_envelope("recipient.home"))
-        await gfs.post("/gfs/envelope", json=_envelope("stranger.home"))
+        await gfs.post(
+            "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+        )
+        await gfs.post(
+            "/gfs/envelope", json=_envelope("stranger2home2222222222222222abc")
+        )
         async with gfs.ws_connect("/gfs/ws") as ws:
-            await ws.send_json(_hello("recipient.home", gfs._seed))
+            await ws.send_json(_hello("recipient2home2222222222222222aa", gfs._seed))
             await asyncio.wait_for(ws.receive_json(), timeout=5)
 
     for record in caplog.records:
@@ -281,3 +301,31 @@ async def test_gfs_info_advertises_envelope_relay_inside_the_signed_block(gfs):
         body["capabilities_sig"],
         body["capabilities_sig_suite"],
     )
+
+
+# ── to_instance shape (log forgery) ──────────────────────────────────────
+
+
+FORGED_ID = (
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+    "2026-09-18 00:00:00 WARNING gfs.envelope: ACCEPTED forged line"
+)
+
+
+@pytest.mark.security
+async def test_a_newline_in_to_instance_is_a_400_and_forges_no_log_line(gfs, caplog):
+    """The relay is anonymous by design, so ``to_instance`` is attacker-
+    controlled on every request — and the server writes it into its own log
+    lines. A length-only bound let a caller author a second, entirely
+    fabricated log record."""
+    with caplog.at_level(logging.DEBUG):
+        resp = await gfs.post(
+            "/gfs/envelope",
+            json={"to_instance": FORGED_ID, "sealed": _sealed()},
+        )
+    assert resp.status == 400
+    for record in caplog.records:
+        assert "forged line" not in record.getMessage()
+
+    rows = await gfs._app[gfs_db_key].fetchall("SELECT * FROM gfs_envelope_queue", ())
+    assert rows == []

@@ -120,6 +120,13 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "unsubscribe_from_space",  # own subscription only
         # Federation inbound hooks — validated by the §24.11 inbound pipeline.
         "on_remote_join_request_approved",
+        # §D2b space-session teardown. No actor to gate: both are driven by
+        # the *absence* of any shared space (a state the caller cannot
+        # assert, only observe), and the inbound half re-derives that answer
+        # from our own ``space_instances`` rows rather than trusting the
+        # sender, so a peer cannot use it to tear down a live seat.
+        "revoke_space_session_if_orphaned",
+        "apply_space_session_cleanup",
         # Federation inbound hook — the actor's role is validated inside
         # the method itself by looking up ``space_remote_members.role``;
         # there is no actor-username to thread through ``_require_admin``.

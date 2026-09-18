@@ -879,7 +879,20 @@ def verify_user_identity_assertion(
 #: gate and relies SOLELY on this replay cache to be deduped. If the window
 #: were shorter than the retry cadence the receiver would apply the event
 #: twice. 24 h gives generous margin over the ~5.2 h ceiling.
-REPLAY_CACHE_WINDOW: timedelta = timedelta(hours=24)
+#:
+#: The binding constraint is now the §D2b connection-server relay. That
+#: relay holds an envelope for an offline household for up to 24 h and the
+#: receiver's timestamp step widens to
+#: :data:`~socialhome.federation.inbound_validator
+#: .RELAY_TIMESTAMP_SKEW_SECONDS` (24 h + 300 s) to accept it on arrival.
+#: A timestamp window is only ever as safe as the replay memory behind it:
+#: anywhere the two diverge, a captured envelope replayed inside the gap
+#: is accepted twice. So this retention is held at **25 h** — strictly
+#: above that skew budget — and
+#: ``tests/federation/test_inbound_validator.py`` asserts the inequality
+#: so a later "tidy-up" back to 24 h fails loudly instead of quietly
+#: reopening the hole.
+REPLAY_CACHE_WINDOW: timedelta = timedelta(hours=25)
 
 
 class ReplayCache:

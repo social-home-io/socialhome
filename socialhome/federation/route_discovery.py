@@ -51,7 +51,7 @@ from ..crypto import (
     sign_ed25519,
     verify_ed25519,
 )
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
 
@@ -1055,12 +1055,28 @@ class RouteDiscoveryService:
         *,
         exclude: set[str],
     ) -> list["RemoteInstance"]:
-        """Return confirmed peers whose ``proto_version >= v_6``,
+        """Return **social** confirmed peers whose ``proto_version >= v_6``,
         minus anything in ``exclude``.
+
+        ``list_social_instances`` and not ``list_instances``: a household
+        seated from an invite link (``source = space_session``) is not a
+        mesh node. It is CONFIRMED and it advertises a ``proto_version``
+        it chose itself, so the raw list would hand it the mesh on both
+        legs —
+
+        * **outbound**, we would flood our route probes to a stranger;
+        * **inbound**, a ``SPACE_ROUTE_FOUND`` answer carries ``path``,
+          i.e. the instance id of every household that relayed it, so
+          treating one as a candidate hop draws them a map of our social
+          graph one probe at a time.
+
+        The inbound half is also refused by the §D2b peer-class gate
+        (``SPACE_FIND_ROUTE`` / ``SPACE_ROUTE_FOUND`` / ``SPACE_ROUTED``
+        are outside ``SPACE_SESSION_ALLOWED_EVENT_TYPES``); this is the
+        outbound half, stated explicitly rather than left as a
+        consequence of the other end's gate.
         """
-        instances = await self._federation_repo.list_instances(
-            status=PairingStatus.CONFIRMED.value,
-        )
+        instances = await self._federation_repo.list_social_instances()
         out: list["RemoteInstance"] = []
         for inst in instances:
             if inst.id in exclude:

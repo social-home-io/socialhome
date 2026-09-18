@@ -39,6 +39,7 @@ guaranteed is that queued envelopes are delivered in queue order.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -74,11 +75,20 @@ ENVELOPE_FRAME_TYPE: str = "envelope"
 #: redeployed before households could migrate to the Phase-2 hybrid suite).
 SEALED_KEYS: frozenset[str] = frozenset({"kem_suite", "eph_pk", "ciphertext"})
 
-#: Upper bound on the routing ``to_instance`` field. Mirrors the identifier
-#: cap ``/gfs/publish`` applies: an instance id is 32 hex chars, so 128 is
-#: generous, and the bound stops a JSON list/dict or a megabyte of text ever
-#: reaching a SQLite bind.
-ENVELOPE_INSTANCE_ID_MAX_CHARS: int = 128
+#: Exact shape of the routing ``to_instance`` field.
+#:
+#: An instance id is not free text: ``socialhome.crypto.derive_instance_id``
+#: produces the unpadded lowercase base32 of a truncated SHA-256 — 32
+#: characters from ``[a-z2-7]``, always. Accepting "any string up to 128
+#: chars" instead let a caller post an id containing a NEWLINE and have the
+#: server's own log lines render an attacker-authored second line — log
+#: forgery, from an endpoint that is anonymous on purpose. It also let
+#: unbounded junk reach a SQLite bind and sit in the queue table.
+#:
+#: Anchored (``fullmatch``) so nothing rides in front of or behind the id,
+#: which also makes the length bound exact rather than an upper limit.
+ENVELOPE_INSTANCE_ID_CHARS: int = 32
+ENVELOPE_INSTANCE_ID_RE = re.compile(rf"[a-z2-7]{{{ENVELOPE_INSTANCE_ID_CHARS}}}")
 
 #: Hard body cap on ``POST /gfs/envelope``, enforced before the bytes are
 #: buffered or parsed (the endpoint is unauthenticated by design — the sender
@@ -124,13 +134,35 @@ ENVELOPE_MAX_PER_MINUTE: int = 30
 #: redeem has to be retried from the link anyway.
 ENVELOPE_QUEUE_TTL_SECONDS: int = 24 * 60 * 60
 
-#: Per-recipient queue depth. Past this the OLDEST row is evicted on insert,
-#: so one household's queue can never grow without bound and an anonymous
-#: flood aimed at one recipient cannot fill the disk (worst case per
-#: household is this many times :data:`ENVELOPE_MAX_BODY_BYTES`). 200 is two
-#: orders of magnitude above the handful of redeems a real household sees in
-#: a day, so a legitimate envelope is never evicted in practice.
-ENVELOPE_QUEUE_MAX_PER_RECIPIENT: int = 200
+#: Per-recipient queue depth. At the cap the NEW envelope is dropped —
+#: **tail-drop**, never evict-oldest.
+#:
+#: Evicting the oldest row looks fairer and is the exact opposite: this
+#: endpoint is anonymous by construction, so anybody who learns an instance
+#: id can post to it. Under evict-oldest, ``cap`` junk envelopes delete
+#: ``cap`` real ones — a stranger silently erases a sleeping household's
+#: mail, and the household never learns anything was lost. Tail-drop caps
+#: the damage at "the flood itself is refused": what is already queued is
+#: exactly what the sender was told was accepted. The uniform ``202`` is
+#: unchanged either way — the caller must not be able to tell a queued
+#: envelope from a dropped one, or the response becomes a depth oracle.
+#:
+#: 2000, up from 200. 200 was sized for "the handful of redeems a real
+#: household sees in a day", which was true when the only thing on this
+#: relay was the invite bootstrap. Since the relay tier carries ALL
+#: federation traffic for a household seated from an invite link (posts,
+#: comments, roster, rekeys, catch-up sync), a day offline in an active
+#: space is thousands of envelopes, and 200 would discard almost all of it.
+ENVELOPE_QUEUE_MAX_PER_RECIPIENT: int = 2000
+
+#: Per-recipient queue size in bytes — the bound that actually matters.
+#: The row count alone is not one: 2000 × :data:`ENVELOPE_MAX_BODY_BYTES`
+#: is 625 MiB, which is a disk-filling attack with extra steps. Whichever
+#: ceiling is reached first tail-drops. 64 MiB is generous for a day of
+#: real space traffic (typical envelopes are single-digit KiB, so the row
+#: cap binds first in normal use) and small enough that a server with many
+#: registered households stays bounded.
+ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 64 * 1024 * 1024
 
 
 class InvalidEnvelope(ValueError):
@@ -144,14 +176,18 @@ def validate_envelope(body: Any) -> tuple[str, dict[str, str]]:
     server checks that it carries exactly the three expected string keys and
     never looks at their values — it cannot open the box and must not behave
     as though it could.
+
+    ``to_instance`` is the exception, and is checked against the real
+    identifier shape (:data:`ENVELOPE_INSTANCE_ID_RE`) rather than a length
+    bound: it is the one field this server routes on, stores, and writes
+    into its own logs, so a value carrying a newline is a log-forgery
+    primitive handed to an anonymous caller.
     """
     if not isinstance(body, dict):
         raise InvalidEnvelope("expected a JSON object")
     to_instance = body.get("to_instance")
-    if (
-        not isinstance(to_instance, str)
-        or not to_instance
-        or len(to_instance) > ENVELOPE_INSTANCE_ID_MAX_CHARS
+    if not isinstance(to_instance, str) or not ENVELOPE_INSTANCE_ID_RE.fullmatch(
+        to_instance
     ):
         raise InvalidEnvelope("invalid field: to_instance")
     sealed = body.get("sealed")
@@ -166,7 +202,14 @@ def validate_envelope(body: Any) -> tuple[str, dict[str, str]]:
 class GfsEnvelopeRelay:
     """Deliver-or-queue sealed envelopes addressed by instance id."""
 
-    __slots__ = ("_fed_repo", "_queue_repo", "_ws_registry", "_ttl", "_max_queued")
+    __slots__ = (
+        "_fed_repo",
+        "_queue_repo",
+        "_ws_registry",
+        "_ttl",
+        "_max_queued",
+        "_max_bytes",
+    )
 
     def __init__(
         self,
@@ -176,12 +219,14 @@ class GfsEnvelopeRelay:
         ws_registry: "GfsWebSocketRegistry",
         ttl_seconds: int = ENVELOPE_QUEUE_TTL_SECONDS,
         max_queued_per_recipient: int = ENVELOPE_QUEUE_MAX_PER_RECIPIENT,
+        max_bytes_per_recipient: int = ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT,
     ) -> None:
         self._fed_repo = fed_repo
         self._queue_repo = queue_repo
         self._ws_registry = ws_registry
         self._ttl = ttl_seconds
         self._max_queued = max_queued_per_recipient
+        self._max_bytes = max_bytes_per_recipient
 
     async def accept(self, to_instance: str, sealed: dict[str, str]) -> None:
         """Push *sealed* to *to_instance*, or queue it for later.
@@ -207,13 +252,27 @@ class GfsEnvelopeRelay:
             log.debug("gfs.envelope: delivered to live socket %s", to_instance)
             return
         now = int(time.time())
-        await self._queue_repo.enqueue(
+        queued = await self._queue_repo.enqueue(
             to_instance,
             orjson.dumps(sealed).decode(),
             created_at=now,
             expires_at=now + self._ttl,
             max_per_recipient=self._max_queued,
+            max_bytes_per_recipient=self._max_bytes,
         )
+        if not queued:
+            # The caller still gets the same 202 — a different answer here
+            # would turn queue depth into an oracle. But a recipient at cap
+            # IS an operator signal: either that household has been offline
+            # far too long, or somebody is flooding it. WARNING, with the
+            # recipient and the depth and nothing about the blob.
+            log.warning(
+                "gfs.envelope: queue full for %s (%d queued) — dropping the "
+                "new envelope; the recipient is offline or being flooded",
+                to_instance,
+                await self._queue_repo.count_for(to_instance),
+            )
+            return
         log.debug("gfs.envelope: queued for offline recipient %s", to_instance)
 
     async def drain(self, to_instance: str) -> int:

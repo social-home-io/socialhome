@@ -116,6 +116,7 @@ class AbstractSpaceRepo(Protocol):
     # ── Instances that mirror this space ───────────────────────────────
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
     async def remove_space_instance(self, space_id: str, instance_id: str) -> None: ...
+    async def instance_in_any_space(self, instance_id: str) -> bool: ...
     async def list_member_instances(self, space_id: str) -> list[str]: ...
 
     # ── Bans ───────────────────────────────────────────────────────────
@@ -163,7 +164,12 @@ class AbstractSpaceRepo(Protocol):
         uses: int = 1,
         expires_at: str | None = None,
     ) -> str: ...
-    async def consume_invite_token(self, token: str) -> dict | None: ...
+    async def consume_invite_token(
+        self,
+        token: str,
+        *,
+        redeemer_user_id: str | None = None,
+    ) -> dict | None: ...
 
     # ── Invitations ────────────────────────────────────────────────────
     async def save_invitation(
@@ -1033,6 +1039,20 @@ class SqliteSpaceRepo:
         )
         return [r["instance_id"] for r in rows]
 
+    async def instance_in_any_space(self, instance_id: str) -> bool:
+        """Whether *instance_id* still shares any space with us at all.
+
+        The question a §D2b space-scoped seat's lifetime turns on: that
+        ``remote_instances`` row exists solely because the two households
+        shared a space, so when the last one goes the row (and its keys)
+        has nothing left to authorize.
+        """
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_instances WHERE instance_id=? LIMIT 1",
+            (instance_id,),
+        )
+        return row is not None
+
     # ── Bans ───────────────────────────────────────────────────────────
 
     async def ban_member(
@@ -1195,12 +1215,25 @@ class SqliteSpaceRepo:
         )
         return token
 
-    async def consume_invite_token(self, token: str) -> dict | None:
+    async def consume_invite_token(
+        self,
+        token: str,
+        *,
+        redeemer_user_id: str | None = None,
+    ) -> dict | None:
         """Decrement a token's remaining uses and return its metadata.
 
-        Returns ``None`` if the token does not exist, has expired, or has
-        already been fully consumed. When it has uses left, decrements the
-        counter atomically and returns the row as a dict.
+        Returns ``None`` if the token does not exist, has expired, has
+        already been fully consumed, or — when ``redeemer_user_id`` is
+        given — that user is banned from the token's space.
+
+        **``redeemer_user_id`` folds the §13.7 ban into the same atomic
+        UPDATE.** The cross-instance redeem used to consume first and check
+        the ban afterwards, with no refund: a banned household could burn a
+        20-use invite link in twenty requests, and the differential answer
+        ("denied" vs "exhausted") told it its own ban status one user at a
+        time. As one statement the counter never moves for a banned
+        redeemer, so there is nothing to burn and nothing to learn.
 
         Both sides of the expiry guard are wrapped in SQLite's
         ``datetime()``. ``expires_at`` holds tz-aware ISO 8601
@@ -1225,8 +1258,17 @@ class SqliteSpaceRepo:
                         expires_at IS NULL
                         OR datetime(expires_at) > datetime('now')
                    )
+                   AND (
+                        ? IS NULL
+                        OR NOT EXISTS (
+                            SELECT 1 FROM space_bans
+                             WHERE space_bans.space_id
+                                   = space_invite_tokens.space_id
+                               AND space_bans.user_id = ?
+                        )
+                   )
                 """,
-                (token,),
+                (token, redeemer_user_id, redeemer_user_id),
             )
             if cur.rowcount == 0:
                 return None

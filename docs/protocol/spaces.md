@@ -59,6 +59,15 @@ signing" below.
 `SPACE_KEY_EXCHANGE_REKEY`, `SPACE_ADMIN_KEY_SHARE`,
 `SPACE_SESSION_CLEANUP`.
 
+`SPACE_SESSION_CLEANUP` is the teardown of a §D2b space-scoped seat: when
+the last membership a link-joined household holds in any space we share
+ends (kick, ban, leave, dissolve), we delete their `space_session`
+`remote_instances` row and its session keys, and send this so they drop
+their mirror. The receiver re-derives the answer from its own
+`space_instances` rows rather than trusting the sender, so it cannot be
+used to tear down a seat that is still carrying another shared space. See
+[`invites.md`](./invites.md).
+
 **Cross-household admin**
 
 `SPACE_MEMBER_ROLE_CHANGED` (v_8+), `SPACE_REMOTE_ADMIN_KICK` (v_9+),

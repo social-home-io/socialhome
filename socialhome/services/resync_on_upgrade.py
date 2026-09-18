@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_capabilities import (
     OURS,
     FederationCapability,
@@ -51,7 +51,12 @@ async def request_capability_resync_if_upgraded(
         return 0
 
     sent = 0
-    peers = await federation_repo.list_instances(status=PairingStatus.CONFIRMED.value)
+    # Social peers only: a household seated from an invite link
+    # (``source = space_session``) shares a space with us, not a
+    # protocol relationship to renegotiate. Its capabilities travel on
+    # the startup ``INSTANCE_CAPABILITIES_UPDATED`` fan-out; asking it
+    # to re-advertise buys nothing and spends a relay envelope.
+    peers = await federation_repo.list_social_instances()
     for peer in peers:
         if not await federation.peer_supports(
             peer.id, min_version=FederationCapability.MIN_FOR_INSTANCE_RESYNC

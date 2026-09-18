@@ -67,6 +67,7 @@ from ..domain.events import (
 from ..domain.federation import (
     BehindMember,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
     SpaceVersionCompat,
 )
@@ -734,6 +735,10 @@ class SpaceService(SpaceMemberGuardMixin):
                 sequence=sequence,
             )
         )
+        # Who was in this space before the cascade takes the rows away —
+        # needed after the purge to decide which space-scoped seats are
+        # now orphaned.
+        member_instances = await self._spaces.list_member_instances(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
             post_repo=self._posts,
@@ -741,6 +746,83 @@ class SpaceService(SpaceMemberGuardMixin):
             bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             space_id=space_id,
+        )
+        for instance_id in member_instances:
+            await self.revoke_space_session_if_orphaned(instance_id)
+
+    async def revoke_space_session_if_orphaned(
+        self,
+        instance_id: str,
+        *,
+        notify: bool = True,
+    ) -> bool:
+        """Drop a §D2b space-scoped seat once nothing justifies it.
+
+        A ``source = space_session`` ``remote_instances`` row exists for
+        exactly one reason: an invite token was redeemed and the two
+        households ended up sharing a space. It is CONFIRMED and it holds
+        live directional session keys — so leaving it behind after the
+        last shared membership ends (kick, ban, leave, dissolve) keeps a
+        household we have no relationship with holding valid keys to us,
+        forever. Nothing else ever cleaned it up.
+
+        The single choke point for all four paths: every one of them ends
+        by removing the ``space_instances`` row, so "does this instance
+        still appear in ANY of our spaces" is the whole question.
+
+        ``notify=False`` skips the outbound ``SPACE_SESSION_CLEANUP`` and is
+        what the *inbound* half passes — otherwise the two households would
+        each answer the other's teardown with one of their own, the second
+        of which arrives at a household that has already deleted the row
+        and is rejected by the pipeline.
+
+        Returns ``True`` when a row was deleted. No-ops — deliberately —
+        for a ``manual`` (QR-paired) peer: that relationship was never
+        about a space and outlives every space.
+        """
+        if self._federation_repo is None:
+            return False
+        instance = await self._federation_repo.get_instance(instance_id)
+        if instance is None or instance.source is not InstanceSource.SPACE_SESSION:
+            return False
+        if await self._spaces.instance_in_any_space(instance_id):
+            return False
+        # Tell the other side first — the send needs the row we are about
+        # to delete (the relay transport reads its key-wrap key and its
+        # introducing server off it). Best-effort: if it never lands, the
+        # peer is left holding a dead seat whose envelopes we now refuse,
+        # which is the safe direction to fail.
+        if notify and self._federation is not None:
+            try:
+                await self._federation.send_event(
+                    to_instance_id=instance_id,
+                    event_type=FederationEventType.SPACE_SESSION_CLEANUP,
+                    payload={"reason": "no_shared_spaces"},
+                )
+            except Exception:
+                log.exception(
+                    "SPACE_SESSION_CLEANUP to %s failed; dropping our row anyway",
+                    instance_id,
+                )
+        await self._federation_repo.delete_instance(instance_id)
+        log.info(
+            "space session: dropped the space-scoped seat for %s — no shared "
+            "space is left to justify it",
+            instance_id,
+        )
+        return True
+
+    async def apply_space_session_cleanup(self, instance_id: str) -> bool:
+        """Inbound half of :meth:`revoke_space_session_if_orphaned`.
+
+        The peer told us it dropped its space-scoped seat for us. We drop
+        ours — but only once *our* view agrees there is no shared space
+        left, so a peer that leaves one of two shared spaces (or lies)
+        can't tear down a seat that is still carrying the other.
+        """
+        return await self.revoke_space_session_if_orphaned(
+            instance_id,
+            notify=False,
         )
 
     async def _forward_admin_action_if_remote(
@@ -3099,6 +3181,12 @@ class SpaceService(SpaceMemberGuardMixin):
             tombstoned=True,
         )
         await self._rotate_and_distribute_space_key(space_id)
+        # LAST: every step above still needs the ``remote_instances`` row to
+        # reach this household (the REMOVED notice, the roster gossip, the
+        # rekey that gives them forward secrecy). Only once they have all
+        # gone out does the §D2b seat lose its reason to exist.
+        if not still_present:
+            await self.revoke_space_session_if_orphaned(instance_id)
 
     async def redeem_invite_token(
         self,

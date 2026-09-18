@@ -4401,7 +4401,10 @@ async def test_remove_remote_member_broadcasts_left(stack):
     stack.space_svc._federation = fed
     from unittest.mock import MagicMock
 
+    # ``revoke_space_session_if_orphaned`` runs at the end of the kick and
+    # reads this row; a manual (QR-paired) peer is left alone.
     stack.space_svc._federation_repo = MagicMock()
+    stack.space_svc._federation_repo.get_instance = AsyncMock(return_value=None)
     remote = await _wire_remote_members(stack)
     await remote.add(
         space_id=space.id,

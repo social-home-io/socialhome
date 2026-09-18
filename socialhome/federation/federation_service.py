@@ -83,6 +83,7 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_replay,
+    make_check_peer_class,
     make_check_timestamp,
     make_decrypt_and_parse,
     make_idempotency_check,
@@ -325,6 +326,12 @@ class FederationService:
         steps = [
             make_parse_json(loads=_loads),
             lookup_step,
+            # §D2b peer-class gate: a household seated from an invite link
+            # may only speak the space vocabulary. Straight after the
+            # lookup (the first step that knows WHO the sender is) and
+            # before any crypto, so an off-vocabulary envelope costs a
+            # set lookup.
+            make_check_peer_class(),
             make_check_timestamp(),
             make_verify_signature(encoder=self._encoder),
             make_check_replay(replay_cache=self._replay_cache),
@@ -932,6 +939,9 @@ class FederationService:
                     instance_id=to_instance_id,
                     ok=True,
                     status_code=result.status_code,
+                    # Carries the relay's "accepted", not "delivered" —
+                    # see :class:`DeliveryResult.via`.
+                    via=result.via,
                 )
             status_code = result.status_code
         else:
@@ -1696,6 +1706,8 @@ class FederationService:
         self,
         instance_id: str,
         raw_body: bytes,
+        *,
+        transport: str = "",
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -1716,7 +1728,11 @@ class FederationService:
         if self._rtc_inbound_pipeline is None:
             self._rtc_inbound_pipeline = self._build_rtc_inbound_pipeline()
         pipeline: InboundPipeline = self._rtc_inbound_pipeline  # type: ignore[assignment]
-        ctx = InboundContext(raw_body=raw_body, instance_id=instance_id)
+        ctx = InboundContext(
+            raw_body=raw_body,
+            instance_id=instance_id,
+            transport=transport,
+        )
         await pipeline.run(ctx)
         return ctx
 
@@ -1724,14 +1740,25 @@ class FederationService:
         self,
         instance_id: str,
         raw_body: bytes,
+        *,
+        transport: str = "",
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
         Same pipeline as :meth:`handle_inbound_envelope` but resolves
         the sender by ``instance_id`` (already known from the peer
         connection) instead of ``inbox_id``.
+
+        ``transport`` names the carrier when it is not a live wire —
+        :data:`~socialhome.federation.inbound_validator.TRANSPORT_GFS_RELAY`
+        for an envelope the connection server queued and replayed later,
+        which widens the timestamp step's skew budget accordingly.
         """
-        ctx = await self.validate_inbound_rtc(instance_id, raw_body)
+        ctx = await self.validate_inbound_rtc(
+            instance_id,
+            raw_body,
+            transport=transport,
+        )
 
         if ctx.early_response is not None:
             return ctx.early_response
@@ -1979,8 +2006,18 @@ class FederationService:
         self,
         event: LocalHomeLocationUpdated,
     ) -> None:
-        """Fan out LOCAL_HOME_LOCATION_CHANGED to every confirmed peer at proto_version >= 5 that has share_home enabled."""
-        peers = await self._federation_repo.list_instances(status="confirmed")
+        """Fan out LOCAL_HOME_LOCATION_CHANGED to every **social** peer at
+        proto_version >= 5 that has share_home enabled.
+
+        ``list_social_instances`` and not ``list_instances`` — the raw
+        list includes ``space_session`` rows, i.e. households we met
+        through an invite link. Our home GPS coordinates are not part of
+        "you joined my space"; sending them there would hand a stranger
+        the family's street. (``share_home`` also defaults False on those
+        rows, so this is belt and braces — deliberately, because the
+        default is a one-line edit away from flipping back.)
+        """
+        peers = await self._federation_repo.list_social_instances()
         payload = {"latitude": event.latitude, "longitude": event.longitude}
         for peer in peers:
             if not peer.share_home:

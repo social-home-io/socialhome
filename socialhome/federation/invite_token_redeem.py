@@ -65,6 +65,7 @@ from ..services.space_service import (
     stub_space_from_metadata,
 )
 from .gfs_relay_transport import is_relay_envelope_body
+from .inbound_validator import TRANSPORT_GFS_RELAY
 from .invite_bootstrap import (
     KIND_REDEEM,
     KIND_REDEEM_ACK,
@@ -101,6 +102,25 @@ log = logging.getLogger(__name__)
 #: Calibrated for a single hop over a healthy WebRTC DataChannel.
 REDEEM_TIMEOUT_SECONDS: float = 10.0
 
+#: The ONE reason string every issuer-side denial ships.
+#:
+#: A redeem can fail for a dozen reasons — unknown token, expired,
+#: exhausted, banned, a storage fault at one of three stages — and the
+#: differences are all facts about the ISSUER's private state. Reported
+#: separately they let anybody holding a public invite link enumerate
+#: them: whether a given user is banned, whether a link is spent, which
+#: internal step broke. The issuer keeps the detail in its own log
+#: (``log.exception``) and the wire carries this, always.
+REDEEM_DENY_REASON: str = "invite redeem denied"
+
+#: What the REDEEMER shows its own user, regardless of what the issuer
+#: put in ``reason``. The issuer is a stranger on this leg — a household
+#: we met through a public link — so rendering its text verbatim in the
+#: SPA hands an unknown party a string in our UI.
+BOOTSTRAP_DENY_CLIENT_MESSAGE: str = (
+    "that invite link didn't work — ask whoever shared it for a fresh one"
+)
+
 #: §D2b inbound throttles. This surface is unauthenticated by
 #: construction — anybody who can reach the relay can address a blob at
 #: us — so it is both a DoS and a token-guessing surface. Tokens are
@@ -110,12 +130,27 @@ REDEEM_TIMEOUT_SECONDS: float = 10.0
 #:
 #: * a **process-wide** bucket checked BEFORE the unseal, so a flood
 #:   costs a list append rather than an AES-GCM open;
+#: * a **per-family** bucket once the blob is open, because two unrelated
+#:   traffic classes ride this one socket (see below);
 #: * a **per-sender** bucket checked once the body's identity has been
 #:   verified, so one household can't burn the global budget alone.
 BOOTSTRAP_INBOUND_LIMIT: int = 600
 BOOTSTRAP_INBOUND_WINDOW_S: int = 60
 BOOTSTRAP_PER_SENDER_LIMIT: int = 30
 BOOTSTRAP_PER_SENDER_WINDOW_S: int = 60
+
+#: Per-family allowances, split out of the single pre-unseal bucket.
+#:
+#: The relay socket carries two things with wildly different cadences:
+#: invite-bootstrap bodies (a handful a day — a redeem is two frames) and
+#: full §24.11 envelopes for every household seated from an invite link
+#: (every post, comment, roster change, rekey and sync chunk of every such
+#: space). Sharing one allowance meant an active space could starve every
+#: redeem attempt, and a redeem flood could stall a space's federation.
+#: They now draw on separate buckets, both still under the process-wide
+#: pre-unseal shed above.
+BOOTSTRAP_BODY_INBOUND_LIMIT: int = 60
+RELAY_ENVELOPE_INBOUND_LIMIT: int = 600
 
 
 class SpaceInviteTokenRedeemCoordinator:
@@ -662,7 +697,7 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._send_deny(
                 event.from_instance,
                 nonce,
-                "redeemer_user_id missing from redeem payload",
+                REDEEM_DENY_REASON,
                 routed_route_id=routed_route_id,
             )
             return
@@ -678,7 +713,7 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._send_deny(
                 event.from_instance,
                 nonce,
-                deny_reason or "invite redeem denied by issuer",
+                deny_reason or REDEEM_DENY_REASON,
                 routed_route_id=routed_route_id,
             )
             return
@@ -714,37 +749,40 @@ class SpaceInviteTokenRedeemCoordinator:
         can never diverge between them.
 
         ``consume_invite_token`` is a single atomic UPDATE guarded on
-        ``uses_remaining > 0`` and the expiry, so an unknown, expired or
-        exhausted token returns ``None`` here.
+        ``uses_remaining > 0``, the expiry **and** the §13.7 ban, so an
+        unknown, expired, exhausted or banned redeem returns ``None`` here
+        without ever moving the counter.
+
+        Every denial returns the same opaque
+        :data:`REDEEM_DENY_REASON`. The three former "issuer storage error
+        during …" strings named the stage that failed, and the ban check's
+        own string told a stranger whether they were banned — an oracle on
+        a surface anybody holding a link can reach. The detail lives in
+        ``log.exception`` on the issuer, where it belongs.
         """
         try:
-            row = await self._spaces.consume_invite_token(token)
+            row = await self._spaces.consume_invite_token(
+                token,
+                # Folds §13.7 into the same statement: a banned redeemer
+                # never decrements the counter, so twenty requests can no
+                # longer exhaust a twenty-use link (and the uniform reason
+                # below means they learn nothing from trying).
+                redeemer_user_id=redeemer_user_id,
+            )
         except Exception:
             log.exception(
                 "invite redeem: consume_invite_token raised for token from %s",
                 redeemer_instance_id,
             )
-            return None, "issuer storage error during token consume"
+            return None, REDEEM_DENY_REASON
 
         if row is None:
-            return None, "invite token invalid, expired, or exhausted"
+            return None, REDEEM_DENY_REASON
 
         space_id = str(row.get("space_id") or "")
         if not space_id:
-            return None, "invite token row missing space_id"
-
-        # §13.7 — a ban on the issuer side overrides a valid token.
-        try:
-            banned = await self._spaces.is_banned(space_id, redeemer_user_id)
-        except Exception:
-            log.exception(
-                "invite redeem: is_banned raised for space_id=%s user_id=%s",
-                space_id,
-                redeemer_user_id,
-            )
-            return None, "issuer storage error during ban check"
-        if banned:
-            return None, "banned from this space"
+            log.warning("invite redeem: consumed token row carried no space_id")
+            return None, REDEEM_DENY_REASON
 
         # Seat the remote redeemer + register their instance so the
         # issuer's outbound fan-outs reach them.
@@ -768,7 +806,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_instance_id,
                 redeemer_user_id,
             )
-            return None, "issuer storage error during member seat"
+            return None, REDEEM_DENY_REASON
 
         # Pull the full space row so we can ship metadata + the member
         # roster back to the receiver. Without the meta the receiver's
@@ -961,10 +999,15 @@ class SpaceInviteTokenRedeemCoordinator:
           (:meth:`FederationService.handle_inbound_rtc` — the
           lookup-by-instance-id variant, since a relayed envelope carries
           no inbox id) with every step intact: the row lookup, the
-          ±300 s window, the Ed25519 verify under the pair key, replay,
-          decrypt, idempotency and the ban check all apply exactly as
-          they do over RTC or the HTTPS inbox. Riding the relay buys no
-          exemption.
+          peer-class gate, the timestamp window, the Ed25519 verify under
+          the pair key, replay, decrypt, idempotency and the ban check
+          all apply exactly as they do over RTC or the HTTPS inbox.
+          Riding the relay buys no exemption — the one concession is the
+          timestamp step's wider window for this transport, which the
+          relay's own 24 h queue TTL requires and the replay cache's
+          longer retention pays for (see
+          :data:`~socialhome.federation.inbound_validator
+          .RELAY_TIMESTAMP_SKEW_SECONDS`).
 
         The pipeline itself is untouched for every ordinary event.
 
@@ -974,7 +1017,8 @@ class SpaceInviteTokenRedeemCoordinator:
         if not self._bootstrap_ready():
             raise ValueError("invite bootstrap is not configured on this host")
         # Process-wide throttle BEFORE the unseal — the cheapest place
-        # to shed a flood.
+        # to shed a flood, and the only one available before we know
+        # which family the blob belongs to.
         if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
             "invite-bootstrap:inbound",
             limit=BOOTSTRAP_INBOUND_LIMIT,
@@ -986,6 +1030,16 @@ class SpaceInviteTokenRedeemCoordinator:
             keywrap_private_key=self._keywrap_private_key,
         )
         if is_relay_envelope_body(body):
+            # Its OWN bucket. The two families share this socket but not
+            # their budgets: an active space's relayed traffic (posts,
+            # roster, sync chunks) is orders of magnitude more frequent
+            # than invite redeems, so one shared allowance meant ordinary
+            # space federation could starve every redeem — or a redeem
+            # flood could stall a space.
+            self._check_family_limit(
+                "envelopes",
+                limit=RELAY_ENVELOPE_INBOUND_LIMIT,
+            )
             # A §24.11 envelope for a link-joined peer. No bootstrap
             # validation applies (there is no ``redeem_nonce`` and the
             # inner envelope carries its own signature): hand it to the
@@ -996,6 +1050,7 @@ class SpaceInviteTokenRedeemCoordinator:
             # anyone starve a household's traffic by claiming its id.
             # The process-wide limiter above is the shed.
             return await self._dispatch_relayed_federation_envelope(body)
+        self._check_family_limit("bodies", limit=BOOTSTRAP_BODY_INBOUND_LIMIT)
         validate_bootstrap_body(
             body,
             expected_kinds=frozenset({KIND_REDEEM, KIND_REDEEM_ACK, KIND_REDEEM_DENY}),
@@ -1024,6 +1079,22 @@ class SpaceInviteTokenRedeemCoordinator:
             return await self._handle_bootstrap_redeem(body, gfs_url=gfs_url)
         return await self._handle_bootstrap_reply(body)
 
+    def _check_family_limit(self, family: str, *, limit: int) -> None:
+        """Throttle one traffic family on the shared relay socket.
+
+        ``family`` is ``"bodies"`` (invite-bootstrap) or ``"envelopes"``
+        (relayed §24.11). Separate keys mean separate budgets — see
+        :data:`BOOTSTRAP_BODY_INBOUND_LIMIT`.
+        """
+        if self._rate_limiter is None:
+            return
+        if not self._rate_limiter.is_allowed(
+            f"invite-bootstrap:{family}",
+            limit=limit,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        ):
+            raise ValueError(f"invite bootstrap {family} rate limit exceeded")
+
     async def _dispatch_relayed_federation_envelope(self, body: dict) -> dict:
         """Run one relayed §24.11 envelope through the normal pipeline.
 
@@ -1045,10 +1116,31 @@ class SpaceInviteTokenRedeemCoordinator:
             inner.get("event_type"),
             from_instance,
         )
-        return await self._federation.handle_inbound_rtc(
-            from_instance,
-            orjson.dumps(inner),
-        )
+        try:
+            return await self._federation.handle_inbound_rtc(
+                from_instance,
+                orjson.dumps(inner),
+                # These bytes may have sat in the relay's queue for up to
+                # its TTL before the socket came back, so the timestamp
+                # step judges them against the wider relay window rather
+                # than the ±300 s live-wire one.
+                transport=TRANSPORT_GFS_RELAY,
+            )
+        except ValueError as exc:
+            # A relay envelope that fails validation is dropped, and until
+            # now it was dropped with nothing an operator could act on:
+            # the raise travelled up to the WS client's generic
+            # "handler raised" line, which names neither the event type
+            # nor the sender. INFO because a rejection here is a normal,
+            # expected outcome (a stale queued frame, an unknown peer);
+            # the reason and the routing fields only — never the payload.
+            log.info(
+                "gfs_relay: rejected %r envelope from %s: %s",
+                inner.get("event_type"),
+                from_instance,
+                exc,
+            )
+            raise
 
     async def _handle_bootstrap_redeem(self, body: dict, *, gfs_url: str = "") -> dict:
         """Issuer-side: authorize a stranger's sealed redeem, reply sealed.
@@ -1083,7 +1175,7 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._send_bootstrap_deny(
                 body,
                 nonce,
-                "redeemer_user_id missing from redeem payload",
+                REDEEM_DENY_REASON,
             )
             return {"ok": True, "denied": True}
 
@@ -1106,7 +1198,7 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._send_bootstrap_deny(
                 body,
                 nonce,
-                deny_reason or "invite redeem denied by issuer",
+                deny_reason or REDEEM_DENY_REASON,
             )
             return {"ok": True, "denied": True}
 
@@ -1151,11 +1243,17 @@ class SpaceInviteTokenRedeemCoordinator:
                 "bootstrap reply came from a household we did not address",
             )
         if body["kind"] == KIND_REDEEM_DENY:
-            fut.set_exception(
-                SpacePermissionError(
-                    str(body.get("reason") or "invite redeem denied by issuer"),
-                )
+            # The issuer's own ``reason`` is logged, never surfaced. On this
+            # leg the issuer is a household we met through a public link —
+            # letting its string through would render attacker-authored text
+            # in our SPA, and the wire reason is opaque by design anyway
+            # (:data:`REDEEM_DENY_REASON`), so there is nothing to lose.
+            log.info(
+                "invite bootstrap: %s denied our redeem (%r)",
+                hint.instance_id,
+                str(body.get("reason") or "")[:200],
             )
+            fut.set_exception(SpacePermissionError(BOOTSTRAP_DENY_CLIENT_MESSAGE))
             return {"ok": True, "denied": True}
         fut.set_result(
             {
@@ -1306,6 +1404,13 @@ class SpaceInviteTokenRedeemCoordinator:
                 local_inbox_id=secrets.token_urlsafe(24),
                 status=PairingStatus.CONFIRMED,
                 source=InstanceSource.SPACE_SESSION,
+                # ``RemoteInstance.share_home`` defaults True — right for a
+                # household you scanned a QR code with in your kitchen,
+                # wrong for one that walked in off a public link. Our home
+                # GPS is a social disclosure and this is not a social
+                # relationship, so the seat starts closed; the owner can
+                # open it per-peer from the SPA like any other.
+                share_home=False,
                 proto_version=proto_version,
                 paired_at=now,
             )

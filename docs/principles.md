@@ -130,7 +130,22 @@ exactly:**
   transport (`from_instance`, `event_type`, `space_id`, `msg_id`,
   `timestamp`) — is sealed to the recipient's static X25519 key-wrap key
   before the relay is handed `{to_instance, sealed}`. The relay cannot
-  read the content, the event kind, the space, the sender, or any name.
+  read the content, the event kind, the space, or any name, and the
+  *application* wire carries no sender: `POST /gfs/envelope` is
+  identity-free and its body is exactly `{to_instance, sealed}`.
+- **The sender is nonetheless in the process access log — by IP.**
+  "No sender on the wire" is a statement about the body, not about the
+  socket. Every `POST /gfs/envelope` is an HTTP request from the sending
+  household's address, and the server's access log records it the way it
+  records the `/gfs/ws` session the same paragraph already concedes. An
+  operator willing to read their own access log can therefore correlate
+  *sender IP → recipient instance id → time → size* for every relayed
+  envelope, which is the pairwise graph the sealed body withholds. This
+  is the same residual `/gfs/publish` carries and has the same answer:
+  closing it needs a mix/onion egress and is out of scope. `to_instance`
+  is validated against the exact instance-id shape (32 lowercase base32
+  characters) before it reaches any log line, so a caller cannot author a
+  second, fabricated log record through it.
 - **It can infer that a household is receiving traffic, how much and
   when.** Sizes are not padded and timings are not batched.
 - **A space fan-out to N link-joined members shows the relay N

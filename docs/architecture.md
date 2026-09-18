@@ -413,6 +413,16 @@ boundary). The
 the §24.11 horizon on a slow cadence so the table doesn't grow
 unboundedly.
 
+That horizon (`crypto.REPLAY_CACHE_WINDOW`) is **25 h**, and it is set by
+the widest timestamp window any transport allows, not by the outbox's
+~5.2 h redelivery cadence. A §D2b envelope carried by the connection
+server's store-and-forward relay may be drained up to 24 h after it was
+signed, so the timestamp step accepts `24 h + 300 s` for that transport
+(`RELAY_TIMESTAMP_SKEW_SECONDS`). A timestamp window is only as safe as
+the replay memory behind it — anywhere the two diverge a captured
+envelope can be replayed into the gap — so the retention is held
+strictly above it and a test asserts the inequality.
+
 ### Idempotency keys
 
 Mutating HTTP routes accept an `Idempotency-Key` header; the

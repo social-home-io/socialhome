@@ -55,6 +55,8 @@ from socialhome.federation.invite_bootstrap import (
     sign_bootstrap_body,
 )
 from socialhome.federation.invite_token_redeem import (
+    BOOTSTRAP_DENY_CLIENT_MESSAGE,
+    REDEEM_DENY_REASON,
     BOOTSTRAP_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_WINDOW_S,
     BOOTSTRAP_PER_SENDER_LIMIT,
@@ -120,7 +122,7 @@ class _FakeSpaceRepo:
         # _on_redeem should populate this so the ACK can carry meta.
         self.space_rows_for_get: dict = {}
 
-    async def consume_invite_token(self, token):
+    async def consume_invite_token(self, token, *, redeemer_user_id=None):
         if self.consume_should_raise is not None:
             raise self.consume_should_raise
         row = self.tokens.get(token)
@@ -129,6 +131,17 @@ class _FakeSpaceRepo:
         if row.get("expired"):
             return None
         if row["uses_remaining"] <= 0:
+            return None
+        # Mirrors the real repo: the §13.7 ban is folded into the same
+        # atomic statement, so a banned redeemer never moves the counter.
+        if (
+            redeemer_user_id is not None
+            and (
+                row["space_id"],
+                redeemer_user_id,
+            )
+            in self.bans
+        ):
             return None
         row["uses_remaining"] -= 1
         return {
@@ -572,7 +585,7 @@ async def test_redeem_with_expired_token_sends_deny():
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert "invalid, expired, or exhausted" in str(exc.value)
+    assert str(exc.value) == REDEEM_DENY_REASON
     # No member should have been seated.
     assert issuer_members.added == []
 
@@ -612,7 +625,7 @@ async def test_redeem_with_banned_redeemer_sends_deny():
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert "banned" in str(exc.value).lower()
+    assert str(exc.value) == REDEEM_DENY_REASON
     assert issuer_members.added == []
 
 
@@ -652,7 +665,7 @@ async def test_redeem_issuer_storage_error_sends_deny():
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert "storage error" in str(exc.value)
+    assert str(exc.value) == REDEEM_DENY_REASON
 
 
 # ── Timeout tests ─────────────────────────────────────────────────────
@@ -820,49 +833,112 @@ async def test_redeem_ack_missing_nonce_is_silent_noop():
     await coord._on_redeem_ack(ev)
 
 
-async def test_issuer_is_banned_raises_sends_deny():
-    """``is_banned`` raising on the issuer side ships a DENY back to
-    the receiver rather than swallowing the error silently — the
-    receiver's HTTP request would otherwise hang until timeout."""
+async def test_a_banned_redeemer_never_burns_a_use():
+    """The ban is inside the atomic consume now.
+
+    It used to be a second query AFTER the consume, with no refund: a
+    banned household could spend a twenty-use invite link in twenty
+    requests, and the distinct "banned from this space" reason told it its
+    own ban status one attempt at a time. Both halves are closed here —
+    the counter does not move, and the reason is the same opaque string
+    every other denial ships.
+    """
     fed = _FakeFederationService()
-    space_repo = _FakeSpaceRepo()
-    space_repo.tokens["tok-banned"] = {
-        "space_id": "s-banned",
-        "created_by": "u-issuer",
-        "uses_remaining": 1,
-    }
-
-    class _ExplodingIsBanned(_FakeSpaceRepo):
-        async def is_banned(self, space_id, user_id):
-            raise RuntimeError("storage down")
-
-    repo = _ExplodingIsBanned()
+    repo = _FakeSpaceRepo()
     repo.tokens["tok-banned"] = {
         "space_id": "s-banned",
         "created_by": "u-issuer",
-        "uses_remaining": 1,
+        "uses_remaining": 20,
     }
+    repo.bans.add(("s-banned", "u-x"))
     coord = _make_coordinator(federation=fed, space_repo=repo)
-    ev = FederationEvent(
-        msg_id="m-redeem-banned",
-        event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
-        from_instance="receiver-1",
-        to_instance="me",
-        timestamp="2026-05-22T00:00:00Z",
-        payload={
-            "redeem_nonce": "n-banned",
-            "invite_token": "tok-banned",
-            "redeemer_user_id": "u-x",
-        },
-    )
-    await coord._on_redeem(ev)
-    sent = [
+
+    for attempt in range(3):
+        ev = FederationEvent(
+            msg_id=f"m-redeem-banned-{attempt}",
+            event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+            from_instance="receiver-1",
+            to_instance="me",
+            timestamp="2026-05-22T00:00:00Z",
+            payload={
+                "redeem_nonce": f"n-banned-{attempt}",
+                "invite_token": "tok-banned",
+                "redeemer_user_id": "u-x",
+            },
+        )
+        await coord._on_redeem(ev)
+
+    assert repo.tokens["tok-banned"]["uses_remaining"] == 20
+    denies = [
         s
         for s in fed.sent
         if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
     ]
-    assert len(sent) == 1
-    assert "storage error" in sent[0]["payload"]["reason"]
+    assert len(denies) == 3
+    assert {d["payload"]["reason"] for d in denies} == {REDEEM_DENY_REASON}
+
+
+async def test_every_deny_path_is_byte_identical():
+    """No oracle: unknown token, expired, exhausted, banned and an issuer
+    storage fault must be indistinguishable on the wire."""
+    reasons = set()
+
+    async def _deny_reason_for(repo, *, user_id="u-x"):
+        fed = _FakeFederationService()
+        coord = _make_coordinator(federation=fed, space_repo=repo)
+        await coord._on_redeem(
+            FederationEvent(
+                msg_id="m-oracle",
+                event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+                from_instance="receiver-1",
+                to_instance="me",
+                timestamp="2026-05-22T00:00:00Z",
+                payload={
+                    "redeem_nonce": "n-oracle",
+                    "invite_token": "tok",
+                    "redeemer_user_id": user_id,
+                },
+            ),
+        )
+        denies = [
+            s
+            for s in fed.sent
+            if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
+        ]
+        assert len(denies) == 1
+        return denies[0]["payload"]["reason"]
+
+    # Unknown token.
+    reasons.add(await _deny_reason_for(_FakeSpaceRepo()))
+
+    # Expired.
+    expired = _FakeSpaceRepo()
+    expired.tokens["tok"] = {
+        "space_id": "s",
+        "created_by": "o",
+        "uses_remaining": 1,
+        "expired": True,
+    }
+    reasons.add(await _deny_reason_for(expired))
+
+    # Exhausted.
+    spent = _FakeSpaceRepo()
+    spent.tokens["tok"] = {"space_id": "s", "created_by": "o", "uses_remaining": 0}
+    reasons.add(await _deny_reason_for(spent))
+
+    # Banned.
+    banned = _FakeSpaceRepo()
+    banned.tokens["tok"] = {"space_id": "s", "created_by": "o", "uses_remaining": 5}
+    banned.bans.add(("s", "u-x"))
+    reasons.add(await _deny_reason_for(banned))
+
+    # Issuer storage fault.
+    broken = _FakeSpaceRepo()
+    broken.tokens["tok"] = {"space_id": "s", "created_by": "o", "uses_remaining": 5}
+    broken.consume_should_raise = RuntimeError("storage down")
+    reasons.add(await _deny_reason_for(broken))
+
+    assert reasons == {REDEEM_DENY_REASON}
 
 
 async def test_issuer_seat_failure_sends_deny():
@@ -905,7 +981,7 @@ async def test_issuer_seat_failure_sends_deny():
         if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
     ]
     assert len(deny) == 1
-    assert "member seat" in deny[0]["payload"]["reason"]
+    assert deny[0]["payload"]["reason"] == REDEEM_DENY_REASON
 
 
 async def test_send_deny_swallows_transport_errors():
@@ -1465,7 +1541,7 @@ async def test_bootstrap_unknown_token_denies_and_seats_nothing():
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
         )
-    assert "invalid, expired, or exhausted" in str(exc.value)
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
     assert env.issuer_repo.saved == []
     assert env.issuer_spaces.space_instances == []
 
@@ -1479,7 +1555,7 @@ async def test_bootstrap_expired_token_denies():
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
         )
-    assert "invalid, expired, or exhausted" in str(exc.value)
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
 
 
 async def test_bootstrap_exhausted_token_denies():
@@ -1491,7 +1567,7 @@ async def test_bootstrap_exhausted_token_denies():
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
         )
-    assert "invalid, expired, or exhausted" in str(exc.value)
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
 
 
 async def test_bootstrap_banned_redeemer_denies():
@@ -1503,7 +1579,7 @@ async def test_bootstrap_banned_redeemer_denies():
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
         )
-    assert "banned from this space" in str(exc.value)
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
 
 
 async def test_bootstrap_age_gate_blocks_underage_redeemer():

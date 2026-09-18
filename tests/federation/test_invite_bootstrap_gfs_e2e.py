@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import aiohttp
@@ -41,12 +42,14 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.events import LocalHomeLocationUpdated
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.space import JoinMode, SpaceType
 from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.invite_bootstrap import InviteBootstrapHint
+from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.federation.gfs_relay_transport import (
     GfsRelayTransport,
     seal_relay_envelope,
@@ -215,6 +218,16 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         bus,
         own_instance_id=instance_id,
     )
+    space_service.attach_federation(federation, federation_repo, remote_members)
+    # The §D1b/§D2b inbound family, including the SPACE_SESSION_CLEANUP
+    # teardown leg the kick path fires.
+    private_invites = PrivateSpaceInviteHandler(
+        bus=bus,
+        space_repo=space_repo,
+        remote_member_repo=remote_members,
+        space_service=space_service,
+    )
+    private_invites.attach_to(federation)
     coordinator = SpaceInviteTokenRedeemCoordinator(
         bus=bus,
         federation_service=federation,
@@ -281,6 +294,7 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
 
     return SimpleNamespace(
         db=db,
+        bus=bus,
         name=name,
         key_manager=key_manager,
         federation=federation,
@@ -643,6 +657,7 @@ async def test_a_tampered_blob_is_dropped_at_the_receiver(households, gfs):
 async def test_an_envelope_from_a_household_that_is_not_this_pair_is_rejected(
     households,
     gfs,
+    caplog,
 ):
     """The seal is confidentiality, not authorization. Anyone who reads
     the public invite blob knows the key-wrap key and can seal a blob to
@@ -675,9 +690,22 @@ async def test_an_envelope_from_a_household_that_is_not_this_pair_is_rejected(
         peer_keywrap_pub=a.keywrap_pub,
     )
 
-    with pytest.raises(ValueError, match="signature"):
-        await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ValueError, match="signature"):
+            await a.coordinator.handle_relayed_envelope({"sealed": sealed})
     assert a.received == []
+    # A relay envelope that fails validation is dropped — but never
+    # silently. The line names the event type, the claimed sender and the
+    # reason, and nothing from inside the payload.
+    rejections = [
+        r.getMessage()
+        for r in caplog.records
+        if "gfs_relay: rejected" in r.getMessage()
+    ]
+    assert len(rejections) == 1
+    assert "space_post_created" in rejections[0]
+    assert b.instance_id in rejections[0]
+    assert "signature" in rejections[0]
 
 
 async def test_the_seat_survives_a_restart(households, gfs):
@@ -800,3 +828,376 @@ async def test_one_fanout_reaches_a_relayed_member_and_a_paired_member(
             await server.close()
     finally:
         await c.db.shutdown()
+
+
+# ─── What a link-joined household must NOT get ───────────────────────────
+
+
+async def test_the_household_gps_never_reaches_a_link_joined_member(
+    households,
+    gfs,
+):
+    """Our home coordinates are a social disclosure.
+
+    ``LOCAL_HOME_LOCATION_CHANGED`` fans out to confirmed peers, and a
+    household seated from an invite link is CONFIRMED — so the raw
+    ``list_instances`` fan-out shipped the family's street to anybody who
+    redeemed a link. Twice over: ``share_home`` also defaults True and the
+    §D2b seat never overrode it.
+    """
+    a, b = households
+    space = await _join(a, b, gfs)
+    assert space is not None
+
+    # The seat itself is closed by default.
+    seat = await b.federation_repo.get_instance(a.instance_id)
+    assert seat is not None
+    assert seat.share_home is False
+
+    await b.bus.publish(
+        LocalHomeLocationUpdated(latitude=52.3676, longitude=4.9041),
+    )
+    await gfs.drain()
+
+    assert gfs.mailbox == [], "home GPS was relayed to a link-joined household"
+    assert a.received == []
+    row = await a.federation_repo.get_instance(b.instance_id)
+    assert row is not None
+    assert row.home_lat is None
+    assert row.home_lon is None
+
+
+NON_SPACE_PROBE_TYPES = [
+    FederationEventType.DM_MESSAGE,
+    FederationEventType.DM_MESSAGE_DELETED,
+    FederationEventType.DM_CONTACT_REQUEST,
+    FederationEventType.USERS_SYNC,
+    FederationEventType.USER_UPDATED,
+    FederationEventType.USER_IDENTITY_RESOLVE,
+    FederationEventType.USER_ONLINE,
+    FederationEventType.CALL_OFFER,
+    FederationEventType.CALL_ICE,
+    FederationEventType.PRESENCE_UPDATED,
+    FederationEventType.MOMENT_CREATED,
+    FederationEventType.HIGHLIGHT_CREATED,
+    FederationEventType.NETWORK_SYNC,
+    FederationEventType.URL_UPDATED,
+    FederationEventType.SPACE_FIND_ROUTE,
+    FederationEventType.SPACE_ROUTE_FOUND,
+    FederationEventType.SPACE_ROUTED,
+    FederationEventType.SPACE_ADMIN_KEY_SHARE,
+    FederationEventType.SPACE_JOIN_REQUEST,
+    FederationEventType.SPACE_DIRECTORY_SYNC,
+]
+
+
+async def test_a_link_joined_household_cannot_push_non_space_events(
+    households,
+    gfs,
+):
+    """The seat is space-scoped. Before the peer-class gate the §24.11
+    pipeline had no notion of peer class at all, so every one of these
+    validated, decrypted and dispatched on the host."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    dispatched: list[FederationEventType] = []
+
+    async def _spy(event: FederationEvent) -> None:
+        dispatched.append(event.event_type)
+
+    for probe in NON_SPACE_PROBE_TYPES:
+        b.federation._event_registry.register(probe, _spy)
+
+    for probe in NON_SPACE_PROBE_TYPES:
+        result = await a.federation.send_event(
+            to_instance_id=b.instance_id,
+            event_type=probe,
+            payload={"probe": probe.value},
+            space_id=space.id if probe.value.startswith("space_") else None,
+        )
+        assert result.ok is True, "the relay accepts everything by design"
+    await gfs.drain()
+
+    assert len(NON_SPACE_PROBE_TYPES) == 20
+    assert dispatched == [], f"host dispatched {dispatched} from a link-joined peer"
+
+
+async def test_the_space_vocabulary_still_flows_both_ways(households, gfs):
+    """The gate is a filter, not a wall — the allow-listed families that
+    make a space work are untouched."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    await b.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_POST_CREATED,
+        _post_payload("still-flows"),
+    )
+    await a.federation.broadcast_to_space_members(
+        space.id,
+        FederationEventType.SPACE_MEMBER_JOINED,
+        {"user_id": "someone"},
+    )
+    await gfs.drain()
+
+    assert [e.payload["content"] for e in a.received] == ["still-flows"]
+    assert [e.event_type for e in b.received] == [
+        FederationEventType.SPACE_MEMBER_JOINED,
+    ]
+
+
+# ─── The relay queue is a mailbox, not a wire ────────────────────────────
+
+
+async def _sealed_envelope_from(sender, recipient, *, timestamp, msg_id, space_id):
+    """One real §24.11 envelope from *sender* to *recipient*, signed and
+    encrypted under their pair keys, at an arbitrary timestamp."""
+    row = await sender.federation_repo.get_instance(recipient.instance_id)
+    session_key = sender.key_manager.decrypt(row.key_self_to_remote)
+    envelope = {
+        "msg_id": msg_id,
+        "event_type": FederationEventType.SPACE_POST_CREATED.value,
+        "from_instance": sender.instance_id,
+        "to_instance": recipient.instance_id,
+        "timestamp": timestamp,
+        "encrypted_payload": sender.federation._encrypt_payload(
+            orjson.dumps(_post_payload("queued-overnight")).decode(),
+            session_key,
+        ),
+        "space_id": space_id,
+        "proto_version": 1,
+        "sig_suite": "ed25519",
+    }
+    envelope["signatures"] = sender.federation._encoder.sign_envelope_all(
+        orjson.dumps(envelope),
+        suite="ed25519",
+    )
+    return seal_relay_envelope(
+        envelope_dict=envelope,
+        peer_keywrap_pub=recipient.keywrap_pub,
+    )
+
+
+async def test_an_envelope_the_relay_queued_overnight_is_accepted(households, gfs):
+    """The relay answers ``202`` and holds the blob for up to 24 h, so the
+    sender never used the outbox. Judging the drained bytes against the
+    ±300 s live-wire window would lose the event outright."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    queued_at = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+    sealed = await _sealed_envelope_from(
+        b,
+        a,
+        timestamp=queued_at,
+        msg_id="queued-20h",
+        space_id=space.id,
+    )
+
+    await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+
+    assert [e.payload["content"] for e in a.received] == ["queued-overnight"]
+
+
+async def test_a_queued_envelope_replayed_hours_later_is_still_rejected(
+    households,
+    gfs,
+):
+    """The wider window is paid for by the replay cache outlasting it."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    sealed = await _sealed_envelope_from(
+        b,
+        a,
+        timestamp=(datetime.now(timezone.utc) - timedelta(hours=10)).isoformat(),
+        msg_id="replay-me",
+        space_id=space.id,
+    )
+    await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    a.received.clear()
+
+    # The same bytes again, 10 h into the window a relay capture could
+    # replay them in.
+    with pytest.raises(ValueError, match="[Rr]eplay"):
+        await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    assert a.received == []
+
+
+async def test_a_wire_envelope_keeps_the_300s_window(households, gfs):
+    """Only the relay tier is widened; the live wire is unchanged."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    stale = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+    row = await b.federation_repo.get_instance(a.instance_id)
+    session_key = b.key_manager.decrypt(row.key_self_to_remote)
+    envelope = {
+        "msg_id": "stale-on-the-wire",
+        "event_type": FederationEventType.SPACE_POST_CREATED.value,
+        "from_instance": b.instance_id,
+        "to_instance": a.instance_id,
+        "timestamp": stale,
+        "encrypted_payload": b.federation._encrypt_payload(
+            orjson.dumps(_post_payload()).decode(),
+            session_key,
+        ),
+        "space_id": space.id,
+        "proto_version": 1,
+        "sig_suite": "ed25519",
+    }
+    envelope["signatures"] = b.federation._encoder.sign_envelope_all(
+        orjson.dumps(envelope),
+        suite="ed25519",
+    )
+
+    with pytest.raises(ValueError, match="skew"):
+        await a.federation.handle_inbound_rtc(
+            b.instance_id,
+            orjson.dumps(envelope),
+        )
+
+
+async def test_a_relay_delivery_result_is_labelled_as_acceptance(households, gfs):
+    """``ok=True`` off the relay means the server took it, not that the
+    other household has it — the label is what stops an operator-facing
+    count reading it as confirmed delivery."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    result = await b.federation.send_event(
+        to_instance_id=a.instance_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload=_post_payload(),
+        space_id=space.id,
+    )
+    await gfs.drain()
+
+    assert result.ok is True
+    assert result.via == "gfs_relay"
+
+
+# ─── The seat is revoked when the membership that bought it ends ─────────
+
+
+async def test_a_kick_revokes_the_space_scoped_seat_on_both_sides(households, gfs):
+    """Kick / ban / leave / dissolve used to leave the ``space_session``
+    row and its live session keys in place forever — a household with no
+    remaining relationship to us still holding valid keys to us.
+
+    Both directions: the host drops its row AND tells the kicked household
+    to drop the mirror it holds (``SPACE_SESSION_CLEANUP``, allow-listed
+    for this peer class because it is the teardown of the relationship
+    itself).
+    """
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    assert await a.federation_repo.get_instance(b.instance_id) is not None
+    assert await b.federation_repo.get_instance(a.instance_id) is not None
+
+    await b.space_service.remove_remote_member(
+        space.id,
+        actor_username=b.username,
+        instance_id=a.instance_id,
+        user_id=a.user_id,
+    )
+    await gfs.drain()
+
+    # Host side: the seat is gone.
+    assert await b.federation_repo.get_instance(a.instance_id) is None
+    # Kicked side: the CLEANUP landed and its mirror is gone too.
+    assert await a.federation_repo.get_instance(b.instance_id) is None
+
+
+async def test_a_seat_carrying_a_second_shared_space_survives_a_kick(
+    households,
+    gfs,
+):
+    """The choke point asks 'any space at all', not 'this one'."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    # A second shared space with the same household.
+    await b.space_repo.add_space_instance("sp-second", a.instance_id)
+    await a.space_repo.add_space_instance("sp-second", b.instance_id)
+
+    await b.space_service.remove_remote_member(
+        space.id,
+        actor_username=b.username,
+        instance_id=a.instance_id,
+        user_id=a.user_id,
+    )
+    await gfs.drain()
+
+    assert await b.federation_repo.get_instance(a.instance_id) is not None
+    assert await a.federation_repo.get_instance(b.instance_id) is not None
+
+
+async def test_a_cleanup_we_disagree_with_is_ignored(households, gfs):
+    """The receiver re-derives the answer from its OWN rows — a peer that
+    shares two spaces with us and leaves one cannot tear down the seat the
+    other still needs."""
+    a, b = households
+    space = await _join(a, b, gfs)
+    assert space is not None
+    await a.space_repo.add_space_instance("sp-other", b.instance_id)
+
+    dropped = await a.space_service.apply_space_session_cleanup(b.instance_id)
+
+    assert dropped is False
+    assert await a.federation_repo.get_instance(b.instance_id) is not None
+
+
+async def test_a_qr_paired_peer_is_never_revoked(households, gfs, tmp_path):
+    """Only ``space_session`` seats have a space-bounded lifetime; a real
+    pairing outlives every space."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    await b.federation_repo.save_instance(
+        RemoteInstance(
+            id="manual-peer",
+            display_name="QR friend",
+            remote_identity_pk="ab" * 32,
+            key_self_to_remote=b.key_manager.encrypt(bytes(32)),
+            key_remote_to_self=b.key_manager.encrypt(bytes(32)),
+            remote_inbox_url="http://friend.example/inbox/x",
+            local_inbox_id="inbox-manual",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        ),
+    )
+    await b.space_repo.add_space_instance(space.id, "manual-peer")
+    await b.space_repo.remove_space_instance(space.id, "manual-peer")
+
+    assert await b.space_service.revoke_space_session_if_orphaned("manual-peer") is (
+        False
+    )
+    assert await b.federation_repo.get_instance("manual-peer") is not None
+
+
+async def test_the_gps_fanout_skips_a_link_joined_seat_even_with_share_home_on(
+    households,
+    gfs,
+):
+    """The second, independent half of the fix.
+
+    ``share_home=False`` on the seat and ``list_social_instances`` in the
+    fan-out each stop this on their own — which is the point, since either
+    is a one-line edit away from being undone. This test forces the flag
+    back on so only the fan-out's peer selection is left holding the line.
+    """
+    a, b = households
+    space = await _join(a, b, gfs)
+    assert space is not None
+    await b.federation_repo.set_share_home(a.instance_id, value=True)
+
+    await b.bus.publish(
+        LocalHomeLocationUpdated(latitude=52.3676, longitude=4.9041),
+    )
+    await gfs.drain()
+
+    assert gfs.mailbox == [], "home GPS was relayed to a link-joined household"
+    assert a.received == []

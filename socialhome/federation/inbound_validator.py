@@ -9,7 +9,10 @@ Steps (in order):
 
 1. **JSON parse** — ``raw_body`` → envelope dict.
 2. **Instance lookup** — ``local_inbox_id`` → ``RemoteInstance``.
-3. **Timestamp skew** — ``abs(now - envelope.timestamp) ≤ 300s``.
+2b. **Peer class** — a ``space_session`` sender may only use the space
+    vocabulary (``SPACE_SESSION_ALLOWED_EVENT_TYPES``).
+3. **Timestamp skew** — ``abs(now - envelope.timestamp) ≤ 300s`` (wider
+   for a relay-carried envelope, see ``RELAY_TIMESTAMP_SKEW_SECONDS``).
 4. **Signature verify** — Ed25519 with the remote's identity_pk.
 5. **Replay check** — ``msg_id`` already seen → reject.
 6. **Decrypt payload** — AES-256-GCM using ``key_remote_to_self``.
@@ -44,12 +47,52 @@ from typing import Any
 
 import orjson
 
-from ..domain.federation import FederationEvent, FederationEventType, RemoteInstance
+from ..domain.federation import (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
+    FederationEvent,
+    FederationEventType,
+    InstanceSource,
+    RemoteInstance,
+)
 
 log = logging.getLogger(__name__)
 
 #: Maximum allowed clock skew for inbound envelopes (§24.11 §5).
 TIMESTAMP_SKEW_SECONDS = 300
+
+#: Transport label for an envelope the connection-server relay carried
+#: (:class:`socialhome.federation.gfs_relay_transport.GfsRelayTransport`).
+#: Set on :attr:`InboundContext.transport` by the relay dispatch seam.
+TRANSPORT_GFS_RELAY = "gfs_relay"
+
+#: How long the relay may hold an undelivered envelope. Mirrors
+#: :data:`socialhome.global_server.envelope_relay.ENVELOPE_QUEUE_TTL_SECONDS`
+#: — duplicated rather than imported because the household half must not
+#: depend on the server package, and pinned equal by
+#: ``tests/federation/test_inbound_validator.py``.
+RELAY_QUEUE_TTL_SECONDS = 24 * 60 * 60
+
+#: Skew budget for a relay-carried envelope.
+#:
+#: The relay answers ``202`` the moment it accepts a blob, and that
+#: acceptance IS the delivery contract: an offline household gets the
+#: bytes on its next hello, up to :data:`RELAY_QUEUE_TTL_SECONDS` later.
+#: Judging those bytes against the ±300 s live-wire window means every
+#: envelope queued for a sleeping household is rejected on arrival — the
+#: sender saw a ``202`` and never used the outbox, so the event is simply
+#: gone. The window therefore has to cover the queue's own TTL plus the
+#: ordinary clock-skew allowance.
+#:
+#: Widening a timestamp window only costs what the replay defence cannot
+#: cover, so the two are pinned together: the durable
+#: ``federation_replay_cache`` retention
+#: (:data:`socialhome.crypto.REPLAY_CACHE_WINDOW`, pruned by
+#: :class:`~socialhome.infrastructure.replay_cache_scheduler
+#: .ReplayCachePruneScheduler`) is ≥ this value, so a captured relay
+#: envelope replayed anywhere inside the window still hits a remembered
+#: ``msg_id``. ``tests/federation/test_inbound_validator.py`` asserts the
+#: inequality so nobody can shrink the retention without noticing.
+RELAY_TIMESTAMP_SKEW_SECONDS = RELAY_QUEUE_TTL_SECONDS + TIMESTAMP_SKEW_SECONDS
 
 
 # ─── Validation context ─────────────────────────────────────────────────
@@ -88,6 +131,12 @@ class InboundContext:
     #: want to return early without dispatching).
     early_response: dict | None = None
 
+    #: Which transport delivered these bytes. Empty for a live wire (RTC
+    #: DataChannel, HTTPS inbox); :data:`TRANSPORT_GFS_RELAY` when the
+    #: connection-server relay carried them, which is the one case where
+    #: the bytes may legitimately be up to a day old.
+    transport: str = ""
+
 
 #: Middleware shape: async callable that takes context + raises or returns.
 InboundStep = Callable[[InboundContext], Awaitable[None]]
@@ -122,6 +171,11 @@ class _InboxInstance:
     @property
     def key_remote_to_self(self) -> str:
         return self._inst.key_remote_to_self
+
+    @property
+    def source(self) -> InstanceSource:
+        """How the row came to exist — read by the peer-class gate."""
+        return self._inst.source
 
 
 # ─── Individual steps ────────────────────────────────────────────────────
@@ -233,7 +287,13 @@ def make_lookup_instance_by_id(*, repo) -> InboundStep:
 
 
 def make_check_timestamp() -> InboundStep:
-    """Step 3: reject when clock skew exceeds threshold."""
+    """Step 3: reject when clock skew exceeds the transport's threshold.
+
+    ±300 s on a live wire. A relay-carried envelope
+    (:data:`TRANSPORT_GFS_RELAY`) gets
+    :data:`RELAY_TIMESTAMP_SKEW_SECONDS` instead — see that constant for
+    why, and for the replay-retention invariant that pays for it.
+    """
 
     async def check_timestamp(ctx: InboundContext) -> None:
         timestamp_str = ctx.envelope["timestamp"]
@@ -243,13 +303,62 @@ def make_check_timestamp() -> InboundStep:
             )
         except ValueError as exc:
             raise ValueError(f"Unparseable timestamp: {timestamp_str!r}") from exc
+        max_skew = (
+            RELAY_TIMESTAMP_SKEW_SECONDS
+            if ctx.transport == TRANSPORT_GFS_RELAY
+            else TIMESTAMP_SKEW_SECONDS
+        )
         skew = abs((datetime.now(timezone.utc) - envelope_ts).total_seconds())
-        if skew > TIMESTAMP_SKEW_SECONDS:
-            raise ValueError(
-                f"Timestamp skew too large: {skew:.1f}s (max {TIMESTAMP_SKEW_SECONDS}s)"
-            )
+        if skew > max_skew:
+            raise ValueError(f"Timestamp skew too large: {skew:.1f}s (max {max_skew}s)")
 
     return check_timestamp
+
+
+def make_check_peer_class() -> InboundStep:
+    """Step 2b: hold a space-scoped peer to the space vocabulary (§D2b).
+
+    Runs straight after the instance lookup — the first point at which
+    the sender's *class* is known — and before any crypto, so an
+    off-vocabulary envelope costs a set lookup.
+
+    A row whose
+    :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
+    source says "we met through an invite link" may exchange the space's
+    own federation events and nothing else; anything outside
+    :data:`~socialhome.domain.federation.SPACE_SESSION_ALLOWED_EVENT_TYPES`
+    is rejected with the pipeline's ordinary ``ValueError``.
+
+    Note this is *independent* of the ban step, which only fires when the
+    envelope carries a ``space_id`` — most of the traffic this gate
+    refuses (DMs, presence, calls, the user roster) carries none and
+    would sail past every other check in the chain.
+    """
+
+    async def check_peer_class(ctx: InboundContext) -> None:
+        source = getattr(ctx.instance, "source", None)
+        if source is not InstanceSource.SPACE_SESSION:
+            return
+        raw_type = ctx.envelope["event_type"]
+        # ``parse_json`` already proved this is a known member.
+        event_type = FederationEventType(raw_type)
+        if event_type in SPACE_SESSION_ALLOWED_EVENT_TYPES:
+            return
+        # INFO, not WARNING: an older peer that still sends a type we now
+        # refuse is a normal, expected rejection, and this surface is
+        # reachable by anyone holding an invite link. Type + sender only
+        # — never the payload, which is the sender's to keep.
+        log.info(
+            "inbound: refusing %r from space-scoped instance %s — not "
+            "permitted for a household seated from an invite link",
+            raw_type,
+            getattr(ctx.instance, "from_instance", ""),
+        )
+        raise ValueError(
+            f"Event type {raw_type!r} is not permitted from a space-scoped peer",
+        )
+
+    return check_peer_class
 
 
 def make_verify_signature(*, encoder) -> InboundStep:

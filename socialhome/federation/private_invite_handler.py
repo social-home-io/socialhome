@@ -188,8 +188,37 @@ class PrivateSpaceInviteHandler:
             FederationEventType.SPACE_MEMBER_LEFT,
             self._on_space_member_left,
         )
+        registry.register(
+            FederationEventType.SPACE_SESSION_CLEANUP,
+            self._on_space_session_cleanup,
+        )
 
     # ── Receive ─────────────────────────────────────────────────────────
+
+    async def _on_space_session_cleanup(self, event: "FederationEvent") -> None:
+        """§D2b — the peer dropped its space-scoped seat for us; drop ours.
+
+        Sent when the sender's last shared membership with us ended (kick,
+        ban, leave, dissolve). We re-derive the same answer from our own
+        rows rather than taking the sender's word: a household that shares
+        two spaces with us and leaves one must not be able to tear down
+        the seat the other still needs.
+        """
+        if self._space_service is None:
+            log.debug(
+                "SPACE_SESSION_CLEANUP from %s: space service not attached",
+                event.from_instance,
+            )
+            return
+        dropped = await self._space_service.apply_space_session_cleanup(
+            event.from_instance,
+        )
+        if not dropped:
+            log.info(
+                "SPACE_SESSION_CLEANUP from %s ignored — we still share a "
+                "space with them, or they were never a space-scoped seat",
+                event.from_instance,
+            )
 
     async def _record_host_identity_pk(
         self,
@@ -503,6 +532,23 @@ class PrivateSpaceInviteHandler:
                 local_space.owner_instance_id == event.from_instance
             ):
                 await self._space_repo.mark_dissolved(space_id)
+                # Stop treating the host as a member household of a space
+                # we are no longer in — otherwise every later fan-out still
+                # targets them, and (§D2b) the space-scoped seat we hold
+                # for them never looks orphaned, so it is never revoked.
+                await self._space_repo.remove_space_instance(
+                    space_id,
+                    event.from_instance,
+                )
+                if self._space_service is not None:
+                    # ``notify=False``: the host initiated this, and on the
+                    # §D2b path it has already dropped its own row — a
+                    # CLEANUP back would land on a household that no longer
+                    # has a row for us and be refused at the lookup step.
+                    await self._space_service.revoke_space_session_if_orphaned(
+                        event.from_instance,
+                        notify=False,
+                    )
         await self._bus.publish(
             RemoteSpaceMemberRemoved(
                 space_id=space_id,

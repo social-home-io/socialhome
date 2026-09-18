@@ -463,6 +463,177 @@ STRUCTURAL_EVENTS: frozenset[FederationEventType] = frozenset(
 )
 
 
+#: What a **space-scoped** peer may send us (§D2b).
+#:
+#: A household seated from an invite link holds an
+#: :data:`InstanceSource.SPACE_SESSION` ``remote_instances`` row: a valid,
+#: unexpired, unexhausted invite token was the whole of its authorization,
+#: and what it bought was *one space*, not a social relationship. Yet the
+#: row is CONFIRMED and carries directional session keys, so without this
+#: gate the §24.11 pipeline happily validates and dispatches **any** event
+#: type from it — DMs, the user roster, presence, call signalling, moments,
+#: mesh-route probes. That is the shape of the finding this list closes:
+#: the pipeline had no notion of peer class at all.
+#:
+#: The rule is **deny by default**. The
+#: ``check_peer_class`` step in :mod:`socialhome.federation.inbound_validator`
+#: rejects anything not named here, so a newly-added
+#: :class:`FederationEventType` is refused from a space-scoped peer until
+#: somebody deliberately classifies it (pinned by a test that enumerates
+#: ``set(FederationEventType)``).
+#:
+#: Membership in *any* shared space is NOT re-checked here — the ban step
+#: only fires when the envelope carries a ``space_id``, and the handlers
+#: themselves are membership-gated. This list is about the *class* of
+#: traffic a link-joined household is entitled to emit at all.
+SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        #: Peers exchange their protocol version on every startup; without
+        #: it both sides stay pinned at v_1 and every capability-gated
+        #: field is suppressed forever. The only non-``SPACE_*`` entry.
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        # ── Structure / config of the space we actually share ──
+        #: The host dissolving the space, or a household leaving it, is
+        #: exactly the news a link-joined member must not miss.
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.SPACE_INSTANCE_LEFT,
+        #: Config edits (name, description, features, join mode, retention)
+        #: and the catch-up replay of them. A member whose config rots shows
+        #: a stale space forever.
+        FederationEventType.SPACE_CONFIG_CHANGED,
+        FederationEventType.SPACE_CONFIG_CATCH_UP,
+        #: Age gate: a §CP.F1 restriction tightened after the join has to
+        #: reach the member household that enforces it locally.
+        FederationEventType.SPACE_AGE_GATE_UPDATED,
+        # ── Roster ──
+        #: The Members tab, and the per-member keys the content-key epoch
+        #: is distributed against. A roster that never updates leaves the
+        #: member unable to attribute — or decrypt — anything.
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+        FederationEventType.SPACE_MEMBER_BANNED,
+        FederationEventType.SPACE_MEMBER_UNBANNED,
+        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
+        #: Host → the kicked household: "your member is out". Dropping it
+        #: would leave a removed member believing they are still seated.
+        FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+        #: Host → admin households: the mirror of a pending critical-action
+        #: proposal plus its tally. Read-only on the receiver.
+        FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
+        #: A link-joined member that the host later promoted to admin is an
+        #: admin: these are its only way to act. Safe to accept because the
+        #: host re-validates the actor's ``space_remote_members.role``
+        #: before running anything — authentication here, authorization
+        #: there.
+        FederationEventType.SPACE_REMOTE_ADMIN_KICK,
+        FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        #: Teardown of the space-scoped relationship itself (§D2b): the
+        #: side that drops its row tells the other to drop its own.
+        FederationEventType.SPACE_SESSION_CLEANUP,
+        # ── Content ──
+        #: The space's own posts, comments and every pillar rendered
+        #: inside it. This is what "joined the space" means.
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_POST_UPDATED,
+        FederationEventType.SPACE_POST_DELETED,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        FederationEventType.SPACE_COMMENT_UPDATED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+        FederationEventType.SPACE_PAGE_CREATED,
+        FederationEventType.SPACE_PAGE_UPDATED,
+        FederationEventType.SPACE_PAGE_DELETED,
+        FederationEventType.SPACE_TASK_CREATED,
+        FederationEventType.SPACE_TASK_UPDATED,
+        FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_POLL_CREATED,
+        FederationEventType.SPACE_POLL_VOTE_CAST,
+        FederationEventType.SPACE_POLL_CLOSED,
+        FederationEventType.SPACE_STICKY_CREATED,
+        FederationEventType.SPACE_STICKY_UPDATED,
+        FederationEventType.SPACE_STICKY_DELETED,
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+        FederationEventType.SPACE_RSVP_UPDATED,
+        FederationEventType.SPACE_RSVP_DELETED,
+        FederationEventType.SPACE_SCHEDULE_CREATED,
+        FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
+        FederationEventType.SPACE_SCHEDULE_FINALIZED,
+        FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+        FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+        FederationEventType.BAZAAR_LISTING_CREATED,
+        FederationEventType.BAZAAR_LISTING_UPDATED,
+        FederationEventType.BAZAAR_BID_PLACED,
+        FederationEventType.BAZAAR_OFFER_ACCEPTED,
+        #: Space-scoped location pins and the space's own zone catalogue —
+        #: a display layer inside the space, distinct from the household
+        #: ``PRESENCE_UPDATED`` fan-out (which stays excluded).
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        FederationEventType.SPACE_ZONE_UPSERTED,
+        FederationEventType.SPACE_ZONE_DELETED,
+        #: Moderation reports raised inside the space.
+        FederationEventType.SPACE_REPORT,
+        # ── Media ──
+        #: The bytes ``SPACE_POST_CREATED`` / the gallery referenced by
+        #: URL. Without them a member renders broken images.
+        FederationEventType.SPACE_MEDIA_BLOB,
+        # ── Content-key epochs ──
+        #: The per-space AES key handshake and its rotations. Excluded from
+        #: this set, a member decrypts nothing after the first rekey.
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        # ── Catch-up sync (§25.6) ──
+        #: The chunked backfill that populates a fresh seat. The RTC
+        #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
+        #: ``_ICE`` / ``_DIRECT_READY`` / ``_DIRECT_FAILED``) is
+        #: deliberately absent: it exists to negotiate a DIRECT peer
+        #: connection, and the whole point of §D2b is that these two
+        #: households never learn each other's address.
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_SYNC_CHUNK_ACK,
+        FederationEventType.SPACE_SYNC_RESUME,
+        FederationEventType.SPACE_SYNC_COMPLETE,
+        FederationEventType.SPACE_SYNC_REQUEST_MORE,
+        FederationEventType.SPACE_SYNC_REJECTED,
+        #: Space-scoped partition repair. Its node-scoped siblings
+        #: (``NODE_PARTITION_*``, ``INSTANCE_SYNC_STATUS``) are about the
+        #: whole household and stay out.
+        FederationEventType.SPACE_PARTITION_GAP,
+        # ── Routing ──
+        #: A route-stale nack only ever invalidates OUR cached route to
+        #: the sender. Its siblings ``SPACE_FIND_ROUTE`` /
+        #: ``SPACE_ROUTE_FOUND`` / ``SPACE_ROUTED`` are excluded on
+        #: purpose: a ``SPACE_ROUTE_FOUND`` carries ``path`` — every relay
+        #: household's id — so answering a stranger's probe hands them a
+        #: map of our social graph. They are not a mesh node.
+        FederationEventType.SPACE_ROUTE_STALE,
+        # ── Joining a SECOND space from the same household ──
+        #: Once the pair exists, ``request_redeem`` takes the direct-peer
+        #: branch, so a second invite token from this household rides the
+        #: §24.11 pipeline rather than the bootstrap relay. The token is
+        #: still the whole authorization. ``SPACE_JOIN_REQUEST*`` stays
+        #: out — that is the ask-an-admin flow, and this peer class does
+        #: not get to queue itself for approval.
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
+    }
+)
+#: Deliberately **excluded**, for the record: every DM / presence / call /
+#: highlight / moment / user-sync / pairing / public-directory type (none of
+#: it is space federation); ``SPACE_ADMIN_KEY_SHARE`` (handing the space
+#: seed to a household that walked in off a link is never right);
+#: ``SPACE_JOIN_REQUEST*`` (they are already a member);
+#: ``SPACE_PRIVATE_INVITE*`` and ``SPACE_INVITE*`` (§D1b social invites);
+#: ``SPACE_CREATED`` (the shared space is seated by the redeem ACK — a
+#: ``SPACE_CREATED`` from this peer class would seat an unrelated one);
+#: ``SPACE_SUBSCRIBER_KEY_HANDOFF`` (a GFS relay frame, never a §24.11
+#: envelope); and the four mesh-routing types above.
+
+
 # ─── Pairing state machine (§11) ──────────────────────────────────────────
 
 
@@ -710,6 +881,21 @@ class DeliveryResult:
     ok: bool
     status_code: int | None = None
     error: str | None = None
+    #: Which transport carried it — ``"rtc"``, ``"https"`` or
+    #: ``"gfs_relay"``; ``None`` when no transport facade was attached.
+    #:
+    #: **``via="gfs_relay"`` with ``ok=True`` means ACCEPTED, not
+    #: delivered.** The connection server answers a uniform ``202`` to
+    #: every well-formed envelope (any other answer would be a
+    #: presence oracle), so a household that is offline — or not a
+    #: client of that server at all — produces exactly the same result
+    #: as one that took the frame off its live socket. What the ``202``
+    #: buys is the queue: the blob waits up to
+    #: ``ENVELOPE_QUEUE_TTL_SECONDS`` and drains on the recipient's next
+    #: hello. Read a ``gfs_relay`` success as "handed to the relay",
+    #: never as "the other household has it", and don't present it to an
+    #: operator as confirmed delivery.
+    via: str | None = None
     #: Seconds the caller should wait before retrying, when the sender knows.
     #: Set on the :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` path (the remaining
     #: negative-cooldown window); ``None`` everywhere else.

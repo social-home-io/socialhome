@@ -1759,7 +1759,8 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         created_at: int,
         expires_at: int,
         max_per_recipient: int,
-    ) -> None: ...
+        max_bytes_per_recipient: int,
+    ) -> bool: ...
 
     async def list_for(
         self,
@@ -1796,32 +1797,51 @@ class SqliteGfsEnvelopeQueueRepo:
         created_at: int,
         expires_at: int,
         max_per_recipient: int,
-    ) -> None:
-        """Append one envelope, evicting this recipient's OLDEST overflow.
+        max_bytes_per_recipient: int,
+    ) -> bool:
+        """Append one envelope unless this recipient is at cap.
 
-        Insert + evict run in one transaction so the per-recipient cap is a
-        real bound rather than a best effort: two concurrent relays to the
-        same offline household can't leave the queue over the cap. Oldest-out
-        is the right eviction order — a queued redeem that has already sat
-        through its TTL window is the one least likely to still matter, and
-        keeping it would let an early flood block every later envelope.
+        Returns ``True`` when the row was written, ``False`` when it was
+        **tail-dropped** — the caller answers the same uniform ``202``
+        either way and logs the drop.
+
+        Tail-drop, not evict-oldest. The relay endpoint is anonymous by
+        design, so the previous "keep the newest N, delete the rest"
+        eviction handed anyone who knew an instance id a delete primitive:
+        ``N`` junk envelopes pushed out ``N`` legitimate queued ones, and
+        neither the household nor the original senders ever learned. Under
+        tail-drop a flood can only refuse itself; what was already accepted
+        stays accepted.
+
+        The count check and the insert share one transaction so two
+        concurrent relays to the same offline household can't both see room
+        and both write. Expired rows don't count towards either ceiling —
+        they are already invisible to ``list_for`` and the TTL sweep will
+        collect them, so a queue full of yesterday's blobs must not block
+        today's.
         """
 
-        def _run(conn) -> None:
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(sealed_json)), 0) "
+                "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ?",
+                (to_instance, created_at),
+            ).fetchone()
+            count = int(row[0] or 0)
+            total_bytes = int(row[1] or 0)
+            if count >= max_per_recipient:
+                return False
+            if total_bytes + len(sealed_json) > max_bytes_per_recipient:
+                return False
             conn.execute(
                 "INSERT INTO gfs_envelope_queue("
                 "to_instance, sealed_json, created_at, expires_at"
                 ") VALUES(?,?,?,?)",
                 (to_instance, sealed_json, created_at, expires_at),
             )
-            conn.execute(
-                "DELETE FROM gfs_envelope_queue WHERE to_instance=? AND id NOT IN ("
-                "SELECT id FROM gfs_envelope_queue WHERE to_instance=? "
-                "ORDER BY created_at DESC, id DESC LIMIT ?)",
-                (to_instance, to_instance, max_per_recipient),
-            )
+            return True
 
-        await self._db.transact(_run)
+        return await self._db.transact(_run)
 
     async def list_for(
         self,

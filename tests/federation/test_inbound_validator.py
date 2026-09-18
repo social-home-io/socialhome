@@ -6,17 +6,27 @@ validation phase.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import orjson
 import pytest
 
-from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.crypto import REPLAY_CACHE_WINDOW, ReplayCache
+from socialhome.domain.federation import (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
+    FederationEvent,
+    FederationEventType,
+    InstanceSource,
+)
 from socialhome.federation.inbound_validator import (
+    RELAY_QUEUE_TTL_SECONDS,
+    RELAY_TIMESTAMP_SKEW_SECONDS,
+    TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
     make_ban_check,
     make_check_deprovisioned_author,
+    make_check_peer_class,
     make_check_replay,
     make_check_timestamp,
     make_idempotency_check,
@@ -212,8 +222,6 @@ class _FakeIdempotencyCache:
 
 
 async def test_idempotency_no_key_passes():
-    from socialhome.domain.federation import FederationEvent, FederationEventType
-
     step = make_idempotency_check(
         cache_holder=lambda: _FakeIdempotencyCache(),
     )
@@ -231,8 +239,6 @@ async def test_idempotency_no_key_passes():
 
 
 async def test_idempotency_duplicate_short_circuits():
-    from socialhome.domain.federation import FederationEvent, FederationEventType
-
     step = make_idempotency_check(
         cache_holder=lambda: _FakeIdempotencyCache(accept=False),
     )
@@ -480,3 +486,199 @@ async def test_pipeline_stops_on_early_response():
     ctx = InboundContext()
     result = await pipeline.run(ctx)
     assert result == {"status": "ok", "deduped": True}
+
+
+# ─── Peer-class gate: what a space-scoped peer may send (§D2b) ───────────
+
+
+class _SourcedInstance:
+    """Minimal stand-in exposing the one attribute the gate reads."""
+
+    def __init__(self, source):
+        self.source = source
+        self.from_instance = "remote-iid"
+
+
+async def test_peer_class_gate_passes_every_type_for_a_manual_peer():
+    """A QR-paired household is a social peer — nothing is filtered."""
+    step = make_check_peer_class()
+    for event_type in FederationEventType:
+        ctx = InboundContext(
+            envelope=_minimal_envelope(event_type=event_type.value),
+            instance=_SourcedInstance(InstanceSource.MANUAL),
+        )
+        await step(ctx)
+
+
+async def test_peer_class_gate_allows_the_space_families_from_a_link_joined_peer():
+    step = make_check_peer_class()
+    for event_type in SPACE_SESSION_ALLOWED_EVENT_TYPES:
+        ctx = InboundContext(
+            envelope=_minimal_envelope(event_type=event_type.value),
+            instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
+        )
+        await step(ctx)
+
+
+async def test_peer_class_gate_rejects_every_unclassified_type_by_default():
+    """Deny-by-default over the WHOLE enum.
+
+    Enumerating ``set(FederationEventType)`` rather than a hand-written
+    list is the point: a federation type added tomorrow is refused from a
+    space-scoped peer until somebody puts it in the allow-list on
+    purpose.
+    """
+    step = make_check_peer_class()
+    denied = set(FederationEventType) - SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert denied, "the allow-list must not swallow the whole enum"
+    for event_type in denied:
+        ctx = InboundContext(
+            envelope=_minimal_envelope(event_type=event_type.value),
+            instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
+        )
+        with pytest.raises(ValueError, match="not permitted"):
+            await step(ctx)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_FIND_ROUTE,
+        FederationEventType.SPACE_ROUTE_FOUND,
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.SPACE_JOIN_REQUEST,
+        FederationEventType.SPACE_JOIN_REQUEST_VIA,
+        FederationEventType.DM_MESSAGE,
+        FederationEventType.USERS_SYNC,
+        FederationEventType.USER_IDENTITY_RESOLVE,
+        FederationEventType.CALL_OFFER,
+        FederationEventType.PRESENCE_UPDATED,
+        FederationEventType.MOMENT_CREATED,
+        FederationEventType.NETWORK_SYNC,
+        FederationEventType.URL_UPDATED,
+    ],
+)
+async def test_peer_class_gate_names_the_types_the_review_probed(event_type):
+    """The specific types an adversarial reviewer pushed through."""
+    step = make_check_peer_class()
+    ctx = InboundContext(
+        envelope=_minimal_envelope(event_type=event_type.value),
+        instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
+    )
+    with pytest.raises(ValueError, match="not permitted"):
+        await step(ctx)
+
+
+async def test_peer_class_gate_logs_type_and_instance_but_never_payload(caplog):
+    step = make_check_peer_class()
+    ctx = InboundContext(
+        envelope=_minimal_envelope(
+            event_type=FederationEventType.DM_MESSAGE.value,
+            encrypted_payload="secret-ciphertext-marker",
+        ),
+        instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
+    )
+    with caplog.at_level("INFO"):
+        with pytest.raises(ValueError):
+            await step(ctx)
+    text = caplog.text
+    assert "dm_message" in text
+    assert "remote-iid" in text
+    assert "secret-ciphertext-marker" not in text
+
+
+async def test_peer_class_gate_is_a_step_in_both_shipped_pipelines():
+    """Mutation guard: the gate has to be IN the chain, not merely exist."""
+    from socialhome.federation.federation_service import FederationService
+
+    svc = FederationService.__new__(FederationService)
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert "check_peer_class" in names
+    # Runs AFTER the instance lookup — it reads ``ctx.instance.source``.
+    assert names.index("check_peer_class") > names.index("_noop_step")
+    assert svc is not None
+
+
+async def _noop_step(ctx):
+    return None
+
+
+class _StubPipelineOwner:
+    """Just enough of :class:`FederationService` for the step builder."""
+
+    _encoder = None
+    _replay_cache = None
+    _key_manager = None
+    _federation_repo = None
+    _idempotency_cache = None
+    _user_repo = None
+
+
+# ─── Relay-carried envelopes: the wider skew window (§D2b) ───────────────
+
+
+async def test_timestamp_step_keeps_the_300s_window_on_a_live_wire():
+    step = make_check_timestamp()
+    stale = datetime.now(timezone.utc) - timedelta(seconds=400)
+    ctx = InboundContext(envelope=_minimal_envelope(timestamp=stale.isoformat()))
+    with pytest.raises(ValueError, match="Timestamp skew too large"):
+        await step(ctx)
+
+
+async def test_timestamp_step_accepts_a_20h_old_relay_queued_envelope():
+    """The relay holds an envelope for a sleeping household for up to its
+    TTL and answers ``202`` to the sender either way — so the sender never
+    used the outbox. Judging the drained bytes against the live-wire
+    window loses the event outright."""
+    step = make_check_timestamp()
+    queued = datetime.now(timezone.utc) - timedelta(hours=20)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(timestamp=queued.isoformat()),
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    await step(ctx)
+
+
+async def test_the_relay_window_still_has_an_upper_bound():
+    step = make_check_timestamp()
+    ancient = datetime.now(timezone.utc) - timedelta(hours=30)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(timestamp=ancient.isoformat()),
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    with pytest.raises(ValueError, match="Timestamp skew too large"):
+        await step(ctx)
+
+
+def test_the_relay_ttl_constant_matches_the_connection_servers():
+    from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
+
+    assert RELAY_QUEUE_TTL_SECONDS == ENVELOPE_QUEUE_TTL_SECONDS
+
+
+def test_replay_retention_covers_the_whole_relay_skew_window():
+    """The invariant that pays for the wider window.
+
+    A timestamp window is only as safe as the replay memory behind it: if
+    the durable ``federation_replay_cache`` forgot a ``msg_id`` while the
+    timestamp step would still accept it, a captured relay envelope could
+    be replayed into the gap. Shrinking ``REPLAY_CACHE_WINDOW`` back to
+    24 h fails here.
+    """
+    assert REPLAY_CACHE_WINDOW.total_seconds() > RELAY_TIMESTAMP_SKEW_SECONDS, (
+        "replay retention must outlast the relay timestamp window"
+    )
+
+
+def test_a_relay_envelope_replayed_10h_later_is_still_remembered():
+    """The in-memory cache (sized by the same window) rejects it."""
+    cache = ReplayCache(window=REPLAY_CACHE_WINDOW)
+    t0 = datetime.now(timezone.utc) - timedelta(hours=20)
+    assert cache.seen("relayed-msg", from_instance="b", now=t0) is False
+    later = t0 + timedelta(hours=10)
+    assert cache.seen("relayed-msg", from_instance="b", now=later) is True

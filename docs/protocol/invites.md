@@ -368,7 +368,13 @@ recipient.
 blob waits in `gfs_envelope_queue` for `ENVELOPE_QUEUE_TTL_SECONDS`
 (24 h — an issuer household may simply be asleep overnight, and dropping
 would make an invite link fail for exactly that reason), capped at
-`ENVELOPE_QUEUE_MAX_PER_RECIPIENT` (200, oldest evicted), and is drained
+`ENVELOPE_QUEUE_MAX_PER_RECIPIENT` (2000) and
+`ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT` (64 MiB) — at either ceiling
+the NEW envelope is **tail-dropped** (never evict-oldest: on an
+anonymous endpoint, evicting the oldest hands a stranger a delete
+primitive over a sleeping household's mail), logged at WARNING with
+the recipient and the depth, and still answered with the same uniform
+`202`. Queued envelopes are drained
 in order on that household's next authenticated hello, each row deleted
 only after its frame went out. Expired rows are swept by the GFS
 maintenance loop.
@@ -398,7 +404,14 @@ HTTP surface), `global_server/routes/ws.py` (the drain on hello),
 Cheapest check first; every rung has its own regression test.
 
 1. **Process-wide rate limit** — before the unseal, so a flood costs a
-   list append rather than an AES-GCM open.
+   list append rather than an AES-GCM open. It is the only bucket
+   available at that point, because which family a blob belongs to is
+   inside the ciphertext.
+1b. **Per-family rate limit**, once the blob is open: bootstrap bodies
+   and relayed §24.11 envelopes draw on separate allowances. They share
+   this socket but not their cadences — an active space's relayed traffic
+   is orders of magnitude more frequent than invite redeems, so one
+   shared budget let either starve the other.
 2. **Size / shape caps** on the sealed blob.
 3. **Unseal** with our key-wrap private key; an unknown `kem_suite` is
    rejected outright, never defaulted.
@@ -422,17 +435,30 @@ Cheapest check first; every rung has its own regression test.
     sender is.
 11. **Key-wrap binding** of the redeemer's own key — we refuse to seal
     a space snapshot (content key included) to a key nobody vouched for.
-12. **Token** — `consume_invite_token`, a single atomic UPDATE guarding
-    `uses_remaining > 0` and the expiry. Unknown / expired / exhausted
-    → DENY.
-13. **Ban check** (§13.7) — a ban overrides a valid token.
-14. **§CP.F1 age gate** — run by the *redeemer* against the host's
+12. **Token + ban, in one statement** — `consume_invite_token`, a single
+    atomic UPDATE guarding `uses_remaining > 0`, the expiry, **and** the
+    §13.7 ban (`NOT EXISTS (SELECT 1 FROM space_bans …)` correlated on
+    the token's own space). Unknown / expired / exhausted / banned →
+    DENY. The ban used to be a second query run *after* the consume with
+    no refund, so a banned household could spend a twenty-use link in
+    twenty requests — and the distinct reason told it its own ban status
+    one attempt at a time. Inside the statement the counter never moves.
+13. **§CP.F1 age gate** — run by the *redeemer* against the host's
     `min_age` from the ACK's `space_meta`, before any local
     persistence, exactly as on the §D2 path.
 
-Every denial ships the existing DENY shape with a human-readable
-`reason`; a failed DENY is logged and swallowed (the redeemer then just
-times out, which is what a dropped frame looks like anyway).
+Every denial ships the existing DENY shape with **one opaque
+`reason`** (`REDEEM_DENY_REASON`). Unknown token, expired, exhausted,
+banned and an issuer storage fault at any stage are byte-identical on the
+wire: the differences are all facts about the issuer's private state, and
+reporting them separately let anybody holding a public link enumerate
+them. The detail stays in the issuer's own `log.exception`. On the
+redeemer side the issuer's string is logged and then **replaced** with a
+fixed local message before it reaches the SPA — on this leg the issuer is
+a household we met through a public link, and rendering its text verbatim
+would put an unknown party's string in our UI. A failed DENY is logged and
+swallowed (the redeemer then just times out, which is what a dropped
+frame looks like anyway).
 
 ### Why the §24.11 pipeline is bypassed
 
@@ -454,16 +480,53 @@ A bootstrap redeem seats a **space-scoped** `remote_instances` row —
 §13 and nothing had ever used. It is CONFIRMED (the space needs a keyed
 instance row to federate against) but it is **not a social peer**:
 
-| Surface | Behaviour for a `space_session` row |
-|---|---|
-| DM send / relay graph | excluded |
-| Profile sync (`USER_UPDATED`), user roster (`USERS_SYNC`) | excluded |
-| Presence (`USER_ONLINE` / `IDLE` / `OFFLINE`) | excluded |
-| Friends constellation, calendar invitee picker, app peer picker | excluded |
-| Moments, highlights ("all paired" audience), URL / capability fan-out | excluded |
-| Public-space directory snapshot | excluded |
-| Auto-pair vouching relay (§11 trust transit) | excluded |
-| Space events, roster, content key, mesh relaying | **works normally** |
+The table has two columns because the two directions are enforced by
+different code and were not, at first, enforced equally. **Send** is what
+our outbound fan-outs will address to such a row — `list_social_instances`
+excludes it, so every non-space fan-out skips it. **Receive** is what the
+§24.11 inbound pipeline will accept *from* it: the `check_peer_class` step
+(`federation/inbound_validator.py`) rejects any `event_type` outside
+`SPACE_SESSION_ALLOWED_EVENT_TYPES` (`domain/federation.py`). Deny by
+default — a federation event type added tomorrow is refused from this peer
+class until somebody classifies it on purpose.
+
+| Surface | Send (we → them) | Receive (them → we) |
+|---|---|---|
+| DM send / relay graph | excluded | rejected |
+| Profile sync (`USER_UPDATED`), user roster (`USERS_SYNC`) | excluded | rejected |
+| Presence (`USER_ONLINE` / `IDLE` / `OFFLINE`, `PRESENCE_UPDATED`) | excluded | rejected |
+| Calls (`CALL_*`) | excluded | rejected |
+| Friends constellation, calendar invitee picker, app peer picker | excluded | rejected |
+| Moments, highlights ("all paired" audience) | excluded | rejected |
+| URL change (`URL_UPDATED`), network discovery (`NETWORK_SYNC`) | excluded | rejected |
+| Home GPS (`LOCAL_HOME_LOCATION_CHANGED`) | excluded, and the seat is written with `share_home=False` | rejected |
+| Public-space directory snapshot (`SPACE_DIRECTORY_SYNC`) | excluded | rejected |
+| Auto-pair vouching relay (§11 trust transit) | excluded | rejected |
+| Capability announce (`INSTANCE_CAPABILITIES_UPDATED`) | sent | **accepted** |
+| Capability re-sync request (`INSTANCE_RESYNC_REQUEST`) | excluded | rejected |
+| Mesh routing (`SPACE_FIND_ROUTE` / `_ROUTE_FOUND` / `SPACE_ROUTED`) | excluded from `_mesh_capable_peers` — we never probe them and never forward theirs | rejected |
+| Route-stale nack (`SPACE_ROUTE_STALE`) | sent | **accepted** (it only invalidates our own cached route to them) |
+| Space content, pages, tasks, polls, stickies, calendar, schedules, gallery, bazaar, zones, reports | sent | **accepted** |
+| Space media bytes (`SPACE_MEDIA_BLOB`) | sent | **accepted** |
+| Space roster + config + age gate | sent | **accepted** |
+| Space content key (`SPACE_KEY_EXCHANGE` / `_ACK` / `_REKEY`) | sent | **accepted** |
+| Space seed delegation (`SPACE_ADMIN_KEY_SHARE`) | never | rejected — handing the space authority seed to a household that walked in off a public link is never right |
+| Catch-up sync chunks (`SPACE_SYNC_BEGIN` … `_COMPLETE`) | sent | **accepted** |
+| Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_*`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
+| Join requests (`SPACE_JOIN_REQUEST*`) | excluded | rejected — they are already a member; this is the ask-an-admin flow |
+| A second invite token from the same household (`SPACE_INVITE_TOKEN_REDEEM` / `_ACK` / `_DENY`) | sent | **accepted** — the pair now exists, so `request_redeem` takes the direct-peer branch and the token is still the whole authorization |
+| Cross-household admin action (`SPACE_REMOTE_ADMIN_KICK` / `_ACTION`) | sent | **accepted** — the host re-validates `space_remote_members.role`, so this authenticates the sender without authorizing them |
+| Seat teardown (`SPACE_SESSION_CLEANUP`) | sent when the last shared membership ends | **accepted** |
+
+The seat is also **revoked** when the membership that bought it ends. A
+`space_session` row exists for exactly one reason — the two households
+share a space — so when the last shared membership goes (kick, ban, leave
+or dissolve), `SpaceService.revoke_space_session_if_orphaned` deletes the
+row and its session keys, and ships `SPACE_SESSION_CLEANUP` so the other
+side drops its mirror. The receiver re-derives the same answer from its
+own `space_instances` rows rather than trusting the sender, so a household
+that shares two spaces and leaves one cannot tear down the seat the other
+still needs.
 
 No `PairingConfirmed` is published either — that event kicks off the
 user-roster sync, the DM-history backfill and the public-space snapshot,
@@ -555,13 +618,34 @@ redeem bodies and full federation envelopes — without either side
 sniffing at field shapes. Inbound, `handle_relayed_envelope` unseals,
 reads the marker, and hands a `space_relay_envelope` to the
 **unmodified** §24.11 pipeline (the lookup-by-`instance_id` variant, as a
-relayed envelope carries no inbox id): row lookup → ±300 s window →
-Ed25519 verify under the pair key → replay → decrypt → idempotency →
-ban → dispatch. Riding the relay buys no exemption; the seal is
-confidentiality, not authorization. Anyone can read the public invite
-blob and seal a blob to that key-wrap key — the signature is what says
-who sent it, and an envelope that is not from this pair is dropped at the
-verify step.
+relayed envelope carries no inbox id): row lookup → **peer class** →
+timestamp window → Ed25519 verify under the pair key → replay → decrypt
+→ idempotency → ban → dispatch. Riding the relay buys no exemption; the
+seal is confidentiality, not authorization. Anyone can read the public
+invite blob and seal a blob to that key-wrap key — the signature is what
+says who sent it, and an envelope that is not from this pair is dropped
+at the verify step.
+
+**The one concession is the timestamp window.** The relay answers `202`
+the moment it accepts a blob, and that acceptance *is* the delivery
+contract: an offline household gets the bytes on its next hello, up to
+`ENVELOPE_QUEUE_TTL_SECONDS` (24 h) later. Judged against the ±300 s
+live-wire window, every envelope queued for a sleeping household would be
+rejected on arrival — and because the sender saw a `202` it never used
+the outbox, so the event would simply be gone. Envelopes tagged with the
+`gfs_relay` transport therefore get
+`RELAY_TIMESTAMP_SKEW_SECONDS` (24 h + 300 s) instead. A timestamp
+window is only ever as safe as the replay memory behind it, so the two
+are pinned together: `REPLAY_CACHE_WINDOW` is 25 h — strictly longer than
+that skew budget — and a test asserts the inequality, so shrinking the
+retention fails loudly rather than quietly reopening the gap. Every other
+transport keeps ±300 s.
+
+**A relay `202` is acceptance, not delivery.** `DeliveryResult.via` is
+`"gfs_relay"` on this path and the field exists so an operator-facing
+count never reads it as confirmed delivery: the uniform `202` is
+identical whether the recipient is online, asleep, or not a client of
+that server at all.
 
 Two pieces of the seat are persisted for this, both read off the row on
 every send so they survive a restart:
@@ -584,7 +668,7 @@ sequenceDiagram
     G-->>H: 202 accepted (uniform)
     G->>M: ws {type: envelope, sealed}<br/>(queued up to 24 h if offline)
     M->>M: unseal → kind: space_relay_envelope
-    M->>M: §24.11 pipeline, unchanged:<br/>lookup → ts → signature → replay →<br/>decrypt → idempotency → ban → dispatch
+    M->>M: §24.11 pipeline:<br/>lookup → peer class → ts (relay window) →<br/>signature → replay → decrypt →<br/>idempotency → ban → dispatch
     Note over M: member replies the same way,<br/>sealed to the host's key-wrap pub
 ```
 
