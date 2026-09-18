@@ -144,7 +144,25 @@ class AsyncDatabase:
             self._writer_task = None
         if self._conn is not None:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._conn.close)
+            conn = self._conn
+            lock = self._conn_thread_lock
+
+            def _locked_close() -> None:
+                # Serialised against every in-flight ``_read`` / ``transact``
+                # / ``checkpoint`` body: they all touch this same connection
+                # from other executor threads under this lock. Closing a
+                # ``sqlite3.Connection`` while another thread is inside
+                # ``conn.execute(...)`` is a data race down in ``_sqlite3``
+                # and faults the whole interpreter — no Python traceback, just
+                # a dead process (under xdist: "node down: Not properly
+                # terminated"). Taking the lock makes the close wait its turn;
+                # a read that arrives after it fails cleanly with
+                # ``sqlite3.ProgrammingError: Cannot operate on a closed
+                # database`` instead, which a caller can see and log.
+                with lock:
+                    conn.close()
+
+            await loop.run_in_executor(None, _locked_close)
             self._conn = None
 
     # ── Reads (direct) ───────────────────────────────────────────────────
