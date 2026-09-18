@@ -44,6 +44,14 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path("/tmp/sh-demo")
+
+#: Upper bound for :func:`cmd_replay`'s poll. The outbox schedule is
+#: ``(5, 10, 20, 40, …)`` s with ±30 % jitter and nothing flushes early on a
+#: peer's return, so the first retry that finds Carol alive lands within
+#: 6.5 + 13 + 26 = 45.5 s of the highlight in the worst case; add Carol's
+#: respawn (~3–8 s) and headroom. Anything past this means the 3rd attempt
+#: failed against a LIVE Carol — a delivery bug, not a timing artefact.
+REPLAY_REDELIVERY_BOUND_S = 60
 STATE_PATH = ROOT / "state.json"
 
 # Each instance: (label, port, username, password, household_name).
@@ -4501,10 +4509,18 @@ def cmd_replay() -> None:
        to ``unreachable`` status.
     4. Respawn Carol on the same port; wait for ``/api/instance/config``
        to answer 200.
-    5. Settle the outbox redelivery window (default 30s exponential
-       backoff; the harness sleeps 25 s which crosses the second
-       backoff slot).
-    6. Assert Carol's ``/api/highlights`` now contains the new caption.
+    5. Poll Carol's ``/api/highlights`` until the caption lands, bounded
+       by the outbox's REAL worst case. ``BACKOFF_SECONDS`` starts
+       ``(5, 10, 20, 40, …)`` with ``JITTER_RATIO = 0.30`` and there is no
+       "peer is back → flush now" fast path, so the retry that first
+       finds Carol alive lands anywhere from ~10 s (2nd slot, low jitter)
+       to ~45 s (3rd slot, high jitter) after the highlight. A fixed
+       35 s sleep — tuned for an older ``{0, 5, 30, …}`` schedule — missed
+       the high-jitter tail roughly one run in four; the poll asserts the
+       same property (redelivery within the schedule) without guessing.
+       The elapsed time is printed so a regression in the schedule is
+       visible in the step output.
+    6. Assert Carol received the caption within that bound.
 
     Run this *after* :func:`cmd_pair` so the a↔c link is confirmed
     (``cmd_traffic`` is optional — the test only depends on the
@@ -4566,23 +4582,37 @@ def cmd_replay() -> None:
     _wait_ready(c["port"])
     print(f"  c respawned: pid={new_pid} ready=200")
 
-    # 5. Outbox redelivery window. The default backoff schedule is
-    #    {0, 5, 30, 120, 600}s; we already burned the immediate slot
-    #    in step 3, so we sleep across the 30s slot to give the
-    #    second attempt a chance to land.
-    settle = 35
-    print(f"  waiting {settle}s for outbox redelivery to flush…")
-    time.sleep(settle)
+    # 5. Outbox redelivery window. ``BACKOFF_SECONDS`` is (5, 10, 20, 40,
+    #    …) with ±30 % jitter and NO reconnect-triggered flush, so the retry
+    #    that first finds Carol alive lands ~10–45 s after the highlight
+    #    (2nd slot low-jitter … 3rd slot high-jitter). Poll until it lands
+    #    instead of sleeping a fixed 35 s — that fixed window missed the
+    #    high-jitter tail about one run in four. The bound covers the 3rd
+    #    slot's worst case plus Carol's respawn with headroom; the 4th slot
+    #    (≥ 52 s after the 3rd) would mean the 3rd attempt ALSO failed
+    #    against a live Carol, which is a real bug, not timing.
+    deadline = time.monotonic() + REPLAY_REDELIVERY_BOUND_S
+    started = time.monotonic()
+    print(
+        f"  polling c for the replayed highlight (bound {REPLAY_REDELIVERY_BOUND_S}s, "
+        f"outbox slots 5/10/20 s ±30 %)…"
+    )
+    captions: set[str] = set()
+    while time.monotonic() < deadline:
+        captions = _highlight_captions(state, "c")
+        if caption in captions:
+            break
+        time.sleep(2)
+    elapsed = time.monotonic() - started
 
     # 6. Carol should now have Alpha's highlight despite having been
     #    down at the moment Alpha posted it.
-    captions = _highlight_captions(state, "c")
     if caption in captions:
-        print(f"  c received the replayed highlight ✓")
+        print(f"  c received the replayed highlight after {elapsed:.0f}s ✓")
     else:
         raise SystemExit(
-            f"replay: Carol did not receive {caption!r} after redelivery "
-            f"window — captions seen: {sorted(captions)!r}",
+            f"replay: Carol did not receive {caption!r} within "
+            f"{REPLAY_REDELIVERY_BOUND_S}s — captions seen: {sorted(captions)!r}",
         )
 
     state["replay_ran"] = True
