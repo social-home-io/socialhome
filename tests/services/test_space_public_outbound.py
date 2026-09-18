@@ -31,6 +31,7 @@ from socialhome.services.space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
 )
+from tests.services.test_space_public_author import _v25_author_signing_bytes
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.post import Post, PostType
@@ -453,6 +454,45 @@ async def test_anchor_authored_post_carries_signed_anchor(env):
     assert derive_user_id(env["own_pk"], "carol") != anchored_user_id
     assert verify_signed_author_inner(inner) is True
     _ = skp
+
+
+async def test_legacy_username_anchored_author_relays_v25_compatible_inner(env):
+    """REGRESSION (live cross-version bug): in production EVERY user row has a
+    non-NULL ``identity_anchor`` (migration 0041 backfilled ``= username``), so
+    the producer always passes an anchor. A legacy, username-anchored author
+    MUST still relay an inner with NO ``identity_anchor`` key whose author_sig
+    verifies over the 13-field v_25 layout — otherwise a not-yet-upgraded
+    subscriber (June 2026 builds, ``OURS=24``) drops every public post."""
+    db = env["db"]
+    # Mirror the 0041 backfill: anchor == username.
+    await db.enqueue(
+        "UPDATE users SET identity_anchor = username WHERE user_id = ?",
+        (env["author_user_id"],),
+    )
+    row = await db.fetchone(
+        "SELECT identity_anchor FROM users WHERE user_id = ?",
+        (env["author_user_id"],),
+    )
+    assert row[0] == "alice"
+    await env["make_space"]("sp-legacy", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-legacy")
+    )
+    assert len(env["gfs"].calls) == 1
+    envelope = env["gfs"].calls[0]["payload"]
+    pt = await env["crypto"].decrypt(
+        "sp-legacy", envelope["epoch"], envelope["encrypted_payload"]
+    )
+    inner = json.loads(pt)
+    assert "identity_anchor" not in inner
+    # A v_25 verifier (13-field layout) accepts the emitted signature...
+    assert verify_ed25519(
+        env["own_pk"],
+        _v25_author_signing_bytes(inner),
+        b64url_decode(inner["author_sig"]),
+    )
+    # ...and so does a v_26+ verifier.
+    assert verify_signed_author_inner(inner) is True
 
 
 async def test_space_service_created_global_space_can_relay(env):

@@ -28,6 +28,7 @@ from socialhome.services.space_public_author import (
     author_signing_bytes,
     verify_signed_author_inner,
 )
+from tests.services.test_space_public_author import _v25_author_signing_bytes
 
 
 @dataclass
@@ -567,6 +568,51 @@ async def test_public_space_post_attaches_signed_public_relay(tier):
         author_signing_bytes(relay),
         b64url_decode(relay["author_sig"]),
     )
+
+
+@pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
+async def test_legacy_username_anchored_author_relay_hint_is_v25_compatible(tier):
+    """REGRESSION (live cross-version bug): every real user row carries an
+    anchor (0041 backfilled ``identity_anchor = username``), so the producer
+    always passes one. A legacy author's ``public_relay`` hint MUST carry NO
+    ``identity_anchor`` key and sign the 13-field v_25 layout, so a
+    seed-holding relay / subscriber on a pre-anchor build still verifies it."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    space_repo = _FakeSpaceRepo({"sp-1": _FakeSpace(space_type=tier)})
+    legacy_uid = derive_user_id(keypair.public_key, "alice")
+    user_repo = _FakeUserRepo(
+        {legacy_uid: _FakeUser(username="alice", identity_anchor="alice")}
+    )
+    _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=space_repo,
+        user_repo=user_repo,
+        identity=(keypair, "inst-self"),
+    )
+    post = Post(
+        id="post-legacy",
+        author=legacy_uid,
+        type=PostType.TEXT,
+        content="public hello",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert "identity_anchor" not in relay
+    assert relay["author_username"] == "alice"
+    # v_25 verifier (13-field layout) accepts the signature...
+    assert verify_ed25519(
+        keypair.public_key,
+        _v25_author_signing_bytes(relay),
+        b64url_decode(relay["author_sig"]),
+    )
+    # ...and so does the current verifier.
+    assert verify_signed_author_inner(relay)
 
 
 async def test_private_space_post_omits_public_relay():

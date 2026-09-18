@@ -195,8 +195,10 @@ class SpacePublicOutbound:
             author_identity_seed=self._own_identity_seed,
             origin_instance_id=self._own_instance_id,
             # Derivation input for the subscriber's self-cert: the immutable
-            # uuid anchor (new users) so the check survives a username change;
-            # None for legacy rows whose user_id derives from the username.
+            # uuid anchor (new users) so the check survives a username change.
+            # Passed raw — the builder normalises a legacy username-anchored
+            # row (``anchor == username``, the 0041 backfill) to "absent" so
+            # its signed bytes stay v_25-compatible.
             author_identity_anchor=author.identity_anchor,
         )
         # Encrypt under the existing per-space epoch key. Raises if no key —
