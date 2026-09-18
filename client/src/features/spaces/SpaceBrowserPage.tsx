@@ -39,6 +39,34 @@ const searchTerm = signal('')
 
 interface MySubscription { space_id: string; subscribed_at: string }
 
+/**
+ * Fill in `allow_subscribers` for locally-hosted discoverable spaces.
+ *
+ * `GET /api/spaces` (the list) returns no `features` block — only
+ * `GET /api/spaces/{id}` does. Without this the household tab knew nothing
+ * about the owner's readability opt-in, so every local public space wore the
+ * 🔒 "Content is private" chip (a lie for the ones with followers ON) and the
+ * 🔔 Subscribe button, which needs an explicit `true`, never appeared at all.
+ *
+ * Only public/global entries are hydrated — a household space is private by
+ * definition, so the flag carries no information there. Each fetch fails soft:
+ * an entry we couldn't read keeps `undefined`, i.e. "unknown", which claims
+ * nothing and offers no Subscribe.
+ */
+export async function hydrateLocalReadability(
+  entries: DirectoryEntry[],
+): Promise<DirectoryEntry[]> {
+  return Promise.all(entries.map(async (e) => {
+    if (e.scope === 'household') return e
+    try {
+      const full = await api.get(`/api/spaces/${e.space_id}`) as Space
+      return { ...e, allow_subscribers: !!full.features?.allow_subscribers }
+    } catch {
+      return e
+    }
+  }))
+}
+
 async function loadAll() {
   loading.value = true
   try {
@@ -90,13 +118,26 @@ async function loadAll() {
         scope:              s.space_type as 'household' | 'public',
         join_mode:          s.join_mode,
         // Readability lives on the space's features, not on its join mode.
-        allow_subscribers:  !!s.features?.allow_subscribers,
+        // LIST `/api/spaces` does not ship `features` (only the detail
+        // endpoint does), so this is `undefined` here and gets hydrated by
+        // {@link hydrateLocalReadability} below. Leaving it `undefined`
+        // rather than coercing to `false` is what keeps the 🔒 chip honest
+        // in the window before (or if) hydration lands: "we don't know" is
+        // not "the content is private".
+        allow_subscribers:  s.features?.allow_subscribers,
         min_age:            0,
         category:           s.category,
         already_member:     realMemberIds.has(s.id),
         already_subscribed: subIds.has(s.id),
         request_pending:    pendingIds.has(s.id),
       }))
+    // …then hydrate the one field the list endpoint withholds. Deliberately
+    // not awaited inside the map above: the cards paint from the list
+    // immediately, and the readability chip/button settles a beat later.
+    void hydrateLocalReadability(household.value).then((hydrated) => {
+      household.value = hydrated
+      cacheDirectoryEntries(hydrated)
+    })
     friends.value = (rawFriends as DirectoryEntry[]).map((e) => ({
       ...e,
       scope:              'public' as const,
@@ -317,7 +358,11 @@ export default function SpaceBrowserPage() {
       return {
         lead: 'No global spaces yet.',
         hint: canRefresh
-          ? 'Try refreshing the directory above.'
+          // Refreshing only helps if this household is actually connected to
+          // a connection server — with none paired the directory is empty no
+          // matter how often it is polled, so name the other way out too.
+          ? 'Try refreshing the directory above, or connect to a connection '
+            + 'server in Settings → Connections.'
           : 'Ask a household admin to refresh the global directory.',
       }
     }

@@ -136,27 +136,36 @@ function decidePrimary(entry: DirectoryEntry): SpaceCardAction {
 }
 
 /**
- * Whether Subscribe is appropriate for this entry. Only LOCAL public /
- * global spaces (hosted by this household) support subscription, and only
- * when the user isn't already a real member. Subscribe is a local
- * self-service member-add with no remote federation path, so it's hidden
- * for remotely-hosted (friends / global) spaces — those use the join-request
- * flow instead.
+ * Whether Subscribe is appropriate for this entry.
+ *
+ * Two kinds of space can be followed, and both go through the same
+ * `POST /api/spaces/{id}/subscribe`:
+ *
+ *   • a public / global space this household HOSTS (`host_instance_id ===
+ *     'local'`) — a local self-service member-add; and
+ *   • a **global** space discovered through a connection server — the host
+ *     mirrors as a local stub and the GFS seats the subscriber, which is the
+ *     entire point of the global directory. Pairing with the host is NOT a
+ *     prerequisite: the content arrives over the GFS relay, which is why the
+ *     card can offer Subscribe next to a "Connect with … first" primary.
+ *
+ * Peer "From friends" spaces are excluded: they are not relayed through a
+ * GFS, so there is no remote-subscribe path and the button would 404. Those
+ * are joined through the request flow instead.
+ *
+ * In every case the owner must have opted into followers and the viewer must
+ * not already be a real member. A space whose owner has not opted in is never
+ * subscribable, local or not: it publishes no content and hands out no
+ * content key, so a subscriber would sit on a seat that never receives
+ * anything — both `/api/spaces/{id}/subscribe` and the GFS refuse it (403,
+ * "this space does not allow subscribers").
  */
 function subscribableScope(entry: DirectoryEntry): boolean {
-  // Subscribe is a LOCAL self-service member-add: the backend
-  // `/api/spaces/{id}/subscribe` requires a local space row, so it only
-  // works for spaces this household hosts. Remote (friends/global) spaces
-  // have no remote-subscribe federation path — showing the button there
-  // just 404s; they're joined via the request flow instead.
-  //
-  // A space whose owner has not opted into followers is never subscribable,
-  // local or not: it publishes no content and hands out no content key, so a
-  // subscriber would sit on a seat that never receives anything (both
-  // `/api/spaces/{id}/subscribe` and the GFS refuse such a subscribe).
+  const reachable =
+    entry.scope === 'global'
+    || (entry.host_instance_id === 'local' && entry.scope === 'public')
   return (
-    entry.host_instance_id === 'local'
-    && (entry.scope === 'public' || entry.scope === 'global')
+    reachable
     // Explicit `true` — an absent flag is never enough to offer Subscribe.
     && entry.allow_subscribers === true
     && !entry.already_member

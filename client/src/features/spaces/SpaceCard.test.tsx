@@ -347,6 +347,65 @@ describe('SpaceCard', () => {
     expect(captured).toEqual({ kind: 'subscribe' })
   })
 
+  // ── Subscribe on a GFS-discovered (remote) global space ────────────
+
+  it('offers Subscribe on a REMOTE global space that allows followers', () => {
+    // The global directory is the main place a person follows a space they
+    // do not host. `POST /api/spaces/{id}/subscribe` answers 200 for such a
+    // space (the host mirrors as a local stub and the connection server
+    // seats the subscriber) and 403 — "this space does not allow
+    // subscribers" — when the owner has not opted in. Gating the button on
+    // `host_instance_id === 'local'` hid it on the one tab where those
+    // spaces live, leaving a directory that could Unsubscribe but never
+    // Subscribe.
+    const { getByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          scope:             'global',
+          host_instance_id:  'ywee64sjb5g2ebsprbm6t7wy37jy7qde',
+          host_is_paired:    false,
+          allow_subscribers: true,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(getByText(/Subscribe/)).toBeTruthy()
+  })
+
+  it('hides Subscribe on a remote global space that takes no followers', () => {
+    const { queryByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          scope:             'global',
+          host_instance_id:  'ywee64sjb5g2ebsprbm6t7wy37jy7qde',
+          allow_subscribers: false,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(queryByText(/Subscribe/)).toBeNull()
+  })
+
+  it('hides Subscribe on a peer "From friends" space', () => {
+    // A peer-hosted public space is not relayed through a connection
+    // server, so there is no remote-subscribe path — the button would 404.
+    // Those are joined through the request flow instead.
+    const { queryByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry,
+          scope:             'public',
+          host_instance_id:  'peer-instance-id',
+          allow_subscribers: true,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(queryByText(/Subscribe/)).toBeNull()
+  })
+
   it('disables Subscribe while the parent reports it busy', () => {
     const { getByLabelText } = render(
       <SpaceCard

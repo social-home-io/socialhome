@@ -579,10 +579,10 @@ export function SpaceSettings({
         <fieldset class="sh-form-fieldset">
           <legend>🔔 Followers</legend>
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            Off by default: this space is listed in the directory, but
-            nothing posted here is published and nobody outside can follow
-            it. Turning it on lets anyone follow along read-only — separate
-            from who may join and post.
+            When off — the default — this space is listed in the directory,
+            but nothing posted here is published and nobody outside can
+            follow it. Turning it on lets anyone follow along read-only —
+            separate from who may join and post.
           </p>
           <label>
             <input
