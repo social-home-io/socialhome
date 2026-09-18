@@ -148,6 +148,28 @@ def test_legacy_username_anchored_author_normalised_to_v25_layout():
     assert verify_signed_author_inner(inner) is True
 
 
+def test_empty_anchor_normalised_to_v25_layout():
+    """An empty-string anchor is *absent* too. The verifier already treats
+    ``""`` as no anchor for the derivation (``anchor if anchor else None``), so
+    a producer that signed an ``identity_anchor: ""`` key would verify on v_26+
+    but lose the v_25 layout for no reason — the builder normalises it the
+    same way as ``anchor == username`` so all three sites agree."""
+    kp = generate_identity_keypair()
+    username = "alice"
+    inner = build_signed_author_inner(
+        post=_post(author=derive_user_id(kp.public_key, username)),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        author_identity_anchor="",
+    )
+    assert "identity_anchor" not in inner
+    assert author_signing_bytes(inner) == _v25_author_signing_bytes(inner)
+    assert verify_signed_author_inner(inner) is True
+
+
 def test_legacy_normalisation_matches_explicit_none():
     """``anchor == username`` and ``anchor=None`` produce the SAME inner (bar
     the randomised signature) — the normalisation is exactly "treat as

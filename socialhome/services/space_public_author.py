@@ -82,12 +82,13 @@ _SIGNED_FIELDS: tuple[str, ...] = (
 #:
 #: "Absent" is decided by :func:`build_signed_author_inner`, NOT by the
 #: callers: in production every ``users`` row carries a non-NULL anchor
-#: (migration ``0041`` backfilled ``identity_anchor = username`` for every
-#: pre-existing user; every provision path writes one), so the producers
-#: always pass an anchor. The builder therefore normalises a *legacy*
-#: username-anchored author (``anchor == username``) to "absent" — only a
-#: uuid4-anchored author (``anchor != username``) writes the key, and those
-#: legitimately verify on v_26+ only (the migration tail).
+#: (migration ``0041`` backfilled ``identity_anchor = username``; the
+#: admin-mirror / HA-person paths via ``derive_local_user_id`` still mint
+#: ``= username`` today), so the producers always pass an anchor. The builder
+#: therefore normalises a username-anchored author (``anchor == username``,
+#: or an empty anchor) to "absent" — only an anchor that differs from the
+#: username (uuid4-provisioned users) writes the key, and those verify on
+#: v_26+ receivers only.
 _OPTIONAL_OMITTED_WHEN_ABSENT: frozenset[str] = frozenset({"identity_anchor"})
 
 
@@ -136,18 +137,22 @@ def build_signed_author_inner(
     member-broadcast relay-hint (space_post_outbound) produce byte-identical
     signed inners.
 
-    **Legacy-anchor normalisation (v_25 wire compatibility).** Callers pass
+    **Username-anchor normalisation (v_25 wire compatibility).** Callers pass
     the author's stored ``identity_anchor`` verbatim — and in production that
-    is never ``None`` (migration ``0041`` backfilled ``= username`` for every
-    pre-existing user; every provision path writes one). A legacy,
-    username-anchored author (``author_identity_anchor == author_username``)
+    is never ``None``: migration ``0041`` backfilled ``= username`` for every
+    pre-existing user, and ``identity_bootstrap.derive_local_user_id`` keeps
+    minting ``identity_anchor = username`` for every admin-mirror and
+    HA-person row, so username-anchored authors are a permanent class, not a
+    rollout tail. Any author whose anchor equals their username (or is empty)
     is normalised here to *absent*: no ``identity_anchor`` key is written and
     none is signed, so their bytes are byte-identical to the pre-anchor v_25
     layout and a not-yet-upgraded subscriber (GFS relay path, no proto
-    negotiation) still verifies them. A uuid4-anchored author's anchor never
-    equals the username, so it is carried and signed unchanged. Done here —
-    the single producer choke point — so every present and future producer
-    inherits it.
+    negotiation) still verifies them. Only an anchor that differs from the
+    username (uuid4-provisioned users) is carried and signed. Equality is the
+    trigger, not an invariant — a user may rename to a string equal to their
+    uuid anchor; the derivation is then identical either way, so omitting the
+    key remains correct. Done here — the single producer choke point — so
+    every present and future producer inherits it.
 
     Security argument: the verifier derives
     ``derive_user_id(author_pk, anchor if present else username)`` and checks
@@ -180,13 +185,13 @@ def build_signed_author_inner(
             "label": post.location.label,
         }
     # The derivation input for ``author_user_id`` (a uuid for new users). OMITTED
-    # entirely for legacy authors whose user_id derives from the username — the
-    # 0041 backfill stores ``identity_anchor = username`` for them, so treat
-    # ``anchor == username`` as absent — keeping the signed bytes byte-identical
+    # entirely for username-anchored authors (the 0041 backfill and the
+    # admin-mirror / HA-person rows store ``identity_anchor = username``), so
+    # treat ``anchor == username`` (or empty) as absent — keeping the signed bytes byte-identical
     # to the pre-anchor (v_25) layout so a not-yet-upgraded subscriber still
     # verifies their posts during rollout (see the docstring for the security
     # argument).
-    if author_identity_anchor is not None and author_identity_anchor != author_username:
+    if author_identity_anchor and author_identity_anchor != author_username:
         inner["identity_anchor"] = author_identity_anchor
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, author_signing_bytes(inner))
