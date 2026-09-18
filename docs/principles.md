@@ -68,13 +68,29 @@ floor, no exceptions for "trusted" peers.
 ## No third-party trust
 
 The Global Federation Server (GFS) sees **routing metadata only** —
-which instance is publishing a public space, which peer is online for
-push fan-out, which SDP/ICE candidates need relaying. It never sees
-plaintext content, votes, names, or messages, and it cannot impersonate
-a household because every payload is signed with the originating
-instance's Ed25519 key (with optional ML-DSA-65 hybrid). A compromised
-or malicious GFS can disrupt discovery and push, but cannot read or
-forge content.
+which space an event belongs to, which peer is online for push fan-out,
+which SDP/ICE candidates need relaying. It never sees plaintext content,
+votes, names, or messages, and it cannot impersonate a household because
+every payload is signed with the originating instance's Ed25519 key (with
+optional ML-DSA-65 hybrid). A compromised or malicious GFS can disrupt
+discovery and push, but cannot read or forge content.
+
+**Strengthened:** the GFS no longer learns *which household relayed* a
+public/global space event either. `POST /gfs/publish` carries exactly
+`{space_id, event_type, payload}` and is authorized purely by the
+space-authority signature sealed inside the opaque payload; the fan-out
+frame to subscribers is identity-free too. The relaying household's
+identity is not **required, stored, logged or forwarded**.
+
+The honest residual: this is not "the GFS cannot learn it". A household
+normally holds an authenticated WebSocket to the same server from the same
+IP, so an operator can correlate a publish's source IP, timing and size
+with that session. Closing that would need a mix/onion egress and is out of
+scope. Two smaller residuals are tracked with the relay itself: a subscriber
+key handoff still names its target in the clear (Phase B removes it), and a
+per-instance GFS ban cannot gate an anonymous relay — the space-level ban is
+the moderation lever there. See
+[`protocol/discovery.md`](./protocol/discovery.md).
 
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 

@@ -17,7 +17,10 @@ Households talk to each other directly, peer-to-peer. A central
 **Global Federation Server (GFS)** is consulted only for tasks that
 genuinely need a meeting point: public-space discovery, push fan-out
 to offline peers, and WebRTC signalling bootstrap. The GFS sees
-routing metadata only — never plaintext content.
+routing metadata only — never plaintext content, and (since the
+anonymous relay) not even which household relayed a public/global space
+event: `/gfs/publish` is authorized purely by the space-authority
+signature inside the opaque payload.
 
 For public-content delivery (public highlights and the public moments
 index) the GFS adds a **lazy-relay fallback tier**: a guest browser

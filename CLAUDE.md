@@ -381,7 +381,10 @@ comments, reactions, calendar events, location pins…):
   the GFS. GFS-relayed public/global content is encrypted under the space
   content key (`SpaceContentEncryption.encrypt`) inside a space-authority-
   signed envelope the content-blind GFS relays as-is
-  (`services/space_public_outbound.py` / `space_public_inbound.py`).
+  (`services/space_public_outbound.py` / `space_public_inbound.py`). That
+  relay is also **identity-free**: `POST /gfs/publish` carries exactly
+  `{space_id, event_type, payload}` and is authorized on the authority
+  signature alone — never send `from_instance` to a connection server.
 - **Content key is membership-gated:** the per-space AES-256 content key
   (`SpaceContentEncryption`) is delivered to a new member via
   the §D1b key handoff (`apply_space_content_key_from_metadata`), never to a
@@ -433,8 +436,8 @@ When you add a new crypto wire format:
 First-revision payloads missing a suite field default to the single supported
 value (see `apply_space_content_key_from_metadata`); once universally shipped,
 the default-on-missing branch becomes the migration tripwire. Full Phase-1→2
-PQ plan: `docs/crypto.md`. `SealedEnvelope` now ships `aead_suite` (prior gap
-closed); new surfaces add the sibling pattern.
+PQ plan: `docs/crypto.md`. Every shipped crypto wire shape now carries its
+suite tag (prior gaps closed); new surfaces add the sibling pattern.
 
 ### Before adding a SQL migration, audit the code path
 

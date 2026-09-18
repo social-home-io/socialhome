@@ -7,7 +7,8 @@ re-exports; here we pin two structural invariants that the move introduced:
 
 1. The primitives round-trip and the suite gate fails-closed.
 2. Importing ONLY this module does NOT drag in the HFS crypto stack
-   (``services.space_crypto_service`` / ``federation.sealed_sender``) — that is
+   (``services.space_crypto_service`` / ``federation.keywrap_seal`` /
+   ``infrastructure.key_manager``) — that is
    the whole point of the split (the content-blind GFS imports from here).
 3. ``services.space_crypto_service`` re-exports the SAME objects (identity), so
    existing importers stay unchanged.
@@ -91,7 +92,8 @@ def test_importing_module_does_not_pull_hfs_crypto_stack():
         "import sys; import socialhome.authority_sig; "
         "leaked = [m for m in ("
         "'socialhome.services.space_crypto_service',"
-        "'socialhome.federation.sealed_sender'"
+        "'socialhome.federation.keywrap_seal',"
+        "'socialhome.infrastructure.key_manager'"
         ") if m in sys.modules]; "
         "print(leaked)"
     )

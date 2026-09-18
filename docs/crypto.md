@@ -34,14 +34,20 @@ Explicit non-goals:
 * **Deniability / OTR-style forward secrecy** — we don't rotate per-
   message keys. §12.5 DM relay is the closest thing to deniability.
 * **Hiding federation metadata from a global adversary** — the GFS
-  necessarily sees `space_id` (to fan out), the subscriber set (it is the
-  directory), source IPs and timing. Content stays opaque to it. Hiding
-  the *relaying household's identity* from the GFS is **a goal, not a
-  non-goal**: `from_instance` is still sent in the clear on GFS-relayed
-  public/global-space events today, which is a known leak — the GFS does
-  not need it once a relay is authenticated by the space-authority
-  signature alone. Its removal is tracked as a follow-up to #675; do not
-  rely on the leak or document it as intended.
+  necessarily sees `space_id` (to fan out), `event_type`, payload size and
+  timing, the subscriber set (it is the directory) and source IPs. Content
+  stays opaque to it.
+
+  Hiding the *relaying household's identity* from the GFS is **a goal, and
+  it is now met on the wire**: `POST /gfs/publish` carries
+  `{space_id, event_type, payload}` and nothing else, and the fan-out frame
+  carries no `from_instance` either. The guarantee is precise and worth
+  stating honestly: the GFS does not **require, store, log or forward** the
+  relaying household's identity. It is *not* "the GFS cannot learn it" — a
+  household normally holds an authenticated WebSocket to the same GFS from
+  the same IP, so an operator can correlate a publish's source IP, timing
+  and size with that session. No protocol change closes that short of a
+  mix/onion egress, which is out of scope.
 * **Anonymity** — instance IDs are derived from identity public keys
   and are persistent. Users consent to this by accepting the pairing.
 
@@ -162,17 +168,29 @@ per author (`space_public_author.build_signed_author_inner`); the
 envelope around it is **space-authority-signed**
 (`authority_sig.sign_authority_event`) and relayed by the content-blind
 GFS, which verifies only that signature against the space pubkey it
-already pins. `from_instance` currently also travels in the clear — a
-known leak of the relayer's identity toward the GFS. It is *not* needed:
-the authority signature already authorizes the relay and `space_id`
-already routes it; the sender-exclusion on fan-out it enables is an
-optimisation the subscriber's post-id dedupe makes unnecessary. Removing
-it (authority-signature-only authentication of `/gfs/publish`) is the
-follow-up to #675. The earlier *sealed-sender*
-construction (`federation/sealed_sender.py` — sender id encrypted under
-the space key plus an identity-key `outer_signature`) is **not wired into
-any federation path**; the module remains as a standalone primitive with
-its own tests. See `docs/protocol/discovery.md` for the shipped flow.
+already pins. The relay is **anonymous**: the household sends no
+`from_instance` and no household transport signature, because the
+authority signature already authorizes the relay and `space_id` already
+routes it. The fan-out therefore reaches *every* subscriber (the GFS can
+no longer exclude the publisher); a subscriber that gets its own post back
+drops it on the post-id / self-echo guard. A legacy identified body from
+an older household is still accepted — verified, then discarded: it never
+authorizes, is never forwarded and is never logged. Receivers take
+attribution (`origin_instance_id`) from the encrypted, authority-signed
+inner only; an outer `from_instance` from an old GFS is never read.
+
+The residual limits, stated plainly: the GFS still sees `space_id`,
+`event_type`, payload size and timing; it can correlate a publish with a
+household's own authenticated WebSocket session by IP/timing; the
+`space_subscriber_key_handoff` payload still carries `target_instance_id`
+in the clear (Phase B removes it once receivers at or above this version
+are deployed — they already treat the seal itself as the gate); and a
+per-instance GFS ban cannot gate an anonymous relay, so the space-level
+ban is the only moderation lever on the relay path.
+
+The whole shape is pinned by the §27.9 release blocker
+`tests/protocol/test_gfs_payload_minimization.py`. See
+`docs/protocol/discovery.md` for the shipped flow.
 
 **Routed-envelope seal** (`federation/routed_crypto.py`) — for
 multi-hop `SPACE_ROUTED` events the inner payload is sealed with a
@@ -289,14 +307,14 @@ delegation enabled, and only when the b64url payload decodes to
 exactly 32 bytes. See `_share_admin_signing_seed` (sender) /
 `PrivateSpaceInviteHandler._on_admin_key_share` (receiver).
 
-**Sealed-sender envelope** (`federation/sealed_sender.py`, an unwired
-primitive — see above) wears the ``aead_suite`` field (today only
-``"aesgcm-256"``) on its wire shape; receivers reject unknown values via
-``UnsupportedAeadSuite``. The suite-tag retrofit promised in earlier
-revisions of this doc is now shipped — every cryptographic wire format in
-the federation surface carries a ``*_suite`` identifier (signatures, mesh
-KEM, content-key delivery). A future ChaCha20-Poly1305 or PQ-protected
-variant is a wire-additive change.
+The suite-tag retrofit promised in earlier revisions of this doc is
+shipped — every cryptographic wire format in the federation surface
+carries a ``*_suite`` identifier (signatures, mesh KEM, key-wrap KEM,
+content-key delivery). A future ChaCha20-Poly1305 or PQ-protected variant
+is therefore a wire-additive change. (An earlier *sealed-sender*
+primitive carried its own ``aead_suite``; it was never wired into any
+federation path and has been deleted — the shipped GFS relay is the
+per-space AES-GCM + space-authority construction described above.)
 
 **Per-user identity binding** (`crypto.py`, independent user identity
 Phase 1) — each household member has an Ed25519 **user** key separate
