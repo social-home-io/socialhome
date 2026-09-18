@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
+import { decodeInviteCode } from '@/lib/spaceInviteCode'
 
 vi.mock('@/api', () => {
   class ApiError extends Error {
@@ -15,6 +16,21 @@ vi.mock('@/baseUrl', () => ({
 }))
 vi.mock('qrcode', () => ({
   default: { toDataURL: vi.fn(async () => 'data:fake') },
+}))
+// Our own instance id — this page is served BY the issuer, so it is
+// also the issuer id the fallback code has to carry.
+const OUR_INSTANCE_ID = 'aaaabbbbccccddddeeeeffff00001111'
+vi.mock('@/store/instance', () => ({
+  instanceConfig: {
+    value: {
+      mode: 'standalone',
+      instance_name: 'Test home',
+      instance_id: OUR_INSTANCE_ID,
+      capabilities: [],
+      setup_required: false,
+    },
+  },
+  loadInstanceConfig: vi.fn(),
 }))
 
 const { api, ApiError } = await import('@/api') as unknown as {
@@ -83,5 +99,53 @@ describe('SpaceJoinLanding', () => {
     })
     expect(container.querySelector('[data-testid="join-landing-wrong-instance"]'))
       .toBeNull()
+  })
+})
+
+describe('SpaceJoinLanding — the fallback code is redeemable', () => {
+  it('stamps our own instance id as the issuer so the paste can route', async () => {
+    // Without it the receiver's Social Home can only try the LOCAL
+    // redeem path, which fails exactly the way this panel is trying to
+    // recover from.
+    api.post.mockRejectedValueOnce(new ApiError(404, 'unknown token'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.token).toBe(TOKEN)
+    expect(decoded.issuer_instance_id).toBe(OUR_INSTANCE_ID)
+  })
+
+  it('carries the space id when the link supplied one', async () => {
+    window.history.replaceState(
+      {}, '', `/join?token=${TOKEN}&space_id=sp-42`,
+    )
+    api.post.mockRejectedValueOnce(new ApiError(410, 'gone'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.space_id).toBe('sp-42')
+  })
+
+  it('leaves space_id null when the link had none', async () => {
+    api.post.mockRejectedValueOnce(new ApiError(403, 'forbidden'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.space_id).toBeNull()
   })
 })

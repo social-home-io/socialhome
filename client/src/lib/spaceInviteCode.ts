@@ -47,8 +47,38 @@ import { base64UrlEncode, base64UrlDecode } from './base64Url'
 export interface SpaceInviteGfsRef {
   /** Base URL of the GFS the space is published on. */
   gfs_url: string
-  /** Space id under that GFS (may differ from the local space id). */
-  gfs_space_id: string
+  /** Space id under that GFS (may differ from the local space id).
+   *  Optional: the mint response (``POST /api/spaces/{id}/invite-tokens``
+   *  → ``gfs``) carries no such id, and the redeem path only ever reads
+   *  ``gfs_url`` (see ``SpaceJoinByCodeDialog``), so a code minted by
+   *  the SPA omits it rather than inventing one. Older codes that carry
+   *  it keep decoding unchanged. */
+  gfs_space_id?: string | null
+}
+
+/**
+ * Derive a connection server's **base** URL from the public invite-link
+ * URL it returns (``{base}/join/{gfs_token}``).
+ *
+ * The mint response hands back the visitor-facing link; the invite code's
+ * ``via_gfs.gfs_url`` needs the server root, because that is what the
+ * redeeming household POSTs ``/gfs/envelope`` to. Returns ``null`` when
+ * the URL isn't parseable or doesn't end in the documented
+ * ``/join/{token}`` shape — the caller then simply omits ``via_gfs``
+ * rather than shipping a guess a stranger's redeem would fail against.
+ */
+export function gfsBaseFromInviteUrl(url: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  const segments = parsed.pathname.split('/').filter(Boolean)
+  if (segments.length < 2) return null
+  if (segments[segments.length - 2] !== 'join') return null
+  const base = segments.slice(0, -2).join('/')
+  return `${parsed.origin}${base ? `/${base}` : ''}`
 }
 
 export interface SpaceInvitePayload {

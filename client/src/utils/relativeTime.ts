@@ -127,3 +127,32 @@ export function relativeDocsTime(iso: string): string {
     year: sameYear ? undefined : 'numeric',
   })
 }
+
+/**
+ * Forward-looking shape — "in 6 days" / "in 3h" / "in 5 min" — for a
+ * timestamp that is expected to sit in the future (an invite link's
+ * ``expires_at``, say).
+ *
+ * ``relativeDocsTime`` is past-tense only: every future stamp collapses
+ * to "just now" there, which reads as *already expired* on exactly the
+ * surface where the remaining life is the point. Anything at or past
+ * the moment of the call returns ``"expired"``.
+ */
+export function relativeFutureTime(iso: string): string {
+  const t = Date.parse(normaliseTimestamp(iso))
+  if (Number.isNaN(t)) return iso
+  const ms = t - Date.now()
+  if (ms <= 0) return 'expired'
+  const min = Math.floor(ms / MS_PER_MIN)
+  if (min < 1) return 'in under a minute'
+  if (min < 60) return `in ${min} min`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `in ${hr}h`
+  const days = Math.floor(ms / MS_PER_DAY)
+  if (days < 30) return `in ${days} day${days === 1 ? '' : 's'}`
+  return `on ${new Date(t).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  })}`
+}

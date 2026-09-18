@@ -646,6 +646,18 @@ function TroubleshootingSection() {
   )
 }
 
+/**
+ * A household seated purely by an invite-link redeem (§D2b) — its
+ * ``remote_instances`` row carries ``source = 'space_session'``. It is a
+ * CONFIRMED peer for the shared space and nothing else: no DMs, no
+ * profile sync, no presence, and it cannot vouch for a third household
+ * in the trust-relay pairing flow. The list says so rather than
+ * rendering social affordances that would fail closed on use.
+ */
+function isSpaceOnly(c: Connection): boolean {
+  return c.source === 'space_session'
+}
+
 export default function ConnectionsPage() {
   useTitle(t('connections.title'))
   const [autoPairBusy, setAutoPairBusy] = useState(false)
@@ -680,7 +692,9 @@ export default function ConnectionsPage() {
     return () => { off1(); off2(); off3(); off4() }
   }, [])
 
-  const confirmed = connections.value.filter(c => c.status === 'confirmed')
+  const confirmed = connections.value.filter(
+    c => c.status === 'confirmed' && !isSpaceOnly(c),
+  )
   const pending = connections.value.filter(c => c.status !== 'confirmed')
   const isAdmin = !!currentUser.value?.is_admin
   const compatByInstance = new Map(compatPeers.value.map(p => [p.instance_id, p]))
@@ -829,7 +843,9 @@ export default function ConnectionsPage() {
                   <span class={hfsStatusDotClass(c)} />
                   <strong>{c.display_name}</strong>
                   {transportIcon(c.transport)}
-                  <span class="sh-type-badge">Household</span>
+                  <span class="sh-type-badge">
+                    {isSpaceOnly(c) ? 'Space only' : 'Household'}
+                  </span>
                   {c.status === 'confirmed' && compatBadge(compatByInstance.get(c.instance_id))}
                   {c.status !== 'confirmed' && (
                     <span class="sh-muted">
@@ -841,14 +857,24 @@ export default function ConnectionsPage() {
                   {c.status === 'confirmed' && !c.reachable && (
                     <span class="sh-muted">Unreachable</span>
                   )}
+                  {isSpaceOnly(c) && (
+                    <span class="sh-muted"
+                          style={{ fontSize: 'var(--sh-font-size-xs)' }}
+                          data-testid={`space-only-note-${c.instance_id}`}>
+                      Shared space only — no messages, profiles or
+                      presence.
+                    </span>
+                  )}
                 </div>
                 <div class="sh-connection-actions">
                   {c.status === 'confirmed' && (
                     <>
-                      <Button variant="secondary"
-                              onClick={() => setDetail(c)}>
-                        Manage
-                      </Button>
+                      {!isSpaceOnly(c) && (
+                        <Button variant="secondary"
+                                onClick={() => setDetail(c)}>
+                          Manage
+                        </Button>
+                      )}
                       <Button variant="danger"
                               onClick={() => void unpair(c.instance_id)}>
                         Unpair

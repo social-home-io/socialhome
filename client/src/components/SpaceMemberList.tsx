@@ -228,7 +228,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
           <h3>{members.value.length} members</h3>
           {canManage.value && (
             <div class="sh-member-list-invite-actions">
-              <Button onClick={() => openSpaceInvite(spaceId)}>
+              <Button onClick={() => openSpaceInvite(spaceId, null, viewerRole)}>
                 + Invite by code
               </Button>
               <Button

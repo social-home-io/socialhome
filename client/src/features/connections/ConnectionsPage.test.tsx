@@ -1032,3 +1032,75 @@ describe('ConnectionDetail prop plumbing', () => {
     expect(conn.dropped_envelopes).toBe(263)
   })
 })
+
+describe('a household seated by an invite link (source = space_session)', () => {
+  beforeEach(() => {
+    wsHandlers.clear()
+    wsMock.on.mockClear()
+  })
+
+  it('labels the row "Space only" and explains what it is not', async () => {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') {
+        return Promise.resolve([makeConnection({ source: 'space_session' })])
+      }
+      return Promise.resolve([])
+    })
+    const { container } = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    expect(container.querySelector('.sh-type-badge')!.textContent!.trim())
+      .toBe('Space only')
+    expect(container.querySelector('[data-testid="space-only-note-inst-1"]'))
+      .not.toBeNull()
+  })
+
+  it('offers no Manage (there is no social relationship to manage)', async () => {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') {
+        return Promise.resolve([makeConnection({ source: 'space_session' })])
+      }
+      return Promise.resolve([])
+    })
+    const { container, queryByText } = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    expect(queryByText('Manage')).toBeNull()
+    // Unpair stays — leaving the arrangement must always be possible.
+    expect(queryByText('Unpair')).not.toBeNull()
+  })
+
+  it('keeps the normal Household label + Manage for a QR-paired peer', async () => {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') {
+        return Promise.resolve([makeConnection({ source: 'qr' })])
+      }
+      return Promise.resolve([])
+    })
+    const { container, queryByText } = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    expect(container.querySelector('.sh-type-badge')!.textContent!.trim())
+      .toBe('Household')
+    expect(queryByText('Manage')).not.toBeNull()
+  })
+
+  it('never offers a space-only peer as a pairing voucher', async () => {
+    // The backend rejects a space_session row as a voucher
+    // (auto_pair_coordinator), so offering it here would be a dead end.
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') {
+        return Promise.resolve([makeConnection({ source: 'space_session' })])
+      }
+      return Promise.resolve([])
+    })
+    const { container, queryByText } = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    expect(queryByText('Pair via a trusted peer')).toBeNull()
+  })
+})
