@@ -456,7 +456,7 @@ async def test_subscribe_invite_only_space_403(gfs_client):
         },
     )
     assert resp.status == 403
-    assert "invite-only" in (await resp.json())["error"]
+    assert "not publicly readable" in (await resp.json())["error"]
 
 
 async def test_subscribe_unsigned_rejected(gfs_client):

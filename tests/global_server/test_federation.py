@@ -2850,10 +2850,10 @@ async def test_subscribe_refused_for_invite_only_space(svc):
     assert await svc._repo.list_subscribers("sp-invite") == []
 
 
-@pytest.mark.parametrize("mode", ["open", "request"])
-async def test_subscribe_allowed_for_open_and_request_spaces(svc, mode):
-    """``open`` and ``request`` spaces stay publicly readable — subscribing
-    to them is unchanged."""
+async def test_subscribe_allowed_for_an_open_space(svc):
+    """``open`` is the ONLY publicly readable join mode — subscribing to such
+    a space is unchanged."""
+    mode = "open"
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
     await svc.register_instance(
@@ -2872,6 +2872,31 @@ async def test_subscribe_allowed_for_open_and_request_spaces(svc, mode):
     await _subscribe(svc, sub_seed, instance_id=f"sub-{mode}", space_id=f"sp-{mode}")
     subs = await svc._repo.list_subscribers(f"sp-{mode}")
     assert [s.instance_id for s in subs] == [f"sub-{mode}"]
+
+
+async def test_subscribe_refused_for_a_request_space(svc):
+    """``request`` is a MEMBERSHIP mode, not a read mode: a person still has
+    to be admitted, so the space is listed for discovery but carries no
+    public readership and a subscribe seat must be refused — exactly as for
+    ``invite_only``."""
+    owner_seed, owner_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance(
+        "owner-req", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
+    )
+    await svc.register_instance(
+        "sub-req", sub_pk.hex(), "http://s.example.com/wh", auto_accept=True
+    )
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-req",
+        space_id="sp-request",
+        join_mode="request",
+    )
+    with pytest.raises(PermissionError, match="not publicly readable"):
+        await _subscribe(svc, sub_seed, instance_id="sub-req", space_id="sp-request")
+    assert await svc._repo.list_subscribers("sp-request") == []
 
 
 async def test_publishing_invite_only_purges_existing_subscribers(svc, caplog):

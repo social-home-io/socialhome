@@ -648,15 +648,15 @@ class JoinMode(StrEnum):
 
 #: The join modes under which a PUBLIC/GLOBAL space is *publicly readable* —
 #: i.e. its posts relay to the GFS and its content key may be sealed to a mere
-#: subscriber. An ``invite_only`` space is LISTED for discovery (that is how
-#: people find it and get invited) but only invited members ever get content.
-#: An allow-list rather than ``is not INVITE_ONLY`` so a future fourth join
-#: mode is non-readable until someone deliberately adds it here. Shared by the
-#: public-relay producers (``space_public_outbound`` + ``space_post_outbound``)
-#: and the subscriber key handoff (``space_subscriber_key_outbound``).
-PUBLIC_READABLE_JOIN_MODES: frozenset["JoinMode"] = frozenset(
-    {JoinMode.OPEN, JoinMode.REQUEST}
-)
+#: subscriber. ONLY ``open`` qualifies. ``invite_only`` and ``request`` both
+#: mean a person must be admitted before they get anything: the space is
+#: LISTED for discovery (that is how people find it and ask in) but only
+#: admitted members ever receive content. An allow-list rather than a
+#: not-invite_only test so a future join mode is non-readable until someone
+#: deliberately adds it here. Shared by the public-relay producers
+#: (``space_public_outbound`` + ``space_post_outbound``) and the subscriber
+#: key handoff (``space_subscriber_key_outbound``).
+PUBLIC_READABLE_JOIN_MODES: frozenset["JoinMode"] = frozenset({JoinMode.OPEN})
 
 
 def normalize_join_mode(value: object) -> str:

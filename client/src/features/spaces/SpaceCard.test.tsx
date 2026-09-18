@@ -153,10 +153,12 @@ describe('SpaceCard', () => {
 
   // ── Subscribe / unsubscribe ─────────────────────────────────────────
 
+  // Subscribe is only meaningful where content actually reaches a
+  // non-member, i.e. join_mode 'open' (PUBLIC_READABLE_JOIN_MODES).
   it('renders a Subscribe button for LOCAL public / global non-members', () => {
     const { getByText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, host_instance_id: 'local' }}
+        entry={{ ...baseEntry, host_instance_id: 'local', join_mode: 'open' }}
         onAction={() => {}}
       />,
     )
@@ -186,6 +188,38 @@ describe('SpaceCard', () => {
       />,
     )
     expect(getByText(/content is private/i)).toBeTruthy()
+  })
+
+  it('hides Subscribe for an approval-required space this household hosts', () => {
+    // Only `open` makes a public / global space publicly readable (see
+    // PUBLIC_READABLE_JOIN_MODES in socialhome/domain/space.py). Until a
+    // member approves you, no content is relayed and no content key is
+    // sealed — so a subscription would seat someone who receives nothing.
+    const { queryByText } = render(
+      <SpaceCard
+        entry={{
+          ...baseEntry, host_instance_id: 'local', join_mode: 'request',
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(queryByText(/Subscribe/)).toBeNull()
+  })
+
+  it('says approval-required content is private too, but keeps the ask-to-join CTA', () => {
+    const { getByText } = render(
+      <SpaceCard
+        entry={{ ...baseEntry, join_mode: 'request' }}
+        onAction={() => {}}
+      />,
+    )
+    // Same readability story as invite-only…
+    expect(getByText(/content is private/i)).toBeTruthy()
+    // …but the two modes stay distinguishable: approval-required is
+    // self-service, so the CTA is live, not the disabled "Invite required".
+    const cta = getByText('Request to join') as HTMLButtonElement
+    expect(cta.disabled).toBe(false)
+    expect(getByText(/Approval required/)).toBeTruthy()
   })
 
   it('hides Subscribe for a remotely-hosted (friends / global) space', () => {
@@ -233,7 +267,7 @@ describe('SpaceCard', () => {
     let captured: { kind: string } | null = null
     const { getByText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, host_instance_id: 'local' }}
+        entry={{ ...baseEntry, host_instance_id: 'local', join_mode: 'open' }}
         onAction={(_e, a) => { captured = a }}
       />,
     )
@@ -244,7 +278,7 @@ describe('SpaceCard', () => {
   it('disables Subscribe while the parent reports it busy', () => {
     const { getByLabelText } = render(
       <SpaceCard
-        entry={{ ...baseEntry, host_instance_id: 'local' }}
+        entry={{ ...baseEntry, host_instance_id: 'local', join_mode: 'open' }}
         onAction={() => {}}
         subscribeBusy={true}
       />,

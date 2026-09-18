@@ -762,9 +762,11 @@ async def test_invite_only_space_still_broadcasts_to_members(tier):
 
 
 @pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
-async def test_request_join_mode_still_attaches_public_relay(tier):
-    """``request`` is a publicly-readable join mode (anyone may ask to join and
-    the content stream stays public), so the relay hint is unchanged."""
+async def test_request_join_mode_omits_public_relay(tier):
+    """``request`` is gated like ``invite_only``: a person must be admitted
+    before they receive anything, so the relay hint — whose only consumer is
+    the now-dead GFS relay for such a space — is not signed or shipped. The
+    member broadcast itself is untouched."""
     bus = EventBus()
     federation = AsyncMock()
     federation.broadcast_to_space_members = AsyncMock()
@@ -791,6 +793,7 @@ async def test_request_join_mode_still_attaches_public_relay(tier):
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
-    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
-    assert relay["post_id"] == "post-req"
-    assert verify_signed_author_inner(relay)
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert "public_relay" not in payload
+    # The member fan-out is unaffected — only the relay hint is suppressed.
+    assert payload["id"] == "post-req"

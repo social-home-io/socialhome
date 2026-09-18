@@ -125,6 +125,9 @@ async def test_dissolve_global_space_unpublishes(stack):
 
 
 async def test_update_without_type_change_does_nothing(stack):
+    """A pure metadata edit (here, a rename) is not a reason to re-publish.
+    Note this deliberately does NOT touch ``join_mode`` — that IS a reason,
+    since the GFS enforces it on ``/gfs/subscribe`` (see below)."""
     svc, gfs = stack
     space = await svc.create_space(
         owner_username="alice",
@@ -138,7 +141,84 @@ async def test_update_without_type_change_does_nothing(stack):
         space.id,
         actor_username="alice",
         name="Chess Renamed",
-        join_mode=JoinMode.OPEN,
     )
     gfs.publish_space_to_all.assert_not_awaited()
     gfs.unpublish_space_from_all.assert_not_awaited()
+
+
+async def test_locking_down_join_mode_republishes_to_the_gfs(stack):
+    """Flipping a GLOBAL space from ``open`` to a gated join mode must
+    re-publish its metadata. The GFS stores ``join_mode`` and refuses a
+    ``/gfs/subscribe`` for anything but ``open``, and the publish handler
+    PURGES the seats taken while the space was readable — so without this
+    the directory would keep offering a space nobody may read, and its
+    existing subscribers would linger, until the owner's next WS reconnect."""
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Chess Club",
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.OPEN,
+    )
+    gfs.publish_space_to_all.reset_mock()
+    await svc.update_config(
+        space.id,
+        actor_username="alice",
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    gfs.publish_space_to_all.assert_awaited_once_with(space.id)
+    gfs.unpublish_space_from_all.assert_not_awaited()
+
+
+async def test_opening_join_mode_also_republishes(stack):
+    """The other direction matters too: until the GFS learns the space is
+    ``open`` it keeps refusing every subscribe."""
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Chess Club",
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    gfs.publish_space_to_all.reset_mock()
+    await svc.update_config(
+        space.id,
+        actor_username="alice",
+        join_mode=JoinMode.OPEN,
+    )
+    gfs.publish_space_to_all.assert_awaited_once_with(space.id)
+
+
+async def test_unchanged_join_mode_does_not_republish(stack):
+    """Re-submitting the same join mode is not a change — no publish."""
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Chess Club",
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.OPEN,
+    )
+    gfs.publish_space_to_all.reset_mock()
+    await svc.update_config(
+        space.id,
+        actor_username="alice",
+        join_mode=JoinMode.OPEN,
+    )
+    gfs.publish_space_to_all.assert_not_awaited()
+
+
+async def test_join_mode_change_on_a_household_space_does_not_publish(stack):
+    """A non-global space has nothing on any GFS to correct."""
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Family",
+        space_type=SpaceType.HOUSEHOLD,
+    )
+    gfs.publish_space_to_all.reset_mock()
+    await svc.update_config(
+        space.id,
+        actor_username="alice",
+        join_mode=JoinMode.OPEN,
+    )
+    gfs.publish_space_to_all.assert_not_awaited()

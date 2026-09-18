@@ -599,9 +599,10 @@ async def test_invite_only_remote_authored_post_not_relayed(env):
     assert env["gfs"].calls == []
 
 
-async def test_request_join_mode_global_space_still_relays(env):
-    """``request`` (anyone may ask to join) stays publicly readable — the only
-    non-readable mode is ``invite_only``."""
+async def test_request_join_mode_global_space_does_not_relay(env):
+    """``request`` is a MEMBERSHIP mode, not a read mode: a person must still
+    be admitted, so the space is listed for discovery but nothing of its
+    content stream is ever relayed. Only ``open`` is publicly readable."""
     await env["make_space"](
         "sp-req",
         SpaceType.GLOBAL,
@@ -611,10 +612,10 @@ async def test_request_join_mode_global_space_still_relays(env):
     await env["bus"].publish(
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-req")
     )
-    assert len(env["gfs"].calls) == 1
+    assert env["gfs"].calls == []
 
 
-async def test_request_join_mode_remote_authored_still_relays(env):
+async def test_request_join_mode_remote_authored_does_not_relay(env):
     await env["make_space"](
         "sp-pub",
         SpaceType.GLOBAL,
@@ -630,4 +631,4 @@ async def test_request_join_mode_remote_authored_still_relays(env):
             public_relay=relay,
         )
     )
-    assert len(env["gfs"].calls) == 1
+    assert env["gfs"].calls == []

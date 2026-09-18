@@ -31,7 +31,11 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..crypto import b64url_decode, verify_ed25519
-from ..domain.space import JoinMode, normalize_category, normalize_join_mode
+from ..domain.space import (
+    PUBLIC_READABLE_JOIN_MODES,
+    normalize_category,
+    normalize_join_mode,
+)
 from .domain import (
     ClientInstance,
     GfsSubscriber,
@@ -714,8 +718,8 @@ class GfsFederationService:
         # readable: its owner relays no content and hands out no content key,
         # so a subscription would be a seat that never receives anything and
         # lingers in ``space_subscribers`` forever. Refuse it outright.
-        if normalize_join_mode(existing.join_mode) == JoinMode.INVITE_ONLY:
-            raise PermissionError("space is invite-only — not publicly readable")
+        if normalize_join_mode(existing.join_mode) not in PUBLIC_READABLE_JOIN_MODES:
+            raise PermissionError("space is not publicly readable")
 
         await self._repo.add_subscriber(
             space_id=space_id,
@@ -1228,7 +1232,7 @@ class GfsFederationService:
         # lives here rather than in the migration because at migration time
         # EVERY row defaults to ``invite_only`` — a blanket purge would evict
         # every legitimate subscriber on the server.
-        if normalized_join_mode == JoinMode.INVITE_ONLY:
+        if normalized_join_mode not in PUBLIC_READABLE_JOIN_MODES:
             purged = await self._repo.purge_subscribers(space_id)
             if purged:
                 log.info(

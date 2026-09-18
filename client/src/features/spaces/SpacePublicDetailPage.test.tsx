@@ -112,10 +112,35 @@ describe('SpacePublicDetailPage onPrimary', () => {
     const { getByText, getByRole } = await renderPage()
     await waitFor(() => getByText(/content is private/i))
     // The chip is honest about readability, not just about joining…
-    expect(getByText(/Posts in this space stay private/i)).toBeTruthy()
+    expect(getByText(/Only members can read this space/i)).toBeTruthy()
+    expect(getByText(/A member has to invite you/i)).toBeTruthy()
     // …and the only CTA is disabled, so nothing can be sent.
     expect((getByRole('button') as HTMLButtonElement).disabled).toBe(true)
     expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('APPROVAL-REQUIRED space says content is private but still lets you ask', async () => {
+    // Only `open` makes a public / global space publicly readable (see
+    // PUBLIC_READABLE_JOIN_MODES in socialhome/domain/space.py) — so the
+    // page must be as honest about `request` as it is about `invite_only`,
+    // while keeping the self-service way in.
+    cacheDirectoryEntries([
+      entry({
+        host_instance_id: 'remote-1',
+        host_display_name: 'Friends',
+        scope:            'global',
+        join_mode:        'request',
+      }),
+    ])
+    const { getByText, getByRole } = await renderPage()
+    await waitFor(() => getByText(/content is private/i))
+    expect(getByText(/Only members can read this space/i)).toBeTruthy()
+    // How you get in is the part that differs from invite-only…
+    expect(getByText(/You can ask to join/i)).toBeTruthy()
+    // …and the CTA stays live, unlike the disabled invite-only one.
+    const cta = getByRole('button') as HTMLButtonElement
+    expect(cta.textContent).toBe('Request to join')
+    expect(cta.disabled).toBe(false)
   })
 
   it('REQUEST space still pops the JoinRequestModal (no immediate send)', async () => {

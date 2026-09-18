@@ -28,6 +28,29 @@ import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
+import { contentIsGated, joinModeChip } from './SpaceCard'
+
+/** Shared readability line for every join mode that admits people one by
+ *  one (``invite_only`` and ``request``): the space is listed so people can
+ *  find it and ask in, but none of its content is published. */
+const GATED_CONTENT_NOTE
+  = 'Only members can read this space. Nothing posted here is published '
+  + 'to the directory.'
+
+/** …paired with one sentence on how you actually get in — the only thing
+ *  the two gated modes differ on. ``null`` for ``open``, which is readable
+ *  without being admitted. */
+function howToGetIn(mode: DirectoryEntry['join_mode']): string | null {
+  switch (mode) {
+    case 'open':
+      return null
+    case 'invite_only':
+      return 'A member has to invite you before you can read or join.'
+    case 'request':
+      return 'You can ask to join — a member decides, and posts start '
+        + 'reaching you once they let you in.'
+  }
+}
 
 const detail = signal<DirectoryEntry | null>(null)
 const loading = signal<boolean>(true)
@@ -177,13 +200,12 @@ export default function SpacePublicDetailPage() {
     entry.scope === 'household' ? '🏠 Your household'
       : entry.scope === 'public' ? '🤝 Public'
       : '🌐 Global'
-  // Invite-only is not merely a join gate: such a space publishes no content
-  // publicly, so there is nothing to read (and nothing to subscribe to)
-  // without an invite.
-  const joinModeLabel =
-    entry.join_mode === 'open' ? '🔓 Open to join'
-      : entry.join_mode === 'request' ? '✉ Approval required'
-      : '🎟 Invite-only · content is private'
+  // Neither invite-only nor approval-required is merely a join gate: such a
+  // space publishes no content publicly, so there is nothing to read (and
+  // nothing to subscribe to) until you are admitted. The chip text is shared
+  // with the browser card so both surfaces tell the same story.
+  const jmode = joinModeChip(entry.join_mode)
+  const joinModeLabel = `${jmode.icon} ${jmode.label}`
 
   const primaryLabel =
     entry.already_member ? 'Open space'
@@ -250,11 +272,10 @@ export default function SpacePublicDetailPage() {
         </section>
       )}
 
-      {entry.join_mode === 'invite_only' && (
+      {contentIsGated(entry.join_mode) && (
         <section class="sh-space-public__section sh-muted">
           <p>
-            Posts in this space stay private — they are never published to
-            the directory. You need an invite from a member to read or join.
+            {GATED_CONTENT_NOTE} {howToGetIn(entry.join_mode)}
           </p>
         </section>
       )}

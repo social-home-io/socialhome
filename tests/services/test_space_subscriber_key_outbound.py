@@ -701,8 +701,10 @@ async def test_invite_only_space_seals_no_key_on_new_subscriber(env):
     assert env["gfs"].calls == []
 
 
-async def test_request_join_mode_space_still_seals_key(env):
-    """``request`` stays publicly readable — only ``invite_only`` is gated."""
+async def test_request_join_mode_space_seals_no_key(env):
+    """``request`` is gated too: a person must be admitted before they get
+    anything, so the content key is never sealed to a mere subscriber. Only
+    ``open`` is publicly readable."""
     await env["make_space"](
         "sp-req",
         SpaceType.GLOBAL,
@@ -716,7 +718,7 @@ async def test_request_join_mode_space_still_seals_key(env):
 
     await env["svc"].handle(frame)
 
-    assert len(env["gfs"].calls) == 1
+    assert env["gfs"].calls == []
 
 
 async def test_reconcile_skips_invite_only_space(recon_env):

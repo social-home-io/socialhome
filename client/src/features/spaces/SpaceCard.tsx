@@ -17,7 +17,9 @@
  *
  * Public + global spaces also surface a secondary "🔔 Subscribe" button
  * in the non-member states — subscription = read-only member (no post
- * / comment / react). Private household spaces do not show Subscribe.
+ * / comment / react). Private household spaces do not show Subscribe,
+ * and neither do spaces whose join mode withholds content until a person
+ * is admitted (see {@link contentIsGated}).
  */
 import { Button } from '@/components/Button'
 import { categoryLabel, SPACE_CATEGORIES } from '@/components/spaceModeOptions'
@@ -60,12 +62,31 @@ function scopeChip(scope: DirectoryEntry['scope']) {
   }
 }
 
-function joinModeChip(mode: DirectoryEntry['join_mode']) {
+/**
+ * Whether this join mode withholds the space's content until a person is
+ * admitted. Mirrors ``PUBLIC_READABLE_JOIN_MODES`` in
+ * ``socialhome/domain/space.py``: only ``open`` makes a public / global
+ * space publicly readable. Both ``invite_only`` and ``request`` are listed
+ * in the directory so people can find them and ask in, but nothing of
+ * their content is relayed and no content key is sealed to a subscriber.
+ */
+export function contentIsGated(mode: DirectoryEntry['join_mode']): boolean {
+  return mode !== 'open'
+}
+
+export function joinModeChip(mode: DirectoryEntry['join_mode']) {
   switch (mode) {
     case 'open':
       return { cls: 'sh-join-mode-chip sh-join-mode-chip--open', icon: '🔓', label: 'Open to join' }
     case 'request':
-      return { cls: 'sh-join-mode-chip sh-join-mode-chip--request', icon: '✉', label: 'Approval required' }
+      // Approval is not just a join gate: until a member approves, none of
+      // this space's content reaches you — same readability story as
+      // invite-only, different way in.
+      return {
+        cls: 'sh-join-mode-chip sh-join-mode-chip--request',
+        icon: '✉',
+        label: 'Approval required · content is private',
+      }
     case 'invite_only':
       // Not just a join gate: an invite-only space publishes nothing
       // publicly, so there is no content to read and nothing to subscribe
@@ -103,14 +124,14 @@ function subscribableScope(entry: DirectoryEntry): boolean {
   // have no remote-subscribe federation path — showing the button there
   // just 404s; they're joined via the request flow instead.
   //
-  // An invite-only space is never subscribable, local or not: it publishes
-  // no content and hands out no content key, so a subscriber would sit on a
-  // seat that never receives anything (the GFS refuses such a subscribe
-  // outright with a 403).
+  // A space that admits people one by one (invite-only OR approval-required)
+  // is never subscribable, local or not: it publishes no content and hands
+  // out no content key, so a subscriber would sit on a seat that never
+  // receives anything (the GFS refuses such a subscribe outright with a 403).
   return (
     entry.host_instance_id === 'local'
     && (entry.scope === 'public' || entry.scope === 'global')
-    && entry.join_mode !== 'invite_only'
+    && !contentIsGated(entry.join_mode)
     && !entry.already_member
   )
 }

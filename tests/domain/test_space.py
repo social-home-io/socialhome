@@ -189,10 +189,16 @@ def test_public_readable_join_modes_is_a_fail_closed_allow_list():
     mode named here. It is an ALLOW-list on purpose: a future fourth
     ``JoinMode`` is non-readable until someone deliberately adds it, rather
     than becoming publicly readable the moment the enum grows."""
-    assert PUBLIC_READABLE_JOIN_MODES == {JoinMode.OPEN, JoinMode.REQUEST}
+    assert PUBLIC_READABLE_JOIN_MODES == {JoinMode.OPEN}
     assert JoinMode.INVITE_ONLY not in PUBLIC_READABLE_JOIN_MODES
+    # ``request`` is a MEMBERSHIP mode, not a read mode: a person must
+    # still be admitted, so the space is listed but not readable.
+    assert JoinMode.REQUEST not in PUBLIC_READABLE_JOIN_MODES
     # Every member of the enum is deliberately classified one way or the other.
-    assert set(JoinMode) - PUBLIC_READABLE_JOIN_MODES == {JoinMode.INVITE_ONLY}
+    assert set(JoinMode) - PUBLIC_READABLE_JOIN_MODES == {
+        JoinMode.INVITE_ONLY,
+        JoinMode.REQUEST,
+    }
 
 
 # ─── normalize_join_mode ─────────────────────────────────────────────────

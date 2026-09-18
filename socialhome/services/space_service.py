@@ -1285,6 +1285,7 @@ class SpaceService(SpaceMemberGuardMixin):
             new_fields["emoji"] = emoji or None
             payload["emoji"] = new_fields["emoji"]
         location_mode_changed = False
+        join_mode_changed = False
         location_feature_just_enabled = False
         delegated_admin_just_enabled = False
         if features is not None:
@@ -1307,6 +1308,7 @@ class SpaceService(SpaceMemberGuardMixin):
             payload["features"] = features.to_wire_dict()
         if join_mode is not None:
             jmode = _coerce_join_mode(join_mode)
+            join_mode_changed = jmode is not space.join_mode
             new_fields["join_mode"] = jmode
             payload["join_mode"] = jmode.value
         if space_type is not None:
@@ -1388,6 +1390,22 @@ class SpaceService(SpaceMemberGuardMixin):
             was_global=was_global,
             is_global=will_be_global,
         )
+        if (
+            join_mode_changed
+            and was_global
+            and will_be_global
+            and self._gfs is not None
+        ):
+            # The GFS stores ``join_mode`` and enforces it on ``/gfs/subscribe``
+            # — only an ``open`` space is publicly readable. Re-publish the
+            # metadata so the directory stops offering a space nobody may read
+            # any more; that publish also PURGES the subscriber seats taken
+            # while it was open, so nobody is left holding a subscription that
+            # can never deliver. Without this the truth would not reach the GFS
+            # until the owner's next WS reconnect (``heal_space_pins``). A type
+            # flip is already covered above, hence the was_global/will_be_global
+            # guard. Fail-soft: GfsConnectionService logs and never raises.
+            await self._gfs.publish_space_to_all(space_id)
         if location_mode_changed:
             # §23.8.6: refire latest presence so receivers see the new
             # privacy tier within seconds rather than waiting for the
