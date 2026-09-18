@@ -2192,3 +2192,41 @@ async def test_expired_invite_token_cannot_be_redeemed(client):
         headers=_auth(client._bob_token),
     )
     assert join.status >= 400
+
+
+async def test_list_spaces_includes_features_block(client):
+    """``GET /api/spaces`` ships the same ``features`` dict as the detail.
+
+    The space browser reads ``features.allow_subscribers`` off the list row
+    to decide whether a local public space wears the 🔒 "Content is private"
+    chip. When the list withheld the block the chip lied on every local
+    space, and the SPA papered over it with a per-space detail fetch.
+    """
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Readable", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    open_sid = (await r.json())["id"]
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Closed", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    closed_sid = (await r.json())["id"]
+    # Owner opts one of the two into followers; the other keeps the default.
+    r = await client.patch(
+        f"/api/spaces/{open_sid}",
+        json={"features": {"allow_subscribers": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+
+    r = await client.get("/api/spaces", headers=_auth(client._admin_token))
+    assert r.status == 200
+    rows = {row["id"]: row for row in await r.json()}
+    assert rows[open_sid]["features"]["allow_subscribers"] is True
+    assert rows[closed_sid]["features"]["allow_subscribers"] is False
+    # …and the block is the full detail shape, not a one-key special case.
+    r = await client.get(f"/api/spaces/{open_sid}", headers=_auth(client._admin_token))
+    assert rows[open_sid]["features"] == (await r.json())["features"]

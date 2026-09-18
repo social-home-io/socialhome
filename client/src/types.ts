@@ -285,7 +285,10 @@ export interface Space {
   join_mode: 'invite_only' | 'open' | 'request'
   /** Discovery category (e.g. ``'gaming'``); ``'general'``/absent = none. */
   category?: string
-  features: SpaceFeatures
+  /** Present on `GET /api/spaces/{id}` AND on every `GET /api/spaces` list
+   *  row. Optional only because an older backend's list withheld it — see
+   *  `hydrateLocalReadability` in `SpaceBrowserPage`. */
+  features?: SpaceFeatures
   retention_days: number | null
   /** When true, HA automations may post into this space via the
    *  bot-bridge. Required before any SpaceBot is registered. */
