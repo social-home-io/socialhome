@@ -602,14 +602,14 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: (``NODE_PARTITION_*``, ``INSTANCE_SYNC_STATUS``) are about the
         #: whole household and stay out.
         FederationEventType.SPACE_PARTITION_GAP,
-        # ── Routing ──
-        #: A route-stale nack only ever invalidates OUR cached route to
-        #: the sender. Its siblings ``SPACE_FIND_ROUTE`` /
-        #: ``SPACE_ROUTE_FOUND`` / ``SPACE_ROUTED`` are excluded on
-        #: purpose: a ``SPACE_ROUTE_FOUND`` carries ``path`` — every relay
-        #: household's id — so answering a stranger's probe hands them a
-        #: map of our social graph. They are not a mesh node.
-        FederationEventType.SPACE_ROUTE_STALE,
+        # ── Routing: NOTHING ──
+        #: A link-joined household is never a mesh hop (``_mesh_capable_peers``
+        #: excludes it), so none of ``SPACE_FIND_ROUTE`` / ``SPACE_ROUTE_FOUND``
+        #: / ``SPACE_ROUTED`` / ``SPACE_ROUTE_STALE`` has any meaning coming
+        #: from one. ``SPACE_ROUTE_FOUND`` carries ``path`` — every relay
+        #: household's id — so answering a stranger's probe would hand them a
+        #: map of our social graph; a route-stale nack from a peer we never
+        #: route through is noise at best.
         # ── Joining a SECOND space from the same household ──
         #: Once the pair exists, ``request_redeem`` takes the direct-peer
         #: branch, so a second invite token from this household rides the

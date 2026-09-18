@@ -40,6 +40,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
     PairingStatus,
+    InstanceSource,
 )
 from socialhome.federation import route_discovery, routed_crypto
 from socialhome.federation.route_discovery import (
@@ -62,6 +63,7 @@ class _FakeInstance:
     id: str
     status: PairingStatus = PairingStatus.CONFIRMED
     proto_version: int = 6
+    source: InstanceSource = InstanceSource.MANUAL
 
 
 class _FakeFederationRepo:
@@ -72,7 +74,15 @@ class _FakeFederationRepo:
         return self._instances.get(instance_id)
 
     async def list_social_instances(self):
-        return await self.list_instances(status="confirmed")
+        # Mirrors ``SqliteFederationRepo.list_social_instances``: CONFIRMED
+        # rows minus the space-scoped ``space_session`` ones. A fake that
+        # returned the same rows for both methods would make the mesh's
+        # peer-class filter untestable here.
+        return [
+            i
+            for i in await self.list_instances(status="confirmed")
+            if i.source is not InstanceSource.SPACE_SESSION
+        ]
 
     async def list_instances(
         self,
@@ -470,6 +480,24 @@ async def test_sub_v6_peer_is_not_proposed_as_next_hop():
     )
     result = await nodes["a"].service.discover_route(nodes["c"].instance_id)
     assert result is None
+
+
+async def test_space_session_peer_is_never_a_mesh_hop():
+    """A household we met through an invite link is not a mesh node. In
+    ``a — b(space_session) — c`` discovering ``c`` returns ``None``: b is
+    neither proposed as a next hop nor flooded with our probe, because
+    ``_mesh_capable_peers`` reads ``list_social_instances()``. (A
+    ``SPACE_ROUTE_FOUND`` carries ``path`` — every relay's id — so a
+    link-joined stranger acting as a hop would map our social graph.)"""
+    nodes = _build_mesh(
+        {"a": ["b"], "b": ["a", "c"], "c": ["b"]},
+        discovery_timeout_s=0.05,
+    )
+    repo = nodes["a"].service._federation_repo
+    repo._instances[nodes["b"].instance_id].source = InstanceSource.SPACE_SESSION
+    capable = await nodes["a"].service._mesh_capable_peers(exclude=set())
+    assert nodes["b"].instance_id not in [i.id for i in capable]
+    assert await nodes["a"].service.discover_route(nodes["c"].instance_id) is None
 
 
 async def test_sub_v6_direct_peer_target_returns_none():
