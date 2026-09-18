@@ -2700,6 +2700,13 @@ def create_app(config: Config | None = None) -> web.Application:
         # server (a rename typically restarts the GFS → forces a reconnect).
         async def _on_gfs_connected(gfs_id: str) -> None:
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
+            # Self-heal the space-authority pins on the GFS: ``/gfs/publish``
+            # authorizes a relay on the space's TOFU-pinned authority key
+            # alone, so a space whose GFS row pinned none (published before
+            # the pin existed) 403s every relay until its metadata is
+            # published again. Re-publish each space we published to this GFS
+            # — idempotent (the pin is immutable once set) and fail-soft.
+            await gfs_connection_service.heal_space_pins(gfs_id)
             # Self-heal the household name on the GFS: a rename is pushed only
             # best-effort on edit (and never re-pushed), so a GFS that was down
             # at rename time — or that re-created our client row — keeps showing

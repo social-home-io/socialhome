@@ -15,6 +15,18 @@ The pairing flow (simpler than HFS):
    responds ``{status, instance_id}``.
 5. Connection saved with ``status=active`` (or ``pending`` if the
    GFS requires admin approval).
+
+Relaying space content (:meth:`GfsConnectionService.publish_space_event`) is
+**identity-free by default**: a connection server must not learn WHICH
+household relayed a public/global-space event. ``GET /gfs/info`` is the
+capability channel for the GFS↔HFS leg (it has no ``proto_version``
+negotiation), so a GFS advertising ``anonymous_publish: true`` receives
+``{space_id, event_type, payload}`` and authorizes the relay purely on the
+space-authority signature inside the opaque payload. A GFS that did not
+advertise it — an older build, or one whose ``/gfs/info`` was unreachable —
+still gets the legacy identified body, once per connection with a WARNING:
+unknown → legacy is the safe default, because the legacy body is accepted by
+both an old and a new GFS while the identity-free one would 403 on an old one.
 """
 
 from __future__ import annotations
@@ -33,6 +45,7 @@ from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.space import normalize_category
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+from ..repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +105,8 @@ class GfsConnectionService:
         "_icon_repo",
         "_own_instance_id",
         "_own_signing_key",
+        "_anon_publish",
+        "_anon_warned",
     )
 
     def __init__(
@@ -106,12 +121,24 @@ class GfsConnectionService:
         # aren't available at the same wiring step as the GFS-connection
         # repo). When unset, ``publish_space`` falls back to a metadata-
         # less ``{space_id}`` body and the GFS lands a pending row.
-        self._space_repo = None
+        self._space_repo: AbstractSpaceRepo | None = None
         self._theme_repo = None
         self._cover_repo = None
         self._icon_repo = None
         self._own_instance_id = ""
         self._own_signing_key = b""
+        # Per-connection GFS capability cache, RAM-only and deliberately
+        # NOT persisted: ``anonymous_publish`` is a property of the REMOTE
+        # server's build, not of this household's data, so a column would
+        # go stale the moment an operator upgrades their GFS. It is
+        # (re)learned from ``GET /gfs/info`` at pair time and on every GFS-WS
+        # (re)connect, plus once on demand when a publish finds it unknown.
+        # Missing key = unknown → the legacy body, which BOTH an old and a
+        # new GFS accept, so the safe default can never strand a household.
+        self._anon_publish: dict[str, bool] = {}
+        # Connections already warned about the privacy downgrade — one
+        # WARNING per connection per process, not one per publish.
+        self._anon_warned: set[str] = set()
 
     def attach_publish_context(
         self,
@@ -274,22 +301,26 @@ class GfsConnectionService:
             paired_at=now,
         )
         await self._repo.save(conn)
+        # Seed the capability cache from the descriptor we already fetched, so
+        # the very first relay to a freshly-paired GFS is identity-free without
+        # a second round-trip.
+        self._anon_publish[conn.id] = bool(info.get("anonymous_publish"))
         return conn
 
-    async def refresh_connection_metadata(self, gfs_id: str) -> None:
-        """Re-fetch the GFS's current server_name from GET /gfs/info and
-        update the stored display_name if it changed. Best-effort: a
-        transport error / missing field is logged and ignored (the next
-        reconnect retries). Called on each GFS WS (re)connect so a server
-        rename propagates to this client."""
-        conn = await self._repo.get(gfs_id)
-        if conn is None:
-            return
+    async def _fetch_gfs_info(self, gfs_id: str, inbox_url: str) -> dict | None:
+        """``GET {inbox_url}/gfs/info``, or ``None`` on any failure.
+
+        Never raises — every caller is on a best-effort path (a reconnect
+        hook or a relay fan-out). A successful fetch refreshes the RAM-only
+        ``anonymous_publish`` capability cache for *gfs_id*; a failure caches
+        NOTHING, so the next publish probes again rather than downgrading
+        this household's privacy forever on one blip.
+        """
         try:
             client = self._client()
         except RuntimeError:
-            return
-        info_url = f"{conn.inbox_url}/gfs/info"
+            return None
+        info_url = f"{inbox_url}/gfs/info"
         try:
             async with client.get(
                 info_url,
@@ -297,18 +328,57 @@ class GfsConnectionService:
             ) as resp:
                 if resp.status != 200:
                     log.debug(
-                        "GFS %s /gfs/info refresh returned HTTP %d — skipping",
+                        "GFS %s /gfs/info returned HTTP %d — skipping",
                         gfs_id,
                         resp.status,
                     )
-                    return
+                    return None
                 info = await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             log.debug(
-                "GFS %s unreachable during name refresh: %s",
+                "GFS %s unreachable during /gfs/info fetch: %s",
                 gfs_id,
                 exc,
             )
+            return None
+        if not isinstance(info, dict):
+            return None
+        self._anon_publish[gfs_id] = bool(info.get("anonymous_publish"))
+        return info
+
+    async def _anonymous_publish_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS advertised ``anonymous_publish`` on /gfs/info.
+
+        Answers from the cache when it is warm (filled at pair time and on
+        every WS reconnect). On a cold miss — the first publish after a boot
+        that hasn't seen a reconnect yet — probe ``/gfs/info`` ONCE rather
+        than spuriously downgrading to the identified body. An unreachable
+        GFS leaves the cache empty and answers ``False`` for this publish
+        only.
+        """
+        cached = self._anon_publish.get(conn.id)
+        if cached is not None:
+            return cached
+        await self._fetch_gfs_info(conn.id, conn.inbox_url)
+        return self._anon_publish.get(conn.id, False)
+
+    async def refresh_connection_metadata(self, gfs_id: str) -> None:
+        """Re-fetch the GFS descriptor from GET /gfs/info and refresh what
+        this household caches about that server.
+
+        Two things ride the descriptor: the operator-settable ``server_name``
+        (persisted as the connection's ``display_name`` when it changed) and
+        the ``anonymous_publish`` capability (RAM-only — see
+        :meth:`_fetch_gfs_info`). Best-effort: a transport error / missing
+        field is logged and ignored (the next reconnect retries). Called on
+        each GFS WS (re)connect, so an operator's rename — and an operator's
+        GFS upgrade — both propagate to this client.
+        """
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            return
+        info = await self._fetch_gfs_info(gfs_id, conn.inbox_url)
+        if info is None:
             return
 
         new_name = str(info.get("server_name") or "")
@@ -705,23 +775,38 @@ class GfsConnectionService:
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
 
-        POSTs ``{space_id, event_type, payload, from_instance, signature}``
-        to ``POST /gfs/publish`` on every GFS the space is published to.
+        POSTs to ``POST /gfs/publish`` on every GFS the space is published to.
         The ``payload`` is the caller-built wire envelope — for the Phase-5a2
         public-post relay it is the already-encrypted + authority-signed
         ``{space_id, epoch, encrypted_payload, authority_sig, ...}`` dict, so
         the GFS stays content-blind and authorizes the relay via the embedded
         space-authority signature (see :class:`SpacePublicOutbound`).
 
-        ``signature`` is THIS household's Ed25519 *transport* signature over
-        the canonical body — the GFS verifies it against the registered
-        instance pubkey to authenticate ``from_instance`` (a separate concern
-        from the content-authority signature inside ``payload``).
+        **The body shape depends on what the GFS advertised.** A GFS whose
+        ``GET /gfs/info`` carries ``anonymous_publish: true`` authorizes the
+        relay on that embedded space-authority signature ALONE, so it gets the
+        identity-free body — exactly ``{space_id, event_type, payload}``, with
+        no ``from_instance`` and no household transport signature. That is the
+        point of the change: a connection server must not learn WHICH
+        household relayed a public/global-space event.
+
+        A GFS that did not advertise it (an older build, or one whose
+        ``/gfs/info`` we couldn't reach) still gets the legacy
+        ``{space_id, event_type, payload, from_instance, signature}`` body,
+        where ``signature`` is THIS household's Ed25519 *transport* signature
+        over the canonical body. Unknown → legacy is the safe default: the
+        legacy body is accepted by BOTH an old and a new GFS, while the
+        identity-free one would 403 on an old server. The privacy downgrade is
+        logged once per connection (:meth:`_warn_identified_publish`).
+
+        *from_instance* is therefore only used for the legacy body; on the
+        anonymous path it is never serialized.
 
         Fail-closed: with no signing identity wired, nothing is sent (returns
-        ``0``). A per-GFS transport/HTTP failure is logged and skipped so one
-        unreachable server doesn't abort the fan-out. Returns the number of
-        GFS instances the event was accepted by.
+        ``0`` — the legacy fallback would be unsignable, and a household with
+        no identity has nothing to relay). A per-GFS transport/HTTP failure is
+        logged and skipped so one unreachable server doesn't abort the
+        fan-out. Returns the number of GFS instances the event was accepted by.
         """
         if self._http_client is None or not self._own_signing_key:
             log.warning(
@@ -733,24 +818,28 @@ class GfsConnectionService:
         conns = await self._repo.list_gfs_for_space(space_id)
         if not conns:
             return 0
-        body = {
+        anonymous_body = {
             "space_id": space_id,
             "event_type": event_type,
             "payload": payload,
-            "from_instance": from_instance,
         }
-        canonical = json.dumps(
-            body,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        body["signature"] = b64url_encode(
-            sign_ed25519(self._own_signing_key, canonical),
-        )
+        legacy_body: dict | None = None
         delivered = 0
         for conn in conns:
             if conn.status != "active":
                 continue
+            if await self._anonymous_publish_supported(conn):
+                body = anonymous_body
+            else:
+                self._warn_identified_publish(conn)
+                if legacy_body is None:
+                    legacy_body = self._legacy_publish_body(
+                        space_id,
+                        event_type,
+                        payload,
+                        from_instance,
+                    )
+                body = legacy_body
             url = f"{conn.inbox_url}/gfs/publish"
             try:
                 async with self._http_client.post(
@@ -776,6 +865,155 @@ class GfsConnectionService:
                     exc,
                 )
         return delivered
+
+    def _legacy_publish_body(
+        self,
+        space_id: str,
+        event_type: str,
+        payload: dict,
+        from_instance: str,
+    ) -> dict:
+        """The pre-anonymous-publish relay body, byte-for-byte as before.
+
+        ``{space_id, event_type, payload, from_instance}`` plus this
+        household's Ed25519 transport ``signature`` over their canonical JSON.
+        Only sent to a GFS that did not advertise ``anonymous_publish`` — that
+        server can't authorize the relay without it.
+        """
+        body = {
+            "space_id": space_id,
+            "event_type": event_type,
+            "payload": payload,
+            "from_instance": from_instance,
+        }
+        canonical = json.dumps(
+            body,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body["signature"] = b64url_encode(
+            sign_ed25519(self._own_signing_key, canonical),
+        )
+        return body
+
+    def _warn_identified_publish(self, conn: GfsConnection) -> None:
+        """Warn ONCE per connection per process about the privacy downgrade.
+
+        A household posting fifty times must not emit fifty warnings, so the
+        connection id lands in ``_anon_warned`` on the first one. The message
+        names the connection (label + URL) and deliberately nothing about the
+        space or its content — an operator needs to know WHICH server to
+        upgrade, not what was posted to it.
+        """
+        if conn.id in self._anon_warned:
+            return
+        self._anon_warned.add(conn.id)
+        log.warning(
+            "GFS %r (%s) does not advertise anonymous_publish — relays to it "
+            "still carry this household's instance id, so that connection "
+            "server learns which household relayed each public-space event. "
+            "Ask its operator to upgrade.",
+            conn.display_name,
+            conn.inbox_url,
+        )
+
+    async def heal_space_pins(self, gfs_id: str) -> int:
+        """Re-publish every space this household published to *gfs_id*.
+
+        Run on each GFS-WS (re)connect. ``POST /gfs/publish`` now authorizes
+        purely on the space's TOFU-pinned authority key, so a GFS row that
+        pinned NO key (published by a household predating the pin) rejects
+        every relay for that space with 403 until the metadata is published
+        again — and nothing else re-publishes it. Re-publishing is idempotent
+        on the GFS side (the pin is COALESCE-guarded and immutable once set),
+        so this heals a NULL pin without disturbing a healthy one.
+
+        Skipped, at DEBUG (both are expected, not faults): a space whose local
+        row is gone, and one this household holds no seed for — the pin must
+        come from a seed-holder, and a household with no KEK wired can't read
+        a seed at all. Sequential and fail-soft per space: this runs on a
+        connect hook, so one unreachable GFS or one rejected publish must never
+        raise out of it. Returns how many spaces were re-published.
+        """
+        if self._space_repo is None:
+            return 0
+        try:
+            conn = await self._repo.get(gfs_id)
+            if conn is None or conn.status != "active":
+                return 0
+            publications = await self._repo.list_publications(gfs_id)
+        except Exception:
+            log.exception("gfs.heal_space_pins: lookup failed for gfs %s", gfs_id)
+            return 0
+        healed = 0
+        for pub in publications:
+            if not await self._holds_space_seed(pub.space_id):
+                continue
+            try:
+                await self.publish_space(pub.space_id, gfs_id)
+                healed += 1
+            except GfsConnectionError as exc:
+                log.info(
+                    "gfs.heal_space_pins: re-publishing space %s to gfs %s failed: %s",
+                    pub.space_id,
+                    gfs_id,
+                    exc,
+                )
+            except Exception:
+                log.exception(
+                    "gfs.heal_space_pins: re-publishing space %s to gfs %s failed",
+                    pub.space_id,
+                    gfs_id,
+                )
+        return healed
+
+    async def _holds_space_seed(self, space_id: str) -> bool:
+        """Whether this household can author a metadata publish for *space_id*.
+
+        True only when the local space row still exists AND this household
+        holds the space's Ed25519 seed (owner or delegated admin). Never
+        raises: ``get_space_seed`` raises :class:`RuntimeError` when no
+        household KEK is wired, which is a "can't check → skip", not a fault.
+        """
+        repo = self._space_repo
+        if repo is None:
+            return False
+        try:
+            space = await repo.get(space_id)
+        except Exception:
+            log.debug(
+                "gfs.heal_space_pins: space lookup failed for %s — skipping",
+                space_id,
+            )
+            return False
+        if space is None:
+            log.debug(
+                "gfs.heal_space_pins: no local row for space %s — skipping",
+                space_id,
+            )
+            return False
+        try:
+            seed = await repo.get_space_seed(space_id)
+        except RuntimeError:
+            log.debug(
+                "gfs.heal_space_pins: no key manager wired — cannot read the "
+                "seed for space %s, skipping",
+                space_id,
+            )
+            return False
+        except Exception:
+            log.debug(
+                "gfs.heal_space_pins: seed lookup failed for space %s — skipping",
+                space_id,
+            )
+            return False
+        if seed is None:
+            log.debug(
+                "gfs.heal_space_pins: no seed held for space %s — skipping",
+                space_id,
+            )
+            return False
+        return True
 
     async def unpublish_space_from_all(self, space_id: str) -> int:
         """Unpublish a space from every GFS it was published to.
