@@ -110,6 +110,15 @@ describe('relativeFutureTime', () => {
     expect(relativeFutureTime(ahead(86_400_000))).toBe('in 1 day')
   })
 
+  it('does not shave a day off a link that was just minted', () => {
+    // A 7-day link created a second ago is 6.9999 days out. Flooring
+    // made the invite dialog contradict its own picker ("Stops working
+    // after 7 days" → "lapses in 6 days"); same for the 1-day option,
+    // which came out as "in 23h".
+    expect(relativeFutureTime(ahead(7 * 86_400_000 - 1_500))).toBe('in 7 days')
+    expect(relativeFutureTime(ahead(86_400_000 - 1_500))).toBe('in 1 day')
+  })
+
   it('falls back to an absolute date beyond a month', () => {
     expect(relativeFutureTime(ahead(90 * 86_400_000))).toMatch(/^on /)
   })

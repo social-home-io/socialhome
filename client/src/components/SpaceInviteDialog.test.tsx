@@ -60,11 +60,12 @@ const { openSpaceInvite, SpaceInviteDialog } = await import('./SpaceInviteDialog
 
 type Row = Record<string, unknown>
 
-/** Wire up ``api.get`` for the dialog's three reads: space detail,
- *  links list, connection servers. */
+/** Wire up ``api.get`` for the dialog's four reads: space detail, links
+ *  list, connection servers, and the member roster it resolves minter
+ *  names against. */
 function mockReads(
-  { tokens = [], servers = [], linksFail = false }:
-  { tokens?: Row[]; servers?: Row[]; linksFail?: boolean } = {},
+  { tokens = [], servers = [], members = [], linksFail = false }:
+  { tokens?: Row[]; servers?: Row[]; members?: Row[]; linksFail?: boolean } = {},
 ) {
   api.get.mockImplementation((url: string) => {
     if (url.endsWith('/invite-tokens')) {
@@ -73,6 +74,7 @@ function mockReads(
         : Promise.resolve({ tokens })
     }
     if (url === '/api/gfs/connections') return Promise.resolve(servers)
+    if (url.endsWith('/members')) return Promise.resolve(members)
     return Promise.resolve({ name: 'Fetched space name' })
   })
 }
@@ -407,9 +409,53 @@ describe('SpaceInviteDialog — the links list', () => {
     const row = container.querySelector('[data-testid="invite-link-row-t1"]')!
     expect(row.textContent).toContain('2 uses left')
     expect(row.textContent).toContain('by pascal')
-    expect(row.textContent).toContain('lapses in 6 days')
+    // A link minted with a 7-day life reads as seven days, not six —
+    // the sentence must not contradict the picker that made it.
+    expect(row.textContent).toContain('lapses in 7 days')
     expect(container.querySelector('[data-testid="invite-link-row-t2"]')!
       .textContent).toContain('Follower')
+  })
+
+  it('counts uses against the size the link was minted with', async () => {
+    mockReads({
+      tokens: [makeRow({ token: 't1', uses: 5, uses_remaining: 2 })],
+    })
+    const { container } = await openDialog()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-link-row-t1"]'))
+        .not.toBeNull()
+    })
+    expect(container.querySelector('[data-testid="invite-link-row-t1"]')!
+      .textContent).toContain('2 of 5 uses left')
+  })
+
+  it('names the minter instead of printing their opaque user id', async () => {
+    mockReads({
+      tokens: [makeRow({ token: 't1', created_by: 'rvnmljabltqi4mp3a7vot3w7uzz' })],
+      members: [{
+        user_id: 'rvnmljabltqi4mp3a7vot3w7uzz',
+        display_name: 'Maximiliana Featherstonehaugh-Wintergreen',
+      }],
+    })
+    const { container } = await openDialog()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-link-row-t1"]')!
+        .textContent).toContain('by Maximiliana Featherstonehaugh-Wintergreen')
+    })
+  })
+
+  it('keeps the raw id when the minter is no longer a member', async () => {
+    mockReads({
+      tokens: [makeRow({ token: 't1', created_by: 'ghost-id' })],
+      members: [{ user_id: 'someone-else', display_name: 'Someone Else' }],
+    })
+    const { container } = await openDialog()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-link-row-t1"]'))
+        .not.toBeNull()
+    })
+    expect(container.querySelector('[data-testid="invite-link-row-t1"]')!
+      .textContent).toContain('by ghost-id')
   })
 
   it('marks a published link with a 🌐 and offers a link copy', async () => {

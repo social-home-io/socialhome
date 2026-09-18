@@ -14456,6 +14456,20 @@ a.sh-welcome-card:hover {
   word-break: break-all;
   font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-sm);
+  /* The code carries the §D2b bootstrap block, so it runs to ~1 kB of
+   * base64 — left unbounded it filled the whole sheet on a phone and
+   * pushed the Copy button, the published web link and the QR below
+   * the fold. It is meant to be copied, not read: cap it and let the
+   * block scroll inside itself. */
+  max-height: 9.5rem;
+  overflow-y: auto;
+}
+/* The invite dialog's action rows sit MID-dialog (the links list
+ * follows them), so the global sticky-bottom treatment parked them
+ * over the content underneath — clipping the "Active links" heading
+ * and half of "Copy code". Here they are ordinary rows. */
+.sh-invite-dialog .sh-form-actions {
+  position: static;
 }
 /* Invite dialog — role picker, publish toggle, and the live-links
  * list. All three stack in the modal's single column, so nothing here

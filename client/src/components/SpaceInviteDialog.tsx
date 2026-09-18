@@ -55,6 +55,9 @@ interface InviteGfsRef {
 interface InviteTokenRow {
   token: string
   role: InviteRole
+  /** Seats the link was minted with — the denominator of "2 of 5 left".
+   *  Absent on a pre-0053 row; the list then shows the bare remainder. */
+  uses?: number | null
   uses_remaining: number
   expires_at: string | null
   created_by: string
@@ -119,6 +122,11 @@ const loading = signal(false)
 const links = signal<InviteTokenRow[]>([])
 const linksLoading = signal(false)
 const linksError = signal(false)
+/** ``user_id`` → display name for the space's members, so a row can say
+ *  "by Maximiliana" instead of the 32-character opaque id the API
+ *  stores. A minter who has since left the space is not in the map and
+ *  keeps the id — wrong-but-honest beats inventing a name. */
+const memberNames = signal<Record<string, string>>({})
 
 /**
  * Open the invite dialog for ``sid``. ``hint`` is the space's display
@@ -144,6 +152,7 @@ export function openSpaceInvite(
   publishBlocked.value = {}
   links.value = []
   linksError.value = false
+  memberNames.value = {}
   open.value = true
 }
 
@@ -211,6 +220,42 @@ async function loadLinks() {
   }
 }
 
+/** "3 of 5 uses left" when the mint size is known, "3 uses left"
+ *  otherwise. The remaining count alone hid how generous a link was. */
+function usesLabel(row: InviteTokenRow): string {
+  const left = row.uses_remaining
+  const total = row.uses ?? null
+  const noun = left === 1 ? 'use' : 'uses'
+  if (total && total !== left) return `${left} of ${total} ${noun} left`
+  return `${left} ${noun} left`
+}
+
+/** Display name for the link's minter, falling back to the raw id. */
+function creatorName(userId: string): string {
+  return memberNames.value[userId] ?? userId
+}
+
+async function loadMemberNames() {
+  const sid = spaceId.value
+  if (!sid) return
+  try {
+    const rows = await api.get(`/api/spaces/${sid}/members`) as {
+      user_id: string
+      display_name?: string | null
+      space_display_name?: string | null
+    }[]
+    if (spaceId.value !== sid) return
+    const map: Record<string, string> = {}
+    for (const m of rows ?? []) {
+      const name = m.space_display_name || m.display_name
+      if (name) map[m.user_id] = name
+    }
+    memberNames.value = map
+  } catch {
+    // Non-fatal: rows fall back to the raw id.
+  }
+}
+
 async function loadServers() {
   try {
     const r = await api.get('/api/gfs/connections') as GfsConnection[]
@@ -239,6 +284,7 @@ export function SpaceInviteDialog() {
     }
     void loadLinks()
     void loadServers()
+    void loadMemberNames()
     return () => { cancelled = true }
   }, [open.value, spaceId.value])
 
@@ -576,13 +622,13 @@ export function SpaceInviteDialog() {
                     </span>
                   )}
                   <span class="sh-muted">
-                    {l.uses_remaining} use{l.uses_remaining === 1 ? '' : 's'} left
+                    {usesLabel(l)}
                     {' · '}
                     {l.expires_at
                       ? `lapses ${relativeFutureTime(l.expires_at)}`
                       : 'never lapses'}
                     {' · '}
-                    by {l.created_by}
+                    by {creatorName(l.created_by)}
                   </span>
                 </div>
                 <div class="sh-invite-link-row-item__actions">

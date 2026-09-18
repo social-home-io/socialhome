@@ -123,4 +123,31 @@ describe('Modal', () => {
     // input, not the close × button.
     expect(document.activeElement).toBe(input)
   })
+
+  it('Escape closes only the topmost dialog of a stack', () => {
+    // A confirm prompt opens over the dialog that asked for it. One
+    // Escape used to close both, so cancelling a revoke also threw the
+    // user out of the invite tray they were working in.
+    const outer = vi.fn()
+    const inner = vi.fn()
+    const { rerender } = render(
+      <>
+        <Modal open={true} title="Outer" onClose={outer}>outer body</Modal>
+        <Modal open={true} title="Inner" onClose={inner}>inner body</Modal>
+      </>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(inner).toHaveBeenCalledTimes(1)
+    expect(outer).not.toHaveBeenCalled()
+
+    // With the inner one gone the outer takes Escape again.
+    rerender(
+      <>
+        <Modal open={true} title="Outer" onClose={outer}>outer body</Modal>
+        <Modal open={false} title="Inner" onClose={inner}>inner body</Modal>
+      </>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(outer).toHaveBeenCalledTimes(1)
+  })
 })

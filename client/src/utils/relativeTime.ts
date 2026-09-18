@@ -146,9 +146,14 @@ export function relativeFutureTime(iso: string): string {
   const min = Math.floor(ms / MS_PER_MIN)
   if (min < 1) return 'in under a minute'
   if (min < 60) return `in ${min} min`
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return `in ${hr}h`
-  const days = Math.floor(ms / MS_PER_DAY)
+  // Round, don't floor, from here up: a link minted seconds ago with a
+  // 7-day life is 6.9999 days out, and flooring made the confirmation
+  // sentence contradict the picker the user had just used ("Stops
+  // working after 7 days" → "lapses in 6 days"). Same for the 1-day
+  // option, which read as "in 23h".
+  const hr = ms / (MS_PER_MIN * 60)
+  if (hr < 23.5) return `in ${Math.round(hr)}h`
+  const days = Math.round(ms / MS_PER_DAY)
   if (days < 30) return `in ${days} day${days === 1 ? '' : 's'}`
   return `on ${new Date(t).toLocaleDateString(undefined, {
     month: 'short',
