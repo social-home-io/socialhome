@@ -221,7 +221,7 @@ async def test_stream_initial_enqueues_catchup_media(encoder):
         thumbnail_url: str
 
     class _PostRepo:
-        async def list_feed(self, space_id, limit=1000):
+        async def list_for_sync(self, space_id, limit=1000):
             return [
                 _Post(id="post-1", image_urls=("api/media/a.webp",)),
                 _Post(id="post-2", media_url="api/media/v.webm"),

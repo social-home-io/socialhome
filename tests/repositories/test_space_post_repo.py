@@ -114,6 +114,35 @@ async def test_list_feed_excludes_hidden_from_feed(env):
     assert got[1].hidden_from_feed is True
 
 
+async def test_list_for_sync_ships_hidden_anchors_but_not_deleted_posts(env):
+    """The §25.6 catch-up exporters enumerate through ``list_for_sync``.
+
+    A bazaar listing or calendar event the author did not announce hangs
+    on a ``hidden_from_feed`` anchor post; ``bazaar_listings.post_id``
+    references it. ``list_feed`` rightly hides that anchor from readers,
+    but a joiner that never receives it cannot store the listing — the
+    INSERT fails its FK and the listing silently never arrives. So the
+    sync query includes every non-deleted post, flag intact, and still
+    skips soft-deleted rows (the provider never back-emits deletes).
+    """
+    from dataclasses import replace
+
+    visible = _post("sp-sync-vis")
+    hidden = replace(_post("sp-sync-anchor"), hidden_from_feed=True)
+    gone = _post("sp-sync-gone")
+    for p in (visible, hidden, gone):
+        await env.repo.save(env.space_id, p)
+    await env.repo.soft_delete("sp-sync-gone")
+
+    synced = {p.id: p for p in await env.repo.list_for_sync(env.space_id)}
+    assert set(synced) == {"sp-sync-vis", "sp-sync-anchor"}
+    assert synced["sp-sync-anchor"].hidden_from_feed is True
+    # And the feed contract is unchanged: the anchor stays out of it.
+    assert "sp-sync-anchor" not in {
+        p.id for p in await env.repo.list_feed(env.space_id)
+    }
+
+
 async def test_list_feed_excludes_deleted(env):
     """list_feed does not return soft-deleted posts."""
     post = _post("sp-del-1")

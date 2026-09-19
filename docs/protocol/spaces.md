@@ -453,6 +453,14 @@ is opt-in:
 - `BazaarService.create_listing(announce_in_feed=False)` (the default)
   creates the wrapper with `space_posts.hidden_from_feed = 1`. The post is
   excluded from `list_feed` so the listing lives only in the Bazaar tab.
+  The §25.6 catch-up sync enumerates posts through `list_for_sync`
+  instead, which ships every non-deleted post **including** hidden
+  anchors, flag intact: `bazaar_listings.post_id` references
+  `space_posts(id)`, so a joiner that never received the anchor could not
+  store the listing (the INSERT failed its FK and the listing silently
+  never arrived — every unannounced listing, on every joiner, until
+  2026-09). The receiver stores the flag with the row, so the joiner's
+  feed stays exactly as clean as the provider's.
 - `announce_in_feed=True` clears the flag → the listing's card also shows
   in the feed (the historical behaviour).
 - **Federation:** `hidden_from_feed` rides the `SPACE_POST_CREATED`

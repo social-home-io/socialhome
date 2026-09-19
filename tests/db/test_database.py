@@ -309,6 +309,50 @@ async def test_batch_error_is_isolated_to_failing_statement(tmp_dir):
         await db.shutdown()
 
 
+async def test_batch_failure_warning_names_the_statement_not_the_params(
+    tmp_dir, caplog
+):
+    """A statement that fails inside a coalesced batch is named in the log.
+
+    The awaiter gets the exception, but awaiters routinely swallow it at
+    DEBUG (the §25.6 sync receiver does), so before this the only trace
+    of a lost write was a count — "1/3 statements failed" — with no way
+    to tell WHICH write. The WARNING carries the error and the SQL text,
+    and never the bound parameters, which may be someone's content.
+    """
+    import asyncio
+    import logging
+
+    db = AsyncDatabase(tmp_dir / "named.db", batch_timeout_ms=200)
+    await db.startup()
+    try:
+        await db.enqueue("CREATE TABLE parent(id INTEGER PRIMARY KEY)")
+        await db.enqueue(
+            "CREATE TABLE child(id INTEGER PRIMARY KEY, "
+            "parent_id INTEGER REFERENCES parent(id), note TEXT)"
+        )
+        with caplog.at_level(logging.WARNING, logger="socialhome.db.database"):
+            bad = asyncio.create_task(
+                db.enqueue(
+                    "INSERT INTO child(parent_id, note) VALUES(?, ?)",
+                    (999, "SECRET-CONTENT"),
+                )
+            )
+            (outcome,) = await asyncio.gather(bad, return_exceptions=True)
+        assert isinstance(outcome, sqlite3.IntegrityError)
+        named = [
+            r.getMessage()
+            for r in caplog.records
+            if "DB write statement failed" in r.getMessage()
+        ]
+        assert len(named) == 1, caplog.text
+        assert "INSERT INTO child(parent_id, note)" in named[0]
+        assert "FOREIGN KEY" in named[0]
+        assert "SECRET-CONTENT" not in caplog.text
+    finally:
+        await db.shutdown()
+
+
 async def test_executemany(tmp_dir):
     """executemany inserts multiple rows."""
     db = AsyncDatabase(tmp_dir / "em.db", batch_timeout_ms=10)

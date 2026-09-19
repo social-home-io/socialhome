@@ -323,7 +323,7 @@ class SpaceSyncService:
         # Posts
         if self._space_post_repo is not None:
             try:
-                posts = await self._space_post_repo.list_feed(
+                posts = await self._space_post_repo.list_for_sync(
                     space_id,
                     limit=1000,
                 )

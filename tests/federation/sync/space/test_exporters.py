@@ -20,12 +20,18 @@ from socialhome.domain.task import RecurrenceRule, Task, TaskStatus
 
 
 class _FakeSpacePostRepo:
-    def __init__(self, posts, comments_by_post=None):
+    def __init__(self, posts, comments_by_post=None, anchors=None):
         self._posts = posts
+        #: ``hidden_from_feed`` anchor posts: in ``list_for_sync``, never
+        #: in ``list_feed`` — the same split the SQLite repo makes.
+        self._anchors = anchors or []
         self._comments_by_post = comments_by_post or {}
 
     async def list_feed(self, space_id, *, before=None, limit=20):
         return self._posts
+
+    async def list_for_sync(self, space_id, *, limit=1000):
+        return self._posts + self._anchors
 
     async def list_comments(self, post_id):
         return self._comments_by_post.get(post_id, [])
@@ -86,6 +92,36 @@ async def test_posts_exporter_serialises_enums_and_datetimes():
     assert recs[0]["type"] == "text"  # enum → str
     assert recs[0]["created_at"].startswith("2026-04-18")  # datetime → ISO
     assert recs[0]["reactions"] == {}  # frozenset → sorted list
+
+
+async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
+    """A bazaar / calendar anchor the author did not announce is exported.
+
+    ``bazaar_listings.post_id`` references ``space_posts(id)``; a joiner
+    that never receives the anchor cannot store the listing. The exporter
+    therefore enumerates through ``list_for_sync`` (anchors included) and
+    ships ``hidden_from_feed`` so the joiner's feed stays as clean as the
+    provider's.
+    """
+    from socialhome.federation.sync.space.exporters import PostsExporter
+
+    when = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    shown = Post(
+        id="p-shown", author="u-1", type=PostType.TEXT, created_at=when, content="hi"
+    )
+    anchor = Post(
+        id="p-anchor",
+        author="u-1",
+        type=PostType.TEXT,
+        created_at=when,
+        content="listing card",
+        hidden_from_feed=True,
+    )
+    ex = PostsExporter(_FakeSpacePostRepo([shown], anchors=[anchor]))
+    recs = {r["id"]: r for r in await ex.list_records("sp-1")}
+    assert set(recs) == {"p-shown", "p-anchor"}
+    assert recs["p-anchor"]["hidden_from_feed"] is True
+    assert recs["p-shown"]["hidden_from_feed"] is False
 
 
 async def test_comments_exporter_walks_posts():
@@ -302,7 +338,7 @@ async def test_polls_exporter_walks_posts_with_polls():
     post = SimpleNamespace(id="p-1")
 
     class _Posts:
-        async def list_feed(self, space_id, *, limit):
+        async def list_for_sync(self, space_id, *, limit):
             return [post]
 
     class _Polls:
@@ -324,7 +360,7 @@ async def test_polls_exporter_skips_posts_without_polls():
     post = SimpleNamespace(id="p-2")
 
     class _Posts:
-        async def list_feed(self, space_id, *, limit):
+        async def list_for_sync(self, space_id, *, limit):
             return [post]
 
     class _Polls:
@@ -504,7 +540,7 @@ async def test_schedules_exporter_emits_slot_defs():
     )
 
     class _PostRepo:
-        async def list_feed(self, space_id, limit=1000):
+        async def list_for_sync(self, space_id, limit=1000):
             return [post]
 
     class _PollRepo:
