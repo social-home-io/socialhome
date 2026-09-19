@@ -1,0 +1,40 @@
+-- 0052 — remote_keywrap_pk on remote_instances.
+--
+-- A household seated from an invite link (§D2b) has no address: both
+-- sides hold a ``source = 'space_session'`` row with an empty
+-- ``remote_inbox_url`` on purpose. Space events reach it by being sealed
+-- to the peer's static X25519 key-wrap key and handed to the connection
+-- server that introduced the pair (``federation/gfs_relay_transport.py``).
+-- That key has to survive a restart, and today it does not: it arrives
+-- inside a sealed bootstrap body, is used once to derive the directional
+-- session keys, and is dropped.
+--
+-- 1. AUDITED THE CODE PATHS THAT TOUCH THIS ROW. Writers:
+--    ``pairing_coordinator`` (QR pairing), ``auto_pair_coordinator``
+--    (trust-relay pairing), ``federation_inbound/pairing.py`` and
+--    ``invite_token_redeem._seat_space_session_instance`` (this path) —
+--    all go through ``SqliteFederationRepo.save_instance``. Readers of
+--    the key material are ``FederationService.send_event`` (session key)
+--    and the §24.11 inbound pipeline (identity pk). Only the §D2b seat
+--    ever learns a key-wrap key, and only the relay transport needs it;
+--    every other row leaves the column NULL.
+-- 2. WHY NOT RE-DERIVE / REUSE. The key-wrap key cannot be recomputed
+--    from anything on the row: ``remote_identity_pk`` is Ed25519 and this
+--    codebase has no Ed25519→X25519 conversion (that is precisely why the
+--    bootstrap ships a *separate*, self-signed key-wrap key). The derived
+--    session keys are one-way HKDF outputs, not the input. Re-fetching it
+--    from the connection server was rejected: a GFS-served key is exactly
+--    the substitution ``verify_keywrap_binding`` exists to defeat, and the
+--    invite blob that carried the verified one is long gone by then.
+--    Storing it in a federation event or recomputing at read time are
+--    therefore both impossible, not merely awkward.
+--    ``relay_via`` (already "introducer instance_id", written only by
+--    auto-pair) is REUSED to hold the introducing connection server's
+--    base URL on these rows — documented on ``RemoteInstance.relay_via``
+--    — so this migration adds one column, not two.
+-- 3. SMALLEST POSSIBLE CHANGE. Additive, nullable, no default, no
+--    backfill, no index, no rewrite of an existing row. Every existing
+--    row reads NULL and behaves exactly as before; the rows that need a
+--    value are written at seat time from that point on.
+
+ALTER TABLE remote_instances ADD COLUMN remote_keywrap_pk TEXT;

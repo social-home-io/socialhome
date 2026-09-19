@@ -15,7 +15,6 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.calendar import CalendarEventCopy
-from ..domain.federation import PairingStatus
 from ..domain.space import SpaceRole
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
@@ -153,9 +152,10 @@ class CalendarInviteesView(BaseView):
         self.user  # auth check
         fed_repo = self.svc(federation_repo_key)
         user_repo = self.svc(user_repo_key)
-        instances = await fed_repo.list_instances(
-            status=PairingStatus.CONFIRMED.value,
-        )
+        # §D2b: social surface — a ``space_session`` row (a household we
+        # only share a space with, via an invite link) is not a social
+        # peer, so read the social list, not every CONFIRMED row.
+        instances = await fed_repo.list_social_instances()
         groups: list[dict] = []
         for inst in instances:
             members = await user_repo.list_remote_for_instance(inst.id)

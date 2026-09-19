@@ -721,6 +721,44 @@ async def test_connections_response_carries_transport_rtc(client):
     assert row["transport"] == "rtc"
 
 
+async def test_connections_response_reports_the_relay_for_a_link_joined_peer(
+    client,
+):
+    """A household seated from an invite link has NO address and no RTC
+    path — its envelopes ride the connection-server relay. Reporting it
+    as ``"https"`` named a transport that literally cannot be used (its
+    ``remote_inbox_url`` is the empty string by design), so the
+    Connections page told an operator to debug an HTTPS inbox that was
+    never going to exist."""
+    kp = generate_identity_keypair()
+    peer = RemoteInstance(
+        id=derive_instance_id(kp.public_key),
+        display_name="peer-relay",
+        remote_identity_pk=kp.public_key.hex(),
+        key_self_to_remote="k",
+        key_remote_to_self="k",
+        remote_inbox_url="",
+        local_inbox_id="wh-relay",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        relay_via="https://gfs.example.org",
+        remote_keywrap_pk="cc" * 32,
+    )
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(peer)
+
+    class _NeverOpenTransport:
+        def is_ready(self, instance_id):
+            return False
+
+    client.app[federation_transport_key] = _NeverOpenTransport()
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    rows = await r.json()
+    row = next(x for x in rows if x["instance_id"] == peer.id)
+    assert row["transport"] == "gfs_relay"
+
+
 async def test_connections_response_transport_https_when_channel_down(client):
     """Same peer, transport service reports not-ready → transport='https'."""
     kp = generate_identity_keypair()

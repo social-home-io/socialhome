@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { relativeChatTime, relativeDocsTime } from './relativeTime'
+import {
+  relativeChatTime, relativeDocsTime, relativeFutureTime,
+} from './relativeTime'
 
 const FIXED_NOW = new Date('2026-05-08T13:00:00Z').getTime()
 
@@ -89,5 +91,49 @@ describe('SQLite naive-UTC normalisation', () => {
 
   it('echoes garbage that looks vaguely like a timestamp', () => {
     expect(relativeDocsTime('not-a-date')).toBe('not-a-date')
+  })
+})
+
+describe('relativeFutureTime', () => {
+  const ahead = (ms: number) => new Date(FIXED_NOW + ms).toISOString()
+
+  it('renders minutes for something lapsing within the hour', () => {
+    expect(relativeFutureTime(ahead(5 * 60_000))).toBe('in 5 min')
+  })
+
+  it('renders hours within the day', () => {
+    expect(relativeFutureTime(ahead(3 * 3_600_000))).toBe('in 3h')
+  })
+
+  it('renders days up to a month', () => {
+    expect(relativeFutureTime(ahead(7 * 86_400_000))).toBe('in 7 days')
+    expect(relativeFutureTime(ahead(86_400_000))).toBe('in 1 day')
+  })
+
+  it('does not shave a day off a link that was just minted', () => {
+    // A 7-day link created a second ago is 6.9999 days out. Flooring
+    // made the invite dialog contradict its own picker ("Stops working
+    // after 7 days" → "lapses in 6 days"); same for the 1-day option,
+    // which came out as "in 23h".
+    expect(relativeFutureTime(ahead(7 * 86_400_000 - 1_500))).toBe('in 7 days')
+    expect(relativeFutureTime(ahead(86_400_000 - 1_500))).toBe('in 1 day')
+  })
+
+  it('falls back to an absolute date beyond a month', () => {
+    expect(relativeFutureTime(ahead(90 * 86_400_000))).toMatch(/^on /)
+  })
+
+  it('says "expired" for a stamp already in the past', () => {
+    // relativeDocsTime would say "just now" here, which reads as still
+    // alive on a surface whose whole point is the remaining life.
+    expect(relativeFutureTime(iso(60_000))).toBe('expired')
+  })
+
+  it('treats a naive SQLite timestamp as UTC, not local time', () => {
+    expect(relativeFutureTime('2026-05-08 13:05:00')).toBe('in 5 min')
+  })
+
+  it('echoes garbage back', () => {
+    expect(relativeFutureTime('not-a-date')).toBe('not-a-date')
   })
 })

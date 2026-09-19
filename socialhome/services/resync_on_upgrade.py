@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_capabilities import (
     OURS,
     FederationCapability,
@@ -51,7 +51,16 @@ async def request_capability_resync_if_upgraded(
         return 0
 
     sent = 0
-    peers = await federation_repo.list_instances(status=PairingStatus.CONFIRMED.value)
+    # Social peers only — and here that is genuinely enough. This asks a
+    # peer to re-advertise ITS capabilities to us; a household seated
+    # from an invite link (``source = space_session``) is reachable only
+    # through the connection-server relay, so the request and its answer
+    # would cost two relay envelopes to learn something we get for free:
+    # our own startup ``INSTANCE_CAPABILITIES_UPDATED`` fan-out DOES
+    # include space-session peers (see
+    # ``CapabilitiesOutbound.confirmed_peers``), and their announcement
+    # to us rides their fan-out in the same way.
+    peers = await federation_repo.list_social_instances()
     for peer in peers:
         if not await federation.peer_supports(
             peer.id, min_version=FederationCapability.MIN_FOR_INSTANCE_RESYNC

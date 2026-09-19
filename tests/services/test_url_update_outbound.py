@@ -15,6 +15,9 @@ class _FakeFederationRepo:
     def __init__(self, peers: list[RemoteInstance]) -> None:
         self._peers = peers
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(
         self,
         *,

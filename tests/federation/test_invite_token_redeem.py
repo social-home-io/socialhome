@@ -18,27 +18,53 @@ Covers both halves of the cross-instance round-trip:
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    generate_identity_keypair,
+    generate_x25519_keypair,
+    sign_ed25519,
+)
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
 )
+from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
     SpacePermissionError,
+    SpaceRole,
     SpaceType,
 )
+from socialhome.federation.invite_bootstrap import (
+    KIND_REDEEM,
+    KIND_REDEEM_ACK,
+    InviteBootstrapHint,
+    sign_bootstrap_body,
+)
 from socialhome.federation.invite_token_redeem import (
+    BOOTSTRAP_DENY_CLIENT_MESSAGE,
+    REDEEM_DENY_REASON,
+    BOOTSTRAP_INBOUND_LIMIT,
+    BOOTSTRAP_INBOUND_WINDOW_S,
+    BOOTSTRAP_PER_SENDER_LIMIT,
+    BOOTSTRAP_PER_SENDER_WINDOW_S,
     SpaceInviteTokenRedeemCoordinator,
 )
+from socialhome.federation.keywrap_seal import seal_to_keywrap
+from socialhome.rate_limiter import RateLimiter
 
 
 # ── Test doubles ──────────────────────────────────────────────────────
@@ -51,6 +77,9 @@ class _FakeInstance:
 
     id: str
     status: PairingStatus = PairingStatus.CONFIRMED
+    #: Carried over when a stale (non-CONFIRMED) row is replaced by a
+    #: space-session seat — the peer may already hold this URL.
+    local_inbox_id: str = "existing-inbox-id"
 
 
 class _FakeFederationRepo:
@@ -96,7 +125,22 @@ class _FakeSpaceRepo:
         # _on_redeem should populate this so the ACK can carry meta.
         self.space_rows_for_get: dict = {}
 
-    async def consume_invite_token(self, token):
+    async def get_live_invite_token(self, token):
+        """Read-only peek — mirrors the repo's "live" predicate exactly and
+        must never move ``uses_remaining``."""
+        row = self.tokens.get(token)
+        if row is None or row.get("expired") or row["uses_remaining"] <= 0:
+            return None
+        return {
+            "token": token,
+            "space_id": row["space_id"],
+            "created_by": row["created_by"],
+            "uses_remaining": row["uses_remaining"],
+            "expires_at": row.get("expires_at"),
+            "role": row.get("role", SpaceRole.MEMBER.value),
+        }
+
+    async def consume_invite_token(self, token, *, redeemer_user_id=None):
         if self.consume_should_raise is not None:
             raise self.consume_should_raise
         row = self.tokens.get(token)
@@ -106,12 +150,25 @@ class _FakeSpaceRepo:
             return None
         if row["uses_remaining"] <= 0:
             return None
+        # Mirrors the real repo: the §13.7 ban is folded into the same
+        # atomic statement, so a banned redeemer never moves the counter.
+        if (
+            redeemer_user_id is not None
+            and (
+                row["space_id"],
+                redeemer_user_id,
+            )
+            in self.bans
+        ):
+            return None
         row["uses_remaining"] -= 1
         return {
             "space_id": row["space_id"],
             "created_by": row["created_by"],
             "uses_remaining": row["uses_remaining"],
             "expires_at": row.get("expires_at"),
+            # Migration 0053 — the seat the issuer minted the link for.
+            "role": row.get("role", SpaceRole.MEMBER.value),
         }
 
     async def add_space_instance(self, space_id, instance_id):
@@ -138,9 +195,13 @@ class _FakeRemoteMemberRepo:
     def __init__(self):
         self.added: list[dict] = []
         self.removed: list[tuple[str, str, str]] = []
+        self.roles: list[tuple[str, str, str, str]] = []
 
     async def add(self, **kwargs):
         self.added.append(kwargs)
+
+    async def set_role(self, space_id, instance_id, user_id, role):
+        self.roles.append((space_id, instance_id, user_id, role))
 
     async def remove(self, space_id, instance_id, user_id):
         self.removed.append((space_id, instance_id, user_id))
@@ -548,7 +609,7 @@ async def test_redeem_with_expired_token_sends_deny():
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert "invalid, expired, or exhausted" in str(exc.value)
+    assert str(exc.value) == REDEEM_DENY_REASON
     # No member should have been seated.
     assert issuer_members.added == []
 
@@ -588,7 +649,7 @@ async def test_redeem_with_banned_redeemer_sends_deny():
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert "banned" in str(exc.value).lower()
+    assert str(exc.value) == REDEEM_DENY_REASON
     assert issuer_members.added == []
 
 
@@ -628,7 +689,7 @@ async def test_redeem_issuer_storage_error_sends_deny():
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert "storage error" in str(exc.value)
+    assert str(exc.value) == REDEEM_DENY_REASON
 
 
 # ── Timeout tests ─────────────────────────────────────────────────────
@@ -732,6 +793,9 @@ async def test_redeem_deny_with_no_reason_uses_default():
     loop = asyncio.get_event_loop()
     fut: asyncio.Future = loop.create_future()
     coord._pending["n1"] = fut
+    # Every path that mints a nonce records who it was addressed to;
+    # ``_on_redeem_deny`` fails closed without it.
+    coord._pending_issuer["n1"] = "issuer-1"
     ev = FederationEvent(
         msg_id="m1",
         event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
@@ -796,49 +860,112 @@ async def test_redeem_ack_missing_nonce_is_silent_noop():
     await coord._on_redeem_ack(ev)
 
 
-async def test_issuer_is_banned_raises_sends_deny():
-    """``is_banned`` raising on the issuer side ships a DENY back to
-    the receiver rather than swallowing the error silently — the
-    receiver's HTTP request would otherwise hang until timeout."""
+async def test_a_banned_redeemer_never_burns_a_use():
+    """The ban is inside the atomic consume now.
+
+    It used to be a second query AFTER the consume, with no refund: a
+    banned household could spend a twenty-use invite link in twenty
+    requests, and the distinct "banned from this space" reason told it its
+    own ban status one attempt at a time. Both halves are closed here —
+    the counter does not move, and the reason is the same opaque string
+    every other denial ships.
+    """
     fed = _FakeFederationService()
-    space_repo = _FakeSpaceRepo()
-    space_repo.tokens["tok-banned"] = {
-        "space_id": "s-banned",
-        "created_by": "u-issuer",
-        "uses_remaining": 1,
-    }
-
-    class _ExplodingIsBanned(_FakeSpaceRepo):
-        async def is_banned(self, space_id, user_id):
-            raise RuntimeError("storage down")
-
-    repo = _ExplodingIsBanned()
+    repo = _FakeSpaceRepo()
     repo.tokens["tok-banned"] = {
         "space_id": "s-banned",
         "created_by": "u-issuer",
-        "uses_remaining": 1,
+        "uses_remaining": 20,
     }
+    repo.bans.add(("s-banned", "u-x"))
     coord = _make_coordinator(federation=fed, space_repo=repo)
-    ev = FederationEvent(
-        msg_id="m-redeem-banned",
-        event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
-        from_instance="receiver-1",
-        to_instance="me",
-        timestamp="2026-05-22T00:00:00Z",
-        payload={
-            "redeem_nonce": "n-banned",
-            "invite_token": "tok-banned",
-            "redeemer_user_id": "u-x",
-        },
-    )
-    await coord._on_redeem(ev)
-    sent = [
+
+    for attempt in range(3):
+        ev = FederationEvent(
+            msg_id=f"m-redeem-banned-{attempt}",
+            event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+            from_instance="receiver-1",
+            to_instance="me",
+            timestamp="2026-05-22T00:00:00Z",
+            payload={
+                "redeem_nonce": f"n-banned-{attempt}",
+                "invite_token": "tok-banned",
+                "redeemer_user_id": "u-x",
+            },
+        )
+        await coord._on_redeem(ev)
+
+    assert repo.tokens["tok-banned"]["uses_remaining"] == 20
+    denies = [
         s
         for s in fed.sent
         if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
     ]
-    assert len(sent) == 1
-    assert "storage error" in sent[0]["payload"]["reason"]
+    assert len(denies) == 3
+    assert {d["payload"]["reason"] for d in denies} == {REDEEM_DENY_REASON}
+
+
+async def test_every_deny_path_is_byte_identical():
+    """No oracle: unknown token, expired, exhausted, banned and an issuer
+    storage fault must be indistinguishable on the wire."""
+    reasons = set()
+
+    async def _deny_reason_for(repo, *, user_id="u-x"):
+        fed = _FakeFederationService()
+        coord = _make_coordinator(federation=fed, space_repo=repo)
+        await coord._on_redeem(
+            FederationEvent(
+                msg_id="m-oracle",
+                event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+                from_instance="receiver-1",
+                to_instance="me",
+                timestamp="2026-05-22T00:00:00Z",
+                payload={
+                    "redeem_nonce": "n-oracle",
+                    "invite_token": "tok",
+                    "redeemer_user_id": user_id,
+                },
+            ),
+        )
+        denies = [
+            s
+            for s in fed.sent
+            if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
+        ]
+        assert len(denies) == 1
+        return denies[0]["payload"]["reason"]
+
+    # Unknown token.
+    reasons.add(await _deny_reason_for(_FakeSpaceRepo()))
+
+    # Expired.
+    expired = _FakeSpaceRepo()
+    expired.tokens["tok"] = {
+        "space_id": "s",
+        "created_by": "o",
+        "uses_remaining": 1,
+        "expired": True,
+    }
+    reasons.add(await _deny_reason_for(expired))
+
+    # Exhausted.
+    spent = _FakeSpaceRepo()
+    spent.tokens["tok"] = {"space_id": "s", "created_by": "o", "uses_remaining": 0}
+    reasons.add(await _deny_reason_for(spent))
+
+    # Banned.
+    banned = _FakeSpaceRepo()
+    banned.tokens["tok"] = {"space_id": "s", "created_by": "o", "uses_remaining": 5}
+    banned.bans.add(("s", "u-x"))
+    reasons.add(await _deny_reason_for(banned))
+
+    # Issuer storage fault.
+    broken = _FakeSpaceRepo()
+    broken.tokens["tok"] = {"space_id": "s", "created_by": "o", "uses_remaining": 5}
+    broken.consume_should_raise = RuntimeError("storage down")
+    reasons.add(await _deny_reason_for(broken))
+
+    assert reasons == {REDEEM_DENY_REASON}
 
 
 async def test_issuer_seat_failure_sends_deny():
@@ -881,7 +1008,7 @@ async def test_issuer_seat_failure_sends_deny():
         if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
     ]
     assert len(deny) == 1
-    assert "member seat" in deny[0]["payload"]["reason"]
+    assert deny[0]["payload"]["reason"] == REDEEM_DENY_REASON
 
 
 async def test_send_deny_swallows_transport_errors():
@@ -1144,3 +1271,863 @@ async def test_redeem_against_sub_v6_issuer_raises_with_upgrade_hint():
     )
     # No envelope shipped — the gate fired before send_event.
     assert not fed.sent
+
+
+# ── §D2b bootstrap redeem (no pre-existing relationship) ──────────────
+
+
+class _FakeKeyManager:
+    """Reversible stand-in for the KEK wrapper — hex, not encryption."""
+
+    def encrypt(self, raw: bytes) -> str:
+        return raw.hex()
+
+    def decrypt(self, blob: str) -> bytes:
+        return bytes.fromhex(blob)
+
+
+class _Party:
+    """One household's identity + key-wrap material for the §D2b path."""
+
+    def __init__(self, display_name: str) -> None:
+        ident = generate_identity_keypair()
+        self.seed = ident.private_key
+        self.identity_pk = ident.public_key
+        self.instance_id = derive_instance_id(ident.public_key)
+        kw = generate_x25519_keypair()
+        self.keywrap_priv = kw.private_key
+        self.keywrap_pub = kw.public_key
+        self.keywrap_sig = b64url_encode(sign_ed25519(self.seed, kw.public_key))
+        self.display_name = display_name
+
+
+class _RelayBus:
+    """In-process stand-in for the connection server.
+
+    Holds one coordinator per instance id and hands each sealed envelope
+    straight to the addressed one. Records every envelope so tests can
+    assert on what a real relay would have been able to see.
+    """
+
+    def __init__(self) -> None:
+        self.coordinators: dict = {}
+        self.envelopes: list[tuple[str, dict]] = []
+        #: The connection server each blob was addressed through — the
+        #: redeemer hands its request to the server that served the
+        #: invite blob, the issuer answers on the one it arrived on.
+        self.gfs_urls: list[str] = []
+        self.deliver = True
+
+    def sender_for(self, _from_instance: str):
+        bus = self
+
+        class _Sender:
+            async def send_sealed_envelope(
+                self,
+                *,
+                to_instance_id,
+                envelope,
+                gfs_url="",
+            ):
+                bus.envelopes.append((to_instance_id, envelope))
+                bus.gfs_urls.append(gfs_url)
+                if not bus.deliver:
+                    return False
+                target = bus.coordinators.get(to_instance_id)
+                if target is None:
+                    return False
+                # A real connection server pushes the blob down the
+                # socket it holds, so the receiver learns which server
+                # carried it — and answers on that one.
+                await target.handle_relayed_envelope(envelope, gfs_url=gfs_url)
+                return True
+
+        return _Sender()
+
+
+class _BootstrapFederationService(_FakeFederationService):
+    """``_FakeFederationService`` plus the identity + replay surface the
+    bootstrap path reads."""
+
+    def __init__(self, party: _Party) -> None:
+        super().__init__(own_instance_id=party.instance_id)
+        self._party = party
+        self._seen: set[str] = set()
+
+    @property
+    def own_identity_pk(self) -> bytes:
+        return self._party.identity_pk
+
+    @property
+    def own_identity_seed(self) -> bytes:
+        return self._party.seed
+
+    async def note_replay_id(self, msg_id: str) -> bool:
+        if msg_id in self._seen:
+            return True
+        self._seen.add(msg_id)
+        return False
+
+
+class _BootstrapFederationRepo(_FakeFederationRepo):
+    def __init__(self, party: _Party, instances=None):
+        super().__init__(instances)
+        self.party = party
+        self.saved: list = []
+
+    async def get_local_identity(self):
+        return {"display_name": self.party.display_name}
+
+    async def save_instance(self, instance):
+        self.saved.append(instance)
+        self._instances[instance.id] = instance
+
+
+def _hint_for(
+    party: _Party,
+    *,
+    space_id="space-1",
+    token="tok-1",
+    proto=OURS,
+    gfs_url="https://gfs.example.org",
+):
+    return InviteBootstrapHint(
+        gfs_url=gfs_url,
+        invite_token=token,
+        space_id=space_id,
+        instance_id=party.instance_id,
+        identity_pk=party.identity_pk.hex(),
+        keywrap_pk=party.keywrap_pub.hex(),
+        keywrap_sig=party.keywrap_sig,
+        proto_version=proto,
+        display_hint=party.display_name,
+    )
+
+
+def _bootstrap_pair(
+    *,
+    min_age=0,
+    banned=False,
+    token_uses=1,
+    expired=False,
+    role=SpaceRole.MEMBER.value,
+):
+    """Wire a redeemer + an issuer coordinator over a fake relay."""
+    relay = _RelayBus()
+    redeemer_party = _Party("Redeemer household")
+    issuer_party = _Party("Issuer household")
+
+    r_fed = _BootstrapFederationService(redeemer_party)
+    i_fed = _BootstrapFederationService(issuer_party)
+    r_repo = _BootstrapFederationRepo(redeemer_party)
+    i_repo = _BootstrapFederationRepo(issuer_party)
+
+    r_spaces = _FakeSpaceRepo()
+    i_spaces = _FakeSpaceRepo()
+    i_spaces.tokens["tok-1"] = {
+        "space_id": "space-1",
+        "created_by": "u-owner",
+        "uses_remaining": token_uses,
+        "expired": expired,
+        "role": role,
+    }
+    i_spaces.space_rows_for_get["space-1"] = _a_space(
+        "space-1",
+        owner_instance_id=issuer_party.instance_id,
+        min_age=min_age,
+    )
+    if banned:
+        i_spaces.bans.add(("space-1", "u-local"))
+
+    redeemer = _make_coordinator(
+        federation=r_fed,
+        federation_repo=r_repo,
+        space_repo=r_spaces,
+    )
+    i_members = _FakeRemoteMemberRepo()
+    issuer = _make_coordinator(
+        federation=i_fed,
+        federation_repo=i_repo,
+        space_repo=i_spaces,
+        remote_members=i_members,
+    )
+    for coord, party in ((redeemer, redeemer_party), (issuer, issuer_party)):
+        coord.attach_bootstrap(
+            relay_sender=relay.sender_for(party.instance_id),
+            keywrap_private_key=party.keywrap_priv,
+            keywrap_public_key=party.keywrap_pub,
+            keywrap_sig=party.keywrap_sig,
+            key_manager=_FakeKeyManager(),
+        )
+    relay.coordinators[redeemer_party.instance_id] = redeemer
+    relay.coordinators[issuer_party.instance_id] = issuer
+    return SimpleNamespace(
+        relay=relay,
+        redeemer=redeemer,
+        issuer=issuer,
+        redeemer_party=redeemer_party,
+        issuer_party=issuer_party,
+        redeemer_repo=r_repo,
+        issuer_repo=i_repo,
+        redeemer_spaces=r_spaces,
+        issuer_spaces=i_spaces,
+        issuer_members=i_members,
+        hint=_hint_for(issuer_party),
+    )
+
+
+async def test_bootstrap_redeem_round_trip_seats_the_space():
+    """A stranger's invite link joins the space with no pairing."""
+    env = _bootstrap_pair()
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["space_id"] == "space-1"
+    assert result["role"] == SpaceRole.MEMBER.value
+    # Issuer seated us; we seated the issuer's space mapping.
+    assert (
+        "space-1",
+        env.redeemer_party.instance_id,
+    ) in env.issuer_spaces.space_instances
+    assert (
+        "space-1",
+        env.issuer_party.instance_id,
+    ) in env.redeemer_spaces.space_instances
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
+
+
+async def test_bootstrap_seats_a_space_scoped_instance_on_both_sides():
+    """The row must be ``space_session``, never a full social peer."""
+    env = _bootstrap_pair()
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    for repo in (env.redeemer_repo, env.issuer_repo):
+        assert len(repo.saved) == 1
+        row = repo.saved[0]
+        assert row.source is InstanceSource.SPACE_SESSION
+        assert row.status is PairingStatus.CONFIRMED
+        # No address is exchanged on this path by design.
+        assert row.remote_inbox_url == ""
+
+
+async def test_bootstrap_session_keys_mirror_across_the_pair():
+    env = _bootstrap_pair()
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    km = _FakeKeyManager()
+    r_row = env.redeemer_repo.saved[0]
+    i_row = env.issuer_repo.saved[0]
+    assert km.decrypt(r_row.key_self_to_remote) == km.decrypt(i_row.key_remote_to_self)
+    assert km.decrypt(i_row.key_self_to_remote) == km.decrypt(r_row.key_remote_to_self)
+
+
+async def test_bootstrap_relay_sees_only_the_recipient():
+    """Identity-free routing envelope (#677)."""
+    env = _bootstrap_pair()
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert env.relay.envelopes
+    for to_instance, envelope in env.relay.envelopes:
+        assert set(envelope) == {"to_instance", "sealed"}
+        blob = json.dumps(envelope)
+        assert "tok-1" not in blob
+        assert "space-1" not in blob
+        assert "u-local" not in blob
+        # The sender never appears — only the addressee.
+        senders = {env.redeemer_party.instance_id, env.issuer_party.instance_id}
+        assert senders - {to_instance} != set()
+        assert (senders - {to_instance}).pop() not in blob
+
+
+async def test_bootstrap_rejected_when_issuer_is_too_old():
+    """Sub-v_29 issuer → the unchanged "pair with them" message."""
+    env = _bootstrap_pair()
+    stale_hint = _hint_for(env.issuer_party, proto=OURS - 1)
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=stale_hint,
+        )
+    assert "no route to issuer — pair with them" in str(exc.value)
+    assert env.relay.envelopes == []
+
+
+async def test_bootstrap_unknown_token_denies_and_seats_nothing():
+    env = _bootstrap_pair()
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "no-such-token",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
+    assert env.issuer_repo.saved == []
+    assert env.issuer_spaces.space_instances == []
+
+
+async def test_bootstrap_expired_token_denies():
+    env = _bootstrap_pair(expired=True)
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
+
+
+async def test_bootstrap_exhausted_token_denies():
+    env = _bootstrap_pair(token_uses=0)
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
+
+
+async def test_bootstrap_banned_redeemer_denies():
+    env = _bootstrap_pair(banned=True)
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
+
+
+async def test_bootstrap_age_gate_blocks_underage_redeemer():
+    """§CP.F1 — the host's min_age rides the ACK and gates seating."""
+    cp = SimpleNamespace(is_age_allowed=AsyncMock(return_value=False))
+    env = _bootstrap_pair(min_age=18)
+    env.redeemer._child_protection = cp
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert "restricted to users aged 18+" in str(exc.value)
+    # Nothing seated locally — not even the space-session instance row.
+    assert env.redeemer_repo.saved == []
+    assert env.redeemer_spaces.space_instances == []
+
+
+async def test_bootstrap_replayed_envelope_is_rejected():
+    env = _bootstrap_pair(token_uses=2)
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    first_to, first_env = env.relay.envelopes[0]
+    assert first_to == env.issuer_party.instance_id
+    with pytest.raises(ValueError, match="Replay detected"):
+        await env.issuer.handle_relayed_envelope(first_env)
+    # The replay must not have consumed a second use.
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+
+
+async def test_bootstrap_spoofed_identity_is_rejected():
+    """§4.1.2 — a body claiming somebody else's instance_id is refused."""
+    env = _bootstrap_pair()
+    victim = _Party("Victim")
+    body = {
+        "kind": KIND_REDEEM,
+        "invite_token": "tok-1",
+        "space_id": "space-1",
+        "redeem_nonce": "n" * 32,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "instance_id": victim.instance_id,  # not ours
+        "identity_pk": env.redeemer_party.identity_pk.hex(),
+        "keywrap_pk": env.redeemer_party.keywrap_pub.hex(),
+        "keywrap_sig": env.redeemer_party.keywrap_sig,
+        "display_name": "spoofed",
+        "redeemer_user_id": "u-evil",
+        "redeemer_display_name": "Evil",
+        "redeemer_public_key": None,
+    }
+    signed = sign_bootstrap_body(body, identity_seed=env.redeemer_party.seed)
+    envelope = {
+        "to_instance": env.issuer_party.instance_id,
+        "sealed": seal_to_keywrap(
+            recipient_keywrap_pub=env.issuer_party.keywrap_pub,
+            plaintext=json.dumps(signed).encode(),
+        ),
+    }
+    with pytest.raises(ValueError, match="does not match identity_pk"):
+        await env.issuer.handle_relayed_envelope(envelope)
+    # Fail-closed: the token was never consumed.
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+    assert env.issuer_repo.saved == []
+
+
+async def test_bootstrap_unbound_keywrap_key_is_rejected():
+    """We must not seal a space snapshot to a key nobody vouched for."""
+    env = _bootstrap_pair()
+    attacker_kw = generate_x25519_keypair()
+    body = {
+        "kind": KIND_REDEEM,
+        "invite_token": "tok-1",
+        "space_id": "space-1",
+        "redeem_nonce": "n" * 32,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "instance_id": env.redeemer_party.instance_id,
+        "identity_pk": env.redeemer_party.identity_pk.hex(),
+        "keywrap_pk": attacker_kw.public_key.hex(),
+        "keywrap_sig": env.redeemer_party.keywrap_sig,
+        "display_name": "sneaky",
+        "redeemer_user_id": "u-local",
+        "redeemer_display_name": "Ada",
+        "redeemer_public_key": None,
+    }
+    signed = sign_bootstrap_body(body, identity_seed=env.redeemer_party.seed)
+    envelope = {
+        "to_instance": env.issuer_party.instance_id,
+        "sealed": seal_to_keywrap(
+            recipient_keywrap_pub=env.issuer_party.keywrap_pub,
+            plaintext=json.dumps(signed).encode(),
+        ),
+    }
+    with pytest.raises(ValueError, match="not bound to its identity"):
+        await env.issuer.handle_relayed_envelope(envelope)
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+
+
+async def test_bootstrap_reply_from_another_household_is_dropped():
+    """The reply leg is pinned to the identity the invite blob named."""
+    env = _bootstrap_pair()
+    imposter = _Party("Imposter")
+    # Park a pending redeem by hand so we can aim a reply at its nonce.
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    env.redeemer._pending["n1"] = fut
+    env.redeemer._bootstrap_hints["n1"] = env.hint
+    body = {
+        "kind": KIND_REDEEM_ACK,
+        "redeem_nonce": "n1",
+        "space_id": "space-1",
+        "role": "member",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "instance_id": imposter.instance_id,
+        "identity_pk": imposter.identity_pk.hex(),
+        "keywrap_pk": imposter.keywrap_pub.hex(),
+        "keywrap_sig": imposter.keywrap_sig,
+        "display_name": "Imposter",
+    }
+    signed = sign_bootstrap_body(body, identity_seed=imposter.seed)
+    envelope = {
+        "to_instance": env.redeemer_party.instance_id,
+        "sealed": seal_to_keywrap(
+            recipient_keywrap_pub=env.redeemer_party.keywrap_pub,
+            plaintext=json.dumps(signed).encode(),
+        ),
+    }
+    with pytest.raises(ValueError, match="did not address"):
+        await env.redeemer.handle_relayed_envelope(envelope)
+    assert not fut.done()
+
+
+async def test_bootstrap_relay_failure_surfaces_as_permission_error():
+    env = _bootstrap_pair()
+    env.relay.deliver = False
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert "connection server" in str(exc.value)
+
+
+async def test_bootstrap_not_offered_without_a_hint():
+    """Without the invite blob there is nothing to address — unchanged."""
+    env = _bootstrap_pair()
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+        )
+    assert "not a confirmed peer" in str(exc.value)
+
+
+async def test_bootstrap_hint_for_a_different_issuer_is_ignored():
+    env = _bootstrap_pair()
+    with pytest.raises(SpacePermissionError) as exc:
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id="some-other-household",
+            bootstrap=env.hint,
+        )
+    assert "not a confirmed peer" in str(exc.value)
+
+
+async def test_bootstrap_does_not_overwrite_an_existing_relationship():
+    """A real pairing must never be re-keyed by an invite link."""
+    env = _bootstrap_pair()
+    existing = _FakeInstance(env.redeemer_party.instance_id)
+    env.issuer_repo._instances[env.redeemer_party.instance_id] = existing
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert env.issuer_repo.saved == []
+    assert env.issuer_repo._instances[env.redeemer_party.instance_id] is existing
+
+
+async def test_a_stale_unconfirmed_row_is_upgraded_to_a_relay_seat():
+    """ "Never re-key an existing relationship" must mean an existing
+    *relationship*, not an existing ROW.
+
+    A household can already have a non-CONFIRMED ``remote_instances`` row
+    for us — an abandoned QR pairing left at ``pending_sent``, a
+    handshake that timed out. The
+    seat used to early-return on ANY row, so it wrote no session keys, no
+    ``relay_via`` and no key-wrap key: the redeem ACKed, both sides
+    believed they were seated, and then every single envelope failed
+    because the transport had nothing to seal to. Silent, and only
+    visible as "the space is there but nothing ever arrives".
+    """
+    env = _bootstrap_pair()
+    stale = _FakeInstance(
+        env.redeemer_party.instance_id,
+        status=PairingStatus.PENDING_SENT,
+    )
+    env.issuer_repo._instances[env.redeemer_party.instance_id] = stale
+
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+
+    saved = [i for i in env.issuer_repo.saved if i.id == env.redeemer_party.instance_id]
+    assert saved, "the stale row must be replaced by a usable relay seat"
+    seat = saved[-1]
+    assert seat.status is PairingStatus.CONFIRMED
+    assert seat.source is InstanceSource.SPACE_SESSION
+    # The three things the relay transport reads on every send.
+    assert seat.remote_keywrap_pk
+    assert seat.relay_via
+    assert seat.key_self_to_remote and seat.key_remote_to_self
+    # The inbox URL the peer may already hold survives the replacement.
+    assert seat.local_inbox_id == "existing-inbox-id"
+
+
+async def test_bootstrap_inbound_is_rate_limited_process_wide():
+    """The relay hands us blobs from anyone — cap them before the unseal."""
+    env = _bootstrap_pair()
+    limiter = RateLimiter()
+    env.issuer._rate_limiter = limiter
+    for _ in range(BOOTSTRAP_INBOUND_LIMIT):
+        assert limiter.is_allowed(
+            "invite-bootstrap:inbound",
+            limit=BOOTSTRAP_INBOUND_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        )
+    with pytest.raises(ValueError, match="inbound rate limit"):
+        await env.issuer.handle_relayed_envelope(
+            {"to_instance": env.issuer_party.instance_id, "sealed": {}},
+        )
+
+
+async def test_bootstrap_inbound_is_rate_limited_per_sender():
+    """One household can't burn the whole process-wide budget."""
+    env = _bootstrap_pair(token_uses=5)
+    limiter = RateLimiter()
+    env.issuer._rate_limiter = limiter
+    bucket = f"invite-bootstrap:sender:{env.redeemer_party.instance_id}"
+    for _ in range(BOOTSTRAP_PER_SENDER_LIMIT):
+        assert limiter.is_allowed(
+            bucket,
+            limit=BOOTSTRAP_PER_SENDER_LIMIT,
+            window_s=BOOTSTRAP_PER_SENDER_WINDOW_S,
+        )
+    body = sign_bootstrap_body(
+        {
+            "kind": KIND_REDEEM,
+            "invite_token": "tok-1",
+            "space_id": "space-1",
+            "redeem_nonce": "n" * 32,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "instance_id": env.redeemer_party.instance_id,
+            "identity_pk": env.redeemer_party.identity_pk.hex(),
+            "keywrap_pk": env.redeemer_party.keywrap_pub.hex(),
+            "keywrap_sig": env.redeemer_party.keywrap_sig,
+            "display_name": "Redeemer",
+            "redeemer_user_id": "u-local",
+            "redeemer_display_name": "Ada",
+            "redeemer_public_key": None,
+        },
+        identity_seed=env.redeemer_party.seed,
+    )
+    envelope = {
+        "to_instance": env.issuer_party.instance_id,
+        "sealed": seal_to_keywrap(
+            recipient_keywrap_pub=env.issuer_party.keywrap_pub,
+            plaintext=json.dumps(body).encode(),
+        ),
+    }
+    with pytest.raises(ValueError, match="per-sender rate limit"):
+        await env.issuer.handle_relayed_envelope(envelope)
+    # Throttled before the token was touched.
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 5
+
+
+async def test_bootstrap_both_legs_travel_through_the_blob_s_server():
+    """The redeemer hands its request to the connection server that served
+    the invite blob, and the issuer answers on the same one — a household
+    paired with several servers must not reply somewhere the requester
+    isn't listening."""
+    env = _bootstrap_pair()
+    hint = _hint_for(env.issuer_party, gfs_url="https://relay-b.example")
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=hint,
+    )
+    assert env.relay.gfs_urls == ["https://relay-b.example"] * 2
+
+
+# ── Invite-link roles (migration 0053) ────────────────────────────────
+
+
+async def test_redeem_of_an_admin_link_seats_an_admin():
+    """The seat comes off the ISSUER's stored row. An ``admin`` link
+    lands the redeemer's household as an admin of the space — on the
+    issuer's roster and in the ACK the receiver mirrors."""
+    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-admin",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.ADMIN.value,
+        },
+    )
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.ADMIN.value
+    assert issuer_members.roles == [
+        ("sp-admin", "sender-1", "u-local", SpaceRole.ADMIN.value)
+    ]
+
+
+async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
+    """An admin met through a public link gets the ROLE and nothing else.
+
+    The space's signing seed is the authority to act AS the space, and
+    the connection server pins a space's authority key TOFU-immutably —
+    so if this household later turns out to be the wrong one to trust,
+    the seed cannot be rotated away from it. A link is not an
+    acquaintance: anyone who saw the URL could be holding it. The seat
+    is therefore a delegated admin WITHOUT authority — its actions ride
+    ``SPACE_REMOTE_ADMIN_ACTION`` to the host, which signs them. The
+    seed still travels on an explicit promotion
+    (``set_remote_member_role``), which is a deliberate act about a
+    household the owner already knows.
+    """
+    sender, issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-seed",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.ADMIN.value,
+        },
+    )
+    # Nothing on the coordinator may even be able to ship a seed.
+    assert not hasattr(issuer, "attach_admin_seed_sharer")
+
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+
+    assert result["role"] == SpaceRole.ADMIN.value
+    assert issuer_members.roles == [
+        ("sp-seed", "sender-1", "u-local", SpaceRole.ADMIN.value)
+    ]
+
+
+async def test_subscriber_link_is_refused_across_households():
+    """``space_remote_members.role`` admits member|admin only (migration
+    0009 — a subscriber has no row there at all). Rather than silently
+    upgrading a reader to a writer, the cross-household redeem of a
+    subscriber link fails closed with a reason the SPA can render."""
+    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    with pytest.raises(SpacePermissionError) as exc:
+        await sender.request_redeem(
+            "good-token",
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
+    assert "household that issued it" in str(exc.value)
+    assert issuer_members.added == []
+
+
+async def test_a_published_follower_link_cannot_be_burned_by_strangers():
+    """The refusal used to run AFTER the atomic consume, so every stranger
+    who opened a published Follower link spent one of its uses on a denial.
+    A 20-use link shared in a group chat was dead before the first person
+    it was meant for got to it. Read the seat, refuse, and leave the
+    counter exactly where it was."""
+    sender, _issuer, _sf, _if, repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 20,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    for _ in range(3):
+        with pytest.raises(SpacePermissionError):
+            await sender.request_redeem(
+                "good-token",
+                viewer_user_id="u-local",
+                issuer_instance_id="issuer-1",
+            )
+
+    assert repo.tokens["good-token"]["uses_remaining"] == 20
+    assert issuer_members.added == []
+
+
+async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
+    """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so
+    the role reaches a household that has never federated with us too."""
+    env = _bootstrap_pair(role=SpaceRole.ADMIN.value)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["role"] == SpaceRole.ADMIN.value
+    assert env.issuer_members.roles == [
+        ("space-1", env.redeemer_party.instance_id, "u-local", SpaceRole.ADMIN.value)
+    ]
+
+
+# ─── §D2: an ACK is only an ACK from the household we addressed ───────
+
+
+async def test_a_redeem_ack_from_a_household_we_did_not_address_is_ignored():
+    """``redeem_nonce`` addresses an in-flight redeem, not an identity.
+
+    Any confirmed peer can send us a SPACE_INVITE_TOKEN_REDEEM_ACK, and
+    without a pin one of them could answer a redeem aimed at somebody
+    else — resolving our Future with ITS ``space_meta``, which is what
+    the local seating then writes: a stub space, a membership row and a
+    roster, all sourced from a household we never asked. The §D2b
+    bootstrap leg already pins its reply to the issuer the invite blob
+    named; this is the same pin for the paired leg.
+    """
+    sender, _issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-pin", "created_by": "owner", "uses_remaining": 1},
+    )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    sender._pending["nonce-1"] = fut
+    sender._pending_issuer["nonce-1"] = "issuer-1"
+
+    await sender._on_redeem_ack(
+        SimpleNamespace(
+            from_instance="an-unrelated-peer",
+            payload={
+                "redeem_nonce": "nonce-1",
+                "space_id": "sp-theirs",
+                "role": SpaceRole.ADMIN.value,
+                "space_meta": {"id": "sp-theirs"},
+            },
+        ),
+    )
+
+    assert not fut.done()
+
+
+async def test_a_redeem_deny_from_a_household_we_did_not_address_is_ignored():
+    """Same pin on the refusal leg — otherwise any peer can cancel
+    somebody else's redeem by guessing nothing more than a nonce it
+    happens to observe."""
+    sender, _issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-pin", "created_by": "owner", "uses_remaining": 1},
+    )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    sender._pending["nonce-2"] = fut
+    sender._pending_issuer["nonce-2"] = "issuer-1"
+
+    await sender._on_redeem_deny(
+        SimpleNamespace(
+            from_instance="an-unrelated-peer",
+            payload={"redeem_nonce": "nonce-2", "reason": "nope"},
+        ),
+    )
+
+    assert not fut.done()
+
+
+async def test_the_addressed_issuer_still_resolves_the_redeem():
+    """The other side of the pin: the household we actually addressed
+    resolves the Future exactly as before."""
+    sender, _issuer, _sf, _if, _repo, _members = _wire_pair(
+        {"space_id": "sp-pin", "created_by": "owner", "uses_remaining": 1},
+    )
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    sender._pending["nonce-3"] = fut
+    sender._pending_issuer["nonce-3"] = "issuer-1"
+
+    await sender._on_redeem_ack(
+        SimpleNamespace(
+            from_instance="issuer-1",
+            payload={
+                "redeem_nonce": "nonce-3",
+                "space_id": "sp-pin",
+                "role": SpaceRole.MEMBER.value,
+            },
+        ),
+    )
+
+    assert fut.result()["space_id"] == "sp-pin"

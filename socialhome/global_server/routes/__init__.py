@@ -45,6 +45,8 @@ from .admin import (
     AdminSpaceCollectionView,
     AdminUiIndexView,
 )
+from .envelope import EnvelopeRelayView
+from .invites import SpaceInviteTokenView, SpaceInviteView
 from .cluster import (
     ClusterHealthView,
     ClusterSignalingBeginView,
@@ -150,6 +152,10 @@ def register_routes(
     # stay open. The protocol is otherwise identical to the WS frames.
     app.router.add_view("/gfs/publish", PublishView)
     app.router.add_view("/gfs/subscribe", SubscribeView)
+    # Opaque household-to-household relay (§D2b invite bootstrap). Anonymous
+    # by design: the body names only the recipient, the payload is sealed
+    # end-to-end, and every well-formed request gets the same 202.
+    app.router.add_view("/gfs/envelope", EnvelopeRelayView)
     app.router.add_view("/gfs/report", ReportView)
     app.router.add_view("/gfs/appeal", AppealView)
     app.router.add_view("/gfs/spaces", SpacesListView)
@@ -157,6 +163,14 @@ def register_routes(
     app.router.add_view("/gfs/spaces/{space_id}/subscribers", SpaceSubscribersView)
     app.router.add_view("/gfs/spaces/{space_id}/publish", SpacePublishView)
     app.router.add_view("/gfs/spaces/{space_id}/unpublish", SpaceUnpublishView)
+    # Owner-minted invite links (§24.8.5). The mint/revoke pair is signed by
+    # the owning household; the public half is ``GET /join/{gfs_token}``
+    # below.
+    app.router.add_view("/gfs/spaces/{space_id}/invite", SpaceInviteView)
+    app.router.add_view(
+        "/gfs/spaces/{space_id}/invite/{gfs_token}",
+        SpaceInviteTokenView,
+    )
     app.router.add_view("/healthz", HealthzView)
 
     # Public SSR pages (spec §24.7 / §24.8) — staying procedural since

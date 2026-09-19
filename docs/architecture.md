@@ -221,6 +221,21 @@ event needs and whether the peer is reachable:
 | 1 — hot | WebRTC DataChannel `fed-v1` | Routine, real-time envelopes once the P2P channel is up. |
 | 2 — warm | WebRTC DataChannel `sync-v1` | Bulk content sync (initial sync after pairing, recovery after long offline). |
 | 3 — cold | HTTPS inbox `POST /federation/inbox/{id}` | Fallback before/while DataChannel is down, and for peers behind a blocked UDP path. |
+| 4 — no address | Connection-server envelope relay `POST {gfs}/gfs/envelope` | Households seated from an invite link (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. |
+
+Tier 4 is a `TransportStrategy` like the others
+(`federation/gfs_relay_transport.GfsRelayTransport`), selected in
+`FederationTransport.send` on `source = space_session` and never for a
+peer that has an address. Because the connection server is a third party
+— not a household — the whole §24.11 envelope (its routing fields are
+plaintext by construction) is sealed to the peer's static X25519 key-wrap
+key before the relay sees it, so the *wire* carries only `(to_instance,
+time, size)` — no sender, no space, no event type, no token. That is a
+statement about the request body, not about the socket: the sending
+household's IP is still in the connection server's HTTP access log. See
+[`protocol/invites.md`](./protocol/invites.md) for the wire shape and
+[`principles.md`](./principles.md) for that residual and the rest of the
+metadata this tier concedes.
 
 The Connections page renders the current per-peer transport tier as
 an inline glyph (⚡ for WebRTC, ☁ for HTTPS), updated live via the
@@ -230,11 +245,11 @@ that recently received a relayed DM, the relay path. The signal is
 strictly diagnostic — federation behaviour is identical at every
 tier; only the latency differs.
 
-Both tiers run their inbound traffic through the same §24.11
+All tiers run their inbound traffic through the same §24.11
 validation pipeline (parse → timestamp → instance lookup → ban check
 → Ed25519 verify → replay cache → decrypt → dispatch). Whether an
-envelope arrives over RTC or HTTPS is invisible to the per-event
-handlers; both paths land in
+envelope arrives over RTC, HTTPS or the connection-server relay is
+invisible to the per-event handlers; every path lands in
 `federation/inbound_validator.InboundPipeline`.
 
 ```mermaid
@@ -400,6 +415,16 @@ boundary). The
 `infrastructure/replay_cache_scheduler.py` evicts entries older than
 the §24.11 horizon on a slow cadence so the table doesn't grow
 unboundedly.
+
+That horizon (`crypto.REPLAY_CACHE_WINDOW`) is **25 h**, and it is set by
+the widest timestamp window any transport allows, not by the outbox's
+~5.2 h redelivery cadence. A §D2b envelope carried by the connection
+server's store-and-forward relay may be drained up to 24 h after it was
+signed, so the timestamp step accepts `24 h + 300 s` for that transport
+(`RELAY_TIMESTAMP_SKEW_SECONDS`). A timestamp window is only as safe as
+the replay memory behind it — anywhere the two diverge a captured
+envelope can be replayed into the gap — so the retention is held
+strictly above it and a test asserts the inequality.
 
 ### Idempotency keys
 

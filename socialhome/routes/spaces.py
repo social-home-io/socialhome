@@ -5,6 +5,8 @@ Thin handlers delegating to :class:`SpaceService`.
 
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
 from aiohttp.multipart import BodyPartReader
@@ -22,6 +24,7 @@ from ..app_keys import (
     online_status_service_key,
     presence_service_key,
     profile_picture_repo_key,
+    rate_limiter_key,
     space_bot_repo_key,
     space_cover_repo_key,
     space_icon_repo_key,
@@ -40,14 +43,17 @@ from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SpaceFeatures,
     SpacePermissionError,
+    SpaceRole,
     SpaceZone,
 )
 from ..domain.space_proposal import ProposalAction
 from ..domain.user import SYSTEM_AUTHOR
 from ..domain.federation import PairingStatus
+from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
+from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_service import (
     DEFAULT_INVITE_TOKEN_TTL_SECONDS,
     _UNSET_MEMBER_PROFILE,
@@ -1151,12 +1157,38 @@ class SpaceBanView(BaseView):
 
 
 class SpaceInviteTokenView(BaseView):
-    """POST /api/spaces/{id}/invite-tokens — create an invite token.
+    """``POST /api/spaces/{id}/invite-tokens`` — mint an invite link.
+    ``GET`` — list the space's live links (admin or owner).
 
-    Body: ``{uses?: int, ttl_seconds?: int | null}``. ``ttl_seconds``
-    defaults to :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS`; an explicit
-    ``null`` mints a token that never expires (uses-limited only).
+    POST body: ``{role?, uses?, ttl_seconds?: int | null, publish_to_gfs?}``.
+    ``role`` is the seat the redeemer lands in (``member`` — the default
+    — / ``subscriber`` / ``admin``) and is the ISSUER's decision: it is
+    stored on the token row and the redeemer never gets to ask for it.
+    Minting ``admin`` is owner-only, ``owner`` is never mintable.
+    ``publish_to_gfs`` is a paired connection server's id — the link's
+    blob is parked there and the response carries the shareable URL.
+
+    ``ttl_seconds`` bounds the link's lifetime and defaults to
+    :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS` when omitted. **Both
+    ``null`` and ``0`` mean "never expires"** (uses-limited only): the
+    service's own contract is ``None``, and the SPA's expiry picker
+    sends the integer ``0`` for its "Never" option, so the two spellings
+    are normalised here at the boundary rather than leaving one of them
+    to 422 on a perfectly reasonable request. Anything else must be a
+    positive integer.
+
+    GET returns only still-redeemable links: an expired or exhausted one
+    grants nothing, so there is nothing to show or revoke.
     """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        links = await svc.list_invite_links(
+            self.match("id"),
+            actor_username=ctx.username,
+        )
+        return web.json_response({"tokens": links})
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -1168,23 +1200,83 @@ class SpaceInviteTokenView(BaseView):
         if ttl_raw is None:
             ttl_seconds = None
         else:
-            try:
-                ttl_seconds = int(ttl_raw)
-            except TypeError, ValueError:
+            # A JSON integer and nothing else. ``int()`` used to accept
+            # — and silently reinterpret — everything nearby: ``0.5``
+            # became ``0``, which this route maps to "never expires";
+            # ``True`` became one second; ``"60"`` worked by accident and
+            # taught callers a shape the API does not promise. An expiry
+            # is a number the owner chose, so a value that is not one is
+            # a client bug to report, not to guess at. ``bool`` is an
+            # ``int`` subclass in Python and is excluded explicitly.
+            if isinstance(ttl_raw, bool) or not isinstance(ttl_raw, int):
                 return error_response(
                     422, "UNPROCESSABLE", "ttl_seconds must be an integer"
                 )
-            if ttl_seconds < 1:
+            ttl_seconds = ttl_raw
+            if ttl_seconds < 0:
                 return error_response(
-                    422, "UNPROCESSABLE", "ttl_seconds must be positive"
+                    422, "UNPROCESSABLE", "ttl_seconds must not be negative"
                 )
-        token = await svc.create_invite_token(
-            space_id,
+            if ttl_seconds == 0:
+                # The SPA's "Never" option sends 0; the service spells
+                # the same thing ``None``. Normalised here so one
+                # boundary owns the two spellings.
+                ttl_seconds = None
+        publish_raw = body.get("publish_to_gfs")
+        try:
+            link = await svc.create_invite_link(
+                space_id,
+                actor_username=ctx.username,
+                role=str(body.get("role") or SpaceRole.MEMBER.value),
+                uses=body.get("uses", 1),
+                ttl_seconds=ttl_seconds,
+                publish_to_gfs=str(publish_raw) if publish_raw else None,
+            )
+        except GfsConnectionError as exc:
+            # Nothing was persisted — the publish runs before the row is
+            # written — so this is a clean "it didn't happen".
+            #
+            # The upstream's own words stay upstream. This used to answer
+            # ``str(exc)``, which put
+            # ``GFS rejected invite (HTTP 403): {"error": "not the owner
+            # of this space"}`` into a toast: not a sentence anybody can
+            # act on, and it binds our UI to another project's error
+            # vocabulary. Map the status CLASS to something a person can
+            # do, and keep the real text in the log where an operator
+            # will look for it.
+            log.warning(
+                "invite publish to a connection server failed for space %s: %s",
+                space_id,
+                exc,
+            )
+            return error_response(
+                422,
+                "GFS_PUBLISH_FAILED",
+                _gfs_publish_failure_message(exc.status),
+            )
+        return web.json_response(link, status=201)
+
+
+class SpaceInviteTokenItemView(BaseView):
+    """``DELETE /api/spaces/{id}/invite-tokens/{token}`` — revoke a link.
+
+    Admin or owner; any admin of the space may revoke any of its links,
+    including one another admin minted — a link belongs to the space, not
+    to its minter. Idempotent (an unknown token still 204s), and total:
+    the local row goes AND the blob comes down on the connection server
+    it was published to. Revoking never un-seats anyone who already
+    redeemed — that is member removal.
+    """
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        await svc.revoke_invite_link(
+            self.match("id"),
+            self.match("token"),
             actor_username=ctx.username,
-            uses=body.get("uses", 1),
-            ttl_seconds=ttl_seconds,
         )
-        return web.json_response({"token": token}, status=201)
+        return web.Response(status=204)
 
 
 class SpaceRemoteInviteView(BaseView):
@@ -1395,6 +1487,125 @@ class RemoteInviteDecisionView(BaseView):
         return web.Response(status=204)
 
 
+def _bootstrap_hint(
+    body: dict,
+    *,
+    issuer_instance_id: str,
+    token: str,
+) -> InviteBootstrapHint | None:
+    """Build the §D2b hint from a pasted invite code, or ``None``.
+
+    An invite link minted for a stranger carries the issuer's public key
+    material alongside the token — the Ed25519 identity key its instance
+    id derives from, the static X25519 key-wrap key, and the signature
+    binding the two. All three are mandatory: without them there is
+    nothing to seal to and nothing to check a substitution against, so a
+    partial set yields ``None`` and the redeem falls back to the
+    direct-peer / mesh paths (which is also what an older code does).
+
+    ``gfs`` is the base URL of the connection server that served the
+    blob — the one relay known to reach the issuer.
+    """
+    identity_pk = str(body.get("issuer_identity_pk") or "").strip()
+    keywrap_pk = str(body.get("issuer_keywrap_pk") or "").strip()
+    keywrap_sig = str(body.get("issuer_keywrap_sig") or "").strip()
+    if not (identity_pk and keywrap_pk and keywrap_sig):
+        return None
+    try:
+        proto_version = int(body.get("issuer_proto_version") or 1)
+    except TypeError, ValueError:
+        proto_version = 1
+    gfs_raw = body.get("gfs")
+    return InviteBootstrapHint(
+        invite_token=token,
+        space_id=str(body.get("space_id") or "").strip(),
+        instance_id=issuer_instance_id,
+        identity_pk=identity_pk,
+        keywrap_pk=keywrap_pk,
+        keywrap_sig=keywrap_sig,
+        proto_version=proto_version,
+        display_hint=str(body.get("space_display_hint") or ""),
+        expires_at=(str(body["expires_at"]) if body.get("expires_at") else None),
+        gfs_url=str(gfs_raw).strip() if gfs_raw else "",
+    )
+
+
+log = logging.getLogger(__name__)
+
+
+def _gfs_publish_failure_message(status: int | None) -> str:
+    """A sentence a person can act on for a failed invite publish.
+
+    One per status class, because that is the granularity at which the
+    advice differs. Anything else — 5xx, a timeout, TLS, an unreachable
+    host — collapses into "not now, try again", which is the honest
+    answer: there is nothing the owner can fix.
+    """
+    if status == 403:
+        return (
+            "The connection server didn't accept this space's owner key "
+            "— re-publish the space and try again"
+        )
+    if status == 429:
+        return (
+            "The connection server is rate-limiting this household — "
+            "try again in a minute"
+        )
+    return "The connection server couldn't publish the link right now"
+
+
+#: Per-IP budget for ``GET /api/invite-links/{token}/code``. The token is
+#: a uuid4 hex (128 bits), so this is not brute-force protection — nothing
+#: is guessable here. It is ordinary anonymous-endpoint shedding: the
+#: handler does two DB reads plus a signature-free payload build, and one
+#: visitor legitimately hits it exactly once per link they open.
+INVITE_CODE_RATE_LIMIT: int = 30
+INVITE_CODE_RATE_WINDOW_S: int = 60
+
+
+class InviteLinkCodeView(BaseView):
+    """``GET /api/invite-links/{token}/code`` — the pasteable code, public.
+
+    Answers ``{"code": "socialhome://invite#<blob>"}`` when ``token`` is a
+    still-redeemable invite link on this household, and a flat ``404``
+    for every other case — expired, exhausted, revoked, or never ours.
+    The four are deliberately indistinguishable: a differentiated answer
+    would turn this into a probe for which links a household has issued.
+
+    **No authentication, by design.** The token IS the credential:
+    whoever holds it can already redeem the link, so handing back the
+    code that belongs to it grants nothing further. What it buys is the
+    ``/join`` landing page's "wrong instance" fallback. An HTTPS invite
+    link shared in a chat lands the receiver on the ISSUER's instance,
+    where the redeem correctly refuses; the page then offers a code to
+    paste into their own home — but a code the page mints client-side
+    carries only the token, space id and issuer id, with none of the
+    issuer's keys or the connection-server URL, so the receiving
+    household cannot bootstrap a redeem with it. The fallback looked
+    helpful and dead-ended every time. This hands over the real thing.
+    """
+
+    async def get(self) -> web.Response:
+        limiter = self.request.app.get(rate_limiter_key)
+        if limiter is not None:
+            client_ip = self.request.remote or "unknown"
+            if not limiter.is_allowed(
+                f"invite-link-code:{client_ip}",
+                limit=INVITE_CODE_RATE_LIMIT,
+                window_s=INVITE_CODE_RATE_WINDOW_S,
+            ):
+                return error_response(
+                    429,
+                    "RATE_LIMITED",
+                    "Too many requests — wait a moment.",
+                )
+        token = self.match("token")
+        code = await self.svc(space_service_key).invite_code_for_token(token)
+        if code is None:
+            return error_response(404, "NOT_FOUND", "No such invite link.")
+        return web.json_response({"code": code})
+
+
 class SpaceJoinView(BaseView):
     """POST /api/spaces/join — accept an invite token.
 
@@ -1405,6 +1616,14 @@ class SpaceJoinView(BaseView):
 
     * 422 — issuer not paired / token denied (``SpacePermissionError``)
     * 504 — issuer didn't respond within the timeout (``TimeoutError``)
+
+    A code pasted from a household we have never met carries the
+    issuer's public keys too (``issuer_identity_pk``,
+    ``issuer_keywrap_pk``, ``issuer_keywrap_sig``,
+    ``issuer_proto_version``, ``gfs``, ``expires_at``). Those build the
+    §D2b bootstrap hint, which the service uses **only** when neither a
+    direct pairing nor a mesh route reaches the issuer — both are
+    strictly better and are tried first.
     """
 
     async def post(self) -> web.Response:
@@ -1413,11 +1632,21 @@ class SpaceJoinView(BaseView):
         body = await self.body()
         issuer_raw = body.get("issuer_instance_id") if isinstance(body, dict) else None
         issuer_instance_id = str(issuer_raw).strip() if issuer_raw else None
+        bootstrap = (
+            _bootstrap_hint(
+                body,
+                issuer_instance_id=issuer_instance_id,
+                token=body["token"],
+            )
+            if isinstance(body, dict) and issuer_instance_id
+            else None
+        )
         try:
             result = await svc.redeem_invite_token(
                 body["token"],
                 user_id=ctx.user_id,
                 issuer_instance_id=issuer_instance_id or None,
+                bootstrap=bootstrap,
             )
         except TimeoutError as exc:
             return error_response(504, "ISSUER_TIMEOUT", str(exc))

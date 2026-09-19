@@ -21,8 +21,15 @@ interface ModalProps {
  *   - On open, focus moves into the dialog automatically.
  *   - Tab at the last focusable element wraps to the first.
  *   - Shift+Tab at the first focusable element wraps to the last.
- *   - Escape invokes ``onClose``.
+ *   - Escape invokes ``onClose`` — on the TOPMOST dialog only. Dialogs
+ *     stack (a confirm prompt opens over the dialog that asked for it),
+ *     and every open Modal listens on ``document``; without the stack
+ *     check one Escape closed the confirm AND the dialog behind it, so
+ *     cancelling a revoke also threw the user out of the invite tray.
  */
+
+/** Open dialogs, oldest first. Only the last entry reacts to keys. */
+const _stack: object[] = []
 export function Modal({ open, onClose, title, children }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const titleId = useRef<string>(`sh-modal-title-${Math.random().toString(36).slice(2, 8)}`)
@@ -44,6 +51,11 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     // Remember the element that had focus pre-open so we can restore.
     const previouslyFocused = document.activeElement as HTMLElement | null
 
+    // Claim the top of the dialog stack for as long as we are open.
+    const token = {}
+    _stack.push(token)
+    const isTopmost = () => _stack[_stack.length - 1] === token
+
     // Move focus into the dialog — first focusable element on
     // pointer-precise devices. On touch devices we land on the
     // dialog itself (tabindex=-1) so the soft keyboard doesn't pop up
@@ -63,6 +75,8 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     }
 
     function onKeyDown(ev: KeyboardEvent) {
+      // A dialog underneath a newer one neither closes nor traps focus.
+      if (!isTopmost()) return
       if (ev.key === 'Escape') {
         ev.preventDefault()
         onCloseRef.current()
@@ -84,6 +98,8 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     document.addEventListener('keydown', onKeyDown)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
+      const at = _stack.indexOf(token)
+      if (at !== -1) _stack.splice(at, 1)
       // Restore focus to whatever triggered the dialog.
       previouslyFocused?.focus?.()
     }

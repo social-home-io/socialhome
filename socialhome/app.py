@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import aiohttp
 import aiolibdatachannel as rtc
+import orjson
 from aiohttp import web
 
 from . import app_keys as K
@@ -40,7 +41,11 @@ from .exception_text import describe_exception
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
 from .db import AsyncDatabase
-from .domain.federation import FederationEventType
+from .domain.federation import (
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
+    FederationEventType,
+    InstanceSource,
+)
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.sync_manager import SyncSessionManager
@@ -215,6 +220,7 @@ from .services.corner_service import CornerService
 from .federation.peer_directory_handler import PeerDirectoryHandler
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.route_discovery import RouteDiscoveryService
+from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.routed_envelope import SpaceRoutedHandler
 from .federation.private_invite_handler import PrivateSpaceInviteHandler
 from .services.peer_directory_service import PeerDirectoryService
@@ -286,6 +292,7 @@ from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
+from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.map_tile_service import MapTileService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
@@ -411,6 +418,46 @@ async def _redeliver_envelope(
     except Exception as exc:
         log.warning("outbox: undecodable entry %s — dropping: %s", entry.id, exc)
         return DeliveryOutcome.PERMANENT
+
+    if instance.source is InstanceSource.SPACE_SESSION:
+        # A household seated from an invite link has no inbox URL by
+        # design — re-POSTing would target the empty string on every
+        # attempt until the entry burns through MAX_ATTEMPTS. Its
+        # envelopes ride the connection-server relay, and the transport
+        # facade already knows how to pick it (``FederationTransport
+        # .send``), so redelivery reuses that one selection point rather
+        # than growing a second copy of the rule.
+        transport = federation_service._transport
+        if transport is None:
+            log.warning(
+                "outbox: %s is reachable only through the connection-server "
+                "relay, which is not wired — dropping",
+                entry.instance_id,
+            )
+            return DeliveryOutcome.PERMANENT
+        result = await transport.send(
+            instance=instance,
+            envelope_dict=orjson.loads(body),
+        )
+        if result.ok:
+            # NO ``mark_reachable`` here. The relay answers a uniform 202
+            # to every well-formed envelope — recipient online, offline,
+            # or not a client of that server at all — because any other
+            # answer would be a presence oracle. That 202 is an
+            # ACCEPTANCE, not a delivery, so it cannot clear the
+            # household's ``unreachable_since``; an inbound envelope
+            # from them is what proves they are there.
+            return DeliveryOutcome.SUCCESS
+        if result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
+            # Deterministic: the frame is over the relay's body cap and
+            # will be on every retry too (media does not ride this
+            # transport). Retrying spends the whole attempt budget
+            # re-deriving one length compare and then reports a
+            # permanent condition as a transient one. The transport
+            # already logged a WARNING naming the peer, event type and
+            # size, so this drop is not silent.
+            return DeliveryOutcome.PERMANENT
+        return DeliveryOutcome.TRANSIENT
 
     try:
         client = await federation_service._get_http_client()
@@ -2305,6 +2352,13 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
         real_space_service.attach_gfs_space_mirror(gfs_space_mirror)
+        # Invite codes carry this household's published key-wrap triple
+        # (the §D2b bootstrap block) so a stranger can seal a redeem to
+        # us. Same key /gfs/info serves — never a fresh one.
+        real_space_service.attach_invite_identity(
+            keywrap_public_key=identity.keywrap_public_key,
+            keywrap_sig=identity.keywrap_sig,
+        )
         # ``attach_federation`` is deferred until just after
         # ``_wire_federation_stack`` returns the live ``federation_service``
         # (see below). Calling it here would bind ``_federation`` to the
@@ -2544,6 +2598,27 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         invite_redeem_coordinator.attach_to(federation_service)
         real_space_service.attach_redeem_coordinator(invite_redeem_coordinator)
+        # §D2b — redeeming an invite link from a household we have never
+        # met. The sealed blob goes out through a connection server
+        # addressed by instance id only; the key-wrap triple is this
+        # household's OWN published static X25519 key + its binding
+        # signature (the same material ``/gfs/info`` serves and the
+        # subscriber key handoff uses — never a fresh keypair), so the
+        # issuer can seal its reply back and both sides derive matching
+        # space-session keys. The inbound leg is attached to the GFS
+        # socket further down (``attach_envelope_handler``).
+        gfs_envelope_sender = GfsEnvelopeSender(
+            gfs_service=gfs_connection_service,
+            gfs_repo=repos.gfs_connection,
+        )
+        invite_redeem_coordinator.attach_bootstrap(
+            relay_sender=gfs_envelope_sender,
+            keywrap_private_key=identity.keywrap_private_key,
+            keywrap_public_key=identity.keywrap_public_key,
+            keywrap_sig=identity.keywrap_sig,
+            key_manager=key_manager,
+            rate_limiter=limiter,
+        )
         # #117 followup — federate SPACE_POST_CREATED outbound so
         # remote members on other households actually receive posts
         # in spaces they belong to. The inbound side was already
@@ -2631,6 +2706,13 @@ def create_app(config: Config | None = None) -> web.Application:
             https_inbox=HttpsInboxTransport(
                 client_factory=federation_service._get_http_client,
             ),
+            # Third tier: households seated from an invite link hold no
+            # address for each other, so their envelopes are sealed to
+            # the peer's key-wrap key and carried by the connection
+            # server that introduced them. Same ``RelayEnvelopeSender``
+            # the bootstrap redeem uses — one HTTP client, one capability
+            # cache, one footprint on that server.
+            gfs_relay=GfsRelayTransport(relay_sender=gfs_envelope_sender),
             signaling_send=_signaling_send,
             ice_servers=fed_ice_servers,
             inbound_handler=federation_service.handle_inbound_rtc,
@@ -2719,6 +2801,19 @@ def create_app(config: Config | None = None) -> web.Application:
                 space_subscriber_key_inbound=space_subscriber_key_inbound,
             )
 
+        # §D2b inbound leg — the GFS pushes ``{type:"envelope", sealed}``
+        # when another household sealed a blob addressed to this one (an
+        # invite redeem from a stranger, or the issuer's sealed reply).
+        # The frame carries nothing else: every check the coordinator runs
+        # reads material from inside the ciphertext. ``gfs_url`` is bound
+        # per connection by the supervisor so the reply goes back out the
+        # server the request arrived on.
+        async def _on_gfs_envelope(frame: dict, *, gfs_url: str = "") -> None:
+            await invite_redeem_coordinator.handle_relayed_envelope(
+                {"sealed": frame.get("sealed")},
+                gfs_url=gfs_url,
+            )
+
         # Re-fetch the GFS's current server_name on each WS (re)connect and
         # refresh the stored display_name if the operator renamed the
         # server (a rename typically restarts the GFS → forces a reconnect).
@@ -2776,6 +2871,7 @@ def create_app(config: Config | None = None) -> web.Application:
             on_moment_signal=moment_public_signaling_handler.handle_signal,
             on_moment_public=moment_public_inbound.handle,
             on_new_subscriber=space_subscriber_key_outbound.handle,
+            on_envelope=_on_gfs_envelope,
             on_connected=_on_gfs_connected,
         )
         await gfs_ws_supervisor.start()

@@ -11,13 +11,17 @@ from ..db import AsyncDatabase
 from .admin_service import GfsAdminService
 from .cluster import ClusterService
 from .config import GfsConfig
+from .envelope_relay import GfsEnvelopeRelay
 from .federation import GfsFederationService
+from .invites import GfsInviteService
 from .repositories import (
     AbstractClusterRepo,
     AbstractGfsAdminRepo,
+    AbstractGfsEnvelopeQueueRepo,
     AbstractGfsFederationRepo,
     AbstractGfsHighlightPublicationRepo,
     AbstractGfsHighlightTokenRepo,
+    AbstractGfsInviteRepo,
     AbstractGfsMomentFollowRepo,
     AbstractGfsUserPictureRepo,
     AbstractGfsUserRegistrationRepo,
@@ -73,3 +77,17 @@ gfs_moment_public_registry_key: AppKey[MomentPublicRegistry] = AppKey(
 gfs_user_picture_repo_key: AppKey[AbstractGfsUserPictureRepo] = AppKey(
     "gfs_user_picture_repo"
 )
+
+#: Store-and-forward queue backing ``POST /gfs/envelope`` (§D2b).
+gfs_envelope_queue_repo_key: AppKey[AbstractGfsEnvelopeQueueRepo] = AppKey(
+    "gfs_envelope_queue_repo"
+)
+#: Deliver-or-queue relay for opaque household-to-household envelopes.
+gfs_envelope_relay_key: AppKey[GfsEnvelopeRelay] = AppKey("gfs_envelope_relay")
+
+#: Bulletin board of owner-minted invite links (§24.8.5).
+gfs_invite_repo_key: AppKey[AbstractGfsInviteRepo] = AppKey("gfs_invite_repo")
+#: Mint / revoke / look up invite links. The public ``GET /join/{token}`` page
+#: reads THROUGH this (never around it into the database) so the "a fetch
+#: writes nothing" rule has exactly one place it could be broken.
+gfs_invite_service_key: AppKey[GfsInviteService] = AppKey("gfs_invite_service")

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { buildInviteCode, decodeInviteCode } from './spaceInviteCode'
+import {
+  buildInviteCode, decodeInviteCode, gfsBaseFromInviteUrl,
+} from './spaceInviteCode'
 
 describe('spaceInviteCode', () => {
   describe('build + decode round-trip', () => {
@@ -83,5 +85,61 @@ describe('spaceInviteCode', () => {
     it('returns null for raw JSON missing token', () => {
       expect(decodeInviteCode('{"space_id":"x"}')).toBeNull()
     })
+  })
+})
+
+describe('bootstrap block (§D2b)', () => {
+  it('round-trips the issuer key material and the connection server', () => {
+    const payload = {
+      token: 'a1b2c3d4e5f60718',
+      space_id: 'sp-1',
+      issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+      issuer_identity_pk: 'aa'.repeat(32),
+      issuer_keywrap_pk: 'bb'.repeat(32),
+      issuer_keywrap_sig: 'c2ln',
+      issuer_proto_version: 29,
+      expires_at: '2026-12-01T00:00:00+00:00',
+      via_gfs: { gfs_url: 'https://relay.example.org', gfs_space_id: 'g-1' },
+    }
+    expect(decodeInviteCode(buildInviteCode(payload))).toEqual(payload)
+  })
+
+  it('still decodes a code minted before the block existed', () => {
+    const old = { token: 'a1b2c3d4e5f60718', space_id: 'sp-1' }
+    expect(decodeInviteCode(buildInviteCode(old))).toEqual(old)
+  })
+})
+
+describe('gfsBaseFromInviteUrl', () => {
+  it('strips the /join/{token} tail to leave the server base', () => {
+    expect(gfsBaseFromInviteUrl('https://relay.example.org/join/abc123'))
+      .toBe('https://relay.example.org')
+  })
+
+  it('keeps a path prefix the server is mounted under', () => {
+    expect(gfsBaseFromInviteUrl('https://example.org/gfs/join/abc123'))
+      .toBe('https://example.org/gfs')
+  })
+
+  it('returns null for a URL that is not a join link', () => {
+    expect(gfsBaseFromInviteUrl('https://relay.example.org/spaces/s1'))
+      .toBeNull()
+    expect(gfsBaseFromInviteUrl('https://relay.example.org/')).toBeNull()
+  })
+
+  it('returns null for something that is not a URL at all', () => {
+    expect(gfsBaseFromInviteUrl('not a url')).toBeNull()
+  })
+})
+
+describe('via_gfs without a gfs_space_id', () => {
+  it('round-trips a published code carrying only the server base', () => {
+    // The mint response has no per-server space id, so the SPA ships
+    // ``gfs_url`` alone - the only field the redeem path reads.
+    const payload = {
+      token: 'a1b2c3d4e5f60718',
+      via_gfs: { gfs_url: 'https://relay.example.org' },
+    }
+    expect(decodeInviteCode(buildInviteCode(payload))).toEqual(payload)
   })
 })

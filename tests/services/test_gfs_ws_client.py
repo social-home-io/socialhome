@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import aiohttp
@@ -1106,3 +1107,132 @@ async def test_client_last_auth_error_clears_on_successful_connect(
         assert client.last_auth_error is None
     finally:
         await client.stop()
+
+
+# ── envelope frames (§D2b invite bootstrap) ───────────────────────────────
+
+
+async def test_client_dispatches_envelope_frames(fake_gfs, http_session):
+    """``envelope`` frames — the sealed §D2b invite blob another household
+    addressed to us — go to the invite-bootstrap handler, not ``on_relay``."""
+    seed, _pub = _gen_keypair()
+    envelopes: list[dict] = []
+    relayed: list[dict] = []
+
+    async def on_relay(frame: dict) -> None:
+        relayed.append(frame)
+
+    async def on_envelope(frame: dict) -> None:
+        envelopes.append(frame)
+
+    client = GfsWebSocketClient(
+        gfs_url=fake_gfs.url,
+        instance_id="sh-env",
+        signing_key=seed,
+        session_factory=lambda: http_session,
+        on_relay=on_relay,
+        on_envelope=on_envelope,
+    )
+    await client.start()
+    try:
+        for _ in range(100):
+            if client.connected:
+                break
+            await asyncio.sleep(0.02)
+        await fake_gfs.outbound.put(
+            {
+                "type": "envelope",
+                "sealed": {
+                    "kem_suite": "x25519",
+                    "eph_pk": "ab" * 32,
+                    "ciphertext": "deadbeef",
+                },
+            },
+        )
+        for _ in range(100):
+            if envelopes:
+                break
+            await asyncio.sleep(0.02)
+        assert len(envelopes) == 1
+        assert envelopes[0]["sealed"]["ciphertext"] == "deadbeef"
+        # Mutation guard: routing the frame to on_relay instead fails here.
+        assert relayed == []
+    finally:
+        await client.stop()
+
+
+async def test_client_attach_envelope_handler_late_binds(fake_gfs, http_session):
+    """The redeem coordinator is wired after the WS client, so the handler
+    must be attachable post-construction."""
+    seed, _pub = _gen_keypair()
+    envelopes: list[dict] = []
+
+    async def on_envelope(frame: dict) -> None:
+        envelopes.append(frame)
+
+    client = GfsWebSocketClient(
+        gfs_url=fake_gfs.url,
+        instance_id="sh-env2",
+        signing_key=seed,
+        session_factory=lambda: http_session,
+        on_relay=_sink_noop,
+    )
+    client.attach_envelope_handler(on_envelope)
+    await client.start()
+    try:
+        for _ in range(100):
+            if client.connected:
+                break
+            await asyncio.sleep(0.02)
+        await fake_gfs.outbound.put({"type": "envelope", "sealed": {}})
+        for _ in range(100):
+            if envelopes:
+                break
+            await asyncio.sleep(0.02)
+        assert len(envelopes) == 1
+    finally:
+        await client.stop()
+
+
+async def test_on_text_drops_envelope_when_no_handler(caplog):
+    """No handler attached → the frame is dropped, not crashed — but
+    LOUDLY. The connection server deletes its queue row to hand us this
+    frame, so a drop here loses the envelope permanently (a redeem that
+    never completes, a space event that silently never lands). At DEBUG
+    that was invisible on any normal deployment."""
+    seed, _pub = _gen_keypair()
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-env3",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_sink_noop,
+    )
+    with caplog.at_level(logging.WARNING):
+        await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
+    assert any(
+        r.levelno == logging.WARNING and "no " in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_on_text_swallows_envelope_handler_exception(caplog):
+    """A rejected blob (bad signature, replay, …) is logged, never fatal —
+    and the log line carries the rejection, not the ciphertext."""
+    seed, _pub = _gen_keypair()
+
+    async def boom(_frame: dict) -> None:
+        raise ValueError("Replay detected: bootstrap nonce='n1'")
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-env4",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_sink_noop,
+        on_envelope=boom,
+    )
+    await client._on_text(
+        json.dumps({"type": "envelope", "sealed": {"ciphertext": "secret-blob"}}),
+    )
+    assert "Replay detected" in caplog.text
+    assert "secret-blob" not in caplog.text

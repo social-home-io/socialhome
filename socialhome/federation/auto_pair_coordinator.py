@@ -227,6 +227,13 @@ class AutoPairCoordinator:
             raise ValueError(
                 "vouching peer must be a confirmed paired instance",
             )
+        # §D2b: a ``space_session`` household reached us through an
+        # invite link, not a QR handshake — there is no vouching to
+        # inherit, so it can never introduce us to a third household.
+        if via.source is InstanceSource.SPACE_SESSION:
+            raise ValueError(
+                "vouching peer must be a confirmed paired instance",
+            )
         if target_instance_id == derive_instance_id(self._own_identity_pk):
             raise ValueError("cannot auto-pair with yourself")
         if not own_inbox_base_url:

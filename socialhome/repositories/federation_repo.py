@@ -49,6 +49,7 @@ class AbstractFederationRepo(Protocol):
         source: str | None = None,
         status: str | None = None,
     ) -> list[RemoteInstance]: ...
+    async def list_social_instances(self) -> list[RemoteInstance]: ...
     async def list_instances_in_space(self, space_id: str) -> list[RemoteInstance]: ...
     async def list_member_instance_ids(self, space_id: str) -> list[str]: ...
     async def delete_instance(self, instance_id: str) -> None: ...
@@ -144,10 +145,10 @@ class SqliteFederationRepo:
                 remote_inbox_url, local_inbox_id,
                 status, source, proto_version,
                 remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
-                intro_relay_enabled, relay_via,
+                intro_relay_enabled, relay_via, remote_keywrap_pk,
                 home_lat, home_lon, paired_at, created_at,
                 last_reachable_at, unreachable_since, share_home
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 display_name=excluded.display_name,
                 remote_identity_pk=excluded.remote_identity_pk,
@@ -162,6 +163,7 @@ class SqliteFederationRepo:
                 sig_suite=excluded.sig_suite,
                 intro_relay_enabled=excluded.intro_relay_enabled,
                 relay_via=excluded.relay_via,
+                remote_keywrap_pk=excluded.remote_keywrap_pk,
                 home_lat=excluded.home_lat,
                 home_lon=excluded.home_lon,
                 paired_at=excluded.paired_at,
@@ -184,6 +186,7 @@ class SqliteFederationRepo:
                 inst.sig_suite,
                 int(inst.intro_relay_enabled),
                 inst.relay_via,
+                inst.remote_keywrap_pk,
                 inst.home_lat,
                 inst.home_lon,
                 inst.paired_at,
@@ -249,6 +252,30 @@ class SqliteFederationRepo:
         rows = await self._db.fetchall(
             f"SELECT * FROM remote_instances{where} ORDER BY display_name",
             tuple(params),
+        )
+        return [i for i in (_row_to_instance(d) for d in rows_to_dicts(rows)) if i]
+
+    async def list_social_instances(self) -> list[RemoteInstance]:
+        """Confirmed peers this household has a **social** relationship with.
+
+        A CONFIRMED row is not automatically a social peer. A row whose
+        ``source`` is
+        :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
+        came from a §D2b invite-link bootstrap: the two households share
+        a space, nothing more. Handing it to DMs, the user roster,
+        presence, the friends constellation or a peer picker would turn
+        "I joined their space" into "we federate socially", which nobody
+        consented to.
+
+        Every non-space surface that fans out to "all confirmed peers"
+        reads this list; space fan-outs keep using ``space_instances`` /
+        :meth:`list_instances_in_space`, which are membership-scoped and
+        unaffected.
+        """
+        rows = await self._db.fetchall(
+            "SELECT * FROM remote_instances "
+            "WHERE status=? AND source<>? ORDER BY display_name",
+            (PairingStatus.CONFIRMED.value, InstanceSource.SPACE_SESSION.value),
         )
         return [i for i in (_row_to_instance(d) for d in rows_to_dicts(rows)) if i]
 
@@ -675,6 +702,7 @@ def _row_to_instance(row: dict | None) -> RemoteInstance | None:
         sig_suite=str(row.get("sig_suite") or "ed25519"),
         intro_relay_enabled=bool_col(row.get("intro_relay_enabled", 1)),
         relay_via=row.get("relay_via"),
+        remote_keywrap_pk=row.get("remote_keywrap_pk"),
         home_lat=row.get("home_lat"),
         home_lon=row.get("home_lon"),
         paired_at=row.get("paired_at"),

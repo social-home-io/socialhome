@@ -60,7 +60,10 @@ class ConfirmedPeerBroadcaster:
         if repo is None:
             return []
         try:
-            peers = await repo.list_instances(status="confirmed")
+            # §D2b: social surface — a ``space_session`` row (a household
+            # we only share a space with, via an invite link) is NOT a
+            # social peer, so read the social list, not every CONFIRMED row.
+            peers = await repo.list_social_instances()
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("%s: list peers failed: %s", type(self).__name__, exc)
             return []

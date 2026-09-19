@@ -35,7 +35,7 @@ from ..domain.events import (
     SpaceRsvpChanged,
     UserProvisioned,
 )
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
 from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
@@ -296,11 +296,11 @@ class CalendarService(BusPublisherMixin):
             return items, {}
         local_id = await self._fed_repo.get_local_identity()
         local_instance_id = (local_id or {}).get("instance_id")
+        # §D2b: social surface — a ``space_session`` row (a household we
+        # only share a space with, via an invite link) is not a social
+        # peer, so read the social list, not every CONFIRMED row.
         confirmed_ids = {
-            inst.id
-            for inst in await self._fed_repo.list_instances(
-                status=PairingStatus.CONFIRMED.value,
-            )
+            inst.id for inst in await self._fed_repo.list_social_instances()
         }
         instance_for_user: dict[str, str] = {}
         for uid in items:

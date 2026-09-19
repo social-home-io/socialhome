@@ -13,6 +13,8 @@ protocol versioning rule:
 
 from __future__ import annotations
 
+import dataclasses
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -44,11 +46,50 @@ def _peer(instance_id: str, *, proto_version: int = 1) -> RemoteInstance:
 
 
 @pytest.mark.asyncio
+async def test_capabilities_reach_a_household_seated_from_an_invite_link():
+    """``proto_version`` is how a sender knows which optional fields a peer
+    can parse, and it is exchanged in exactly one place — this fan-out.
+
+    A link-joined household is not a *social* peer (no DMs, no roster, no
+    presence) but it IS a federation peer: space posts, comments, roster
+    events and sync chunks all flow to it. Reading the social list here
+    meant its version froze at whatever it advertised the moment it was
+    seated, so every later ``peer_supports`` gate answered from stale
+    data and silently withheld fields it could handle.
+    """
+    social = _peer("inst-social")
+    link_joined = _peer("inst-link")
+    link_joined = dataclasses.replace(
+        link_joined,
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+    )
+    repo = SimpleNamespace(
+        list_instances=AsyncMock(return_value=[social, link_joined]),
+        list_social_instances=AsyncMock(return_value=[social]),
+        get_local_identity=AsyncMock(return_value={"display_name": "My Home"}),
+    )
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    out = CapabilitiesOutbound(federation_service=fed, federation_repo=repo)
+
+    sent = await out.publish()
+
+    assert sent == 2
+    targets = {c.kwargs["to_instance_id"] for c in fed.send_event.await_args_list}
+    assert targets == {"inst-social", "inst-link"}
+    # Only CONFIRMED rows — the enumeration must not widen to every row.
+    assert repo.list_instances.await_args.kwargs["status"] == (
+        PairingStatus.CONFIRMED.value
+    )
+
+
+@pytest.mark.asyncio
 async def test_capabilities_outbound_fans_out_to_confirmed_peers():
     peer_a = _peer("inst-a")
     peer_b = _peer("inst-b")
     repo = SimpleNamespace(
         list_instances=AsyncMock(return_value=[peer_a, peer_b]),
+        list_social_instances=AsyncMock(return_value=[peer_a, peer_b]),
         get_local_identity=AsyncMock(return_value={"display_name": "My Home"}),
     )
     fed = SimpleNamespace(
@@ -85,6 +126,7 @@ async def test_capabilities_outbound_omits_blank_display_name():
     peer = _peer("inst-a")
     repo = SimpleNamespace(
         list_instances=AsyncMock(return_value=[peer]),
+        list_social_instances=AsyncMock(return_value=[peer]),
         get_local_identity=AsyncMock(return_value={"display_name": "   "}),
     )
     fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
@@ -102,6 +144,7 @@ async def test_capabilities_outbound_omits_when_no_local_identity():
     peer = _peer("inst-a")
     repo = SimpleNamespace(
         list_instances=AsyncMock(return_value=[peer]),
+        list_social_instances=AsyncMock(return_value=[peer]),
         get_local_identity=AsyncMock(return_value=None),
     )
     fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
@@ -118,6 +161,7 @@ async def test_capabilities_outbound_skips_self():
     peer = _peer("inst-self")
     repo = SimpleNamespace(
         list_instances=AsyncMock(return_value=[peer]),
+        list_social_instances=AsyncMock(return_value=[peer]),
     )
     fed = SimpleNamespace(
         _own_instance_id="inst-self",
@@ -138,6 +182,7 @@ async def test_capabilities_outbound_skips_self():
 async def test_capabilities_outbound_tolerates_repo_failure():
     repo = SimpleNamespace(
         list_instances=AsyncMock(side_effect=RuntimeError("boom")),
+        list_social_instances=AsyncMock(side_effect=RuntimeError("boom")),
     )
     fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
     out = CapabilitiesOutbound(
@@ -156,6 +201,7 @@ async def test_resend_to_re_advertises_to_one_peer():
     envelope to the named peer and returns True."""
     repo = SimpleNamespace(
         list_instances=AsyncMock(return_value=[]),
+        list_social_instances=AsyncMock(return_value=[]),
         get_local_identity=AsyncMock(return_value={"display_name": "My Home"}),
     )
     fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
@@ -179,7 +225,7 @@ async def test_resend_to_re_advertises_to_one_peer():
 @pytest.mark.asyncio
 async def test_resend_to_skips_self():
     """``resend_to`` to our own instance id is a no-op returning False."""
-    repo = SimpleNamespace(list_instances=AsyncMock(return_value=[]))
+    repo = SimpleNamespace(list_social_instances=AsyncMock(return_value=[]))
     fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
     out = CapabilitiesOutbound(federation_service=fed, federation_repo=repo)
 

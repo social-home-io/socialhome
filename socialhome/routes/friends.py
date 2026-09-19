@@ -179,9 +179,10 @@ class FriendsView(BaseView):
         ]
 
         # Confirmed remote households + their members.
-        instances = await fed_repo.list_instances(
-            status=PairingStatus.CONFIRMED.value,
-        )
+        # §D2b: social surface — a ``space_session`` row (a household we
+        # only share a space with, via an invite link) is not a social
+        # peer, so read the social list, not every CONFIRMED row.
+        instances = await fed_repo.list_social_instances()
         remote_members_by_instance: list[tuple] = []
         for inst in instances:
             members = [

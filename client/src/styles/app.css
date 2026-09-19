@@ -14456,6 +14456,127 @@ a.sh-welcome-card:hover {
   word-break: break-all;
   font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-sm);
+  /* The code carries the §D2b bootstrap block, so it runs to ~1 kB of
+   * base64 — left unbounded it filled the whole sheet on a phone and
+   * pushed the Copy button, the published web link and the QR below
+   * the fold. It is meant to be copied, not read: cap it and let the
+   * block scroll inside itself. */
+  max-height: 9.5rem;
+  overflow-y: auto;
+}
+/* The invite dialog's action rows sit MID-dialog (the links list
+ * follows them), so the global sticky-bottom treatment parked them
+ * over the content underneath — clipping the "Active links" heading
+ * and half of "Copy code". Here they are ordinary rows. */
+.sh-invite-dialog .sh-form-actions {
+  position: static;
+}
+/* Invite dialog — role picker, publish toggle, and the live-links
+ * list. All three stack in the modal's single column, so nothing here
+ * sets a fixed width: the 390px phone gets the same layout as the
+ * 1280px desktop, just narrower. */
+.sh-invite-fieldset {
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  padding: var(--sh-space-sm);
+  margin: 0;
+}
+.sh-invite-fieldset legend {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-secondary);
+  font-weight: 600;
+  padding: 0 var(--sh-space-xs);
+}
+.sh-invite-roles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-invite-role {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas: "radio label" "radio hint";
+  align-items: center;
+  column-gap: var(--sh-space-sm);
+  /* ≥36px tap target on touch even with a one-line hint. */
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--sh-radius-md);
+  cursor: pointer;
+}
+.sh-invite-role:hover { background: var(--sh-bg-secondary); }
+.sh-invite-role--active {
+  border-color: var(--sh-accent);
+  background: var(--sh-bg-secondary);
+}
+/* Role the current form state can't offer (Follower while publishing to a
+ * connection server) — still readable, obviously not pickable. */
+.sh-invite-role--disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.sh-invite-role--disabled:hover { background: none; }
+.sh-invite-role input { grid-area: radio; margin: 0; }
+.sh-invite-role__label { grid-area: label; font-weight: 600; }
+.sh-invite-role__hint {
+  grid-area: hint;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-secondary);
+}
+.sh-invite-publish {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-invite-publish__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  cursor: pointer;
+}
+.sh-invite-publish__picker { width: 100%; }
+.sh-invite-links {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  border-top: 1px solid var(--sh-border);
+  padding-top: var(--sh-space-sm);
+}
+.sh-invite-links__title {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-invite-links__error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  align-items: flex-start;
+}
+.sh-invite-link-row-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+}
+.sh-invite-link-row-item__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  /* Let the meta line wrap instead of pushing Revoke off a phone. */
+  min-width: 0;
+  flex: 1 1 12rem;
+  font-size: var(--sh-font-size-xs);
+}
+.sh-invite-link-row-item__actions {
+  display: flex;
+  gap: var(--sh-space-xs);
+  flex-wrap: wrap;
 }
 /* Spaces dashboard — "Join with invite code" dialog body. Modal
  * supplies the surface chrome (background, border, padding); this
@@ -18192,6 +18313,10 @@ a.sh-btn--ghost:hover {
 }
 .sh-transport-icon--https {
   color: var(--sh-warning);
+}
+/* Reachable only through the connection-server relay (invite-link peers). */
+.sh-transport-icon--gfs-relay {
+  color: var(--sh-accent, var(--sh-warning));
 }
 
 /* ───── Apps page (§Apps) ────────────────────────────────────────────────── */

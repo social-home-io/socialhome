@@ -44,6 +44,7 @@ from .domain import (
 from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
+    from .repositories import AbstractGfsInviteRepo
     from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
@@ -264,15 +265,27 @@ class GfsFederationService:
     * Listing all known global spaces.
     """
 
-    __slots__ = ("_reconnect_tasks", "_repo", "_seen_payloads", "_ws_registry")
+    __slots__ = (
+        "_invite_repo",
+        "_reconnect_tasks",
+        "_repo",
+        "_seen_payloads",
+        "_ws_registry",
+    )
 
     def __init__(
         self,
         repo: AbstractGfsFederationRepo,
         ws_registry: "GfsWebSocketRegistry | None" = None,
+        invite_repo: "AbstractGfsInviteRepo | None" = None,
     ) -> None:
         self._repo = repo
         self._ws_registry = ws_registry
+        # Optional: only :meth:`hide_space` touches it, to take a withdrawn
+        # space's public invite pages down with the listing. ``None`` in the
+        # tests / embedders that predate invite links; production always wires
+        # it (``server.py``).
+        self._invite_repo = invite_repo
         self._seen_payloads = SeenPayloadCache()
         # Strong refs to in-flight reconnect-notify tasks — an asyncio task
         # with no reference can be garbage-collected mid-await.
@@ -672,6 +685,29 @@ class GfsFederationService:
         self._assert_fresh_ts(payload.get("ts"))
         return inst
 
+    async def verify_signed_request(
+        self,
+        instance_id: str,
+        payload: dict[str, object],
+        *,
+        signature: str,
+    ) -> ClientInstance:
+        """Public entry point onto :meth:`_verify_signed_request`.
+
+        Sibling services built on the same registered-instance identity —
+        :class:`.invites.GfsInviteService` today — authenticate through this
+        rather than reaching into the private method or growing a second
+        signature verifier that could drift from this one (a duplicate is how
+        a missing ``action`` discriminator or a dropped freshness check gets
+        shipped). Same contract, same fail-closed
+        :class:`PermissionError`.
+        """
+        return await self._verify_signed_request(
+            instance_id,
+            payload,
+            signature=signature,
+        )
+
     async def subscribe(
         self,
         instance_id: str,
@@ -1030,6 +1066,14 @@ class GfsFederationService:
         if existing.owning_instance != owning_instance:
             raise PermissionError("not the owner of this space")
         await self._repo.set_space_withdrawn(space_id, True)
+        # Take the space's public invite pages down with the listing. The
+        # ``withdrawn`` flag itself is reversible, but an invite link is a
+        # STANDING public URL already sitting in other people's chats — leaving
+        # it live would keep a working side door into a listing its owner
+        # deliberately delisted. Re-publishing restores the listing, not the
+        # old links; the owner mints fresh ones.
+        if self._invite_repo is not None:
+            await self._invite_repo.delete_for_space(space_id)
         log.info("GFS: owner %s withdrew space %s", owning_instance, space_id)
 
     async def publish_space(

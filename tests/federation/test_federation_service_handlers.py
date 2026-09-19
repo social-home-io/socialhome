@@ -1471,6 +1471,68 @@ async def test_handle_request_more_clamp_returns_none(svc):
     )
 
 
+async def test_request_more_only_answers_the_household_that_asked(svc):
+    """A sync session belongs to ONE requester. ``sync_id`` is the only
+    thing addressing the session, so without this check any peer that
+    learns (or guesses) one can ask us to re-stream a space's history —
+    and the provider ships it to ``session.requester_instance_id``, not
+    to the asker, so the theft is silent on both ends. The sibling
+    ``SPACE_SYNC_CHUNK`` handler has always pinned its counterpart; this
+    one did not.
+    """
+    session = SimpleNamespace(
+        sync_id="s-1",
+        space_id="sp-1",
+        requester_instance_id="the-requester",
+    )
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.clamp_request_more = AsyncMock(
+        return_value={"sync_id": "s-1", "resource": "posts"},
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_request_more = AsyncMock()
+
+    await svc._handle_space_sync_request_more(
+        _event(
+            "SPACE_SYNC_REQUEST_MORE",
+            {"sync_id": "s-1"},
+            from_instance="somebody-else",
+        ),
+    )
+    await asyncio.sleep(0)
+
+    svc._space_sync_service.stream_request_more.assert_not_awaited()
+
+
+async def test_request_more_from_the_real_requester_still_streams(svc):
+    """The other side of the same branch — the pin must not break the
+    ordinary "give me an older slice" round."""
+    session = SimpleNamespace(
+        sync_id="s-2",
+        space_id="sp-1",
+        requester_instance_id="peer-1",
+    )
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.clamp_request_more = AsyncMock(
+        return_value={"sync_id": "s-2", "resource": "posts"},
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_request_more = AsyncMock()
+
+    await svc._handle_space_sync_request_more(
+        _event(
+            "SPACE_SYNC_REQUEST_MORE",
+            {"sync_id": "s-2"},
+            from_instance="peer-1",
+        ),
+    )
+    await asyncio.sleep(0)
+
+    svc._space_sync_service.stream_request_more.assert_awaited_once()
+
+
 # ─── _handle_instance_sync_status ────────────────────────────────
 
 

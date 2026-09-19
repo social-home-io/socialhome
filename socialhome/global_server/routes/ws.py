@@ -24,8 +24,15 @@ Push frames (sent by :class:`GfsFederationService._fan_out`)::
 
     {"type": "relay", "space_id": ..., "event_type": ..., "payload": ...}
 
-The frame is deliberately identity-free: the GFS never learns which
-household relayed a space event, so it has nothing to forward.
+Sealed household-to-household envelopes (§D2b invite bootstrap) arrive
+as::
+
+    {"type": "envelope", "sealed": {kem_suite, eph_pk, ciphertext}}
+
+Both frames are deliberately identity-free: the GFS never learns which
+household relayed a space event, nor who sealed an envelope, so it has
+nothing to forward. Queued envelopes are drained in order right after
+the hello verifies.
 
 Fire-and-forget — the SH never acks at the application layer.
 """
@@ -79,6 +86,13 @@ class GfsWebSocketView(web.View):
         self.request.app[K.gfs_federation_key].schedule_subscriber_connected(
             instance_id
         )
+
+        # §D2b — flush any sealed envelopes that arrived while this household
+        # was offline, oldest first, deleting each row only after its frame
+        # went out. Awaited (not backgrounded) so queue order is the delivery
+        # order; bounded by ENVELOPE_QUEUE_MAX_PER_RECIPIENT, and the SH sends
+        # no application frames of its own, so nothing is missed meanwhile.
+        await self.request.app[K.gfs_envelope_relay_key].drain(instance_id)
 
         try:
             async for msg in ws:

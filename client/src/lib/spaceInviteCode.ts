@@ -27,6 +27,17 @@
  *  - ``via_gfs`` — for GFS-published spaces, the GFS reference the
  *    receiver can use to redeem if their household is paired with
  *    that GFS. Optional; ``null`` for private peer-to-peer spaces.
+ *  - ``issuer_identity_pk`` / ``issuer_keywrap_pk`` /
+ *    ``issuer_keywrap_sig`` / ``issuer_proto_version`` /
+ *    ``expires_at`` — the §D2b bootstrap block, present on a code
+ *    minted for someone the issuing household has never federated
+ *    with. Public keys only, never an address: the identity key the
+ *    instance id derives from, the static X25519 key-wrap key, and
+ *    the signature binding the two. The receiver seals its redeem to
+ *    that key-wrap key and relays the blob by instance id through the
+ *    connection server named in ``via_gfs``. All optional — an older
+ *    code simply has none of them and redeems over the direct /
+ *    mesh paths as before.
  *
  * Backend redeems travel through the §24.11 federation pipeline
  * (``SPACE_INVITE_TOKEN_REDEEM`` family) when issuer ≠ receiver.
@@ -36,8 +47,38 @@ import { base64UrlEncode, base64UrlDecode } from './base64Url'
 export interface SpaceInviteGfsRef {
   /** Base URL of the GFS the space is published on. */
   gfs_url: string
-  /** Space id under that GFS (may differ from the local space id). */
-  gfs_space_id: string
+  /** Space id under that GFS (may differ from the local space id).
+   *  Optional: the mint response (``POST /api/spaces/{id}/invite-tokens``
+   *  → ``gfs``) carries no such id, and the redeem path only ever reads
+   *  ``gfs_url`` (see ``SpaceJoinByCodeDialog``), so a code minted by
+   *  the SPA omits it rather than inventing one. Older codes that carry
+   *  it keep decoding unchanged. */
+  gfs_space_id?: string | null
+}
+
+/**
+ * Derive a connection server's **base** URL from the public invite-link
+ * URL it returns (``{base}/join/{gfs_token}``).
+ *
+ * The mint response hands back the visitor-facing link; the invite code's
+ * ``via_gfs.gfs_url`` needs the server root, because that is what the
+ * redeeming household POSTs ``/gfs/envelope`` to. Returns ``null`` when
+ * the URL isn't parseable or doesn't end in the documented
+ * ``/join/{token}`` shape — the caller then simply omits ``via_gfs``
+ * rather than shipping a guess a stranger's redeem would fail against.
+ */
+export function gfsBaseFromInviteUrl(url: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  const segments = parsed.pathname.split('/').filter(Boolean)
+  if (segments.length < 2) return null
+  if (segments[segments.length - 2] !== 'join') return null
+  const base = segments.slice(0, -2).join('/')
+  return `${parsed.origin}${base ? `/${base}` : ''}`
 }
 
 export interface SpaceInvitePayload {
@@ -46,6 +87,20 @@ export interface SpaceInvitePayload {
   space_display_hint?: string | null
   issuer_instance_id?: string | null
   via_gfs?: SpaceInviteGfsRef | null
+  /** Issuer's Ed25519 identity public key (hex) — its instance id derives
+   *  from this, so a substituted key can't keep the advertised id. */
+  issuer_identity_pk?: string | null
+  /** Issuer's static X25519 key-wrap public key (hex) — what the redeem
+   *  request is sealed to. */
+  issuer_keywrap_pk?: string | null
+  /** base64url signature binding ``issuer_keywrap_pk`` to
+   *  ``issuer_identity_pk``; verified before anything is sealed. */
+  issuer_keywrap_sig?: string | null
+  /** Issuer's advertised federation protocol version — there is no peer
+   *  row to ask, so the blob carries it. */
+  issuer_proto_version?: number | null
+  /** When the invite stops being redeemable (tz-aware ISO-8601). */
+  expires_at?: string | null
 }
 
 export function buildInviteCode(payload: SpaceInvitePayload): string {

@@ -114,6 +114,64 @@ GFS ban cannot gate an anonymous relay — the space-level ban is the
 moderation lever there. See
 [`protocol/discovery.md`](./protocol/discovery.md).
 
+### Sign-off: the connection server learns the recipients of a link-joined pair
+
+Two households introduced by an invite link (§D2b) hold no address for
+each other — deliberately, because the invite blob is public. Every
+federation envelope between them is therefore carried by the connection
+server that introduced them (`POST {gfs}/gfs/envelope`,
+`federation/gfs_relay_transport.py`), which means a third party is on the
+path of ordinary space traffic for the first time. **What it concedes,
+exactly:**
+
+- **The GFS sees, per envelope: `to_instance`, a timestamp and a byte
+  size.** Nothing else is on the wire. The whole §24.11 envelope —
+  including the routing fields that are plaintext on every other
+  transport (`from_instance`, `event_type`, `space_id`, `msg_id`,
+  `timestamp`) — is sealed to the recipient's static X25519 key-wrap key
+  before the relay is handed `{to_instance, sealed}`. The relay cannot
+  read the content, the event kind, the space, or any name, and the
+  *application* wire carries no sender: `POST /gfs/envelope` is
+  identity-free and its body is exactly `{to_instance, sealed}`.
+- **The sender is nonetheless in the process access log — by IP.**
+  "No sender on the wire" is a statement about the body, not about the
+  socket. Every `POST /gfs/envelope` is an HTTP request from the sending
+  household's address, and the server's access log records it the way it
+  records the `/gfs/ws` session the same paragraph already concedes. An
+  operator willing to read their own access log can therefore correlate
+  *sender IP → recipient instance id → time → size* for every relayed
+  envelope, which is the pairwise graph the sealed body withholds. This
+  is the same residual `/gfs/publish` carries and has the same answer:
+  closing it needs a mix/onion egress and is out of scope. `to_instance`
+  is validated against the exact instance-id shape (32 lowercase base32
+  characters) before it reaches any log line, so a caller cannot author a
+  second, fabricated log record through it.
+- **It can infer that a household is receiving traffic, how much and
+  when.** Sizes are not padded and timings are not batched.
+- **A space fan-out to N link-joined members shows the relay N
+  recipients at (almost) the same instant.** Those N ids are thereby
+  linkable as "plausibly members of one thing" — the relay does not learn
+  *what* thing, or that a space is involved at all, but the correlation
+  is real and is the sharpest edge of this concession.
+- **It can correlate with the household's own WebSocket session** — same
+  server, same IP — exactly as the `/gfs/publish` residual above notes.
+- **It cannot forge.** The seal is confidentiality only; authorization is
+  the Ed25519 signature under the pair's key, checked by the unmodified
+  §24.11 pipeline at the receiver. A relay that substitutes, replays or
+  edits a blob is dropped there.
+- **It can drop or delay.** An at-least-once, best-effort relay is the
+  trust level here; a relay that refuses everything makes the pair mute,
+  not readable.
+
+**Why this is accepted:** the alternative is exchanging addresses inside
+the sealed ACK, which publishes each household's network address to the
+other — a strictly larger and more permanent disclosure, to a party the
+user knows even less about than their own connection server. A household
+that would rather not concede the timing metadata has two exits that need
+no code: pair with the other household normally (QR / trust relay), at
+which point the peer row is no longer `space_session` and traffic moves
+back to RTC / HTTPS, or decline invite-link joins.
+
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 
 `APP_SESSION` and `APP_MESSAGE` events may carry `to_user` (the target user's

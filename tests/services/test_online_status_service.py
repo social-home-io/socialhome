@@ -216,6 +216,9 @@ class _FakeFederationRepo:
     def __init__(self, instances) -> None:
         self._instances = instances
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(self, *, status=None):
         return list(self._instances)
 
@@ -470,3 +473,29 @@ async def test_user_online_no_visibility_repo_fans_to_every_peer():
     await svc.user_session_opened("alice", ws_id=1)
     targets = {tid for tid, _t, _p in fed.sent}
     assert targets == {"inst-A", "inst-B"}
+
+
+class _SourceAwareFedRepo:
+    """Distinguishes the social list from every CONFIRMED row."""
+
+    async def list_instances(self, *, status=None):
+        return [_peer("inst-A"), _peer("inst-space")]
+
+    async def list_social_instances(self):
+        return [_peer("inst-A")]
+
+
+async def test_presence_is_not_fanned_to_space_session_households():
+    """§D2b — an invite-link household shares a space, not a presence
+    relationship; who is home is not theirs to see."""
+    svc, _bus, _repo, _captured = _make()
+    fed = _FakeFederationService()
+    svc.attach_federation(
+        federation_service=fed,
+        federation_repo=_SourceAwareFedRepo(),
+        own_instance_id="inst-self",
+    )
+
+    await svc.user_session_opened("alice", ws_id=1)
+
+    assert {to for to, _evt, _payload in fed.sent} == {"inst-A"}

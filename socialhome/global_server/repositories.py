@@ -32,7 +32,9 @@ from .domain import (
     GfsFraudReport,
     GfsHighlightPublication,
     GfsHighlightToken,
+    GfsInviteToken,
     GfsMomentFollow,
+    GfsQueuedEnvelope,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -1740,3 +1742,314 @@ class SqliteGfsUserPictureRepo:
             digest=d["digest"],
             updated_at=int(d["updated_at"]),
         )
+
+
+# ─── Envelope relay queue ────────────────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsEnvelopeQueueRepo(Protocol):
+    """Store-and-forward queue for sealed household-to-household envelopes."""
+
+    async def enqueue(
+        self,
+        to_instance: str,
+        sealed_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+    ) -> bool: ...
+
+    async def list_for(
+        self,
+        to_instance: str,
+        *,
+        now: int,
+    ) -> list[GfsQueuedEnvelope]: ...
+
+    async def delete(self, envelope_id: int) -> int: ...
+
+    async def prune_expired(self, now: int) -> int: ...
+
+    async def count_for(self, to_instance: str) -> int: ...
+
+
+class SqliteGfsEnvelopeQueueRepo:
+    """SQLite-backed :class:`AbstractGfsEnvelopeQueueRepo`.
+
+    The GFS is blind to what it stores here: ``sealed_json`` is written and
+    read back verbatim and never parsed. No sender column exists — the
+    routing envelope carries none.
+    """
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def enqueue(
+        self,
+        to_instance: str,
+        sealed_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+    ) -> bool:
+        """Append one envelope unless this recipient is at cap.
+
+        Returns ``True`` when the row was written, ``False`` when it was
+        **tail-dropped** — the caller answers the same uniform ``202``
+        either way and logs the drop.
+
+        Tail-drop, not evict-oldest. The relay endpoint is anonymous by
+        design, so the previous "keep the newest N, delete the rest"
+        eviction handed anyone who knew an instance id a delete primitive:
+        ``N`` junk envelopes pushed out ``N`` legitimate queued ones, and
+        neither the household nor the original senders ever learned. Under
+        tail-drop a flood can only refuse itself; what was already accepted
+        stays accepted.
+
+        The count check and the insert share one transaction so two
+        concurrent relays to the same offline household can't both see room
+        and both write. Expired rows don't count towards either ceiling —
+        they are already invisible to ``list_for`` and the TTL sweep will
+        collect them, so a queue full of yesterday's blobs must not block
+        today's.
+        """
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(sealed_json)), 0) "
+                "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ?",
+                (to_instance, created_at),
+            ).fetchone()
+            count = int(row[0] or 0)
+            total_bytes = int(row[1] or 0)
+            if count >= max_per_recipient:
+                return False
+            if total_bytes + len(sealed_json) > max_bytes_per_recipient:
+                return False
+            conn.execute(
+                "INSERT INTO gfs_envelope_queue("
+                "to_instance, sealed_json, created_at, expires_at"
+                ") VALUES(?,?,?,?)",
+                (to_instance, sealed_json, created_at, expires_at),
+            )
+            return True
+
+        return await self._db.transact(_run)
+
+    async def list_for(
+        self,
+        to_instance: str,
+        *,
+        now: int,
+    ) -> list[GfsQueuedEnvelope]:
+        """Unexpired envelopes for *to_instance*, oldest first.
+
+        Expired rows are skipped here as well as swept by the maintenance
+        loop: a household reconnecting between two sweeps must not receive a
+        blob whose TTL has already run out.
+        """
+        rows = await self._db.fetchall(
+            "SELECT id, to_instance, sealed_json, created_at, expires_at "
+            "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ? "
+            "ORDER BY created_at ASC, id ASC",
+            (to_instance, now),
+        )
+        out: list[GfsQueuedEnvelope] = []
+        for row in rows:
+            d = _as_dict(row)
+            if not d:
+                continue
+            try:
+                sealed = orjson.loads(d["sealed_json"])
+            except orjson.JSONDecodeError:
+                # Unreachable through the route (the dict is serialised from a
+                # validated shape), but a corrupt row must not wedge the whole
+                # drain — skip it and let the TTL sweep collect it.
+                continue
+            if not isinstance(sealed, dict):
+                continue
+            out.append(
+                GfsQueuedEnvelope(
+                    id=int(d["id"]),
+                    to_instance=d["to_instance"],
+                    sealed=sealed,
+                    created_at=int(d["created_at"]),
+                    expires_at=int(d["expires_at"]),
+                )
+            )
+        return out
+
+    async def delete(self, envelope_id: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_envelope_queue WHERE id=?",
+                (envelope_id,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def prune_expired(self, now: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_envelope_queue WHERE expires_at <= ?",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def count_for(self, to_instance: str) -> int:
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM gfs_envelope_queue WHERE to_instance=?",
+            (to_instance,),
+        )
+        d = _as_dict(row)
+        return int(d["n"]) if d else 0
+
+
+# ─── Invite tokens ───────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsInviteRepo(Protocol):
+    """Bulletin board for owner-minted space invites (§24.8.5)."""
+
+    async def create(
+        self,
+        *,
+        gfs_token: str,
+        space_id: str,
+        source_instance_id: str,
+        blob: str,
+        created_at: int,
+        expires_at: int,
+    ) -> GfsInviteToken: ...
+
+    async def get_live(
+        self,
+        gfs_token: str,
+        *,
+        now: int,
+    ) -> GfsInviteToken | None: ...
+
+    async def delete(self, gfs_token: str) -> int: ...
+
+    async def delete_for_space(self, space_id: str) -> int: ...
+
+    async def prune_expired(self, now: int) -> int: ...
+
+
+class SqliteGfsInviteRepo:
+    """SQLite-backed :class:`AbstractGfsInviteRepo`.
+
+    Read-only on the public path: :meth:`get_live` is the ONLY method
+    ``GET /join/{gfs_token}`` calls, and it writes nothing. There is
+    deliberately no ``bump_uses`` / ``record_fetch`` — counting fetches would
+    make this server a record of who opened whose invite (see
+    ``migrations/0012_gfs_invite_tokens_blob.sql``). The ``uses`` /
+    ``max_uses`` columns 0001 shipped are never named by any statement here.
+    """
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def create(
+        self,
+        *,
+        gfs_token: str,
+        space_id: str,
+        source_instance_id: str,
+        blob: str,
+        created_at: int,
+        expires_at: int,
+    ) -> GfsInviteToken:
+        await self._db.enqueue(
+            "INSERT INTO gfs_invite_tokens("
+            "gfs_token, space_id, source_instance_id, blob, created_at, expires_at"
+            ") VALUES(?,?,?,?,?,?)",
+            (gfs_token, space_id, source_instance_id, blob, created_at, expires_at),
+        )
+        return GfsInviteToken(
+            gfs_token=gfs_token,
+            space_id=space_id,
+            source_instance_id=source_instance_id,
+            blob=blob,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+
+    async def get_live(
+        self,
+        gfs_token: str,
+        *,
+        now: int,
+    ) -> GfsInviteToken | None:
+        """The unexpired row for *gfs_token*, or ``None``.
+
+        Expiry is filtered in SQL as well as swept hourly: a visitor arriving
+        between two sweeps must not be handed a blob whose TTL has run out.
+        """
+        row = await self._db.fetchone(
+            "SELECT gfs_token, space_id, source_instance_id, blob, "
+            "created_at, expires_at FROM gfs_invite_tokens "
+            "WHERE gfs_token=? AND expires_at > ?",
+            (gfs_token, now),
+        )
+        d = _as_dict(row)
+        if not d:
+            return None
+        return GfsInviteToken(
+            gfs_token=d["gfs_token"],
+            space_id=d["space_id"],
+            source_instance_id=d["source_instance_id"],
+            blob=d["blob"] or "",
+            created_at=int(d["created_at"] or 0),
+            expires_at=int(d["expires_at"] or 0),
+        )
+
+    async def delete(self, gfs_token: str) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_invite_tokens WHERE gfs_token=?",
+                (gfs_token,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def delete_for_space(self, space_id: str) -> int:
+        """Drop every invite for *space_id*.
+
+        Called when the owner withdraws the listing: a withdrawn space's
+        public page 404s, and its invite page must go with it rather than
+        stay a working side door into a listing its owner delisted.
+        """
+
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_invite_tokens WHERE space_id=?",
+                (space_id,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def prune_expired(self, now: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_invite_tokens WHERE expires_at <= ?",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)

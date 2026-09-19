@@ -19,6 +19,7 @@ import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api, ApiError } from '@/api'
 import { addBase } from '@/baseUrl'
+import { instanceConfig } from '@/store/instance'
 import { buildInviteCode } from '@/lib/spaceInviteCode'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
@@ -32,7 +33,7 @@ const message = signal<string>('')
 const joined  = signal<{ space_id: string } | null>(null)
 const pasteCode = signal<string>('')
 
-async function consumeToken(token: string) {
+async function consumeToken(token: string, spaceId: string | null) {
   try {
     const r = await api.post('/api/spaces/join', { token }) as {
       space_id: string
@@ -42,13 +43,51 @@ async function consumeToken(token: string) {
     status.value = 'joined'
   } catch (err: unknown) {
     if (err instanceof ApiError && [403, 404, 410].includes(err.status)) {
-      pasteCode.value = buildInviteCode({ token })
+      // The link landed on the ISSUER's instance — which is this one —
+      // so our own instance id is exactly the issuer id the receiver's
+      // Social Home needs to route the redeem over federation. Minting
+      // the fallback code without it produced a code that could only
+      // ever take the local path, i.e. fail the same way again on the
+      // other side.
+      // Prefer the issuer's own, bootstrap-capable code; fall back to the
+      // locally-built one when the endpoint isn't there or says 404.
+      pasteCode.value = await fetchIssuerCode(token) ?? buildInviteCode({
+        token,
+        space_id: spaceId,
+        issuer_instance_id: instanceConfig.value?.instance_id ?? null,
+      })
       status.value = 'wrong-instance'
       return
     }
     const msg = (err as Error)?.message ?? String(err)
     message.value = msg || 'Invite link rejected'
     status.value = 'error'
+  }
+}
+
+/**
+ * Ask the issuing household for the *complete* paste code for this token.
+ *
+ * A locally-minted `buildInviteCode(...)` carries only the token / space /
+ * issuer id — it has no bootstrap block (the issuer's identity + key-wrap
+ * keys and the connection-server URL), so the receiving household can never
+ * actually bootstrap a redeem with it. `GET /api/invite-links/{token}/code`
+ * returns the real, bootstrap-capable blob (the token is itself the
+ * credential, so the endpoint is public + per-IP rate limited).
+ *
+ * Returns `null` when the token isn't a live invite link here (404) or the
+ * request fails — the caller then falls back to the local code, so this
+ * page is never worse than before.
+ */
+async function fetchIssuerCode(token: string): Promise<string | null> {
+  try {
+    const r = await api.get(`/api/invite-links/${encodeURIComponent(token)}/code`) as {
+      code?: string | null
+    }
+    const code = r?.code
+    return typeof code === 'string' && code !== '' ? code : null
+  } catch {
+    return null
   }
 }
 
@@ -67,12 +106,16 @@ export default function SpaceJoinLanding() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const token = params.get('token') || ''
+    // Optional — a link minted with the space id attached lets the
+    // fallback code carry it, so the receiver's join card can name the
+    // space and the backend can address the bootstrap redeem.
+    const spaceId = params.get('space_id') || params.get('space') || null
     if (!token) {
       status.value = 'error'
       message.value = 'This invite link is missing its token.'
       return
     }
-    void consumeToken(token)
+    void consumeToken(token, spaceId)
   }, [])
 
   if (status.value === 'loading') {

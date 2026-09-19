@@ -11,6 +11,16 @@ here.
   three-message DH handshake, stores the resulting session keys.
 - **GFS**: uninvolved. Pairing is strictly peer-to-peer.
 
+**Not a pairing:** the §D2b invite-link bootstrap redeem
+([`invites.md`](./invites.md)) also short-circuits the §24.11 pipeline
+with a self-signed, TOFU-verified body, but it is not a handshake — it
+creates a **space-scoped** `remote_instances` row
+(`InstanceSource.space_session`) that is excluded from DMs, the user
+roster, presence, the friends constellation and the auto-pair vouching
+relay, and it publishes no `PairingConfirmed`. It runs over the
+connection server rather than the inbox URL, so "GFS: uninvolved" stays
+true of pairing itself.
+
 ## Event types
 
 `PAIRING_INTRO`, `PAIRING_INTRO_RELAY`, `PAIRING_INTRO_AUTO`,

@@ -1106,6 +1106,50 @@ async def test_create_invite_token(client):
     assert "token" in body
 
 
+async def test_create_invite_token_rejects_bad_ttl(client):
+    """``ttl_seconds`` bounds the link's life; garbage is a 422, not a
+    silently-immortal token."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "TtlSpace"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    for bad in ("soon", -1):
+        resp = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"uses": 1, "ttl_seconds": bad},
+            headers=_auth(client._admin_token),
+        )
+        assert resp.status == 422
+
+
+async def test_create_invite_token_with_ttl_expires(client):
+    """A token minted with a 1-second TTL is dead on arrival a moment
+    later — proof the value reaches the DB row, not just the API."""
+    import asyncio
+
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "TtlSpace2"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r2 = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1, "ttl_seconds": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r2.json())["token"]
+    await asyncio.sleep(1.5)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status >= 400
+
+
 async def test_join_via_invite_token(client):
     """POST /api/spaces/join with a valid token adds the user as member."""
     r = await client.post(
@@ -1137,7 +1181,9 @@ async def test_join_forwards_issuer_instance_id_to_service(client, monkeypatch):
 
     captured: dict = {}
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         captured["token"] = token
         captured["user_id"] = user_id
         captured["issuer_instance_id"] = issuer_instance_id
@@ -1164,7 +1210,9 @@ async def test_join_remote_redeem_denied_maps_to_422(client, monkeypatch):
     from socialhome.domain.space import SpacePermissionError
     from socialhome.services.space_service import SpaceService
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         raise SpacePermissionError(
             "invite token invalid, expired, or exhausted",
         )
@@ -1185,7 +1233,9 @@ async def test_join_remote_redeem_timeout_maps_to_504(client, monkeypatch):
     """A ``TimeoutError`` (issuer didn't ACK / DENY in time) maps to 504."""
     from socialhome.services.space_service import SpaceService
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         raise TimeoutError("issuer did not respond")
 
     monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
@@ -1206,7 +1256,9 @@ async def test_join_local_ban_still_maps_to_403(client, monkeypatch):
     from socialhome.domain.space import SpacePermissionError
     from socialhome.services.space_service import SpaceService
 
-    async def _fake_redeem(self, token, *, user_id, issuer_instance_id=None):
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
         raise SpacePermissionError("banned from this space", banned=True)
 
     monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
@@ -2157,9 +2209,21 @@ async def test_invite_token_explicit_null_ttl_never_expires(client):
     assert await _token_expiry(client, (await resp.json())["token"]) is None
 
 
-@pytest.mark.parametrize("bad", [0, -1, "soon", [5]])
+@pytest.mark.parametrize("bad", [-1, "soon", [5], 0.5, 1.0, True, False, "60"])
 async def test_invite_token_rejects_bad_ttl(client, bad):
-    """A non-positive or non-integer ``ttl_seconds`` is a 422."""
+    """A negative or non-integer ``ttl_seconds`` is a 422.
+
+    ``0`` is deliberately absent: the SPA's expiry picker sends it for
+    "Never", so the route maps it onto the service's ``None`` — see
+    :func:`test_ttl_seconds_zero_means_never_expires`.
+
+    ``int()`` accepted every one of the odd values here and quietly
+    changed what the caller asked for: ``0.5`` became ``0``, i.e. a link
+    that never expires; ``True`` became one second; ``"60"`` worked by
+    accident and taught clients a shape the API does not promise. An
+    expiry is a number the owner picked — a value that is not a JSON
+    integer is a client bug worth reporting, not one worth guessing at.
+    """
     sid = await _invite_space(client)
     resp = await client.post(
         f"/api/spaces/{sid}/invite-tokens",
@@ -2230,3 +2294,479 @@ async def test_list_spaces_includes_features_block(client):
     # …and the block is the full detail shape, not a one-key special case.
     r = await client.get(f"/api/spaces/{open_sid}", headers=_auth(client._admin_token))
     assert rows[open_sid]["features"] == (await r.json())["features"]
+
+
+async def test_join_builds_a_bootstrap_hint_from_an_invite_link(client, monkeypatch):
+    """§D2b — a code minted for a stranger carries the issuer's public keys
+    and the connection server that served it; the view turns those into the
+    hint the service falls back to when no pairing and no mesh route
+    reaches the issuer."""
+    from socialhome.services.space_service import SpaceService
+
+    captured: dict = {}
+
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
+        captured["bootstrap"] = bootstrap
+        return {"space_id": "sp-remote", "role": "member"}
+
+    monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={
+            "token": "tkn",
+            "space_id": "sp-remote",
+            "issuer_instance_id": "issuer-abc",
+            "issuer_identity_pk": "aa" * 32,
+            "issuer_keywrap_pk": "bb" * 32,
+            "issuer_keywrap_sig": "c2ln",
+            "issuer_proto_version": 29,
+            "expires_at": "2026-12-01T00:00:00+00:00",
+            "gfs": "https://relay.example.org",
+        },
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    hint = captured["bootstrap"]
+    assert hint is not None
+    assert hint.instance_id == "issuer-abc"
+    assert hint.invite_token == "tkn"
+    assert hint.space_id == "sp-remote"
+    assert hint.identity_pk == "aa" * 32
+    assert hint.keywrap_pk == "bb" * 32
+    assert hint.keywrap_sig == "c2ln"
+    assert hint.proto_version == 29
+    assert hint.expires_at == "2026-12-01T00:00:00+00:00"
+    assert hint.gfs_url == "https://relay.example.org"
+
+
+async def test_join_without_the_key_block_sends_no_hint(client, monkeypatch):
+    """An older code (or one missing any of the three key fields) redeems
+    over the direct / mesh paths exactly as before — there is nothing to
+    seal to, so no hint is built."""
+    from socialhome.services.space_service import SpaceService
+
+    captured: dict = {}
+
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
+        captured["bootstrap"] = bootstrap
+        return {"space_id": "sp-remote", "role": "member"}
+
+    monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={
+            "token": "tkn",
+            "issuer_instance_id": "issuer-abc",
+            # key-wrap signature missing → not enough to seal safely
+            "issuer_identity_pk": "aa" * 32,
+            "issuer_keywrap_pk": "bb" * 32,
+        },
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    assert captured["bootstrap"] is None
+
+
+async def test_join_relay_unavailable_maps_to_422(client, monkeypatch):
+    """No connection server can carry the sealed blob → the user reads the
+    reason, not a ten-second timeout."""
+    from socialhome.services.gfs_envelope_sender import EnvelopeRelayUnavailable
+    from socialhome.services.space_service import SpaceService
+
+    async def _fake_redeem(
+        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+    ):
+        raise EnvelopeRelayUnavailable(
+            "this connection server can't relay invites yet",
+        )
+
+    monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
+    resp = await client.post(
+        "/api/spaces/join",
+        json={"token": "tkn", "issuer_instance_id": "issuer-abc"},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 422
+    body = await resp.json()
+    assert body["error"]["code"] == "REDEEM_DENIED"
+    assert "can't relay invites yet" in body["error"]["detail"]
+
+
+# ── Invite links: role, list, revoke ──────────────────────────────────
+
+
+async def _a_space(client, name: str) -> str:
+    r = await client.post(
+        "/api/spaces",
+        json={"name": name},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def test_mint_invite_link_returns_the_full_shape(client):
+    """201 carries everything the SPA renders: the seat, the counters,
+    and the ``socialhome://invite#…`` code."""
+    import base64
+    import json
+
+    sid = await _a_space(client, "LinkShape")
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "subscriber", "uses": 3},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    body = await resp.json()
+    assert body["role"] == "subscriber"
+    assert body["uses_remaining"] == 3
+    assert body["gfs"] is None
+    assert body["created_by"] and body["created_at"] and body["expires_at"]
+    blob = body["code"].split("#", 1)[1]
+    decoded = json.loads(base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
+    assert decoded["token"] == body["token"]
+    # The bootstrap block carries this household's REAL published
+    # identity triple — the same one /gfs/info serves — so a stranger
+    # can seal a redeem to us off a pasted code.
+    db = client.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key, keywrap_public_key, keywrap_sig "
+        "FROM instance_identity WHERE id='self'"
+    )
+    assert decoded["issuer_identity_pk"] == row["identity_public_key"]
+    assert decoded["issuer_keywrap_pk"] == row["keywrap_public_key"]
+    assert decoded["issuer_keywrap_sig"] == row["keywrap_sig"]
+
+
+async def test_mint_invite_link_defaults_to_member(client):
+    sid = await _a_space(client, "LinkDefault")
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    assert (await resp.json())["role"] == "member"
+
+
+async def test_mint_invite_link_rejects_owner_and_unknown_roles(client):
+    sid = await _a_space(client, "LinkBadRole")
+    for bad in ("owner", "superuser"):
+        resp = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"role": bad},
+            headers=_auth(client._admin_token),
+        )
+        assert resp.status == 422, bad
+
+
+async def test_list_invite_links_is_admin_only(client):
+    sid = await _a_space(client, "LinkList")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    assert listed.status == 200
+    assert [t["token"] for t in (await listed.json())["tokens"]] == [token]
+    # A plain member cannot read the space's bearer credentials.
+    denied = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._bob_token),
+    )
+    assert denied.status == 403
+
+
+async def test_revoke_invite_link_is_204_and_idempotent(client):
+    sid = await _a_space(client, "LinkRevoke")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    first = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    assert first.status == 204
+    second = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    assert second.status == 204
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    assert (await listed.json())["tokens"] == []
+
+
+async def test_a_revoked_link_no_longer_joins(client):
+    sid = await _a_space(client, "LinkDead")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    joined = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert joined.status == 404
+
+
+async def test_revoke_invite_link_is_admin_only(client):
+    sid = await _a_space(client, "LinkRevokeAuth")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    token = (await r.json())["token"]
+    denied = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._bob_token),
+    )
+    assert denied.status == 403
+
+
+async def test_mint_invite_link_rejects_an_unknown_connection_server(client):
+    sid = await _a_space(client, "LinkNoGfs")
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"publish_to_gfs": "gfs-nope"},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    assert (await listed.json())["tokens"] == []
+
+
+async def test_mint_invite_link_reports_the_minted_total(client):
+    """ "3 of 10 left" needs the total: ``uses_remaining`` is decremented
+    in place, so it cannot be derived after the first redeem."""
+    sid = await _a_space(client, "LinkCounts")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 10},
+        headers=_auth(client._admin_token),
+    )
+    body = await r.json()
+    assert body["uses"] == 10
+    assert body["uses_remaining"] == 10
+    token = body["token"]
+    joined = await client.post(
+        "/api/spaces/join",
+        json={"token": token},
+        headers=_auth(client._bob_token),
+    )
+    assert joined.status == 200
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    row = (await listed.json())["tokens"][0]
+    assert row["uses"] == 10
+    assert row["uses_remaining"] == 9
+
+
+async def test_ttl_seconds_zero_means_never_expires(client):
+    """The SPA sends ``0`` for "Never"; omitting the field takes the
+    server default instead."""
+    sid = await _a_space(client, "LinkTtl")
+    never = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"ttl_seconds": 0},
+        headers=_auth(client._admin_token),
+    )
+    assert (await never.json())["expires_at"] is None
+    default = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert (await default.json())["expires_at"] is not None
+
+
+# ─── GET /api/invite-links/{token}/code ──────────────────────────────────
+
+
+async def test_invite_link_code_is_public_and_returns_the_full_code(client):
+    """The ``/join`` landing page's "wrong instance" fallback needs a code
+    the RECEIVING household can actually bootstrap a redeem with — which
+    means the issuer's keys and the connection-server URL, none of which
+    the page can mint on its own. No Authorization header: the token is
+    the credential, and whoever holds it can already redeem the link."""
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+
+    resp = await client.get(f"/api/invite-links/{token}/code")
+
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["code"].startswith("socialhome://invite#")
+    # It is the same code the admin list hands out — one builder, so the
+    # paste path and the /join path cannot drift.
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens",
+        headers=_auth(client._admin_token),
+    )
+    rows = (await listed.json())["tokens"]
+    assert body["code"] == next(r for r in rows if r["token"] == token)["code"]
+
+
+async def test_invite_link_code_404s_for_an_unknown_token(client):
+    """A token that was never ours and one that has expired must be
+    indistinguishable — otherwise this is a probe for which links a
+    household has issued."""
+    resp = await client.get("/api/invite-links/deadbeef" + "0" * 24 + "/code")
+    assert resp.status == 404
+
+
+async def test_invite_link_code_404s_once_the_link_is_revoked(client):
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+    assert (await client.get(f"/api/invite-links/{token}/code")).status == 200
+
+    revoked = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{token}",
+        headers=_auth(client._admin_token),
+    )
+    assert revoked.status in (200, 204)
+
+    assert (await client.get(f"/api/invite-links/{token}/code")).status == 404
+
+
+async def test_invite_link_code_404s_once_the_link_has_expired(client):
+    import asyncio
+
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1, "ttl_seconds": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+    await asyncio.sleep(1.2)
+
+    assert (await client.get(f"/api/invite-links/{token}/code")).status == 404
+
+
+async def test_invite_link_code_is_rate_limited_per_ip(client):
+    """An anonymous endpoint gets a budget. Not brute-force protection —
+    a uuid4 token is not guessable — just ordinary shedding."""
+    from socialhome.routes.spaces import INVITE_CODE_RATE_LIMIT
+
+    sid = await _invite_space(client)
+    minted = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"uses": 1},
+        headers=_auth(client._admin_token),
+    )
+    token = (await minted.json())["token"]
+
+    statuses = [
+        (await client.get(f"/api/invite-links/{token}/code")).status
+        for _ in range(INVITE_CODE_RATE_LIMIT + 1)
+    ]
+
+    assert statuses[:INVITE_CODE_RATE_LIMIT] == [200] * INVITE_CODE_RATE_LIMIT
+    assert statuses[-1] == 429
+
+
+# ─── Publishing an invite link: the upstream's words stay upstream ───────
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (403, "owner key"),
+        (429, "rate-limiting"),
+        (500, "couldn't publish the link right now"),
+        (None, "couldn't publish the link right now"),
+    ],
+)
+async def test_publish_failure_is_a_sentence_not_an_upstream_dump(
+    client,
+    caplog,
+    status,
+    expected,
+):
+    """The SPA was showing people this, verbatim, in a toast:
+
+        GFS rejected invite (HTTP 403): {"error": "not the owner of this space"}
+
+    Three problems. It is not a sentence anybody can act on; it leaks the
+    upstream's error vocabulary into our UI, so a wording change over
+    there changes what our users read; and it says nothing about what to
+    DO. ``security.error_response`` says as much in its own docstring —
+    "Pass a fixed string literal — never ``str(exc)`` directly". Map it
+    per status class here, and keep the raw text where it is useful: the
+    log.
+    """
+    import logging
+
+    from socialhome.app_keys import space_service_key
+    from socialhome.services.gfs_connection_service import GfsConnectionError
+
+    sid = await _invite_space(client)
+    svc = client.server.app[space_service_key]
+
+    raw = 'GFS rejected invite (HTTP 403): {"error": "not the owner of this space"}'
+
+    async def _boom(*a, **kw):
+        raise GfsConnectionError(raw, status=status)
+
+    from unittest.mock import patch
+
+    with (
+        patch.object(type(svc), "create_invite_link", side_effect=_boom),
+        caplog.at_level(logging.WARNING),
+    ):
+        resp = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"uses": 1, "publish_to_gfs": "gfs-1"},
+            headers=_auth(client._admin_token),
+        )
+
+    assert resp.status == 422
+    body = await resp.json()
+    assert body["error"]["code"] == "GFS_PUBLISH_FAILED"
+    message = body["error"]["detail"]
+    assert expected in message
+    # Not one word of the upstream's own text reaches the user…
+    assert "HTTP 403" not in message
+    assert "not the owner of this space" not in message
+    # …but an operator can still find it.
+    assert any(raw in r.getMessage() for r in caplog.records)

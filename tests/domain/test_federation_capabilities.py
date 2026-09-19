@@ -6,12 +6,14 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 28
+    assert fc.OURS == 29
 
 
 def test_route_stale_nack_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_ROUTE_STALE_NACK == 28
     assert fc.FederationCapability.MIN_FOR_ROUTE_STALE_NACK <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM == 29
+    assert fc.FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM <= fc.OURS
 
 
 def test_route_stale_nack_feature_label():

@@ -94,7 +94,7 @@ def _peer(iid: str) -> RemoteInstance:
 async def test_first_frame_fans_highlight_created_to_all_paired(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-a"), _peer("peer-b")],
     )
     await out._on_frame_added(_frame_event(is_first=True))
@@ -106,7 +106,7 @@ async def test_first_frame_fans_highlight_created_to_all_paired(stack):
 async def test_subsequent_frame_uses_frame_appended(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-a")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
     await out._on_frame_added(_frame_event(is_first=False))
     assert fed.send_event.call_args.kwargs["event_type"] is (
         FederationEventType.HIGHLIGHT_FRAME_APPENDED
@@ -117,7 +117,7 @@ async def test_remote_author_skips_echo_loop(stack):
     """When the author lives on a peer, the same DomainEvent must not re-fan."""
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="peer-source")
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-a")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
     await out._on_frame_added(_frame_event())
     assert fed.send_event.call_count == 0
 
@@ -134,7 +134,7 @@ async def test_users_audience_resolves_each_user_to_home_instance(stack):
         }.get(uid)
 
     user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
-    fed_repo.list_instances = AsyncMock(return_value=[])
+    fed_repo.list_social_instances = AsyncMock(return_value=[])
     await out._on_frame_added(
         _frame_event(audience_kind="users", audience=("uid-bob", "uid-carol")),
     )
@@ -145,7 +145,7 @@ async def test_users_audience_resolves_each_user_to_home_instance(stack):
 async def test_households_audience_uses_listed_instance_ids(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(return_value=[])
+    fed_repo.list_social_instances = AsyncMock(return_value=[])
     await out._on_frame_added(
         _frame_event(
             audience_kind="households",
@@ -159,7 +159,7 @@ async def test_households_audience_uses_listed_instance_ids(stack):
 async def test_frame_removed_maps_to_frame_deleted(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-a")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
     await out._on_frame_removed(
         HighlightFrameRemoved(
             highlight_id="s-1",
@@ -177,7 +177,7 @@ async def test_frame_removed_maps_to_frame_deleted(stack):
 async def test_highlight_removed_maps_to_highlight_deleted(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-a")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
     await out._on_highlight_removed(
         HighlightRemoved(
             highlight_id="s-1",
@@ -194,7 +194,7 @@ async def test_highlight_removed_maps_to_highlight_deleted(stack):
 async def test_own_instance_filtered_from_paired_peers(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("self"), _peer("peer-a")],
     )
     await out._on_frame_added(_frame_event())
@@ -206,7 +206,7 @@ async def test_send_failure_does_not_abort_other_peers(stack):
     """A bad peer doesn't stop fan-out to the rest of the audience."""
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-bad"), _peer("peer-ok")],
     )
 
@@ -347,7 +347,7 @@ async def test_fan_to_audience_skips_peer_that_hid_author():
     federation_repo = MagicMock()
     user_repo = MagicMock()
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    federation_repo.list_instances = AsyncMock(
+    federation_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-a"), _peer("peer-b")],
     )
     # peer-a has hidden uid-author; peer-b has not

@@ -236,7 +236,19 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
     identified (household-signed, third-party-provable) legacy body."""
     resp = await gfs_client.get("/gfs/info")
     body = await resp.json()
-    assert body["capabilities"] == {"anonymous_publish": True}
+    assert body["capabilities"] == {
+        "anonymous_publish": True,
+        # §D2b — this GFS carries ``POST /gfs/envelope``, so a household only
+        # attempts a bootstrap redeem against a server that proved it can
+        # relay one. Inside the signed block for the same reason
+        # ``anonymous_publish`` is: an on-path stripper must not be able to
+        # push a household back onto a path that reveals more.
+        "envelope_relay": True,
+        # §24.8.5 — this GFS hosts owner-minted invite links, so a household
+        # only offers to mint one against a server that proved it can serve
+        # the ``/join`` page. Signed for the same reason as its siblings.
+        "invite_links": True,
+    }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(
         body["public_key"],

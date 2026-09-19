@@ -25,7 +25,9 @@ from .repositories import PAIR_TOKEN_RETENTION_SECONDS
 if TYPE_CHECKING:
     from .repositories import (
         AbstractGfsAdminRepo,
+        AbstractGfsEnvelopeQueueRepo,
         AbstractGfsHighlightPublicationRepo,
+        AbstractGfsInviteRepo,
     )
 
 log = logging.getLogger(__name__)
@@ -34,17 +36,31 @@ log = logging.getLogger(__name__)
 class GfsMaintenanceScheduler:
     """Background task that runs the dormant GFS retention prunes."""
 
-    __slots__ = ("_admin_repo", "_highlight_repo", "_interval", "_task", "_stop")
+    __slots__ = (
+        "_admin_repo",
+        "_highlight_repo",
+        "_envelope_queue_repo",
+        "_invite_repo",
+        "_interval",
+        "_task",
+        "_stop",
+    )
 
     def __init__(
         self,
         *,
         admin_repo: "AbstractGfsAdminRepo",
         highlight_repo: "AbstractGfsHighlightPublicationRepo",
+        envelope_queue_repo: "AbstractGfsEnvelopeQueueRepo | None" = None,
+        invite_repo: "AbstractGfsInviteRepo | None" = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
         self._admin_repo = admin_repo
         self._highlight_repo = highlight_repo
+        # Optional so an existing test/embedder that builds the scheduler with
+        # the two original repos keeps working; production always wires it.
+        self._envelope_queue_repo = envelope_queue_repo
+        self._invite_repo = invite_repo
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -100,9 +116,30 @@ class GfsMaintenanceScheduler:
             )
         except Exception as exc:
             log.warning("gfs maintenance: prune_old_pair_tokens failed: %s", exc)
-        if highlights or tokens:
+        envelopes = 0
+        if self._envelope_queue_repo is not None:
+            try:
+                envelopes = await self._envelope_queue_repo.prune_expired(now)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: prune_expired envelopes failed: %s",
+                    exc,
+                )
+        invites = 0
+        if self._invite_repo is not None:
+            try:
+                invites = await self._invite_repo.prune_expired(now)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: prune_expired invites failed: %s",
+                    exc,
+                )
+        if highlights or tokens or envelopes or invites:
             log.debug(
-                "gfs maintenance: pruned %d highlight publications, %d pair tokens",
+                "gfs maintenance: pruned %d highlight publications, %d pair "
+                "tokens, %d expired envelopes, %d expired invites",
                 highlights,
                 tokens,
+                envelopes,
+                invites,
             )

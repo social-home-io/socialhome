@@ -629,6 +629,44 @@ async def test_consume_exhausted_token_returns_none(env):
     assert result is None
 
 
+async def test_consume_expired_tz_aware_token_returns_none(env):
+    """Regression: a tz-aware ISO expiry in the past must deny.
+
+    The guard used to compare ``expires_at`` to ``datetime('now')`` as a
+    string. Python writes ``2026-09-18T15:25:42+00:00`` and SQLite emits
+    ``2026-09-18 15:25:42``; ``T`` sorts above the space, so every
+    expiry looked like it was in the future and no invite token ever
+    expired — including the 5-minute ones minted for remote invites.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    await env.repo.save(_space("sp-expired"))
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    token = await env.repo.create_invite_token(
+        "sp-expired",
+        "uid-alice",
+        uses=1,
+        expires_at=past,
+    )
+    assert await env.repo.consume_invite_token(token) is None
+
+
+async def test_consume_future_tz_aware_token_succeeds(env):
+    from datetime import datetime, timedelta, timezone
+
+    await env.repo.save(_space("sp-live"))
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    token = await env.repo.create_invite_token(
+        "sp-live",
+        "uid-alice",
+        uses=1,
+        expires_at=soon,
+    )
+    row = await env.repo.consume_invite_token(token)
+    assert row is not None
+    assert row["space_id"] == "sp-live"
+
+
 async def test_consume_missing_token_returns_none(env):
     """consume_invite_token returns None for a non-existent token."""
     result = await env.repo.consume_invite_token("no-such-token")
@@ -960,3 +998,184 @@ async def test_list_expired_join_requests_sees_same_day_expiry(env):
     )
     rows = await env.repo.list_expired_join_requests()
     assert [r["id"] for r in rows] == [rid]
+
+
+async def test_a_banned_redeemer_consumes_nothing(env):
+    """§13.7 folded into the consume.
+
+    It used to be a separate query run AFTER the UPDATE, with no refund,
+    so a banned household could spend a twenty-use invite link in twenty
+    requests — and the differential answer told it its own ban status.
+    """
+    await env.repo.save(_space("sp-banned"))
+    token = await env.repo.create_invite_token("sp-banned", "uid-alice", uses=20)
+    await env.repo.ban_member("sp-banned", "uid-bob", "uid-alice")
+
+    for _ in range(3):
+        assert (
+            await env.repo.consume_invite_token(
+                token,
+                redeemer_user_id="uid-bob",
+            )
+            is None
+        )
+
+    # Not one use burned — the next honest redeemer still gets all twenty.
+    row = await env.repo.consume_invite_token(token, redeemer_user_id="uid-carol")
+    assert row is not None
+    assert row["uses_remaining"] == 19
+
+
+async def test_a_ban_in_another_space_does_not_block_this_token(env):
+    """The ban subquery is correlated on the token's OWN space."""
+    await env.repo.save(_space("sp-one"))
+    await env.repo.save(_space("sp-two"))
+    await env.repo.ban_member("sp-two", "uid-bob", "uid-alice")
+    token = await env.repo.create_invite_token("sp-one", "uid-alice", uses=1)
+
+    row = await env.repo.consume_invite_token(token, redeemer_user_id="uid-bob")
+    assert row is not None
+    assert row["space_id"] == "sp-one"
+
+
+async def test_consume_without_a_redeemer_id_ignores_bans(env):
+    """The local ``accept_invite_token`` path passes no redeemer and keeps
+    its own ban check — the new argument must stay opt-in."""
+    await env.repo.save(_space("sp-opt-in"))
+    await env.repo.ban_member("sp-opt-in", "uid-bob", "uid-alice")
+    token = await env.repo.create_invite_token("sp-opt-in", "uid-alice", uses=1)
+
+    assert await env.repo.consume_invite_token(token) is not None
+
+
+# ── Invite-token roles + publication (migration 0053) ──────────────────────
+
+
+async def test_invite_token_defaults_to_a_member_seat(env):
+    """Every token that existed before 0053 means ``member``, and so does
+    one minted without saying otherwise."""
+    await env.repo.save(_space("sp-role-default"))
+    token = await env.repo.create_invite_token("sp-role-default", "uid-alice")
+    row = await env.repo.consume_invite_token(token)
+    assert row is not None
+    assert row["role"] == "member"
+
+
+async def test_invite_token_role_round_trips(env):
+    """The seat is stored on the row and comes back out of the atomic
+    consume — the redeemer never supplies it."""
+    await env.repo.save(_space("sp-role"))
+    for role in ("member", "subscriber", "admin"):
+        token = await env.repo.create_invite_token("sp-role", "uid-alice", role=role)
+        row = await env.repo.consume_invite_token(token)
+        assert row is not None
+        assert row["role"] == role
+
+
+async def test_invite_token_rejects_an_unknown_role(env):
+    """The CHECK is the on-disk authority — ``owner`` is not in it, and
+    neither is anything invented."""
+    import sqlite3
+
+    await env.repo.save(_space("sp-role-bad"))
+    for bad in ("owner", "superuser"):
+        with pytest.raises(sqlite3.IntegrityError):
+            await env.repo.create_invite_token("sp-role-bad", "uid-alice", role=bad)
+
+
+async def test_create_invite_token_accepts_a_caller_supplied_token(env):
+    """The publish-first mint seals the token into the blob before the
+    row exists, so it hands the value down."""
+    await env.repo.save(_space("sp-supplied"))
+    token = await env.repo.create_invite_token(
+        "sp-supplied",
+        "uid-alice",
+        token="deadbeef" * 4,
+    )
+    assert token == "deadbeef" * 4
+    assert await env.repo.consume_invite_token("deadbeef" * 4) is not None
+
+
+async def test_list_live_invite_tokens_returns_the_gfs_triple(env):
+    await env.repo.save(_space("sp-pub"))
+    token = await env.repo.create_invite_token(
+        "sp-pub",
+        "uid-alice",
+        role="subscriber",
+        gfs_id="gfs-1",
+        gfs_token="gt-1",
+        gfs_url="https://relay.example.org/join/gt-1",
+    )
+    rows = await env.repo.list_live_invite_tokens("sp-pub")
+    assert len(rows) == 1
+    assert rows[0]["token"] == token
+    assert rows[0]["role"] == "subscriber"
+    assert rows[0]["gfs_id"] == "gfs-1"
+    assert rows[0]["gfs_token"] == "gt-1"
+    assert rows[0]["gfs_url"] == "https://relay.example.org/join/gt-1"
+
+
+async def test_list_live_invite_tokens_excludes_spent_links(env):
+    """An expired or exhausted token grants nothing; listing it would
+    only invite an owner to 'revoke' something already dead."""
+    from datetime import datetime, timedelta, timezone
+
+    await env.repo.save(_space("sp-live-list"))
+    live = await env.repo.create_invite_token("sp-live-list", "uid-alice", uses=2)
+    exhausted = await env.repo.create_invite_token("sp-live-list", "uid-alice", uses=1)
+    await env.repo.consume_invite_token(exhausted)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    await env.repo.create_invite_token(
+        "sp-live-list",
+        "uid-alice",
+        expires_at=past,
+    )
+    rows = await env.repo.list_live_invite_tokens("sp-live-list")
+    assert [r["token"] for r in rows] == [live]
+
+
+async def test_list_live_invite_tokens_never_leaks_another_space(env):
+    await env.repo.save(_space("sp-mine"))
+    await env.repo.save(_space("sp-theirs"))
+    mine = await env.repo.create_invite_token("sp-mine", "uid-alice")
+    await env.repo.create_invite_token("sp-theirs", "uid-bob")
+    rows = await env.repo.list_live_invite_tokens("sp-mine")
+    assert [r["token"] for r in rows] == [mine]
+
+
+async def test_delete_invite_token_returns_the_row_and_is_idempotent(env):
+    await env.repo.save(_space("sp-del"))
+    token = await env.repo.create_invite_token(
+        "sp-del",
+        "uid-alice",
+        gfs_id="gfs-9",
+        gfs_token="gt-9",
+    )
+    row = await env.repo.delete_invite_token("sp-del", token)
+    assert row is not None
+    assert row["gfs_id"] == "gfs-9"
+    assert row["gfs_token"] == "gt-9"
+    # Gone, and a second revoke is a no-op rather than an error.
+    assert await env.repo.delete_invite_token("sp-del", token) is None
+    assert await env.repo.consume_invite_token(token) is None
+
+
+async def test_delete_invite_token_is_scoped_to_its_space(env):
+    """An admin of one space must not be able to revoke another space's
+    link by guessing the token."""
+    await env.repo.save(_space("sp-a"))
+    await env.repo.save(_space("sp-b"))
+    token = await env.repo.create_invite_token("sp-a", "uid-alice")
+    assert await env.repo.delete_invite_token("sp-b", token) is None
+    assert await env.repo.consume_invite_token(token) is not None
+
+
+async def test_invite_token_remembers_the_minted_total(env):
+    """``uses_remaining`` is decremented in place, so the total has to be
+    stored or it is gone after the first redeem."""
+    await env.repo.save(_space("sp-total"))
+    token = await env.repo.create_invite_token("sp-total", "uid-alice", uses=10)
+    await env.repo.consume_invite_token(token)
+    rows = await env.repo.list_live_invite_tokens("sp-total")
+    assert rows[0]["uses_total"] == 10
+    assert rows[0]["uses_remaining"] == 9

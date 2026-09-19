@@ -12,7 +12,10 @@ import orjson
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
-from socialhome.domain.federation import DELIVERY_ERROR_ROUTE_COOLDOWN
+from socialhome.domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_ROUTE_COOLDOWN,
+)
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     ChunkBuilder,
@@ -774,3 +777,110 @@ async def test_non_cooldown_failure_still_counts_a_strike(provider):
     assert federation.send_with_mesh_fallback.await_count == 1
     federation.close_sync_session.assert_called_once_with(session.sync_id)
     sleep_mock.assert_not_awaited()
+
+
+# ─── Relay back-pressure: a 429 is a window, not a broken path ────────
+
+
+def _relay_throttle_result(retry_after_s: float = 0.01):
+    """A ``DeliveryResult``-shaped 429 from the connection-server relay."""
+    return SimpleNamespace(
+        ok=False,
+        error=DELIVERY_ERROR_RELAY_THROTTLED,
+        retry_after_s=retry_after_s,
+    )
+
+
+async def test_a_relay_throttle_waits_and_retries_the_same_chunk(provider):
+    """A link-joined household is reachable ONLY through the connection
+    server's envelope relay, so every catch-up chunk rides a per-minute
+    window. Counting a 429 as a chunk failure abandoned the whole
+    backfill after three of them — which is what a few hundred chunks
+    hitting the window produces in under a second."""
+    from unittest.mock import AsyncMock
+
+    expected = await _baseline_send_count(provider)
+    assert expected > 1
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    ok = SimpleNamespace(ok=True, error=None, retry_after_s=None)
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        side_effect=[_relay_throttle_result()] + [ok] * (expected + 2),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        patch.object(provider_mod, "MAX_RELAY_THROTTLE_WAIT_S", 0.01),
+    ):
+        await provider.stream_initial(session)
+
+    federation.close_sync_session.assert_not_called()
+    assert federation.send_with_mesh_fallback.await_count == expected + 1
+
+
+async def test_relay_throttle_waits_are_bounded(provider):
+    """A relay that never lets us through still terminates the stream
+    rather than parking the provider task forever."""
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        return_value=_relay_throttle_result(),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        patch.object(provider_mod, "MAX_RELAY_THROTTLE_WAITS", 2),
+        patch.object(provider_mod, "MAX_RELAY_THROTTLE_WAIT_S", 0.01),
+    ):
+        await provider.stream_initial(session)
+
+    assert federation.send_with_mesh_fallback.await_count == 3
+    federation.close_sync_session.assert_called_once_with(session.sync_id)
+
+
+async def test_the_two_waitable_reasons_keep_separate_budgets(provider):
+    """A stream that waits out a route cooldown must not arrive at the
+    relay window with its patience already spent — the two conditions
+    are unrelated and a backfill routinely meets both."""
+    from unittest.mock import AsyncMock
+
+    expected = await _baseline_send_count(provider)
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    ok = SimpleNamespace(ok=True, error=None, retry_after_s=None)
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        side_effect=(
+            [_cooldown_result(), _relay_throttle_result()] + [ok] * (expected + 2)
+        ),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        patch.object(provider_mod, "MAX_ROUTE_COOLDOWN_WAITS", 1),
+        patch.object(provider_mod, "MAX_ROUTE_COOLDOWN_WAIT_S", 0.01),
+        patch.object(provider_mod, "MAX_RELAY_THROTTLE_WAITS", 1),
+        patch.object(provider_mod, "MAX_RELAY_THROTTLE_WAIT_S", 0.01),
+    ):
+        await provider.stream_initial(session)
+
+    federation.close_sync_session.assert_not_called()
+    assert federation.send_with_mesh_fallback.await_count == expected + 2

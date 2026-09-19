@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from socialhome.domain.federation import (
+    InstanceSource,
     PairingSession,
     PairingStatus,
     RemoteInstance,
@@ -692,3 +693,58 @@ async def test_set_instance_display_name_round_trips(env):
     identity = await env.fed_repo.get_local_identity()
     assert identity is not None
     assert identity["display_name"] == "Casa Vizeli"
+
+
+async def test_list_social_instances_excludes_space_session_rows(env):
+    """§D2b — a household we only share a space with is not a social peer.
+
+    ``list_social_instances`` is what every non-space fan-out (DMs, the
+    user roster, presence, the friends constellation, peer pickers)
+    reads, so a ``space_session`` row must not appear in it while an
+    ordinary confirmed pairing does.
+    """
+    paired = RemoteInstance(
+        id="peer-social",
+        display_name="Paired household",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://social/wh",
+        local_inbox_id="wh-social",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    space_only = RemoteInstance(
+        id="peer-space",
+        display_name="Invite-link household",
+        remote_identity_pk="bb" * 32,
+        key_self_to_remote="k3",
+        key_remote_to_self="k4",
+        remote_inbox_url="",
+        local_inbox_id="wh-space",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+    )
+    pending = RemoteInstance(
+        id="peer-pending",
+        display_name="Half-paired",
+        remote_identity_pk="cc" * 32,
+        key_self_to_remote="k5",
+        key_remote_to_self="k6",
+        remote_inbox_url="https://pending/wh",
+        local_inbox_id="wh-pending",
+        status=PairingStatus.PENDING_SENT,
+        source=InstanceSource.MANUAL,
+    )
+    for inst in (paired, space_only, pending):
+        await env.fed_repo.save_instance(inst)
+
+    social = await env.fed_repo.list_social_instances()
+    assert [i.id for i in social] == ["peer-social"]
+    # The row still exists and is still CONFIRMED — space federation
+    # reads it through the space-scoped lists.
+    everyone = await env.fed_repo.list_instances(status="confirmed")
+    assert {i.id for i in everyone} == {"peer-social", "peer-space"}
+    assert (await env.fed_repo.get_instance("peer-space")).source is (
+        InstanceSource.SPACE_SESSION
+    )

@@ -57,6 +57,9 @@ class _InMemoryFederationRepo:
         self.instances[inst.id] = inst
         return inst
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(self, *, source=None, status=None):
         out = list(self.instances.values())
         if status is not None:
@@ -67,7 +70,11 @@ class _InMemoryFederationRepo:
         return []
 
 
-def _make_peer_remote_instance(pk_hex: str, status=PairingStatus.CONFIRMED):
+def _make_peer_remote_instance(
+    pk_hex: str,
+    status=PairingStatus.CONFIRMED,
+    source=InstanceSource.MANUAL,
+):
     return RemoteInstance(
         id=derive_instance_id(bytes.fromhex(pk_hex)),
         display_name="Peer",
@@ -77,7 +84,7 @@ def _make_peer_remote_instance(pk_hex: str, status=PairingStatus.CONFIRMED):
         remote_inbox_url="https://peer.example/inbox",
         local_inbox_id="loc-" + os.urandom(4).hex(),
         status=status,
-        source=InstanceSource.MANUAL,
+        source=source,
     )
 
 
@@ -209,6 +216,29 @@ async def test_request_via_rejects_unknown_peer(coord):
     with pytest.raises(ValueError, match="confirmed paired"):
         await coord.request_via(
             via_instance_id="no-such-peer",
+            target_instance_id="target",
+            target_display_name="T",
+            own_inbox_base_url=_OWN_INBOX_BASE,
+        )
+
+
+async def test_request_via_rejects_space_session_voucher(coord, fed_repo):
+    """§D2b — an invite-link household never vouches for a third party.
+
+    A ``space_session`` row is CONFIRMED but carries no QR handshake and
+    no out-of-band SAS, so there is no trust to transit: letting it
+    introduce us would turn "I joined their space" into a pairing with
+    somebody we have never met.
+    """
+    b_kp = generate_identity_keypair()
+    b = _make_peer_remote_instance(
+        b_kp.public_key.hex(),
+        source=InstanceSource.SPACE_SESSION,
+    )
+    fed_repo.instances[b.id] = b
+    with pytest.raises(ValueError, match="confirmed paired"):
+        await coord.request_via(
+            via_instance_id=b.id,
             target_instance_id="target",
             target_display_name="T",
             own_inbox_base_url=_OWN_INBOX_BASE,

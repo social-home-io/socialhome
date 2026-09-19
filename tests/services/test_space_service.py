@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
@@ -13,6 +18,7 @@ from socialhome.domain.space import (
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
+    SpaceRole,
     SpaceType,
 )
 from socialhome.infrastructure.event_bus import EventBus
@@ -3447,6 +3453,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space roster gossip",
         "Admin authoritative config offline",
         "Mesh route-stale nack",
+        "Invite-link bootstrap redeem",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3462,6 +3469,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space roster gossip",
         "Admin authoritative config offline",
         "Mesh route-stale nack",
+        "Invite-link bootstrap redeem",
     )
 
 
@@ -3489,6 +3497,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space roster gossip",
         "Admin authoritative config offline",
         "Mesh route-stale nack",
+        "Invite-link bootstrap redeem",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3531,6 +3540,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space roster gossip",
         "Admin authoritative config offline",
         "Mesh route-stale nack",
+        "Invite-link bootstrap redeem",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -4397,7 +4407,10 @@ async def test_remove_remote_member_broadcasts_left(stack):
     stack.space_svc._federation = fed
     from unittest.mock import MagicMock
 
+    # ``revoke_space_session_if_orphaned`` runs at the end of the kick and
+    # reads this row; a manual (QR-paired) peer is left alone.
     stack.space_svc._federation_repo = MagicMock()
+    stack.space_svc._federation_repo.get_instance = AsyncMock(return_value=None)
     remote = await _wire_remote_members(stack)
     await remote.add(
         space_id=space.id,
@@ -6013,3 +6026,491 @@ async def test_approved_admin_update_config_cannot_flip_allow_subscribers(stack)
     assert refreshed.features.allow_subscribers is False
     assert refreshed.name == "Approved Rename"
     assert refreshed.features.location is True
+
+
+# ── Invite links: roles, listing, revoke (migration 0053) ─────────────
+
+
+class _FakeGfs:
+    """Stand-in for :class:`GfsConnectionService`'s invite surface.
+
+    Records what was published / revoked so the tests can assert the
+    stored triple travels back out on revoke.
+    """
+
+    def __init__(self, *, publish_error: Exception | None = None):
+        self.connections = [
+            SimpleNamespace(id="gfs-1", inbox_url="https://relay.example.org"),
+        ]
+        self.published: list[tuple] = []
+        self.revoked: list[tuple] = []
+        self.publish_error = publish_error
+        self.revoke_error: Exception | None = None
+
+    async def list_connections(self):
+        return self.connections
+
+    async def publish_invite(self, space_id, gfs_id, blob, expires_at):
+        if self.publish_error is not None:
+            raise self.publish_error
+        self.published.append((space_id, gfs_id, blob, expires_at))
+        return ("gt-1", "https://relay.example.org/join/gt-1")
+
+    async def revoke_invite(self, space_id, gfs_id, gfs_token):
+        if self.revoke_error is not None:
+            raise self.revoke_error
+        self.revoked.append((space_id, gfs_id, gfs_token))
+
+
+async def _space_with_owner_and_admin(stack):
+    """A space owned by anna with bob seated as an admin."""
+    await stack.provision_user("anna", is_admin=True)
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Links")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    await stack.space_svc.set_role(
+        space.id,
+        actor_username="anna",
+        user_id=bob.user_id,
+        role=SpaceRole.ADMIN.value,
+    )
+    return space, bob
+
+
+async def test_admin_may_mint_a_member_link(stack):
+    space, _bob = await _space_with_owner_and_admin(stack)
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="bob",
+        role=SpaceRole.MEMBER.value,
+    )
+    assert link["role"] == SpaceRole.MEMBER.value
+
+
+async def test_admin_may_mint_a_subscriber_link(stack):
+    space, _bob = await _space_with_owner_and_admin(stack)
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="bob",
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    assert link["role"] == SpaceRole.SUBSCRIBER.value
+
+
+async def test_admin_may_not_mint_an_admin_link(stack):
+    """An admin minting an admin link would be self-service promotion by
+    proxy — only the owner delegates admin."""
+    space, _bob = await _space_with_owner_and_admin(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.create_invite_link(
+            space.id,
+            actor_username="bob",
+            role=SpaceRole.ADMIN.value,
+        )
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_owner_may_mint_an_admin_link(stack):
+    space, _bob = await _space_with_owner_and_admin(stack)
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        role=SpaceRole.ADMIN.value,
+    )
+    assert link["role"] == SpaceRole.ADMIN.value
+
+
+async def test_nobody_may_mint_an_owner_link(stack):
+    """Ownership moves through transfer_ownership, never a link."""
+    space, _bob = await _space_with_owner_and_admin(stack)
+    with pytest.raises(ValueError):
+        await stack.space_svc.create_invite_link(
+            space.id,
+            actor_username="anna",
+            role=SpaceRole.OWNER.value,
+        )
+
+
+async def test_an_unknown_role_is_refused(stack):
+    space, _bob = await _space_with_owner_and_admin(stack)
+    with pytest.raises(ValueError):
+        await stack.space_svc.create_invite_link(
+            space.id,
+            actor_username="anna",
+            role="superuser",
+        )
+
+
+async def test_a_plain_member_may_not_mint_anything(stack):
+    await stack.provision_user("anna", is_admin=True)
+    carol = await stack.provision_user("carol")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Closed")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=carol.user_id
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.create_invite_link(space.id, actor_username="carol")
+
+
+async def test_redeeming_an_admin_link_seats_an_admin(stack):
+    """The seat is the row's, not the redeemer's request."""
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Seats")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        role=SpaceRole.ADMIN.value,
+    )
+    member = await stack.space_svc.accept_invite_token(
+        link["token"], user_id=dave.user_id
+    )
+    assert member.role == SpaceRole.ADMIN
+    stored = await stack.space_repo.get_member(space.id, dave.user_id)
+    assert stored.role == SpaceRole.ADMIN
+
+
+async def test_redeeming_a_subscriber_link_seats_a_subscriber(stack):
+    """No readability / "strangers may subscribe" flag is consulted: that
+    flag governs people who walked up on their own, and an explicit
+    invite is the owner deciding otherwise."""
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Read")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    member = await stack.space_svc.accept_invite_token(
+        link["token"], user_id=dave.user_id
+    )
+    assert member.role == SpaceRole.SUBSCRIBER
+    stored = await stack.space_repo.get_member(space.id, dave.user_id)
+    assert stored.role == SpaceRole.SUBSCRIBER
+
+
+async def test_a_plain_link_still_seats_a_member(stack):
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Plain")
+    link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    member = await stack.space_svc.accept_invite_token(
+        link["token"], user_id=dave.user_id
+    )
+    assert member.role == SpaceRole.MEMBER
+
+
+async def test_the_minted_code_decodes_to_the_documented_fields(stack):
+    import base64
+    import json
+
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Coded")
+    link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    code = link["code"]
+    assert code.startswith("socialhome://invite#")
+    blob = code.split("#", 1)[1]
+    decoded = json.loads(base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
+    assert decoded["token"] == link["token"]
+    assert decoded["space_id"] == space.id
+    assert decoded["space_display_hint"] == "Coded"
+    assert decoded["issuer_instance_id"] == stack.iid
+    assert decoded["expires_at"] == link["expires_at"]
+    assert set(decoded) == {
+        "token",
+        "space_id",
+        "space_display_hint",
+        "issuer_instance_id",
+        "issuer_identity_pk",
+        "issuer_keywrap_pk",
+        "issuer_keywrap_sig",
+        "issuer_proto_version",
+        "expires_at",
+    }
+
+
+async def test_listing_excludes_spent_links_and_other_spaces(stack):
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    mine = await stack.space_svc.create_space(owner_username="anna", name="Mine")
+    theirs = await stack.space_svc.create_space(owner_username="anna", name="Theirs")
+    live = await stack.space_svc.create_invite_link(mine.id, actor_username="anna")
+    spent = await stack.space_svc.create_invite_link(
+        mine.id, actor_username="anna", uses=1
+    )
+    await stack.space_svc.accept_invite_token(spent["token"], user_id=dave.user_id)
+    await stack.space_svc.create_invite_link(theirs.id, actor_username="anna")
+    listed = await stack.space_svc.list_invite_links(mine.id, actor_username="anna")
+    assert [row["token"] for row in listed] == [live["token"]]
+
+
+async def test_listing_requires_admin_or_owner(stack):
+    await stack.provision_user("anna", is_admin=True)
+    carol = await stack.provision_user("carol")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Private")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=carol.user_id
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.list_invite_links(space.id, actor_username="carol")
+
+
+async def test_revoke_kills_the_link_and_is_idempotent(stack):
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Revoked")
+    link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    await stack.space_svc.revoke_invite_link(
+        space.id, link["token"], actor_username="anna"
+    )
+    # A second revoke is a no-op, not an error.
+    await stack.space_svc.revoke_invite_link(
+        space.id, link["token"], actor_username="anna"
+    )
+    assert (
+        await stack.space_svc.list_invite_links(space.id, actor_username="anna") == []
+    )
+    with pytest.raises(KeyError):
+        await stack.space_svc.accept_invite_token(link["token"], user_id=dave.user_id)
+
+
+async def test_revoke_never_unseats_someone_who_already_joined(stack):
+    """Revoking a link takes the door away; it does not evict the people
+    who already walked through it. That is member removal."""
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Seated")
+    link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="anna", uses=5
+    )
+    await stack.space_svc.accept_invite_token(link["token"], user_id=dave.user_id)
+    await stack.space_svc.revoke_invite_link(
+        space.id, link["token"], actor_username="anna"
+    )
+    assert await stack.space_repo.get_member(space.id, dave.user_id) is not None
+
+
+async def test_an_admin_may_revoke_a_link_another_admin_minted(stack):
+    """A link belongs to the space, not to its minter."""
+    space, _bob = await _space_with_owner_and_admin(stack)
+    link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    await stack.space_svc.revoke_invite_link(
+        space.id, link["token"], actor_username="bob"
+    )
+    assert (
+        await stack.space_svc.list_invite_links(space.id, actor_username="anna") == []
+    )
+
+
+async def test_publishing_a_link_records_the_server_and_returns_its_url(stack):
+    gfs = _FakeGfs()
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Public")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        publish_to_gfs="gfs-1",
+    )
+    assert link["gfs"] == {
+        "gfs_id": "gfs-1",
+        "gfs_token": "gt-1",
+        "url": "https://relay.example.org/join/gt-1",
+        # The server's BASE url, handed over rather than left to be
+        # parsed back out of the /join link.
+        "gfs_url": "https://relay.example.org",
+    }
+    # The blob parked on the server is the SAME builder as the code, and
+    # it names the relay that serves it.
+    import base64
+    import json
+
+    (_sid, _gid, blob, _exp) = gfs.published[0]
+    decoded = json.loads(base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
+    assert decoded["token"] == link["token"]
+    assert decoded["via_gfs"] == {
+        "gfs_url": "https://relay.example.org",
+        "gfs_space_id": space.id,
+    }
+
+
+async def test_revoking_a_published_link_takes_the_blob_down(stack):
+    gfs = _FakeGfs()
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Public2")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        publish_to_gfs="gfs-1",
+    )
+    await stack.space_svc.revoke_invite_link(
+        space.id, link["token"], actor_username="anna"
+    )
+    assert gfs.revoked == [(space.id, "gfs-1", "gt-1")]
+
+
+async def test_a_gfs_outage_still_revokes_locally_with_one_warning(stack, caplog):
+    """The local row is what decides a redeem, so the revoke succeeds;
+    the operator gets one WARNING naming the server to retry."""
+    gfs = _FakeGfs()
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Public3")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        publish_to_gfs="gfs-1",
+    )
+    gfs.revoke_error = RuntimeError("Could not reach GFS")
+    with caplog.at_level(logging.WARNING):
+        await stack.space_svc.revoke_invite_link(
+            space.id, link["token"], actor_username="anna"
+        )
+    assert (
+        await stack.space_svc.list_invite_links(space.id, actor_username="anna") == []
+    )
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "gfs-1" in warnings[0].getMessage()
+
+
+async def test_a_server_without_invite_links_creates_no_local_row(stack):
+    """Mint is publish-first, so a refusal from the connection server
+    leaves nothing behind for the owner to see or share."""
+    from socialhome.services.gfs_connection_service import GfsConnectionError
+
+    gfs = _FakeGfs(
+        publish_error=GfsConnectionError(
+            "this connection server can't host invite links yet"
+        )
+    )
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Old")
+    with pytest.raises(GfsConnectionError):
+        await stack.space_svc.create_invite_link(
+            space.id,
+            actor_username="anna",
+            publish_to_gfs="gfs-1",
+        )
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_an_unpaired_server_is_refused_before_anything_is_written(stack):
+    gfs = _FakeGfs()
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Nope")
+    with pytest.raises(ValueError):
+        await stack.space_svc.create_invite_link(
+            space.id,
+            actor_username="anna",
+            publish_to_gfs="gfs-unknown",
+        )
+    assert gfs.published == []
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+# ── Invite-link TTL semantics (reconciled with #681) ──────────────────
+
+
+async def test_an_invite_link_takes_the_default_ttl(stack):
+    """Omitting ``ttl_seconds`` anchors the expiry on OUR clock at
+    :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS`, not on the caller's."""
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="TtlDef")
+    link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    delta = datetime.fromisoformat(link["expires_at"]) - datetime.now(timezone.utc)
+    assert timedelta(days=6) < delta <= timedelta(days=7)
+
+
+async def test_an_explicit_none_ttl_never_expires(stack):
+    """``None`` — and only ``None`` — is the service's spelling of
+    "never". The HTTP layer maps the SPA's ``0`` onto it; the service
+    itself treats ``0`` as a (clamped) positive lifetime, so nothing but
+    an explicit ``None`` can mint an immortal link by accident."""
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="TtlNone")
+    never = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        ttl_seconds=None,
+    )
+    assert never["expires_at"] is None
+    bounded = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        ttl_seconds=0,
+    )
+    assert bounded["expires_at"] is not None
+
+
+# ─── Published invite blobs: the household cap must clear the server's ───
+
+
+def test_the_published_ttl_cap_clears_the_connection_server_boundary():
+    """The two caps used to be the SAME number, which put every
+    never-expiring published link exactly ON the server's reject
+    boundary: the household computes ``now + 30d`` from ITS clock and
+    the server checks ``expires_at - its_now > 30d``, so a connection
+    server running one second behind 422'd a link the household
+    considered perfectly legal — and an owner picking "Never" was told
+    "30 days" was too long. A margin, not a coincidence, keeps them apart.
+    """
+    from socialhome.global_server.invites import (
+        INVITE_MAX_TTL_SECONDS,
+        validate_expires_at,
+    )
+    from socialhome.services.space_service import (
+        PUBLISHED_INVITE_MAX_TTL_SECONDS,
+        PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS,
+        _invite_expiry_epoch,
+    )
+
+    assert PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS == 300
+    assert (
+        PUBLISHED_INVITE_MAX_TTL_SECONDS
+        == INVITE_MAX_TTL_SECONDS - PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS
+    )
+
+    # "Never expires" locally → the capped published expiry.
+    epoch = _invite_expiry_epoch(None)
+
+    # A connection server whose clock trails ours by the whole margin
+    # still accepts it — and so does one that is perfectly in sync.
+    for behind in (0, PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS):
+        server_now = int(time.time()) - behind
+        assert validate_expires_at(epoch, now=server_now) == epoch
+
+
+async def test_a_banned_local_redeemer_burns_no_uses(stack):
+    """The local redeem consumed first and checked the ban after, with no
+    refund — so a banned household member could exhaust a twenty-use
+    link in twenty clicks, and the differential answer told them their
+    own ban status one attempt at a time. The cross-household path
+    already folds §13.7 into the atomic UPDATE; this is the same fold on
+    the local one, and the SPA still gets ``banned=True`` rather than a
+    generic "invalid token"."""
+    await stack.provision_user("anna", is_admin=True)
+    dave = await stack.provision_user("dave")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Banned")
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="anna",
+        uses=5,
+    )
+    await stack.space_repo.ban_member(space.id, dave.user_id, "anna")
+
+    for _ in range(3):
+        with pytest.raises(SpacePermissionError) as exc:
+            await stack.space_svc.accept_invite_token(
+                link["token"], user_id=dave.user_id
+            )
+        assert exc.value.banned is True
+
+    live = await stack.space_repo.get_live_invite_token(link["token"])
+    assert live is not None and live["uses_remaining"] == 5

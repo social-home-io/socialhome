@@ -79,7 +79,7 @@ def stack():
 async def test_create_fans_to_all_paired_with_hop_1(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-a"), _peer("peer-b")],
     )
     await out._on_created(_create_event())
@@ -93,7 +93,7 @@ async def test_remote_author_skips_origin_fan(stack):
     """Inbound republished MomentCreated must not re-fan from the bus."""
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="peer-source")
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-a")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
     await out._on_created(_create_event())
     fed.send_event.assert_not_called()
 
@@ -101,7 +101,7 @@ async def test_remote_author_skips_origin_fan(stack):
 async def test_delete_fans_with_hop_1(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-a")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
     await out._on_deleted(
         MomentDeleted(
             moment_id="m-1",
@@ -177,7 +177,7 @@ async def test_reaction_skipped_when_author_local(stack):
 
 async def test_relay_inbound_bumps_hop_and_excludes_origin_and_sender(stack):
     out, fed, fed_repo, _user_repo = stack
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[
             _peer("peer-origin"),
             _peer("peer-sender"),
@@ -202,7 +202,7 @@ async def test_relay_inbound_bumps_hop_and_excludes_origin_and_sender(stack):
 
 async def test_relay_inbound_stops_at_max_hops(stack):
     out, fed, fed_repo, _user_repo = stack
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
     payload = {
         "moment_id": "m-1",
         "author_user_id": "uid-author",
@@ -219,7 +219,7 @@ async def test_relay_inbound_stops_at_max_hops(stack):
 
 async def test_relay_inbound_skips_with_invalid_hop(stack):
     out, fed, fed_repo, _user_repo = stack
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
     await out.relay_inbound(
         event_type=FederationEventType.MOMENT_CREATED,
         payload={"hop_count": "weird", "origin_instance_id": "peer-origin"},
@@ -237,7 +237,7 @@ async def test_relay_inbound_skips_when_received_via_gfs(stack):
     into the household federation mesh, even when ``hop_count`` is
     still under the 3-hop cap."""
     out, fed, fed_repo, _user_repo = stack
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
     payload = {
         "moment_id": "m-1",
         "author_user_id": "uid-remote",
@@ -257,7 +257,7 @@ async def test_relay_inbound_still_relays_household_arrival(stack):
     """Sanity: the guard only short-circuits ``received_via='gfs'``;
     the standard ``household`` arrival path still relays."""
     out, fed, fed_repo, _user_repo = stack
-    fed_repo.list_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
     payload = {
         "moment_id": "m-1",
         "author_user_id": "uid-remote",
@@ -279,7 +279,7 @@ async def test_send_failure_swallowed_per_peer(stack):
     """A misbehaving peer doesn't break the relay loop."""
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-bad"), _peer("peer-ok")],
     )
 
@@ -298,7 +298,7 @@ async def test_list_instances_failure_returns_no_peers(stack):
     """A failing federation_repo.list_instances logs and returns []."""
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(side_effect=RuntimeError("db down"))
+    fed_repo.list_social_instances = AsyncMock(side_effect=RuntimeError("db down"))
     await out._on_created(_create_event())
     fed.send_event.assert_not_called()
 
@@ -326,7 +326,7 @@ async def test_moment_created_skips_peer_that_hid_author():
         visibility_repo=visibility_repo,
     )
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-hider"), _peer("peer-ok")],
     )
     await out._on_created(_create_event(author="uid-author"))
@@ -355,7 +355,7 @@ async def test_moment_deleted_skips_peer_that_hid_author():
         visibility_repo=visibility_repo,
     )
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
-    fed_repo.list_instances = AsyncMock(
+    fed_repo.list_social_instances = AsyncMock(
         return_value=[_peer("peer-hider"), _peer("peer-ok")],
     )
     await out._on_deleted(

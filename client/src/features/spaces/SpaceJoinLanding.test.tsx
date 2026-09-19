@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
+import { decodeInviteCode } from '@/lib/spaceInviteCode'
 
 vi.mock('@/api', () => {
   class ApiError extends Error {
     constructor(public status: number, msg = 'api error') { super(msg) }
   }
-  return { api: { post: vi.fn() }, ApiError }
+  return { api: { post: vi.fn(), get: vi.fn() }, ApiError }
 })
 vi.mock('@/baseUrl', () => ({
   basePath: '/',
@@ -16,9 +17,24 @@ vi.mock('@/baseUrl', () => ({
 vi.mock('qrcode', () => ({
   default: { toDataURL: vi.fn(async () => 'data:fake') },
 }))
+// Our own instance id — this page is served BY the issuer, so it is
+// also the issuer id the fallback code has to carry.
+const OUR_INSTANCE_ID = 'aaaabbbbccccddddeeeeffff00001111'
+vi.mock('@/store/instance', () => ({
+  instanceConfig: {
+    value: {
+      mode: 'standalone',
+      instance_name: 'Test home',
+      instance_id: OUR_INSTANCE_ID,
+      capabilities: [],
+      setup_required: false,
+    },
+  },
+  loadInstanceConfig: vi.fn(),
+}))
 
 const { api, ApiError } = await import('@/api') as unknown as {
-  api: { post: ReturnType<typeof vi.fn> }
+  api: { post: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn> }
   ApiError: new (status: number, msg?: string) => Error & { status: number }
 }
 
@@ -26,6 +42,10 @@ const TOKEN = 'a1b2c3d4e5f60718'
 
 beforeEach(() => {
   api.post.mockReset()
+  api.get.mockReset()
+  // Default: the issuer's code endpoint is unavailable, so every existing
+  // expectation still describes the locally-built fallback code.
+  api.get.mockRejectedValue(new ApiError(404, 'no such invite link'))
   // Inject ?token=… into the location so SpaceJoinLanding's effect
   // picks it up; useLocation here is fine because it reads from
   // window.location directly.
@@ -83,5 +103,88 @@ describe('SpaceJoinLanding', () => {
     })
     expect(container.querySelector('[data-testid="join-landing-wrong-instance"]'))
       .toBeNull()
+  })
+})
+
+describe('SpaceJoinLanding — the fallback code is redeemable', () => {
+  it('stamps our own instance id as the issuer so the paste can route', async () => {
+    // Without it the receiver's Social Home can only try the LOCAL
+    // redeem path, which fails exactly the way this panel is trying to
+    // recover from.
+    api.post.mockRejectedValueOnce(new ApiError(404, 'unknown token'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.token).toBe(TOKEN)
+    expect(decoded.issuer_instance_id).toBe(OUR_INSTANCE_ID)
+  })
+
+  it('carries the space id when the link supplied one', async () => {
+    window.history.replaceState(
+      {}, '', `/join?token=${TOKEN}&space_id=sp-42`,
+    )
+    api.post.mockRejectedValueOnce(new ApiError(410, 'gone'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.space_id).toBe('sp-42')
+  })
+
+  it('leaves space_id null when the link had none', async () => {
+    api.post.mockRejectedValueOnce(new ApiError(403, 'forbidden'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.space_id).toBeNull()
+  })
+})
+
+
+describe('SpaceJoinLanding — the issuer supplies the complete code', () => {
+  const SERVER_CODE = 'socialhome://invite#complete-bootstrap-blob'
+
+  it('renders the code from /api/invite-links/{token}/code when it resolves', async () => {
+    api.post.mockRejectedValueOnce(new ApiError(404, 'unknown token'))
+    api.get.mockResolvedValue({ code: SERVER_CODE })
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    expect(api.get).toHaveBeenCalledWith(`/api/invite-links/${TOKEN}/code`)
+    // The locally-built code has no bootstrap block, so the server's code
+    // is the one that must reach the clipboard.
+    expect(container.querySelector('[data-testid="fallback-code"]')!.textContent)
+      .toBe(SERVER_CODE)
+  })
+
+  it('falls back to the locally-built code when the endpoint 404s', async () => {
+    api.post.mockRejectedValueOnce(new ApiError(410, 'gone'))
+    api.get.mockRejectedValue(new ApiError(404, 'no such invite link'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="fallback-code"]'))
+        .not.toBeNull()
+    })
+    const decoded = decodeInviteCode(
+      container.querySelector('[data-testid="fallback-code"]')!.textContent!,
+    )!
+    expect(decoded.token).toBe(TOKEN)
+    expect(decoded.issuer_instance_id).toBe(OUR_INSTANCE_ID)
   })
 })

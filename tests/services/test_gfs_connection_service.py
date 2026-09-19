@@ -2850,3 +2850,344 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
             assert svc._anon_publish[conn.id] is True  # noqa: SLF001
     finally:
         await db.shutdown()
+
+
+# ── envelope_relay capability (§D2b invite bootstrap) ──────────────────────
+
+
+async def test_envelope_relay_supported_reads_the_signed_block(env):
+    """Only the SIGNED capability block grants the relay — the same rule
+    ``anonymous_publish`` follows, for the same reason."""
+    _db, repo = env
+    conn = _make_conn("er-1", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True, "envelope_relay": True},
+        ),
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is True
+    # Cached after the first probe — a redeem must not re-fetch /gfs/info.
+    assert await svc.envelope_relay_supported(conn) is True
+    assert len(session.gets) == 1
+
+
+async def test_envelope_relay_absent_from_the_block_is_false(env):
+    _db, repo = env
+    conn = _make_conn("er-2", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True},
+        ),
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is False
+
+
+async def test_envelope_relay_from_a_stripped_block_is_false(env):
+    """An unsigned flag is an on-path attacker's, not a capability."""
+    _db, repo = env
+    conn = _make_conn("er-3", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(info={"server_name": "x", "envelope_relay": True})
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is False
+
+
+async def test_envelope_relay_unreachable_gfs_is_false_and_suppressed(env):
+    """An unreachable probe answers ``False`` for this attempt and is not
+    re-tried until the negative TTL lapses."""
+    _db, repo = env
+    conn = _make_conn("er-4", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(raise_on_get=True)
+    svc = GfsConnectionService(repo, http_client=session)
+    assert await svc.envelope_relay_supported(conn) is False
+    assert await svc.envelope_relay_supported(conn) is False
+    assert len(session.gets) == 1
+
+
+# ── invite links (§24.8.5) ────────────────────────────────────────────────
+
+
+#: A plausible opaque invite blob. The household composes it; the connection
+#: server never parses it.
+_INVITE_BLOB = "eyJ0b2tlbiI6ICJhYmMxMjMifQ"
+
+
+class _InviteSession(_AnonSession):
+    """``_AnonSession`` whose POST answers like the invite mint/revoke routes."""
+
+    def __init__(self, *, post_status: int = 201, post_body=None, **kw) -> None:
+        super().__init__(**kw)
+        self.post_status = post_status
+        self.post_body = (
+            {"gfs_token": "tok-1", "url": "https://gfs.example.com/join/tok-1"}
+            if post_body is None
+            else post_body
+        )
+
+    def post(self, url, *, json=None, **_kw):
+        self.posts.append((url, json or {}))
+        return _StubResp(self.post_status, self.post_body)
+
+
+def _invite_capable_info(conn):
+    return _signed_info(
+        gfs_instance_id=conn.gfs_instance_id,
+        capabilities={"anonymous_publish": True, "invite_links": True},
+    )
+
+
+async def _invite_svc(repo, session, gfs_id: str):
+    """A service with a signing identity + a saved, invite-capable GFS."""
+    conn = _make_conn(gfs_id, public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    kp = generate_identity_keypair()
+    svc = GfsConnectionService(repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=kp.private_key,
+    )
+    return svc, conn, kp.public_key
+
+
+async def test_publish_invite_signs_the_canonical_mint_body(env):
+    """SECURITY: the mint is owner-authenticated on the GFS, so the body
+    carries an Ed25519 signature over ``{action: "mint_invite",
+    owning_instance, space_id, ts}`` — the ``action`` inside the signed bytes
+    so it can never be replayed as a revoke."""
+    _db, repo = env
+    conn = _make_conn("inv-1", public_key=_GFS_KP.public_key.hex())
+    session = _InviteSession(info=_invite_capable_info(conn))
+    svc, conn, own_pub = await _invite_svc(repo, session, "inv-1")
+
+    token, url = await svc.publish_invite("sp-i", "inv-1", _INVITE_BLOB, 1234567890)
+    assert token == "tok-1"
+    assert url == "https://gfs.example.com/join/tok-1"
+
+    posted_url, body = session.posts[-1]
+    assert posted_url == "https://gfs.example.com/gfs/spaces/sp-i/invite"
+    assert body["blob"] == _INVITE_BLOB
+    assert body["expires_at"] == 1234567890
+    canonical = json.dumps(
+        {
+            "action": "mint_invite",
+            "owning_instance": "alpha.home",
+            "space_id": "sp-i",
+            "ts": body["ts"],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    assert verify_ed25519(own_pub, canonical, b64url_decode(body["signature"]))
+
+
+async def test_publish_invite_refuses_a_server_without_the_capability(env):
+    """An older connection server has no ``/invite`` route and no ``/join``
+    page — minting there would hand the owner a link that 404s for everyone
+    they send it to."""
+    _db, repo = env
+    conn = _make_conn("inv-2", public_key=_GFS_KP.public_key.hex())
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True},
+        ),
+    )
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-2")
+    with pytest.raises(GfsConnectionError, match="can't host invite links"):
+        await svc.publish_invite("sp-i", "inv-2", _INVITE_BLOB, 1234567890)
+    assert session.posts == []
+
+
+async def test_publish_invite_refuses_an_unsigned_capability_block(env):
+    """An unsigned flag is an on-path attacker's, not a capability."""
+    _db, repo = env
+    session = _InviteSession(info={"server_name": "x", "invite_links": True})
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-3")
+    with pytest.raises(GfsConnectionError):
+        await svc.publish_invite("sp-i", "inv-3", _INVITE_BLOB, 1234567890)
+
+
+async def test_publish_invite_raises_without_a_signing_identity(env):
+    _db, repo = env
+    await repo.save(_make_conn("inv-4"))
+    svc = GfsConnectionService(repo, http_client=_InviteSession())
+    with pytest.raises(GfsConnectionError, match="signing identity"):
+        await svc.publish_invite("sp-i", "inv-4", _INVITE_BLOB, 1234567890)
+
+
+async def test_publish_invite_unknown_connection(env):
+    _db, repo = env
+    svc = GfsConnectionService(repo, http_client=_InviteSession())
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=generate_identity_keypair().private_key,
+    )
+    with pytest.raises(GfsConnectionError, match="not found"):
+        await svc.publish_invite("sp-i", "nope", _INVITE_BLOB, 1234567890)
+
+
+async def test_publish_invite_raises_on_a_rejection(env):
+    _db, repo = env
+    conn = _make_conn("inv-5", public_key=_GFS_KP.public_key.hex())
+    session = _InviteSession(
+        info=_invite_capable_info(conn),
+        post_status=403,
+        post_body={"error": "not the owner of this space"},
+    )
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-5")
+    with pytest.raises(GfsConnectionError, match="HTTP 403"):
+        await svc.publish_invite("sp-i", "inv-5", _INVITE_BLOB, 1234567890)
+
+
+async def test_publish_invite_raises_when_the_gfs_returns_no_token(env):
+    """Without both fields there is nothing to share and nothing to revoke
+    later — fail loudly rather than hand back a half-answer."""
+    _db, repo = env
+    conn = _make_conn("inv-6", public_key=_GFS_KP.public_key.hex())
+    session = _InviteSession(info=_invite_capable_info(conn), post_body={})
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-6")
+    with pytest.raises(GfsConnectionError, match="no invite token"):
+        await svc.publish_invite("sp-i", "inv-6", _INVITE_BLOB, 1234567890)
+
+
+async def test_publish_invite_maps_a_transport_error(env):
+    _db, repo = env
+    conn = _make_conn("inv-7", public_key=_GFS_KP.public_key.hex())
+
+    class _Boom(_InviteSession):
+        def post(self, url, **kw):
+            raise aiohttp.ClientError("down")
+
+    session = _Boom(info=_invite_capable_info(conn))
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-7")
+    with pytest.raises(GfsConnectionError, match="Could not reach GFS"):
+        await svc.publish_invite("sp-i", "inv-7", _INVITE_BLOB, 1234567890)
+
+
+async def test_revoke_invite_signs_the_canonical_revoke_body(env):
+    """SECURITY: the token is inside the signed bytes alongside the
+    ``action``, so a revoke can be replayed neither as a mint nor against a
+    different token."""
+    _db, repo = env
+    session = _InviteSession(post_status=204, post_body={})
+    svc, _conn, own_pub = await _invite_svc(repo, session, "inv-8")
+
+    await svc.revoke_invite("sp-i", "inv-8", "tok-9")
+
+    posted_url, body = session.posts[-1]
+    assert posted_url == "https://gfs.example.com/gfs/spaces/sp-i/invite/tok-9"
+    canonical = json.dumps(
+        {
+            "action": "revoke_invite",
+            "gfs_token": "tok-9",
+            "owning_instance": "alpha.home",
+            "space_id": "sp-i",
+            "ts": body["ts"],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    assert verify_ed25519(own_pub, canonical, b64url_decode(body["signature"]))
+    # The token never rides outside the signed bytes as a query parameter.
+    assert "gfs_token" not in body
+
+
+@pytest.mark.parametrize("status", [200, 204, 404])
+async def test_revoke_invite_is_idempotent(env, status):
+    """The link is gone either way — a revoke racing a sweep, or a second
+    revoke, must not surface as an error."""
+    _db, repo = env
+    session = _InviteSession(post_status=status, post_body={})
+    svc, _conn, _pub = await _invite_svc(repo, session, f"inv-r{status}")
+    await svc.revoke_invite("sp-i", f"inv-r{status}", "tok-9")
+
+
+async def test_revoke_invite_does_not_capability_gate(env):
+    """A server that never had the route also never has the link; refusing
+    here would strand an owner cleaning up after a downgrade."""
+    _db, repo = env
+    session = _InviteSession(
+        info={"server_name": "old"},
+        post_status=404,
+        post_body={},
+    )
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-9")
+    await svc.revoke_invite("sp-i", "inv-9", "tok-9")
+    assert session.gets == []  # no capability probe at all
+
+
+async def test_revoke_invite_raises_on_a_rejection(env):
+    _db, repo = env
+    session = _InviteSession(post_status=403, post_body={"error": "nope"})
+    svc, _conn, _pub = await _invite_svc(repo, session, "inv-10")
+    with pytest.raises(GfsConnectionError, match="HTTP 403"):
+        await svc.revoke_invite("sp-i", "inv-10", "tok-9")
+
+
+async def test_revoke_invite_raises_without_a_signing_identity(env):
+    _db, repo = env
+    await repo.save(_make_conn("inv-11"))
+    svc = GfsConnectionService(repo, http_client=_InviteSession())
+    with pytest.raises(GfsConnectionError, match="signing identity"):
+        await svc.revoke_invite("sp-i", "inv-11", "tok-9")
+
+
+async def test_revoke_invite_unknown_connection(env):
+    _db, repo = env
+    svc = GfsConnectionService(repo, http_client=_InviteSession())
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=generate_identity_keypair().private_key,
+    )
+    with pytest.raises(GfsConnectionError, match="not found"):
+        await svc.revoke_invite("sp-i", "nope", "tok-9")
+
+
+async def test_revoke_invite_maps_a_transport_error(env):
+    _db, repo = env
+
+    class _Boom(_InviteSession):
+        def post(self, url, **kw):
+            raise aiohttp.ClientError("down")
+
+    svc, _conn, _pub = await _invite_svc(repo, _Boom(), "inv-12")
+    with pytest.raises(GfsConnectionError, match="Could not reach GFS"):
+        await svc.revoke_invite("sp-i", "inv-12", "tok-9")
+
+
+async def test_invite_links_capability_is_cached_after_one_probe(env):
+    _db, repo = env
+    conn = _make_conn("inv-13", public_key=_GFS_KP.public_key.hex())
+    session = _InviteSession(info=_invite_capable_info(conn))
+    svc, conn, _pub = await _invite_svc(repo, session, "inv-13")
+    assert await svc.invite_links_supported(conn) is True
+    assert await svc.invite_links_supported(conn) is True
+    assert len(session.gets) == 1
+
+
+async def test_invite_links_unreachable_gfs_is_false_and_suppressed(env):
+    _db, repo = env
+    session = _InviteSession(raise_on_get=True)
+    svc, conn, _pub = await _invite_svc(repo, session, "inv-14")
+    assert await svc.invite_links_supported(conn) is False
+    assert await svc.invite_links_supported(conn) is False
+    assert len(session.gets) == 1
+
+
+async def test_client_exposes_the_shared_session(env):
+    """Sibling GFS-facing services borrow this session rather than opening
+    a second connection pool."""
+    _db, repo = env
+    session = _AnonSession()
+    svc = GfsConnectionService(repo, http_client=session)
+    assert svc.client() is session

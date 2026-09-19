@@ -52,6 +52,8 @@ from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
     DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     BroadcastResult,
     DeliveryResult,
@@ -65,6 +67,7 @@ from ..infrastructure.key_manager import KeyManager
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
 from .encoder import FederationEncoder
+from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
     SUPPORTED_APP_AEAD_SUITES,
@@ -83,6 +86,7 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_replay,
+    make_check_peer_class,
     make_check_timestamp,
     make_decrypt_and_parse,
     make_idempotency_check,
@@ -325,6 +329,12 @@ class FederationService:
         steps = [
             make_parse_json(loads=_loads),
             lookup_step,
+            # §D2b peer-class gate: a household seated from an invite link
+            # may only speak the space vocabulary. Straight after the
+            # lookup (the first step that knows WHO the sender is) and
+            # before any crypto, so an off-vocabulary envelope costs a
+            # set lookup.
+            make_check_peer_class(),
             make_check_timestamp(),
             make_verify_signature(encoder=self._encoder),
             make_check_replay(replay_cache=self._replay_cache),
@@ -777,6 +787,27 @@ class FederationService:
         )
         self._replay_cache.load(entries)
 
+    async def note_replay_id(self, msg_id: str) -> bool:
+        """Check-and-insert one id against the shared replay cache.
+
+        Returns ``True`` if this id was already seen inside the window
+        (i.e. the caller is looking at a replay and must drop it), and
+        records it otherwise. Backed by the same
+        :class:`~socialhome.crypto.ReplayCache` and the same durable
+        ``federation_replay_cache`` table the §24.11 pipeline uses, so a
+        restart cannot re-open a window — see
+        :func:`~socialhome.federation.inbound_validator.make_check_replay`
+        and ``make_persist_replay``.
+
+        Callers outside the pipeline namespace their ids (e.g.
+        ``"invite-bootstrap:<nonce>"``) so they can never collide with
+        an envelope ``msg_id``.
+        """
+        if self._replay_cache.seen(msg_id, now=datetime.now(timezone.utc)):
+            return True
+        await self._federation_repo.insert_replay_id(msg_id)
+        return False
+
     # ─── HTTP client helper ───────────────────────────────────────────────
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
@@ -896,23 +927,41 @@ class FederationService:
         was_unreachable = instance.unreachable_since is not None
 
         status_code: int | None = None
+        transport_error: str | None = None
         if self._transport is not None:
             result = await self._transport.send(
                 instance=instance,
                 envelope_dict=envelope_dict,
             )
             if result.ok:
-                await self._federation_repo.mark_reachable(to_instance_id)
-                if was_unreachable:
-                    await self._bus.publish(
-                        ConnectionReachable(instance_id=to_instance_id),
-                    )
+                # Reachability is only provable by DELIVERY. The
+                # connection-server relay answers a uniform 202 to every
+                # well-formed envelope — offline recipient, unknown
+                # recipient, recipient that is not even a client of that
+                # server — because any other answer would be a presence
+                # oracle. Marking the peer reachable on that 202 turned
+                # the SPA's dot green for a household that had not
+                # received a byte, and fired ConnectionReachable
+                # (which wakes resyncs) on nothing at all. A relay
+                # ``ok`` is an ACCEPTANCE; leave the reachability state
+                # exactly as it was and let a real inbound envelope from
+                # that household be what proves it is there.
+                if result.via != "gfs_relay":
+                    await self._federation_repo.mark_reachable(to_instance_id)
+                    if was_unreachable:
+                        await self._bus.publish(
+                            ConnectionReachable(instance_id=to_instance_id),
+                        )
                 return DeliveryResult(
                     instance_id=to_instance_id,
                     ok=True,
                     status_code=result.status_code,
+                    # Carries the relay's "accepted", not "delivered" —
+                    # see :class:`DeliveryResult.via`.
+                    via=result.via,
                 )
             status_code = result.status_code
+            transport_error = result.error
         else:
             try:
                 client = await self._get_http_client()
@@ -946,20 +995,55 @@ class FederationService:
                 )
                 status_code = None
 
-        # Delivery failed — mark and enqueue for retry.
-        await self._federation_repo.mark_unreachable(to_instance_id)
-        if not was_unreachable:
-            # reachable → unreachable edge only (mirrors the reachable
-            # publish above) so the SPA flips the dot red live.
-            await self._bus.publish(
-                ConnectionUnreachable(instance_id=to_instance_id),
+        if transport_error == DELIVERY_ERROR_RELAY_TOO_LARGE:
+            # Deterministic refusal: the frame is bigger than the relay's
+            # body cap and will be on every future attempt too. Neither
+            # marking the peer unreachable (it is our frame that is
+            # wrong, not their household) nor queueing it (five retries
+            # to re-derive the same arithmetic) is honest — the relay
+            # transport already logged the WARNING naming the peer, the
+            # event type and the size.
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                status_code=status_code if isinstance(status_code, int) else None,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+                via="gfs_relay",
             )
+
+        # Delivery failed — mark and enqueue for retry.
+        if transport_error != DELIVERY_ERROR_RELAY_THROTTLED:
+            # A relay 429 is back-pressure on US, not evidence about the
+            # peer: the relay is up and the blob is fine. Flipping the
+            # household to unreachable on it (and firing
+            # ConnectionUnreachable at the SPA) would paint a red dot
+            # for a household that is perfectly fine, on a busy minute.
+            await self._federation_repo.mark_unreachable(to_instance_id)
+            if not was_unreachable:
+                # reachable → unreachable edge only (mirrors the reachable
+                # publish above) so the SPA flips the dot red live.
+                await self._bus.publish(
+                    ConnectionUnreachable(instance_id=to_instance_id),
+                )
         await self._outbox_repo.enqueue(
             instance_id=to_instance_id,
             event_type=event_type,
             payload_json=_dumps(envelope_dict),
             msg_id=msg_id,
         )
+        if transport_error == DELIVERY_ERROR_RELAY_THROTTLED:
+            # Queued like any other failure — a throttle must never cost
+            # an event — but reported as the waitable window it is, so a
+            # caller with its own retry loop (the space-sync provider)
+            # sleeps and re-ships instead of abandoning the stream.
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                status_code=status_code if isinstance(status_code, int) else None,
+                error=DELIVERY_ERROR_RELAY_THROTTLED,
+                via="gfs_relay",
+                retry_after_s=RELAY_THROTTLE_COOLDOWN_S,
+            )
         return DeliveryResult(
             instance_id=to_instance_id,
             ok=False,
@@ -1675,6 +1759,8 @@ class FederationService:
         self,
         instance_id: str,
         raw_body: bytes,
+        *,
+        transport: str = "",
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -1695,7 +1781,11 @@ class FederationService:
         if self._rtc_inbound_pipeline is None:
             self._rtc_inbound_pipeline = self._build_rtc_inbound_pipeline()
         pipeline: InboundPipeline = self._rtc_inbound_pipeline  # type: ignore[assignment]
-        ctx = InboundContext(raw_body=raw_body, instance_id=instance_id)
+        ctx = InboundContext(
+            raw_body=raw_body,
+            instance_id=instance_id,
+            transport=transport,
+        )
         await pipeline.run(ctx)
         return ctx
 
@@ -1703,14 +1793,25 @@ class FederationService:
         self,
         instance_id: str,
         raw_body: bytes,
+        *,
+        transport: str = "",
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
         Same pipeline as :meth:`handle_inbound_envelope` but resolves
         the sender by ``instance_id`` (already known from the peer
         connection) instead of ``inbox_id``.
+
+        ``transport`` names the carrier when it is not a live wire —
+        :data:`~socialhome.federation.inbound_validator.TRANSPORT_GFS_RELAY`
+        for an envelope the connection server queued and replayed later,
+        which widens the timestamp step's skew budget accordingly.
         """
-        ctx = await self.validate_inbound_rtc(instance_id, raw_body)
+        ctx = await self.validate_inbound_rtc(
+            instance_id,
+            raw_body,
+            transport=transport,
+        )
 
         if ctx.early_response is not None:
             return ctx.early_response
@@ -1958,8 +2059,18 @@ class FederationService:
         self,
         event: LocalHomeLocationUpdated,
     ) -> None:
-        """Fan out LOCAL_HOME_LOCATION_CHANGED to every confirmed peer at proto_version >= 5 that has share_home enabled."""
-        peers = await self._federation_repo.list_instances(status="confirmed")
+        """Fan out LOCAL_HOME_LOCATION_CHANGED to every **social** peer at
+        proto_version >= 5 that has share_home enabled.
+
+        ``list_social_instances`` and not ``list_instances`` — the raw
+        list includes ``space_session`` rows, i.e. households we met
+        through an invite link. Our home GPS coordinates are not part of
+        "you joined my space"; sending them there would hand a stranger
+        the family's street. (``share_home`` also defaults False on those
+        rows, so this is belt and braces — deliberately, because the
+        default is a one-line edit away from flipping back.)
+        """
+        peers = await self._federation_repo.list_social_instances()
         payload = {"latitude": event.latitude, "longitude": event.longitude}
         for peer in peers:
             if not peer.share_home:
@@ -2648,6 +2759,22 @@ class FederationService:
             return
         session = self._sync_manager.get_session(sync_id)
         if session is None:
+            return
+        if getattr(session, "requester_instance_id", "") != event.from_instance:
+            # A session belongs to ONE household. ``sync_id`` is the only
+            # thing addressing it, so without this any peer that learns
+            # (or guesses) one could ask us to re-stream a space's
+            # history — and the provider ships to
+            # ``session.requester_instance_id``, never to the asker, so
+            # neither end would see anything odd. Same pin the sibling
+            # SPACE_SYNC_CHUNK handler has always had.
+            log.warning(
+                "SPACE_SYNC_REQUEST_MORE sync_id=%s from %s != session "
+                "requester %s — ignoring",
+                sync_id,
+                event.from_instance,
+                getattr(session, "requester_instance_id", ""),
+            )
             return
         asyncio.create_task(
             self._space_sync_service.stream_request_more(session, cleaned),

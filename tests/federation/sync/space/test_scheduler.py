@@ -63,6 +63,9 @@ class _FakeFedRepo:
     def __init__(self, instances):
         self._instances = instances
 
+    async def list_social_instances(self):
+        return await self.list_instances(status="confirmed")
+
     async def list_instances(self, *, source=None, status=None):
         return self._instances
 

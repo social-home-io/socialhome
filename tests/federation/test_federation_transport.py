@@ -17,6 +17,8 @@ import aiolibdatachannel as rtc
 
 from socialhome.domain.events import PeerTransportChanged
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
     DeliveryResult,
     FederationEventType,
     InstanceSource,
@@ -24,6 +26,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.federation import transport as transport_mod
+from socialhome.federation.gfs_relay_transport import RELAY_STATUS_TOO_LARGE
 from socialhome.federation.transport import (
     MAX_HANDSHAKE_RESTARTS,
     RTC_RETRY_BACKOFF_BASE_S,
@@ -2613,3 +2616,189 @@ async def test_closing_flag_raised_mid_offer_drops_the_peer():
     assert inst.id not in t._peers
     assert caught[0]._closed is True
     assert len(_offers(signal)) == 1
+
+
+# ─── Transport selection: the connection-server relay tier ────────────────
+
+
+class _RecordingRelay:
+    """Drop-in :class:`GfsRelayTransport` for facade selection tests."""
+
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.calls: list[tuple[RemoteInstance, dict]] = []
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls.append((instance, envelope_dict))
+        return self.ok, None
+
+
+def _link_joined_instance(iid: str = "link-peer") -> RemoteInstance:
+    """A household seated from an invite link: no address, ever."""
+    return RemoteInstance(
+        id=iid,
+        display_name=iid,
+        remote_identity_pk="bb" * 32,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_inbox_url="",
+        local_inbox_id=f"wh-{iid}",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        relay_via="https://gfs.example.org",
+        remote_keywrap_pk="cc" * 32,
+    )
+
+
+async def test_space_session_peer_goes_to_the_relay_never_https():
+    """A link-joined household has NO inbox URL by design. Letting it
+    fall through to the HTTPS inbox would POST at the empty string on
+    every space event; it rides the connection-server relay instead."""
+    https_inbox = _RecordingHttpsInbox()
+    relay = _RecordingRelay()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=https_inbox,
+        gfs_relay=relay,
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-1", "event_type": "space.post_created"},
+    )
+
+    assert result.ok is True
+    assert result.via == "gfs_relay"
+    assert [c[1]["msg_id"] for c in relay.calls] == ["m-1"]
+    # The HTTPS inbox was never touched, and no RTC handshake started.
+    assert https_inbox.calls == []
+    assert t._peers == {}
+
+
+async def test_confirmed_peer_with_an_address_is_unchanged_by_the_relay_tier():
+    """The selection change must not touch the ordinary path: a normal
+    peer still tries RTC and falls back to its HTTPS inbox."""
+    https_inbox = _RecordingHttpsInbox()
+    relay = _RecordingRelay()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=https_inbox,
+        gfs_relay=relay,
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_fake_instance("peer-1"),
+        envelope_dict={"msg_id": "m-2"},
+    )
+
+    assert result.via == "https"
+    assert result.ok is True
+    assert relay.calls == []
+    assert [c[1]["msg_id"] for c in https_inbox.calls] == ["m-2"]
+
+
+async def test_space_session_peer_fails_closed_without_a_relay():
+    """No relay wired → a named failure, still never an HTTPS POST at ''."""
+    https_inbox = _RecordingHttpsInbox()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=https_inbox,
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-3"},
+    )
+
+    assert result.ok is False
+    assert result.error == "gfs_relay_unavailable"
+    assert https_inbox.calls == []
+
+
+async def test_relay_failure_is_a_transport_failure_not_a_raise():
+    https_inbox = _RecordingHttpsInbox()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=https_inbox,
+        gfs_relay=_RecordingRelay(ok=False),
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-4"},
+    )
+
+    assert result.ok is False
+    assert result.via == "gfs_relay"
+    assert result.error == "gfs_relay_failed"
+    assert https_inbox.calls == []
+
+
+class _ThrottlingRelay:
+    """A relay tier that reports the connection server's 429."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls.append(envelope_dict)
+        return False, 429
+
+
+class _OversizeRefusingRelay:
+    """A relay tier refusing a frame that structurally cannot fit."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def send(self, *, instance, envelope_dict):
+        self.calls.append(envelope_dict)
+        return False, RELAY_STATUS_TOO_LARGE
+
+
+async def test_a_relay_throttle_is_a_waitable_window_not_a_generic_failure():
+    """A 429 says "come back in a moment", and the caller has to be able
+    to tell that apart from "this peer is not reachable" — otherwise a
+    space-sync catch-up abandons over a few seconds of back-pressure."""
+    relay = _ThrottlingRelay()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        gfs_relay=relay,
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-429"},
+    )
+
+    assert result.ok is False
+    assert result.via == "gfs_relay"
+    assert result.status_code == 429
+    assert result.error == DELIVERY_ERROR_RELAY_THROTTLED
+
+
+async def test_a_frame_too_big_for_the_relay_is_not_a_transient_failure():
+    """Media does not fit the relay body cap and never will, so the
+    refusal is deterministic — retrying it just burns the outbox budget."""
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        gfs_relay=_OversizeRefusingRelay(),
+        signaling_send=_FakeSignaler(),
+    )
+
+    result = await t.send(
+        instance=_link_joined_instance(),
+        envelope_dict={"msg_id": "m-big"},
+    )
+
+    assert result.ok is False
+    assert result.via == "gfs_relay"
+    assert result.status_code == RELAY_STATUS_TOO_LARGE
+    assert result.error == DELIVERY_ERROR_RELAY_TOO_LARGE

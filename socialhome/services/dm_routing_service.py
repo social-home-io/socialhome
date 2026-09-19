@@ -202,9 +202,10 @@ class DmRoutingService(VisibilityMixin):
 
     async def get_own_peers(self) -> list[str]:
         """Confirmed direct pairings (1-hop neighbours)."""
-        instances = await self._fed_repo.list_instances(
-            status=PairingStatus.CONFIRMED.value,
-        )
+        # §D2b: social surface — a ``space_session`` row (a household
+        # we only share a space with, via an invite link) is NOT a
+        # social peer, so read the social list, not every CONFIRMED row.
+        instances = await self._fed_repo.list_social_instances()
         return [i.id for i in instances]
 
     async def get_known_peers(self, source_instance_id: str) -> list[str]:

@@ -34,10 +34,16 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from ..crypto import generate_identity_keypair
+from ..federation.invite_code import (
+    build_invite_code,
+    build_invite_payload,
+    encode_invite_blob,
+)
 
 if TYPE_CHECKING:
     import pathlib
 
+    from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
 from ..domain.events import (
@@ -66,6 +72,7 @@ from ..domain.events import (
 from ..domain.federation import (
     BehindMember,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
     SpaceVersionCompat,
 )
@@ -180,6 +187,48 @@ MAX_POST_LENGTH = 10_000
 MAX_COMMENT_LENGTH = 2_000
 
 
+#: Safety margin between this household's cap and the connection
+#: server's, in seconds.
+#:
+#: The server's check is a strict ``expires_at - its_now > MAX`` against
+#: ITS clock, while the household computes ``our_now + cap`` against
+#: OURS. Setting the two numbers equal put every "never expires"
+#: published link exactly ON that boundary, so a server running a single
+#: second behind us answered 422 — and the owner, who had picked
+#: "Never", was told that "30 days" was too long. Five minutes is the
+#: same skew budget §24.11 already allows federation envelopes, so a
+#: clock sloppy enough to break this breaks federation first.
+PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS: int = 300
+
+#: Longest life a connection server will hold an invite blob for
+#: (``global_server.invites.INVITE_MAX_TTL_SECONDS`` is 30 days), minus
+#: :data:`PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS`. A never-expiring local
+#: token is fine — the household decides every redeem — but the public
+#: blob is a row on somebody else's disk, so a published link is capped
+#: here rather than rejected by the server.
+PUBLISHED_INVITE_MAX_TTL_SECONDS: int = 30 * 24 * 3600 - (
+    PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS
+)
+
+
+def _invite_expiry_epoch(expires_at: str | None) -> int:
+    """Absolute unix-second expiry for the published blob.
+
+    A link with no local expiry still gets a bounded one on the server:
+    ``validate_expires_at`` there requires a future instant at most
+    :data:`PUBLISHED_INVITE_MAX_TTL_SECONDS` out.
+    """
+    now = datetime.now(timezone.utc)
+    cap = int((now + timedelta(seconds=PUBLISHED_INVITE_MAX_TTL_SECONDS)).timestamp())
+    if not expires_at:
+        return cap
+    try:
+        when = int(datetime.fromisoformat(expires_at).timestamp())
+    except ValueError:
+        return cap
+    return min(when, cap)
+
+
 class SpaceService(SpaceMemberGuardMixin):
     """Orchestrates space lifecycle + member + post flows."""
 
@@ -204,6 +253,8 @@ class SpaceService(SpaceMemberGuardMixin):
         "_media_dir",
         "_gallery",
         "_bazaar",
+        "_invite_keywrap_pk",
+        "_invite_keywrap_sig",
     )
 
     def __init__(
@@ -241,6 +292,32 @@ class SpaceService(SpaceMemberGuardMixin):
         # (post media still cleaned via ``space_post_repo``).
         self._gallery = None
         self._bazaar = None
+        # §D2b bootstrap material carried inside every invite code we
+        # mint. Wired by ``attach_invite_identity`` once the real
+        # identity exists; empty until then, which simply yields a code
+        # with no bootstrap block (redeemable over the direct / mesh
+        # paths, exactly as an older code is).
+        self._invite_keywrap_pk = ""
+        self._invite_keywrap_sig = ""
+
+    def attach_invite_identity(
+        self,
+        *,
+        keywrap_public_key: bytes,
+        keywrap_sig: str,
+    ) -> None:
+        """Wire this household's published key-wrap triple for invite codes.
+
+        The same static X25519 key ``/gfs/info`` serves and the
+        subscriber key handoff seals to — never a fresh keypair — plus
+        the Ed25519 self-signature binding it to our identity. The
+        identity public key itself comes off the attached
+        :class:`FederationService` (``own_identity_pk``), so the three
+        values an invite blob advertises are the one triple this
+        household publishes everywhere else.
+        """
+        self._invite_keywrap_pk = keywrap_public_key.hex()
+        self._invite_keywrap_sig = keywrap_sig
 
     def attach_gallery_repo(self, gallery_repo) -> None:
         """Wire the gallery repo so a hard-deleted space's gallery media
@@ -720,6 +797,10 @@ class SpaceService(SpaceMemberGuardMixin):
                 sequence=sequence,
             )
         )
+        # Who was in this space before the cascade takes the rows away —
+        # needed after the purge to decide which space-scoped seats are
+        # now orphaned.
+        member_instances = await self._spaces.list_member_instances(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
             post_repo=self._posts,
@@ -727,6 +808,83 @@ class SpaceService(SpaceMemberGuardMixin):
             bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             space_id=space_id,
+        )
+        for instance_id in member_instances:
+            await self.revoke_space_session_if_orphaned(instance_id)
+
+    async def revoke_space_session_if_orphaned(
+        self,
+        instance_id: str,
+        *,
+        notify: bool = True,
+    ) -> bool:
+        """Drop a §D2b space-scoped seat once nothing justifies it.
+
+        A ``source = space_session`` ``remote_instances`` row exists for
+        exactly one reason: an invite token was redeemed and the two
+        households ended up sharing a space. It is CONFIRMED and it holds
+        live directional session keys — so leaving it behind after the
+        last shared membership ends (kick, ban, leave, dissolve) keeps a
+        household we have no relationship with holding valid keys to us,
+        forever. Nothing else ever cleaned it up.
+
+        The single choke point for all four paths: every one of them ends
+        by removing the ``space_instances`` row, so "does this instance
+        still appear in ANY of our spaces" is the whole question.
+
+        ``notify=False`` skips the outbound ``SPACE_SESSION_CLEANUP`` and is
+        what the *inbound* half passes — otherwise the two households would
+        each answer the other's teardown with one of their own, the second
+        of which arrives at a household that has already deleted the row
+        and is rejected by the pipeline.
+
+        Returns ``True`` when a row was deleted. No-ops — deliberately —
+        for a ``manual`` (QR-paired) peer: that relationship was never
+        about a space and outlives every space.
+        """
+        if self._federation_repo is None:
+            return False
+        instance = await self._federation_repo.get_instance(instance_id)
+        if instance is None or instance.source is not InstanceSource.SPACE_SESSION:
+            return False
+        if await self._spaces.instance_in_any_space(instance_id):
+            return False
+        # Tell the other side first — the send needs the row we are about
+        # to delete (the relay transport reads its key-wrap key and its
+        # introducing server off it). Best-effort: if it never lands, the
+        # peer is left holding a dead seat whose envelopes we now refuse,
+        # which is the safe direction to fail.
+        if notify and self._federation is not None:
+            try:
+                await self._federation.send_event(
+                    to_instance_id=instance_id,
+                    event_type=FederationEventType.SPACE_SESSION_CLEANUP,
+                    payload={"reason": "no_shared_spaces"},
+                )
+            except Exception:
+                log.exception(
+                    "SPACE_SESSION_CLEANUP to %s failed; dropping our row anyway",
+                    instance_id,
+                )
+        await self._federation_repo.delete_instance(instance_id)
+        log.info(
+            "space session: dropped the space-scoped seat for %s — no shared "
+            "space is left to justify it",
+            instance_id,
+        )
+        return True
+
+    async def apply_space_session_cleanup(self, instance_id: str) -> bool:
+        """Inbound half of :meth:`revoke_space_session_if_orphaned`.
+
+        The peer told us it dropped its space-scoped seat for us. We drop
+        ours — but only once *our* view agrees there is no shared space
+        left, so a peer that leaves one of two shared spaces (or lies)
+        can't tear down a seat that is still carrying the other.
+        """
+        return await self.revoke_space_session_if_orphaned(
+            instance_id,
+            notify=False,
         )
 
     async def _forward_admin_action_if_remote(
@@ -2595,16 +2753,88 @@ class SpaceService(SpaceMemberGuardMixin):
         actor_username: str,
         uses: int = 1,
         ttl_seconds: int | None = DEFAULT_INVITE_TOKEN_TTL_SECONDS,
+        role: str = SpaceRole.MEMBER.value,
     ) -> str:
         """Mint a shareable invite token for ``space_id``.
+
+        Thin wrapper over :meth:`create_invite_link` for callers that
+        only want the bearer credential (the §D1b remote invite, the §D2
+        join-request approval, and every existing test).
 
         ``ttl_seconds`` is a lifetime rather than an absolute
         ``expires_at`` on purpose: the expiry is anchored on *our* clock,
         so a wrong client clock can't mint a token that outlives its
-        intent. ``None`` restores the historical never-expires behaviour.
+        intent. An explicit ``None`` restores the historical
+        never-expires behaviour; omitting it takes
+        :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS`.
+        """
+        link = await self.create_invite_link(
+            space_id,
+            actor_username=actor_username,
+            uses=uses,
+            ttl_seconds=ttl_seconds,
+            role=role,
+        )
+        return str(link["token"])
+
+    async def create_invite_link(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        uses: int = 1,
+        ttl_seconds: int | None = DEFAULT_INVITE_TOKEN_TTL_SECONDS,
+        role: str = SpaceRole.MEMBER.value,
+        publish_to_gfs: str | None = None,
+    ) -> dict:
+        """Mint an invite link — the token, the seat it grants, the code.
+
+        ``role`` is the seat the redeemer lands in and is decided HERE,
+        by the issuer, and stored on the row. The redeemer never gets to
+        ask for it (see the 0053 migration header). Who may mint what:
+
+        * admin **or** owner → ``member`` / ``subscriber``;
+        * **owner only** → ``admin``. An admin must not be able to clone
+          their own privilege, so this re-checks with
+          :meth:`_require_owner`.
+        * ``owner`` is never mintable — ownership moves only through
+          :meth:`transfer_ownership`.
+
+        A ``subscriber`` link works regardless of any
+        "strangers may subscribe" space flag: that flag governs people
+        who walked up on their own, while an explicit invite is the
+        owner deciding otherwise for one named link. (That flag does not
+        exist on this branch yet; this seat deliberately does not consult
+        it when it lands.)
+
+        ``publish_to_gfs`` parks the link's blob on one connection
+        server's bulletin board and returns its public ``url``. Mint is
+        **publish-first**: the token string is minted, sealed into the
+        blob, published, and only then persisted. A publish failure
+        therefore leaves no local row — the owner is told the link does
+        not exist rather than being shown one in the list that resolves
+        to nothing. The inverse ordering's failure mode (a blob on a
+        server with no local row) is inert: the redeem denies on an
+        unknown token and the server sweeps the blob at expiry.
+
+        ``ttl_seconds`` bounds the link's life from *now*; an explicit
+        ``None`` means it never expires and only ``uses`` limits it.
+        (The HTTP layer additionally accepts ``0`` for "never", because
+        that is what the SPA's picker sends — see
+        ``routes.spaces.SpaceInviteTokenView``.)
         """
         space = await self._require_space(space_id)
+        try:
+            seat = SpaceRole(role)
+        except ValueError:
+            raise ValueError(f"unknown invite role {role!r}") from None
+        if seat is SpaceRole.OWNER:
+            raise ValueError("owner cannot be granted by an invite link")
         await self._require_admin_or_owner(space, actor_username)
+        if seat is SpaceRole.ADMIN:
+            # An admin minting an admin link would be self-service
+            # promotion by proxy. Only the owner delegates admin.
+            await self._require_owner(space, actor_username)
         actor = await self._users.get(actor_username)
         assert actor is not None
         expires_at: str | None = None
@@ -2613,12 +2843,279 @@ class SpaceService(SpaceMemberGuardMixin):
             expires_at = (
                 datetime.now(timezone.utc) + timedelta(seconds=ttl)
             ).isoformat()
-        return await self._spaces.create_invite_token(
+
+        token = uuid.uuid4().hex
+        gfs_token: str | None = None
+        gfs_url: str | None = None
+        gfs_base: str | None = None
+        if publish_to_gfs:
+            gfs_base = await self._gfs_base_url(publish_to_gfs)
+            gfs = self._gfs
+            assert gfs is not None  # _gfs_base_url raises when unwired
+            gfs_token, gfs_url = await gfs.publish_invite(
+                space_id,
+                publish_to_gfs,
+                encode_invite_blob(
+                    self._invite_payload(
+                        space,
+                        token=token,
+                        expires_at=expires_at,
+                        gfs_url=gfs_base,
+                    )
+                ),
+                _invite_expiry_epoch(expires_at),
+            )
+        await self._spaces.create_invite_token(
             space_id,
             created_by=actor.user_id,
             uses=max(1, int(uses)),
             expires_at=expires_at,
+            token=token,
+            role=seat.value,
+            gfs_id=publish_to_gfs or None,
+            gfs_token=gfs_token,
+            gfs_url=gfs_url,
         )
+        rows = await self._spaces.list_live_invite_tokens(space_id)
+        row = next(
+            (r for r in rows if r.get("token") == token),
+            # A very short ttl_seconds (or clock skew) can put the row
+            # outside the "live" window the instant it is written; the
+            # caller still gets back the link it just minted.
+            {
+                "token": token,
+                "role": seat.value,
+                "uses_remaining": max(1, int(uses)),
+                "uses_total": max(1, int(uses)),
+                "expires_at": expires_at,
+                "created_by": actor.user_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "gfs_id": publish_to_gfs or None,
+                "gfs_token": gfs_token,
+                "gfs_url": gfs_url,
+            },
+        )
+        return self._invite_link_dict(space, row, gfs_base=gfs_base)
+
+    async def invite_code_for_token(self, token: str) -> str | None:
+        """The full ``socialhome://invite#…`` code for one live link.
+
+        ``None`` when ``token`` is not a still-redeemable invite link on
+        this household — expired, exhausted, revoked, or never ours.
+
+        **The token IS the credential**, which is what makes this
+        answerable without a session. Anyone holding it can already
+        redeem the link; handing back the code it belongs to grants
+        nothing further. What it fixes is the ``/join`` landing page's
+        "wrong instance" fallback: a visitor whose HTTPS link landed on
+        the ISSUER's instance gets a code to paste into their own home,
+        and a code minted client-side carries only the token, the space
+        id and the issuer id — no issuer keys, no connection-server URL,
+        so the receiving household cannot bootstrap a redeem with it and
+        the fallback always dead-ended. Built from the same
+        :meth:`_invite_payload` the mint and the admin list use, so the
+        three can never drift.
+
+        Deliberately answers ``None`` — a flat 404 at the route — for
+        every "no": an expired link and a token that was never ours must
+        be indistinguishable, or this becomes a probe for which links a
+        household has issued. Rate limiting lives at the route.
+        """
+        row = await self._spaces.get_live_invite_token(token)
+        if row is None:
+            return None
+        space = await self._spaces.get(str(row["space_id"]))
+        if space is None:
+            return None
+        gfs_base: str | None = None
+        gfs_id = row.get("gfs_id")
+        if gfs_id:
+            try:
+                gfs_base = await self._gfs_base_url(str(gfs_id))
+            except ValueError:
+                # Server unpaired since the link was minted. The code
+                # still works for a household that can reach the issuer
+                # another way; it just carries no relay hint.
+                gfs_base = None
+        return build_invite_code(
+            self._invite_payload(
+                space,
+                token=str(row["token"]),
+                expires_at=row.get("expires_at"),
+                gfs_url=gfs_base,
+            )
+        )
+
+    async def list_invite_links(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+    ) -> list[dict]:
+        """Every still-redeemable invite link of ``space_id``, newest first.
+
+        Admin or owner only — the token strings ARE the credentials.
+        Expired and exhausted rows are excluded by the repo: they grant
+        nothing, so listing them would only invite an owner to "revoke"
+        something that is already spent.
+        """
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        rows = await self._spaces.list_live_invite_tokens(space_id)
+        # One lookup for the whole page: a published row's ``code`` has
+        # to name the connection server's BASE url (the relay a stranger
+        # hands its sealed redeem to), and the row only stores the
+        # shareable /join page.
+        bases: dict[str, str] = {}
+        for gfs_id in {str(r["gfs_id"]) for r in rows if r.get("gfs_id")}:
+            try:
+                bases[gfs_id] = await self._gfs_base_url(gfs_id)
+            except ValueError:
+                # Server unpaired since the link was minted — the link
+                # still lists (and revokes); its code just carries no
+                # relay hint.
+                continue
+        return [
+            self._invite_link_dict(
+                space,
+                row,
+                gfs_base=bases.get(str(row.get("gfs_id") or "")),
+            )
+            for row in rows
+        ]
+
+    async def revoke_invite_link(
+        self,
+        space_id: str,
+        token: str,
+        *,
+        actor_username: str,
+    ) -> None:
+        """Take one invite link down, locally and on its connection server.
+
+        Idempotent: an unknown or already-revoked token is a no-op, so a
+        double-click and a retry both succeed. Revoke does NOT un-seat
+        anybody who already redeemed the link — that is member removal,
+        a separate decision with its own audit trail.
+
+        The connection-server leg is fail-soft: the local row is gone
+        either way (the household stops honouring the token, which is
+        what actually decides a redeem), and a server that is down gets
+        one WARNING naming it so an operator can retry. Any admin of the
+        space may revoke any of its links, including one another admin
+        minted — a link is the space's, not its minter's.
+        """
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        row = await self._spaces.delete_invite_token(space_id, token)
+        if row is None:
+            return
+        gfs_id = row.get("gfs_id")
+        gfs_token = row.get("gfs_token")
+        if not gfs_id or not gfs_token or self._gfs is None:
+            return
+        try:
+            await self._gfs.revoke_invite(space_id, str(gfs_id), str(gfs_token))
+        except Exception as exc:
+            log.warning(
+                "invite revoke: space=%s token deleted locally but connection "
+                "server %s (%s) did not take the blob down: %s — the link is "
+                "dead (we refuse the redeem) but its page stays up until the "
+                "server expires it; retry the revoke when it is back",
+                space_id,
+                gfs_id,
+                row.get("gfs_url") or "no url recorded",
+                exc,
+            )
+
+    def _invite_payload(
+        self,
+        space: Space,
+        *,
+        token: str,
+        expires_at: str | None,
+        gfs_url: str | None,
+    ) -> dict:
+        """The decoded invite payload for one link. One builder, two uses:
+        the ``code`` the SPA renders and the blob a connection server
+        parks, so the paste path and the /join path can never diverge.
+        """
+        identity_pk = (
+            self._federation.own_identity_pk.hex()
+            if self._federation is not None
+            else ""
+        )
+        return build_invite_payload(
+            token=token,
+            space_id=space.id,
+            space_display_hint=space.name,
+            issuer_instance_id=self._own_instance_id or "",
+            issuer_identity_pk=identity_pk,
+            issuer_keywrap_pk=self._invite_keywrap_pk,
+            issuer_keywrap_sig=self._invite_keywrap_sig,
+            issuer_proto_version=OURS,
+            expires_at=expires_at,
+            gfs_url=gfs_url,
+        )
+
+    async def _gfs_base_url(self, gfs_id: str) -> str:
+        """Base URL of the paired connection server ``gfs_id``.
+
+        Raises ``ValueError`` (→ 422) for an id this household is not
+        paired with, BEFORE anything is published or persisted.
+        """
+        if self._gfs is None:
+            raise ValueError("no connection server is paired with this household")
+        for conn in await self._gfs.list_connections():
+            if conn.id == gfs_id:
+                return str(conn.inbox_url)
+        raise ValueError(f"connection server {gfs_id!r} is not paired")
+
+    def _invite_link_dict(
+        self,
+        space: Space,
+        row: dict,
+        *,
+        gfs_base: str | None = None,
+    ) -> dict:
+        """API shape for one invite link row (see ``docs/api.md``)."""
+        gfs_id = row.get("gfs_id")
+        gfs_token = row.get("gfs_token")
+        return {
+            "token": row["token"],
+            "role": row.get("role") or SpaceRole.MEMBER.value,
+            # What the link was minted with, so the UI can say "3 of 10
+            # left". A row from before migration 0053 has no total —
+            # falling back to the remaining count is honest ("3 of 3")
+            # where inventing one would not be.
+            "uses": row.get("uses_total") or row.get("uses_remaining"),
+            "uses_remaining": row.get("uses_remaining"),
+            "expires_at": row.get("expires_at"),
+            "created_by": row.get("created_by"),
+            "created_at": row.get("created_at"),
+            "code": build_invite_code(
+                self._invite_payload(
+                    space,
+                    token=str(row["token"]),
+                    expires_at=row.get("expires_at"),
+                    gfs_url=gfs_base,
+                )
+            ),
+            "gfs": (
+                {
+                    "gfs_id": gfs_id,
+                    "gfs_token": gfs_token,
+                    # The shareable /join page…
+                    "url": row.get("gfs_url"),
+                    # …and the server's BASE url, which the blob's
+                    # ``via_gfs`` names. Handed over rather than left to
+                    # be parsed back out of the page link.
+                    "gfs_url": gfs_base,
+                }
+                if gfs_id and gfs_token
+                else None
+            ),
+        }
 
     async def _send_invite_envelope(
         self,
@@ -3085,6 +3582,12 @@ class SpaceService(SpaceMemberGuardMixin):
             tombstoned=True,
         )
         await self._rotate_and_distribute_space_key(space_id)
+        # LAST: every step above still needs the ``remote_instances`` row to
+        # reach this household (the REMOVED notice, the roster gossip, the
+        # rekey that gives them forward secrecy). Only once they have all
+        # gone out does the §D2b seat lose its reason to exist.
+        if not still_present:
+            await self.revoke_space_session_if_orphaned(instance_id)
 
     async def redeem_invite_token(
         self,
@@ -3092,6 +3595,7 @@ class SpaceService(SpaceMemberGuardMixin):
         *,
         user_id: str,
         issuer_instance_id: str | None = None,
+        bootstrap: "InviteBootstrapHint | None" = None,
     ) -> dict:
         """Consume an invite token, possibly via a cross-instance round-trip.
 
@@ -3102,6 +3606,12 @@ class SpaceService(SpaceMemberGuardMixin):
         handshakes with the issuer and returns the same shape. Raises
         :class:`SpacePermissionError` (unpaired / banned / denied) or
         ``TimeoutError`` (issuer unreachable).
+
+        ``bootstrap`` carries what the redeeming household read out of a
+        public invite blob (§D2b). It is used only when the issuer is
+        neither a confirmed peer nor mesh-reachable — the token is then
+        the sole authorization and the redeem travels sealed through a
+        connection server.
         """
         if issuer_instance_id is None or issuer_instance_id == self._own_instance_id:
             member = await self.accept_invite_token(token, user_id=user_id)
@@ -3114,6 +3624,7 @@ class SpaceService(SpaceMemberGuardMixin):
             token,
             viewer_user_id=user_id,
             issuer_instance_id=issuer_instance_id,
+            bootstrap=bootstrap,
         )
 
     async def accept_invite_token(
@@ -3122,16 +3633,43 @@ class SpaceService(SpaceMemberGuardMixin):
         *,
         user_id: str,
     ) -> SpaceMember:
-        """Consume an invite token and enroll ``user_id`` as a member."""
-        row = await self._spaces.consume_invite_token(token)
+        """Consume an invite token and seat ``user_id`` in the role it grants.
+
+        The seat comes off the stored row — ``member``, ``subscriber`` or
+        ``admin``, decided by whoever minted the link. A ``subscriber``
+        link seats a subscriber whatever the space's "strangers may
+        subscribe" setting says: that setting governs people who walked
+        up on their own; this one was invited by name.
+        """
+        # §13.7 rides INSIDE the atomic UPDATE (``redeemer_user_id``), the
+        # same way the cross-household redeem does it. Consuming first and
+        # checking the ban afterwards spent a use on every refusal and
+        # never refunded it, so a banned member could exhaust a twenty-use
+        # link in twenty clicks — and the differential answer told them
+        # their own ban status one attempt at a time.
+        row = await self._spaces.consume_invite_token(
+            token,
+            redeemer_user_id=user_id,
+        )
         if row is None:
+            # ``None`` is now ambiguous — dead token, or live token plus a
+            # banned redeemer — because neither moves the counter. The SPA
+            # renders the two differently ("this link is no longer valid"
+            # vs "you're banned from this space"), so resolve it with a
+            # read. No use was spent either way, and the answer is about
+            # the caller's own household, so it is not an oracle.
+            peek = await self._spaces.get_live_invite_token(token)
+            if peek is not None and await self._spaces.is_banned(
+                str(peek["space_id"]),
+                user_id,
+            ):
+                raise SpacePermissionError(
+                    "banned from this space",
+                    banned=True,
+                )
             raise KeyError("invite token invalid, expired, or exhausted")
         space_id = row["space_id"]
-        if await self._spaces.is_banned(space_id, user_id):
-            raise SpacePermissionError(
-                "banned from this space",
-                banned=True,
-            )
+        seat = SpaceRole(row.get("role") or SpaceRole.MEMBER.value)
         # §CP.F1 — an invite link must not seat an under-age protected minor
         # in an age-restricted space. (The token is already consumed above;
         # a blocked minor burns one use, which beats letting them in.)
@@ -3140,7 +3678,7 @@ class SpaceService(SpaceMemberGuardMixin):
         member = SpaceMember(
             space_id=space_id,
             user_id=user_id,
-            role=SpaceRole.MEMBER,
+            role=seat,
             joined_at=datetime.now(timezone.utc).isoformat(),
         )
         await self._spaces.save_member(member)
@@ -3148,9 +3686,13 @@ class SpaceService(SpaceMemberGuardMixin):
             SpaceMemberJoined(
                 space_id=space_id,
                 user_id=user_id,
-                role=SpaceRole.MEMBER,
+                role=seat,
             )
         )
+        # An ADMIN seat on THIS household needs no signing-seed share:
+        # the seed already lives here (see the note in
+        # ``set_remote_member_role``, where the share is the remote-only
+        # half of the same promotion).
         return member
 
     async def request_join(

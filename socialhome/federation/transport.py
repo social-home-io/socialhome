@@ -45,12 +45,28 @@ from aiohttp import ClientTimeout
 
 from . import app_framing
 from . import media_framing
+
+# Runtime import of two ints only — the relay transport class itself stays
+# behind TYPE_CHECKING, and this module is not imported by that one, so
+# there is no cycle to route around.
+from .gfs_relay_transport import (
+    RELAY_STATUS_THROTTLED,
+    RELAY_STATUS_TOO_LARGE,
+)
 from ..domain.events import PeerTransportChanged
 from ..exception_text import describe_exception
-from ..domain.federation import DeliveryResult, FederationEventType, RemoteInstance
+from ..domain.federation import (
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_RELAY_TOO_LARGE,
+    DeliveryResult,
+    FederationEventType,
+    InstanceSource,
+    RemoteInstance,
+)
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
+    from .gfs_relay_transport import GfsRelayTransport
 
 log = logging.getLogger(__name__)
 
@@ -1467,12 +1483,34 @@ class _RtcPeer:
 # ─── Facade ────────────────────────────────────────────────────────────────
 
 
+def _relay_failure_reason(status: int | None) -> str:
+    """Name a relay failure so the caller can decide whether to retry.
+
+    Three outcomes hide behind one ``ok=False`` and they want opposite
+    handling, so the status the relay tier reported is classified once,
+    here, instead of at every call site:
+
+    * :data:`~.gfs_relay_transport.RELAY_STATUS_THROTTLED` — waitable.
+      Sleep the window out and send the SAME frame again.
+    * :data:`~.gfs_relay_transport.RELAY_STATUS_TOO_LARGE` — permanent.
+      The frame does not fit and never will; retrying burns the outbox
+      budget to re-derive the same arithmetic.
+    * anything else — the ordinary transient failure (relay unreachable,
+      malformed seal, no connection server), which keeps retrying.
+    """
+    if status == RELAY_STATUS_THROTTLED:
+        return DELIVERY_ERROR_RELAY_THROTTLED
+    if status == RELAY_STATUS_TOO_LARGE:
+        return DELIVERY_ERROR_RELAY_TOO_LARGE
+    return "gfs_relay_failed"
+
+
 @dataclass(slots=True, frozen=True)
 class _TransportSendResult:
     """What :meth:`FederationTransport.send` returns to the caller."""
 
     ok: bool
-    via: str  # "rtc" | "https"
+    via: str  # "rtc" | "https" | "gfs_relay"
     status_code: int | None = None
     error: str | None = None
 
@@ -1489,6 +1527,7 @@ class FederationTransport:
     __slots__ = (
         "_own_instance_id",
         "_https_inbox",
+        "_gfs_relay",
         "_signaling_send",
         "_ice_servers",
         "_peers",
@@ -1514,6 +1553,7 @@ class FederationTransport:
         *,
         own_instance_id: str,
         https_inbox: HttpsInboxTransport,
+        gfs_relay: "GfsRelayTransport | None" = None,
         signaling_send: Callable[
             [str, FederationEventType, dict], Awaitable[DeliveryResult]
         ],
@@ -1529,6 +1569,13 @@ class FederationTransport:
     ) -> None:
         self._own_instance_id = own_instance_id
         self._https_inbox = https_inbox
+        #: Third transport tier — the connection-server envelope relay,
+        #: the ONLY way to reach a household seated from an invite link
+        #: (:data:`InstanceSource.SPACE_SESSION`): that pair deliberately
+        #: never exchanged an address, so there is nothing for RTC to
+        #: signal towards and nothing for the HTTPS inbox to POST to.
+        #: ``None`` in tests and in builds with no connection server.
+        self._gfs_relay = gfs_relay
         self._signaling_send = signaling_send
         self._ice_servers = ice_servers or []
         self._peers: dict[str, _RtcPeer] = {}
@@ -1687,6 +1734,35 @@ class FederationTransport:
         The envelope is unchanged across transports — the signature and
         AES-256-GCM payload are already baked in.
         """
+        # A household seated from an invite link has no address AT ALL,
+        # by design (§D2b): ``remote_inbox_url`` is empty and no RTC
+        # signalling can reach it, because signalling itself travels over
+        # the peer relationship this pair does not have. It rides the
+        # connection-server relay or it goes nowhere — never a fall-
+        # through to an HTTPS POST at the empty string.
+        if instance.source is InstanceSource.SPACE_SESSION:
+            if self._gfs_relay is None:
+                log.warning(
+                    "fed send to %s needs the connection-server relay, "
+                    "which is not wired on this host",
+                    instance.id,
+                )
+                return _TransportSendResult(
+                    ok=False,
+                    via="gfs_relay",
+                    error="gfs_relay_unavailable",
+                )
+            ok, status = await self._gfs_relay.send(
+                instance=instance,
+                envelope_dict=envelope_dict,
+            )
+            return _TransportSendResult(
+                ok=ok,
+                via="gfs_relay",
+                status_code=status,
+                error=None if ok else _relay_failure_reason(status),
+            )
+
         peer = self._peers.get(instance.id)
         if peer is not None and peer.is_ready:
             try:

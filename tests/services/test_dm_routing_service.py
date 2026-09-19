@@ -95,7 +95,12 @@ class _Event:
     payload: dict
 
 
-def _remote(iid: str, *, status=PairingStatus.CONFIRMED) -> RemoteInstance:
+def _remote(
+    iid: str,
+    *,
+    status=PairingStatus.CONFIRMED,
+    source=InstanceSource.MANUAL,
+) -> RemoteInstance:
     return RemoteInstance(
         id=iid,
         display_name=iid,
@@ -105,7 +110,7 @@ def _remote(iid: str, *, status=PairingStatus.CONFIRMED) -> RemoteInstance:
         remote_inbox_url="https://x/wh",
         local_inbox_id=f"wh-{iid}",
         status=status,
-        source=InstanceSource.MANUAL,
+        source=source,
     )
 
 
@@ -166,6 +171,18 @@ async def test_get_own_peers_lists_confirmed(env):
     )
     peers = await svc.get_own_peers()
     assert set(peers) == {"m", "n"}
+
+
+async def test_get_own_peers_excludes_space_session_households(env):
+    """§D2b — a household reached through an invite link shares a space
+    with us, not a DM relationship, so it is not a 1-hop DM neighbour
+    and must not appear in the relay graph we announce."""
+    _, fed_repo, svc, _ = env
+    await fed_repo.save_instance(_remote("m"))
+    await fed_repo.save_instance(
+        _remote("space-only", source=InstanceSource.SPACE_SESSION),
+    )
+    assert await svc.get_own_peers() == ["m"]
 
 
 async def test_get_known_peers_self_equals_own_peers(env):

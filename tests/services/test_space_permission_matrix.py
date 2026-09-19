@@ -72,6 +72,9 @@ GATED_METHODS: frozenset[str] = frozenset(
         "ban",
         "unban",
         "create_invite_token",
+        "create_invite_link",
+        "list_invite_links",
+        "revoke_invite_link",
         "invite_remote_user",
         "remove_remote_member",
         "approve_join_request",
@@ -97,6 +100,13 @@ GATED_METHODS: frozenset[str] = frozenset(
 UNGATED_METHODS: frozenset[str] = frozenset(
     {
         # Pure reads.
+        # Deliberately ungated and reachable with NO session: the invite
+        # token IS the credential, so whoever holds it can already redeem
+        # the link and learns nothing further from the code it belongs
+        # to. Answers ``None`` — a flat 404 at the route — for anything
+        # that is not a live link of ours, so it is not an existence
+        # oracle either. See ``routes.spaces.InviteLinkCodeView``.
+        "invite_code_for_token",
         "list_feed",
         "get_space",  # plain row read; callers (routes / sibling services) gate
         "list_comments",  # route layer applies the membership gate
@@ -120,6 +130,13 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "unsubscribe_from_space",  # own subscription only
         # Federation inbound hooks — validated by the §24.11 inbound pipeline.
         "on_remote_join_request_approved",
+        # §D2b space-session teardown. No actor to gate: both are driven by
+        # the *absence* of any shared space (a state the caller cannot
+        # assert, only observe), and the inbound half re-derives that answer
+        # from our own ``space_instances`` rows rather than trusting the
+        # sender, so a peer cannot use it to tear down a live seat.
+        "revoke_space_session_if_orphaned",
+        "apply_space_session_cleanup",
         # Federation inbound hook — the actor's role is validated inside
         # the method itself by looking up ``space_remote_members.role``;
         # there is no actor-username to thread through ``_require_admin``.
@@ -303,6 +320,20 @@ async def stack(tmp_dir):
         (
             "create_invite_token",
             lambda s: s.space_svc.create_invite_token(s.space.id, actor_username="bob"),
+        ),
+        (
+            "create_invite_link",
+            lambda s: s.space_svc.create_invite_link(s.space.id, actor_username="bob"),
+        ),
+        (
+            "list_invite_links",
+            lambda s: s.space_svc.list_invite_links(s.space.id, actor_username="bob"),
+        ),
+        (
+            "revoke_invite_link",
+            lambda s: s.space_svc.revoke_invite_link(
+                s.space.id, "tok-x", actor_username="bob"
+            ),
         ),
     ],
 )
