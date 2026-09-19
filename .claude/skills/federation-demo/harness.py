@@ -3604,6 +3604,51 @@ def cmd_verify() -> None:
     else:
         print("  (v_29 bootstrap wire skipped — run 'gfs-invite-link')")
 
+    # 0b-bis. v_31 — the mesh-routed origin signature (#692). Every
+    #     SPACE_ROUTED leg carries ``origin_sig`` inside its sealed blob
+    #     now, and the endpoint verifies it against the identity key it
+    #     already holds for ``path[0]`` before the inner event reaches a
+    #     handler. The chains that actually ride the mesh
+    #     (``invite-redeem-routed``, ``remote-invite-routed``) already
+    #     assert the inner events LANDED; what this adds is that they
+    #     landed on the SIGNED path. Two tripwires, both read off the
+    #     endpoints' own logs:
+    #
+    #       * no "accepting unsigned inner event from pre-v_31 origin" —
+    #         that INFO line is the legacy window, and a same-build demo
+    #         must never need it. Seeing it means the sender stopped
+    #         signing (the whole hole reopens for any peer the receiver
+    #         reads as older) rather than that a peer is behind.
+    #       * no "dropping (forged origin)" / "no origin signature" —
+    #         a genuine leg failing the verify would mean the signing
+    #         bytes disagree across the two ends.
+    for _label in ("a", "b", "c", "d"):
+        _legacy = _log_lines_matching(_label, "pre-v_31 origin")
+        if _legacy:
+            failures.append(
+                f"{_label}: took the v_31 legacy window on a mesh-routed "
+                f"envelope ({_legacy[-1].strip()[:160]}) — every household in "
+                "this demo runs the same build, so the origin stopped signing",
+            )
+        for _needle in ("forged origin", "no origin signature"):
+            _bad = _log_lines_matching(_label, _needle)
+            if _bad:
+                failures.append(
+                    f"{_label}: refused a mesh-routed envelope on the v_31 "
+                    f"origin check ({_bad[-1].strip()[:160]}) — the origin "
+                    "signing bytes and the endpoint's disagree",
+                )
+    if state.get("invite_redeem_routed_ran") or state.get("remote_invite_routed_ran"):
+        print(
+            "  mesh-routed inner events landed with a verified v_31 origin "
+            "signature (no legacy-window, no refusal) \u2713"
+        )
+    else:
+        print(
+            "  (v_31 routed-origin signature only smoke-checked — run "
+            "'invite-redeem-routed' / 'remote-invite-routed' for the wire)"
+        )
+
     # 0a-bis. v_30 — a cross-household Follower seat. The host's
     #     ``space_remote_members`` row is the authority every write from
     #     that household is judged against, and it can only carry

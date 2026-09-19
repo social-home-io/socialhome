@@ -37,6 +37,15 @@ Coverage:
   a key the origin never sealed under. The origin binds ``stale_eph_pk`` to
   the key IT sealed under for that ``route_id`` — before the signature
   check — so the target-signed nack is inert and the live route stays.
+* **A non-member cannot dispatch space content as a member (#692, v_31).**
+  ``path[0]`` is relay-supplied and becomes the inner event's
+  ``from_instance``, the field every §24.11 post-decrypt gate judges. The
+  household at ``path[0]`` signs the routing claim + the sealed material
+  with its Ed25519 identity key and the endpoint verifies it before the
+  dispatcher — against the key it already pinned, or against the shipped
+  pub bound by ``derive_instance_id`` when there is no row. The signature
+  covers only bytes the relay already sees, so it hands no confirmation
+  oracle to a relay guessing at a low-entropy payload.
 """
 
 from __future__ import annotations
@@ -218,10 +227,25 @@ class _RecordingFed:
     def __init__(self, own_instance_id: str) -> None:
         self._own_instance_id = own_instance_id
         self.sent: list[dict] = []
+        self.identity = generate_identity_keypair()
+        #: ``instance_id -> Ed25519 identity pk`` this node has pinned,
+        #: read by the v_31 routed origin-authentication check.
+        self.identity_pks: dict[str, bytes] = {}
 
     @property
     def own_instance_id(self) -> str:
         return self._own_instance_id
+
+    @property
+    def own_identity_seed(self) -> bytes:
+        return self.identity.private_key
+
+    @property
+    def own_identity_pk(self) -> bytes:
+        return self.identity.public_key
+
+    async def peer_identity_public_key(self, instance_id: str) -> bytes | None:
+        return self.identity_pks.get(instance_id)
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         return True
@@ -650,3 +674,253 @@ async def test_relay_substituted_eph_cannot_tear_down_a_live_route():
         assert route_id not in handler._pending_routed
     finally:
         _cancel_deferred(handler)
+
+
+# ── Origin authentication on the mesh (#692, v_31) ────────────────────
+
+
+class _MemberTargetFed(_RecordingFed):
+    """The victim household's federation service: it knows the member
+    household ``H`` (pinned identity key, current wire) and the relay
+    ``F`` that sits next to it, exactly as ``remote_instances`` would."""
+
+    def __init__(self, own_instance_id: str) -> None:
+        super().__init__(own_instance_id)
+        self.gate_calls: list[dict] = []
+
+    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+        async def _record(ctx):
+            self.gate_calls.append(dict(ctx.envelope))
+
+        return [_record]
+
+
+async def test_non_member_cannot_dispatch_space_content_as_a_member(caplog):
+    """#692 — the release-blocking shape of the hole.
+
+    ``F`` is a household on the mesh that is **not** a member of the
+    space. It probes ``V`` for a route (so it legitimately holds ``V``'s
+    ephemeral pub and can seal something ``V`` decrypts), then ships
+    ``SPACE_ROUTED{path: [H, F, V], position: 1}`` — ``H`` being a real
+    member household. Both hop checks pass: ``path[1] == F`` is the
+    authenticated sender and ``path[2] == V`` is us.
+
+    Pre-v_31 ``V`` synthesised the inner event with
+    ``from_instance = H`` and handed it to the dispatcher, so the post
+    ended up persisted as ``H``'s — and every §24.11 post-decrypt gate
+    (ban check, Follower write gate) judged the forged field. Nothing may
+    reach the dispatcher, and the gates must not even be consulted: they
+    are not the defence here, the origin signature is.
+    """
+    member = generate_identity_keypair()
+    member_id = derive_instance_id(member.public_key)
+    relay = generate_identity_keypair()
+    relay_id = derive_instance_id(relay.public_key)
+
+    fed = _MemberTargetFed("victim-instance")
+    fed.identity_pks[member_id] = member.public_key
+    fed.identity_pks[relay_id] = relay.public_key
+    dispatched: list = []
+
+    async def _dispatch(ev) -> None:
+        dispatched.append(ev)
+
+    target_priv, target_pub = routed_crypto.generate_ephemeral_keypair()
+    handler = SpaceRoutedHandler(
+        federation_service=fed,  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        event_dispatcher=_dispatch,
+        target_eph_lookup=lambda pub: target_priv if pub == target_pub else None,
+    )
+    path = [member_id, relay_id, fed.own_instance_id]
+    sealed = _seal(
+        {"space_id": "sp-1", "post_id": "p-forged", "body": "not from the member"},
+        target_pub=target_pub,
+    )
+    # Sanity: the forgery IS decryptable — the seal alone proves nothing
+    # about who wrote it, which is the whole bug.
+    assert "not from the member" in routed_crypto.unseal_inner_payload(
+        sealed=sealed,
+        target_eph_priv_b64=target_priv,
+        route_id=ROUTE_ID,
+        inner_event_type=INNER_EVENT,
+    )
+    ev = FederationEvent(
+        msg_id="m-forged",
+        event_type=FederationEventType.SPACE_ROUTED,
+        from_instance=relay_id,
+        to_instance=fed.own_instance_id,
+        timestamp="2026-09-19T00:00:00Z",
+        payload={
+            "route_id": ROUTE_ID,
+            "path": path,
+            "position": 1,
+            "direction": "forward",
+            "inner_event_type": INNER_EVENT,
+            "sealed": sealed,
+        },
+    )
+    await handler._on_routed(ev)
+    assert dispatched == [], "a non-member dispatched space content as a member"
+    assert fed.gate_calls == [], (
+        "the forged origin reached the post-decrypt gates — they judge "
+        "from_instance, so they are downstream of this check, not a substitute"
+    )
+    # And the forgery did not turn the target into a route-stale signing
+    # oracle either: nothing at all went back out.
+    assert fed.sent == []
+
+
+async def test_the_genuine_member_still_reaches_the_dispatcher():
+    """The same shape, signed by the household it claims to be: the post
+    lands, attributed to the member, and the §24.11 gates run on it."""
+    member = generate_identity_keypair()
+    member_id = derive_instance_id(member.public_key)
+    relay_id = "relay-instance"
+
+    fed = _MemberTargetFed("victim-instance")
+    fed.identity_pks[member_id] = member.public_key
+    dispatched: list = []
+
+    async def _dispatch(ev) -> None:
+        dispatched.append(ev)
+
+    target_priv, target_pub = routed_crypto.generate_ephemeral_keypair()
+    handler = SpaceRoutedHandler(
+        federation_service=fed,  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        event_dispatcher=_dispatch,
+        target_eph_lookup=lambda pub: target_priv if pub == target_pub else None,
+    )
+    path = [member_id, relay_id, fed.own_instance_id]
+    sealed = _seal({"space_id": "sp-1", "post_id": "p-real"}, target_pub=target_pub)
+    sealed["origin_identity_pk"] = member.public_key.hex()
+    sealed["origin_sig_suite"] = routed_crypto.ROUTED_ORIGIN_SIG_SUITE_ED25519
+    sealed["origin_sig"] = routed_crypto.sign_routed_origin(
+        seed=member.private_key,
+        route_id=ROUTE_ID,
+        direction="forward",
+        path=path,
+        inner_event_type=INNER_EVENT,
+        sealed=sealed,
+    )
+    ev = FederationEvent(
+        msg_id="m-real",
+        event_type=FederationEventType.SPACE_ROUTED,
+        from_instance=relay_id,
+        to_instance=fed.own_instance_id,
+        timestamp="2026-09-19T00:00:00Z",
+        payload={
+            "route_id": ROUTE_ID,
+            "path": path,
+            "position": 1,
+            "direction": "forward",
+            "inner_event_type": INNER_EVENT,
+            "sealed": sealed,
+        },
+    )
+    await handler._on_routed(ev)
+    assert len(dispatched) == 1
+    assert dispatched[0].from_instance == member_id
+    assert fed.gate_calls == [{"space_id": "sp-1", "from_instance": member_id}]
+
+
+async def test_origin_signature_cannot_be_lifted_onto_another_route():
+    """A relay that saw a genuine signed envelope for ``V`` must not be
+    able to replay the signature onto a different route, leg, or target —
+    every one of those is inside the signed bytes."""
+    member = generate_identity_keypair()
+    member_id = derive_instance_id(member.public_key)
+    path = [member_id, "relay-instance", "victim-instance"]
+    _priv, target_pub = routed_crypto.generate_ephemeral_keypair()
+    sealed = _seal({"space_id": "sp-1"}, target_pub=target_pub)
+    sig = routed_crypto.sign_routed_origin(
+        seed=member.private_key,
+        route_id=ROUTE_ID,
+        direction="forward",
+        path=path,
+        inner_event_type=INNER_EVENT,
+        sealed=sealed,
+    )
+    common = {
+        "identity_pk": member.public_key,
+        "sealed": sealed,
+        "sig_b64": sig,
+        "sig_suite": routed_crypto.ROUTED_ORIGIN_SIG_SUITE_ED25519,
+    }
+    assert routed_crypto.verify_routed_origin(
+        route_id=ROUTE_ID,
+        direction="forward",
+        path=path,
+        inner_event_type=INNER_EVENT,
+        **common,
+    )
+    # Another route_id.
+    assert not routed_crypto.verify_routed_origin(
+        route_id="route-something-else",
+        direction="forward",
+        path=path,
+        inner_event_type=INNER_EVENT,
+        **common,
+    )
+    # The reply leg.
+    assert not routed_crypto.verify_routed_origin(
+        route_id=ROUTE_ID,
+        direction="reply",
+        path=path,
+        inner_event_type=INNER_EVENT,
+        **common,
+    )
+    # A different target at the end of the path.
+    assert not routed_crypto.verify_routed_origin(
+        route_id=ROUTE_ID,
+        direction="forward",
+        path=[member_id, "relay-instance", "another-victim"],
+        inner_event_type=INNER_EVENT,
+        **common,
+    )
+    # A relabelled inner event type.
+    assert not routed_crypto.verify_routed_origin(
+        route_id=ROUTE_ID,
+        direction="forward",
+        path=path,
+        inner_event_type="space_member_left",
+        **common,
+    )
+
+
+def test_origin_signature_never_covers_the_plaintext():
+    """Encryption-first (§25.8.21): the signed bytes are derived from
+    fields the relay already sees, so a relay holding a *guess* at a
+    low-entropy inner payload gets no oracle to confirm it with. Two
+    different plaintexts sealed under the same key must produce signing
+    bytes that differ only because the ciphertext differs — never because
+    the plaintext is in them."""
+    secret = "dinner at seven"
+    _priv, target_pub = routed_crypto.generate_ephemeral_keypair()
+    sealed = _seal({"body": secret}, target_pub=target_pub)
+    signed = routed_crypto.routed_origin_signing_bytes(
+        route_id=ROUTE_ID,
+        direction="forward",
+        path=["a", "b", "c"],
+        inner_event_type=INNER_EVENT,
+        sealed=sealed,
+    )
+    assert secret.encode() not in signed
+    assert b"dinner" not in signed
+    # Every byte hashed into it is a field on the wire the relay can read.
+    stripped = {
+        k: v
+        for k, v in sealed.items()
+        if k in ("kem_suite", "origin_eph_pk", "target_eph_pk", "nonce", "ciphertext")
+    }
+    assert (
+        routed_crypto.routed_origin_signing_bytes(
+            route_id=ROUTE_ID,
+            direction="forward",
+            path=["a", "b", "c"],
+            inner_event_type=INNER_EVENT,
+            sealed=stripped,
+        )
+        == signed
+    )

@@ -90,6 +90,7 @@ right now is the single value ``x25519``.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 
@@ -148,6 +149,28 @@ class UnsupportedRouteStaleSuite(ValueError):
     signature suite this build doesn't know. Receivers MUST reject
     rather than verify under a default algorithm — otherwise a peer
     stripping the tag downgrades the check once Phase-2 hybrid lands."""
+
+
+#: Signature suite for the **origin authentication** field set that
+#: rides alongside a sealed ``SPACE_ROUTED`` payload (v_31, #692). The
+#: household at ``path[0]`` signs the routing claim plus the sealed
+#: material with its Ed25519 identity key, so the receiver stops having
+#: to take the relay-supplied ``path[0]`` on faith. Same tag vocabulary
+#: as :data:`ROUTE_STALE_SIG_SUITE_ED25519` / ``Encoder.sig_suite``;
+#: Phase 2 of ``docs/crypto.md`` adds ``"ed25519+mldsa65"`` as a sibling
+#: constant with both signatures produced + verified in parallel.
+ROUTED_ORIGIN_SIG_SUITE_ED25519: str = "ed25519"
+SUPPORTED_ROUTED_ORIGIN_SIG_SUITES: frozenset[str] = frozenset(
+    {ROUTED_ORIGIN_SIG_SUITE_ED25519}
+)
+
+
+class UnsupportedRoutedOriginSuite(ValueError):
+    """Raised when a ``SPACE_ROUTED`` origin-authentication field set
+    advertises a signature suite this build doesn't know. Receivers MUST
+    reject rather than verify under a default algorithm — a peer that
+    could strip the tag down to a weaker default would walk straight
+    back into #692."""
 
 
 def _require_known_suite(sealed: dict[str, str]) -> None:
@@ -438,6 +461,129 @@ def verify_route_stale(
     )
 
 
+def routed_origin_signing_bytes(
+    *,
+    route_id: str,
+    direction: str,
+    path: list[str],
+    inner_event_type: str,
+    sealed: dict[str, str],
+) -> bytes:
+    """Canonical bytes the household at ``path[0]`` signs over a
+    ``SPACE_ROUTED`` envelope it authored (v_31, #692).
+
+    Binds the whole routing claim — which leg, which route_id, which
+    source-route (and therefore which origin AND which target), which
+    inner event type — to the sealed material that carries the content.
+    A relay that re-seals the payload under its own ephemeral (the only
+    thing an anonymous X25519 seal lets it do) changes the material
+    digest, so the origin's signature no longer verifies; a relay that
+    lifts a genuine signature onto a different route, leg, or target
+    changes the prefix, so it doesn't verify either.
+
+    The digest covers **public** bytes only — the relay already sees
+    every field it hashes. That is deliberate: signing the *plaintext*
+    (or its digest) would hand a relay holding a guess at a low-entropy
+    inner payload a verification oracle to confirm it with, which the
+    §25.8.21 encryption-first rule rules out. Binding the ciphertext is
+    equivalent for authenticity: the AEAD tag already binds ciphertext
+    to plaintext under a key the forger doesn't share with the target.
+
+    Domain-separated (``space-routed-origin:v1:``) so a signature can
+    never be confused with ``space-route-found:v1:`` (which binds an
+    ephemeral pub as live) or ``space-route-stale:v1:`` (which binds the
+    same pub as dead).
+    """
+    material = "|".join(
+        [
+            str(sealed.get("kem_suite") or ""),
+            str(sealed.get("origin_eph_pk") or ""),
+            str(sealed.get("target_eph_pk") or ""),
+            str(sealed.get("nonce") or ""),
+            str(sealed.get("ciphertext") or ""),
+        ]
+    ).encode("utf-8")
+    digest = hashlib.sha256(material).hexdigest()
+    return (
+        b"space-routed-origin:v1:"
+        + direction.encode("utf-8")
+        + b":"
+        + route_id.encode("utf-8")
+        + b":"
+        + "|".join(path).encode("utf-8")
+        + b":"
+        + inner_event_type.encode("utf-8")
+        + b":"
+        + digest.encode("ascii")
+    )
+
+
+def sign_routed_origin(
+    *,
+    seed: bytes,
+    route_id: str,
+    direction: str,
+    path: list[str],
+    inner_event_type: str,
+    sealed: dict[str, str],
+) -> str:
+    """Author-side: sign :func:`routed_origin_signing_bytes` with the
+    instance identity seed. Returns the b64url-encoded signature."""
+    sig = sign_ed25519(
+        seed,
+        routed_origin_signing_bytes(
+            route_id=route_id,
+            direction=direction,
+            path=path,
+            inner_event_type=inner_event_type,
+            sealed=sealed,
+        ),
+    )
+    return b64url_encode(sig)
+
+
+def verify_routed_origin(
+    *,
+    identity_pk: bytes,
+    route_id: str,
+    direction: str,
+    path: list[str],
+    inner_event_type: str,
+    sealed: dict[str, str],
+    sig_b64: str,
+    sig_suite: str,
+) -> bool:
+    """Receiver-side: verify the origin-authentication signature.
+
+    Raises :class:`UnsupportedRoutedOriginSuite` for any ``sig_suite``
+    outside :data:`SUPPORTED_ROUTED_ORIGIN_SIG_SUITES` — never falls back
+    to a default algorithm. Returns ``False`` (never raises) for a
+    malformed, wrong-length, or non-verifying signature, matching
+    :func:`socialhome.crypto.verify_ed25519`'s posture.
+    """
+    if sig_suite not in SUPPORTED_ROUTED_ORIGIN_SIG_SUITES:
+        raise UnsupportedRoutedOriginSuite(
+            f"SPACE_ROUTED origin auth advertises unsupported "
+            f"sig_suite={sig_suite!r}; this build supports "
+            f"{sorted(SUPPORTED_ROUTED_ORIGIN_SIG_SUITES)!r}",
+        )
+    try:
+        sig = b64url_decode(sig_b64)
+    except ValueError, TypeError:
+        return False
+    return verify_ed25519(
+        identity_pk,
+        routed_origin_signing_bytes(
+            route_id=route_id,
+            direction=direction,
+            path=path,
+            inner_event_type=inner_event_type,
+            sealed=sealed,
+        ),
+        sig,
+    )
+
+
 def _fresh_nonce() -> bytes:
     """12-byte AES-GCM nonce drawn from the OS CSPRNG."""
     return os.urandom(12)
@@ -450,19 +596,25 @@ def expired(stored_at: float, ttl_s: float) -> bool:
 
 __all__ = [
     "DEFAULT_TARGET_EPH_TTL_S",
+    "ROUTED_ORIGIN_SIG_SUITE_ED25519",
     "ROUTE_STALE_SIG_SUITE_ED25519",
+    "SUPPORTED_ROUTED_ORIGIN_SIG_SUITES",
     "SUPPORTED_ROUTE_STALE_SIG_SUITES",
     "UnsupportedRouteStaleSuite",
+    "UnsupportedRoutedOriginSuite",
     "derive_directional_keys",
     "expired",
     "generate_ephemeral_keypair",
     "route_stale_signing_bytes",
+    "routed_origin_signing_bytes",
     "seal_inner_payload",
     "seal_reply_payload",
     "sign_route_stale",
+    "sign_routed_origin",
     "unseal_inner_payload",
     "unseal_reply_payload",
     "verify_route_stale",
+    "verify_routed_origin",
 ]
 # ``X25519PrivateKey`` re-imported only so test fixtures that monkey-
 # patch this module's namespace (rare) can pull it through the public

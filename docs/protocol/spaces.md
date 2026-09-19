@@ -1115,13 +1115,13 @@ sequenceDiagram
     participant A as HFS A<br/>(origin)
     participant B as HFS B<br/>(relay)
     participant C as HFS C<br/>(target)
-    Note over A: seal inner payload<br/>(AES-256-GCM with<br/>origin→target HKDF key,<br/>AAD bound to route_id +<br/>inner_event_type)
-    A->>B: SPACE_ROUTED<br/>(direction=forward,<br/>position=0, sealed=…)
-    B->>C: SPACE_ROUTED<br/>(position=1, sealed=…<br/>relay never decrypts)
-    Note over C: lookup cached eph priv<br/>by target_eph_pk,<br/>unseal, dispatch inner<br/>event with routed_path<br/>+ routed_route_id
-    C->>B: SPACE_ROUTED<br/>(direction=reply,<br/>sealed=… target→origin)
+    Note over A: seal inner payload<br/>(AES-256-GCM with<br/>origin→target HKDF key,<br/>AAD bound to route_id +<br/>inner_event_type)<br/>then SIGN the routing claim<br/>+ sealed material with A's<br/>Ed25519 identity key
+    A->>B: SPACE_ROUTED<br/>(direction=forward,<br/>position=0, sealed=…<br/>+ origin_sig)
+    B->>C: SPACE_ROUTED<br/>(position=1, sealed=…<br/>relay never decrypts,<br/>never alters origin_sig)
+    Note over C: verify origin_sig against<br/>A's pinned identity key<br/>(or the shipped pub bound<br/>by derive_instance_id);<br/>then lookup cached eph priv<br/>by target_eph_pk,<br/>unseal, dispatch inner<br/>event with routed_path<br/>+ routed_route_id
+    C->>B: SPACE_ROUTED<br/>(direction=reply,<br/>sealed=… target→origin<br/>+ C's origin_sig)
     B->>A: SPACE_ROUTED
-    Note over A: lookup origin eph priv<br/>by route_id,<br/>unseal reply
+    Note over A: verify C's origin_sig,<br/>lookup origin eph priv<br/>by route_id,<br/>unseal reply
 ```
 
 Forward and reply use **different** symmetric keys (HKDF info
@@ -1148,10 +1148,89 @@ The wire shape of ``SPACE_ROUTED.payload``:
     "origin_eph_pk": "<32 b64url>",
     "target_eph_pk": "<32 b64url>",
     "nonce":         "<12 b64url>",
-    "ciphertext":    "<aead b64url>"
+    "ciphertext":    "<aead b64url>",
+
+    # v_31 origin authentication — see "Authenticating path[0]" below
+    "origin_identity_pk": "<64 hex>",
+    "origin_sig":         "<b64url>",
+    "origin_sig_suite":   "ed25519"
   }
 }
 ```
+
+### Authenticating `path[0]` (v_31+)
+
+The seal proves **confidentiality**, not **authorship**. The ephemeral
+X25519 exchange is anonymous: any household that learned the target's
+`target_eph_pk` — every peer that ever probed it with `SPACE_FIND_ROUTE`,
+and every relay, since the pub travels in plaintext on the wire — can mint
+its own ephemeral and produce a blob the target happily decrypts. And
+`path[0]` arrives inside a payload the *previous hop* wrote: `_on_routed`
+binds only `path[position]` (the authenticated sender) and `path[position+1]`
+(us). Everything before that is a claim.
+
+That claim is what the unwrap turns into the inner event's `from_instance`,
+and `from_instance` is exactly what the §24.11 post-decrypt gates judge — the
+mesh ban check, the v_30 Follower write gate, every owner-keyed handler. So
+pre-v_31 a mesh peer `F` could probe `V`, then ship
+`SPACE_ROUTED{path: [H, F, V], position: 1}` and have `V` persist its content
+as if `H` — a genuine member household — had written it (#692).
+
+Since v_31 the household at `path[0]` signs the leg with its Ed25519
+**identity** key and the endpoint verifies before dispatch:
+
+```
+origin_identity_pk : "<64 hex>"   # the author's Ed25519 identity public key
+origin_sig         : "<b64url>"   # Ed25519 over the signing bytes below
+origin_sig_suite   : "ed25519"    # suite tag; an unknown value is rejected
+
+b"space-routed-origin:v1:" + direction + b":" + route_id
+  + b":" + "|".join(path) + b":" + inner_event_type
+  + b":" + sha256(kem_suite|origin_eph_pk|target_eph_pk|nonce|ciphertext).hex()
+```
+
+Relays forward the three fields **opaquely**, exactly as they do the
+ROUTE_FOUND signature. The endpoint verifies against a key it already holds:
+
+1. the pinned `remote_instances.remote_identity_pk` when it has a row for
+   `path[0]` (a paired peer, or one seated from an invite link) — the same
+   key the §24.11 pipeline verifies that household's direct envelopes
+   against; otherwise
+2. the shipped `origin_identity_pk`, self-authenticating because an
+   `instance_id` **is** the SHA-256 fingerprint of the identity key (§4.1.2).
+   The mesh exists precisely to reach households we are *not* paired with, so
+   without this fallback the fix would sever its main use case. A shipped pub
+   that contradicts a pinned one is a drop.
+
+The prefix binds the leg (`direction`), the send (`route_id`), the whole
+source-route — and therefore both the origin and the target — and the inner
+event type, so a captured signature cannot be lifted onto another route, leg,
+target, or event type. The digest binds the sealed material, so a relay that
+re-seals the payload under its own ephemeral (the one thing an anonymous seal
+lets it do) invalidates the signature.
+
+The digest deliberately covers the **ciphertext**, never the plaintext: every
+byte it hashes is already visible to the relay, whereas signing the plaintext
+would give a relay holding a guess at a low-entropy inner payload a
+deterministic oracle to confirm it with — which the §25.8.21 encryption-first
+rule forbids. Authenticity is unaffected, because the AEAD tag already binds
+ciphertext to plaintext under a key the forger does not share with the target.
+
+**Senders always sign.** The three fields are siblings of the KEM fields, not
+part of the AEAD, so a pre-v_31 endpoint reads the sealed blob by name and
+ignores them — the outbound is wire-additive and needs no
+`peer_supports` gate (which is just as well: an origin frequently has no
+`remote_instances` row for a mesh-only target to gate against).
+
+**Receivers fail closed, with a named legacy window.** An unsigned inner
+event is accepted only when the receiver holds a row for the claimed origin
+AND that row's `proto_version` is below
+`FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE` — logged at INFO so
+the window is countable in the logs, and closing by itself as peers upgrade.
+The version comes from a signed `INSTANCE_CAPABILITIES_UPDATED`, so an
+attacker can only impersonate households that genuinely still lag. An
+unsigned event naming a v_31+ origin, or one the receiver holds no row for
+at all, is dropped at WARNING.
 
 ### Route-stale nack (v_28+)
 

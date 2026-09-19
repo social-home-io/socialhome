@@ -156,6 +156,17 @@ That single command runs the full sequence:
      attempt on) and the sealed redeem body carries the redeemer's (what
      the issuer stamps on the seat). Both land on the seats, so the seats
      are where the round-trip is provable.
+   - **v_31 routed-origin signature (#692).** Every ``SPACE_ROUTED`` leg
+     carries ``origin_sig`` inside its sealed blob and the endpoint
+     verifies it against the identity key it already holds for ``path[0]``
+     before the inner event reaches a handler. ``verify`` asserts no
+     household's log shows the pre-v_31 legacy window ("accepting unsigned
+     inner event from pre-v_31 origin") or a refusal ("forged origin" /
+     "no origin signature"): the mesh chains already prove the inner
+     events LAND, so this proves they landed on the *signed* path. Every
+     household in the demo runs the same build, so taking the legacy
+     window would mean the origin stopped signing — which reopens the
+     hole for any peer a receiver reads as older.
      (The capability-bump tripwire — v_24, which makes
      ``SPACE_CONFIG_CHANGED`` space-authority-signed so a seed-holding delegated
      admin can change a space's config with the owner offline and every member
