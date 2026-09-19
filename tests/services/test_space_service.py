@@ -6264,8 +6264,10 @@ async def test_a_plain_member_may_not_mint_anything(stack):
         await stack.space_svc.create_invite_link(space.id, actor_username="carol")
 
 
-async def test_redeeming_an_admin_link_seats_an_admin(stack):
-    """The seat is the row's, not the redeemer's request."""
+async def test_redeeming_an_admin_link_seats_a_member_pending_approval(stack):
+    """An admin/mod link seats a MEMBER and files a pending elevation the
+    owner approves (owner decision, 2026-09-19) — it does not grant admin
+    straight through, so a leaked link is at worst a member."""
     await stack.provision_user("anna", is_admin=True)
     dave = await stack.provision_user("dave")
     space = await stack.space_svc.create_space(owner_username="anna", name="Seats")
@@ -6277,9 +6279,12 @@ async def test_redeeming_an_admin_link_seats_an_admin(stack):
     member = await stack.space_svc.accept_invite_token(
         link["token"], user_id=dave.user_id
     )
-    assert member.role == SpaceRole.ADMIN
+    assert member.role == SpaceRole.MEMBER
     stored = await stack.space_repo.get_member(space.id, dave.user_id)
-    assert stored.role == SpaceRole.ADMIN
+    assert stored.role == SpaceRole.MEMBER
+    (elev,) = await stack.space_repo.list_pending_join_requests(space.id)
+    assert elev["requested_role"] == SpaceRole.ADMIN.value
+    assert elev["user_id"] == dave.user_id
 
 
 async def test_redeeming_a_subscriber_link_seats_a_subscriber(stack):
@@ -6664,3 +6669,102 @@ async def test_attaching_a_coordinator_without_the_seam_still_works():
     old = _Old()
     SpaceService.attach_redeem_coordinator(svc, old)
     assert svc._redeem_coordinator is old
+
+
+async def test_admin_invite_link_seats_a_member_and_files_a_pending_elevation(stack):
+    """An admin/mod link must not grant admin straight through (owner
+    decision, 2026-09-19). Redeeming seats the person as a MEMBER now and
+    files a pending elevation the owner approves with a click; a leaked
+    admin link is therefore at worst a member.
+    """
+    _a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    tok = await stack.space_repo.create_invite_token(
+        space.id, "uid-anna", uses=1, role="admin"
+    )
+    m = await stack.space_svc.accept_invite_token(tok, user_id=b.user_id)
+    # Seated as a member, not an admin.
+    assert m.role == "member"
+    seated = await stack.space_repo.get_member(space.id, b.user_id)
+    assert seated.role == "member"
+    # A pending admin elevation is on file for the owner to approve.
+    pending = await stack.space_repo.list_pending_join_requests(space.id)
+    elevations = [r for r in pending if r["requested_role"] == "admin"]
+    assert len(elevations) == 1
+    assert elevations[0]["user_id"] == b.user_id
+
+
+async def test_member_invite_link_still_seats_straight_through(stack):
+    """A plain member link is unchanged — no elevation request, seated now."""
+    _a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    tok = await stack.space_repo.create_invite_token(space.id, "uid-anna", uses=1)
+    m = await stack.space_svc.accept_invite_token(tok, user_id=b.user_id)
+    assert m.role == "member"
+    assert await stack.space_repo.list_pending_join_requests(space.id) == []
+
+
+async def test_approving_an_elevation_promotes_the_member_to_admin(stack):
+    """The owner's click runs the existing owner-only promote."""
+    _a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    tok = await stack.space_repo.create_invite_token(
+        space.id, "uid-anna", uses=1, role="admin"
+    )
+    await stack.space_svc.accept_invite_token(tok, user_id=b.user_id)
+    (elev,) = await stack.space_repo.list_pending_join_requests(space.id)
+    await stack.space_svc.approve_join_request(elev["id"], actor_username="anna")
+    promoted = await stack.space_repo.get_member(space.id, b.user_id)
+    assert promoted.role == "admin"
+    # Request no longer pending.
+    assert await stack.space_repo.list_pending_join_requests(space.id) == []
+
+
+async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
+    """A household met through an invite link over a connection server
+    (``InstanceSource.SPACE_SESSION``) never receives the signing seed, even
+    when delegation is on and the owner approves its admin elevation. The
+    GFS pins the space authority key TOFU-immutably, so there is no rotation
+    on a later kick — a link-joined admin acts through the host, it does not
+    sign locally. This holds now that an admin/mod elevation is approved
+    through ``set_remote_member_role``.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from socialhome.domain.federation import InstanceSource
+    from socialhome.domain.space import SpaceFeatures, SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="S",
+        features=SpaceFeatures(delegated_admin_authority=True),
+    )
+    fed = _seed_share_fed()
+    stack.space_svc._federation = fed
+    fed_repo = MagicMock()
+    fed_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(source=InstanceSource.SPACE_SESSION)
+    )
+    stack.space_svc._federation_repo = fed_repo
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="relay-peer",
+        user_id="ru1",
+        user_pk=None,
+        display_name=None,
+    )
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="relay-peer",
+        user_id="ru1",
+        role=SpaceRole.ADMIN,
+    )
+    # The role change still federates…
+    fed.broadcast_to_space_members.assert_awaited()
+    # …but NO seed share went out to the relay-only household.
+    fed.send_with_mesh_fallback.assert_not_awaited()

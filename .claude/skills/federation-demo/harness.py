@@ -2110,11 +2110,14 @@ def cmd_gfs_invite_link() -> None:
        styled "expired or revoked" page, which must not echo the dead
        token back), and a fresh redeem of the same code is refused —
        while e, who already walked through the door, keeps its seat.
-    9. Roles: a (the owner) mints an ``admin`` link on a SECOND space and
-       e redeems it into an admin seat — with no space signing seed, which
-       a link-joined admin must never hold (the connection server pins a
-       space's identity key TOFU-immutably, so that credential could never
-       be taken back).
+    9. Roles: a (the owner) mints an ``admin`` link on a SECOND space.
+       Redeeming it seats e as a MEMBER with the admin role PENDING (owner
+       decision, 2026-09-19 — a link can leak, so admin is never granted
+       straight through); a sees the pending elevation, approves it, and
+       only then is e's household an admin on the host — still with no
+       signing seed, which a link-joined admin must never hold (the
+       connection server pins a space's identity key TOFU-immutably, so
+       that credential could never be taken back).
     10. Followers (v_30): a mints a ``subscriber`` link on a THIRD space
        and e redeems it into a read-only seat. Assert the seat on BOTH
        sides (``space_remote_members.role='subscriber'`` on the host —
@@ -2467,22 +2470,72 @@ def cmd_gfs_invite_link() -> None:
         timeout=40.0,
     )
     admin_joined = _must("e redeems the admin link", s, admin_joined, ok=(200, 201))
-    if admin_joined.get("role") != "admin":
+    # An admin/mod link no longer grants admin straight through (owner
+    # decision, 2026-09-19): e is seated as a MEMBER and the admin role is
+    # pending a's approval.
+    if admin_joined.get("role") != "member":
         raise SystemExit(
             f"gfs-invite-link: e's admin redeem returned role="
-            f"{admin_joined.get('role')!r}, expected 'admin' — the seat is the "
-            "ISSUER's row, read out of the atomic consume.",
+            f"{admin_joined.get('role')!r}, expected 'member' — an admin link "
+            "seats a member and files a pending elevation.",
+        )
+    if admin_joined.get("pending_role") != "admin":
+        raise SystemExit(
+            "gfs-invite-link: e's admin redeem did not carry "
+            f"pending_role='admin' (got {admin_joined.get('pending_role')!r}).",
         )
     admin_rows = _rows(
         "e",
         "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
         (admin_space_id, e["user_id"]),
     )
-    if not admin_rows or admin_rows[0][0] != "admin":
+    if not admin_rows or admin_rows[0][0] != "member":
         raise SystemExit(
             f"gfs-invite-link: e's space_members row for the admin space is "
-            f"{admin_rows!r}, expected role 'admin'",
+            f"{admin_rows!r}, expected role 'member' (admin pending)",
         )
+    print("  e redeemed the admin link into a MEMBER seat, admin pending ✓")
+    # a (the owner/host) sees a pending admin elevation for e's household.
+    s, pending = _request(
+        f"{a_base}/api/spaces/{admin_space_id}/join-requests",
+        token=a["token"],
+    )
+    pending = _must("a lists pending join-requests", s, pending, ok=(200,))
+    elevations = [
+        r for r in pending if r.get("requested_role") == "admin"
+    ]
+    if len(elevations) != 1:
+        raise SystemExit(
+            f"gfs-invite-link: a expected exactly one pending admin elevation, "
+            f"saw {pending!r}",
+        )
+    elev_id = elevations[0]["id"]
+    # a approves it — the owner-only promote runs (set_remote_member_role).
+    s, approved = _request(
+        f"{a_base}/api/spaces/{admin_space_id}/join-requests/{elev_id}/approve",
+        token=a["token"],
+        method="POST",
+        body={},
+    )
+    _must("a approves e's admin elevation", s, approved, ok=(200, 201))
+    # a's roster now records e's household as an admin.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        host_role = _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id = ? "
+            "AND instance_id = ?",
+            (admin_space_id, e["instance_id"]),
+        )
+        if host_role and host_role[0][0] == "admin":
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            "gfs-invite-link: after approval, a's space_remote_members role for "
+            f"e is {host_role!r}, expected 'admin'",
+        )
+    print("  a approved the elevation — e's household is now admin on the host ✓")
     # …and NOT the signing seed. An admin met through a public link
     # manages the space through SPACE_REMOTE_ADMIN_ACTION; the seed is a
     # credential nobody could take back, because the connection server
@@ -2628,7 +2681,8 @@ def cmd_gfs_invite_link() -> None:
     _save(state)
     print(
         "gfs-invite-link: ok (published link → stranger joins over the relay → "
-        "revoke → admin seat without the seed → follower seat that reads but "
+        "revoke → admin link seats a member + pending elevation → owner "
+        "approves → admin without the seed → follower seat that reads but "
         "cannot write)"
     )
 

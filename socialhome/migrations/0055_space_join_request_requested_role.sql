@@ -1,0 +1,47 @@
+-- 0055 — a join request can carry the ROLE it is asking for.
+--
+-- Adds ``space_join_requests.requested_role`` (nullable). NULL keeps the
+-- historical meaning — "let me in as a member" — so every existing row and
+-- every ordinary request path is unchanged. A value of ``'admin'`` means the
+-- applicant has ALREADY been seated as a member (an admin/mod invite link no
+-- longer grants admin straight through) and is waiting for the owner to
+-- approve the elevation with a click. Approval runs the existing owner-only
+-- promote (``set_role`` / ``set_remote_member_role``); denial or expiry leaves
+-- them a member.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this table.
+--       ``repositories/space_repo.py`` owns all of it
+--       (``save_join_request`` / ``list_pending_join_requests`` /
+--       ``list_pending_join_request_space_ids_for_user`` /
+--       ``update_join_request_status`` / ``list_expired_join_requests`` /
+--       ``get_join_request``); callers are ``services/space_service.py``
+--       (request_join / approve_join_request / deny_join_request / the
+--       expiry sweep) and ``services/federation_inbound_service.py`` (§D2
+--       remote join requests). ``list_pending_join_requests`` is
+--       ``SELECT *``, so the new column reaches the routes and the SPA with
+--       no query change; only ``save_join_request`` gains a parameter.
+--
+--   (2) Non-migration alternatives considered and rejected.
+--       * A ``pending_role`` column on ``space_members`` — rejected: it
+--         couples the pending decision to the seat row, has no place for a
+--         REMOTE applicant (who has a ``space_remote_members`` row, or none
+--         yet), and duplicates the review/expiry/actor machinery this table
+--         already has.
+--       * A new ``space_role_elevations`` table — rejected under the
+--         CLAUDE.md "don't add a table when an existing one proves what you
+--         need" rule: ``space_join_requests`` already carries status,
+--         reviewed_by/at, expires_at, the §D2 ``remote_applicant_*`` columns,
+--         the pending-list index, the REST surface and the SPA queue. An
+--         elevation is a pending, owner-reviewed, expiring request about a
+--         (space, user) — the same shape.
+--       * Encoding the role in ``message`` — rejected: it is user-facing free
+--         text, not a typed field, and every reader would have to parse it.
+--
+--   (3) Smallest possible change. One nullable ``ADD COLUMN`` with no default
+--       backfill: existing rows read NULL, which is exactly their historical
+--       meaning. No table rebuild, no index change, no row rewrite.
+ALTER TABLE space_join_requests
+    ADD COLUMN requested_role TEXT
+        CHECK(requested_role IS NULL OR requested_role IN ('admin'));

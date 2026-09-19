@@ -122,6 +122,7 @@ export function SpaceJoinByCodeDialog() {
       }
       const r = await api.post('/api/spaces/join', body) as {
         space_id: string
+        pending_role?: string | null
       }
       open.value = false
       draft.value = ''
@@ -132,7 +133,18 @@ export function SpaceJoinByCodeDialog() {
       // the new card. Same-instance redeems return a row that's
       // visible immediately, so the deep-link is safe there.
       const dest = issuer ? addBase('/spaces') : addBase(`/spaces/${r.space_id}`)
-      showToast("You're in! 🎉", 'success')
+      // An admin/mod link seats you as a member now; the admin role waits
+      // for an owner to approve it, so say so rather than implying you are
+      // already an admin.
+      if (r.pending_role === 'admin') {
+        showToast(
+          "You're in as a member — an owner still needs to approve your " +
+          'admin role.',
+          'success',
+        )
+      } else {
+        showToast("You're in! 🎉", 'success')
+      }
       loc.route(dest)
     } catch (e) {
       if (e instanceof ApiError && (e.status === 404 || e.status === 410)) {

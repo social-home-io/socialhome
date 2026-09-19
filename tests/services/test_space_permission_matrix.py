@@ -167,6 +167,13 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # the space signing seed (only the owner/seed-holder signs); no
         # actor-username to thread through ``_require_admin``.
         "broadcast_remote_member_joined",
+        # Internal seam the invite-redeem coordinator calls after it has
+        # already consumed the token and seated the household as a member;
+        # it only records a pending admin/mod elevation (a join_requests
+        # row) for the owner to approve later. The authorization is the
+        # owner-only approve path (``approve_join_request`` → ``set_role`` /
+        # ``set_remote_member_role``), not this filing. No route reaches it.
+        "file_admin_elevation_request",
     }
 )
 

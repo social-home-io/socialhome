@@ -887,13 +887,18 @@ never executes outside its unit tests.
    **not** echo the dead token back, and a fresh redeem of the same
    code is refused (422). e, who already walked through the door,
    keeps its seat — revoke is not eviction.
-9. **An ``admin`` link**, minted by the owner on a SECOND space and
-   redeemed by e into an ``admin`` seat — with **no** space signing
-   seed (``spaces.identity_private_key`` stays NULL and a ships no
-   ``SPACE_ADMIN_KEY_SHARE``). A connection server pins a space's
-   identity key TOFU-immutably, so that credential could never be
-   taken back from a household whose only introduction was a public
-   string.
+9. **An ``admin`` link**, minted by the owner on a SECOND space.
+   Redeeming it seats e as a **member** with the admin role **pending**
+   (the redeem returns ``pending_role='admin'``; an admin link never
+   grants admin straight through, since a link can leak — owner decision
+   2026-09-19). a sees the pending elevation in
+   ``GET /api/spaces/{id}/join-requests`` (``requested_role='admin'``),
+   approves it, and only then does a's ``space_remote_members`` role for
+   e become ``admin`` — with **no** space signing seed
+   (``spaces.identity_private_key`` stays NULL and a ships no
+   ``SPACE_ADMIN_KEY_SHARE``). A connection server pins a space's identity
+   key TOFU-immutably, so that credential could never be taken back from a
+   household whose only introduction was a public string.
 
 10. **A ``subscriber`` (Follower) link**, minted on a THIRD space and
    redeemed by e into a read-only seat (v_30). Asserted on both sides:

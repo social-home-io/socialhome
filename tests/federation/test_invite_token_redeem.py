@@ -1958,11 +1958,12 @@ async def test_bootstrap_both_legs_travel_through_the_blob_s_server():
 # ── Invite-link roles (migration 0053) ────────────────────────────────
 
 
-async def test_redeem_of_an_admin_link_seats_an_admin():
-    """The seat comes off the ISSUER's stored row. An ``admin`` link
-    lands the redeemer's household as an admin of the space — on the
-    issuer's roster and in the ACK the receiver mirrors."""
-    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+async def test_redeem_of_an_admin_link_seats_a_member_and_files_an_elevation():
+    """An ``admin`` link no longer grants admin straight through (owner
+    decision, 2026-09-19). The host seats the redeeming household as a
+    MEMBER and files a pending elevation for the owner to approve; the ACK
+    tells the redeemer their admin role is pending."""
+    sender, issuer, _sf, _if, _repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-admin",
             "created_by": "owner",
@@ -1970,13 +1971,19 @@ async def test_redeem_of_an_admin_link_seats_an_admin():
             "role": SpaceRole.ADMIN.value,
         },
     )
+    spaces = _RecordingSpaceService()
+    issuer.attach_space_service(spaces)
     result = await sender.request_redeem(
         "good-token",
         viewer_user_id="u-local",
         issuer_instance_id="issuer-1",
     )
-    assert result["role"] == SpaceRole.ADMIN.value
-    assert issuer_members.added[0]["role"] == SpaceRole.ADMIN.value
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert result["pending_role"] == SpaceRole.ADMIN.value
+    assert issuer_members.added[0]["role"] == SpaceRole.MEMBER.value
+    assert len(spaces.elevations) == 1
+    assert spaces.elevations[0]["user_id"] == "u-local"
+    assert spaces.elevations[0]["remote_instance_id"] == "sender-1"
 
 
 async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
@@ -2001,6 +2008,8 @@ async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
             "role": SpaceRole.ADMIN.value,
         },
     )
+    spaces = _RecordingSpaceService()
+    issuer.attach_space_service(spaces)
     # Nothing on the coordinator may even be able to ship a seed.
     assert not hasattr(issuer, "attach_admin_seed_sharer")
 
@@ -2010,8 +2019,14 @@ async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
         issuer_instance_id="issuer-1",
     )
 
-    assert result["role"] == SpaceRole.ADMIN.value
-    assert issuer_members.added[0]["role"] == SpaceRole.ADMIN.value
+    # The redeem seats a MEMBER — no admin, so no seed even in principle.
+    # Approving the pending elevation later promotes via
+    # ``set_remote_member_role``, whose relay-only guard still withholds the
+    # seed from a link-joined household (covered by the service-level test).
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert result["pending_role"] == SpaceRole.ADMIN.value
+    assert issuer_members.added[0]["role"] == SpaceRole.MEMBER.value
+    assert len(spaces.elevations) == 1
 
 
 async def test_subscriber_link_seats_a_follower_across_households():
@@ -2105,19 +2120,25 @@ async def test_bootstrap_redeem_of_a_follower_link_seats_a_subscriber():
     assert env.issuer_members.roles == []
 
 
-async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
-    """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so
-    the role reaches a household that has never federated with us too."""
+async def test_bootstrap_redeem_of_an_admin_link_seats_a_member_and_files_an_elevation():
+    """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so a
+    stranger who redeems an admin link over the connection server is also
+    seated as a MEMBER with a pending elevation — never admin straight
+    through."""
     env = _bootstrap_pair(role=SpaceRole.ADMIN.value)
+    spaces = _RecordingSpaceService()
+    env.issuer.attach_space_service(spaces)
     result = await env.redeemer.request_redeem(
         "tok-1",
         viewer_user_id="u-local",
         issuer_instance_id=env.issuer_party.instance_id,
         bootstrap=env.hint,
     )
-    assert result["role"] == SpaceRole.ADMIN.value
-    assert env.issuer_members.added[0]["role"] == SpaceRole.ADMIN.value
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert result["pending_role"] == SpaceRole.ADMIN.value
+    assert env.issuer_members.added[0]["role"] == SpaceRole.MEMBER.value
     assert env.issuer_members.roles == []
+    assert len(spaces.elevations) == 1
 
 
 # ─── §D2: an ACK is only an ACK from the household we addressed ───────
@@ -2208,13 +2229,19 @@ async def test_the_addressed_issuer_still_resolves_the_redeem():
 
 
 class _RecordingSpaceService:
-    """Just the roster-gossip seam the coordinator uses."""
+    """The two host-side seams the coordinator uses: roster gossip and the
+    pending admin/mod elevation an admin link files instead of granting
+    admin straight through."""
 
     def __init__(self) -> None:
         self.joined: list[dict] = []
+        self.elevations: list[dict] = []
 
     async def broadcast_remote_member_joined(self, space_id, **kwargs):
         self.joined.append({"space_id": space_id, **kwargs})
+
+    async def file_admin_elevation_request(self, space_id, user_id, **kwargs):
+        self.elevations.append({"space_id": space_id, "user_id": user_id, **kwargs})
 
 
 async def test_a_redeem_tells_existing_member_households_about_the_seat():
@@ -2255,9 +2282,11 @@ async def test_a_redeem_tells_existing_member_households_about_the_seat():
     ]
 
 
-async def test_a_redeem_gossips_the_seat_the_token_actually_carried():
-    """An ``admin`` link gossips ``admin`` — the role the peers store is
-    the one the host decided, not a default."""
+async def test_an_admin_redeem_gossips_the_member_seat_and_files_an_elevation():
+    """An ``admin`` link gossips ``member`` — peers store the seat the
+    household actually holds until the owner approves the elevation, which
+    is filed separately. (A ``member``/``subscriber`` link gossips its own
+    role unchanged; only ``admin`` is downgraded pending approval.)"""
     sender, issuer, _sf, _if, _repo, _members = _wire_pair(
         {
             "space_id": "sp-admin",
@@ -2273,7 +2302,8 @@ async def test_a_redeem_gossips_the_seat_the_token_actually_carried():
         viewer_user_id="u-local",
         issuer_instance_id="issuer-1",
     )
-    assert [j["role"] for j in spaces.joined] == [SpaceRole.ADMIN.value]
+    assert [j["role"] for j in spaces.joined] == [SpaceRole.MEMBER.value]
+    assert len(spaces.elevations) == 1
 
 
 async def test_a_failed_gossip_never_fails_the_redeem():

@@ -9129,6 +9129,11 @@ hr {
   gap: var(--sh-space-sm);
   margin-bottom: var(--sh-space-lg);
 }
+.sh-join-elevation {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--sh-accent, #b25a00);
+}
 .sh-join-actions {
   display: flex;
   gap: var(--sh-space-sm);
