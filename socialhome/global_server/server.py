@@ -94,6 +94,17 @@ SIGNING_SEED_FILENAME = "gfs_identity.seed"
 SIGNING_SEED_BYTES = 32
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+
+#: Max request body the GFS will read. aiohttp's default is 1 MiB, which a
+#: legitimate ``POST /gfs/spaces/{id}/publish`` overruns: the publish embeds
+#: the space's cover + icon as base64 ``data:`` URIs (a 1200px WebP cover can
+#: base64 to well over a megabyte), so at the default the body was rejected
+#: with "400 Invalid JSON body: Content Too Large" before the handler ever
+#: ran — publishing a space that HAS a cover image simply failed. 8 MiB fits a
+#: dimension-capped cover + icon + metadata with wide margin; the household
+#: also caps what it embeds (see ``gfs_connection_service``), and every write
+#: route is per-IP rate limited, so this is bounded, not a DoS lever.
+GFS_MAX_REQUEST_BYTES: int = 8 * 1024 * 1024
 _ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
 _PUBLIC_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -387,7 +398,10 @@ class GfsApp:
             build_publish_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
         ]
-        return web.Application(middlewares=middlewares)
+        return web.Application(
+            middlewares=middlewares,
+            client_max_size=GFS_MAX_REQUEST_BYTES,
+        )
 
     # ─── Wiring ────────────────────────────────────────────────────
 

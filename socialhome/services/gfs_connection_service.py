@@ -845,10 +845,24 @@ class GfsConnectionService:
                 accent = theme.accent_color or accent
         return primary, accent
 
+    #: Largest cover/icon (raw WebP bytes) the publish body will embed. Kept
+    #: comfortably under the GFS request limit (``GFS_MAX_REQUEST_BYTES``, 8
+    #: MiB) so cover + icon + metadata can never overrun it and fail the whole
+    #: publish. A dimension-capped cover (``SPACE_COVER_MAX_DIMENSION`` = 1200
+    #: px) is far smaller than this; an image over it is simply left out of
+    #: the directory listing — the space still publishes, just without art —
+    #: rather than sinking the publish with a "Content Too Large".
+    _MAX_EMBEDDED_IMAGE_BYTES: int = 3 * 1024 * 1024
+
     async def _image_data_uri(self, repo, space, *, icon: bool = False) -> str:
         """A ``data:image/webp;base64,…`` URI for the space's cover/icon, or
         ``""`` when none is set. Self-contained so the GFS page renders it
-        without a cross-origin, auth-gated fetch back to the host."""
+        without a cross-origin, auth-gated fetch back to the host.
+
+        Bounded: an image whose raw bytes exceed
+        :data:`_MAX_EMBEDDED_IMAGE_BYTES` is omitted (``""``) so it cannot
+        push the publish body past the GFS request limit and fail the publish.
+        """
         has = getattr(space, "icon_hash" if icon else "cover_hash", None)
         if repo is None or not has:
             return ""
@@ -856,6 +870,16 @@ class GfsConnectionService:
         if got is None:
             return ""
         webp, _hash = got
+        if len(webp) > self._MAX_EMBEDDED_IMAGE_BYTES:
+            log.warning(
+                "GFS publish: %s for space %s is %d bytes (> %d) — omitting "
+                "it from the publish body so the space still lists",
+                "icon" if icon else "cover",
+                space.id,
+                len(webp),
+                self._MAX_EMBEDDED_IMAGE_BYTES,
+            )
+            return ""
         return "data:image/webp;base64," + base64.b64encode(webp).decode("ascii")
 
     async def unpublish_space(self, space_id: str, gfs_id: str) -> None:

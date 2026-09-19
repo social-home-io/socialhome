@@ -872,13 +872,18 @@ def cmd_gfs_cluster() -> None:
         iid, seed = clients[i]
         space_id = generate_identity_keypair().public_key.hex()[:32]
         authority_pk = generate_identity_keypair().public_key.hex()
+        # A couple of publishes carry a ~1.5 MiB cover data URI — the shape
+        # that used to be rejected by the GFS's 1 MiB default before
+        # ``client_max_size`` was raised (a space with a cover could not
+        # publish). Exercises that on the real cluster, not just a unit test.
+        cover = ("data:image/webp;base64," + "A" * (1_500_000)) if i < 2 else ""
         body = {
             "space_id": space_id,
             "owning_instance": iid,
             "name": f"Cluster space {i}",
             "description": "",
             "about_markdown": "",
-            "cover_url": "",
+            "cover_url": cover,
             "icon_url": "",
             "min_age": 0,
             "category": "general",

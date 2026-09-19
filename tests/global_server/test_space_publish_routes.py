@@ -1162,3 +1162,43 @@ async def test_publish_allow_subscribers_is_covered_by_the_signature(gfs_client)
     body["allow_subscribers"] = True
     resp = await gfs_client.post("/gfs/spaces/sp-rd-tamper/publish", json=body)
     assert resp.status == 403
+
+
+async def test_publish_space_with_a_large_cover_is_not_rejected_as_too_large(
+    gfs_client,
+):
+    """A publish carrying a big cover data URI must be READ, not bounced.
+
+    The publish embeds the space's cover + icon as base64 ``data:`` URIs; a
+    1200px WebP cover can base64 to over a megabyte. aiohttp's default 1 MiB
+    ``client_max_size`` rejected that with "400 Invalid JSON body: Content
+    Too Large" before the handler ran, so a space with a cover simply could
+    not be published. The GFS now raises the limit
+    (``GFS_MAX_REQUEST_BYTES``); a ~2 MiB body reaches the handler and
+    publishes.
+    """
+    from socialhome.global_server.server import GFS_MAX_REQUEST_BYTES
+
+    assert GFS_MAX_REQUEST_BYTES > 1024 * 1024  # bigger than aiohttp's default
+    seed, _pk = await _register_owner(gfs_client.server.app, auto_accept=True)
+    big_cover = "data:image/webp;base64," + "A" * (2 * 1024 * 1024)
+    body = _sign_publish_body(
+        {
+            "space_id": "sp-big",
+            "owning_instance": "owner.home",
+            "name": "Big Cover",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": big_cover,
+            "min_age": 0,
+            "category": "general",
+            "accent_color": "#D2542A",
+            "icon_url": "",
+            "primary_color": "#D2542A",
+        },
+        seed=seed,
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-big/publish", json=body)
+    # The whole point: it is READ and accepted, not 400 "Content Too Large".
+    assert resp.status == 200, await resp.text()
+    assert (await resp.json())["status"] == "active"

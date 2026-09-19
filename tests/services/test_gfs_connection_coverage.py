@@ -565,3 +565,33 @@ async def test_report_fraud_network_error_returns_false(env):
         signing_key=b"\x00" * 32,
     )
     assert ok is False
+
+
+async def test_image_data_uri_omits_an_oversized_cover(env):
+    """A cover/icon whose bytes exceed the embed cap is left out of the
+    publish body (returns "") so it can't push the body past the GFS
+    request limit and fail the whole publish; a small one is embedded.
+    """
+    from types import SimpleNamespace
+
+    svc = GfsConnectionService(env)
+    cap = svc._MAX_EMBEDDED_IMAGE_BYTES
+
+    class _CoverRepo:
+        def __init__(self, blob: bytes) -> None:
+            self._blob = blob
+
+        async def get(self, space_id: str):
+            return (self._blob, "hash")
+
+    space = SimpleNamespace(id="sp-1", cover_hash="h", icon_hash="h")
+
+    # Oversized → omitted.
+    big = await svc._image_data_uri(_CoverRepo(b"x" * (cap + 1)), space)
+    assert big == ""
+    # Within the cap → embedded as a data URI.
+    small = await svc._image_data_uri(_CoverRepo(b"x" * 32), space)
+    assert small.startswith("data:image/webp;base64,")
+    # No cover set → empty regardless.
+    none_space = SimpleNamespace(id="sp-2", cover_hash=None, icon_hash=None)
+    assert await svc._image_data_uri(_CoverRepo(b"x"), none_space) == ""
