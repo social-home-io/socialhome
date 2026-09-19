@@ -152,6 +152,20 @@ class SqliteSpaceRemoteMemberRepo:
         the UPDATE left a household that paid for a read-only seat sitting
         as a full ``member`` — the exact seat the §24.11 space-writer gate
         reads to decide whether to refuse its writes.
+
+        A re-seat also **clears the tombstone**. :meth:`remove` retains the
+        row with ``tombstoned=1``, and the writer gate reads tombstones on
+        purpose (so a kicked household does not read like one we never
+        met). Without clearing it here, a household kicked and then
+        legitimately re-invited stayed in the gate's ``else → refuse``
+        branch for ever — silently, because that refusal answers
+        ``{"status": "ok"}``, so the sender's outbox never retries.
+
+        The ``member_version`` bump rides the same CASE: the version is a
+        CRDT clock over state CHANGES (:meth:`apply_member_event`), so a
+        resurrection must out-rank the tombstone :meth:`remove` wrote,
+        while a plain refresh of a live row must NOT race the roster
+        gossip's own counter upwards.
         """
         await self._db.enqueue(
             """
@@ -161,7 +175,10 @@ class SqliteSpaceRemoteMemberRepo:
             ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                 user_pk=excluded.user_pk,
                 display_name=excluded.display_name,
-                role=excluded.role
+                role=excluded.role,
+                tombstoned=0,
+                member_version=space_remote_members.member_version
+                    + (CASE WHEN space_remote_members.tombstoned THEN 1 ELSE 0 END)
             """,
             (space_id, instance_id, user_id, user_pk, display_name, role),
         )

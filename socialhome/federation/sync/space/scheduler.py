@@ -195,12 +195,21 @@ class SpaceSyncScheduler:
             # runtime negotiates DataChannel first and falls back via
             # ``trigger_relay_sync`` on the 15 s ICE timeout.
             prefer_direct = os.environ.get("SH_FORCE_SYNC_HTTPS") != "1"
+            sync_id = uuid.uuid4().hex
+            # Record what we are asking for, so the provider's
+            # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
+            # offer for a sync_id nobody here issued is refused.
+            self._federation.record_sync_request(
+                sync_id=sync_id,
+                space_id=space_id,
+                provider_instance_id=peer_instance_id,
+            )
             try:
                 await self._federation.send_event(
                     to_instance_id=peer_instance_id,
                     event_type=FederationEventType.SPACE_SYNC_BEGIN,
                     payload={
-                        "sync_id": uuid.uuid4().hex,
+                        "sync_id": sync_id,
                         "space_id": space_id,
                         "sync_mode": "initial",
                         "prefer_direct": prefer_direct,

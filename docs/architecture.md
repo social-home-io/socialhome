@@ -368,6 +368,17 @@ chunkers under `socialhome/federation/sync/space/` and
 `socialhome/federation/sync/dm_history/`. Wire details are in
 [`protocol/sync.md`](./protocol/sync.md).
 
+A sync session is **requester-initiated and pinned end to end**. The
+requester records every `SPACE_SYNC_BEGIN` it sends
+(`SyncSessionManager.record_sync_request`); a `SPACE_SYNC_OFFER` is only
+an answer, so one naming a `sync_id` nobody here issued — or arriving
+from a household we did not ask — is dropped. The session then carries
+the provider it belongs to, and every chunk is checked against both that
+provider and the session's own `space_id`. Without those three pins an
+unsolicited offer minted a session with no provider and no space, and its
+chunks wrote members (role included), bans and content for any space the
+sender named.
+
 ## Space cryptographic identity (§4.3)
 
 Every space has its own Ed25519 keypair and a per-epoch AES-256

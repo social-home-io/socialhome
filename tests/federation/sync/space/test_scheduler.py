@@ -37,6 +37,13 @@ class _FakeFederation:
         #: What ``begin_mesh_catchup_sync`` reports. False models the
         #: ``no_route`` a freshly-booted household gets.
         self.catchup_ships: bool = True
+        #: (sync_id, space_id, provider) recorded before each BEGIN.
+        self.requests: list[tuple[str, str, str]] = []
+
+    def record_sync_request(self, *, sync_id, space_id, provider_instance_id):
+        """A requester notes the sync_id it is about to ask for, so the
+        provider's SPACE_SYNC_OFFER can be recognised as an answer."""
+        self.requests.append((sync_id, space_id, provider_instance_id))
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed

@@ -863,7 +863,15 @@ listed nor kicked — and because `instance_in_any_space` reads
 could never be revoked either. The DB is the authority; absence of a row
 is not.
 
-`owner` remains unmintable and unseatable on either side.
+`owner` remains unmintable and unseatable on either side, and a Follower
+household cannot promote itself: **roster mutations are accepted only
+from the space's host, or under the space-authority signature** — which
+covers the seat it holds, the bans, the members, and the invitation
+family. A `SPACE_PRIVATE_INVITE` is the *host* inviting one of our users,
+so it is refused for a space we already know under a different owner; its
+accept is bound to the invitation it answers (right household, right
+user, still pending — one invitation, one seat) and never raises an
+existing live seat's role. Full rule: [spaces.md](./spaces.md#roster-authority).
 
 A redeem of a follower link consumes a use like any other redeem — there
 is no pre-consume refusal left. (There was one, precisely so that a

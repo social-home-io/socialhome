@@ -190,6 +190,55 @@ The rule, precisely:
   attributed, and passing it would hand a follower every handler that
   keys on a bare row id.
 
+## Roster authority
+
+Content is only half the promise. The other half is the roster itself: a
+household that could rewrite seats, bans or members would simply promote
+itself out of the read-only gate above.
+
+**A roster mutation is applied only when it comes from the space's own
+host (`spaces.owner_instance_id == event.from_instance`) or carries a
+valid space-authority signature verified against
+`spaces.identity_public_key`.** Not from a paired peer, not from a member
+household, not from a household holding a Follower seat. Concretely:
+
+- `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_MEMBER_BANNED`,
+  `SPACE_MEMBER_UNBANNED` and the `space_members` half of
+  `SPACE_REMOTE_MEMBER_REMOVED` are **host-only**. An unknown space is
+  refused too — there is no owner to compare the sender against.
+- `SPACE_MEMBER_JOINED` / `SPACE_MEMBER_LEFT` (the v_23 roster gossip) are
+  **authority-signed**, so a delegated admin can act while the owner is
+  offline; the trust root is the signature, not the relay.
+- `SPACE_PRIVATE_INVITE` is the host inviting one of our users, so it is
+  refused for a space we already know under a different owner. Its
+  `_ACCEPT` / `_DECLINE` are bound to the invitation they answer: the
+  signed sender must be the invited household, the named user must be the
+  invited user, and the invitation must still be pending — one invitation,
+  one seat. (`expires_at` is not enforced: it is a 15-minute TTL inherited
+  from the invite token, while the invitee's pending list has no expiry
+  filter, so refusing on it would drop legitimate late accepts.) An
+  accept never *raises* an existing live seat's role — promotion is the
+  host's decision and rides `SPACE_MEMBER_ROLE_CHANGED`.
+- The sender's OWN seat is the one exception, and it is not an exception
+  to the rule: a household may drop the seat it holds
+  (`SPACE_REMOTE_MEMBER_REMOVED` naming its own user) because that is a
+  statement about itself.
+
+One handler registration per event type is not guaranteed —
+`EventDispatchRegistry.dispatch` runs **every** handler bound to a type, so
+a guarded handler does not shadow an unguarded sibling. A protocol test
+(`tests/protocol/test_space_roster_authority.py`) enumerates the real
+registry for each roster-mutating type and drives a forged envelope
+through every handler bound to it.
+
+The §25.6 catch-up sync carries the same rule into the bulk path: a
+`SPACE_SYNC_OFFER` is accepted only for a `sync_id` this household
+actually requested and only from the household it asked, the session pins
+that provider for every chunk, and each chunk's `space_id` is pinned to
+the session's. Without those, an unsolicited offer minted a session with
+no provider and no space, and its chunks wrote members (role included),
+bans and content for any space at all.
+
 Older peers: `role='subscriber'` is unstorable below v_30, so a follower's
 roster gossip is gated on
 `FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`. A sub-v_30 peer

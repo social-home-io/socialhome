@@ -18,6 +18,7 @@ from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
 )
+from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
     RELAY_QUEUE_TTL_SECONDS,
     RELAY_TIMESTAMP_SKEW_SECONDS,
@@ -1168,3 +1169,21 @@ def test_a_relay_envelope_replayed_10h_later_is_still_remembered():
     assert cache.seen("relayed-msg", from_instance="b", now=t0) is False
     later = t0 + timedelta(hours=10)
     assert cache.seen("relayed-msg", from_instance="b", now=later) is True
+
+
+# ─── The mesh path runs the same gates the pipeline does ─────────────
+
+
+def test_the_deprovisioned_author_gate_is_one_of_the_shared_post_decrypt_gates():
+    """``make_check_deprovisioned_author``'s own docstring names mesh
+    envelopes as its reason to exist, but it was appended to the pipeline
+    step list directly — so a ``SPACE_ROUTED`` unwrap, which composes
+    ``post_decrypt_gate_steps`` instead of running the pipeline, skipped
+    it. Both paths now get it from the same place."""
+    svc = FederationService.__new__(FederationService)
+    svc._federation_repo = object()
+    svc._user_repo = object()
+    svc._space_repo = None
+    svc._space_remote_member_repo = None
+    names = [getattr(s, "__name__", "") for s in svc.post_decrypt_gate_steps()]
+    assert "check_deprovisioned_author" in names

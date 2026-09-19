@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from socialhome.domain.federation import (
     FederationEventType,
@@ -14,6 +14,9 @@ from socialhome.domain.federation import (
 from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
+    MAX_PENDING_REQUESTS,
+    PENDING_REQUEST_TTL_SECONDS,
+    PendingSyncRequest,
     MAX_INSTANCE_SYNC_STATUS_SPACES,
     SYNC_BEGIN_RATE_LIMIT_PER_HOUR,
     SyncSessionManager,
@@ -654,3 +657,72 @@ def test_reap_stale_tears_down_rtc_handle_via_close_session():
     assert n == 1
     fake_rtc.close.assert_called_once()
     assert mgr.get_session("with-rtc") is None
+
+
+# ─── F3: only a sync WE asked for may be offered to us ────────────────
+
+
+def _mgr():
+    return SyncSessionManager(_FakeFedRepo())
+
+
+def test_pending_sync_request_is_unknown_until_we_record_one():
+    mgr = _mgr()
+    assert mgr.pending_sync_request("s1") is None
+
+
+def test_record_sync_request_pins_the_provider_and_space():
+    """``sync_id`` is the only thing addressing a session, and until now
+    the requester kept no record of the ones it issued — so any peer's
+    ``SPACE_SYNC_OFFER`` minted one."""
+    mgr = _mgr()
+    mgr.record_sync_request(sync_id="s1", space_id="sp", provider_instance_id="host")
+    pending = mgr.pending_sync_request("s1")
+    assert pending is not None
+    assert pending.space_id == "sp"
+    assert pending.provider_instance_id == "host"
+
+
+def test_pending_sync_requests_expire():
+    """A request the provider never answered must not sit there for the
+    process's lifetime waiting to be claimed."""
+    mgr = _mgr()
+    mgr.record_sync_request(sync_id="s1", space_id="sp", provider_instance_id="host")
+    mgr._requests["s1"] = PendingSyncRequest(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        created_at=time.time() - PENDING_REQUEST_TTL_SECONDS - 1,
+    )
+    assert mgr.pending_sync_request("s1") is None
+
+
+def test_pending_sync_requests_are_capped():
+    """Bounded like every other in-memory table here — the oldest entries
+    are evicted rather than letting a retry storm grow it without end."""
+    mgr = _mgr()
+    for i in range(MAX_PENDING_REQUESTS + 10):
+        mgr.record_sync_request(
+            sync_id=f"s{i}", space_id="sp", provider_instance_id="host"
+        )
+    assert len(mgr._requests) <= MAX_PENDING_REQUESTS
+    assert mgr.pending_sync_request(f"s{MAX_PENDING_REQUESTS + 9}") is not None
+
+
+async def test_apply_offer_records_the_provider_on_a_fresh_session():
+    """The requester-side session used to be minted with
+    ``provider_instance_id=""`` — the empty string the chunk handler's
+    origin pin skipped over."""
+    mgr = _mgr()
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+        )
+    assert mgr.get_session("s1").provider_instance_id == "host"

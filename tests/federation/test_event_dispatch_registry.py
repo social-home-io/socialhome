@@ -132,3 +132,20 @@ async def test_same_handler_for_multiple_event_types():
     await reg.dispatch(_event(FederationEventType.SPACE_POST_CREATED))
     await reg.dispatch(_event(FederationEventType.SPACE_MEMBER_JOINED))
     assert len(called) == 2
+
+
+def test_handlers_for_exposes_the_bound_handlers():
+    """``dispatch`` runs EVERY handler bound to a type, so "which handlers
+    does this roster-mutating event reach?" is a question the protocol
+    tests have to be able to ask — otherwise a second, unguarded handler
+    can be added next to a guarded one and nothing notices."""
+    registry = EventDispatchRegistry()
+
+    async def one(_event) -> None: ...
+
+    async def two(_event) -> None: ...
+
+    registry.register(FederationEventType.SPACE_MEMBER_BANNED, one)
+    registry.register(FederationEventType.SPACE_MEMBER_BANNED, two)
+    assert registry.handlers_for(FederationEventType.SPACE_MEMBER_BANNED) == (one, two)
+    assert registry.handlers_for(FederationEventType.SPACE_MEMBER_LEFT) == ()

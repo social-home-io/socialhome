@@ -357,20 +357,11 @@ class FederationService:
             make_ban_check(federation_repo=self._federation_repo),
             make_persist_replay(federation_repo=self._federation_repo),
         ]
-        # Receiver-side deprovisioned-author backstop. Runs LAST so the
-        # replay-id is recorded regardless — if we dropped this here on
-        # a later retry the sender's outbox would still get a 200 OK
-        # (early-response) and stop redelivering. ``user_repo`` is
-        # threaded in via :meth:`attach_user_repo`; if it's unset we
-        # skip the step so legacy fixtures still build a working
-        # pipeline.
-        if self._user_repo is not None:
-            steps.append(
-                make_check_deprovisioned_author(user_repo=self._user_repo),
-            )
-        # Read-only-Follower gate. Also last, and for the same reason:
-        # the replay-id must be persisted whether or not we keep the
-        # event, or the sender's outbox redelivers forever.
+        # The post-decrypt gates (deprovisioned author, read-only
+        # Follower) run LAST so the replay-id is recorded regardless — if
+        # we dropped an event before that, a later retry would still get
+        # a 200 OK (early-response) and the sender would stop
+        # redelivering.
         steps.extend(self.post_decrypt_gate_steps())
         return steps
 
@@ -396,6 +387,17 @@ class FederationService:
         steps: list = []
         if include_ban_check:
             steps.append(make_ban_check(federation_repo=self._federation_repo))
+        # Receiver-side deprovisioned-author backstop. Its own docstring
+        # names mesh envelopes as its reason to exist, so it belongs to
+        # the SHARED gates rather than to the pipeline alone — a
+        # ``SPACE_ROUTED`` unwrap used to skip it entirely. ``user_repo``
+        # is threaded in via :meth:`attach_user_repo`; if it's unset the
+        # step is skipped so legacy fixtures still build a working
+        # pipeline.
+        if self._user_repo is not None:
+            steps.append(
+                make_check_deprovisioned_author(user_repo=self._user_repo),
+            )
         if self._space_repo is not None and self._space_remote_member_repo is not None:
             steps.append(
                 make_check_space_writer(
@@ -406,6 +408,28 @@ class FederationService:
         return steps
 
     # ─── Wiring helpers ──────────────────────────────────────────────────
+
+    def record_sync_request(
+        self,
+        *,
+        sync_id: str,
+        space_id: str,
+        provider_instance_id: str,
+    ) -> None:
+        """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
+
+        Thin delegation so callers that hold the federation service (the
+        :class:`SpaceSyncScheduler`) do not need the manager. No-op when
+        the sync machinery isn't wired, like every other sync entry point
+        here — the OFFER would be refused in that case anyway.
+        """
+        if self._sync_manager is None:
+            return
+        self._sync_manager.record_sync_request(
+            sync_id=sync_id,
+            space_id=space_id,
+            provider_instance_id=provider_instance_id,
+        )
 
     def attach_sync_manager(self, sync_manager) -> None:
         """Attach a :class:`SyncSessionManager` after construction.
@@ -1313,6 +1337,11 @@ class FederationService:
                 # the caller should stop asking about it.
                 return True
             sync_id = uuid.uuid4().hex
+            self._sync_manager.record_sync_request(
+                sync_id=sync_id,
+                space_id=space_id,
+                provider_instance_id=host_instance_id,
+            )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
                 space_id=space_id,
@@ -2421,6 +2450,32 @@ class FederationService:
         space_id = event.space_id or ""
         if not sync_id or not sdp_offer:
             return
+        # An OFFER is an ANSWER: it only exists because we sent
+        # ``SPACE_SYNC_BEGIN``. Accepting one for a ``sync_id`` we never
+        # issued hands the sender a requester session — and everything
+        # downstream (the chunk origin pin, the space pin) hangs off that
+        # session, so the whole §25.6 receive path inherits whatever it
+        # says. Refuse at WARNING: a legitimate provider cannot hit this.
+        pending = self._sync_manager.pending_sync_request(sync_id)
+        if pending is None:
+            log.warning(
+                "sync %s: unsolicited SPACE_SYNC_OFFER from %s — we never "
+                "requested this sync; dropping",
+                sync_id,
+                event.from_instance,
+            )
+            return
+        if pending.provider_instance_id != event.from_instance:
+            log.warning(
+                "sync %s: SPACE_SYNC_OFFER from %s but we asked %s — dropping",
+                sync_id,
+                event.from_instance,
+                pending.provider_instance_id,
+            )
+            return
+        # The session's space is the one WE asked about, never the one the
+        # OFFER claims.
+        space_id = pending.space_id or space_id
         # The OFFER/ANSWER/ICE dance is direct-path only: ICE can't traverse
         # a relay, and the host never offers a mesh-only requester (it forces
         # HTTPS mode in ``_handle_space_sync_begin``). An OFFER from a
@@ -2439,6 +2494,7 @@ class FederationService:
             sync_id=sync_id,
             sdp_offer=sdp_offer,
             requester_instance_id=self._own_instance_id,
+            provider_instance_id=event.from_instance,
             space_id=space_id,
             ice_servers=payload.get("ice_servers"),
         )
@@ -2559,6 +2615,7 @@ class FederationService:
                 await self._space_sync_receiver.on_chunk(
                     raw,
                     from_instance=provider_instance_id,
+                    expected_space_id=record.space_id,
                 )
             except Exception:
                 log.exception(
@@ -2774,15 +2831,17 @@ class FederationService:
             )
             return
         # The provider on the originating side IS the from_instance for
-        # an HTTPS-mode session. The receiver re-checks the per-chunk
-        # signature against the peer's identity key, so this is a
-        # belt-and-braces guard, not the authoritative check.
-        if (
-            record.provider_instance_id
-            and record.provider_instance_id != event.from_instance
-        ):
+        # an HTTPS-mode session.
+        #
+        # An EMPTY ``provider_instance_id`` is a refusal, not a skip. The
+        # old ``if record.provider_instance_id and ...`` shape meant an
+        # unpinned session accepted chunks from everybody — and the
+        # requester session ``apply_offer`` minted was exactly that. Every
+        # session now records who may stream into it (the sibling
+        # ``SPACE_SYNC_REQUEST_MORE`` pin has always read this way).
+        if record.provider_instance_id != event.from_instance:
             log.warning(
-                "SPACE_SYNC_CHUNK sync_id=%s from %s != expected provider %s",
+                "SPACE_SYNC_CHUNK sync_id=%s from %s != expected provider %r",
                 sync_id,
                 event.from_instance,
                 record.provider_instance_id,
@@ -2792,6 +2851,7 @@ class FederationService:
             await self._space_sync_receiver.on_chunk(
                 raw,
                 from_instance=event.from_instance,
+                expected_space_id=record.space_id,
             )
         except Exception:
             log.exception(

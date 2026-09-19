@@ -144,6 +144,7 @@ class SpaceSyncReceiver:
         raw: bytes | str,
         *,
         from_instance: str,
+        expected_space_id: str | None = None,
     ) -> None:
         """Handle one chunk (DataChannel frame or routed federation event).
 
@@ -151,7 +152,16 @@ class SpaceSyncReceiver:
         a paired peer: a mesh-joined member receives its catch-up stream
         from a host it has no pairing with, so this method authenticates
         the chunk itself rather than assuming the transport already did
-        (see the signature-verification block below, and #648)."""
+        (see the signature-verification block below, and #648).
+
+        ``expected_space_id`` PINS the chunk to the session that carried
+        it. A sync session is opened for ONE space, but nothing here
+        looked at which space a chunk claimed — so a provider streaming
+        an agreed session for space A could write members (role
+        included), bans and every content type of space B. The caller
+        knows the session; it passes its ``space_id``. ``None`` means the
+        caller has no session context (kept for the replay path, which
+        re-enters with the chunk it already accepted)."""
         try:
             envelope = parse_chunk(raw)
         except ValueError as exc:
@@ -163,6 +173,16 @@ class SpaceSyncReceiver:
         space_id = str(envelope.get("space_id") or "")
         if not resource or not sync_id or not space_id:
             log.debug("sync chunk missing required outer fields")
+            return
+        if expected_space_id is not None and space_id != expected_space_id:
+            log.warning(
+                "sync chunk from %s claims space %s but session %s is for %s "
+                "— dropping",
+                from_instance,
+                space_id,
+                sync_id,
+                expected_space_id,
+            )
             return
 
         # Signature verification — the sender's Ed25519 identity key, so a
@@ -289,7 +309,11 @@ class SpaceSyncReceiver:
                 )
 
                 async def _redeliver() -> None:
-                    await self.on_chunk(raw, from_instance=from_instance)
+                    await self.on_chunk(
+                        raw,
+                        from_instance=from_instance,
+                        expected_space_id=space_id,
+                    )
 
                 self._pending_decrypts.stash(space_id, epoch, _redeliver)
                 return
