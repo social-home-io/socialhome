@@ -33,6 +33,11 @@ class _PendingWrite:
     sql: str
     params: tuple[Any, ...]
     future: "asyncio.Future[int]"  # resolves to cursor.lastrowid
+    #: When set, the future resolves to ``cursor.rowcount`` instead of
+    #: ``lastrowid``. Scoped mutators (``… WHERE space_id=?``) need to
+    #: know whether the predicate actually matched a row so the caller
+    #: can refuse + log a cross-space write attempt.
+    want_rowcount: bool = False
 
 
 class AsyncDatabase:
@@ -213,6 +218,33 @@ class AsyncDatabase:
         )
         return await fut
 
+    async def enqueue_rowcount(
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
+    ) -> int:
+        """Queue a write statement. Returns the number of rows it changed.
+
+        Same coalesced-batch path as :meth:`enqueue` — only the value the
+        future resolves to differs. Use it for the space-scoped mutators
+        (``UPDATE … WHERE id=? AND space_id=?``): a ``0`` return means the
+        row exists in a *different* space (or not at all), which callers
+        surface as a refusal rather than a silent no-op.
+        """
+        self._assert_running()
+        assert self._write_queue is not None
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[int] = loop.create_future()
+        await self._write_queue.put(
+            _PendingWrite(
+                sql=sql,
+                params=tuple(params),
+                future=fut,
+                want_rowcount=True,
+            ),
+        )
+        return await fut
+
     async def executemany(
         self,
         sql: str,
@@ -385,7 +417,10 @@ class AsyncDatabase:
                             results.append((pending, stmt_exc))
                             continue
                         conn.execute(f"RELEASE {sp}")
-                        results.append((pending, cursor.lastrowid or 0))
+                        if pending.want_rowcount:
+                            results.append((pending, cursor.rowcount))
+                        else:
+                            results.append((pending, cursor.lastrowid or 0))
                     conn.execute("COMMIT")
                 except Exception:
                     conn.execute("ROLLBACK")
