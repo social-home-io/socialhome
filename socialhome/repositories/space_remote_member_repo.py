@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..db.database import AsyncDatabase
+from ..domain.space import SpaceRole
 from .base import rows_to_dicts
 
 
@@ -57,6 +58,7 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
         user_id: str,
         user_pk: str | None,
         display_name: str | None,
+        role: str = SpaceRole.MEMBER.value,
     ) -> None: ...
 
     async def remove(
@@ -67,6 +69,14 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
     ) -> None: ...
 
     async def list_for_space(self, space_id: str) -> list[SpaceRemoteMember]: ...
+
+    async def list_for_instance(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        include_tombstoned: bool = True,
+    ) -> list[SpaceRemoteMember]: ...
 
     async def list_for_space_including_tombstones(
         self, space_id: str
@@ -132,17 +142,28 @@ class SqliteSpaceRemoteMemberRepo:
         user_id: str,
         user_pk: str | None,
         display_name: str | None,
+        role: str = SpaceRole.MEMBER.value,
     ) -> None:
+        """Seat a remote member, role included, in ONE write.
+
+        ``role`` lands in the same INSERT rather than through a follow-up
+        :meth:`set_role`. The two-step version was a durability hole on
+        the Follower path: a redeem that crashed between the INSERT and
+        the UPDATE left a household that paid for a read-only seat sitting
+        as a full ``member`` — the exact seat the §24.11 space-writer gate
+        reads to decide whether to refuse its writes.
+        """
         await self._db.enqueue(
             """
             INSERT INTO space_remote_members(
-                space_id, instance_id, user_id, user_pk, display_name
-            ) VALUES(?, ?, ?, ?, ?)
+                space_id, instance_id, user_id, user_pk, display_name, role
+            ) VALUES(?, ?, ?, ?, ?, ?)
             ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                 user_pk=excluded.user_pk,
-                display_name=excluded.display_name
+                display_name=excluded.display_name,
+                role=excluded.role
             """,
-            (space_id, instance_id, user_id, user_pk, display_name),
+            (space_id, instance_id, user_id, user_pk, display_name, role),
         )
 
     async def remove(
@@ -174,6 +195,38 @@ class SqliteSpaceRemoteMemberRepo:
             "SELECT * FROM space_remote_members "
             "WHERE space_id=? AND tombstoned=0 ORDER BY joined_at",
             (space_id,),
+        )
+        return [_row(r) for r in rows_to_dicts(rows)]
+
+    async def list_for_instance(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        include_tombstoned: bool = True,
+    ) -> list[SpaceRemoteMember]:
+        """Every seat one HOUSEHOLD holds in one space — tombstones included.
+
+        The §24.11 space-writer gate
+        (:func:`~socialhome.federation.inbound_validator
+        .make_check_space_writer`) asks a household-level question — "does
+        the household that signed this envelope hold a seat here that may
+        write?" — so it needs all of that household's rows at once, and it
+        needs the removed ones: :meth:`get` and :meth:`list_for_space`
+        filter tombstones, which would make a household we KICKED read
+        exactly like a household we have simply never heard of. Those two
+        must not be the same answer — the second is the unconverged-mirror
+        case the gate is lenient about, the first is a decision we already
+        made.
+
+        ``include_tombstoned=False`` gives the live-roster subset for
+        callers that want today's filtered view.
+        """
+        sql = "SELECT * FROM space_remote_members WHERE space_id=? AND instance_id=?"
+        if not include_tombstoned:
+            sql += " AND tombstoned=0"
+        rows = await self._db.fetchall(
+            sql + " ORDER BY joined_at", (space_id, instance_id)
         )
         return [_row(r) for r in rows_to_dicts(rows)]
 

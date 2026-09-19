@@ -103,6 +103,41 @@ class SpaceRole(StrEnum):
     SUBSCRIBER = "subscriber"
 
 
+#: Roles a **remote** household's seat may carry — the
+#: ``space_remote_members.role`` CHECK (migrations 0009 + 0054), in code.
+#: ``subscriber`` is a household that redeemed a Follower invite link
+#: (v_30); ``owner`` is absent because ownership is a local-only privilege
+#: with no remote row shape, and the host legitimately ships its own
+#: ``space_members.role`` — ``owner`` included — on the roster wire.
+MIRRORABLE_REMOTE_ROLES: frozenset[str] = frozenset(
+    {
+        SpaceRole.MEMBER.value,
+        SpaceRole.ADMIN.value,
+        SpaceRole.SUBSCRIBER.value,
+    }
+)
+
+
+def mirrorable_remote_role(raw: object) -> str:
+    """Coerce a wire-supplied role to one a remote seat may hold.
+
+    The role is advisory on the wire; the mutation carrying it is not. A
+    value this household's ``space_remote_members.role`` CHECK rejects —
+    an ``owner``, or a role from a future version — raises IntegrityError
+    out of the apply and takes the WHOLE event down with it, tombstone
+    included, and the version guard then refuses the retry at the same
+    ``member_version``. So an unknown role becomes the least-privileged
+    real seat and the mutation survives: losing "which seat" is
+    recoverable from the next snapshot, losing "they left" is not.
+
+    Note the direction of the coercion — DOWN to ``member``, never up.
+    A missing role on a first-revision payload means an old sender that
+    knew only ``member``/``admin``, which is the same answer.
+    """
+    role = str(raw or SpaceRole.MEMBER.value)
+    return role if role in MIRRORABLE_REMOTE_ROLES else SpaceRole.MEMBER.value
+
+
 class RemoteAdminOutcome(StrEnum):
     """Result of a host receiving a forwarded ``SPACE_REMOTE_ADMIN_ACTION``."""
 

@@ -381,6 +381,59 @@ async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
         call.kwargs["user_id"] for call in handler.remote_members.add.await_args_list
     }
     assert seated_ids == {"u-pascal", "u-anna"}
+    # The snapshot's role is mirrored, not a blanket ``member``: seating
+    # a Follower as a full member on every OTHER household in the space
+    # is what made those households accept its writes. ``owner`` has no
+    # remote row shape, so it coerces DOWN to ``member``.
+    roles = {
+        call.kwargs["user_id"]: call.kwargs["role"]
+        for call in handler.remote_members.add.await_args_list
+    }
+    assert roles == {"u-pascal": "member", "u-anna": "member"}
+
+
+async def test_invite_roster_mirrors_a_follower_as_a_follower(handler):
+    """A ``subscriber`` entry stays a subscriber in the mirror — that row
+    is what the receiving household's §24.11 space-writer gate reads to
+    refuse the follower's writes."""
+    handler.remote_members.add = AsyncMock()
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        {
+            "space_id": "sp-remote",
+            "invite_token": "tkn",
+            "invitee_user_id": "u-self",
+            "inviter_user_id": "u-pascal",
+            "space_meta": {
+                "name": "Family",
+                "owner_instance_id": "peer-1",
+                "owner_username": "pascal",
+                "identity_public_key": "abc",
+                "roster": [
+                    {
+                        "user_id": "u-follower",
+                        "instance_id": "peer-9",
+                        "display_name": "Fran",
+                        "role": "subscriber",
+                    },
+                    {
+                        "user_id": "u-future",
+                        "instance_id": "peer-9",
+                        "display_name": "Future",
+                        "role": "overlord",
+                    },
+                ],
+            },
+        },
+    )
+    await handler.h._on_invite(ev)
+    roles = {
+        call.kwargs["user_id"]: call.kwargs["role"]
+        for call in handler.remote_members.add.await_args_list
+    }
+    # An out-of-vocabulary role coerces down to the least-privileged real
+    # seat rather than raising out of the whole apply.
+    assert roles == {"u-follower": "subscriber", "u-future": "member"}
 
 
 async def test_invite_with_cover_bytes_writes_to_cover_repo(handler):

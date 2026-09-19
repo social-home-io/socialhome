@@ -6620,3 +6620,43 @@ async def test_a_banned_local_redeemer_burns_no_uses(stack):
 
     live = await stack.space_repo.get_live_invite_token(link["token"])
     assert live is not None and live["uses_remaining"] == 5
+
+
+# ─── attach_redeem_coordinator wires the roster-gossip seam both ways ──
+
+
+async def test_attaching_the_redeem_coordinator_hands_it_the_gossip_seam():
+    """A redeem seats a household on the HOST; every other member
+    household learns about it only through the v_23 roster gossip, which
+    the SpaceService (the seed-holder) signs. Without the back-reference
+    the peers hold no row for the new household — and the §24.11
+    space-writer gate is deliberately lenient about a household it has no
+    row for, so a Follower's writes would sail past every peer-side
+    gate."""
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.attached: list[object] = []
+
+        def attach_space_service(self, svc) -> None:
+            self.attached.append(svc)
+
+    svc = SpaceService.__new__(SpaceService)
+    coordinator = _Coordinator()
+    SpaceService.attach_redeem_coordinator(svc, coordinator)
+    assert coordinator.attached == [svc]
+    assert svc._redeem_coordinator is coordinator
+
+
+async def test_attaching_a_coordinator_without_the_seam_still_works():
+    """Legacy fixtures / older coordinators keep working — the back-wire
+    is best-effort, the forward one is what ``redeem_invite_token``
+    needs."""
+
+    class _Old:
+        pass
+
+    svc = SpaceService.__new__(SpaceService)
+    old = _Old()
+    SpaceService.attach_redeem_coordinator(svc, old)
+    assert svc._redeem_coordinator is old

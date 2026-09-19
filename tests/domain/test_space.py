@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.space import (
+    MIRRORABLE_REMOTE_ROLES,
     HouseholdFeatures,
     JoinMode,
     RemoteAdminOutcome,
@@ -12,6 +13,8 @@ from socialhome.domain.space import (
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
+    SpaceRole,
+    mirrorable_remote_role,
     normalize_join_mode,
     normalize_min_age,
 )
@@ -247,3 +250,36 @@ def test_normalize_join_mode_accepts_the_enum_member():
     """A :class:`JoinMode` member (a ``StrEnum``) normalises to its value, so
     callers can pass the domain object straight through."""
     assert normalize_join_mode(JoinMode.OPEN) == "open"
+
+
+# ─── mirrorable_remote_role ──────────────────────────────────────────────
+
+
+def test_mirrorable_remote_roles_are_the_three_remote_seats():
+    """The ``space_remote_members.role`` CHECK, in code. ``owner`` is
+    absent: ownership is local-only and has no remote row shape."""
+    assert MIRRORABLE_REMOTE_ROLES == {"member", "admin", "subscriber"}
+
+
+def test_a_real_remote_role_passes_through():
+    for role in MIRRORABLE_REMOTE_ROLES:
+        assert mirrorable_remote_role(role) == role
+
+
+def test_an_owner_on_the_wire_coerces_down_to_member():
+    """The host ships its own ``space_members.role`` on the roster wire,
+    ``owner`` included, and a receiver's CHECK rejects it — which used to
+    raise out of the whole apply and lose the mutation, tombstone and
+    all."""
+    assert mirrorable_remote_role(SpaceRole.OWNER.value) == SpaceRole.MEMBER.value
+
+
+def test_an_unknown_future_role_coerces_down_rather_than_up():
+    assert mirrorable_remote_role("overlord") == SpaceRole.MEMBER.value
+
+
+def test_a_missing_role_reads_as_member():
+    """A first-revision payload from a sender that knew only
+    member/admin — the same answer."""
+    assert mirrorable_remote_role(None) == SpaceRole.MEMBER.value
+    assert mirrorable_remote_role("") == SpaceRole.MEMBER.value

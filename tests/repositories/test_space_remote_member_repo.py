@@ -191,3 +191,102 @@ async def test_remove_tombstones_rather_than_deletes(repo):
     assert len(rows) == 1
     assert rows[0].tombstoned is True
     assert rows[0].member_version >= 1
+
+
+# ─── list_for_instance / add(role=) — the §24.11 Follower gate's reads ───
+
+
+async def test_list_for_instance_returns_every_seat_of_one_household(repo):
+    """The §24.11 space-writer gate asks a HOUSEHOLD-level question, so it
+    needs every seat the household holds in the space — a household with
+    one Follower and one full member may write."""
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id="u1",
+        user_pk=None,
+        display_name=None,
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id="u2",
+        user_pk=None,
+        display_name=None,
+    )
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-b",
+        user_id="u3",
+        user_pk=None,
+        display_name=None,
+    )
+    seats = await repo.list_for_instance("sp1", "i-a")
+    assert sorted((s.user_id, s.role) for s in seats) == [
+        ("u1", SpaceRole.SUBSCRIBER.value),
+        ("u2", SpaceRole.MEMBER.value),
+    ]
+
+
+async def test_list_for_instance_includes_tombstones_by_default(repo):
+    """A kicked household must not read as "no row" — that is the
+    leniency reserved for a roster that has not converged, and handing it
+    to a household we deliberately removed turns a kick into a bypass."""
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id="u1",
+        user_pk=None,
+        display_name=None,
+    )
+    await repo.remove("sp1", "i-a", "u1")
+    seats = await repo.list_for_instance("sp1", "i-a")
+    assert [(s.user_id, s.tombstoned) for s in seats] == [("u1", True)]
+    live_only = await repo.list_for_instance("sp1", "i-a", include_tombstoned=False)
+    assert live_only == []
+
+
+async def test_list_for_instance_is_empty_for_a_household_we_never_seated(repo):
+    assert await repo.list_for_instance("sp1", "i-nobody") == []
+
+
+async def test_add_lands_the_role_in_the_same_insert(repo):
+    """One write, not add-then-set_role: a crash between the two used to
+    leave a Follower seated as a full member."""
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id="u1",
+        user_pk=None,
+        display_name=None,
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    row = await repo.get("sp1", "i-a", "u1")
+    assert row is not None and row.role == SpaceRole.SUBSCRIBER.value
+
+
+async def test_add_keeps_defaulting_to_member(repo):
+    await repo.add(
+        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
+    )
+    row = await repo.get("sp1", "i-a", "u1")
+    assert row is not None and row.role == SpaceRole.MEMBER.value
+
+
+async def test_add_updates_the_role_of_an_existing_seat(repo):
+    """The upsert is how a re-redeem lands, so the role has to move with
+    it — otherwise a re-seated Follower keeps a stale member role."""
+    await repo.add(
+        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
+    )
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id="u1",
+        user_pk=None,
+        display_name=None,
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    row = await repo.get("sp1", "i-a", "u1")
+    assert row is not None and row.role == SpaceRole.SUBSCRIBER.value

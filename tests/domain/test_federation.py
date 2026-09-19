@@ -11,6 +11,8 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
     PAIRING_EVENTS,
+    SPACE_READER_EVENT_TYPES,
+    SPACE_WRITE_EVENT_TYPES,
     STRUCTURAL_EVENTS,
 )
 
@@ -136,3 +138,82 @@ def test_space_route_stale_event_type_round_trip():
         == FederationEventType.SPACE_ROUTE_STALE
     )
     assert FederationEventType.SPACE_ROUTE_STALE == "space_route_stale"
+
+
+# ─── Space write / read partition (the read-only Follower gate) ──────────
+
+
+def test_every_space_event_type_is_classified_write_or_read():
+    """Default-deny over the whole enum, same idiom as the peer-class list.
+
+    A ``SPACE_*`` / ``BAZAAR_*`` type added tomorrow has to be put in
+    :data:`SPACE_WRITE_EVENT_TYPES` (a space-content mutation — refused
+    from a household holding only Follower seats) or deliberately into
+    :data:`SPACE_READER_EVENT_TYPES` (a reader may legitimately send it).
+    Forgetting the classification fails here rather than silently
+    handing a Follower a new write surface.
+    """
+    scoped = {
+        e
+        for e in FederationEventType
+        if e.name.startswith("SPACE_") or e.name.startswith("BAZAAR_")
+    }
+    unclassified = scoped - SPACE_WRITE_EVENT_TYPES - SPACE_READER_EVENT_TYPES
+    assert not unclassified, (
+        "classify these as a space write or an explicit reader event: "
+        f"{sorted(e.name for e in unclassified)}"
+    )
+
+
+def test_the_write_and_reader_sets_are_disjoint():
+    assert not (SPACE_WRITE_EVENT_TYPES & SPACE_READER_EVENT_TYPES)
+
+
+def test_the_classification_covers_only_space_scoped_types():
+    """Neither set reaches outside the ``SPACE_``/``BAZAAR_`` families —
+    the gate is about space content, not about DMs or presence."""
+    for event_type in SPACE_WRITE_EVENT_TYPES | SPACE_READER_EVENT_TYPES:
+        assert event_type.name.startswith(("SPACE_", "BAZAAR_"))
+
+
+def test_the_content_mutations_are_writes():
+    """Spot-check the families the §24.11 gate exists for — a follower
+    household must not be able to post, task, sticky, vote, RSVP, bid,
+    pin a zone, ship media bytes, or edit/delete anyone's row."""
+    for event_type in (
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_POST_UPDATED,
+        FederationEventType.SPACE_POST_DELETED,
+        FederationEventType.SPACE_MEDIA_BLOB,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        FederationEventType.SPACE_TASK_CREATED,
+        FederationEventType.SPACE_STICKY_UPDATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+        FederationEventType.SPACE_POLL_VOTE_CAST,
+        FederationEventType.SPACE_RSVP_UPDATED,
+        FederationEventType.SPACE_SCHEDULE_FINALIZED,
+        FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        FederationEventType.SPACE_ZONE_UPSERTED,
+        FederationEventType.BAZAAR_LISTING_CREATED,
+        FederationEventType.BAZAAR_BID_PLACED,
+        FederationEventType.BAZAAR_OFFER_ACCEPTED,
+    ):
+        assert event_type in SPACE_WRITE_EVENT_TYPES
+
+
+def test_a_reader_may_still_speak_the_non_content_vocabulary():
+    """A Follower household is a real participant on the transport: it
+    reports, syncs, rekeys and leaves like anybody else."""
+    for event_type in (
+        FederationEventType.SPACE_REPORT,
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_INSTANCE_LEFT,
+        FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+    ):
+        assert event_type in SPACE_READER_EVENT_TYPES

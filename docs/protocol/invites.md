@@ -587,7 +587,8 @@ sequenceDiagram
     G->>I: ws {type: envelope, sealed}<br/>(queued up to 24 h if offline)
     Note over I: unseal → anti-tamper → signature →<br/>ts → replay → token → ban
     alt token valid
-        I->>I: consume token, seat remote member,<br/>space_instances, space_session row
+        I->>I: consume token, seat remote member<br/>(role in the same INSERT),<br/>space_instances, space_session row
+        I-->>I: SPACE_MEMBER_JOINED roster gossip<br/>to every member household (v_23,<br/>subscriber roles gated on v_30)
         I->>G: POST /gfs/envelope<br/>{to_instance: R, sealed ACK + space_meta}
         G->>R: ws {type: envelope, sealed}
         Note over R: §CP.F1 age gate, §D1b anti-hijack,<br/>then seat stub + key + roster
@@ -848,7 +849,7 @@ on the transport and a reader in the roster.
 | Content stream | Same as a member. `broadcast_to_space_members` targets `space_instances`, so posts, comments, calendar, roster and config events all arrive — over whichever transport that pair uses (`space_session` relay for a link-joined peer, direct/mesh for a paired one). |
 | Content key | Same as a member. The §D1b handoff ships the epoch key in the ACK's `space_meta` (`apply_space_content_key_from_metadata`), and every later rotation reaches it because rotation fans out over `space_instances`. |
 | Local seat | The redeeming user gets a local `space_members` row at `role='subscriber'`, so their own household's `_assert_writable_member` / `_reject_subscriber` refuse their writes with the usual message. |
-| Writes, host-side | Refused **again** on the host, regardless of what the sending household claims. A follower holds a valid content key, so it can produce a well-formed, correctly-signed `SPACE_POST_CREATED`; the host's own seat is the only authority that counts. Step 12 of the §24.11 pipeline (`make_check_space_writer`) drops it before dispatch. `allow_subscriber_comment` still governs comments, exactly as it does for a local follower. |
+| Writes, everywhere | Refused **again** by every household that receives them, regardless of what the sending household claims. A follower holds a valid content key, so it can produce a well-formed, correctly-signed write of any content type; the seat the RECEIVER holds for the signed `from_instance` is the authority. Step 12 of the §24.11 pipeline (`make_check_space_writer`) drops it before dispatch, across the whole `SPACE_WRITE_EVENT_TYPES` vocabulary (`*_UPDATED` / `*_DELETED` included) and on the mesh-routed path too. Enforced on member households, not only the host — space content fans out peer-to-peer. `allow_subscriber_comment` still governs comments, exactly as it does for a local follower (and the author must name a live `subscriber` seat of that household). A household the receiver holds no roster row for is not gated, which is why the host gossips the new seat to every member household at redeem time. Full rule: [spaces.md](./spaces.md). |
 | Roster | Listed. `GET /api/spaces/{id}/members` merges `space_remote_members` into the member list and emits `role` verbatim — the same way a LOCAL subscriber is listed today, which is the behaviour this mirrors. |
 | Revocation | Identical to a member's. Kick/ban tombstones the seat, drops the household from `space_instances` when its last seat goes, rotates the epoch key, and — for a link-joined peer with no other shared space — revokes the `space_session` row via `revoke_space_session_if_orphaned`. |
 
@@ -879,6 +880,10 @@ follower's roster gossip is gated on
 simply does not learn about the follower, which is strictly better than
 losing the event that carried it. Receivers also coerce an
 out-of-vocabulary role to `member` rather than dropping the mutation.
+Because that household then holds no row for the follower at all, its own
+space-writer gate treats it as an unconverged mirror and does not refuse
+its writes — the seat becomes enforceable there on upgrade. The host, and
+every v_30 member household, refuses them throughout.
 
 ### Listing and revoking links
 

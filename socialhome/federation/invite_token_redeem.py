@@ -54,7 +54,12 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
-from ..domain.space import SpaceMember, SpacePermissionError, SpaceRole
+from ..domain.space import (
+    SpaceMember,
+    SpacePermissionError,
+    SpaceRole,
+    mirrorable_remote_role,
+)
 from ..services.space_service import (
     _coerce_min_age,
     apply_space_content_key_from_metadata,
@@ -201,6 +206,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_key_manager",
         "_bootstrap_hints",
         "_rate_limiter",
+        "_space_service",
     )
 
     def __init__(
@@ -271,6 +277,24 @@ class SpaceInviteTokenRedeemCoordinator:
         #: blob advertised rather than trusting whatever comes back.
         self._bootstrap_hints: dict[str, InviteBootstrapHint] = {}
         self._rate_limiter: "RateLimiter | None" = None
+        #: Set by :meth:`attach_space_service` — the seed-holder that
+        #: signs roster gossip. Optional so legacy fixtures still build a
+        #: coordinator; unset simply means today's host-only seating.
+        self._space_service: Any = None
+
+    def attach_space_service(self, space_service: Any) -> None:
+        """Wire the roster-gossip seam (v_23).
+
+        A redeem seats a household on the HOST and nothing else, which
+        left every other member household of the space holding no row for
+        it at all. That matters now that a seat carries authority: the
+        §24.11 space-writer gate is deliberately lenient about a
+        household it has no row for (a roster that has not converged), so
+        without the gossip a Follower's writes would sail past every
+        peer-side gate — and peer-to-peer fan-out means the peers are
+        where its writes actually land.
+        """
+        self._space_service = space_service
 
     def attach_bootstrap(
         self,
@@ -673,6 +697,11 @@ class SpaceInviteTokenRedeemCoordinator:
                                 if entry.get("display_name")
                                 else None
                             ),
+                            # The snapshot's role, not a blanket ``member``:
+                            # mirroring a Follower as a full member is what
+                            # made every OTHER household in the space accept
+                            # that household's writes.
+                            role=mirrorable_remote_role(entry.get("role")),
                         )
         return {
             "space_id": space_id,
@@ -836,25 +865,56 @@ class SpaceInviteTokenRedeemCoordinator:
         # Seat the remote redeemer + register their instance so the
         # issuer's outbound fan-outs reach them.
         try:
+            # The seat lands in the SAME write as the row. It used to be
+            # an ``add`` (always ``member``) followed by a ``set_role``,
+            # which on the Follower path was a durability hole: a crash
+            # between the two left a household that paid for a read-only
+            # seat sitting as a full ``member`` — and that row is exactly
+            # what the §24.11 space-writer gate reads to refuse its
+            # writes. Both directions ride the one INSERT: up to admin, or
+            # down to a read-only follower.
             await self._remote_members.add(
                 space_id=space_id,
                 instance_id=redeemer_instance_id,
                 user_id=redeemer_user_id,
                 user_pk=redeemer_pk,
                 display_name=redeemer_display,
+                role=seat,
             )
-            if seat != SpaceRole.MEMBER.value:
-                # ``add`` has no role parameter — it always lands a plain
-                # member — so an ``admin`` or ``subscriber`` seat is written
-                # here. Both directions are deliberate: up to admin, or DOWN
-                # to a read-only follower whose every write the host refuses
-                # (``make_check_space_writer`` in the §24.11 pipeline).
-                await self._remote_members.set_role(
-                    space_id,
-                    redeemer_instance_id,
-                    redeemer_user_id,
-                    seat,
-                )
+            # v_23 roster gossip, deliberately BEFORE the redeemer's own
+            # ``space_instances`` row exists.
+            #
+            # ``broadcast_to_space_members`` targets ``space_instances``,
+            # so running it here reaches exactly the households that were
+            # already in the space — which is the whole point: they need a
+            # row for the new household, or their §24.11 space-writer gate
+            # has nothing to refuse a Follower on (it is deliberately
+            # lenient about a household it holds no row for). The redeemer
+            # must NOT be among them: it has no local space row yet — it
+            # builds one from the ACK's ``space_meta``, whose roster
+            # snapshot carries its own seat — so a gossip sent now would
+            # arrive there for an unknown space and be dropped.
+            #
+            # Fail-soft: the seat is already durable, so a gossip that
+            # raises must never turn a completed redeem into a DENY. The
+            # next snapshot / §25.6 sync reconciles.
+            if self._space_service is not None:
+                try:
+                    await self._space_service.broadcast_remote_member_joined(
+                        space_id,
+                        instance_id=redeemer_instance_id,
+                        user_id=redeemer_user_id,
+                        user_pk=redeemer_pk,
+                        display_name=redeemer_display,
+                        role=seat,
+                    )
+                except Exception:
+                    log.exception(
+                        "invite redeem: roster gossip failed for "
+                        "space_id=%s instance=%s",
+                        space_id,
+                        redeemer_instance_id,
+                    )
             await self._spaces.add_space_instance(
                 space_id,
                 redeemer_instance_id,

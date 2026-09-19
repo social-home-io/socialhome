@@ -103,6 +103,12 @@ class _LinkedFederationService:
         #: unknown peers read as ``default_peer_version`` (current wire).
         self.peer_versions: dict[str, int] = {}
         self.default_peer_version: int = FederationCapability.MIN_FOR_ROUTE_STALE_NACK
+        #: §24.11 post-decrypt gates the routed handler runs on a
+        #: synthesised inner event before dispatch. Empty = allow all.
+        self.gate_steps: list = []
+
+    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+        return list(self.gate_steps)
 
     @property
     def own_instance_id(self) -> str:
@@ -3193,3 +3199,82 @@ async def test_route_stale_at_origin_survives_a_raising_invalidate(caplog):
     finally:
         for task in list(a.handler._deferred_retransmits.values()):
             task.cancel()
+
+
+# ── Post-decrypt gates on the routed inner event (the mesh bypass) ─────
+
+
+async def test_routed_inner_event_runs_the_post_decrypt_gates():
+    """A ``SPACE_ROUTED`` unwrap must not be a way around §24.11.
+
+    The inner event is synthesised here and handed straight to the
+    dispatcher — it never passes through ``InboundPipeline``, so before
+    this it reached the handlers with no ban check and no space-writer
+    check. A §D2 direct-paired Follower household is mesh-capable, which
+    made this the cheapest way for it to write into a space it may only
+    read.
+    """
+    nodes = _build_chain(["a", "b"])
+    target_eph_pk = _mint_target_eph(nodes["b"])
+    seen: list[FederationEvent] = []
+
+    async def _refuse(ctx):
+        seen.append(ctx.event)
+        ctx.early_response = {"status": "ok", "dropped": "subscriber-write"}
+
+    nodes["b"].fed.gate_steps = [_refuse]
+    await nodes["a"].handler.send_routed(
+        path=["a", "b"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1", "author": "u-follower"},
+    )
+    for _ in range(4):
+        await asyncio.sleep(0)
+    # The gate saw the INNER event, and nothing was dispatched.
+    assert [e.event_type for e in seen] == [FederationEventType.SPACE_POST_CREATED]
+    assert seen[0].from_instance == "a"
+    assert nodes["b"].dispatched == []
+
+
+async def test_routed_inner_event_dispatches_when_the_gates_pass():
+    nodes = _build_chain(["a", "b"])
+    target_eph_pk = _mint_target_eph(nodes["b"])
+
+    async def _pass(ctx):
+        return None
+
+    nodes["b"].fed.gate_steps = [_pass]
+    await nodes["a"].handler.send_routed(
+        path=["a", "b"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1"},
+    )
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert len(nodes["b"].dispatched) == 1
+
+
+async def test_routed_gate_sees_the_space_id_from_the_inner_payload():
+    """The routing ``space_id`` is deliberately absent from a routed
+    envelope (a relay must not learn which space), so the gate's envelope
+    view is rebuilt from the inner payload — otherwise the ban check
+    would silently no-op on every mesh-delivered space event."""
+    nodes = _build_chain(["a", "b"])
+    target_eph_pk = _mint_target_eph(nodes["b"])
+    envelopes: list[dict] = []
+
+    async def _capture(ctx):
+        envelopes.append(dict(ctx.envelope))
+
+    nodes["b"].fed.gate_steps = [_capture]
+    await nodes["a"].handler.send_routed(
+        path=["a", "b"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-77"},
+    )
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert envelopes == [{"space_id": "sp-77", "from_instance": "a"}]

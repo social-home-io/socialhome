@@ -368,15 +368,39 @@ class FederationService:
             steps.append(
                 make_check_deprovisioned_author(user_repo=self._user_repo),
             )
-        # Host-side read-only-Follower gate. Also last, and for the same
-        # reason: the replay-id must be persisted whether or not we keep
-        # the event, or the sender's outbox redelivers forever.
+        # Read-only-Follower gate. Also last, and for the same reason:
+        # the replay-id must be persisted whether or not we keep the
+        # event, or the sender's outbox redelivers forever.
+        steps.extend(self.post_decrypt_gate_steps())
+        return steps
+
+    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+        """The gates that judge a DECRYPTED event, in pipeline order.
+
+        Split out because the mesh path needs exactly these and nothing
+        else: a ``SPACE_ROUTED`` envelope is validated as a routing
+        envelope, and its inner event is then synthesised and dispatched
+        by :class:`SpaceRoutedHandler` without passing through
+        :class:`InboundPipeline` at all. Running the composed steps there
+        (:func:`run_post_decrypt_gates`) rather than a second copy of the
+        logic is what keeps the two paths honest: a step added here is
+        enforced on both.
+
+        ``include_ban_check`` is the one difference between the two
+        callers. The pipeline runs the ban check earlier (step 9, before
+        the replay-id is persisted) and does not want it twice; the mesh
+        path needs it here, because the envelope the pipeline judged was
+        the RELAY's — nothing has yet checked whether the ORIGIN household
+        is banned from the space.
+        """
+        steps: list = []
+        if include_ban_check:
+            steps.append(make_ban_check(federation_repo=self._federation_repo))
         if self._space_repo is not None and self._space_remote_member_repo is not None:
             steps.append(
                 make_check_space_writer(
                     space_repo=self._space_repo,
                     remote_member_repo=self._space_remote_member_repo,
-                    own_instance_id=self._own_instance_id,
                 ),
             )
         return steps
@@ -459,13 +483,15 @@ class FederationService:
     def attach_space_write_gate(self, space_repo, space_remote_member_repo) -> None:
         """Attach the repos the §24.11 space-writer step reads.
 
-        Enables ``make_check_space_writer``: a household we seated as a
+        Enables ``make_check_space_writer``: a household seated as a
         ``subscriber`` (it redeemed a Follower invite link) receives the
-        space's content stream but has every write to a space WE host
-        refused here, before dispatch — the host's seat is the authority,
-        never the sending household's own view of its member's role.
-        Unset repos skip the step so legacy fixtures still build a working
-        pipeline.
+        space's content stream but has every space-content write refused
+        here, before dispatch — the seat THIS household holds for the
+        signed ``from_instance`` is the authority, never the sending
+        household's own view of its member's role. Enforced on every
+        receiving household, host or member, because space content fans
+        out peer-to-peer from the originating household. Unset repos skip
+        the step so legacy fixtures still build a working pipeline.
         """
         self._space_repo = space_repo
         self._space_remote_member_repo = space_remote_member_repo

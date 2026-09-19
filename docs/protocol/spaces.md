@@ -138,22 +138,64 @@ entirely in how the content reaches them:
 | In the roster | No. | Yes, exactly as a LOCAL subscriber is: `GET /api/spaces/{id}/members` emits `role` verbatim for both. |
 | Revocation | Drop the subscription / turn `allow_subscribers` off; the next epoch rotation locks them out. | Kick or ban, like any member — seat tombstoned, household dropped from `space_instances` when its last seat goes, epoch rotated, and for a link-joined peer with no other shared space the `space_session` row revoked (`revoke_space_session_if_orphaned`). |
 
-**Writes from a Follower household are refused on the host.** It holds a
-valid content key, so it can produce a well-formed, correctly-signed
-`SPACE_POST_CREATED` whatever its own local gate says — and its own local
-gate *does* refuse, via the ordinary `_assert_writable_member` on the
-redeemer's `space_members` row. The host does not take that on trust: step
-12 of the §24.11 pipeline (`make_check_space_writer` in
-`federation/inbound_validator.py`) reads the seat the HOST decided at
-redeem time and drops the envelope before dispatch. `SPACE_POST_CREATED`
-is always refused; `SPACE_COMMENT_CREATED` is refused unless
-`allow_subscriber_comment` is on — the same opt-in that governs a local
-follower. The step only fires for spaces this household hosts: a member
-household holds a mirror of the roster, not authority over it.
+**Writes from a Follower household are refused by every household that
+receives them.** It holds a valid content key, so it can produce a
+well-formed, correctly-signed `SPACE_POST_CREATED` whatever its own local
+gate says — and its own local gate *does* refuse, via the ordinary
+`_assert_writable_member` on the redeemer's `space_members` row. Nobody
+takes that on trust: step 12 of the §24.11 pipeline
+(`make_check_space_writer` in `federation/inbound_validator.py`) drops the
+envelope before dispatch.
+
+The rule, precisely:
+
+- **A household that holds only `subscriber` seats in the space — or only
+  tombstoned ones — has every space-content write refused.** The decision
+  is keyed on the signed `from_instance`, never on a payload author field
+  (the sender writes those). A household holding at least one live
+  `member` / `admin` seat may write, even if it also holds a follower
+  seat.
+- **Every receiving household enforces it, not just the host.** Space
+  content fans out peer-to-peer from the *originating* household
+  (`broadcast_to_space_members`), so a member household receives a
+  follower's writes directly — and the follower learns every member
+  household's instance id from the roster snapshot in its own redeem ACK.
+- **The whole write vocabulary**
+  (`SPACE_WRITE_EVENT_TYPES` in `domain/federation.py`): posts, comments,
+  pages, tasks, polls, stickies, calendar events, RSVPs, schedules,
+  gallery items, bazaar listings / bids / offers, zones, location pins,
+  media blobs — and every `*_UPDATED` / `*_DELETED` sibling, because
+  editing or deleting somebody else's row is a write. The classification
+  is exhaustive over the enum and pinned by a test, so a new space event
+  type is refused-by-default until somebody classifies it.
+- **One opt-in:** `SPACE_COMMENT_CREATED`, when the space has
+  `allow_subscriber_comment` on **and** the payload's author names a live
+  `subscriber` seat of that same household. (`allow_subscriber_react` has
+  no inbound surface — space reactions are not federated events.)
+- **A household the receiver holds no roster row for is not gated.** That
+  is roster convergence, not trust: a household seated on the host before
+  the gossip arrived legitimately has no row here. It is also why the seat
+  read includes **tombstones** — a household we kicked must not read like
+  one we have never heard of. A redeem gossips the new seat to every
+  member household (`broadcast_remote_member_joined`) so this leniency
+  stays about lag rather than about followers.
+- **The mesh is not a way around it.** The inner event of a
+  `SPACE_ROUTED` envelope is re-judged by the same gates after the unwrap
+  (`run_post_decrypt_gates`); without that it would reach the handlers
+  with neither this check nor the ban check.
+- **An envelope that names no space is refused.** Every writer we ship
+  sets the routing `space_id`, and the payload carries its own copy for
+  the mesh path (where the routing field is deliberately absent so a relay
+  cannot learn which space is served). One with neither cannot be
+  attributed, and passing it would hand a follower every handler that
+  keys on a bare row id.
 
 Older peers: `role='subscriber'` is unstorable below v_30, so a follower's
 roster gossip is gated on
-`FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`.
+`FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`. A sub-v_30 peer
+therefore holds no row for the follower and falls into the
+convergence-leniency branch above — the seat only becomes enforceable
+there once that household upgrades.
 
 ## `allow_subscribers` gates public readability
 

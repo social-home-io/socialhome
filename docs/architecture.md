@@ -256,8 +256,29 @@ The two authorize steps run **after** the replay-id is persisted, so a
 dropped envelope still answers 200 and the sender's outbox stops
 redelivering: `check_deprovisioned_author` drops user-scoped events
 from a remote user we have hidden, and `check_space_writer` drops a
-space write from a household we seated as a read-only Follower
-(`space_remote_members.role = 'subscriber'`) on a space we host.
+space-content write from a household that holds only read-only
+Follower seats in that space (`space_remote_members.role =
+'subscriber'`) — or only tombstoned ones.
+
+`check_space_writer` is **household-level and keyed on the signed
+`from_instance`**, never on a payload author field the sender writes,
+and it runs on **every receiving household, not only the space's
+host**: space content fans out peer-to-peer from the *originating*
+household (`broadcast_to_space_members`), so a member household
+receives a follower's writes directly. It covers the whole write
+vocabulary (`SPACE_WRITE_EVENT_TYPES` — posts, comments, pages, tasks,
+polls, stickies, calendar events, RSVPs, schedules, gallery items,
+bazaar listings / bids / offers, zones, location pins, media blobs,
+and every `*_UPDATED` / `*_DELETED` sibling), with one opt-in:
+`SPACE_COMMENT_CREATED` when the space has `allow_subscriber_comment`
+on and the payload's author names a live `subscriber` seat of that
+same household. A household the receiver holds **no** roster row for
+is not gated — that is roster convergence, not trust, and it is why a
+removed household is read back **including its tombstones** rather
+than as "never heard of". The same two gates re-run on the inner event
+of a `SPACE_ROUTED` envelope after the mesh unwrap
+(`run_post_decrypt_gates`), which would otherwise dispatch without
+passing through the pipeline at all.
 
 ```mermaid
 flowchart LR

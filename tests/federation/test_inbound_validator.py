@@ -34,6 +34,7 @@ from socialhome.federation.inbound_validator import (
     make_lookup_instance,
     make_parse_json,
     make_persist_replay,
+    run_post_decrypt_gates,
 )
 
 
@@ -605,6 +606,39 @@ async def test_peer_class_gate_is_a_step_in_both_shipped_pipelines():
     assert svc is not None
 
 
+async def test_the_space_writer_gate_is_a_step_in_the_shipped_pipeline():
+    """Mutation guard: the Follower gate has to be IN the chain — and
+    LAST, so the replay-id is persisted whether or not the write is kept
+    (otherwise the sender's outbox redelivers the refused envelope
+    forever)."""
+    owner = _StubPipelineOwner()
+    owner._space_repo = object()  # type: ignore[assignment]
+    owner._space_remote_member_repo = object()  # type: ignore[assignment]
+    from socialhome.federation.federation_service import FederationService
+
+    steps = FederationService._common_pipeline_steps(
+        owner,  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names[-1] == "check_space_writer"
+    assert names.index("persist_replay") < names.index("check_space_writer")
+
+
+async def test_the_mesh_gate_set_carries_both_the_ban_and_writer_checks():
+    """Mutation guard for the routed path: the inner event of a
+    SPACE_ROUTED is judged by the SAME steps, ban check included (the
+    pipeline only ever saw the relay's envelope)."""
+    owner = _StubPipelineOwner()
+    owner._space_repo = object()  # type: ignore[assignment]
+    owner._space_remote_member_repo = object()  # type: ignore[assignment]
+    names = [
+        getattr(s, "__name__", "")
+        for s in owner.post_decrypt_gate_steps(include_ban_check=True)
+    ]
+    assert names == ["ban_check", "check_space_writer"]
+
+
 async def _noop_step(ctx):
     return None
 
@@ -622,8 +656,23 @@ class _StubPipelineOwner:
     _space_remote_member_repo = None
     _own_instance_id = "own-1"
 
+    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):
+        # The real method, so the mutation guards below exercise the
+        # actual composition rather than a stand-in.
+        from socialhome.federation.federation_service import FederationService
+
+        return FederationService.post_decrypt_gate_steps(
+            self,  # type: ignore[arg-type]
+            include_ban_check=include_ban_check,
+        )
+
 
 # ─── Step 12: check_space_writer (the read-only Follower gate) ───────────
+#
+# The rule under test, in one line: a household that holds only Follower
+# seats in a space — or only tombstoned ones — has every space-content
+# write refused, on EVERY receiving household, keyed on the signed
+# ``from_instance`` and never on a sender-written author field.
 
 
 class _FakeFeatures:
@@ -647,147 +696,332 @@ class _FakeSpaceRepo:
 
 
 class _FakeSeat:
-    def __init__(self, role: str) -> None:
+    def __init__(
+        self,
+        role: str,
+        *,
+        user_id: str = "u-follower",
+        tombstoned: bool = False,
+    ) -> None:
         self.role = role
+        self.user_id = user_id
+        self.tombstoned = tombstoned
 
 
 class _FakeRemoteMemberRepo:
     def __init__(self, seats: dict) -> None:
         self._seats = seats
 
-    async def get(self, space_id, instance_id, user_id):
-        return self._seats.get((space_id, instance_id, user_id))
+    async def list_for_instance(
+        self,
+        space_id,
+        instance_id,
+        *,
+        include_tombstoned: bool = True,
+    ):
+        rows = self._seats.get((space_id, instance_id), [])
+        if include_tombstoned:
+            return list(rows)
+        return [r for r in rows if not r.tombstoned]
 
 
 OWN = "own-instance"
+
+#: Every content family the gate covers, one representative each, so a
+#: type dropped from ``SPACE_WRITE_EVENT_TYPES`` fails a named test and
+#: not only the domain tripwire.
+_WRITE_SAMPLES = [
+    (FederationEventType.SPACE_POST_CREATED, {"author": "u-follower"}),
+    (FederationEventType.SPACE_POST_UPDATED, {"id": "p1"}),
+    (FederationEventType.SPACE_POST_DELETED, {"post_id": "p1"}),
+    (FederationEventType.SPACE_MEDIA_BLOB, {"blob_id": "b1"}),
+    (FederationEventType.SPACE_COMMENT_UPDATED, {"comment_id": "c1"}),
+    (FederationEventType.SPACE_COMMENT_DELETED, {"comment_id": "c1"}),
+    (FederationEventType.SPACE_PAGE_CREATED, {"id": "pg1"}),
+    (FederationEventType.SPACE_TASK_CREATED, {"id": "t1"}),
+    (FederationEventType.SPACE_TASK_DELETED, {"id": "t1"}),
+    (FederationEventType.SPACE_POLL_VOTE_CAST, {"post_id": "p1"}),
+    (FederationEventType.SPACE_POLL_CLOSED, {"post_id": "p1"}),
+    (FederationEventType.SPACE_STICKY_CREATED, {"id": "s1"}),
+    (FederationEventType.SPACE_CALENDAR_EVENT_CREATED, {"event_id": "e1"}),
+    (FederationEventType.SPACE_CALENDAR_EVENT_DELETED, {"event_id": "e1"}),
+    (FederationEventType.SPACE_RSVP_UPDATED, {"event_id": "e1"}),
+    (FederationEventType.SPACE_SCHEDULE_FINALIZED, {"post_id": "p1"}),
+    (FederationEventType.SPACE_GALLERY_ITEM_CREATED, {"id": "g1"}),
+    (FederationEventType.SPACE_GALLERY_ITEM_DELETED, {"id": "g1"}),
+    (FederationEventType.BAZAAR_LISTING_CREATED, {"post_id": "p1"}),
+    (FederationEventType.BAZAAR_BID_PLACED, {"bid_id": "b1"}),
+    (FederationEventType.BAZAAR_OFFER_ACCEPTED, {"bid_id": "b1"}),
+    (FederationEventType.SPACE_LOCATION_UPDATED, {"user_id": "u-follower"}),
+    (FederationEventType.SPACE_ZONE_UPSERTED, {"id": "z1"}),
+    (FederationEventType.SPACE_ZONE_DELETED, {"id": "z1"}),
+]
+
+REFUSED = {"status": "ok", "dropped": "subscriber-write"}
 
 
 def _writer_step(
     *,
     owner=OWN,
-    role="subscriber",
+    seats=None,
     allow_comment=False,
     space_id="sp-1",
 ):
+    if seats is None:
+        seats = [_FakeSeat("subscriber")]
     return make_check_space_writer(
         space_repo=_FakeSpaceRepo(
             {space_id: _FakeSpace(owner, allow_comment=allow_comment)}
         ),
-        remote_member_repo=_FakeRemoteMemberRepo(
-            {(space_id, "peer-x", "u-follower"): _FakeSeat(role)}
+        remote_member_repo=_FakeRemoteMemberRepo({(space_id, "peer-x"): seats}),
+    )
+
+
+def _space_event(event_type, payload, *, space_id="sp-1"):
+    """A write envelope with the ROUTING ``space_id`` set — what every
+    sender we ship produces on the direct path."""
+    return FederationEvent(
+        msg_id="m1",
+        event_type=event_type,
+        from_instance="peer-x",
+        to_instance="self",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        payload=payload,
+        space_id=space_id,
+    )
+
+
+async def _run(step, event_type, payload, *, space_id="sp-1"):
+    ctx = InboundContext()
+    ctx.event = _space_event(event_type, payload, space_id=space_id)
+    await step(ctx)
+    return ctx
+
+
+@pytest.mark.parametrize("event_type,payload", _WRITE_SAMPLES)
+async def test_space_writer_refuses_every_write_family_from_a_follower(
+    event_type,
+    payload,
+):
+    """The whole content vocabulary, not just posts and comments.
+
+    A Follower household holds the epoch content key, so it can produce a
+    perfectly valid, correctly-signed envelope of ANY of these types — and
+    the handlers persist them with no membership check of their own. This
+    is the parametrisation that closes that: tasks, stickies, calendar
+    events, poll votes, bazaar bids, zones, media bytes and every
+    ``*_UPDATED`` / ``*_DELETED`` sibling are refused exactly like a post.
+    """
+    ctx = await _run(_writer_step(), event_type, payload)
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_refuses_a_spoofed_author():
+    """The decision is keyed on the SIGNED ``from_instance``, never on the
+    payload's author field, which the sender writes.
+
+    The first cut of this gate looked the author up as a seat and passed
+    when it found none — so ``author="anybody"`` walked straight through.
+    A household is a Follower or it is not; who it claims to be writing as
+    changes nothing.
+    """
+    ctx = await _run(
+        _writer_step(),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-nobody-has-ever-heard-of", "content": "hi"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_refuses_an_unresolvable_space():
+    """No routing ``space_id`` and none in the payload → refuse.
+
+    Every writer we ship sets the routing ``space_id``
+    (``broadcast_to_space_members`` passes it per peer) or carries it in
+    the payload, so an envelope with neither is a sender that removed it.
+    Passing it would be the C3 hole: a handler that keys on a row id alone
+    (a comment, an RSVP, a calendar delete) would then apply the write to
+    whatever space that row lives in.
+    """
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"author": "u-follower", "post_id": "p1"},
+    )
+    await _writer_step()(ctx)
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_reads_the_space_id_out_of_the_payload():
+    """Mesh-routed envelopes carry no plaintext routing ``space_id`` (the
+    relay must not learn which space), so the payload's copy is the one
+    the gate reads there."""
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-follower"},
+    )
+    await _writer_step()(ctx)
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_refuses_a_household_with_only_tombstoned_seats():
+    """A kicked household must not read like a household we never met.
+
+    ``get`` / ``list_for_space`` filter tombstones, so a removed follower
+    used to read as "no row" — and "no row" is the one answer this gate is
+    lenient about. The gate reads tombstones deliberately.
+    """
+    ctx = await _run(
+        _writer_step(seats=[_FakeSeat("member", tombstoned=True)]),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-follower"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_passes_a_household_holding_one_live_member():
+    """The unit is the HOUSEHOLD: a mixed household (a Follower seat and a
+    real member seat) may write, because a real member of it may."""
+    ctx = await _run(
+        _writer_step(
+            seats=[
+                _FakeSeat("subscriber", user_id="u-follower"),
+                _FakeSeat("member", user_id="u-real"),
+            ]
         ),
-        own_instance_id=OWN,
-    )
-
-
-async def test_space_writer_drops_a_post_from_a_follower_household():
-    """The flagship refusal: a household seated as a read-only Follower
-    holds the space's content key, so it can produce a perfectly valid,
-    correctly-signed SPACE_POST_CREATED. The HOST's seat is the
-    authority, and it says no."""
-    step = _writer_step()
-    ctx = InboundContext()
-    ctx.event = _event(
         FederationEventType.SPACE_POST_CREATED,
-        {"space_id": "sp-1", "author": "u-follower", "content": "hi"},
+        {"author": "u-follower"},
     )
-    await step(ctx)
-    assert ctx.early_response == {"status": "ok", "dropped": "subscriber-write"}
+    assert ctx.early_response is None
 
 
-async def test_space_writer_drops_a_comment_unless_the_space_opted_in():
-    """``allow_subscriber_comment`` is the same admin opt-in that decides
-    what a LOCAL subscriber may do — a remote follower is the same kind
-    of seat, so it governs both."""
-    blocked = _writer_step(allow_comment=False)
-    ctx = InboundContext()
-    ctx.event = _event(
+async def test_space_writer_passes_an_admin_seat():
+    ctx = await _run(
+        _writer_step(seats=[_FakeSeat("admin")]),
+        FederationEventType.SPACE_TASK_CREATED,
+        {"id": "t1"},
+    )
+    assert ctx.early_response is None
+
+
+async def test_space_writer_passes_a_household_we_hold_no_row_for():
+    """Roster convergence, and the ONLY leniency left.
+
+    Zero rows means the mirror has not converged (a household seated on
+    the host before the roster gossip reached us). Refusing there would
+    drop real content from real members whenever a roster lagged. A
+    household we hold ANY row for gets no such benefit.
+    """
+    ctx = await _run(
+        _writer_step(seats=[]),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-follower"},
+    )
+    assert ctx.early_response is None
+
+
+async def test_space_writer_enforces_on_a_household_that_does_not_host():
+    """Space content fans out peer-to-peer from the ORIGINATING household
+    (``broadcast_to_space_members``), so a member household receives a
+    Follower's writes directly and is a first-class enforcement point. The
+    first cut only enforced on the host, which the follower could simply
+    route around — it learns every member household's instance id from the
+    roster snapshot in its own redeem ACK.
+    """
+    ctx = await _run(
+        _writer_step(owner="some-other-host"),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-follower"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_allows_a_comment_only_with_the_opt_in():
+    """``allow_subscriber_comment`` is the one opt-in, and it is the same
+    admin toggle that governs a LOCAL subscriber."""
+    blocked = await _run(
+        _writer_step(allow_comment=False),
         FederationEventType.SPACE_COMMENT_CREATED,
-        {"space_id": "sp-1", "author": "u-follower", "content": "nice"},
+        {"author": "u-follower", "content": "nice"},
     )
-    await blocked(ctx)
-    assert ctx.early_response == {"status": "ok", "dropped": "subscriber-write"}
+    assert blocked.early_response == REFUSED
 
-    allowed = _writer_step(allow_comment=True)
-    ctx2 = InboundContext()
-    ctx2.event = _event(
+    allowed = await _run(
+        _writer_step(allow_comment=True),
         FederationEventType.SPACE_COMMENT_CREATED,
-        {"space_id": "sp-1", "author": "u-follower", "content": "nice"},
+        {"author": "u-follower", "content": "nice"},
     )
-    await allowed(ctx2)
-    assert ctx2.early_response is None
+    assert allowed.early_response is None
 
 
-async def test_space_writer_never_blocks_a_comment_opt_in_for_a_post():
-    """The opt-in is per action: a space that lets followers comment
-    still never lets them post."""
-    step = _writer_step(allow_comment=True)
-    ctx = InboundContext()
-    ctx.event = _event(
+async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():
+    """Even under the opt-in the author must name a LIVE ``subscriber``
+    seat of that same household — otherwise the exception would be the
+    author-spoof hole again, wearing a feature flag."""
+    ctx = await _run(
+        _writer_step(allow_comment=True),
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"author": "u-somebody-else", "content": "nice"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_never_extends_the_comment_opt_in_to_a_post():
+    """The opt-in is per action: a space that lets followers comment still
+    never lets them post."""
+    ctx = await _run(
+        _writer_step(allow_comment=True),
         FederationEventType.SPACE_POST_CREATED,
-        {"space_id": "sp-1", "author": "u-follower"},
+        {"author": "u-follower"},
     )
-    await step(ctx)
-    assert ctx.early_response == {"status": "ok", "dropped": "subscriber-write"}
+    assert ctx.early_response == REFUSED
 
 
-async def test_space_writer_passes_a_member_seat():
-    """A ``member`` seat is exactly what it says — untouched."""
-    step = _writer_step(role="member")
-    ctx = InboundContext()
-    ctx.event = _event(
-        FederationEventType.SPACE_POST_CREATED,
-        {"space_id": "sp-1", "author": "u-follower"},
+async def test_space_writer_refuses_a_comment_opt_in_on_an_unknown_space():
+    """The exception needs the space's features to exist. A space we hold
+    no row for cannot have opted in, so the refusal stands."""
+    step = make_check_space_writer(
+        space_repo=_FakeSpaceRepo({}),
+        remote_member_repo=_FakeRemoteMemberRepo(
+            {("sp-1", "peer-x"): [_FakeSeat("subscriber")]}
+        ),
     )
-    await step(ctx)
-    assert ctx.early_response is None
-
-
-async def test_space_writer_ignores_a_space_we_do_not_host():
-    """A member household holds a MIRROR of the roster, not authority
-    over it. Enforcing on a mirror would drop real content whenever the
-    mirror lagged; the host is the single place the decision is made."""
-    step = _writer_step(owner="some-other-host")
-    ctx = InboundContext()
-    ctx.event = _event(
-        FederationEventType.SPACE_POST_CREATED,
-        {"space_id": "sp-1", "author": "u-follower"},
+    ctx = await _run(
+        step,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"author": "u-follower"},
     )
-    await step(ctx)
-    assert ctx.early_response is None
+    assert ctx.early_response == REFUSED
 
 
-async def test_space_writer_passes_a_sender_with_no_seat_row():
-    """No row means "not in our mirror", which is the pre-existing state
-    for plenty of legitimate senders (a roster that has not converged
-    yet). Inventing a rejection there would fail in the direction of
-    losing real content."""
-    step = _writer_step()
-    ctx = InboundContext()
-    ctx.event = _event(
-        FederationEventType.SPACE_POST_CREATED,
-        {"space_id": "sp-1", "author": "u-stranger"},
-    )
-    await step(ctx)
-    assert ctx.early_response is None
-
-
-async def test_space_writer_skips_unmapped_event_types():
-    """Only the two author-bearing space CREATE events are gated; a
-    roster / routing envelope passes untouched."""
-    step = _writer_step()
-    ctx = InboundContext()
-    ctx.event = _event(
+async def test_space_writer_skips_reader_event_types():
+    """A Follower is a real participant: roster, sync, key-exchange and
+    report traffic passes untouched."""
+    for event_type in (
         FederationEventType.SPACE_MEMBER_JOINED,
-        {"space_id": "sp-1", "author": "u-follower"},
+        FederationEventType.SPACE_REPORT,
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_INSTANCE_LEFT,
+    ):
+        ctx = await _run(_writer_step(), event_type, {"author": "u-follower"})
+        assert ctx.early_response is None, event_type
+
+
+async def test_space_writer_refuses_an_authorless_comment_under_the_opt_in():
+    """No author field, nothing to bind the opt-in to — refuse."""
+    ctx = await _run(
+        _writer_step(allow_comment=True),
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"content": "nice"},
     )
-    await step(ctx)
-    assert ctx.early_response is None
+    assert ctx.early_response == REFUSED
 
 
-async def test_space_writer_fails_soft_on_a_lookup_error():
-    """A transient DB hiccup must not start dropping legitimate space
-    content — the seat is durable, so the next envelope is gated again."""
+async def test_space_writer_keeps_the_refusal_when_the_features_read_fails():
+    """The inverse of the seat lookup's fail-soft: the opt-in is an
+    exception to a "no", so an unreadable flag leaves the "no"."""
 
     class _Exploding:
         async def get(self, *a, **kw):
@@ -795,15 +1029,79 @@ async def test_space_writer_fails_soft_on_a_lookup_error():
 
     step = make_check_space_writer(
         space_repo=_Exploding(),
+        remote_member_repo=_FakeRemoteMemberRepo(
+            {("sp-1", "peer-x"): [_FakeSeat("subscriber")]}
+        ),
+    )
+    ctx = await _run(
+        step,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"author": "u-follower"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_post_decrypt_gates_treat_a_raising_step_as_a_refusal():
+    """The ban check rejects by raising ``ValueError``, so the mesh seam
+    has to read that as "drop", not let it escape into the unwrap."""
+
+    async def _ban(ctx):
+        raise ValueError("Instance 'peer-x' is banned from space 'sp-1'")
+
+    allowed = await run_post_decrypt_gates(InboundContext(), steps=[_ban])
+    assert allowed is False
+
+
+async def test_post_decrypt_gates_stop_at_the_first_early_response():
+    """A step that sets ``early_response`` (the writer gate's refusal)
+    short-circuits the rest, exactly as the pipeline runner does."""
+    calls: list[str] = []
+
+    async def _refuse(ctx):
+        calls.append("refuse")
+        ctx.early_response = {"status": "ok", "dropped": "subscriber-write"}
+
+    async def _never(ctx):  # pragma: no cover — must not run
+        calls.append("never")
+
+    allowed = await run_post_decrypt_gates(
+        InboundContext(),
+        steps=[_refuse, _never],
+    )
+    assert allowed is False
+    assert calls == ["refuse"]
+
+
+async def test_post_decrypt_gates_pass_an_event_no_step_objects_to():
+    calls: list[str] = []
+
+    async def _ok(ctx):
+        calls.append("ran")
+
+    allowed = await run_post_decrypt_gates(InboundContext(), steps=[_ok, _ok])
+    assert allowed is True
+    assert calls == ["ran", "ran"]
+
+
+async def test_space_writer_fails_soft_on_a_seat_lookup_error():
+    """A transient DB hiccup must not start dropping legitimate space
+    content — the seat is durable, so the next envelope is gated again.
+    The lookup RETURNING nothing is a different thing entirely and is
+    never a pass for a household that has rows."""
+
+    class _Exploding:
+        async def list_for_instance(self, *a, **kw):
+            raise RuntimeError("db is having a day")
+
+    step = make_check_space_writer(
+        space_repo=_FakeSpaceRepo({}),
         remote_member_repo=_Exploding(),
-        own_instance_id=OWN,
     )
-    ctx = InboundContext()
-    ctx.event = _event(
+    ctx = await _run(
+        step,
         FederationEventType.SPACE_POST_CREATED,
-        {"space_id": "sp-1", "author": "u-follower"},
+        {"author": "u-follower"},
     )
-    await step(ctx)
     assert ctx.early_response is None
 
 

@@ -286,6 +286,12 @@ class SpaceMediaSyncService:
                         payload=payload,
                         raw_chunk=raw,
                         mesh_fallback=True,
+                        # The envelope's routing ``space_id`` — every other
+                        # space fan-out sets it, and these frames did not:
+                        # the §24.11 ban check reads it off the envelope and
+                        # silently no-ops when it is absent, so a household
+                        # banned from the space could still push bytes at us.
+                        space_id=entry.space_id,
                     )
                     if not result.ok:
                         raise RuntimeError(result.error or "delivery_failed")

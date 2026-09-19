@@ -411,6 +411,13 @@ class SpaceService(SpaceMemberGuardMixin):
         ``issuer_instance_id`` requests.
         """
         self._redeem_coordinator = coordinator
+        # And the reverse: the coordinator needs us to sign + fan out the
+        # v_23 roster gossip for a seat a redeem just installed, so every
+        # OTHER member household holds a row for the new household (the
+        # §24.11 space-writer gate has nothing to refuse on without one).
+        attach = getattr(coordinator, "attach_space_service", None)
+        if attach is not None:
+            attach(self)
 
     def attach_mesh(
         self,

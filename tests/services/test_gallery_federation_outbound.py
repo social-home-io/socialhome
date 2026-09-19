@@ -171,7 +171,14 @@ async def test_deleted_event_emits_delete(env):
     types = {entry[1] for entry in fed.sent}
     assert types == {FederationEventType.SPACE_GALLERY_ITEM_DELETED}
     payload = fed.sent[0][2]
-    assert payload == {"id": "it-1", "album_id": "alb-space-A"}
+    # ``space_id`` rides the payload so a mesh-relayed envelope — which
+    # carries no plaintext routing space_id — is still attributable to a
+    # space by the receiver's §24.11 space-writer gate.
+    assert payload == {
+        "id": "it-1",
+        "album_id": "alb-space-A",
+        "space_id": "sp-A",
+    }
 
 
 async def test_deleted_event_for_household_album_skipped(env):

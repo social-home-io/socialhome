@@ -161,6 +161,13 @@ class GalleryFederationOutbound:
         event_type: FederationEventType,
         payload: dict,
     ) -> None:
+        # The space rides the payload as well as the routing field. A
+        # mesh-relayed envelope (SPACE_ROUTED) carries no plaintext
+        # routing ``space_id`` — a relay must not learn which space is
+        # being served — so the payload's copy is the only thing the
+        # receiver's §24.11 space-writer gate can read there. Additive;
+        # older peers ignore it.
+        payload = {**payload, "space_id": space_id}
         try:
             peers = await self._space_repo.list_member_instances(space_id)
         except Exception as exc:  # pragma: no cover — defensive
