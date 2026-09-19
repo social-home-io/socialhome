@@ -528,6 +528,14 @@ class ClusterService:
         # shared-DB deployment) silently didn't work for it. So when we learn a
         # peer we did NOT already know, we HELLO back — one round-trip, and both
         # sides converge the moment EITHER announces, whatever the boot order.
+        # The Nomad peer template renders ``nomadService "gfs"`` — which
+        # includes THIS alloc — so a node HELLOs itself. Never register self
+        # as a peer: it would inflate ``cluster_nodes``, make a node heartbeat
+        # itself, and show up peering with itself on ``/cluster/health``. The
+        # ``node_id`` is unique per alloc, so it is the reliable self-check
+        # (the URL may not match ``base_url`` exactly).
+        if from_node_id == self._node_id:
+            return
         existing = await self._repo.list_nodes()
         already_known = any(n.node_id == from_node_id for n in existing)
         await self._repo.upsert_node(
@@ -830,7 +838,7 @@ class ClusterService:
         """
         while not self._stop.is_set():
             for peer_url in self._peers:
-                if not peer_url:
+                if not peer_url or peer_url == self._self_url:
                     continue
                 try:
                     await self._post_to_peer(
@@ -865,6 +873,8 @@ class ClusterService:
             "public_key": self._own_pk_hex,
         }
         for peer_url in self._peers:
+            if peer_url == self._self_url:
+                continue
             try:
                 await self._post_to_peer(peer_url, NODE_HELLO, msg, session=None)
             except Exception as exc:
