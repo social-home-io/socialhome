@@ -85,6 +85,7 @@ from .inbound_validator import (
     _InboxInstance,
     make_ban_check,
     make_check_deprovisioned_author,
+    make_check_space_writer,
     make_check_replay,
     make_check_peer_class,
     make_check_timestamp,
@@ -183,6 +184,8 @@ class FederationService:
         "_event_registry",
         "_gfs_connection_service",
         "_user_repo",
+        "_space_repo",
+        "_space_remote_member_repo",
         "_route_service",
         "_last_mesh_begin_at",
         "_routed_handler",
@@ -238,6 +241,11 @@ class FederationService:
         # legacy boot path / unit-test fixture without a user repo still
         # functions, just without the visibility backstop.
         self._user_repo = None
+        # Set via :meth:`attach_space_write_gate`. Enables the §24.11
+        # space-writer step, which refuses a write from a household we
+        # seated as a read-only Follower.
+        self._space_repo = None
+        self._space_remote_member_repo = None
         # §D2 PR2 mesh-routing primitives — set via :meth:`attach_mesh`.
         # When wired, :meth:`send_with_mesh_fallback` discovers a path
         # through the federation graph and ships SPACE_ROUTED when a
@@ -360,6 +368,17 @@ class FederationService:
             steps.append(
                 make_check_deprovisioned_author(user_repo=self._user_repo),
             )
+        # Host-side read-only-Follower gate. Also last, and for the same
+        # reason: the replay-id must be persisted whether or not we keep
+        # the event, or the sender's outbox redelivers forever.
+        if self._space_repo is not None and self._space_remote_member_repo is not None:
+            steps.append(
+                make_check_space_writer(
+                    space_repo=self._space_repo,
+                    remote_member_repo=self._space_remote_member_repo,
+                    own_instance_id=self._own_instance_id,
+                ),
+            )
         return steps
 
     # ─── Wiring helpers ──────────────────────────────────────────────────
@@ -436,6 +455,20 @@ class FederationService:
         sender's outbox sees the 200 OK and stops redelivering).
         """
         self._user_repo = user_repo
+
+    def attach_space_write_gate(self, space_repo, space_remote_member_repo) -> None:
+        """Attach the repos the §24.11 space-writer step reads.
+
+        Enables ``make_check_space_writer``: a household we seated as a
+        ``subscriber`` (it redeemed a Follower invite link) receives the
+        space's content stream but has every write to a space WE host
+        refused here, before dispatch — the host's seat is the authority,
+        never the sending household's own view of its member's role.
+        Unset repos skip the step so legacy fixtures still build a working
+        pipeline.
+        """
+        self._space_repo = space_repo
+        self._space_remote_member_repo = space_remote_member_repo
 
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""

@@ -27,6 +27,7 @@ from socialhome.federation.inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_peer_class,
+    make_check_space_writer,
     make_check_replay,
     make_check_timestamp,
     make_idempotency_check,
@@ -617,6 +618,193 @@ class _StubPipelineOwner:
     _federation_repo = None
     _idempotency_cache = None
     _user_repo = None
+    _space_repo = None
+    _space_remote_member_repo = None
+    _own_instance_id = "own-1"
+
+
+# ─── Step 12: check_space_writer (the read-only Follower gate) ───────────
+
+
+class _FakeFeatures:
+    def __init__(self, allow_subscriber_comment: bool = False) -> None:
+        self.allow_subscriber_comment = allow_subscriber_comment
+        self.allow_subscriber_react = False
+
+
+class _FakeSpace:
+    def __init__(self, owner_instance_id: str, *, allow_comment: bool = False) -> None:
+        self.owner_instance_id = owner_instance_id
+        self.features = _FakeFeatures(allow_comment)
+
+
+class _FakeSpaceRepo:
+    def __init__(self, by_id: dict) -> None:
+        self._by_id = by_id
+
+    async def get(self, space_id: str):
+        return self._by_id.get(space_id)
+
+
+class _FakeSeat:
+    def __init__(self, role: str) -> None:
+        self.role = role
+
+
+class _FakeRemoteMemberRepo:
+    def __init__(self, seats: dict) -> None:
+        self._seats = seats
+
+    async def get(self, space_id, instance_id, user_id):
+        return self._seats.get((space_id, instance_id, user_id))
+
+
+OWN = "own-instance"
+
+
+def _writer_step(
+    *,
+    owner=OWN,
+    role="subscriber",
+    allow_comment=False,
+    space_id="sp-1",
+):
+    return make_check_space_writer(
+        space_repo=_FakeSpaceRepo(
+            {space_id: _FakeSpace(owner, allow_comment=allow_comment)}
+        ),
+        remote_member_repo=_FakeRemoteMemberRepo(
+            {(space_id, "peer-x", "u-follower"): _FakeSeat(role)}
+        ),
+        own_instance_id=OWN,
+    )
+
+
+async def test_space_writer_drops_a_post_from_a_follower_household():
+    """The flagship refusal: a household seated as a read-only Follower
+    holds the space's content key, so it can produce a perfectly valid,
+    correctly-signed SPACE_POST_CREATED. The HOST's seat is the
+    authority, and it says no."""
+    step = _writer_step()
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-follower", "content": "hi"},
+    )
+    await step(ctx)
+    assert ctx.early_response == {"status": "ok", "dropped": "subscriber-write"}
+
+
+async def test_space_writer_drops_a_comment_unless_the_space_opted_in():
+    """``allow_subscriber_comment`` is the same admin opt-in that decides
+    what a LOCAL subscriber may do — a remote follower is the same kind
+    of seat, so it governs both."""
+    blocked = _writer_step(allow_comment=False)
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"space_id": "sp-1", "author": "u-follower", "content": "nice"},
+    )
+    await blocked(ctx)
+    assert ctx.early_response == {"status": "ok", "dropped": "subscriber-write"}
+
+    allowed = _writer_step(allow_comment=True)
+    ctx2 = InboundContext()
+    ctx2.event = _event(
+        FederationEventType.SPACE_COMMENT_CREATED,
+        {"space_id": "sp-1", "author": "u-follower", "content": "nice"},
+    )
+    await allowed(ctx2)
+    assert ctx2.early_response is None
+
+
+async def test_space_writer_never_blocks_a_comment_opt_in_for_a_post():
+    """The opt-in is per action: a space that lets followers comment
+    still never lets them post."""
+    step = _writer_step(allow_comment=True)
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-follower"},
+    )
+    await step(ctx)
+    assert ctx.early_response == {"status": "ok", "dropped": "subscriber-write"}
+
+
+async def test_space_writer_passes_a_member_seat():
+    """A ``member`` seat is exactly what it says — untouched."""
+    step = _writer_step(role="member")
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-follower"},
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_space_writer_ignores_a_space_we_do_not_host():
+    """A member household holds a MIRROR of the roster, not authority
+    over it. Enforcing on a mirror would drop real content whenever the
+    mirror lagged; the host is the single place the decision is made."""
+    step = _writer_step(owner="some-other-host")
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-follower"},
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_space_writer_passes_a_sender_with_no_seat_row():
+    """No row means "not in our mirror", which is the pre-existing state
+    for plenty of legitimate senders (a roster that has not converged
+    yet). Inventing a rejection there would fail in the direction of
+    losing real content."""
+    step = _writer_step()
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-stranger"},
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_space_writer_skips_unmapped_event_types():
+    """Only the two author-bearing space CREATE events are gated; a
+    roster / routing envelope passes untouched."""
+    step = _writer_step()
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_MEMBER_JOINED,
+        {"space_id": "sp-1", "author": "u-follower"},
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_space_writer_fails_soft_on_a_lookup_error():
+    """A transient DB hiccup must not start dropping legitimate space
+    content — the seat is durable, so the next envelope is gated again."""
+
+    class _Exploding:
+        async def get(self, *a, **kw):
+            raise RuntimeError("db is having a day")
+
+    step = make_check_space_writer(
+        space_repo=_Exploding(),
+        remote_member_repo=_Exploding(),
+        own_instance_id=OWN,
+    )
+    ctx = InboundContext()
+    ctx.event = _event(
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "sp-1", "author": "u-follower"},
+    )
+    await step(ctx)
+    assert ctx.early_response is None
 
 
 # ─── Relay-carried envelopes: the wider skew window (§D2b) ───────────────

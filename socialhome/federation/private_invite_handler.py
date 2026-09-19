@@ -31,7 +31,7 @@ from ..domain.events import (
 )
 from ..crypto import derive_instance_id
 from ..domain.federation import FederationEventType
-from ..domain.space import RemoteAdminOutcome
+from ..domain.space import RemoteAdminOutcome, SpaceRole
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
 from ..services.space_crypto_service import (
@@ -58,6 +58,19 @@ if TYPE_CHECKING:
     from .federation_service import FederationService
 
 log = logging.getLogger(__name__)
+
+#: Roles a roster mirror may store for a remote member — the
+#: ``space_remote_members.role`` CHECK, in code. ``subscriber`` is a
+#: household that redeemed a Follower invite link (migration 0054, v_30);
+#: ``owner`` is absent because ownership is a local-only privilege and the
+#: host's own ``space_members.role`` can legitimately carry it on the wire.
+MIRRORABLE_REMOTE_ROLES: frozenset[str] = frozenset(
+    {
+        SpaceRole.MEMBER.value,
+        SpaceRole.ADMIN.value,
+        SpaceRole.SUBSCRIBER.value,
+    }
+)
 
 
 class PrivateSpaceInviteHandler:
@@ -1199,7 +1212,27 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
-        role = str(p.get("role") or "member")
+        role = str(p.get("role") or SpaceRole.MEMBER.value)
+        if role not in MIRRORABLE_REMOTE_ROLES:
+            # The role is advisory here; the mutation is not. A value this
+            # household's ``space_remote_members.role`` CHECK rejects — an
+            # ``owner`` (the host ships the raw ``space_members.role``, and
+            # ownership has no remote shape), or a role from a future
+            # version — used to raise IntegrityError out of
+            # ``apply_member_event`` and take the WHOLE event down with it,
+            # tombstone included. The version guard then refused the retry
+            # at the same ``member_version``, so a removal lost this way was
+            # unhealable. Coerce to the least-privileged real seat and keep
+            # the mutation: losing "which seat" is recoverable from the next
+            # snapshot, losing "they left" is not.
+            log.info(
+                "roster-gossip %s for %s: unknown role %r — mirroring as %r",
+                event.event_type,
+                space_id,
+                role,
+                SpaceRole.MEMBER.value,
+            )
+            role = SpaceRole.MEMBER.value
         display_name = p.get("display_name")
         user_pk = p.get("user_pk")
         await self._remote_members.apply_member_event(

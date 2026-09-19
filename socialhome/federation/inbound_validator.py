@@ -54,6 +54,7 @@ from ..domain.federation import (
     InstanceSource,
     RemoteInstance,
 )
+from ..domain.space import SpaceRole
 
 log = logging.getLogger(__name__)
 
@@ -625,6 +626,127 @@ def make_check_deprovisioned_author(*, user_repo) -> InboundStep:
             }
 
     return check_deprovisioned_author
+
+
+#: Space-content **write** events and the payload field naming the user who
+#: made the write. A household seated as a ``subscriber`` (a Follower that
+#: redeemed a role-carrying invite link) is a reader: every one of these is
+#: refused on the host regardless of what the sending household believes its
+#: own member's role to be. Keyed by event-type *value*, same shape as
+#: :data:`_AUTHOR_FIELD_FOR_INBOUND`, with the action name
+#: ``SpaceFeatures`` opts in by (``comment`` can be allowed for subscribers
+#: via ``allow_subscriber_comment``; ``post`` never can).
+#:
+#: Only the two CREATE events are listed, because they are the only
+#: space-content envelopes that name their author: ``*_updated`` /
+#: ``*_deleted`` carry an id and nothing else, and reactions on a space post
+#: do not federate at all (they ride the local row and the §25.6 sync
+#: snapshot). A follower has no content on the host to edit or delete, so
+#: there is nothing for those events to refer to anyway.
+_SPACE_WRITE_FOR_INBOUND: dict[str, tuple[str, str]] = {
+    "space_post_created": ("author", "post"),
+    "space_comment_created": ("author", "comment"),
+}
+
+
+def make_check_space_writer(
+    *,
+    space_repo,
+    remote_member_repo,
+    own_instance_id: str,
+) -> InboundStep:
+    """Step 12: refuse a space write from a household we seated as a reader.
+
+    A ``subscriber`` seat in ``space_remote_members`` (migration 0054) is
+    the on-disk fact that a household redeemed a **Follower** invite link.
+    Such a household is a full participant on the transport — it sits in
+    ``space_instances``, so ``broadcast_to_space_members`` delivers the
+    content stream and the epoch content key reaches it — and it must not
+    be able to write back.
+
+    Enforced **here**, on the host, rather than trusted to the sender.
+    The follower's own household already refuses the write locally
+    (``_assert_writable_member`` on its ``space_members`` row), but that
+    is its own copy of the rule; a patched or hostile household holds a
+    valid content key and could produce a perfectly well-formed,
+    correctly-signed ``SPACE_POST_CREATED``. The seat the HOST decided at
+    redeem time is the only authority that matters, so it is the one read
+    here.
+
+    Scope, deliberately narrow:
+
+    * Only for spaces **we host** (``owner_instance_id == own_instance_id``).
+      A member household holds a mirror of the roster, not the authority
+      over it; the host is the single place the decision is made, and it is
+      the host that fans content out.
+    * Only when the sender actually HAS a row with ``role='subscriber'``.
+      No row means "not in our mirror", which is the pre-existing state
+      for plenty of legitimate senders (a roster that has not converged
+      yet) — inventing a rejection there would be a behaviour change well
+      beyond a Follower seat, and one that fails in the direction of
+      losing real content.
+    * ``allow_subscriber_comment`` still governs. It is the same admin
+      opt-in that decides what a LOCAL subscriber may do, and a remote
+      follower is the same kind of seat; splitting the two would mean a
+      space could invite followers it then treats differently depending on
+      which household they sit on. (Its sibling
+      ``allow_subscriber_react`` has no inbound surface: space reactions
+      are not federated events.)
+
+    Fail-soft on an infrastructure error (a lookup that raises) for the
+    same reason :func:`make_check_deprovisioned_author` does: a transient
+    DB hiccup must not start dropping legitimate space content. The seat
+    itself is durable, so the next envelope is gated again.
+    """
+
+    async def check_space_writer(ctx: InboundContext) -> None:
+        event = ctx.event
+        if event is None:
+            return
+        entry = _SPACE_WRITE_FOR_INBOUND.get(event.event_type.value)
+        if entry is None:
+            return
+        author_field, action = entry
+        payload = event.payload if isinstance(event.payload, dict) else None
+        if payload is None:
+            return
+        space_id = event.space_id or str(payload.get("space_id") or "")
+        author_user_id = str(payload.get(author_field) or "")
+        if not space_id or not author_user_id:
+            return
+        try:
+            space = await space_repo.get(space_id)
+            if space is None or space.owner_instance_id != own_instance_id:
+                return
+            seat = await remote_member_repo.get(
+                space_id,
+                event.from_instance,
+                author_user_id,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            log.debug(
+                "inbound: space-writer lookup failed for %s in %s: %s",
+                author_user_id,
+                space_id,
+                exc,
+            )
+            return
+        if seat is None or seat.role != SpaceRole.SUBSCRIBER.value:
+            return
+        features = space.features
+        if action == "comment" and features.allow_subscriber_comment:
+            return
+        log.warning(
+            "inbound: refused %s in space %s from %s@%s — that household "
+            "holds a read-only Follower seat here",
+            event.event_type.value,
+            space_id,
+            author_user_id,
+            event.from_instance,
+        )
+        ctx.early_response = {"status": "ok", "dropped": "subscriber-write"}
+
+    return check_space_writer
 
 
 # ─── Pipeline runner ─────────────────────────────────────────────────────

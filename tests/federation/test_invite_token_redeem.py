@@ -39,7 +39,7 @@ from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
 )
-from socialhome.domain.federation_capabilities import OURS
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -1555,9 +1555,17 @@ async def test_bootstrap_relay_sees_only_the_recipient():
 
 
 async def test_bootstrap_rejected_when_issuer_is_too_old():
-    """Sub-v_29 issuer → the unchanged "pair with them" message."""
+    """Sub-v_29 issuer → the unchanged "pair with them" message.
+
+    Pinned to the capability, not to ``OURS - 1``: later versions keep
+    shipping and the gate is still the version that introduced the
+    bootstrap handler.
+    """
     env = _bootstrap_pair()
-    stale_hint = _hint_for(env.issuer_party, proto=OURS - 1)
+    stale_hint = _hint_for(
+        env.issuer_party,
+        proto=FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM - 1,
+    )
     with pytest.raises(SpacePermissionError) as exc:
         await env.redeemer.request_redeem(
             "tok-1",
@@ -1984,11 +1992,16 @@ async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
     ]
 
 
-async def test_subscriber_link_is_refused_across_households():
-    """``space_remote_members.role`` admits member|admin only (migration
-    0009 — a subscriber has no row there at all). Rather than silently
-    upgrading a reader to a writer, the cross-household redeem of a
-    subscriber link fails closed with a reason the SPA can render."""
+async def test_subscriber_link_seats_a_follower_across_households():
+    """A Follower link redeemed by ANOTHER household seats that household
+    as ``role='subscriber'`` on the host, and tells the redeemer so.
+
+    This is the flagship case for a follower link: hand it to a stranger
+    so they can *read* the space. It used to fail closed because
+    ``space_remote_members.role`` admitted member|admin only; migration
+    0054 gave a remote reader a row shape, so the redeem runs through
+    like any other and the seat the ISSUER minted is what lands.
+    """
     sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-sub",
@@ -1997,23 +2010,25 @@ async def test_subscriber_link_is_refused_across_households():
             "role": SpaceRole.SUBSCRIBER.value,
         },
     )
-    with pytest.raises(SpacePermissionError) as exc:
-        await sender.request_redeem(
-            "good-token",
-            viewer_user_id="u-local",
-            issuer_instance_id="issuer-1",
-        )
-    assert "household that issued it" in str(exc.value)
-    assert issuer_members.added == []
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    # Seated on the host — ``add`` always lands a plain member, so the
+    # follower seat is the explicit ``set_role`` that follows it.
+    assert len(issuer_members.added) == 1
+    assert issuer_members.roles == [
+        ("sp-sub", "sender-1", "u-local", SpaceRole.SUBSCRIBER.value)
+    ]
 
 
-async def test_a_published_follower_link_cannot_be_burned_by_strangers():
-    """The refusal used to run AFTER the atomic consume, so every stranger
-    who opened a published Follower link spent one of its uses on a denial.
-    A 20-use link shared in a group chat was dead before the first person
-    it was meant for got to it. Read the seat, refuse, and leave the
-    counter exactly where it was."""
-    sender, _issuer, _sf, _if, repo, issuer_members = _wire_pair(
+async def test_a_follower_link_spends_a_use_like_any_other():
+    """The seat is honoured, so the consume is the only thing deciding
+    whether a use is spent — there is no pre-consume refusal left to
+    leave the counter untouched."""
+    sender, _issuer, _sf, _if, repo, _members = _wire_pair(
         {
             "space_id": "sp-sub",
             "created_by": "owner",
@@ -2021,16 +2036,57 @@ async def test_a_published_follower_link_cannot_be_burned_by_strangers():
             "role": SpaceRole.SUBSCRIBER.value,
         },
     )
-    for _ in range(3):
-        with pytest.raises(SpacePermissionError):
-            await sender.request_redeem(
-                "good-token",
-                viewer_user_id="u-local",
-                issuer_instance_id="issuer-1",
-            )
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert repo.tokens["good-token"]["uses_remaining"] == 19
 
-    assert repo.tokens["good-token"]["uses_remaining"] == 20
+
+async def test_an_unseatable_role_is_refused_without_seating_anything():
+    """The two CHECKs (0053 mint, 0054 seat) agree on member|admin|
+    subscriber. A row carrying anything else — a seat minted by a future
+    version, or a hand-edited DB — is refused rather than written: a
+    role we cannot gate must never become a seat we cannot revoke."""
+    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": "overlord",
+        },
+    )
+    with pytest.raises(SpacePermissionError):
+        await sender.request_redeem(
+            "good-token",
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
     assert issuer_members.added == []
+    assert issuer_members.roles == []
+
+
+async def test_bootstrap_redeem_of_a_follower_link_seats_a_subscriber():
+    """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so
+    a household that has never federated with us can hold a read-only
+    seat too — the whole point of publishing a Follower link."""
+    env = _bootstrap_pair(role=SpaceRole.SUBSCRIBER.value)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    assert env.issuer_members.roles == [
+        (
+            "space-1",
+            env.redeemer_party.instance_id,
+            "u-local",
+            SpaceRole.SUBSCRIBER.value,
+        )
+    ]
 
 
 async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():

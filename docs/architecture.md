@@ -247,10 +247,17 @@ tier; only the latency differs.
 
 All tiers run their inbound traffic through the same §24.11
 validation pipeline (parse → timestamp → instance lookup → ban check
-→ Ed25519 verify → replay cache → decrypt → dispatch). Whether an
-envelope arrives over RTC, HTTPS or the connection-server relay is
-invisible to the per-event handlers; every path lands in
+→ Ed25519 verify → replay cache → decrypt → authorize → dispatch).
+Whether an envelope arrives over RTC, HTTPS or the connection-server
+relay is invisible to the per-event handlers; every path lands in
 `federation/inbound_validator.InboundPipeline`.
+
+The two authorize steps run **after** the replay-id is persisted, so a
+dropped envelope still answers 200 and the sender's outbox stops
+redelivering: `check_deprovisioned_author` drops user-scoped events
+from a remote user we have hidden, and `check_space_writer` drops a
+space write from a household we seated as a read-only Follower
+(`space_remote_members.role = 'subscriber'`) on a space we host.
 
 ```mermaid
 flowchart LR
@@ -262,7 +269,8 @@ flowchart LR
     ban --> sig["Ed25519 verify"]
     sig --> replay["replay cache"]
     replay --> decrypt["decrypt payload"]
-    decrypt --> dispatch["event dispatch"]
+    decrypt --> authz["authorize author<br/>(hidden user / Follower seat)"]
+    authz --> dispatch["event dispatch"]
     dispatch --> handler["per-event handler"]
 ```
 

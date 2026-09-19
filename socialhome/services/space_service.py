@@ -1207,12 +1207,23 @@ class SpaceService(SpaceMemberGuardMixin):
             space_seed=seed,
         )
         payload.update(signed)
+        # v_30 — a ``subscriber`` role is not storable below v_30: the
+        # receiver's ``space_remote_members.role`` CHECK rejects it (migration
+        # 0054 widened it) and ``apply_member_event`` then raises out of the
+        # whole handler, losing the mutation — tombstone included, unhealable
+        # because the version guard drops the retry at the same
+        # ``member_version``. So a follower's roster event is simply not sent
+        # to a sub-v_30 household: it keeps the pre-v_30 view (no follower in
+        # its mirror) instead of losing the event that carried one.
+        min_version = FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP
+        if str(role) == SpaceRole.SUBSCRIBER.value:
+            min_version = FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE
         try:
             await self._federation.broadcast_to_space_members(
                 space.id,
                 event_type,
                 payload,
-                min_proto_version=(FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP),
+                min_proto_version=min_version,
             )
         except Exception:
             log.exception(

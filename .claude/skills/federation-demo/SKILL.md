@@ -884,12 +884,25 @@ never executes outside its unit tests.
    taken back from a household whose only introduction was a public
    string.
 
+10. **A ``subscriber`` (Follower) link**, minted on a THIRD space and
+   redeemed by e into a read-only seat (v_30). Asserted on both sides:
+   ``space_remote_members.role='subscriber'`` on the host — the row
+   every write from that household is judged against, and the row that
+   makes it listable and kickable — plus e's own ``space_members`` row.
+   Then the two halves of what a Follower *is*: it READS (a's post
+   arrives over the relay, decrypted with the content key the ACK's
+   ``space_meta`` carried) and it cannot WRITE (403). A Follower link
+   handed to another household used to be refused outright, because
+   ``space_remote_members.role`` had no value for a remote reader.
+
 Failure modes this catches: a blob that grows an address field; a
 ``/join`` page that stops handing over a code; a relay that starts
 logging the pair; a redeem that seats a full social peer instead of a
 space-scoped one (which would then join every DM / presence / moment
-fan-out); a revoked link that still resolves; and a link-joined admin
-handed the space authority seed.
+fan-out); a revoked link that still resolves; a link-joined admin
+handed the space authority seed; and a Follower seat that quietly
+lands as a full member (or that never receives the content key it is
+seated to read).
 
 ### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
 

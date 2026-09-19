@@ -434,7 +434,24 @@ from __future__ import annotations
 #:   message, so no envelope is burned on a household that can't answer.
 #:   Space-scoped (it is how a household joins a space at all), so it appears
 #:   in the per-space compatibility banner.
-OURS: int = 29
+#: * **v_30** (2026-09-19) — cross-household Follower seats:
+#:   ``space_remote_members.role`` may now be ``'subscriber'`` (migration
+#:   0054), so a household that redeemed a Follower invite link is seated in
+#:   the host's roster as a reader and appears in the v_23 roster gossip with
+#:   that role. A sub-v_30 household's ``role`` CHECK admits only
+#:   ``member|admin``, so binding ``'subscriber'`` into it raises
+#:   ``IntegrityError`` and loses the WHOLE roster event — tombstone included,
+#:   unhealable because the version guard drops the retry at the same
+#:   ``member_version``. Not fail-soft, therefore gated:
+#:   :data:`FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`. Older-peer
+#:   fallback: a subscriber-roled roster event is simply not sent to a
+#:   sub-v_30 household, which keeps the pre-v_30 view (the follower is absent
+#:   from its roster mirror) rather than losing the event that carried it;
+#:   every other roster mutation reaches it unchanged. Receivers also coerce
+#:   an out-of-vocabulary role to ``'member'`` rather than dropping the
+#:   mutation. Space-scoped, so it appears in the per-space compatibility
+#:   banner.
+OURS: int = 30
 
 
 class FederationCapability:
@@ -705,6 +722,17 @@ class FederationCapability:
     #: message instead of waiting out a timeout.
     MIN_FOR_INVITE_BOOTSTRAP_REDEEM = 29
 
+    #: Minimum proto_version where a peer's ``space_remote_members.role``
+    #: CHECK admits ``'subscriber'`` (migration 0054), i.e. where a roster
+    #: event about a **cross-household Follower** can be applied at all.
+    #: Below it the receiver's ``apply_member_event`` raises IntegrityError
+    #: on the INSERT and the whole roster mutation is lost — including the
+    #: tombstone of a LEFT, which the version guard then refuses to re-apply.
+    #: Losing a removal is worse than never learning about the seat, so the
+    #: host skips a subscriber-roled roster event for sub-v_30 households
+    #: instead of shipping something they cannot store.
+    MIN_FOR_REMOTE_SUBSCRIBER_ROLE = 30
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -777,6 +805,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
         "Mesh route-stale nack",
     ),
+    (
+        FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
+        "Cross-household Follower seats",
+    ),
 ]
 
 
@@ -828,6 +860,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS,
         FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
         FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM,
+        FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
     }
 )
 

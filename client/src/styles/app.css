@@ -14509,13 +14509,6 @@ a.sh-welcome-card:hover {
   border-color: var(--sh-accent);
   background: var(--sh-bg-secondary);
 }
-/* Role the current form state can't offer (Follower while publishing to a
- * connection server) — still readable, obviously not pickable. */
-.sh-invite-role--disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.sh-invite-role--disabled:hover { background: none; }
 .sh-invite-role input { grid-area: radio; margin: 0; }
 .sh-invite-role__label { grid-area: label; font-weight: 600; }
 .sh-invite-role__hint {

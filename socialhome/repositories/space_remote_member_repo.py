@@ -27,10 +27,14 @@ class SpaceRemoteMember:
     display_name: str | None = None
     joined_at: str | None = None
     #: Per-space role. The on-disk authority is the
-    #: ``space_remote_members.role`` CHECK constraint (member|admin);
-    #: in-code authority is :class:`SpaceRole`.MEMBER / .ADMIN.
-    #: Owner is intentionally not allowed here — see the migration
-    #: 0009 docstring for the rationale.
+    #: ``space_remote_members.role`` CHECK constraint
+    #: (member|admin|subscriber); in-code authority is
+    #: :class:`SpaceRole`.MEMBER / .ADMIN / .SUBSCRIBER. ``subscriber``
+    #: is a household that redeemed a Follower invite link: it receives
+    #: the space's content stream like any member and is refused every
+    #: write host-side (``make_check_space_writer``, §24.11). Owner is
+    #: intentionally not allowed here — see the migration 0009 docstring
+    #: for the rationale, and 0054 for why ``subscriber`` joined.
     role: str = "member"
     #: Monotonic per-(space_id, user_id) version, bumped on every
     #: authoritative mutation (add/role-change/remove). Drives the

@@ -123,6 +123,38 @@ sequenceDiagram
     Note over A,B: both sides ready to<br/>exchange encrypted content
 ```
 
+## Two kinds of follower (v_30)
+
+"Follower" covers two seats that behave identically to a reader and differ
+entirely in how the content reaches them:
+
+| | GFS subscriber | Follower **household** |
+|---|---|---|
+| How they arrived | Walked up on their own through a connection-server listing (`allow_subscribers` on). | Redeemed a `subscriber` **invite link** the owner minted (see [invites.md](./invites.md)). |
+| Seat on the host | None. The connection server holds the subscription; the host knows only "there are subscribers". | A real `space_remote_members` row with `role='subscriber'` (migration `0054`), plus a `space_instances` row. |
+| Delivery | GFS relay of authority-signed, content-key-encrypted public/global events. | The ordinary member fan-out — `broadcast_to_space_members` over `space_instances`, on whatever transport that pair uses (`space_session` relay for a link-joined peer, direct/mesh for a paired one). |
+| Content key | `SPACE_SUBSCRIBER_KEY_HANDOFF`, sealed to the subscriber's published X25519 key. | The §D1b handoff in the redeem ACK's `space_meta`, then every epoch rotation (rotation fans out over `space_instances`). |
+| Applicable space types | public / global only, and only with `allow_subscribers` on. | Any space the owner mints a link for — an invite is the owner deciding for one named link, not a standing public policy. |
+| In the roster | No. | Yes, exactly as a LOCAL subscriber is: `GET /api/spaces/{id}/members` emits `role` verbatim for both. |
+| Revocation | Drop the subscription / turn `allow_subscribers` off; the next epoch rotation locks them out. | Kick or ban, like any member — seat tombstoned, household dropped from `space_instances` when its last seat goes, epoch rotated, and for a link-joined peer with no other shared space the `space_session` row revoked (`revoke_space_session_if_orphaned`). |
+
+**Writes from a Follower household are refused on the host.** It holds a
+valid content key, so it can produce a well-formed, correctly-signed
+`SPACE_POST_CREATED` whatever its own local gate says — and its own local
+gate *does* refuse, via the ordinary `_assert_writable_member` on the
+redeemer's `space_members` row. The host does not take that on trust: step
+12 of the §24.11 pipeline (`make_check_space_writer` in
+`federation/inbound_validator.py`) reads the seat the HOST decided at
+redeem time and drops the envelope before dispatch. `SPACE_POST_CREATED`
+is always refused; `SPACE_COMMENT_CREATED` is refused unless
+`allow_subscriber_comment` is on — the same opt-in that governs a local
+follower. The step only fires for spaces this household hosts: a member
+household holds a mirror of the roster, not authority over it.
+
+Older peers: `role='subscriber'` is unstorable below v_30, so a follower's
+roster gossip is gated on
+`FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`.
+
 ## `allow_subscribers` gates public readability
 
 A space carries three independent dials:

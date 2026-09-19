@@ -569,7 +569,7 @@ describe('SpaceInviteDialog — revoke', () => {
   })
 })
 
-describe('SpaceInviteDialog — Follower is off the table while publishing', () => {
+describe('SpaceInviteDialog — a Follower link can be published', () => {
   const SERVERS = [{ id: 'gfs-1', display_name: 'Relay One', status: 'active' }]
 
   async function openWithServerAndPublish() {
@@ -586,56 +586,44 @@ describe('SpaceInviteDialog — Follower is off the table while publishing', () 
     return result
   }
 
-  it('disables the Follower role with the cross-household hint once publishing is on', async () => {
+  it('keeps the Follower role pickable once publishing is on', async () => {
     const result = await openWithServerAndPublish()
     const follower = result.container
       .querySelector('[data-testid="invite-role-subscriber"]') as HTMLInputElement
-    expect(follower.disabled).toBe(true)
-    expect(follower.closest('label')!.textContent).toContain(
-      "Followers can't join from another household yet",
-    )
-    // The other roles stay pickable.
-    expect((result.container
-      .querySelector('[data-testid="invite-role-member"]') as HTMLInputElement)
-      .disabled).toBe(false)
-  })
-
-  it('leaves Follower pickable while the link is not published', async () => {
-    mockReads({ servers: SERVERS })
-    const result = await openDialog()
-    const follower = result.container
-      .querySelector('[data-testid="invite-role-subscriber"]') as HTMLInputElement
     expect(follower.disabled).toBe(false)
+    // The "not yet" hint is gone -- a household CAN join as a Follower now.
     expect(follower.closest('label')!.textContent).not.toContain(
       "Followers can't join from another household yet",
     )
+    expect(follower.closest('label')!.textContent).toContain('reads only')
   })
 
-  it('falls back to Member when publishing is switched on with Follower picked', async () => {
-    mockReads({ servers: SERVERS })
-    const result = await openDialog()
-    await waitFor(() => {
-      expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
-        .not.toBeNull()
+  it('keeps Follower picked when publishing is switched on, and submits it',
+    async () => {
+      mockReads({ servers: SERVERS })
+      const result = await openDialog()
+      await waitFor(() => {
+        expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
+          .not.toBeNull()
+      })
+      await act(async () => {
+        fireEvent.click(result.container
+          .querySelector('[data-testid="invite-role-subscriber"]')!)
+      })
+      await act(async () => {
+        fireEvent.click(result.container
+          .querySelector('[data-testid="invite-publish-toggle"]')!)
+      })
+      // No silent fallback to Member: the combination is real now.
+      expect((result.container
+        .querySelector('[data-testid="invite-role-subscriber"]') as HTMLInputElement)
+        .checked).toBe(true)
+      await generate(result, makeRow({ role: 'subscriber' }))
+      expect(api.post).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ role: 'subscriber', publish_to_gfs: 'gfs-1' }),
+      )
     })
-    await act(async () => {
-      fireEvent.click(result.container
-        .querySelector('[data-testid="invite-role-subscriber"]')!)
-    })
-    await act(async () => {
-      fireEvent.click(result.container
-        .querySelector('[data-testid="invite-publish-toggle"]')!)
-    })
-    expect((result.container
-      .querySelector('[data-testid="invite-role-member"]') as HTMLInputElement)
-      .checked).toBe(true)
-    // …and the impossible combination can never reach the backend.
-    await generate(result, makeRow({ role: 'member' }))
-    expect(api.post).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ role: 'member', publish_to_gfs: 'gfs-1' }),
-    )
-  })
 })
 
 describe('SpaceInviteDialog — a published never-expiring link', () => {

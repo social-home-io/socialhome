@@ -276,6 +276,60 @@ async def test_left_gossip_does_not_register_broadcast_target(handler):
     handler.space_repo.add_space_instance.assert_not_awaited()
 
 
+async def test_subscriber_gossip_is_mirrored_as_a_follower_seat(handler):
+    """A ``subscriber`` role on the wire is a cross-household Follower
+    (v_30) and is mirrored verbatim — ``space_remote_members.role``
+    admits it since migration 0054."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-fan",
+        "instance_id": "inst-fan",
+        "role": "subscriber",
+        "member_version": 5,
+    }
+    ev = _event("SPACE_MEMBER_JOINED", payload, from_instance="inst-fan")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload)),
+    ):
+        await handler.h._on_space_member_joined(ev)
+
+    assert (
+        handler.remote_members.apply_member_event.await_args.kwargs["role"]
+        == "subscriber"
+    )
+
+
+async def test_out_of_vocabulary_gossip_role_keeps_the_mutation(handler):
+    """A role this household's CHECK rejects — ``owner`` (the host ships
+    the raw ``space_members.role``), or one from a future version — used
+    to raise IntegrityError out of ``apply_member_event`` and take the
+    WHOLE event down with it, tombstone included; the version guard then
+    refused the retry at the same ``member_version``, so a removal lost
+    this way was unhealable. Coerce to the least-privileged real seat and
+    keep the removal: losing "which seat" is recoverable from the next
+    snapshot, losing "they left" is not."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-boss",
+        "instance_id": "inst-boss",
+        "role": "owner",
+        "member_version": 6,
+    }
+    ev = _event("SPACE_MEMBER_LEFT", payload, from_instance="inst-boss")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload)),
+    ):
+        await handler.h._on_space_member_left(ev)
+
+    kwargs = handler.remote_members.apply_member_event.await_args.kwargs
+    assert kwargs["role"] == "member"
+    assert kwargs["tombstoned"] is True
+
+
 async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
     """#115 — the ``space_meta`` blob carries a ``roster`` of every
     member already in the space. The joiner's instance writes each
