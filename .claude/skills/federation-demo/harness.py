@@ -41,6 +41,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -741,7 +742,12 @@ def cmd_gfs_cluster() -> None:
     """
     import concurrent.futures
 
-    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+    from socialhome.crypto import (
+        b64url_encode,
+        derive_instance_id,
+        generate_identity_keypair,
+        sign_ed25519,
+    )
 
     state = _load()
     if not state:
@@ -790,20 +796,22 @@ def cmd_gfs_cluster() -> None:
     n = 24
     targets = [(urlA if i % 2 == 0 else urlB) for i in range(n)]
     tokens = [_gfs_landing_token(url) for url in targets]
-    ids: list[str] = []
+    # Each entry: (instance_id, identity_seed) — kept so the same instances
+    # can then SIGN space publishes below (a publish is verified against the
+    # registered instance key).
+    clients: list[tuple[str, bytes]] = [("", b"")] * n
 
     def _register(i: int) -> tuple[int, int]:
         kp = generate_identity_keypair()
-        pk = kp.public_key
-        iid = derive_instance_id(pk)
-        ids.append(iid)
+        iid = derive_instance_id(kp.public_key)
+        clients[i] = (iid, kp.private_key)
         code, _body = _request(
             f"{targets[i]}/gfs/register",
             method="POST",
             body={
                 "token": tokens[i],
                 "instance_id": iid,
-                "public_key": pk.hex(),
+                "public_key": kp.public_key.hex(),
                 "inbox_url": f"http://127.0.0.1:9/inbox/{iid}",
                 "display_name": f"cluster-client-{i}",
             },
@@ -825,6 +833,61 @@ def cmd_gfs_cluster() -> None:
         )
     print(
         f"  {n} concurrent registrations across both nodes — all accepted, "
+        "0 'database is locked' ✓"
+    )
+
+    # 3b. The operation the user actually hit: concurrent SPACE PUBLISHES.
+    # Each registered instance signs a publish (the GFS verifies it against
+    # that instance's key) for a fresh space, fired across both node ports so
+    # the two processes' ``upsert_space`` writes collide on the shared DB.
+    def _publish(i: int) -> tuple[int, int]:
+        iid, seed = clients[i]
+        space_id = generate_identity_keypair().public_key.hex()[:32]
+        authority_pk = generate_identity_keypair().public_key.hex()
+        body = {
+            "space_id": space_id,
+            "owning_instance": iid,
+            "name": f"Cluster space {i}",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": "",
+            "icon_url": "",
+            "min_age": 0,
+            "category": "general",
+            "join_mode": "open",
+            "allow_subscribers": False,
+            "accent_color": "#C8902F",
+            "primary_color": "#D2542A",
+            "identity_public_key": authority_pk,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        canonical = json.dumps(
+            body, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
+        code, _b = _request(
+            f"{targets[i]}/gfs/spaces/{space_id}/publish",
+            method="POST",
+            body=body,
+            timeout=15.0,
+        )
+        return i, code
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+        pub_results = list(ex.map(_publish, range(n)))
+    pub_failed = [(i, c) for i, c in pub_results if c not in (200, 201)]
+    pub_locked = _gfs_cluster_log_matches("database is locked")
+    if pub_failed or pub_locked:
+        _gfs_cluster_down(preserve_logs=True)
+        raise SystemExit(
+            f"gfs-cluster: {len(pub_failed)} of {n} concurrent space "
+            f"PUBLISHES failed {pub_failed[:3]!r}; {len(pub_locked)} "
+            f"'database is locked' line(s): {pub_locked[:3]!r} — this is the "
+            "exact operation behind 'the connection server couldn't publish' "
+            "(check PRAGMA busy_timeout).",
+        )
+    print(
+        f"  {n} concurrent space publishes across both nodes — all accepted, "
         "0 'database is locked' ✓"
     )
 
