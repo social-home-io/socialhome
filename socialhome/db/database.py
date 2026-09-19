@@ -43,6 +43,9 @@ class AsyncDatabase:
     Connection flags applied on open:
 
     * ``PRAGMA journal_mode=WAL`` — lets readers and writers coexist.
+    * ``PRAGMA busy_timeout`` — wait (not fail) for the write lock, so a
+      multi-process deployment sharing one DB file doesn't error on a
+      collided write. Default 5 s; 0 restores the old fail-fast behaviour.
     * ``PRAGMA synchronous=NORMAL`` — durability / throughput compromise.
     * ``PRAGMA cache_size=-16384`` — 16 MiB of page cache.
     * ``PRAGMA mmap_size=134217728`` — 128 MiB memory-mapped read window.
@@ -55,11 +58,24 @@ class AsyncDatabase:
         *,
         batch_max: int = 50,
         batch_timeout_ms: int = 500,
+        busy_timeout_ms: int = 5000,
         migrations_dir: Path | None = None,
     ) -> None:
         self._path = str(path)
         self._batch_max = batch_max
         self._batch_timeout = batch_timeout_ms / 1000.0
+        # How long a write waits for SQLite's file lock before giving up.
+        # The default is 0 — fail instantly — which is fine for a
+        # single-process household but wrong for a MULTI-PROCESS deployment
+        # sharing one DB file (the GFS runs several allocs against one
+        # ``/var/lib/sh-gfs/gfs.db``): there, two allocs writing at the same
+        # instant made one fail immediately with "database is locked", which
+        # surfaced to a user as e.g. "the connection server couldn't publish
+        # the link right now". WAL lets readers and one writer coexist, but
+        # writers still serialise on the lock, so a contended writer must
+        # WAIT for the other's short write to commit rather than error. Five
+        # seconds is far longer than any single write here takes.
+        self._busy_timeout_ms = max(0, int(busy_timeout_ms))
         self._migrations_dir = migrations_dir or MIGRATIONS_DIR
 
         # Populated by ``startup()``.
@@ -99,6 +115,7 @@ class AsyncDatabase:
             )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-16384")
             conn.execute("PRAGMA mmap_size=134217728")

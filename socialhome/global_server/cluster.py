@@ -88,6 +88,7 @@ class ClusterService:
         "_own_pk_hex",
         "_enabled",
         "_heartbeat_task",
+        "_announce_task",
         "_stop",
         "_fail_counts",
         "_seen_relays",
@@ -122,6 +123,7 @@ class ClusterService:
         self._own_pk_hex = own_public_key_hex
         self._enabled = enabled
         self._heartbeat_task: asyncio.Task | None = None
+        self._announce_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._fail_counts: dict[str, int] = {}
         #: 10-minute TTL dedup for relayed message ids.
@@ -219,17 +221,26 @@ class ClusterService:
         await self._announce_to_peers()
         loop = asyncio.get_running_loop()
         self._heartbeat_task = loop.create_task(self._heartbeat_loop())
+        # Re-announce loop: the one-shot announce above is lost if a peer is
+        # not yet listening (a cold-start race — a sibling alloc that boots a
+        # second later, or announces before its own HTTP server binds). Nothing
+        # else recovers it: the heartbeat loop only pings peers already in the
+        # DB, and a HELLO is the only thing that puts one there. So keep
+        # HELLOing configured peers we do not yet know until they answer.
+        self._announce_task = loop.create_task(self._reannounce_loop())
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._heartbeat_task is not None:
-            try:
-                await asyncio.wait_for(self._heartbeat_task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
-                self._heartbeat_task.cancel()
-            except Exception:  # pragma: no cover
-                pass
-            self._heartbeat_task = None
+        for attr in ("_heartbeat_task", "_announce_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except asyncio.TimeoutError, asyncio.CancelledError:
+                    task.cancel()
+                except Exception:  # pragma: no cover
+                    pass
+                setattr(self, attr, None)
 
     async def health(self) -> dict:
         """Return this node's cluster status (public ``GET /cluster/health``)."""
@@ -506,6 +517,19 @@ class ClusterService:
         url: str,
         public_key_hex: str,
     ) -> None:
+        # Discovery must be bidirectional on first contact. ``_announce_to_peers``
+        # only fires once, at startup, against the CONFIGURED peer URLs — so a
+        # node whose peer was still down at that instant loses that HELLO and is
+        # never re-announced to (the heartbeat loop only pings peers already in
+        # the DB, and a HELLO is the only thing that puts one there). The result
+        # was a cold-start deadlock: whichever node came up first stayed unknown
+        # to the other, its heartbeats rejected 403 ``unknown_node`` forever, and
+        # cross-alloc WS-push routing (the whole reason cluster mode is on for a
+        # shared-DB deployment) silently didn't work for it. So when we learn a
+        # peer we did NOT already know, we HELLO back — one round-trip, and both
+        # sides converge the moment EITHER announces, whatever the boot order.
+        existing = await self._repo.list_nodes()
+        already_known = any(n.node_id == from_node_id for n in existing)
         await self._repo.upsert_node(
             ClusterNode(
                 node_id=from_node_id,
@@ -515,6 +539,23 @@ class ClusterService:
                 last_seen=_now_iso(),
             )
         )
+        if not already_known and url and self._enabled and self._node_id:
+            # Reply only on FIRST contact so this can't ping-pong: the peer
+            # already knows us by the time it processes this, so its own
+            # handle_hello takes the ``already_known`` branch and stops.
+            try:
+                await self._post_to_peer(
+                    url,
+                    NODE_HELLO,
+                    {
+                        "node_id": self._node_id,
+                        "url": self._self_url,
+                        "public_key": self._own_pk_hex,
+                    },
+                    session=None,
+                )
+            except Exception as exc:
+                log.debug("cluster: reply NODE_HELLO to %s failed: %s", url, exc)
 
     async def handle_heartbeat(
         self,
@@ -771,6 +812,51 @@ class ClusterService:
         return ""
 
     # ─── Internals ────────────────────────────────────────────────────
+
+    async def _reannounce_loop(self) -> None:
+        """Periodically HELLO every configured peer, until stopped.
+
+        A HELLO must reach the peer for it to learn us — but the startup
+        announce is lost if the peer is not yet listening, and a reply-HELLO
+        on first contact can hit the same cold-start window (a sibling alloc
+        that has printed "Running" but is not yet accepting). Crucially, once
+        WE learn a peer (from ITS hello) we cannot tell whether IT learned US,
+        so filtering on "peers we don't know" would stop too early and leave
+        the link one-directional — exactly the deadlock this fixes. So HELLO
+        ALL configured peers every tick: idempotent (:meth:`handle_hello`
+        upserts and only replies on genuinely-first contact, so no ping-pong),
+        cheap for a handful of allocs, and it also re-registers us after a peer
+        restarts or a transient partition. Fail-soft per peer.
+        """
+        while not self._stop.is_set():
+            for peer_url in self._peers:
+                if not peer_url:
+                    continue
+                try:
+                    await self._post_to_peer(
+                        peer_url,
+                        NODE_HELLO,
+                        {
+                            "node_id": self._node_id,
+                            "url": self._self_url,
+                            "public_key": self._own_pk_hex,
+                        },
+                        session=None,
+                    )
+                except Exception as exc:
+                    log.debug(
+                        "cluster: re-announce HELLO to %s failed: %s",
+                        peer_url,
+                        exc,
+                    )
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=SYNC_RETRY_DELAY_S,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
 
     async def _announce_to_peers(self) -> None:
         msg = {

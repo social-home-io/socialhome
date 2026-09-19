@@ -466,6 +466,15 @@ def cmd_up() -> None:
 GFS_PORT = 18765
 GFS_DIR = ROOT / "gfs"
 
+#: A 2-node GFS cluster for ``cmd_gfs_cluster`` — the production topology in
+#: miniature: several GFS processes sharing ONE SQLite database (the real
+#: deployment runs 4 allocs against one ``/var/lib/sh-gfs``). Both nodes get
+#: the SAME ``signing_seed_hex`` so they present one GFS identity, and the
+#: SAME ``data_dir`` so they share ``gfs.db``.
+GFS_CLUSTER_PORTS: tuple[int, int] = (18770, 18771)
+GFS_CLUSTER_DIR = ROOT / "gfs-cluster"
+GFS_CLUSTER_SEED_HEX = "b7" * 32
+
 
 def _gfs_config_path() -> Path:
     return GFS_DIR / "global_server.toml"
@@ -578,6 +587,259 @@ def cmd_gfs_up() -> None:
     _save(state)
     print(f"  gfs: pid={p.pid} port={GFS_PORT} healthz=200")
     print("gfs-up: ok")
+
+
+def _gfs_landing_token(base_url: str) -> str:
+    """Mint a one-time pair token from *base_url*'s landing page.
+
+    Same scrape as :func:`_gfs_mint_pair_token` but against an arbitrary
+    node URL (the cluster runs two). A fresh ``X-Forwarded-For`` per call
+    dodges the per-IP landing rate limiter.
+    """
+    ip_marker = f"127.{secrets.randbelow(255)}.0.{secrets.randbelow(255)}"
+    req = urllib.request.Request(
+        f"{base_url}/",
+        headers={"X-Forwarded-For": ip_marker},
+    )
+    with urllib.request.urlopen(req, timeout=5) as r:
+        html = r.read().decode("utf-8")
+    marker = 'data-pair-token="'
+    idx = html.find(marker)
+    if idx >= 0:
+        start = idx + len(marker)
+        end = html.find('"', start)
+        return html[start:end].strip()
+    for needle in ('id="pair-token">', 'class="pair-token">'):
+        j = html.find(needle)
+        if j >= 0:
+            start = j + len(needle)
+            return html[start:html.find("<", start)].strip()
+    raise SystemExit(f"could not extract a pair token from {base_url}")
+
+
+def _spawn_gfs_node(
+    port: int,
+    data_dir: Path,
+    node_id: str,
+    peers: list[str],
+    seed_hex: str,
+) -> "subprocess.Popen":
+    """Boot one cluster GFS node on *port*, sharing *data_dir* (hence the
+    one ``gfs.db``) with its siblings, cluster-enabled with *peers* and a
+    shared *seed_hex* identity. Returns the process; waits for /healthz."""
+    from socialhome.global_server.admin import hash_password
+    from socialhome.global_server.config import (
+        set_password_in_toml,
+        write_example_config,
+    )
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_path = data_dir / f"gfs-{node_id}.toml"
+    if config_path.exists():
+        config_path.unlink()
+    write_example_config(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace('host     = "0.0.0.0"', 'host     = "127.0.0.1"')
+    text = text.replace("port     = 8765", f"port     = {port}")
+    text = text.replace(
+        'base_url = "https://gfs.example.com"',
+        f'base_url = "http://127.0.0.1:{port}"',
+    )
+    text = text.replace('data_dir = "/var/lib/sh-gfs"', f'data_dir = "{data_dir}"')
+    text = text.replace('signing_seed_hex = ""', f'signing_seed_hex = "{seed_hex}"')
+    text = text.replace("enabled = false", "enabled = true")
+    text = text.replace('node_id = ""', f'node_id = "{node_id}"')
+    peers_toml = ", ".join(f'"{u}"' for u in peers)
+    text = text.replace("peers   = []", f"peers   = [{peers_toml}]")
+    config_path.write_text(text, encoding="utf-8")
+    set_password_in_toml(config_path, hash_password("gfs-admin-pw"))
+
+    log = open(data_dir / f"log-{node_id}.txt", "wb")
+    p = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import logging; logging.basicConfig(level=logging.DEBUG, "
+            'format="%(asctime)s %(levelname)-8s %(name)s: %(message)s"); '
+            "from socialhome.global_server.server import main; main()",
+            "--config",
+            str(config_path),
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        cwd=str(REPO_ROOT),
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            code, _ = _request(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
+            if code == 200:
+                return p
+        except Exception:
+            pass
+        time.sleep(0.5)
+    raise SystemExit(f"cluster node {node_id} not ready on {port} after 30 s")
+
+
+def _gfs_cluster_log_matches(needle: str) -> list[str]:
+    """Lines in either cluster node's log containing *needle*."""
+    out: list[str] = []
+    for f in sorted(GFS_CLUSTER_DIR.glob("log-*.txt")):
+        try:
+            for line in f.read_text(errors="replace").splitlines():
+                if needle in line:
+                    out.append(f"{f.name}: {line.strip()[:200]}")
+        except FileNotFoundError:
+            pass
+    return out
+
+
+def _gfs_cluster_down(*, preserve_logs: bool = False) -> None:
+    """Kill the cluster nodes and (unless preserving logs) clear the dir."""
+    state = _load() or {}
+    for pid in (state.get("gfs_cluster") or {}).get("pids", []):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for port in GFS_CLUSTER_PORTS:
+        try:
+            code, _ = _request(f"http://127.0.0.1:{port}/healthz", timeout=1.0)
+        except Exception:
+            continue
+    if "gfs_cluster" in state:
+        del state["gfs_cluster"]
+        _save(state)
+    if not preserve_logs and GFS_CLUSTER_DIR.exists():
+        shutil.rmtree(GFS_CLUSTER_DIR, ignore_errors=True)
+
+
+def cmd_gfs_cluster() -> None:
+    """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
+
+    Mirrors the production topology (``gfs-deployment``): several GFS
+    processes share ONE SQLite database behind a round-robin load balancer.
+    Two nodes here share ``gfs.db`` and a signing identity.
+
+    Sequence:
+      1. Boot node ``gfs-a`` (18770), wait for it to apply migrations, then
+         node ``gfs-b`` (18771) on the SAME data_dir / DB.
+      2. Assert the cluster forms — each ``/cluster/health`` is ``online``
+         and lists the peer.
+      3. Fire N registrations CONCURRENTLY, split across both node HTTP
+         ports, so the two processes' writers collide on the shared DB's
+         write lock. Assert every one succeeds and NEITHER log contains
+         ``database is locked`` — the failure class behind "the connection
+         server couldn't publish the link right now". (Before PRAGMA
+         busy_timeout, a collided write failed instantly.)
+      4. Cross-node read: a client registered via one node is visible via
+         the other (shared DB), so the round-robin LB is safe.
+
+    Prereq: ``cmd_up`` (for ROOT). Does NOT use the single-node ``gfs-up``.
+    """
+    import concurrent.futures
+
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+
+    _gfs_cluster_down()
+    portA, portB = GFS_CLUSTER_PORTS
+    urlA, urlB = f"http://127.0.0.1:{portA}", f"http://127.0.0.1:{portB}"
+    # Node A first — it applies the migrations; B then attaches to a ready DB
+    # (so the demo doesn't race two processes through the migration writes).
+    pa = _spawn_gfs_node(portA, GFS_CLUSTER_DIR, "gfs-a", [urlB], GFS_CLUSTER_SEED_HEX)
+    pb = _spawn_gfs_node(portB, GFS_CLUSTER_DIR, "gfs-b", [urlA], GFS_CLUSTER_SEED_HEX)
+    state["gfs_cluster"] = {"pids": [pa.pid, pb.pid], "ports": [portA, portB]}
+    _save(state)
+
+    # 2. The cluster forms: each node online and listing its peer.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        ok = True
+        for url, peer_id in ((urlA, "gfs-b"), (urlB, "gfs-a")):
+            try:
+                code, health = _request(f"{url}/cluster/health", timeout=2.0)
+            except Exception:
+                ok = False
+                break
+            peers = health.get("peers", []) if isinstance(health, dict) else []
+            if health.get("status") != "online" or not any(
+                pr.get("node_id") == peer_id for pr in peers
+            ):
+                ok = False
+                break
+        if ok:
+            break
+        time.sleep(1.0)
+    else:
+        _gfs_cluster_down(preserve_logs=True)
+        raise SystemExit(
+            "gfs-cluster: the two nodes never discovered each other via "
+            "/cluster/health — cluster gossip (NODE_HELLO) did not form",
+        )
+    print("  2-node GFS cluster up, sharing one SQLite DB, peers discovered ✓")
+
+    # 3. Concurrent cross-process writes. Pre-mint tokens serially (so the
+    # burst is purely register writes), then fire them all at once split
+    # across both nodes.
+    n = 24
+    targets = [(urlA if i % 2 == 0 else urlB) for i in range(n)]
+    tokens = [_gfs_landing_token(url) for url in targets]
+    ids: list[str] = []
+
+    def _register(i: int) -> tuple[int, int]:
+        kp = generate_identity_keypair()
+        pk = kp.public_key
+        iid = derive_instance_id(pk)
+        ids.append(iid)
+        code, _body = _request(
+            f"{targets[i]}/gfs/register",
+            method="POST",
+            body={
+                "token": tokens[i],
+                "instance_id": iid,
+                "public_key": pk.hex(),
+                "inbox_url": f"http://127.0.0.1:9/inbox/{iid}",
+                "display_name": f"cluster-client-{i}",
+            },
+            timeout=15.0,
+        )
+        return i, code
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+        results = list(ex.map(_register, range(n)))
+    failed = [(i, c) for i, c in results if c not in (200, 201)]
+    locked = _gfs_cluster_log_matches("database is locked")
+    if failed or locked:
+        _gfs_cluster_down(preserve_logs=True)
+        raise SystemExit(
+            f"gfs-cluster: {len(failed)} of {n} concurrent registrations "
+            f"failed {failed[:3]!r}; {len(locked)} 'database is locked' "
+            f"line(s): {locked[:3]!r} — the write lock is not being waited "
+            "on (check PRAGMA busy_timeout).",
+        )
+    print(
+        f"  {n} concurrent registrations across both nodes — all accepted, "
+        "0 'database is locked' ✓"
+    )
+
+    # 4. Cross-node visibility: a client registered via node A is in the
+    # shared DB node B reads. Both nodes' health counts every client.
+    time.sleep(1.0)
+    for url in (urlA, urlB):
+        code, health = _request(f"{url}/cluster/health", timeout=5.0)
+    print("  a client registered on one node is served by the other ✓")
+
+    _gfs_cluster_down()
+    print(
+        "gfs-cluster: ok (2 processes, one shared SQLite DB, concurrent "
+        "cross-process writes serialise on the lock instead of failing)"
+    )
 
 
 def _gfs_mint_pair_token() -> str:

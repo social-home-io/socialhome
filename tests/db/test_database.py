@@ -459,3 +459,70 @@ async def test_foreign_keys_enforced_after_full_migration_chain(tmp_dir):
         assert await db.fetchval("PRAGMA foreign_keys") == 1
     finally:
         await db.shutdown()
+
+
+async def test_busy_timeout_is_set_so_a_contended_write_waits(tmp_dir):
+    """A write that collides with another process's lock must WAIT for it,
+    not fail instantly.
+
+    Default SQLite ``busy_timeout`` is 0 — fail-fast — which is wrong for the
+    GFS's multi-process shared-DB deployment: two allocs writing the same
+    instant made one error with "database is locked", surfacing as e.g. "the
+    connection server couldn't publish the link right now". This holds a
+    second raw connection's write lock briefly and asserts the AsyncDatabase
+    write rides it out instead of raising.
+    """
+    import asyncio
+    import sqlite3
+    import threading
+
+    db = AsyncDatabase(tmp_dir / "busy.db")
+    await db.startup()
+    try:
+        assert await db.fetchval("PRAGMA busy_timeout") == 5000
+        await db.enqueue("CREATE TABLE t(x INTEGER)")
+
+        # A separate connection (a stand-in for another process/alloc) grabs
+        # the write lock, holds it ~0.4 s, then releases.
+        acquired = threading.Event()
+        HOLD_S = 0.4
+
+        def hold_then_release() -> None:
+            # The connection MUST be created and used in the same thread.
+            holder = sqlite3.connect(str(tmp_dir / "busy.db"), isolation_level=None)
+            holder.execute("PRAGMA journal_mode=WAL")
+            holder.execute("BEGIN IMMEDIATE")  # take the write lock
+            holder.execute("INSERT INTO t VALUES(1)")
+            acquired.set()
+            import time as _t
+
+            _t.sleep(HOLD_S)
+            holder.execute("COMMIT")  # release it
+            holder.close()
+
+        threading.Thread(target=hold_then_release, daemon=True).start()
+        assert acquired.wait(timeout=5.0)  # the holder now owns the lock
+
+        # This write collides with the held lock. With busy_timeout it BLOCKS
+        # until the holder commits (~HOLD_S) and then succeeds; without it (the
+        # old default 0) it raised OperationalError instantly.
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await db.enqueue("INSERT INTO t VALUES(2)")
+        waited = loop.time() - t0
+        assert waited >= HOLD_S * 0.5, (
+            f"write did not wait for the lock ({waited:.2f}s)"
+        )
+        assert await db.fetchval("SELECT COUNT(*) FROM t") == 2
+    finally:
+        await db.shutdown()
+
+
+async def test_busy_timeout_can_be_disabled(tmp_dir):
+    """``busy_timeout_ms=0`` restores fail-fast (documented escape hatch)."""
+    db = AsyncDatabase(tmp_dir / "nb.db", busy_timeout_ms=0)
+    await db.startup()
+    try:
+        assert await db.fetchval("PRAGMA busy_timeout") == 0
+    finally:
+        await db.shutdown()
