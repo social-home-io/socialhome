@@ -2323,10 +2323,9 @@ class SpaceJoinRequestCollectionView(BaseView):
         ctx = self.user
         svc = self.svc(space_service_key)
         space_id = self.match("id")
-        space = await svc._require_space(space_id)
-        await svc._require_admin_or_owner(space, ctx.username)
-        requests = await self.svc(space_repo_key).list_pending_join_requests(
+        requests = await svc.list_pending_join_requests(
             space_id,
+            actor_username=ctx.username,
         )
         return web.json_response([sanitise_for_api(r) for r in requests])
 

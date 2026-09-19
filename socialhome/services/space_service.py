@@ -3843,6 +3843,45 @@ class SpaceService(SpaceMemberGuardMixin):
         )
         return request_id
 
+    async def list_pending_join_requests(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+    ) -> list[dict]:
+        """Pending join requests for ``space_id``, each enriched with a
+        resolved ``display_name`` (admin/owner only).
+
+        The raw row carries only a ``user_id`` — a 32-char hash — so the SPA
+        queue showed that for a REMOTE applicant, whose name is not in the
+        local household roster (#698). Resolve it here: a remote applicant's
+        name comes off its ``space_remote_members`` seat (an admin/mod
+        elevation is already seated), a local applicant's from the user repo.
+        ``None`` when unknown, so the SPA keeps its own fallback.
+        """
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        rows = await self._spaces.list_pending_join_requests(space_id)
+        out: list[dict] = []
+        for row in rows:
+            enriched = dict(row)
+            name: str | None = None
+            instance_id = row.get("remote_applicant_instance_id")
+            user_id = str(row.get("user_id") or "")
+            if instance_id and self._remote_members is not None:
+                seat = await self._remote_members.get(
+                    space_id, str(instance_id), user_id
+                )
+                if seat is not None:
+                    name = seat.display_name
+            elif not instance_id:
+                user = await self._users.get_by_user_id(user_id)
+                if user is not None:
+                    name = user.display_name
+            enriched["display_name"] = name
+            out.append(enriched)
+        return out
+
     async def approve_join_request(
         self,
         request_id: str,

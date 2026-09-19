@@ -6768,3 +6768,47 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
     fed.broadcast_to_space_members.assert_awaited()
     # …but NO seed share went out to the relay-only household.
     fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_list_pending_join_requests_resolves_applicant_display_names(stack):
+    """The pending-request list carries a resolved ``display_name`` so the
+    SPA queue shows a person, not a raw 32-char user id — for a remote
+    applicant (an admin/mod elevation, whose seat holds the name) and a
+    local applicant alike. #698.
+    """
+    from socialhome.domain.space import SpaceRole
+
+    anna = await stack.provision_user("anna", is_admin=True)
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+
+    # A local admin elevation: bob redeems an admin link.
+    tok = await stack.space_repo.create_invite_token(
+        space.id, anna.user_id, uses=1, role=SpaceRole.ADMIN.value
+    )
+    await stack.space_svc.accept_invite_token(tok, user_id=bob.user_id)
+
+    # A remote applicant seated as a remote member with a display name.
+    await stack.space_repo.add_space_instance(space.id, "peer-remote")
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-remote",
+        user_id="ruid-carol",
+        user_pk=None,
+        display_name="Carol Remote",
+        role=SpaceRole.MEMBER.value,
+    )
+    await stack.space_repo.save_join_request(
+        space.id,
+        "ruid-carol",
+        requested_role=SpaceRole.ADMIN.value,
+        remote_applicant_instance_id="peer-remote",
+    )
+
+    rows = await stack.space_svc.list_pending_join_requests(
+        space.id, actor_username="anna"
+    )
+    by_user = {r["user_id"]: r for r in rows}
+    assert by_user[bob.user_id]["display_name"] == "bob"
+    assert by_user["ruid-carol"]["display_name"] == "Carol Remote"
