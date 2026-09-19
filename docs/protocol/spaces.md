@@ -190,6 +190,36 @@ The rule, precisely:
   attributed, and passing it would hand a follower every handler that
   keys on a bare row id.
 
+## The routing `space_id` is authoritative for every mutation
+
+The gates above judge a sender against **one** space — the one
+`resolve_space_id(event)` returns: the routing field first, the payload
+copy only as a fallback for the mesh path, and a present-but-different
+payload copy is a refusal rather than a tiebreak. That same id is then the
+one the write is allowed to land in. Content handlers pass it down and
+**the repositories enforce it**: every space-content mutator takes a
+`space_id` and scopes its statement with `AND space_id = ?`; an upsert's
+`ON CONFLICT` clause never rewrites `space_id` and refuses a conflict on
+an id owned by another space; a child row (a comment, an RSVP, a bid, a
+poll vote) resolves its parent inside the same scoped statement
+(`… AND EXISTS (SELECT 1 FROM space_posts WHERE id=? AND space_id=?)`)
+rather than trusting a handler-side pre-read. A mutator that matches no
+row reports it, and the handler logs the refusal at WARNING and publishes
+no bus event.
+
+Without that, the gates were checking a different question from the one
+the write answered: a household holding any seat in space A — a public
+member link is enough — could send an event routed as A that names a row
+id belonging to space B and have the edit, delete or vote land in B, where
+it may be banned, hold a read-only Follower seat, or have no seat at all.
+There is no `space_id=None` escape hatch on those signatures: local REST
+callers always know their space and pass it too, so the scoped statement
+is the only path to the table. The two tables whose column is genuinely
+nullable (`stickies`, and the `pages`/`space_pages` split) take
+`str | None`, where `None` means the household's own row and a federation
+handler never passes it — which is also what keeps a `SPACE_PAGE_DELETED`
+off the household's personal `pages` table.
+
 ## Roster authority
 
 Content is only half the promise. The other half is the roster itself: a

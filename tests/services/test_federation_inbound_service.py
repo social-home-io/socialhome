@@ -1175,6 +1175,7 @@ async def test_space_comment_created_persists_and_publishes(db, bus, inbound):
         _event(
             FederationEventType.SPACE_COMMENT_CREATED,
             {
+                "space_id": "sp-1",
                 "post_id": "p-1",
                 "comment_id": "c-1",
                 "author": "u-r",
@@ -3143,3 +3144,325 @@ async def test_config_hlc_within_drift_bound_applies(db, bus, inbound):
     assert row["name"] == "WithinBound"
     assert row["config_hlc"] == f"{within}-0"
     assert row["config_sequence"] == 6
+
+
+# ─── Cross-space write refusal (#693) ────────────────────────────────────
+#
+# The §24.11 pipeline gates a sender against ONE space id. A handler that
+# mutated a bare row id would let a household seated in space A name a row of
+# space B and have the write land there. Every space content handler resolves
+# the gated space and passes it down into the scoped repo mutators.
+
+
+@pytest.fixture
+async def two_spaces(db):
+    """Spaces A and B; B holds one post + one comment the attacker names."""
+    from socialhome.domain.post import Comment, CommentType
+
+    for sid in ("sp-a", "sp-b"):
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key, space_type, join_mode) VALUES(?,?,?,?,?,?,?)",
+            (
+                sid,
+                sid,
+                "peer-a",
+                "owner",
+                "aa" * 32,
+                SpaceType.HOUSEHOLD.value,
+                JoinMode.INVITE_ONLY.value,
+            ),
+        )
+    repo = SqliteSpacePostRepo(db)
+    await repo.save(
+        "sp-b",
+        Post(
+            id="post-b",
+            author="u-b",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="B's post",
+        ),
+    )
+    await repo.add_comment(
+        Comment(
+            id="cmt-b",
+            post_id="post-b",
+            author="u-b",
+            type=CommentType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="B's comment",
+        ),
+        space_id="sp-b",
+    )
+    return repo
+
+
+async def _post_row(db, post_id: str) -> dict:
+    row = await db.fetchone("SELECT * FROM space_posts WHERE id=?", (post_id,))
+    return {k: row[k] for k in row.keys()}
+
+
+async def _comment_row(db, comment_id: str) -> dict:
+    row = await db.fetchone(
+        "SELECT * FROM space_post_comments WHERE id=?",
+        (comment_id,),
+    )
+    return {k: row[k] for k in row.keys()}
+
+
+async def test_cross_space_post_created_refused(db, bus, inbound, two_spaces, caplog):
+    """A sender gated for A cannot overwrite B's post by naming its id."""
+    before = await _post_row(db, "post-b")
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_post_created(
+            _event(
+                FederationEventType.SPACE_POST_CREATED,
+                {
+                    "id": "post-b",
+                    "author": "u-evil",
+                    "type": "text",
+                    "content": "pwned",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert await _post_row(db, "post-b") == before
+    assert captured == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_cross_space_post_updated_refused(db, bus, inbound, two_spaces, caplog):
+    from socialhome.domain.events import PostEdited
+
+    before = await _post_row(db, "post-b")
+    captured: list[PostEdited] = []
+    bus.subscribe(PostEdited, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_post_updated(
+            _event(
+                FederationEventType.SPACE_POST_UPDATED,
+                {"id": "post-b", "content": "pwned"},
+                space_id="sp-a",
+            )
+        )
+    assert await _post_row(db, "post-b") == before
+    assert captured == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_cross_space_post_deleted_refused(db, bus, inbound, two_spaces, caplog):
+    before = await _post_row(db, "post-b")
+    captured: list[PostDeleted] = []
+    bus.subscribe(PostDeleted, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_post_deleted(
+            _event(
+                FederationEventType.SPACE_POST_DELETED,
+                {"post_id": "post-b"},
+                space_id="sp-a",
+            )
+        )
+    assert await _post_row(db, "post-b") == before
+    assert captured == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_cross_space_comment_added_refused(db, bus, inbound, two_spaces, caplog):
+    """No comment row lands on B's post, and the counter stays put."""
+    before = await _post_row(db, "post-b")
+    captured: list[CommentAdded] = []
+    bus.subscribe(CommentAdded, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_comment_added(
+            _event(
+                FederationEventType.SPACE_COMMENT_CREATED,
+                {
+                    "post_id": "post-b",
+                    "comment_id": "cmt-evil",
+                    "author": "u-evil",
+                    "type": "text",
+                    "content": "pwned",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert (
+        await db.fetchone(
+            "SELECT id FROM space_post_comments WHERE id=?",
+            ("cmt-evil",),
+        )
+        is None
+    )
+    assert await _post_row(db, "post-b") == before
+    assert captured == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_cross_space_comment_updated_refused(
+    db, bus, inbound, two_spaces, caplog
+):
+    """The event carries no post id — the repo's EXISTS is the only guard."""
+    from socialhome.domain.events import CommentUpdated
+
+    before = await _comment_row(db, "cmt-b")
+    captured: list[CommentUpdated] = []
+    bus.subscribe(CommentUpdated, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_comment_updated(
+            _event(
+                FederationEventType.SPACE_COMMENT_UPDATED,
+                {"id": "cmt-b", "content": "pwned"},
+                space_id="sp-a",
+            )
+        )
+    assert await _comment_row(db, "cmt-b") == before
+    assert captured == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_cross_space_comment_deleted_refused(
+    db, bus, inbound, two_spaces, caplog
+):
+    from socialhome.domain.events import CommentDeleted
+
+    before = await _comment_row(db, "cmt-b")
+    post_before = await _post_row(db, "post-b")
+    captured: list[CommentDeleted] = []
+    bus.subscribe(CommentDeleted, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_comment_deleted(
+            _event(
+                FederationEventType.SPACE_COMMENT_DELETED,
+                {"comment_id": "cmt-b", "post_id": "post-b"},
+                space_id="sp-a",
+            )
+        )
+    assert await _comment_row(db, "cmt-b") == before
+    assert await _post_row(db, "post-b") == post_before
+    assert captured == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_routing_payload_space_mismatch_is_dropped(
+    db, bus, inbound, two_spaces, caplog
+):
+    """Routing field and payload copy disagreeing is a refusal, not a
+    tiebreak — the envelope was gated as one space and asks for another."""
+    before = await _post_row(db, "post-b")
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_post_created(
+            _event(
+                FederationEventType.SPACE_POST_CREATED,
+                {
+                    "space_id": "sp-b",
+                    "id": "post-b",
+                    "author": "u-evil",
+                    "type": "text",
+                    "content": "pwned",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert await _post_row(db, "post-b") == before
+    assert captured == []
+    assert "does not match payload space" in caplog.text
+
+
+# ── Same-space paths still work ──────────────────────────────────────────
+
+
+async def test_same_space_post_lifecycle_unchanged(db, bus, inbound, two_spaces):
+    """Create → update → delete inside the gated space all land."""
+    from socialhome.domain.events import PostEdited
+
+    created: list[SpacePostCreated] = []
+    edited: list[PostEdited] = []
+    deleted: list[PostDeleted] = []
+    bus.subscribe(SpacePostCreated, created.append)
+    bus.subscribe(PostEdited, edited.append)
+    bus.subscribe(PostDeleted, deleted.append)
+
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {"id": "post-a", "author": "u-a", "type": "text", "content": "hi"},
+            space_id="sp-a",
+        )
+    )
+    assert [p.post.id for p in created] == ["post-a"]
+    assert (await _post_row(db, "post-a"))["space_id"] == "sp-a"
+
+    await inbound._on_space_post_updated(
+        _event(
+            FederationEventType.SPACE_POST_UPDATED,
+            {"id": "post-a", "content": "edited"},
+            space_id="sp-a",
+        )
+    )
+    assert (await _post_row(db, "post-a"))["content"] == "edited"
+    assert len(edited) == 1
+
+    await inbound._on_space_post_deleted(
+        _event(
+            FederationEventType.SPACE_POST_DELETED,
+            {"post_id": "post-a"},
+            space_id="sp-a",
+        )
+    )
+    assert (await _post_row(db, "post-a"))["deleted"] == 1
+    assert [e.space_id for e in deleted] == ["sp-a"]
+
+
+async def test_same_space_comment_lifecycle_unchanged(db, bus, inbound, two_spaces):
+    """Comment add → update → delete inside B's own space all land."""
+    from socialhome.domain.events import CommentDeleted, CommentUpdated
+
+    added: list[CommentAdded] = []
+    updated: list[CommentUpdated] = []
+    removed: list[CommentDeleted] = []
+    bus.subscribe(CommentAdded, added.append)
+    bus.subscribe(CommentUpdated, updated.append)
+    bus.subscribe(CommentDeleted, removed.append)
+
+    await inbound._on_space_comment_added(
+        _event(
+            FederationEventType.SPACE_COMMENT_CREATED,
+            {
+                "post_id": "post-b",
+                "comment_id": "cmt-new",
+                "author": "u-b",
+                "type": "text",
+                "content": "nice",
+            },
+            space_id="sp-b",
+        )
+    )
+    assert (await _comment_row(db, "cmt-new"))["content"] == "nice"
+    assert (await _post_row(db, "post-b"))["comment_count"] == 1
+    assert [c.comment.id for c in added] == ["cmt-new"]
+
+    await inbound._on_space_comment_updated(
+        _event(
+            FederationEventType.SPACE_COMMENT_UPDATED,
+            {"id": "cmt-new", "content": "nicer"},
+            space_id="sp-b",
+        )
+    )
+    assert (await _comment_row(db, "cmt-new"))["content"] == "nicer"
+    assert [c.space_id for c in updated] == ["sp-b"]
+
+    await inbound._on_space_comment_deleted(
+        _event(
+            FederationEventType.SPACE_COMMENT_DELETED,
+            {"comment_id": "cmt-new", "post_id": "post-b"},
+            space_id="sp-b",
+        )
+    )
+    assert (await _comment_row(db, "cmt-new"))["deleted"] == 1
+    assert (await _post_row(db, "post-b"))["comment_count"] == 0
+    assert [c.comment_id for c in removed] == ["cmt-new"]

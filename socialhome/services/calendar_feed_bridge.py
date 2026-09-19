@@ -115,7 +115,13 @@ class CalendarFeedBridge:
             content=event.summary,
             linked_event_id=event.id,
         )
-        await self._post_repo.save(space_id, post)
+        if await self._post_repo.save(space_id, post) is None:
+            log.warning(
+                "calendar-feed-bridge: post id %s already exists in another "
+                "space — skipping the feed mirror",
+                post.id,
+            )
+            return
         await self._bus.publish(
             SpacePostCreated(space_id=space_id, post=post),
         )
@@ -124,21 +130,25 @@ class CalendarFeedBridge:
         post = await self._find_existing_post(evt.event.id)
         if post is None:
             return
-        _space_id, existing = post
+        space_id, existing = post
         # Only republish when the user-visible body actually changed.
         new_body = evt.event.summary
         if existing.content == new_body:
             return
-        await self._post_repo.edit(existing.id, new_body)
+        # Local-only bridge: the post was located by ``linked_event_id``
+        # and its own ``space_id`` is the gated scope (#693).
+        await self._post_repo.edit(existing.id, new_body, space_id=space_id)
 
     async def _on_deleted(self, evt: CalendarEventDeleted) -> None:
         post = await self._find_existing_post(evt.event_id)
         if post is None:
             return
-        _space_id, existing = post
+        space_id, existing = post
         if existing.deleted:
             return
-        await self._post_repo.soft_delete(existing.id, moderated_by=None)
+        await self._post_repo.soft_delete(
+            existing.id, space_id=space_id, moderated_by=None
+        )
 
     async def _find_existing_post(
         self,

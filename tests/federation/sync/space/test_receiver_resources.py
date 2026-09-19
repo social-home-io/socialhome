@@ -75,9 +75,9 @@ class _FakeRepos:
             ) is False and hasattr(args[0], "title") else self.stickies.append(args[0])
         return args[-1]
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self.comments.append(comment)
-        return comment
+        return True
 
     # space_task_repo.save(space_id, task)
     async def save_task(self, space_id, task):
@@ -105,45 +105,45 @@ class _PostRepoStub:
         self._c.posts.append((space_id, post))
         return post
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self._c.comments.append(comment)
-        return comment
+        return True
 
 
 class _TaskRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save(self, space_id, task):
+    async def save(self, task, *, space_id):
         self._c.tasks.append((space_id, task))
-        return task
+        return True
 
 
 class _PageRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save(self, page):
+    async def save(self, page, *, space_id):
         self._c.pages.append(page)
-        return page
+        return True
 
 
 class _StickyRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save(self, sticky):
+    async def save(self, sticky, *, space_id):
         self._c.stickies.append(sticky)
-        return sticky
+        return True
 
 
 class _CalendarRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save_event(self, space_id, event):
+    async def save_event(self, event, *, space_id):
         self._c.calendar.append((space_id, event))
-        return event
+        return True
 
 
 class _GalleryRepoStub:

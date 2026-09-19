@@ -88,9 +88,9 @@ class _FakeSpacePostRepo:
         self.saved.append((space_id, post))
         return post
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self.comments.append(comment)
-        return comment
+        return True
 
 
 class _Stub:

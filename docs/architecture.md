@@ -696,6 +696,22 @@ maps domain exceptions to HTTP responses centrally
 (`socialhome/routes/base.py`). See `CLAUDE.md` for the full set of
 architectural rules.
 
+**Space-content repositories carry the space boundary.** Every mutator on
+a space-content table (`space_posts`, `space_post_comments`, `space_tasks`,
+`space_pages`, `stickies`, `space_calendar_events`, `space_calendar_rsvps`,
+the `space_poll_*` / `space_schedule_*` family, `gallery_items`,
+`space_zones`, `bazaar_listings`, `bazaar_bids`) takes a `space_id` and
+scopes its statement with it — `AND space_id = ?`, an `ON CONFLICT` clause
+that never rewrites `space_id`, or, for a child row, an `EXISTS` on the
+parent inside the same statement. The mutator reports whether a row was
+affected so the caller can refuse and log. Authorisation for a federated
+write is checked against one space id (see
+[`docs/protocol/spaces.md`](protocol/spaces.md)); putting the predicate in
+the repository is what makes the write land in that same space instead of
+wherever the sender's payload pointed. There is deliberately no optional
+`space_id=None` on those signatures — local REST callers pass their own
+space id, so the scoped statement is the only path to the table.
+
 ## Spec references
 
 - §2 — design principles (mirrored in [`principles.md`](./principles.md))

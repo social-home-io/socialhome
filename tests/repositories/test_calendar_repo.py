@@ -207,7 +207,7 @@ async def test_space_cal_save_and_get(env):
         end=end,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, evt)
+    await env.space_cal_repo.save_event(evt, space_id=sid)
     result = await env.space_cal_repo.get_event("sp-ev-1")
     assert result is not None
     returned_sid, returned_evt = result
@@ -238,8 +238,8 @@ async def test_space_cal_list_events_in_range(env):
         end=e2,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, ev1)
-    await env.space_cal_repo.save_event(sid, ev2)
+    await env.space_cal_repo.save_event(ev1, space_id=sid)
+    await env.space_cal_repo.save_event(ev2, space_id=sid)
     ws = datetime(2025, 8, 1, tzinfo=timezone.utc)
     we = datetime(2025, 8, 5, tzinfo=timezone.utc)
     results = await env.space_cal_repo.list_events_in_range(sid, start=ws, end=we)
@@ -260,7 +260,7 @@ async def test_space_cal_rsvp_upsert_and_list(env):
         end=end,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, evt)
+    await env.space_cal_repo.save_event(evt, space_id=sid)
     rsvp = CalendarRSVP(
         event_id="sp-ev-r",
         user_id="uid-alice",
@@ -268,7 +268,7 @@ async def test_space_cal_rsvp_upsert_and_list(env):
         updated_at="2025-09-01T00:00:00",
         occurrence_at=now.isoformat(),
     )
-    await env.space_cal_repo.upsert_rsvp(rsvp)
+    await env.space_cal_repo.upsert_rsvp(rsvp, space_id=sid)
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-r")
     assert len(rsvps) == 1
     assert rsvps[0].status == RSVPStatus.GOING
@@ -287,7 +287,7 @@ async def test_space_cal_rsvp_upsert_update(env):
         end=now,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, evt)
+    await env.space_cal_repo.save_event(evt, space_id=sid)
     rsvp1 = CalendarRSVP(
         event_id="sp-ev-u",
         user_id="uid-alice",
@@ -302,8 +302,8 @@ async def test_space_cal_rsvp_upsert_update(env):
         updated_at="2025-09-02T00:00:00",
         occurrence_at=now.isoformat(),
     )
-    await env.space_cal_repo.upsert_rsvp(rsvp1)
-    await env.space_cal_repo.upsert_rsvp(rsvp2)
+    await env.space_cal_repo.upsert_rsvp(rsvp1, space_id=sid)
+    await env.space_cal_repo.upsert_rsvp(rsvp2, space_id=sid)
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-u")
     assert len(rsvps) == 1
     assert rsvps[0].status == RSVPStatus.MAYBE
@@ -311,6 +311,7 @@ async def test_space_cal_rsvp_upsert_update(env):
 
 async def test_space_cal_rsvp_invalid_status_raises(env):
     """upsert_rsvp raises ValueError for an invalid status string."""
+    sid = await _seed_space(env, "sp-bad-status")
     rsvp = CalendarRSVP(
         event_id="x",
         user_id="u",
@@ -319,7 +320,7 @@ async def test_space_cal_rsvp_invalid_status_raises(env):
         occurrence_at="2025-09-01T00:00:00",
     )
     with pytest.raises(ValueError, match="invalid RSVP status"):
-        await env.space_cal_repo.upsert_rsvp(rsvp)
+        await env.space_cal_repo.upsert_rsvp(rsvp, space_id=sid)
 
 
 async def test_recurring_event_expands_into_window(env):
@@ -385,7 +386,7 @@ async def test_space_cal_rsvp_remove(env):
         end=now,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, evt)
+    await env.space_cal_repo.save_event(evt, space_id=sid)
     rsvp = CalendarRSVP(
         event_id="sp-ev-rm",
         user_id="uid-alice",
@@ -393,11 +394,12 @@ async def test_space_cal_rsvp_remove(env):
         updated_at="2025-09-01T00:00:00",
         occurrence_at=now.isoformat(),
     )
-    await env.space_cal_repo.upsert_rsvp(rsvp)
+    await env.space_cal_repo.upsert_rsvp(rsvp, space_id=sid)
     await env.space_cal_repo.remove_rsvp(
         "sp-ev-rm",
         "uid-alice",
         occurrence_at=now.isoformat(),
+        space_id=sid,
     )
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-rm")
     assert rsvps == []
@@ -419,7 +421,7 @@ async def test_rsvp_per_occurrence_distinct_rows(env):
         created_by="uid-alice",
         rrule="FREQ=WEEKLY;COUNT=3",
     )
-    await env.space_cal_repo.save_event(sid, evt)
+    await env.space_cal_repo.save_event(evt, space_id=sid)
     occ1 = seed.isoformat()
     occ2 = (datetime(2026, 5, 11, 9, 0, tzinfo=timezone.utc)).isoformat()
     await env.space_cal_repo.upsert_rsvp(
@@ -429,7 +431,8 @@ async def test_rsvp_per_occurrence_distinct_rows(env):
             status=RSVPStatus.GOING,
             updated_at="2026-05-01T00:00:00",
             occurrence_at=occ1,
-        )
+        ),
+        space_id=sid,
     )
     await env.space_cal_repo.upsert_rsvp(
         CalendarRSVP(
@@ -438,7 +441,8 @@ async def test_rsvp_per_occurrence_distinct_rows(env):
             status=RSVPStatus.DECLINED,
             updated_at="2026-05-08T00:00:00",
             occurrence_at=occ2,
-        )
+        ),
+        space_id=sid,
     )
     all_rsvps = await env.space_cal_repo.list_rsvps("sp-ev-occ")
     assert len(all_rsvps) == 2
@@ -459,17 +463,18 @@ async def test_rsvp_per_occurrence_distinct_rows(env):
 async def test_rsvp_buffer_holds_orphan_rsvps(env):
     """RSVP that arrives before its event is buffered until the event lands."""
     occ_iso = "2026-06-01T18:00:00+00:00"
+    sid = await _seed_space(env, "sp-future")
     await env.space_cal_repo.buffer_pending_rsvp(
         event_id="ev-future",
         user_id="uid-bob",
         occurrence_at=occ_iso,
         status=RSVPStatus.GOING,
         updated_at="2026-05-20T00:00:00",
+        space_id=sid,
     )
     # No event yet → no live RSVP rows.
     assert await env.space_cal_repo.list_rsvps("ev-future") == []
     # Event arrives — flush picks up the buffered RSVP.
-    sid = await _seed_space(env, "sp-future")
     seed = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
     evt = CalendarEvent(
         id="ev-future",
@@ -479,15 +484,15 @@ async def test_rsvp_buffer_holds_orphan_rsvps(env):
         end=seed,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, evt)
-    applied = await env.space_cal_repo.flush_pending_rsvps("ev-future")
+    await env.space_cal_repo.save_event(evt, space_id=sid)
+    applied = await env.space_cal_repo.flush_pending_rsvps("ev-future", space_id=sid)
     assert len(applied) == 1
     assert applied[0].user_id == "uid-bob"
     rsvps = await env.space_cal_repo.list_rsvps("ev-future")
     assert len(rsvps) == 1
     assert rsvps[0].status == RSVPStatus.GOING
     # Buffer is drained.
-    re_flush = await env.space_cal_repo.flush_pending_rsvps("ev-future")
+    re_flush = await env.space_cal_repo.flush_pending_rsvps("ev-future", space_id=sid)
     assert re_flush == []
 
 
@@ -505,7 +510,7 @@ async def test_rsvp_buffer_removed_status_drops_live_row(env):
         end=seed,
         created_by="uid-alice",
     )
-    await env.space_cal_repo.save_event(sid, evt)
+    await env.space_cal_repo.save_event(evt, space_id=sid)
     await env.space_cal_repo.upsert_rsvp(
         CalendarRSVP(
             event_id="ev-rm",
@@ -513,7 +518,8 @@ async def test_rsvp_buffer_removed_status_drops_live_row(env):
             status=RSVPStatus.GOING,
             updated_at="2026-05-30T00:00:00",
             occurrence_at=occ_iso,
-        )
+        ),
+        space_id=sid,
     )
     # A buffered 'removed' arrives — flush should delete the live row.
     await env.space_cal_repo.buffer_pending_rsvp(
@@ -522,8 +528,9 @@ async def test_rsvp_buffer_removed_status_drops_live_row(env):
         occurrence_at=occ_iso,
         status="removed",
         updated_at="2026-06-01T00:00:00",
+        space_id=sid,
     )
-    await env.space_cal_repo.flush_pending_rsvps("ev-rm")
+    await env.space_cal_repo.flush_pending_rsvps("ev-rm", space_id=sid)
     assert await env.space_cal_repo.list_rsvps("ev-rm") == []
 
 
@@ -1142,3 +1149,146 @@ def test_chunks_respects_the_host_parameter_ceiling(count, expected):
     items = [f"u{i}" for i in range(count)]
 
     assert [len(c) for c in _chunks(items)] == expected
+
+
+# ─── §24.11 cross-space scoping (issue #693) ──────────────────────────────
+
+
+@pytest.fixture
+async def two_space_calendars(env):
+    """An event (+ one RSVP) in space A and in space B."""
+    for sid, eid in (("cs-a", "cev-a"), ("cs-b", "cev-b")):
+        await _seed_space(env, sid)
+        start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        assert await env.space_cal_repo.save_event(
+            CalendarEvent(
+                id=eid,
+                calendar_id=sid,
+                summary=f"summary-{sid}",
+                start=start,
+                end=start,
+                created_by="uid-alice",
+            ),
+            space_id=sid,
+        )
+        assert await env.space_cal_repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=eid,
+                user_id="uid-bob",
+                status=RSVPStatus.GOING,
+                updated_at="2026-06-01T00:00:00",
+                occurrence_at=start.isoformat(),
+            ),
+            space_id=sid,
+        )
+    return env
+
+
+async def _event_row(env, event_id):
+    row = await env.db.fetchone(
+        "SELECT * FROM space_calendar_events WHERE id=?", (event_id,)
+    )
+    return dict(row) if row is not None else None
+
+
+async def test_space_event_save_refuses_cross_space_id(two_space_calendars):
+    """Re-saving space B's event id under space A leaves B's row untouched."""
+    env = two_space_calendars
+    before = await _event_row(env, "cev-b")
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert (
+        await env.space_cal_repo.save_event(
+            CalendarEvent(
+                id="cev-b",
+                calendar_id="cs-a",
+                summary="stolen",
+                start=start,
+                end=start,
+                created_by="uid-attacker",
+            ),
+            space_id="cs-a",
+        )
+        is False
+    )
+    assert await _event_row(env, "cev-b") == before
+
+
+async def test_space_event_delete_refuses_cross_space_id(two_space_calendars):
+    """A delete routed as space A cannot remove space B's event."""
+    env = two_space_calendars
+    assert await env.space_cal_repo.delete_event("cev-b", space_id="cs-a") is False
+    assert await env.space_cal_repo.get_event("cev-b") is not None
+    assert await env.space_cal_repo.delete_event("cev-b", space_id="cs-b") is True
+    assert await env.space_cal_repo.get_event("cev-b") is None
+
+
+async def test_rsvp_upsert_resolves_the_parent_event_in_space(two_space_calendars):
+    """An RSVP for space B's event cannot be written under space A."""
+    env = two_space_calendars
+    occ = datetime(2026, 7, 1, tzinfo=timezone.utc).isoformat()
+    assert (
+        await env.space_cal_repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id="cev-b",
+                user_id="uid-attacker",
+                status=RSVPStatus.GOING,
+                updated_at="2026-06-02T00:00:00",
+                occurrence_at=occ,
+            ),
+            space_id="cs-a",
+        )
+        is False
+    )
+    rows = await env.space_cal_repo.list_rsvps("cev-b")
+    assert [r.user_id for r in rows] == ["uid-bob"]
+
+
+async def test_rsvp_remove_resolves_the_parent_event_in_space(two_space_calendars):
+    """An RSVP removal routed as space A cannot clear space B's RSVP."""
+    env = two_space_calendars
+    occ = datetime(2026, 7, 1, tzinfo=timezone.utc).isoformat()
+    assert (
+        await env.space_cal_repo.remove_rsvp(
+            "cev-b", "uid-bob", occurrence_at=occ, space_id="cs-a"
+        )
+        is False
+    )
+    assert len(await env.space_cal_repo.list_rsvps("cev-b")) == 1
+    assert (
+        await env.space_cal_repo.remove_rsvp(
+            "cev-b", "uid-bob", occurrence_at=occ, space_id="cs-b"
+        )
+        is True
+    )
+    assert await env.space_cal_repo.list_rsvps("cev-b") == []
+
+
+async def test_pending_rsvp_buffer_only_flushes_its_own_space(two_space_calendars):
+    """A buffered RSVP is never laundered into another space's event."""
+    env = two_space_calendars
+    occ = datetime(2026, 9, 1, tzinfo=timezone.utc).isoformat()
+    # Buffered while gated on space A, naming an id that later lands in B.
+    await env.space_cal_repo.buffer_pending_rsvp(
+        event_id="cev-late",
+        user_id="uid-attacker",
+        occurrence_at=occ,
+        status=RSVPStatus.GOING,
+        updated_at="2026-08-01T00:00:00",
+        space_id="cs-a",
+    )
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert await env.space_cal_repo.save_event(
+        CalendarEvent(
+            id="cev-late",
+            calendar_id="cs-b",
+            summary="later",
+            start=start,
+            end=start,
+            created_by="uid-alice",
+        ),
+        space_id="cs-b",
+    )
+    assert (
+        await env.space_cal_repo.flush_pending_rsvps("cev-late", space_id="cs-b") == []
+    )
+    assert await env.space_cal_repo.list_rsvps("cev-late") == []

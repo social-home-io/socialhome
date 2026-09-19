@@ -588,7 +588,8 @@ class SpaceTaskService(BusPublisherMixin):
             name=name,
             created_by=created_by,
         )
-        saved = await self._repo.save_list(space_id, lst)
+        await self._repo.save_list(lst, space_id=space_id)
+        saved = lst
         await self._emit(
             TaskListCreated(
                 list_id=saved.id,
@@ -612,7 +613,8 @@ class SpaceTaskService(BusPublisherMixin):
             raise KeyError(f"task list {list_id!r} not found")
         space_id, current = result
         updated = replace(current, name=name)
-        saved = await self._repo.save_list(space_id, updated)
+        await self._repo.save_list(updated, space_id=space_id)
+        saved = updated
         await self._emit(
             TaskListUpdated(
                 list_id=saved.id,
@@ -627,7 +629,7 @@ class SpaceTaskService(BusPublisherMixin):
         if result is None:
             raise KeyError(f"task list {list_id!r} not found")
         space_id, _ = result
-        await self._repo.delete_list(list_id)
+        await self._repo.delete_list(list_id, space_id=space_id)
         await self._emit(
             TaskListDeleted(
                 list_id=list_id,
@@ -680,7 +682,8 @@ class SpaceTaskService(BusPublisherMixin):
             due_date=due,
             assignees=tuple(assignees or []),
         )
-        saved = await self._repo.save(space_id, task)
+        await self._repo.save(task, space_id=space_id)
+        saved = task
         if self._bus is not None:
             await self._bus.publish(TaskCreated(task=saved, space_id=space_id))
             for user_id in saved.assignees:
@@ -737,7 +740,8 @@ class SpaceTaskService(BusPublisherMixin):
             kwargs["position"] = int(position)
 
         updated = replace(task, **kwargs)
-        saved = await self._repo.save(space_id, updated)
+        await self._repo.save(updated, space_id=space_id)
+        saved = updated
         if self._bus is not None:
             await self._bus.publish(TaskUpdated(task=saved, space_id=space_id))
             previous = set(task.assignees or ())
@@ -764,7 +768,7 @@ class SpaceTaskService(BusPublisherMixin):
         if result is None:
             raise KeyError(f"space task {task_id!r} not found")
         space_id, task = result
-        await self._repo.delete(task_id)
+        await self._repo.delete(task_id, space_id=space_id)
         await self._emit(
             TaskDeleted(
                 task_id=task_id,
@@ -796,6 +800,7 @@ class SpaceTaskService(BusPublisherMixin):
             archived_at=now if archived else None,
             updated_at=now,
         )
-        saved = await self._repo.save(space_id, updated)
+        await self._repo.save(updated, space_id=space_id)
+        saved = updated
         await self._emit(TaskUpdated(task=saved, space_id=space_id))
         return saved

@@ -585,9 +585,10 @@ class SqliteCalendarRepo:
 class AbstractSpaceCalendarRepo(Protocol):
     async def save_event(
         self,
-        space_id: str,
         event: CalendarEvent,
-    ) -> CalendarEvent: ...
+        *,
+        space_id: str,
+    ) -> bool: ...
     async def get_event(
         self,
         event_id: str,
@@ -606,16 +607,17 @@ class AbstractSpaceCalendarRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[CalendarEvent]: ...
-    async def delete_event(self, event_id: str) -> None: ...
+    async def delete_event(self, event_id: str, *, space_id: str) -> bool: ...
 
-    async def upsert_rsvp(self, rsvp: CalendarRSVP) -> None: ...
+    async def upsert_rsvp(self, rsvp: CalendarRSVP, *, space_id: str) -> bool: ...
     async def remove_rsvp(
         self,
         event_id: str,
         user_id: str,
         *,
         occurrence_at: str,
-    ) -> None: ...
+        space_id: str,
+    ) -> bool: ...
     async def list_rsvps(
         self,
         event_id: str,
@@ -632,10 +634,13 @@ class AbstractSpaceCalendarRepo(Protocol):
         occurrence_at: str,
         status: str,
         updated_at: str,
+        space_id: str,
     ) -> None: ...
     async def flush_pending_rsvps(
         self,
         event_id: str,
+        *,
+        space_id: str,
     ) -> list[CalendarRSVP]: ...
     async def gc_pending_rsvps(self, *, older_than_iso: str) -> int: ...
 
@@ -706,10 +711,18 @@ class SqliteSpaceCalendarRepo:
 
     async def save_event(
         self,
-        space_id: str,
         event: CalendarEvent,
-    ) -> CalendarEvent:
-        await self._db.enqueue(
+        *,
+        space_id: str,
+    ) -> bool:
+        """Upsert a space calendar event into ``space_id``.
+
+        ``space_id`` is authoritative (§24.11): a conflict on an id
+        that already belongs to another space is refused and reported
+        as ``False`` — the gated space decides where the write lands,
+        never the bare row id in the payload.
+        """
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_calendar_events(
                 id, space_id, summary, description, start_dt, end_dt,
@@ -732,6 +745,7 @@ class SqliteSpaceCalendarRepo:
                 tz=excluded.tz,
                 announce_in_feed=excluded.announce_in_feed,
                 updated_at=datetime('now')
+            WHERE space_calendar_events.space_id = excluded.space_id
             """,
             (
                 event.id,
@@ -753,7 +767,7 @@ class SqliteSpaceCalendarRepo:
                 None,
             ),
         )
-        return event
+        return n > 0
 
     async def get_event(
         self,
@@ -821,24 +835,37 @@ class SqliteSpaceCalendarRepo:
         )
         return [_row_to_space_event(d) for d in rows_to_dicts(rows)]
 
-    async def delete_event(self, event_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_calendar_events WHERE id=?",
-            (event_id,),
+    async def delete_event(self, event_id: str, *, space_id: str) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "DELETE FROM space_calendar_events WHERE id=? AND space_id=?",
+            (event_id, space_id),
         )
+        return n > 0
 
     # ── RSVPs ──────────────────────────────────────────────────────────
 
-    async def upsert_rsvp(self, rsvp: CalendarRSVP) -> None:
+    async def upsert_rsvp(self, rsvp: CalendarRSVP, *, space_id: str) -> bool:
+        """Upsert an RSVP, scoped through its parent event (§24.11).
+
+        ``space_calendar_rsvps`` carries no ``space_id`` of its own, so
+        the parent event is resolved *inside* the same statement: the
+        row is written only if ``rsvp.event_id`` names an event in
+        ``space_id``. ``False`` means it did not and nothing was
+        written — never pre-read the parent in the caller.
+        """
         if rsvp.status not in RSVPStatus.ALL:
             raise ValueError(f"invalid RSVP status {rsvp.status!r}")
         if not rsvp.occurrence_at:
             raise ValueError("CalendarRSVP.occurrence_at must be set")
-        await self._db.enqueue(
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_calendar_rsvps(
                 event_id, user_id, occurrence_at, status, updated_at
-            ) VALUES(?, ?, ?, ?, COALESCE(?, datetime('now')))
+            )
+            SELECT ?, ?, ?, ?, COALESCE(?, datetime('now'))
+             WHERE EXISTS (
+                 SELECT 1 FROM space_calendar_events WHERE id=? AND space_id=?
+             )
             ON CONFLICT(event_id, user_id, occurrence_at) DO UPDATE SET
                 status=excluded.status,
                 updated_at=excluded.updated_at
@@ -849,8 +876,11 @@ class SqliteSpaceCalendarRepo:
                 rsvp.occurrence_at,
                 rsvp.status,
                 rsvp.updated_at,
+                rsvp.event_id,
+                space_id,
             ),
         )
+        return n > 0
 
     async def remove_rsvp(
         self,
@@ -858,14 +888,20 @@ class SqliteSpaceCalendarRepo:
         user_id: str,
         *,
         occurrence_at: str,
-    ) -> None:
-        await self._db.enqueue(
+        space_id: str,
+    ) -> bool:
+        """Delete an RSVP, scoped through its parent event (§24.11)."""
+        n = await self._db.enqueue_rowcount(
             """
             DELETE FROM space_calendar_rsvps
              WHERE event_id=? AND user_id=? AND occurrence_at=?
+               AND EXISTS (
+                   SELECT 1 FROM space_calendar_events WHERE id=? AND space_id=?
+               )
             """,
-            (event_id, user_id, occurrence_at),
+            (event_id, user_id, occurrence_at, event_id, space_id),
         )
+        return n > 0
 
     async def list_rsvps(
         self,
@@ -906,6 +942,7 @@ class SqliteSpaceCalendarRepo:
         occurrence_at: str,
         status: str,
         updated_at: str,
+        space_id: str,
     ) -> None:
         """Buffer an inbound RSVP whose event hasn't propagated yet.
 
@@ -913,21 +950,32 @@ class SqliteSpaceCalendarRepo:
         Status ``"removed"`` represents a DELETE that arrived before its
         event — so when the event lands and we flush, the deletion is
         honoured (rather than the buffer resurrecting a stale RSVP).
+
+        ``space_id`` is the space the §24.11 pipeline gated the sender
+        on and is stored with the row, so the buffer cannot launder a
+        cross-space write: :meth:`flush_pending_rsvps` only drains rows
+        buffered under the same space as the event that landed.
         """
         await self._db.enqueue(
             """
             INSERT INTO pending_federated_rsvps(
-                event_id, user_id, occurrence_at, status, updated_at
-            ) VALUES(?, ?, ?, ?, ?)
+                event_id, user_id, occurrence_at, status, updated_at, space_id
+            ) VALUES(?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id, user_id, occurrence_at) DO UPDATE SET
                 status=excluded.status,
                 updated_at=excluded.updated_at,
+                space_id=excluded.space_id,
                 received_at=datetime('now')
             """,
-            (event_id, user_id, occurrence_at, status, updated_at),
+            (event_id, user_id, occurrence_at, status, updated_at, space_id),
         )
 
-    async def flush_pending_rsvps(self, event_id: str) -> list[CalendarRSVP]:
+    async def flush_pending_rsvps(
+        self,
+        event_id: str,
+        *,
+        space_id: str,
+    ) -> list[CalendarRSVP]:
         """Drain buffered RSVPs for ``event_id`` and apply them.
 
         Called when an event lands locally (either local create or
@@ -935,10 +983,16 @@ class SqliteSpaceCalendarRepo:
         ``removed`` rows which result in a delete). The buffer rows are
         always cleared regardless of whether the apply succeeded —
         callers shouldn't see the same buffered RSVP twice.
+
+        Only rows buffered under ``space_id`` are drained (§24.11) — a
+        row buffered for another space stays put and ages out through
+        :meth:`gc_pending_rsvps`, so the buffer can't be used to write
+        into a space the sender was never gated on. Rows written before
+        the ``space_id`` column existed carry NULL and likewise age out.
         """
         rows = await self._db.fetchall(
-            "SELECT * FROM pending_federated_rsvps WHERE event_id=?",
-            (event_id,),
+            "SELECT * FROM pending_federated_rsvps WHERE event_id=? AND space_id=?",
+            (event_id, space_id),
         )
         applied: list[CalendarRSVP] = []
         for r in rows:
@@ -949,6 +1003,7 @@ class SqliteSpaceCalendarRepo:
                     event_id,
                     r["user_id"],
                     occurrence_at=occurrence_at,
+                    space_id=space_id,
                 )
             elif status in RSVPStatus.ALL:
                 rsvp = CalendarRSVP(
@@ -958,12 +1013,12 @@ class SqliteSpaceCalendarRepo:
                     updated_at=r["updated_at"],
                     occurrence_at=occurrence_at,
                 )
-                await self.upsert_rsvp(rsvp)
+                await self.upsert_rsvp(rsvp, space_id=space_id)
                 applied.append(rsvp)
         if rows:
             await self._db.enqueue(
-                "DELETE FROM pending_federated_rsvps WHERE event_id=?",
-                (event_id,),
+                "DELETE FROM pending_federated_rsvps WHERE event_id=? AND space_id=?",
+                (event_id, space_id),
             )
         return applied
 

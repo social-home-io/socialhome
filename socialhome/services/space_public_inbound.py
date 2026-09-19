@@ -200,7 +200,13 @@ class SpacePublicInbound:
             return
 
         post = self._post_from_inner(post_id, author_user_id, inner)
-        await self._posts.save(space_id, post)
+        if await self._posts.save(space_id, post) is None:
+            log.warning(
+                "space_public.inbound: post %s already exists in another space "
+                "— refusing the relayed write",
+                post_id,
+            )
+            return
         await self._bus.publish(
             SpacePostCreated(
                 post=post,

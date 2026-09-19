@@ -99,7 +99,7 @@ async def test_list_space_stickies(env):
 async def test_update_content(env):
     """update_content changes the sticky's text."""
     sticky = await env.repo.add(author="uid-alice", content="Old")
-    await env.repo.update_content(sticky.id, "New content")
+    await env.repo.update_content(sticky.id, "New content", space_id=None)
     fetched = await env.repo.get(sticky.id)
     assert fetched.content == "New content"
 
@@ -108,13 +108,13 @@ async def test_update_content_empty_raises(env):
     """update_content raises ValueError when new content is empty."""
     sticky = await env.repo.add(author="uid-alice", content="Valid")
     with pytest.raises(ValueError):
-        await env.repo.update_content(sticky.id, "")
+        await env.repo.update_content(sticky.id, "", space_id=None)
 
 
 async def test_update_position(env):
     """update_position changes x and y coordinates."""
     sticky = await env.repo.add(author="uid-alice", content="Move me")
-    await env.repo.update_position(sticky.id, 100.5, 200.75)
+    await env.repo.update_position(sticky.id, 100.5, 200.75, space_id=None)
     fetched = await env.repo.get(sticky.id)
     assert abs(fetched.position_x - 100.5) < 0.01
     assert abs(fetched.position_y - 200.75) < 0.01
@@ -123,7 +123,7 @@ async def test_update_position(env):
 async def test_update_color(env):
     """update_color changes the sticky's color."""
     sticky = await env.repo.add(author="uid-alice", content="Recolor")
-    await env.repo.update_color(sticky.id, "#123456")
+    await env.repo.update_color(sticky.id, "#123456", space_id=None)
     fetched = await env.repo.get(sticky.id)
     assert fetched.color == "#123456"
 
@@ -131,5 +131,127 @@ async def test_update_color(env):
 async def test_delete_sticky(env):
     """delete removes the sticky note."""
     sticky = await env.repo.add(author="uid-alice", content="Delete me")
-    await env.repo.delete(sticky.id)
+    await env.repo.delete(sticky.id, space_id=None)
     assert await env.repo.get(sticky.id) is None
+
+
+# ─── §24.11 cross-space scoping (issue #693) ──────────────────────────────
+
+
+async def _make_space(db, space_id):
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?,?,?,?,?)",
+        (space_id, space_id, "inst-1", "owner", "ab" * 32),
+    )
+
+
+@pytest.fixture
+async def two_spaces(env):
+    """Two space stickies (space-a / space-b) plus one household sticky."""
+    from socialhome.domain.sticky import Sticky
+
+    await _make_space(env.db, "space-a")
+    await _make_space(env.db, "space-b")
+    for sid, rid in (("space-a", "st-a"), ("space-b", "st-b"), (None, "st-hh")):
+        await env.repo.save(
+            Sticky(
+                id=rid,
+                author="uid-owner",
+                content=f"body-{rid}",
+                color="#FFF9B1",
+                position_x=1.0,
+                position_y=2.0,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                space_id=sid,
+            ),
+            space_id=sid,
+        )
+    return env
+
+
+async def _snapshot(env, sticky_id):
+    row = await env.db.fetchone("SELECT * FROM stickies WHERE id=?", (sticky_id,))
+    return dict(row) if row is not None else None
+
+
+async def test_update_content_refuses_foreign_space(two_spaces):
+    """A writer gated on space A cannot edit space B's sticky."""
+    before = await _snapshot(two_spaces, "st-b")
+    assert (
+        await two_spaces.repo.update_content("st-b", "hax", space_id="space-a") is False
+    )
+    assert await _snapshot(two_spaces, "st-b") == before
+
+
+async def test_update_content_own_space_still_works(two_spaces):
+    """The same call scoped to the sticky's own space applies."""
+    assert (
+        await two_spaces.repo.update_content("st-b", "edited", space_id="space-b")
+        is True
+    )
+    assert (await two_spaces.repo.get("st-b")).content == "edited"
+
+
+async def test_update_position_and_color_are_space_scoped(two_spaces):
+    """Position and colour updates honour the gated space too."""
+    before = await _snapshot(two_spaces, "st-b")
+    assert (
+        await two_spaces.repo.update_position("st-b", 9.0, 9.0, space_id="space-a")
+        is False
+    )
+    assert (
+        await two_spaces.repo.update_color("st-b", "#000000", space_id="space-a")
+        is False
+    )
+    assert await _snapshot(two_spaces, "st-b") == before
+    assert (
+        await two_spaces.repo.update_position("st-b", 9.0, 9.0, space_id="space-b")
+        is True
+    )
+    assert (
+        await two_spaces.repo.update_color("st-b", "#000000", space_id="space-b")
+        is True
+    )
+
+
+async def test_delete_refuses_foreign_space(two_spaces):
+    """A delete routed as space A cannot remove space B's sticky."""
+    assert await two_spaces.repo.delete("st-b", space_id="space-a") is False
+    assert await two_spaces.repo.get("st-b") is not None
+    assert await two_spaces.repo.delete("st-b", space_id="space-b") is True
+    assert await two_spaces.repo.get("st-b") is None
+
+
+async def test_space_scoped_call_cannot_touch_household_sticky(two_spaces):
+    """``space_id IS ?`` is null-safe: a space write misses household rows."""
+    before = await _snapshot(two_spaces, "st-hh")
+    assert (
+        await two_spaces.repo.update_content("st-hh", "hax", space_id="space-a")
+        is False
+    )
+    assert await two_spaces.repo.delete("st-hh", space_id="space-a") is False
+    assert await _snapshot(two_spaces, "st-hh") == before
+    assert await two_spaces.repo.update_content("st-hh", "mine", space_id=None) is True
+
+
+async def test_save_upsert_refuses_cross_space_id(two_spaces):
+    """Re-saving space B's id under space A leaves B untouched and adds no row."""
+    from socialhome.domain.sticky import Sticky
+
+    before = await _snapshot(two_spaces, "st-b")
+    stolen = Sticky(
+        id="st-b",
+        author="uid-attacker",
+        content="stolen",
+        color="#FF0000",
+        position_x=0.0,
+        position_y=0.0,
+        created_at="2026-02-01T00:00:00+00:00",
+        updated_at="2026-02-01T00:00:00+00:00",
+        space_id="space-a",
+    )
+    assert await two_spaces.repo.save(stolen, space_id="space-a") is False
+    assert await _snapshot(two_spaces, "st-b") == before
+    assert [s.id for s in await two_spaces.repo.list(space_id="space-a")] == ["st-a"]

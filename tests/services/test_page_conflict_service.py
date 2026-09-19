@@ -100,7 +100,7 @@ async def svc(tmp_dir):
         created_by="u1",
         space_id="sp-1",
     )
-    await repo.save(page)
+    await repo.save(page, space_id=page.space_id)
     svc = PageConflictService(repo)
     yield db, repo, svc, page
     await db.shutdown()
@@ -137,7 +137,7 @@ async def test_merge_remote_conflict_stores_both_sides(svc):
     # Diverge locally.
     from dataclasses import replace
 
-    await repo.save(replace(page, content="mine-version"))
+    await repo.save(replace(page, content="mine-version"), space_id="sp-1")
     # Remote also diverged from base — conflict.
     result = await service.merge_remote_body(
         page_id=page.id,
@@ -170,7 +170,7 @@ async def test_resolve_conflict_mine_keeps_local(svc):
         body="original",
         author_user_id="u1",
     )
-    await repo.save(replace(page, content="mine-version"))
+    await repo.save(replace(page, content="mine-version"), space_id="sp-1")
     await service.merge_remote_body(
         page_id=page.id,
         space_id="sp-1",
@@ -197,7 +197,7 @@ async def test_resolve_conflict_theirs_applies_remote(svc):
         body="original",
         author_user_id="u1",
     )
-    await repo.save(replace(page, content="mine-version"))
+    await repo.save(replace(page, content="mine-version"), space_id="sp-1")
     await service.merge_remote_body(
         page_id=page.id,
         space_id="sp-1",
@@ -225,7 +225,7 @@ async def test_resolve_conflict_merged_requires_content(svc):
         body="original",
         author_user_id="u1",
     )
-    await repo.save(replace(page, content="mine-version"))
+    await repo.save(replace(page, content="mine-version"), space_id="sp-1")
     await service.merge_remote_body(
         page_id=page.id,
         space_id="sp-1",
@@ -252,7 +252,7 @@ async def test_resolve_conflict_merged_applies_provided_body(svc):
         body="original",
         author_user_id="u1",
     )
-    await repo.save(replace(page, content="mine-version"))
+    await repo.save(replace(page, content="mine-version"), space_id="sp-1")
     await service.merge_remote_body(
         page_id=page.id,
         space_id="sp-1",

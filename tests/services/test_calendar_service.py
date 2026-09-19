@@ -128,7 +128,7 @@ async def test_space_calendar_with_rsvps(env):
         end=now + timedelta(hours=1),
         created_by="u1",
     )
-    await env.space_cal_repo.save_event("space-1", event)
+    await env.space_cal_repo.save_event(event, space_id="space-1")
 
     rsvp_going = CalendarRSVP(
         event_id=event.id,

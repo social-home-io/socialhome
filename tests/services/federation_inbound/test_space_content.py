@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from socialhome.domain.events import CalendarEventCreated, CalendarEventDeleted
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
@@ -24,41 +25,82 @@ class _FakeFederationService:
         self._event_registry = _FakeRegistry()
 
 
+class _ScopedRows:
+    """Mimics the repos' §24.11 scoping: a row id belongs to one space."""
+
+    def __init__(self) -> None:
+        self.space_of: dict[str, str | None] = {}
+
+    def claim(self, row_id, space_id) -> bool:
+        """Upsert under ``space_id``; False when the id is another space's."""
+        owner = self.space_of.get(row_id, space_id)
+        if owner != space_id:
+            return False
+        self.space_of[row_id] = space_id
+        return True
+
+    def drop(self, row_id, space_id) -> bool:
+        if self.space_of.get(row_id) != space_id:
+            return False
+        del self.space_of[row_id]
+        return True
+
+
 class _FakePageRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.rows = _ScopedRows()
 
-    async def save(self, page):
+    async def save(self, page, *, space_id):
+        if not self.rows.claim(page.id, space_id):
+            return False
         self.saved.append(page)
+        return True
 
-    async def delete(self, page_id):
+    async def delete(self, page_id, *, space_id):
+        if not self.rows.drop(page_id, space_id):
+            return False
         self.deleted.append(page_id)
+        return True
 
 
 class _FakeStickyRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.rows = _ScopedRows()
 
-    async def save(self, sticky):
+    async def save(self, sticky, *, space_id):
+        if not self.rows.claim(sticky.id, space_id):
+            return False
         self.saved.append(sticky)
+        return True
 
-    async def delete(self, sticky_id):
+    async def delete(self, sticky_id, *, space_id):
+        if not self.rows.drop(sticky_id, space_id):
+            return False
         self.deleted.append(sticky_id)
+        return True
 
 
 class _FakeSpaceTaskRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.rows = _ScopedRows()
 
-    async def save(self, space_id, task):
+    async def save(self, task, *, space_id):
+        if not self.rows.claim(task.id, space_id):
+            return False
         self.saved.append((space_id, task))
-        return task
+        return True
 
-    async def delete(self, task_id):
+    async def delete(self, task_id, *, space_id):
+        if not self.rows.drop(task_id, space_id):
+            return False
         self.deleted.append(task_id)
+        return True
 
 
 class _FakeSpaceCalendarRepo:
@@ -73,23 +115,38 @@ class _FakeSpaceCalendarRepo:
         self.buffer: dict = {}
         self.flush_calls: list[str] = []
 
-    async def save_event(self, space_id, event):
+    async def save_event(self, event, *, space_id):
+        owner = self._events.get(event.id)
+        if owner is not None and owner[0] != space_id:
+            return False
         self.saved.append((space_id, event))
         self._events[event.id] = (space_id, event)
-        return event
+        return True
 
     async def get_event(self, event_id):
         return self._events.get(event_id)
 
-    async def delete_event(self, event_id):
+    async def delete_event(self, event_id, *, space_id):
+        owner = self._events.get(event_id)
+        if owner is None or owner[0] != space_id:
+            return False
         self.deleted.append(event_id)
         self._events.pop(event_id, None)
+        return True
 
-    async def upsert_rsvp(self, rsvp):
+    async def upsert_rsvp(self, rsvp, *, space_id):
+        owner = self._events.get(rsvp.event_id)
+        if owner is None or owner[0] != space_id:
+            return False
         self.rsvps[(rsvp.event_id, rsvp.user_id, rsvp.occurrence_at)] = rsvp
+        return True
 
-    async def remove_rsvp(self, event_id, user_id, *, occurrence_at):
+    async def remove_rsvp(self, event_id, user_id, *, occurrence_at, space_id):
+        owner = self._events.get(event_id)
+        if owner is None or owner[0] != space_id:
+            return False
         self.rsvps.pop((event_id, user_id, occurrence_at), None)
+        return True
 
     async def buffer_pending_rsvp(
         self,
@@ -99,18 +156,24 @@ class _FakeSpaceCalendarRepo:
         occurrence_at,
         status,
         updated_at,
+        space_id,
     ):
         self.buffer[(event_id, user_id, occurrence_at)] = {
             "status": status,
             "updated_at": updated_at,
+            "space_id": space_id,
         }
 
-    async def flush_pending_rsvps(self, event_id):
+    async def flush_pending_rsvps(self, event_id, *, space_id):
         self.flush_calls.append(event_id)
         applied = []
         from socialhome.domain.calendar import CalendarRSVP, RSVPStatus
 
-        keys_to_drop = [k for k in self.buffer if k[0] == event_id]
+        keys_to_drop = [
+            k
+            for k in self.buffer
+            if k[0] == event_id and self.buffer[k].get("space_id") == space_id
+        ]
         for key in keys_to_drop:
             entry = self.buffer.pop(key)
             _, user_id, occ = key
@@ -279,10 +342,12 @@ async def test_task_saved_missing_fields_drops(repos, handlers):
 
 
 async def test_task_deleted(repos, handlers):
+    repos["task"].rows.claim("t-1", "sp-1")
     await handlers._on_task_deleted(
         _event(
             FederationEventType.SPACE_TASK_DELETED,
             {"id": "t-1"},
+            space_id="sp-1",
         )
     )
     assert repos["task"].deleted == ["t-1"]
@@ -323,10 +388,12 @@ async def test_page_saved_missing_title_drops(repos, handlers):
 
 
 async def test_page_deleted(repos, handlers):
+    repos["page"].rows.claim("p-1", "sp-1")
     await handlers._on_page_deleted(
         _event(
             FederationEventType.SPACE_PAGE_DELETED,
             {"id": "p-1"},
+            space_id="sp-1",
         )
     )
     assert repos["page"].deleted == ["p-1"]
@@ -366,10 +433,12 @@ async def test_sticky_saved_missing_content_drops(repos, handlers):
 
 
 async def test_sticky_deleted(repos, handlers):
+    repos["sticky"].rows.claim("s-1", "sp-1")
     await handlers._on_sticky_deleted(
         _event(
             FederationEventType.SPACE_STICKY_DELETED,
             {"id": "s-1"},
+            space_id="sp-1",
         )
     )
     assert repos["sticky"].deleted == ["s-1"]
@@ -417,10 +486,12 @@ async def test_calendar_saved_missing_end_drops(repos, handlers):
 
 
 async def test_calendar_deleted(repos, handlers):
+    repos["calendar"]._events["e-1"] = ("sp-1", object())
     await handlers._on_calendar_deleted(
         _event(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
             {"id": "e-1"},
+            space_id="sp-1",
         )
     )
     assert repos["calendar"].deleted == ["e-1"]
@@ -524,6 +595,7 @@ async def test_calendar_event_arrival_flushes_buffer(repos, handlers):
         occurrence_at=occ,
         status="going",
         updated_at="2026-05-10T00:00:00+00:00",
+        space_id="sp-1",
     )
     # Event arrives.
     await handlers._on_calendar_saved(
@@ -1347,3 +1419,299 @@ async def test_calendar_saved_validates_peer_tz(repos, handlers, wire_tz, expect
     )
     _space_id, ev = repos["calendar"]._events["e-tz"]
     assert ev.tz == expected
+
+
+# ─── §24.11 cross-space refusals (issue #693) ─────────────────────────────
+#
+# Every handler below is fed an envelope the pipeline gated on space A
+# that names a row of space B. The write must not land, a WARNING must
+# say so, and no bus event may fire.
+
+
+def _seed_other_space(repos):
+    """Give space ``sp-b`` one row of every kind the handlers mutate."""
+    repos["task"].rows.claim("t-b", "sp-b")
+    repos["page"].rows.claim("p-b", "sp-b")
+    repos["page"].rows.claim("hh-page", None)  # a household (personal) page
+    repos["sticky"].rows.claim("s-b", "sp-b")
+    repos["calendar"]._events["e-b"] = ("sp-b", object())
+
+
+@pytest.fixture
+def other_space(repos):
+    _seed_other_space(repos)
+    return repos
+
+
+async def test_task_saved_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_saved(
+            _event(
+                FederationEventType.SPACE_TASK_UPDATED,
+                {"id": "t-b", "list_id": "l-b", "title": "stolen"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["task"].saved == []
+    assert other_space["task"].rows.space_of["t-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_task_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_deleted(
+            _event(
+                FederationEventType.SPACE_TASK_DELETED,
+                {"id": "t-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["task"].deleted == []
+    assert other_space["task"].rows.space_of["t-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_page_saved_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_page_saved(
+            _event(
+                FederationEventType.SPACE_PAGE_UPDATED,
+                {"id": "p-b", "title": "stolen", "content": "x"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["page"].saved == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_page_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_page_deleted(
+            _event(
+                FederationEventType.SPACE_PAGE_DELETED,
+                {"id": "p-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["page"].deleted == []
+    assert other_space["page"].rows.space_of["p-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_space_page_deleted_cannot_reach_the_personal_pages_table(
+    other_space, handlers, caplog
+):
+    """A SPACE_PAGE_DELETED routed for a space never touches ``pages``.
+
+    The household page id lives in the personal ``pages`` table
+    (``space_id IS NULL``). The repo's delete now picks its table from
+    the gated space, so a space-routed delete can't reach it — this
+    asserts the handler passes that scope through.
+    """
+    with caplog.at_level("WARNING"):
+        await handlers._on_page_deleted(
+            _event(
+                FederationEventType.SPACE_PAGE_DELETED,
+                {"id": "hh-page"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["page"].deleted == []
+    assert other_space["page"].rows.space_of["hh-page"] is None
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_sticky_saved_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_sticky_saved(
+            _event(
+                FederationEventType.SPACE_STICKY_UPDATED,
+                {"id": "s-b", "author": "u-1", "content": "stolen"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["sticky"].saved == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_sticky_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_sticky_deleted(
+            _event(
+                FederationEventType.SPACE_STICKY_DELETED,
+                {"id": "s-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["sticky"].deleted == []
+    assert other_space["sticky"].rows.space_of["s-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_calendar_saved_cross_space_is_refused(
+    bus, other_space, handlers, caplog
+):
+    """No row change, no CalendarEventCreated, no buffer flush."""
+    seen = []
+    bus.subscribe(CalendarEventCreated, lambda e: seen.append(e))
+    with caplog.at_level("WARNING"):
+        await handlers._on_calendar_saved(
+            _event(
+                FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+                {
+                    "id": "e-b",
+                    "calendar_id": "cal-a",
+                    "summary": "stolen",
+                    "created_by": "u-1",
+                    "start": "2026-05-15T18:00:00+00:00",
+                    "end": "2026-05-15T20:00:00+00:00",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert other_space["calendar"].saved == []
+    assert other_space["calendar"].flush_calls == []
+    assert seen == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_calendar_deleted_cross_space_is_refused(
+    bus, other_space, handlers, caplog
+):
+    """No row change and no CalendarEventDeleted on the bus."""
+    seen = []
+    bus.subscribe(CalendarEventDeleted, lambda e: seen.append(e))
+    with caplog.at_level("WARNING"):
+        await handlers._on_calendar_deleted(
+            _event(
+                FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+                {"id": "e-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["calendar"].deleted == []
+    assert "e-b" in other_space["calendar"]._events
+    assert seen == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_rsvp_updated_cross_space_is_refused(other_space, handlers, caplog):
+    occ = "2026-05-15T18:00:00+00:00"
+    with caplog.at_level("WARNING"):
+        await handlers._on_rsvp_updated(
+            _event(
+                FederationEventType.SPACE_RSVP_UPDATED,
+                {
+                    "event_id": "e-b",
+                    "user_id": "u-attacker",
+                    "occurrence_at": occ,
+                    "status": "going",
+                    "updated_at": "2026-05-10T00:00:00+00:00",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert other_space["calendar"].rsvps == {}
+    assert other_space["calendar"].buffer == {}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_rsvp_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    occ = "2026-05-15T18:00:00+00:00"
+    other_space["calendar"].rsvps[("e-b", "u-9", occ)] = object()
+    with caplog.at_level("WARNING"):
+        await handlers._on_rsvp_deleted(
+            _event(
+                FederationEventType.SPACE_RSVP_DELETED,
+                {
+                    "event_id": "e-b",
+                    "user_id": "u-9",
+                    "occurrence_at": occ,
+                    "updated_at": "2026-05-10T00:00:00+00:00",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert ("e-b", "u-9", occ) in other_space["calendar"].rsvps
+    assert other_space["calendar"].buffer == {}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_buffered_rsvp_carries_the_gated_space(repos, handlers):
+    """An out-of-order RSVP is buffered under the space it was gated on."""
+    occ = "2026-05-15T18:00:00+00:00"
+    await handlers._on_rsvp_updated(
+        _event(
+            FederationEventType.SPACE_RSVP_UPDATED,
+            {
+                "event_id": "e-later",
+                "user_id": "u-9",
+                "occurrence_at": occ,
+                "status": "going",
+                "updated_at": "2026-05-10T00:00:00+00:00",
+            },
+            space_id="sp-a",
+        )
+    )
+    assert repos["calendar"].buffer[("e-later", "u-9", occ)]["space_id"] == "sp-a"
+
+
+@pytest.mark.parametrize(
+    "handler_name,payload",
+    [
+        ("_on_task_saved", {"id": "t-1", "list_id": "l-1", "title": "x"}),
+        ("_on_task_deleted", {"id": "t-1"}),
+        ("_on_page_saved", {"id": "p-1", "title": "x"}),
+        ("_on_page_deleted", {"id": "p-1"}),
+        ("_on_sticky_saved", {"id": "s-1", "author": "u", "content": "x"}),
+        ("_on_sticky_deleted", {"id": "s-1"}),
+        (
+            "_on_calendar_saved",
+            {
+                "id": "e-1",
+                "calendar_id": "c-1",
+                "summary": "x",
+                "created_by": "u",
+                "start": "2026-05-15T18:00:00+00:00",
+                "end": "2026-05-15T19:00:00+00:00",
+            },
+        ),
+        ("_on_calendar_deleted", {"id": "e-1"}),
+        (
+            "_on_rsvp_updated",
+            {
+                "event_id": "e-1",
+                "user_id": "u",
+                "occurrence_at": "2026-05-15T18:00:00+00:00",
+                "status": "going",
+                "updated_at": "2026-05-10T00:00:00+00:00",
+            },
+        ),
+        (
+            "_on_rsvp_deleted",
+            {
+                "event_id": "e-1",
+                "user_id": "u",
+                "occurrence_at": "2026-05-15T18:00:00+00:00",
+                "updated_at": "2026-05-10T00:00:00+00:00",
+            },
+        ),
+    ],
+)
+async def test_routing_payload_space_mismatch_is_dropped(
+    repos, handlers, caplog, handler_name, payload
+):
+    """Routing field and payload copy disagree → nothing is written."""
+    evt = _event(
+        FederationEventType.SPACE_TASK_UPDATED,
+        dict(payload, space_id="sp-b"),
+        space_id="sp-a",
+    )
+    with caplog.at_level("WARNING"):
+        await getattr(handlers, handler_name)(evt)
+    assert repos["task"].saved == [] and repos["task"].deleted == []
+    assert repos["page"].saved == [] and repos["page"].deleted == []
+    assert repos["sticky"].saved == [] and repos["sticky"].deleted == []
+    assert repos["calendar"].saved == [] and repos["calendar"].deleted == []
+    assert repos["calendar"].rsvps == {} and repos["calendar"].buffer == {}
+    assert "does not match payload space" in caplog.text

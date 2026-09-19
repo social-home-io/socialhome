@@ -91,14 +91,17 @@ class StickyDetailView(BaseView):
         if sticky is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
 
+        # The sticky was loaded above, so its own scope is the one to
+        # write under — the repo mutators are space-scoped (§24.11).
+        scope = sticky.space_id
         if "content" in body:
-            await repo.update_content(sticky_id, body["content"])
+            await repo.update_content(sticky_id, body["content"], space_id=scope)
         if "position_x" in body or "position_y" in body:
             x = float(body.get("position_x", sticky.position_x))
             y = float(body.get("position_y", sticky.position_y))
-            await repo.update_position(sticky_id, x, y)
+            await repo.update_position(sticky_id, x, y, space_id=scope)
         if "color" in body:
-            await repo.update_color(sticky_id, body["color"])
+            await repo.update_color(sticky_id, body["color"], space_id=scope)
 
         updated = await repo.get(sticky_id)
         if updated is None:
@@ -123,7 +126,7 @@ class StickyDetailView(BaseView):
         sticky = await repo.get(sticky_id)
         if sticky is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await repo.delete(sticky_id)
+        await repo.delete(sticky_id, space_id=sticky.space_id)
         await bus.publish(
             StickyDeleted(
                 sticky_id=sticky_id,
@@ -215,13 +218,13 @@ class SpaceStickyDetailView(BaseView):
 
         body = await self.body()
         if "content" in body:
-            await repo.update_content(sticky.id, body["content"])
+            await repo.update_content(sticky.id, body["content"], space_id=space_id)
         if "position_x" in body or "position_y" in body:
             x = float(body.get("position_x", sticky.position_x))
             y = float(body.get("position_y", sticky.position_y))
-            await repo.update_position(sticky.id, x, y)
+            await repo.update_position(sticky.id, x, y, space_id=space_id)
         if "color" in body:
-            await repo.update_color(sticky.id, body["color"])
+            await repo.update_color(sticky.id, body["color"], space_id=space_id)
 
         updated = await repo.get(sticky.id)
         if updated is None:
@@ -248,7 +251,7 @@ class SpaceStickyDetailView(BaseView):
         sticky = await self._load(space_id, self.match("sid"))
         if sticky is None:
             return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await repo.delete(sticky.id)
+        await repo.delete(sticky.id, space_id=space_id)
         await bus.publish(
             StickyDeleted(
                 sticky_id=sticky.id,

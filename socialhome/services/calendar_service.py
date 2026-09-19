@@ -1153,6 +1153,7 @@ class SpaceCalendarService(BusPublisherMixin):
                     base_id,
                     event.user_id,
                     occurrence_at=r.occurrence_at,
+                    space_id=event.space_id,
                 )
                 await self._publish_rsvp_changed(
                     space_id=event.space_id,
@@ -1240,7 +1241,8 @@ class SpaceCalendarService(BusPublisherMixin):
             tz=event_tz,
             announce_in_feed=announce_in_feed,
         )
-        saved = await self._repo.save_event(space_id, event)
+        await self._repo.save_event(event, space_id=space_id)
+        saved = event
         await self._emit(CalendarEventCreated(event=saved))
         await self._publish_federation_event_saved(
             space_id=space_id,
@@ -1259,7 +1261,8 @@ class SpaceCalendarService(BusPublisherMixin):
                 status=RSVPStatus.GOING,
                 updated_at=datetime.now(timezone.utc).isoformat(),
                 occurrence_at=start_dt.isoformat(),
-            )
+            ),
+            space_id=space_id,
         )
         await self._publish_rsvp_changed(
             space_id=space_id,
@@ -1293,7 +1296,8 @@ class SpaceCalendarService(BusPublisherMixin):
                     )
                 }
             )
-        await self._repo.delete_event(event_id)
+        if snapshot_space is not None:
+            await self._repo.delete_event(event_id, space_id=snapshot_space)
         await self._emit(
             CalendarEventDeleted(
                 event_id=event_id,
@@ -1400,7 +1404,7 @@ class SpaceCalendarService(BusPublisherMixin):
             location=new_location,
             tz=new_tz,
         )
-        await self._repo.save_event(space_id, updated)
+        await self._repo.save_event(updated, space_id=space_id)
         await self._publish_federation_event_saved(
             space_id=space_id,
             event=updated,
@@ -1507,7 +1511,8 @@ class SpaceCalendarService(BusPublisherMixin):
                 status=effective_status,
                 updated_at=now_iso,
                 occurrence_at=occ_iso,
-            )
+            ),
+            space_id=space_id,
         )
         await self._publish_federation_rsvp(
             space_id=space_id,
@@ -1551,6 +1556,7 @@ class SpaceCalendarService(BusPublisherMixin):
             event_id,
             user_id,
             occurrence_at=occ_iso,
+            space_id=space_id,
         )
         await self._publish_federation_rsvp(
             space_id=space_id,
@@ -1733,7 +1739,8 @@ class SpaceCalendarService(BusPublisherMixin):
                 status=new_status,
                 updated_at=now_iso,
                 occurrence_at=occ_iso,
-            )
+            ),
+            space_id=space_id,
         )
         await self._publish_federation_rsvp(
             space_id=space_id,
@@ -1844,7 +1851,8 @@ class SpaceCalendarService(BusPublisherMixin):
                 status=RSVPStatus.GOING,
                 updated_at=now_iso,
                 occurrence_at=occ_iso,
-            )
+            ),
+            space_id=space_id,
         )
         await self._publish_federation_rsvp(
             space_id=space_id,

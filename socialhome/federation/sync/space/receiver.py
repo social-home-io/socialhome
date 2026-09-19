@@ -421,33 +421,48 @@ class SpaceSyncReceiver:
         elif resource == "posts":
             for r in records:
                 post = _post_from_record(r)
-                if post is not None:
-                    await self._space_post_repo.save(space_id, post)
+                if post is not None and (
+                    await self._space_post_repo.save(space_id, post) is None
+                ):
+                    log.warning(
+                        "space sync: post %s already exists in another space "
+                        "— refusing the write for %s",
+                        post.id,
+                        space_id,
+                    )
         elif resource == "comments":
             for r in records:
                 comment = _comment_from_record(r)
-                if comment is not None:
-                    await self._space_post_repo.add_comment(comment)
+                if comment is not None and not await self._space_post_repo.add_comment(
+                    comment, space_id=space_id
+                ):
+                    log.warning(
+                        "space sync: comment %s targets post %s outside space "
+                        "%s — refusing the write",
+                        comment.id,
+                        comment.post_id,
+                        space_id,
+                    )
         elif resource in ("tasks", "tasks_archived"):
             for r in records:
                 task = _task_from_record(r)
                 if task is not None:
-                    await self._space_task_repo.save(space_id, task)
+                    await self._space_task_repo.save(task, space_id=space_id)
         elif resource == "pages":
             for r in records:
                 page = _page_from_record(r, space_id)
                 if page is not None:
-                    await self._page_repo.save(page)
+                    await self._page_repo.save(page, space_id=space_id)
         elif resource == "stickies":
             for r in records:
                 sticky = _sticky_from_record(r, space_id)
                 if sticky is not None:
-                    await self._sticky_repo.save(sticky)
+                    await self._sticky_repo.save(sticky, space_id=space_id)
         elif resource == "calendar":
             for r in records:
                 event = _calendar_from_record(r)
                 if event is not None:
-                    await self._space_calendar_repo.save_event(space_id, event)
+                    await self._space_calendar_repo.save_event(event, space_id=space_id)
         elif resource == "gallery":
             # Albums first, then items — preserve the exporter's order.
             for r in records:

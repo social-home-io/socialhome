@@ -175,6 +175,7 @@ async def test_space_post_deleted_happy_path(svc):
         _evt(
             "SPACE_POST_DELETED",
             {"post_id": "p", "moderated_by": "admin"},
+            space_id="sp",
         ),
     )
     svc.sp_post.soft_delete.assert_awaited_once()
@@ -196,6 +197,7 @@ async def test_space_comment_added_bad_type_falls_back(svc):
                 "type": "bogus",
                 "content": "hi",
             },
+            space_id="sp",
         ),
     )
     svc.sp_post.add_comment.assert_awaited_once()
@@ -225,7 +227,7 @@ async def test_space_comment_updated_happy_path(svc):
             space_id="sp",
         ),
     )
-    svc.sp_post.edit_comment.assert_awaited_once_with("c", "new")
+    svc.sp_post.edit_comment.assert_awaited_once_with("c", "new", space_id="sp")
     assert any(isinstance(e, CommentUpdated) for e in svc.bus.events)
 
 
@@ -250,6 +252,7 @@ async def test_space_comment_deleted_happy_path(svc):
         _evt(
             "SPACE_COMMENT_DELETED",
             {"post_id": "p", "comment_id": "c"},
+            space_id="sp",
         ),
     )
     svc.sp_post.soft_delete_comment.assert_awaited_once()

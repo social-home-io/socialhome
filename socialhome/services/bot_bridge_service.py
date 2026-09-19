@@ -121,6 +121,10 @@ class BotBridgeService:
             bot_id=bot.bot_id,
         )
         saved = await self._space_posts.save(bot.space_id, post)
+        if saved is None:
+            # ``save`` refuses an id owned by another space (#693); the id
+            # is a fresh uuid4, so this only fires on real corruption.
+            raise ValueError(f"post id {post.id!r} already exists in another space")
         await self._bus.publish(SpacePostCreated(post=saved, space_id=bot.space_id))
         log.info(
             "bot-bridge: space post %s by bot %s (%s) in space %s",

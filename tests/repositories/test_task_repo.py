@@ -212,7 +212,7 @@ async def test_delete_task(env):
 async def test_space_save_and_get_list(env):
     """SqliteSpaceTaskRepo save_list / get_list roundtrip."""
     tl = _list_("spl-1", "Space Tasks")
-    await env.space_repo.save_list("sp-1", tl)
+    await env.space_repo.save_list(tl, space_id="sp-1")
     result = await env.space_repo.get_list("spl-1")
     assert result is not None
     sid, fetched = result
@@ -223,7 +223,7 @@ async def test_space_save_and_get_list(env):
 async def test_space_save_and_get_task(env):
     """SqliteSpaceTaskRepo save / get task roundtrip."""
     tl = _list_("spl-t", "ST")
-    await env.space_repo.save_list("sp-1", tl)
+    await env.space_repo.save_list(tl, space_id="sp-1")
     now = datetime.now(timezone.utc)
     task = Task(
         id="sp-t1",
@@ -235,7 +235,7 @@ async def test_space_save_and_get_task(env):
         created_at=now,
         updated_at=now,
     )
-    await env.space_repo.save("sp-1", task)
+    await env.space_repo.save(task, space_id="sp-1")
     result = await env.space_repo.get("sp-t1")
     assert result is not None
     sid, fetched = result
@@ -246,7 +246,7 @@ async def test_space_save_and_get_task(env):
 async def test_space_list_by_list(env):
     """list_by_list on space repo returns tasks in the list."""
     tl = _list_("spl-lbl")
-    await env.space_repo.save_list("sp-1", tl)
+    await env.space_repo.save_list(tl, space_id="sp-1")
     now = datetime.now(timezone.utc)
     for i in range(3):
         t = Task(
@@ -259,7 +259,7 @@ async def test_space_list_by_list(env):
             created_at=now,
             updated_at=now,
         )
-        await env.space_repo.save("sp-1", t)
+        await env.space_repo.save(t, space_id="sp-1")
     results = await env.space_repo.list_by_list("spl-lbl")
     assert len(results) == 3
 
@@ -268,8 +268,8 @@ async def test_space_list_by_space(env):
     """list_by_space returns all tasks belonging to the space."""
     tl1 = _list_("spl-bs1")
     tl2 = _list_("spl-bs2")
-    await env.space_repo.save_list("sp-1", tl1)
-    await env.space_repo.save_list("sp-1", tl2)
+    await env.space_repo.save_list(tl1, space_id="sp-1")
+    await env.space_repo.save_list(tl2, space_id="sp-1")
     now = datetime.now(timezone.utc)
     t1 = Task(
         id="sp-tbs1",
@@ -291,8 +291,8 @@ async def test_space_list_by_space(env):
         created_at=now,
         updated_at=now,
     )
-    await env.space_repo.save("sp-1", t1)
-    await env.space_repo.save("sp-1", t2)
+    await env.space_repo.save(t1, space_id="sp-1")
+    await env.space_repo.save(t2, space_id="sp-1")
     results = await env.space_repo.list_by_space("sp-1")
     ids = {t.id for t in results}
     assert {"sp-tbs1", "sp-tbs2"}.issubset(ids)
@@ -301,7 +301,7 @@ async def test_space_list_by_space(env):
 async def test_space_delete_task(env):
     """delete on space task repo removes the task."""
     tl = _list_("spl-del")
-    await env.space_repo.save_list("sp-1", tl)
+    await env.space_repo.save_list(tl, space_id="sp-1")
     now = datetime.now(timezone.utc)
     task = Task(
         id="sp-tdel",
@@ -313,6 +313,79 @@ async def test_space_delete_task(env):
         created_at=now,
         updated_at=now,
     )
-    await env.space_repo.save("sp-1", task)
-    await env.space_repo.delete("sp-tdel")
+    await env.space_repo.save(task, space_id="sp-1")
+    await env.space_repo.delete("sp-tdel", space_id="sp-1")
     assert await env.space_repo.get("sp-tdel") is None
+
+
+# ─── §24.11 cross-space scoping (issue #693) ──────────────────────────────
+
+
+@pytest.fixture
+async def two_spaces(env):
+    """Space sp-1 and space sp-2, each with a task list and one task."""
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?,?,?,?,?)",
+        ("sp-2", "OtherSpace", "inst-x", "alice", "ccdd" * 16),
+    )
+    for sid, lid, tid in (("sp-1", "l-1", "t-1"), ("sp-2", "l-2", "t-2")):
+        assert await env.space_repo.save_list(_list_(lid, f"list-{sid}"), space_id=sid)
+        assert await env.space_repo.save(_task(tid, lid, f"task-{sid}"), space_id=sid)
+    return env
+
+
+async def _task_row(env, task_id):
+    row = await env.db.fetchone("SELECT * FROM space_tasks WHERE id=?", (task_id,))
+    return dict(row) if row is not None else None
+
+
+async def test_space_task_save_refuses_cross_space_id(two_spaces):
+    """Re-saving sp-2's task id under sp-1 leaves sp-2's row untouched."""
+    before = await _task_row(two_spaces, "t-2")
+    assert (
+        await two_spaces.space_repo.save(_task("t-2", "l-1", "stolen"), space_id="sp-1")
+        is False
+    )
+    assert await _task_row(two_spaces, "t-2") == before
+    assert [t.id for t in await two_spaces.space_repo.list_by_space("sp-1")] == ["t-1"]
+
+
+async def test_space_task_save_refuses_foreign_parent_list(two_spaces):
+    """A task may not be filed under another space's list."""
+    assert (
+        await two_spaces.space_repo.save(
+            _task("t-new", "l-2", "smuggled"), space_id="sp-1"
+        )
+        is False
+    )
+    assert await two_spaces.space_repo.get("t-new") is None
+    assert [t.id for t in await two_spaces.space_repo.list_by_list("l-2")] == ["t-2"]
+
+
+async def test_space_task_delete_refuses_foreign_space(two_spaces):
+    """A delete routed as sp-1 cannot remove sp-2's task."""
+    assert await two_spaces.space_repo.delete("t-2", space_id="sp-1") is False
+    assert await two_spaces.space_repo.get("t-2") is not None
+    assert await two_spaces.space_repo.delete("t-2", space_id="sp-2") is True
+    assert await two_spaces.space_repo.get("t-2") is None
+
+
+async def test_space_task_list_save_refuses_cross_space_id(two_spaces):
+    """Re-saving sp-2's list id under sp-1 leaves sp-2's list untouched."""
+    assert (
+        await two_spaces.space_repo.save_list(_list_("l-2", "renamed"), space_id="sp-1")
+        is False
+    )
+    result = await two_spaces.space_repo.get_list("l-2")
+    assert result is not None
+    assert result[0] == "sp-2"
+    assert result[1].name == "list-sp-2"
+
+
+async def test_space_task_list_delete_refuses_foreign_space(two_spaces):
+    """A list delete routed as sp-1 cannot remove sp-2's list."""
+    assert await two_spaces.space_repo.delete_list("l-2", space_id="sp-1") is False
+    assert await two_spaces.space_repo.get_list("l-2") is not None
+    assert await two_spaces.space_repo.delete_list("l-2", space_id="sp-2") is True
+    assert await two_spaces.space_repo.get_list("l-2") is None
