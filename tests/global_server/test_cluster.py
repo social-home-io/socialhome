@@ -11,6 +11,7 @@ from socialhome.capabilities_sig import (
 )
 from socialhome.global_server.cluster import (
     MAX_SIGNALING_SESSIONS,
+    NODE_HELLO,
     ClusterService,
 )
 from socialhome.global_server.domain import ClusterNode
@@ -460,3 +461,45 @@ async def test_sign_capabilities_block_without_a_key_signs_nothing(cluster):
         "",
         "",
     )
+
+
+async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirectional(
+    enabled_cluster, monkeypatch
+):
+    """A HELLO from an unknown peer is answered with our own HELLO.
+
+    ``_announce_to_peers`` only fires once at startup, so a node whose peer was
+    down at that instant would otherwise never be re-announced to — a cold-start
+    deadlock where one node stays ``unknown_node`` (403) to the other forever.
+    Replying on first contact converges both sides the moment either announces.
+    """
+    posted: list[tuple] = []
+
+    async def fake_post(self, url, msg_type, payload, *, session=None):
+        posted.append((url, msg_type, payload))
+
+    # ClusterService is __slots__-ed, so patch the class method, not the
+    # instance.
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+
+    # First contact from an unknown peer → we register it AND HELLO back.
+    await enabled_cluster.handle_hello(
+        from_node_id="node-b",
+        url="https://b.gfs.test",
+        public_key_hex="bb" * 32,
+    )
+    node_ids = {n.node_id for n in await enabled_cluster.list_nodes()}
+    assert "node-b" in node_ids
+    replies = [p for p in posted if p[1] == NODE_HELLO]
+    assert len(replies) == 1, posted
+    assert replies[0][0] == "https://b.gfs.test"
+    assert replies[0][2]["node_id"] == "node-a"
+
+    # A SECOND hello from the now-known peer must NOT reply — no ping-pong.
+    posted.clear()
+    await enabled_cluster.handle_hello(
+        from_node_id="node-b",
+        url="https://b.gfs.test",
+        public_key_hex="bb" * 32,
+    )
+    assert [p for p in posted if p[1] == NODE_HELLO] == []

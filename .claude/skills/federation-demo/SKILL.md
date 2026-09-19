@@ -549,6 +549,38 @@ python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
+### ``gfs-cluster`` — a multi-process GFS on one shared DB
+
+Standalone (needs only ``up`` for ROOT; runs its OWN two GFS nodes on
+18770/18771, tears them down at the end). Mirrors the production topology
+(``gfs-deployment``): several GFS processes share ONE SQLite database
+behind a round-robin load balancer, with cluster mode on only to route
+WS pushes across allocs. The step:
+
+1. Boots ``gfs-a`` then ``gfs-b`` on the SAME ``data_dir`` (hence one
+   ``gfs.db``) and a shared ``signing_seed_hex`` (one GFS identity).
+2. Asserts the cluster **forms** — each ``/cluster/health`` is ``online``
+   and lists the peer. This exercises the cold-start discovery fix: the
+   one-shot startup HELLO is lost if a peer is not yet listening, so a
+   re-announce loop HELLOs configured peers each tick until they answer,
+   and ``handle_hello`` replies on first contact — otherwise the nodes
+   deadlock one-directional (heartbeats rejected ``403 unknown_node``).
+3. Fires **24 registrations concurrently, split across both node ports**,
+   so the two processes' writers collide on the shared DB's write lock,
+   and asserts every one is accepted with **0 ``database is locked``**.
+   Before ``PRAGMA busy_timeout`` a collided write failed instantly with
+   HTTP 500 — the class of failure behind "the connection server couldn't
+   publish the link right now"; with ``busy_timeout=0`` this step reports
+   ``12 of 24 … failed`` and the lock lines, so it is a real regression
+   guard, not a smoke test.
+4. Confirms a client registered via one node is served by the other
+   (shared DB → the round-robin LB is safe).
+
+```bash
+python .claude/skills/federation-demo/harness.py up
+python .claude/skills/federation-demo/harness.py gfs-cluster
+```
+
 ``gfs-replay`` slots in anywhere after ``gfs-traffic`` and is optional
 (it restarts Alpha); the content steps only need ``gfs-traffic`` to
 have published the space.
