@@ -221,10 +221,25 @@ class _FakeFederationService:
         # sending REDEEM, so a v_5 issuer should be 422'd up front.
         self._peer_min_version = peer_min_version
         self._own_instance_id = own_instance_id
+        self.identity = generate_identity_keypair()
+        #: ``instance_id -> Ed25519 identity pk`` this node has pinned,
+        #: read by the v_31 routed origin-authentication check.
+        self.identity_pks: dict[str, bytes] = {}
 
     @property
     def own_instance_id(self) -> str:
         return self._own_instance_id
+
+    @property
+    def own_identity_seed(self) -> bytes:
+        return self.identity.private_key
+
+    @property
+    def own_identity_pk(self) -> bytes:
+        return self.identity.public_key
+
+    async def peer_identity_public_key(self, instance_id: str) -> bytes | None:
+        return self.identity_pks.get(instance_id)
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         self.sent.append(
@@ -1163,6 +1178,12 @@ async def test_redeem_round_trip_via_mesh_routing():
         event_dispatcher=lambda ev: _dispatch_via_registry(issuer_fed, ev),
         target_eph_lookup=issuer_route_svc.lookup_target_eph_priv,
     )
+
+    # Each side pins the other's identity key, the way a
+    # ``remote_instances`` row does — that is what the v_31 routed
+    # origin-authentication check verifies ``path[0]`` against.
+    sender_fed.identity_pks["issuer-1"] = issuer_fed.identity.public_key
+    issuer_fed.identity_pks["sender-1"] = sender_fed.identity.public_key
 
     # ── Coordinators ──────────────────────────────────────────────────
     sender = _make_coordinator(

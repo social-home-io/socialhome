@@ -451,7 +451,28 @@ from __future__ import annotations
 #:   an out-of-vocabulary role to ``'member'`` rather than dropping the
 #:   mutation. Space-scoped, so it appears in the per-space compatibility
 #:   banner.
-OURS: int = 30
+#: * **v_31** (2026-09-19) — authenticated ``SPACE_ROUTED`` origin (#692):
+#:   the sealed blob gains ``origin_identity_pk`` / ``origin_sig`` /
+#:   ``origin_sig_suite``. The household at ``path[0]`` signs
+#:   ``space-routed-origin:v1:<direction>:<route_id>:<path>:<inner_event_type>``
+#:   plus a SHA-256 over the sealed material with its Ed25519 identity key,
+#:   and the endpoint verifies it before the inner event reaches the
+#:   dispatcher. Until v_31 ``path[0]`` was relay-supplied and unproven, so a
+#:   mesh peer could probe a household for a route and then ship it an inner
+#:   event attributed to any household it liked — defeating the §24.11
+#:   post-decrypt gates (ban check, Follower write gate) that judge exactly
+#:   that field. Senders **always** sign: the outbound is wire-additive
+#:   (pre-v_31 endpoints ignore the extra sealed fields) and the origin often
+#:   has no ``remote_instances`` row for a mesh-only target to gate on.
+#:   **Fail-closed at the receiver, with a named legacy window.** Older-peer
+#:   fallback: an unsigned inner event is accepted only when the receiver
+#:   holds a row for the claimed origin AND that row's ``proto_version`` is
+#:   below :data:`FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE` —
+#:   logged at INFO so the window is visible, and it closes by itself as
+#:   peers upgrade. An unsigned event naming an origin at v_31+, or one the
+#:   receiver holds no row for, is dropped. Space-scoped (the mesh carries
+#:   space content), so it appears in the per-space compatibility banner.
+OURS: int = 31
 
 
 class FederationCapability:
@@ -733,6 +754,19 @@ class FederationCapability:
     #: instead of shipping something they cannot store.
     MIN_FOR_REMOTE_SUBSCRIBER_ROLE = 30
 
+    #: Minimum proto_version where a household signs the ``SPACE_ROUTED``
+    #: envelopes it originates (``origin_identity_pk`` / ``origin_sig`` /
+    #: ``origin_sig_suite`` inside the sealed blob, #692). Used **only** at
+    #: the receiving endpoint, and only to decide what an *unsigned* inner
+    #: event means: a claimed origin at v_31+ that ships no signature is a
+    #: forgery and is dropped, while a claimed origin the receiver knows to
+    #: be older is the legacy window and is accepted at INFO. Senders never
+    #: gate on it — they always sign, because the extra fields are
+    #: wire-additive (a pre-v_31 endpoint reads the sealed blob by name and
+    #: ignores them) and because an origin routinely has no
+    #: ``remote_instances`` row for a mesh-only target to gate against.
+    MIN_FOR_ROUTED_ORIGIN_SIGNATURE = 31
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -809,6 +843,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
         "Cross-household Follower seats",
     ),
+    (
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
+        "Authenticated mesh-routed origin",
+    ),
 ]
 
 
@@ -861,6 +899,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
         FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM,
         FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
     }
 )
 

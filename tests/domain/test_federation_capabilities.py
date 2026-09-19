@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 30
+    assert fc.OURS == 31
 
 
 def test_remote_subscriber_role_capability_threshold():
@@ -26,6 +26,26 @@ def test_remote_subscriber_role_capability_threshold():
     )
     assert "Cross-household Follower seats" in fc.space_features_missing_below(29)
     assert "Cross-household Follower seats" not in fc.space_features_missing_below(30)
+
+
+def test_routed_origin_signature_capability_threshold():
+    """v_31 — the household at ``path[0]`` of a ``SPACE_ROUTED`` envelope
+    signs it, so the endpoint stops taking the relay-supplied origin on
+    faith (#692). The threshold is read at the RECEIVER to decide what an
+    unsigned inner event means: a forgery from a current peer, or the
+    legacy window of a household that has not upgraded yet. Space-scoped:
+    the mesh carries space content."""
+    assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE == 31
+    assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE <= fc.OURS
+    labels = dict(fc.CAPABILITY_FEATURES).values()
+    assert "Authenticated mesh-routed origin" in labels
+    assert "Authenticated mesh-routed origin" in fc.features_missing_below(30)
+    assert "Authenticated mesh-routed origin" not in fc.features_missing_below(31)
+    assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Authenticated mesh-routed origin" in fc.space_features_missing_below(30)
+    assert "Authenticated mesh-routed origin" not in fc.space_features_missing_below(31)
 
 
 def test_route_stale_nack_capability_threshold():

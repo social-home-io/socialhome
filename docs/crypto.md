@@ -207,6 +207,40 @@ probe and ships the public via `SPACE_ROUTE_FOUND`; the origin
 generates its own ephemeral on `send_routed` and stashes the priv
 for the matching reply. Relays only ever see the opaque ciphertext.
 
+**Routed-origin signature (v_31, #692).** The seal proves *confidentiality*
+to the target, not *authorship*: the ephemeral X25519 exchange is anonymous,
+so any peer that learned the target's `target_eph_pk` can produce a blob the
+target decrypts. `path[0]` — which the unwrap turns into the inner event's
+`from_instance` — is therefore signed. The authoring household stamps three
+sibling fields onto `sealed`:
+
+```
+origin_identity_pk : "<64 hex>"   # its Ed25519 identity public key
+origin_sig         : "<b64url>"   # Ed25519 over the signing bytes below
+origin_sig_suite   : "ed25519"    # suite tag; unknown value → reject
+```
+
+```
+b"space-routed-origin:v1:" + direction + b":" + route_id
+  + b":" + "|".join(path) + b":" + inner_event_type
+  + b":" + sha256(kem_suite|origin_eph_pk|target_eph_pk|nonce|ciphertext).hex()
+```
+
+`routed_crypto.sign_routed_origin` / `verify_routed_origin`. The endpoint
+verifies against the key it already pins for `path[0]`, or — for a mesh
+origin it has never paired with, which has no `remote_instances` row — the
+shipped pub bound by `derive_instance_id(pk) == path[0]` (§4.1.2). Both legs
+are covered; `direction` separates them, so a forward signature cannot be
+lifted onto a reply, and `path` binds the target, so a signature captured en
+route to one household will not verify at another.
+
+The digest deliberately covers the **ciphertext**, never the plaintext or a
+digest of it: a relay already holds every byte that goes into it, whereas
+signing the plaintext would hand a relay with a guess at a low-entropy inner
+payload a deterministic oracle to confirm the guess with — which §25.8.21
+rules out. Authenticity is unaffected: the AEAD tag binds ciphertext to
+plaintext under a key the forger does not share with the target.
+
 A target that cannot open a routed envelope (its private half died with
 a restart) answers with a `SPACE_ROUTE_STALE` nack whose `sig` is an
 Ed25519 signature by the target's **identity** key over

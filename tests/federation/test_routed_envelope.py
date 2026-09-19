@@ -106,6 +106,14 @@ class _LinkedFederationService:
         #: §24.11 post-decrypt gates the routed handler runs on a
         #: synthesised inner event before dispatch. Empty = allow all.
         self.gate_steps: list = []
+        #: ``instance_id -> Ed25519 identity pk`` this node has pinned on
+        #: its ``remote_instances`` rows, read by
+        #: :meth:`peer_identity_public_key` when the routed unwrap
+        #: authenticates a claimed origin.
+        self.identity_pks: dict[str, bytes] = {}
+
+    async def peer_identity_public_key(self, instance_id: str) -> bytes | None:
+        return self.identity_pks.get(instance_id)
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         return list(self.gate_steps)
@@ -236,6 +244,7 @@ def _build_chain(
                 continue
             node.fed.peers[other_id] = other.handler
             node.repo._instances[other_id] = _FakeInstance(id=other_id)
+            node.fed.identity_pks[other_id] = other.fed.identity.public_key
     return nodes
 
 
@@ -3278,3 +3287,355 @@ async def test_routed_gate_sees_the_space_id_from_the_inner_payload():
     for _ in range(4):
         await asyncio.sleep(0)
     assert envelopes == [{"space_id": "sp-77", "from_instance": "a"}]
+
+
+# ── Origin authentication (#692, v_31) ────────────────────────────────
+
+
+def _seal_as(
+    *,
+    target_eph_pk: str,
+    route_id: str,
+    inner_event_type: FederationEventType,
+    inner_payload: dict,
+) -> dict:
+    """Seal ``inner_payload`` to ``target_eph_pk`` the way *any* peer
+    that learned the target's ephemeral pub can — no origin signature.
+    This is the attacker's capability in #692."""
+    priv, pub = routed_crypto.generate_ephemeral_keypair()
+    return routed_crypto.seal_inner_payload(
+        inner_payload_json=json.dumps(
+            inner_payload, separators=(",", ":"), sort_keys=True
+        ),
+        origin_eph_priv_b64=priv,
+        origin_eph_pub_b64=pub,
+        target_eph_pub_b64=target_eph_pk,
+        route_id=route_id,
+        inner_event_type=inner_event_type.value,
+    )
+
+
+async def test_forged_path0_from_a_current_peer_is_dropped(caplog):
+    """#692: a mesh peer f that probed v for a route can seal a perfectly
+    decryptable inner payload and claim ``path[0] == h`` — a household v
+    trusts. Both hop checks pass, so the only thing standing between the
+    forgery and the dispatcher is the origin signature."""
+    nodes = _build_chain(["h", "f", "v"])
+    nodes["v"].fed.peer_versions["h"] = (
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE
+    )
+    target_eph_pk = _mint_target_eph(nodes["v"])
+    sealed = _seal_as(
+        target_eph_pk=target_eph_pk,
+        route_id="rid-forged",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1", "body": "forged"},
+    )
+    ev = _make_envelope(
+        route_id="rid-forged",
+        path=["h", "f", "v"],
+        position=1,
+        from_instance="f",
+        to_instance="v",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=sealed,
+    )
+    with caplog.at_level(logging.WARNING):
+        await nodes["v"].handler._on_routed(ev)
+    assert nodes["v"].dispatched == []
+    assert "origin" in caplog.text.lower()
+
+
+async def test_genuine_origin_is_dispatched_with_signature():
+    """The honest path still lands: ``send_routed`` signs the sealed
+    material with the origin's identity key and the target verifies it
+    against the key it already pinned for that household."""
+    nodes = _build_chain(["h", "f", "v"])
+    nodes["v"].fed.peer_versions["h"] = (
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE
+    )
+    target_eph_pk = _mint_target_eph(nodes["v"])
+    await nodes["h"].handler.send_routed(
+        path=["h", "f", "v"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1", "body": "genuine"},
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    assert len(nodes["v"].dispatched) == 1
+    assert nodes["v"].dispatched[0].from_instance == "h"
+    # The signature rides inside the sealed blob's sibling fields and is
+    # relayed untouched.
+    wire = [s for s in nodes["h"].fed.sent if s["to"] == "f"][0]["payload"]
+    assert wire["sealed"]["origin_sig_suite"] == (
+        routed_crypto.ROUTED_ORIGIN_SIG_SUITE_ED25519
+    )
+    assert wire["sealed"]["origin_identity_pk"] == (
+        nodes["h"].fed.identity.public_key.hex()
+    )
+
+
+async def test_unsigned_inner_from_a_legacy_origin_is_accepted(caplog):
+    """A sub-v_31 household ships no signature. Refusing it would cut the
+    mesh off mid-upgrade, so the target accepts and says so at INFO — the
+    window is visible in the logs and closes as peers upgrade."""
+    nodes = _build_chain(["h", "f", "v"])
+    nodes["v"].fed.peer_versions["h"] = (
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE - 1
+    )
+    target_eph_pk = _mint_target_eph(nodes["v"])
+    sealed = _seal_as(
+        target_eph_pk=target_eph_pk,
+        route_id="rid-legacy",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1"},
+    )
+    ev = _make_envelope(
+        route_id="rid-legacy",
+        path=["h", "f", "v"],
+        position=1,
+        from_instance="f",
+        to_instance="v",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=sealed,
+    )
+    with caplog.at_level(logging.INFO):
+        await nodes["v"].handler._on_routed(ev)
+    assert len(nodes["v"].dispatched) == 1
+    assert nodes["v"].dispatched[0].from_instance == "h"
+    assert "pre-v_31" in caplog.text
+
+
+async def test_unsigned_inner_from_an_unknown_origin_is_dropped(caplog):
+    """No ``remote_instances`` row for the claimed origin means no version
+    to reason about and no key to check — an unsigned envelope naming it
+    is exactly the #692 forgery, so it is refused rather than guessed at."""
+    nodes = _build_chain(["f", "v"])
+    target_eph_pk = _mint_target_eph(nodes["v"])
+    sealed = _seal_as(
+        target_eph_pk=target_eph_pk,
+        route_id="rid-unknown",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1"},
+    )
+    ev = _make_envelope(
+        route_id="rid-unknown",
+        path=["ghost", "f", "v"],
+        position=1,
+        from_instance="f",
+        to_instance="v",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=sealed,
+    )
+    with caplog.at_level(logging.WARNING):
+        await nodes["v"].handler._on_routed(ev)
+    assert nodes["v"].dispatched == []
+    assert "unknown origin" in caplog.text
+
+
+async def test_signed_inner_from_an_unpaired_origin_verifies_by_derivation():
+    """A mesh origin the target has never paired with has no pinned key —
+    but ``instance_id`` IS the fingerprint of the identity key (§4.1.2),
+    so the shipped pk authenticates itself against ``path[0]``."""
+    origin, relay, target = _build_identity_chain(3)
+    # The target has never heard of the origin.
+    target.fed.identity_pks.pop(origin.instance_id, None)
+    target.repo._instances.pop(origin.instance_id, None)
+    target_eph_pk = _mint_target_eph(target)
+    await origin.handler.send_routed(
+        path=[origin.instance_id, relay.instance_id, target.instance_id],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1"},
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    assert len(target.dispatched) == 1
+    assert target.dispatched[0].from_instance == origin.instance_id
+
+
+async def test_shipped_identity_pk_not_matching_path0_is_dropped(caplog):
+    """The attacker's own — perfectly valid — identity key does not
+    derive to the household it claims to be, so the derivation binding
+    catches it even with a signature that verifies under that key."""
+    origin, relay, target = _build_identity_chain(3)
+    target.fed.identity_pks.pop(origin.instance_id, None)
+    target.repo._instances.pop(origin.instance_id, None)
+    target_eph_pk = _mint_target_eph(target)
+    path = [origin.instance_id, relay.instance_id, target.instance_id]
+    route_id = "rid-wrong-pk"
+    sealed = _seal_as(
+        target_eph_pk=target_eph_pk,
+        route_id=route_id,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1"},
+    )
+    # Signed with the RELAY's identity while claiming to be the origin.
+    sealed["origin_identity_pk"] = relay.fed.identity.public_key.hex()
+    sealed["origin_sig_suite"] = routed_crypto.ROUTED_ORIGIN_SIG_SUITE_ED25519
+    sealed["origin_sig"] = routed_crypto.sign_routed_origin(
+        seed=relay.fed.identity.private_key,
+        route_id=route_id,
+        direction="forward",
+        path=path,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=sealed,
+    )
+    ev = _make_envelope(
+        route_id=route_id,
+        path=path,
+        position=1,
+        from_instance=relay.instance_id,
+        to_instance=target.instance_id,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=sealed,
+    )
+    with caplog.at_level(logging.WARNING):
+        await target.handler._on_routed(ev)
+    assert target.dispatched == []
+    assert "does not derive" in caplog.text
+
+
+async def test_tampered_ciphertext_under_a_replayed_signature_is_dropped(caplog):
+    """The signature covers the sealed material, so swapping in a
+    relay-minted ciphertext while keeping the genuine signature fails the
+    verify — a relay cannot substitute content under a real origin."""
+    nodes = _build_chain(["h", "f", "v"])
+    target_eph_pk = _mint_target_eph(nodes["v"])
+    await nodes["h"].handler.send_routed(
+        path=["h", "f", "v"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1", "body": "genuine"},
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    genuine = [s for s in nodes["h"].fed.sent if s["to"] == "f"][0]["payload"]
+    nodes["v"].dispatched.clear()
+    swapped = _seal_as(
+        target_eph_pk=target_eph_pk,
+        route_id="rid-swap",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1", "body": "swapped"},
+    )
+    swapped["origin_identity_pk"] = genuine["sealed"]["origin_identity_pk"]
+    swapped["origin_sig_suite"] = genuine["sealed"]["origin_sig_suite"]
+    swapped["origin_sig"] = genuine["sealed"]["origin_sig"]
+    ev = _make_envelope(
+        route_id="rid-swap",
+        path=["h", "f", "v"],
+        position=1,
+        from_instance="f",
+        to_instance="v",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=swapped,
+    )
+    with caplog.at_level(logging.WARNING):
+        await nodes["v"].handler._on_routed(ev)
+    assert nodes["v"].dispatched == []
+    assert "does not verify" in caplog.text
+
+
+async def test_unknown_origin_sig_suite_is_dropped(caplog):
+    """Unknown suite → refuse. Never fall back to a default algorithm."""
+    nodes = _build_chain(["h", "f", "v"])
+    target_eph_pk = _mint_target_eph(nodes["v"])
+    sealed = _seal_as(
+        target_eph_pk=target_eph_pk,
+        route_id="rid-suite",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"space_id": "sp-1"},
+    )
+    sealed["origin_identity_pk"] = nodes["h"].fed.identity.public_key.hex()
+    sealed["origin_sig_suite"] = "dilithium9000"
+    sealed["origin_sig"] = "AAAA"
+    ev = _make_envelope(
+        route_id="rid-suite",
+        path=["h", "f", "v"],
+        position=1,
+        from_instance="f",
+        to_instance="v",
+        inner_event_type=FederationEventType.SPACE_POST_CREATED.value,
+        sealed=sealed,
+    )
+    with caplog.at_level(logging.INFO):
+        await nodes["v"].handler._on_routed(ev)
+    assert nodes["v"].dispatched == []
+    assert "unsupported origin sig_suite" in caplog.text
+
+
+async def test_reply_leg_forged_origin_is_dropped(caplog):
+    """The reply leg is the same hole mirrored: ``path[0]`` of the reverse
+    path names the replying household. A relay that kept the route_id
+    cannot forge that household's signature."""
+    nodes = _build_chain(["a", "b", "c"])
+    nodes["a"].fed.peer_versions["c"] = (
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE
+    )
+    target_eph_pk = _mint_target_eph(nodes["c"])
+    await nodes["a"].handler.send_routed(
+        path=["a", "b", "c"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        inner_payload={"redeem_nonce": "n1"},
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    route_id = nodes["c"].dispatched[0].routed_route_id
+    origin_eph_pub = [s for s in nodes["a"].fed.sent if s["to"] == "b"][0]["payload"][
+        "sealed"
+    ]["origin_eph_pk"]
+    # b forges a reply: it holds no target→origin key, but it can mint a
+    # fresh ephemeral and seal under the origin's advertised pub.
+    forged_priv, forged_pub = routed_crypto.generate_ephemeral_keypair()
+    sealed = routed_crypto.seal_reply_payload(
+        inner_payload_json=json.dumps({"ok": False}, separators=(",", ":")),
+        target_eph_priv_b64=forged_priv,
+        target_eph_pub_b64=forged_pub,
+        origin_eph_pub_b64=origin_eph_pub,
+        route_id=route_id,
+        inner_event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK.value,
+    )
+    ev = _make_envelope(
+        route_id=route_id,
+        path=["c", "b", "a"],
+        position=1,
+        from_instance="b",
+        to_instance="a",
+        direction="reply",
+        inner_event_type=(FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK.value),
+        sealed=sealed,
+    )
+    nodes["a"].dispatched.clear()
+    with caplog.at_level(logging.WARNING):
+        await nodes["a"].handler._on_routed(ev)
+    assert nodes["a"].dispatched == []
+
+
+async def test_reply_leg_genuine_origin_is_dispatched():
+    """The genuine reply leg still round-trips with the signature on."""
+    nodes = _build_chain(["a", "b", "c"])
+    nodes["a"].fed.peer_versions["c"] = (
+        FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE
+    )
+    target_eph_pk = _mint_target_eph(nodes["c"])
+    await nodes["a"].handler.send_routed(
+        path=["a", "b", "c"],
+        target_eph_pk_b64=target_eph_pk,
+        inner_event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        inner_payload={"redeem_nonce": "n1"},
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    route_id = nodes["c"].dispatched[0].routed_route_id
+    await nodes["c"].handler.send_routed_reply(
+        route_id=route_id,
+        inner_event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+        inner_payload={"ok": True},
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    assert len(nodes["a"].dispatched) == 1
+    assert nodes["a"].dispatched[0].from_instance == "c"
+    assert nodes["a"].dispatched[0].payload == {"ok": True}

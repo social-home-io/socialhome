@@ -414,6 +414,13 @@ class SpaceRoutedHandler:
             route_id=route_id,
             inner_event_type=inner_event_type.value,
         )
+        self._attach_origin_auth(
+            sealed=sealed,
+            route_id=route_id,
+            direction="forward",
+            path=path,
+            inner_event_type=inner_event_type.value,
+        )
         self._origin_eph_state[route_id] = (
             origin_priv_b64,
             origin_pub_b64,
@@ -490,6 +497,13 @@ class SpaceRoutedHandler:
             target_eph_pub_b64=target_pub_b64,
             origin_eph_pub_b64=origin_pub_b64,
             route_id=route_id,
+            inner_event_type=inner_event_type.value,
+        )
+        self._attach_origin_auth(
+            sealed=sealed,
+            route_id=route_id,
+            direction="reply",
+            path=reply_path,
             inner_event_type=inner_event_type.value,
         )
         # Mark the reply route_id as seen so a re-entrance is dropped.
@@ -712,6 +726,21 @@ class SpaceRoutedHandler:
         AAD) and dispatch.
         """
         self_id = self._federation.own_instance_id
+        # #692: ``path[0]`` is relay-supplied and becomes the inner
+        # event's ``from_instance`` — the very field the §24.11
+        # post-decrypt gates judge. Prove it before anything else runs,
+        # including the stale-eph nack (which would otherwise make us a
+        # signing oracle for an envelope we never accepted) and the
+        # one-shot origin-ephemeral pop on the reply leg.
+        if not await self._origin_authenticated(
+            origin=path[0],
+            route_id=route_id,
+            direction=direction,
+            path=path,
+            inner_type_raw=inner_type_raw,
+            sealed=sealed,
+        ):
+            return
         if direction == "forward":
             target_pub = str(sealed.get("target_eph_pk") or "")
             if not target_pub:
@@ -839,6 +868,193 @@ class SpaceRoutedHandler:
         )
         if await self._inner_event_allowed(synth):
             await self._dispatcher(synth)
+
+    def _attach_origin_auth(
+        self,
+        *,
+        sealed: dict[str, str],
+        route_id: str,
+        direction: str,
+        path: list[str],
+        inner_event_type: str,
+    ) -> None:
+        """Stamp the v_31 origin-authentication fields onto ``sealed``.
+
+        We are ``path[0]`` of the leg being sent, so we sign the routing
+        claim + the sealed material with our Ed25519 identity key and
+        ship the matching pub alongside. Mutates ``sealed`` in place —
+        the three fields are siblings of the KEM fields, not part of the
+        AEAD, which is what makes them wire-additive: a pre-v_31
+        endpoint reads the sealed blob by name and never sees them.
+
+        Always attached, never gated on the target's ``proto_version``:
+        the whole point of the mesh is reaching a household we have no
+        ``remote_instances`` row for, so there is frequently no version
+        to gate on, and a missing signature is exactly what the receiver
+        must be able to call out.
+        """
+        sealed["origin_identity_pk"] = self._federation.own_identity_pk.hex()
+        sealed["origin_sig_suite"] = routed_crypto.ROUTED_ORIGIN_SIG_SUITE_ED25519
+        sealed["origin_sig"] = routed_crypto.sign_routed_origin(
+            seed=self._federation.own_identity_seed,
+            route_id=route_id,
+            direction=direction,
+            path=path,
+            inner_event_type=inner_event_type,
+            sealed=sealed,
+        )
+
+    async def _origin_authenticated(
+        self,
+        *,
+        origin: str,
+        route_id: str,
+        direction: str,
+        path: list[str],
+        inner_type_raw: str,
+        sealed: dict,
+    ) -> bool:
+        """Is ``path[0]`` really the household that authored this leg?
+
+        The hop checks in :meth:`_on_routed` bind only the previous and
+        the next hop. ``path[0]`` travels inside a payload the previous
+        hop wrote, and the unwrap turns it into the inner event's
+        ``from_instance`` — so before v_31 any mesh peer that had probed
+        us for a route could seal a decryptable payload, claim to be a
+        member household, and walk past the ban check and the Follower
+        write gate that judge exactly that field (#692).
+
+        The proof reuses keys the receiver already has, per the
+        "no new key when an existing one proves it" rule:
+
+        * a pinned ``remote_instances.remote_identity_pk`` when we have
+          a row for the claimed origin (paired, or seated from an invite
+          link), which is the same key the §24.11 pipeline verifies that
+          household's direct envelopes against; otherwise
+        * the shipped ``origin_identity_pk``, self-authenticating
+          because an ``instance_id`` **is** the SHA-256 fingerprint of
+          the identity key (§4.1.2) — the same
+          :func:`~socialhome.crypto.derive_instance_id` binding the
+          ROUTE_FOUND and ROUTE_STALE checks use. A mesh origin we have
+          never paired with has no row, so without this fallback the fix
+          would sever exactly the households the mesh exists for.
+
+        Unsigned (pre-v_31) envelopes are the migration window and it is
+        deliberately narrow: accepted only from a claimed origin we hold
+        a row for whose advertised ``proto_version`` is below
+        :data:`FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE`,
+        logged at INFO so the window is countable in the logs and closes
+        on its own as peers upgrade. No row → no version and no key →
+        refuse, because that is indistinguishable from the forgery.
+        """
+        sig = str(sealed.get("origin_sig") or "")
+        pinned = await self._federation.peer_identity_public_key(origin)
+        if not sig:
+            if pinned is None:
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: unsigned inner event from unknown"
+                    " origin %s (no peer row); dropping",
+                    route_id[:8],
+                    origin,
+                )
+                return False
+            if await self._federation.peer_supports(
+                origin,
+                min_version=FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
+            ):
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: origin %s advertises v_%d+ but the"
+                    " inner event carries no origin signature; dropping (forged"
+                    " path[0]?)",
+                    route_id[:8],
+                    origin,
+                    FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
+                )
+                return False
+            log.info(
+                "SPACE_ROUTED route_id=%s: accepting unsigned inner event from"
+                " pre-v_31 origin %s (legacy window — closes when it upgrades)",
+                route_id[:8],
+                origin,
+            )
+            return True
+        shipped: bytes | None = None
+        shipped_hex = str(sealed.get("origin_identity_pk") or "")
+        if shipped_hex:
+            try:
+                shipped = bytes.fromhex(shipped_hex)
+            except ValueError:
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: malformed origin_identity_pk; dropping",
+                    route_id[:8],
+                )
+                return False
+        if pinned is None and shipped is None:
+            log.warning(
+                "SPACE_ROUTED route_id=%s: signed inner event from unknown origin"
+                " %s carries no origin_identity_pk; dropping",
+                route_id[:8],
+                origin,
+            )
+            return False
+        if pinned is not None and shipped is not None and shipped != pinned:
+            log.warning(
+                "SPACE_ROUTED route_id=%s: origin_identity_pk does not match the"
+                " key pinned for %s; dropping",
+                route_id[:8],
+                origin,
+            )
+            return False
+        if pinned is None:
+            assert shipped is not None  # narrowed by the guard above
+            try:
+                derived = derive_instance_id(shipped)
+            except ValueError:
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: origin_identity_pk is not a 32-byte"
+                    " Ed25519 key; dropping",
+                    route_id[:8],
+                )
+                return False
+            if derived != origin:
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: origin_identity_pk does not derive"
+                    " to path[0]=%s (got %s); dropping",
+                    route_id[:8],
+                    origin,
+                    derived,
+                )
+                return False
+        identity_pk = pinned if pinned is not None else shipped
+        assert identity_pk is not None  # one of the two is always set here
+        try:
+            verified = routed_crypto.verify_routed_origin(
+                identity_pk=identity_pk,
+                route_id=route_id,
+                direction=direction,
+                path=path,
+                inner_event_type=inner_type_raw,
+                sealed=sealed,
+                sig_b64=sig,
+                sig_suite=str(sealed.get("origin_sig_suite") or ""),
+            )
+        except routed_crypto.UnsupportedRoutedOriginSuite:
+            log.info(
+                "SPACE_ROUTED route_id=%s: unsupported origin sig_suite=%r;"
+                " dropping (no fallback)",
+                route_id[:8],
+                sealed.get("origin_sig_suite"),
+            )
+            return False
+        if not verified:
+            log.warning(
+                "SPACE_ROUTED route_id=%s: origin signature does not verify under"
+                " the identity of path[0]=%s; dropping (forged origin)",
+                route_id[:8],
+                origin,
+            )
+            return False
+        return True
 
     async def _inner_event_allowed(self, synth: FederationEvent) -> bool:
         """Run the §24.11 post-decrypt gates on a synthesised inner event.

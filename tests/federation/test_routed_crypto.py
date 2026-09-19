@@ -416,3 +416,141 @@ def test_verify_route_stale_unknown_suite_raises(suite):
             sig_b64=sig,
             sig_suite=suite,
         )
+
+
+# ── Routed origin authentication (#692, v_31) ─────────────────────────
+
+
+def _sealed_fixture() -> dict[str, str]:
+    """A sealed blob shaped exactly as the wire carries it."""
+    origin_priv, origin_pub = rc.generate_ephemeral_keypair()
+    _target_priv, target_pub = rc.generate_ephemeral_keypair()
+    return rc.seal_inner_payload(
+        inner_payload_json='{"post_id":"p1"}',
+        origin_eph_priv_b64=origin_priv,
+        origin_eph_pub_b64=origin_pub,
+        target_eph_pub_b64=target_pub,
+        route_id="r-1",
+        inner_event_type="space_post_created",
+    )
+
+
+def test_routed_origin_sig_suite_constants():
+    assert rc.ROUTED_ORIGIN_SIG_SUITE_ED25519 == "ed25519"
+    assert rc.SUPPORTED_ROUTED_ORIGIN_SIG_SUITES == frozenset({"ed25519"})
+    assert issubclass(rc.UnsupportedRoutedOriginSuite, ValueError)
+
+
+def test_routed_origin_signing_bytes_domain_separated():
+    """The tag must not collide with ROUTE_FOUND (binds a pub as live)
+    or ROUTE_STALE (binds the same pub as dead) — a signature from one
+    surface must never verify on another."""
+    got = rc.routed_origin_signing_bytes(
+        route_id="r-1",
+        direction="forward",
+        path=["a", "b"],
+        inner_event_type="space_post_created",
+        sealed=_sealed_fixture(),
+    )
+    assert got.startswith(b"space-routed-origin:v1:forward:r-1:a|b:space_post_created:")
+    assert not got.startswith(b"space-route-stale:v1:")
+    assert not got.startswith(b"space-route-found:v1:")
+
+
+def test_routed_origin_signing_bytes_cover_every_sealed_field():
+    """Each piece of the sealed material is inside the digest — flipping
+    any one of them changes the bytes, so a relay can't swap ephemerals
+    or ciphertext under a captured signature."""
+    sealed = _sealed_fixture()
+
+    def _bytes(mutated: dict[str, str]) -> bytes:
+        return rc.routed_origin_signing_bytes(
+            route_id="r-1",
+            direction="forward",
+            path=["a", "b"],
+            inner_event_type="space_post_created",
+            sealed=mutated,
+        )
+
+    base = _bytes(sealed)
+    for field in ("kem_suite", "origin_eph_pk", "target_eph_pk", "nonce", "ciphertext"):
+        assert _bytes({**sealed, field: "tampered"}) != base, field
+
+
+def test_sign_verify_routed_origin_round_trip():
+    seed, pk = _identity()
+    sealed = _sealed_fixture()
+    kwargs = {
+        "route_id": "r-1",
+        "direction": "forward",
+        "path": ["a", "b", "c"],
+        "inner_event_type": "space_post_created",
+        "sealed": sealed,
+    }
+    sig = rc.sign_routed_origin(seed=seed, **kwargs)
+    assert isinstance(sig, str)
+    assert rc.verify_routed_origin(
+        identity_pk=pk,
+        sig_b64=sig,
+        sig_suite=rc.ROUTED_ORIGIN_SIG_SUITE_ED25519,
+        **kwargs,
+    )
+
+
+def test_verify_routed_origin_wrong_key_false():
+    """The whole point: a signature by one household does not verify as
+    another's, so ``path[0]`` can't be claimed by a relay."""
+    seed, _pk = _identity()
+    _other_seed, other_pk = _identity()
+    sealed = _sealed_fixture()
+    kwargs = {
+        "route_id": "r-1",
+        "direction": "forward",
+        "path": ["a", "b", "c"],
+        "inner_event_type": "space_post_created",
+        "sealed": sealed,
+    }
+    sig = rc.sign_routed_origin(seed=seed, **kwargs)
+    assert not rc.verify_routed_origin(
+        identity_pk=other_pk,
+        sig_b64=sig,
+        sig_suite=rc.ROUTED_ORIGIN_SIG_SUITE_ED25519,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("bad_sig", ["", "!!not-base64!!", "AAAA"])
+def test_verify_routed_origin_malformed_sig_false_not_raise(bad_sig):
+    """Malformed input is a ``False``, never an exception — the inbound
+    path must drop, not crash."""
+    _seed, pk = _identity()
+    assert (
+        rc.verify_routed_origin(
+            identity_pk=pk,
+            route_id="r-1",
+            direction="forward",
+            path=["a", "b"],
+            inner_event_type="space_post_created",
+            sealed=_sealed_fixture(),
+            sig_b64=bad_sig,
+            sig_suite=rc.ROUTED_ORIGIN_SIG_SUITE_ED25519,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("suite", ["", "ED25519", "ed25519+mldsa65", "rsa"])
+def test_verify_routed_origin_unknown_suite_raises(suite):
+    """Unknown suite → reject outright, never verify under a default, so
+    a peer stripping the tag can't downgrade the Phase-2 PQ migration."""
+    seed, pk = _identity()
+    kwargs = {
+        "route_id": "r-1",
+        "direction": "forward",
+        "path": ["a", "b"],
+        "inner_event_type": "space_post_created",
+        "sealed": _sealed_fixture(),
+    }
+    sig = rc.sign_routed_origin(seed=seed, **kwargs)
+    with pytest.raises(rc.UnsupportedRoutedOriginSuite):
+        rc.verify_routed_origin(identity_pk=pk, sig_b64=sig, sig_suite=suite, **kwargs)
