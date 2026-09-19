@@ -472,7 +472,7 @@ GFS_DIR = ROOT / "gfs"
 #: deployment runs 4 allocs against one ``/var/lib/sh-gfs``). Both nodes get
 #: the SAME ``signing_seed_hex`` so they present one GFS identity, and the
 #: SAME ``data_dir`` so they share ``gfs.db``.
-GFS_CLUSTER_PORTS: tuple[int, int] = (18770, 18771)
+GFS_CLUSTER_PORTS: tuple[int, ...] = (18770, 18771, 18772)
 GFS_CLUSTER_DIR = ROOT / "gfs-cluster"
 GFS_CLUSTER_SEED_HEX = "b7" * 32
 
@@ -754,47 +754,75 @@ def cmd_gfs_cluster() -> None:
         raise SystemExit("run 'up' first")
 
     _gfs_cluster_down()
-    portA, portB = GFS_CLUSTER_PORTS
-    urlA, urlB = f"http://127.0.0.1:{portA}", f"http://127.0.0.1:{portB}"
-    # Node A first — it applies the migrations; B then attaches to a ready DB
-    # (so the demo doesn't race two processes through the migration writes).
-    pa = _spawn_gfs_node(portA, GFS_CLUSTER_DIR, "gfs-a", [urlB], GFS_CLUSTER_SEED_HEX)
-    pb = _spawn_gfs_node(portB, GFS_CLUSTER_DIR, "gfs-b", [urlA], GFS_CLUSTER_SEED_HEX)
-    state["gfs_cluster"] = {"pids": [pa.pid, pb.pid], "ports": [portA, portB]}
+    ports = list(GFS_CLUSTER_PORTS)
+    urls = [f"http://127.0.0.1:{p}" for p in ports]
+    node_ids = [f"gfs-{i}" for i in range(len(ports))]
+    # Every node's peer list is ALL node URLs INCLUDING ITSELF — the shape the
+    # deployment's Nomad template renders (``nomadService "gfs"`` with no
+    # self-filter). A node must ignore its OWN hello (the self-guard in
+    # ``cluster.handle_hello``) rather than register itself as a peer.
+    all_urls = list(urls)
+    # First node applies the migrations; the rest attach to a ready DB (so the
+    # demo doesn't race N processes through the migration writes).
+    procs = [
+        _spawn_gfs_node(port, GFS_CLUSTER_DIR, nid, all_urls, GFS_CLUSTER_SEED_HEX)
+        for port, nid in zip(ports, node_ids)
+    ]
+    state["gfs_cluster"] = {"pids": [pr.pid for pr in procs], "ports": ports}
     _save(state)
 
-    # 2. The cluster forms: each node online and listing its peer.
-    deadline = time.monotonic() + 30.0
+    # 2. The cluster forms: each node online, listing every OTHER node and NOT
+    # itself (the self-guard keeps a node out of its own peer list).
+    deadline = time.monotonic() + 40.0
     while time.monotonic() < deadline:
         ok = True
-        for url, peer_id in ((urlA, "gfs-b"), (urlB, "gfs-a")):
+        for idx, url in enumerate(urls):
             try:
                 code, health = _request(f"{url}/cluster/health", timeout=2.0)
             except Exception:
                 ok = False
                 break
-            peers = health.get("peers", []) if isinstance(health, dict) else []
-            if health.get("status") != "online" or not any(
-                pr.get("node_id") == peer_id for pr in peers
-            ):
+            if not isinstance(health, dict) or health.get("status") != "online":
+                ok = False
+                break
+            peer_ids = {pr.get("node_id") for pr in health.get("peers", [])}
+            # ``peers`` includes this node's own startup self-row (the admin
+            # view marks it ``is_self``), so require every OTHER node present
+            # rather than a self-free list.
+            expected = set(node_ids) - {node_ids[idx]}
+            if not expected.issubset(peer_ids):
                 ok = False
                 break
         if ok:
             break
         time.sleep(1.0)
     else:
+        snap = []
+        for idx, url in enumerate(urls):
+            try:
+                _c, h = _request(f"{url}/cluster/health", timeout=2.0)
+            except Exception as exc:
+                snap.append(f"{node_ids[idx]}: unreachable ({exc})")
+                continue
+            pids = sorted(pr.get("node_id") for pr in (h.get("peers") or []))
+            snap.append(f"{node_ids[idx]}: status={h.get('status')} peers={pids}")
         _gfs_cluster_down(preserve_logs=True)
         raise SystemExit(
-            "gfs-cluster: the two nodes never discovered each other via "
-            "/cluster/health — cluster gossip (NODE_HELLO) did not form",
+            f"gfs-cluster: the {len(ports)} nodes never converged on "
+            "/cluster/health — each must list every OTHER node and not "
+            "itself (cluster gossip / self-guard). Last snapshot: "
+            + " | ".join(snap),
         )
-    print("  2-node GFS cluster up, sharing one SQLite DB, peers discovered ✓")
+    print(
+        f"  {len(ports)}-node GFS cluster up, sharing one SQLite DB, "
+        "every node discovered every other over HELLO ✓"
+    )
 
     # 3. Concurrent cross-process writes. Pre-mint tokens serially (so the
     # burst is purely register writes), then fire them all at once split
-    # across both nodes.
+    # across all nodes.
     n = 24
-    targets = [(urlA if i % 2 == 0 else urlB) for i in range(n)]
+    targets = [urls[i % len(urls)] for i in range(n)]
     tokens = [_gfs_landing_token(url) for url in targets]
     # Each entry: (instance_id, identity_seed) — kept so the same instances
     # can then SIGN space publishes below (a publish is verified against the
@@ -832,7 +860,7 @@ def cmd_gfs_cluster() -> None:
             "on (check PRAGMA busy_timeout).",
         )
     print(
-        f"  {n} concurrent registrations across both nodes — all accepted, "
+        f"  {n} concurrent registrations across all nodes — all accepted, "
         "0 'database is locked' ✓"
     )
 
@@ -887,21 +915,22 @@ def cmd_gfs_cluster() -> None:
             "(check PRAGMA busy_timeout).",
         )
     print(
-        f"  {n} concurrent space publishes across both nodes — all accepted, "
+        f"  {n} concurrent space publishes across all nodes — all accepted, "
         "0 'database is locked' ✓"
     )
 
-    # 4. Cross-node visibility: a client registered via node A is in the
-    # shared DB node B reads. Both nodes' health counts every client.
+    # 4. Cross-node visibility: a client registered via one node is in the
+    # shared DB every other node reads.
     time.sleep(1.0)
-    for url in (urlA, urlB):
+    for url in urls:
         code, health = _request(f"{url}/cluster/health", timeout=5.0)
-    print("  a client registered on one node is served by the other ✓")
+    print("  a client registered on one node is served by the others ✓")
 
     _gfs_cluster_down()
     print(
-        "gfs-cluster: ok (2 processes, one shared SQLite DB, concurrent "
-        "cross-process writes serialise on the lock instead of failing)"
+        f"gfs-cluster: ok ({len(ports)} processes, one shared SQLite DB; "
+        "peers discovered incl. self-guard; concurrent cross-process "
+        "registrations + space publishes serialise on the lock)"
     )
 
 

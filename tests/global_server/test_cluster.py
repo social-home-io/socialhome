@@ -503,3 +503,29 @@ async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirection
         public_key_hex="bb" * 32,
     )
     assert [p for p in posted if p[1] == NODE_HELLO] == []
+
+
+async def test_handle_hello_ignores_a_message_from_this_node_itself(
+    enabled_cluster, monkeypatch
+):
+    """The Nomad peer list includes this alloc, so a node HELLOs itself.
+    Registering self would inflate cluster_nodes and make a node peer with
+    itself — ignore a hello whose from_node_id is our own.
+    """
+    posted: list = []
+
+    async def fake_post(self, url, msg_type, payload, *, session=None):
+        posted.append((url, msg_type))
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+
+    before = {n.node_id for n in await enabled_cluster.list_nodes()}
+    await enabled_cluster.handle_hello(
+        from_node_id="node-a",  # == enabled_cluster's own node_id
+        url="https://a.gfs.test",
+        public_key_hex="aa" * 32,
+    )
+    after = {n.node_id for n in await enabled_cluster.list_nodes()}
+    # No new node, and no reply-hello to ourselves.
+    assert after == before
+    assert posted == []
