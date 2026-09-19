@@ -27,6 +27,9 @@ interface JoinRequest {
   message?:      string | null
   requested_at:  string
   status?:       string
+  /** Server-resolved applicant name — set for a remote applicant whose
+   *  id isn't in the local roster (#698); may be null. */
+  display_name?: string | null
   /** Non-null ('admin') when the row is a pending role elevation: the
    *  applicant is already a member (an admin/mod invite link seated them)
    *  and is waiting for the owner to approve the admin role. */
@@ -102,7 +105,7 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
     <div class="sh-join-requests sh-card" aria-label="Pending join requests">
       <h4>Join requests ({rows.length})</h4>
       {rows.map(r => {
-        const name = householdDisplayName(r.user_id)
+        const name = r.display_name || householdDisplayName(r.user_id)
         return (
           <div key={r.id} class="sh-join-request">
             <Avatar name={name} size={32} />

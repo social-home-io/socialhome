@@ -79,6 +79,7 @@ GATED_METHODS: frozenset[str] = frozenset(
         "remove_remote_member",
         "approve_join_request",
         "deny_join_request",
+        "list_pending_join_requests",
         "create_post",
         "approve_moderation_item",
         "reject_moderation_item",
