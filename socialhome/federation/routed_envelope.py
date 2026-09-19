@@ -96,6 +96,7 @@ from ..crypto import derive_instance_id
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
+from .inbound_validator import InboundContext, run_post_decrypt_gates
 from .route_discovery import ROUTE_CACHE_TTL_S, cap_by_expiry
 
 if TYPE_CHECKING:
@@ -780,7 +781,8 @@ class SpaceRoutedHandler:
                 routed_path=list(path),
                 routed_route_id=route_id,
             )
-            await self._dispatcher(synth)
+            if await self._inner_event_allowed(synth):
+                await self._dispatcher(synth)
             return
 
         # direction == "reply" — we are the origin.
@@ -835,7 +837,43 @@ class SpaceRoutedHandler:
             # need to set routed_route_id, no further reply expected.
             routed_path=list(path),
         )
-        await self._dispatcher(synth)
+        if await self._inner_event_allowed(synth):
+            await self._dispatcher(synth)
+
+    async def _inner_event_allowed(self, synth: FederationEvent) -> bool:
+        """Run the §24.11 post-decrypt gates on a synthesised inner event.
+
+        The unwrap is the one place a fully-formed
+        :class:`FederationEvent` reaches a dispatch handler without having
+        travelled through :class:`InboundPipeline`: the pipeline judged
+        the OUTER ``SPACE_ROUTED`` envelope, which is a routing envelope
+        from the previous relay hop. Nothing had yet asked whether the
+        ORIGIN household is banned from the space, or whether it holds a
+        seat there that may write — so the mesh was a way around both
+        gates, and a §D2 direct-paired Follower household is mesh-capable.
+
+        The steps are the pipeline's own
+        (:meth:`FederationService.post_decrypt_gate_steps`), composed
+        rather than re-implemented, so the two paths cannot drift.
+
+        The context is rebuilt for the inner event: the ban check reads
+        ``envelope["space_id"]``, and a routed envelope deliberately
+        carries none in plaintext (a relay must not learn which space is
+        being served), so the space is taken from the inner event —
+        routing field first, then the payload's own copy.
+        """
+        payload = synth.payload if isinstance(synth.payload, dict) else {}
+        ctx = InboundContext(
+            envelope={
+                "space_id": (synth.space_id or payload.get("space_id") or None),
+                "from_instance": synth.from_instance,
+            },
+            event=synth,
+        )
+        return await run_post_decrypt_gates(
+            ctx,
+            steps=self._federation.post_decrypt_gate_steps(include_ban_check=True),
+        )
 
     # ── Route-stale nack (SPACE_ROUTE_STALE) ───────────────────────────
 

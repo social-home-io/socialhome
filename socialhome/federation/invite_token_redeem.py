@@ -54,7 +54,12 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
-from ..domain.space import SpaceMember, SpacePermissionError, SpaceRole
+from ..domain.space import (
+    SpaceMember,
+    SpacePermissionError,
+    SpaceRole,
+    mirrorable_remote_role,
+)
 from ..services.space_service import (
     _coerce_min_age,
     apply_space_content_key_from_metadata,
@@ -96,6 +101,21 @@ if TYPE_CHECKING:
     from .routed_envelope import SpaceRoutedHandler
 
 log = logging.getLogger(__name__)
+
+#: The seats a redeem may install on a **remote** household, i.e. the
+#: intersection of the ``space_invite_tokens.role`` CHECK (migration 0053)
+#: and the ``space_remote_members.role`` CHECK (0054). ``owner`` is in
+#: neither: ownership moves only through ``transfer_ownership`` and is a
+#: local-only privilege. A ``subscriber`` seat joined this set in v_30 —
+#: before that a Follower link was refused across households outright,
+#: because there was no on-disk row shape for a remote reader.
+SEATABLE_REMOTE_ROLES: frozenset[str] = frozenset(
+    {
+        SpaceRole.MEMBER.value,
+        SpaceRole.ADMIN.value,
+        SpaceRole.SUBSCRIBER.value,
+    }
+)
 
 
 #: How long the receiver waits for an ACK / DENY before giving up.
@@ -186,6 +206,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_key_manager",
         "_bootstrap_hints",
         "_rate_limiter",
+        "_space_service",
     )
 
     def __init__(
@@ -256,6 +277,24 @@ class SpaceInviteTokenRedeemCoordinator:
         #: blob advertised rather than trusting whatever comes back.
         self._bootstrap_hints: dict[str, InviteBootstrapHint] = {}
         self._rate_limiter: "RateLimiter | None" = None
+        #: Set by :meth:`attach_space_service` — the seed-holder that
+        #: signs roster gossip. Optional so legacy fixtures still build a
+        #: coordinator; unset simply means today's host-only seating.
+        self._space_service: Any = None
+
+    def attach_space_service(self, space_service: Any) -> None:
+        """Wire the roster-gossip seam (v_23).
+
+        A redeem seats a household on the HOST and nothing else, which
+        left every other member household of the space holding no row for
+        it at all. That matters now that a seat carries authority: the
+        §24.11 space-writer gate is deliberately lenient about a
+        household it has no row for (a roster that has not converged), so
+        without the gossip a Follower's writes would sail past every
+        peer-side gate — and peer-to-peer fan-out means the peers are
+        where its writes actually land.
+        """
+        self._space_service = space_service
 
     def attach_bootstrap(
         self,
@@ -658,6 +697,11 @@ class SpaceInviteTokenRedeemCoordinator:
                                 if entry.get("display_name")
                                 else None
                             ),
+                            # The snapshot's role, not a blanket ``member``:
+                            # mirroring a Follower as a full member is what
+                            # made every OTHER household in the space accept
+                            # that household's writes.
+                            role=mirrorable_remote_role(entry.get("role")),
                         )
         return {
             "space_id": space_id,
@@ -769,41 +813,6 @@ class SpaceInviteTokenRedeemCoordinator:
         a surface anybody holding a link can reach. The detail lives in
         ``log.exception`` on the issuer, where it belongs.
         """
-        # ── Refuse a cross-household subscriber seat BEFORE the consume ──
-        # ``space_remote_members.role`` admits member|admin only (migration
-        # 0009: a subscriber has no row there at all), so this seat cannot
-        # be honoured across households and fails closed. Reading the seat
-        # first is the whole point: the refusal used to run *after* the
-        # atomic consume, which meant every stranger who opened a published
-        # Follower link spent one of its uses to be told no — a twenty-use
-        # link posted in a group chat was exhausted before the people it was
-        # for arrived. A peek is not an authorization decision (the consume
-        # below is still the only thing that can spend a use), so nothing
-        # about the race is weakened by doing it here.
-        try:
-            peek = await self._spaces.get_live_invite_token(token)
-        except Exception:
-            log.exception(
-                "invite redeem: get_live_invite_token raised for token from %s",
-                redeemer_instance_id,
-            )
-            return None, REDEEM_DENY_REASON
-        if peek is not None and str(peek.get("role") or "") == (
-            SpaceRole.SUBSCRIBER.value
-        ):
-            # The one denial that does NOT collapse to
-            # :data:`REDEEM_DENY_REASON`. The caller is holding a link
-            # whose seat we published ourselves, so naming the reason
-            # tells it nothing it could not read off the link — while a
-            # bare "denied" would leave the SPA unable to explain why a
-            # legitimate link refuses. It is not an oracle either: the
-            # answer depends only on the seat the issuer minted, never on
-            # who is asking.
-            return None, (
-                "a subscriber invite link can only be redeemed on the "
-                "household that issued it"
-            )
-
         try:
             row = await self._spaces.consume_invite_token(
                 token,
@@ -832,21 +841,21 @@ class SpaceInviteTokenRedeemCoordinator:
         # redeemer never gets to ask for a role, so this is read here and
         # nowhere else.
         seat = str(row.get("role") or SpaceRole.MEMBER.value)
-        if seat == SpaceRole.SUBSCRIBER.value:  # pragma: no cover — belt
-            # Unreachable in practice: the peek above refuses this seat
-            # before a use is spent. Kept as the last line of defence, so
-            # a future caller that reaches the consume by another route
-            # still cannot seat a reader with write authority — and
-            # deliberately NOT the place the denial is supposed to happen
-            # (getting here means a use was already burned).
+        if seat not in SEATABLE_REMOTE_ROLES:
+            # The ``space_invite_tokens.role`` CHECK (migration 0053) and the
+            # ``space_remote_members.role`` CHECK (0054) agree on exactly
+            # these three values, so this is unreachable on a healthy row —
+            # it is the tripwire for a fourth seat being minted before this
+            # side knows how to sit in it. Refuse rather than seat a role we
+            # cannot gate: an unrecognised seat that fell through to
+            # ``set_role`` would hit the CHECK anyway, but only AFTER the
+            # use was spent and the instance registered.
             log.warning(
-                "invite redeem: a subscriber seat reached the consume — "
-                "a use was spent on a link that cannot be redeemed",
+                "invite redeem: token for space carries unseatable role %r "
+                "— refusing (a use was spent)",
+                seat,
             )
-            return None, (
-                "a subscriber invite link can only be redeemed on the "
-                "household that issued it"
-            )
+            return None, REDEEM_DENY_REASON
 
         # §13.7 needs no separate check here: the ban is folded into the
         # same atomic UPDATE as the consume above (``redeemer_user_id``),
@@ -856,20 +865,56 @@ class SpaceInviteTokenRedeemCoordinator:
         # Seat the remote redeemer + register their instance so the
         # issuer's outbound fan-outs reach them.
         try:
+            # The seat lands in the SAME write as the row. It used to be
+            # an ``add`` (always ``member``) followed by a ``set_role``,
+            # which on the Follower path was a durability hole: a crash
+            # between the two left a household that paid for a read-only
+            # seat sitting as a full ``member`` — and that row is exactly
+            # what the §24.11 space-writer gate reads to refuse its
+            # writes. Both directions ride the one INSERT: up to admin, or
+            # down to a read-only follower.
             await self._remote_members.add(
                 space_id=space_id,
                 instance_id=redeemer_instance_id,
                 user_id=redeemer_user_id,
                 user_pk=redeemer_pk,
                 display_name=redeemer_display,
+                role=seat,
             )
-            if seat != SpaceRole.MEMBER.value:
-                await self._remote_members.set_role(
-                    space_id,
-                    redeemer_instance_id,
-                    redeemer_user_id,
-                    seat,
-                )
+            # v_23 roster gossip, deliberately BEFORE the redeemer's own
+            # ``space_instances`` row exists.
+            #
+            # ``broadcast_to_space_members`` targets ``space_instances``,
+            # so running it here reaches exactly the households that were
+            # already in the space — which is the whole point: they need a
+            # row for the new household, or their §24.11 space-writer gate
+            # has nothing to refuse a Follower on (it is deliberately
+            # lenient about a household it holds no row for). The redeemer
+            # must NOT be among them: it has no local space row yet — it
+            # builds one from the ACK's ``space_meta``, whose roster
+            # snapshot carries its own seat — so a gossip sent now would
+            # arrive there for an unknown space and be dropped.
+            #
+            # Fail-soft: the seat is already durable, so a gossip that
+            # raises must never turn a completed redeem into a DENY. The
+            # next snapshot / §25.6 sync reconciles.
+            if self._space_service is not None:
+                try:
+                    await self._space_service.broadcast_remote_member_joined(
+                        space_id,
+                        instance_id=redeemer_instance_id,
+                        user_id=redeemer_user_id,
+                        user_pk=redeemer_pk,
+                        display_name=redeemer_display,
+                        role=seat,
+                    )
+                except Exception:
+                    log.exception(
+                        "invite redeem: roster gossip failed for "
+                        "space_id=%s instance=%s",
+                        space_id,
+                        redeemer_instance_id,
+                    )
             await self._spaces.add_space_instance(
                 space_id,
                 redeemer_instance_id,

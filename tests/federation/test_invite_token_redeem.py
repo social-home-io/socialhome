@@ -39,7 +39,7 @@ from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
 )
-from socialhome.domain.federation_capabilities import OURS
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -241,6 +241,11 @@ class _FakeFederationService:
 
     async def peer_supports(self, instance_id, *, min_version):
         return self._peer_min_version >= min_version
+
+    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+        """§24.11 gates the routed handler runs on an unwrapped inner
+        event. No repos wired in these fixtures → nothing to enforce."""
+        return []
 
 
 class _FakeRegistry:
@@ -1555,9 +1560,17 @@ async def test_bootstrap_relay_sees_only_the_recipient():
 
 
 async def test_bootstrap_rejected_when_issuer_is_too_old():
-    """Sub-v_29 issuer → the unchanged "pair with them" message."""
+    """Sub-v_29 issuer → the unchanged "pair with them" message.
+
+    Pinned to the capability, not to ``OURS - 1``: later versions keep
+    shipping and the gate is still the version that introduced the
+    bootstrap handler.
+    """
     env = _bootstrap_pair()
-    stale_hint = _hint_for(env.issuer_party, proto=OURS - 1)
+    stale_hint = _hint_for(
+        env.issuer_party,
+        proto=FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM - 1,
+    )
     with pytest.raises(SpacePermissionError) as exc:
         await env.redeemer.request_redeem(
             "tok-1",
@@ -1942,9 +1955,7 @@ async def test_redeem_of_an_admin_link_seats_an_admin():
         issuer_instance_id="issuer-1",
     )
     assert result["role"] == SpaceRole.ADMIN.value
-    assert issuer_members.roles == [
-        ("sp-admin", "sender-1", "u-local", SpaceRole.ADMIN.value)
-    ]
+    assert issuer_members.added[0]["role"] == SpaceRole.ADMIN.value
 
 
 async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
@@ -1979,16 +1990,19 @@ async def test_an_admin_seated_by_link_never_receives_the_signing_seed():
     )
 
     assert result["role"] == SpaceRole.ADMIN.value
-    assert issuer_members.roles == [
-        ("sp-seed", "sender-1", "u-local", SpaceRole.ADMIN.value)
-    ]
+    assert issuer_members.added[0]["role"] == SpaceRole.ADMIN.value
 
 
-async def test_subscriber_link_is_refused_across_households():
-    """``space_remote_members.role`` admits member|admin only (migration
-    0009 — a subscriber has no row there at all). Rather than silently
-    upgrading a reader to a writer, the cross-household redeem of a
-    subscriber link fails closed with a reason the SPA can render."""
+async def test_subscriber_link_seats_a_follower_across_households():
+    """A Follower link redeemed by ANOTHER household seats that household
+    as ``role='subscriber'`` on the host, and tells the redeemer so.
+
+    This is the flagship case for a follower link: hand it to a stranger
+    so they can *read* the space. It used to fail closed because
+    ``space_remote_members.role`` admitted member|admin only; migration
+    0054 gave a remote reader a row shape, so the redeem runs through
+    like any other and the seat the ISSUER minted is what lands.
+    """
     sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-sub",
@@ -1997,23 +2011,25 @@ async def test_subscriber_link_is_refused_across_households():
             "role": SpaceRole.SUBSCRIBER.value,
         },
     )
-    with pytest.raises(SpacePermissionError) as exc:
-        await sender.request_redeem(
-            "good-token",
-            viewer_user_id="u-local",
-            issuer_instance_id="issuer-1",
-        )
-    assert "household that issued it" in str(exc.value)
-    assert issuer_members.added == []
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    # Seated on the host in ONE write, role included. The add-then-
+    # set_role dance it replaced could be interrupted between its two
+    # halves and leave a Follower sitting as a full member.
+    assert len(issuer_members.added) == 1
+    assert issuer_members.added[0]["role"] == SpaceRole.SUBSCRIBER.value
+    assert issuer_members.roles == []
 
 
-async def test_a_published_follower_link_cannot_be_burned_by_strangers():
-    """The refusal used to run AFTER the atomic consume, so every stranger
-    who opened a published Follower link spent one of its uses on a denial.
-    A 20-use link shared in a group chat was dead before the first person
-    it was meant for got to it. Read the seat, refuse, and leave the
-    counter exactly where it was."""
-    sender, _issuer, _sf, _if, repo, issuer_members = _wire_pair(
+async def test_a_follower_link_spends_a_use_like_any_other():
+    """The seat is honoured, so the consume is the only thing deciding
+    whether a use is spent — there is no pre-consume refusal left to
+    leave the counter untouched."""
+    sender, _issuer, _sf, _if, repo, _members = _wire_pair(
         {
             "space_id": "sp-sub",
             "created_by": "owner",
@@ -2021,16 +2037,51 @@ async def test_a_published_follower_link_cannot_be_burned_by_strangers():
             "role": SpaceRole.SUBSCRIBER.value,
         },
     )
-    for _ in range(3):
-        with pytest.raises(SpacePermissionError):
-            await sender.request_redeem(
-                "good-token",
-                viewer_user_id="u-local",
-                issuer_instance_id="issuer-1",
-            )
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert repo.tokens["good-token"]["uses_remaining"] == 19
 
-    assert repo.tokens["good-token"]["uses_remaining"] == 20
+
+async def test_an_unseatable_role_is_refused_without_seating_anything():
+    """The two CHECKs (0053 mint, 0054 seat) agree on member|admin|
+    subscriber. A row carrying anything else — a seat minted by a future
+    version, or a hand-edited DB — is refused rather than written: a
+    role we cannot gate must never become a seat we cannot revoke."""
+    sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": "overlord",
+        },
+    )
+    with pytest.raises(SpacePermissionError):
+        await sender.request_redeem(
+            "good-token",
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
     assert issuer_members.added == []
+    assert issuer_members.roles == []
+
+
+async def test_bootstrap_redeem_of_a_follower_link_seats_a_subscriber():
+    """The §D2b stranger path shares ``_consume_seat_and_build_ack``, so
+    a household that has never federated with us can hold a read-only
+    seat too — the whole point of publishing a Follower link."""
+    env = _bootstrap_pair(role=SpaceRole.SUBSCRIBER.value)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    assert env.issuer_members.added[0]["role"] == SpaceRole.SUBSCRIBER.value
+    assert env.issuer_members.roles == []
 
 
 async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
@@ -2044,9 +2095,8 @@ async def test_bootstrap_redeem_of_an_admin_link_seats_an_admin():
         bootstrap=env.hint,
     )
     assert result["role"] == SpaceRole.ADMIN.value
-    assert env.issuer_members.roles == [
-        ("space-1", env.redeemer_party.instance_id, "u-local", SpaceRole.ADMIN.value)
-    ]
+    assert env.issuer_members.added[0]["role"] == SpaceRole.ADMIN.value
+    assert env.issuer_members.roles == []
 
 
 # ─── §D2: an ACK is only an ACK from the household we addressed ───────
@@ -2131,3 +2181,205 @@ async def test_the_addressed_issuer_still_resolves_the_redeem():
     )
 
     assert fut.result()["space_id"] == "sp-pin"
+
+
+# ─── The host tells the other member households about the new seat ────
+
+
+class _RecordingSpaceService:
+    """Just the roster-gossip seam the coordinator uses."""
+
+    def __init__(self) -> None:
+        self.joined: list[dict] = []
+
+    async def broadcast_remote_member_joined(self, space_id, **kwargs):
+        self.joined.append({"space_id": space_id, **kwargs})
+
+
+async def test_a_redeem_tells_existing_member_households_about_the_seat():
+    """Peers need a row for the new household, or every peer-side gate
+    passes.
+
+    The §24.11 space-writer gate is lenient about a household it holds NO
+    row for (roster convergence). The redeem path used to seat the
+    redeemer on the host and tell nobody else, so every other member
+    household held exactly nothing for the follower — and the leniency
+    that exists for a lagging mirror became the rule for a household we
+    had deliberately seated as a reader.
+    """
+    sender, issuer, _sf, _if, _repo, _members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    spaces = _RecordingSpaceService()
+    issuer.attach_space_service(spaces)
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert spaces.joined == [
+        {
+            "space_id": "sp-sub",
+            "instance_id": "sender-1",
+            "user_id": "u-local",
+            "user_pk": "pk-alice",
+            "display_name": "Alice",
+            "role": SpaceRole.SUBSCRIBER.value,
+        }
+    ]
+
+
+async def test_a_redeem_gossips_the_seat_the_token_actually_carried():
+    """An ``admin`` link gossips ``admin`` — the role the peers store is
+    the one the host decided, not a default."""
+    sender, issuer, _sf, _if, _repo, _members = _wire_pair(
+        {
+            "space_id": "sp-admin",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.ADMIN.value,
+        },
+    )
+    spaces = _RecordingSpaceService()
+    issuer.attach_space_service(spaces)
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert [j["role"] for j in spaces.joined] == [SpaceRole.ADMIN.value]
+
+
+async def test_a_failed_gossip_never_fails_the_redeem():
+    """The seat is already durable when the gossip runs; a broadcast that
+    raises must not turn a completed redeem into a DENY."""
+
+    class _Exploding:
+        async def broadcast_remote_member_joined(self, *a, **kw):
+            raise RuntimeError("no seed")
+
+    sender, issuer, _sf, _if, _repo, members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    issuer.attach_space_service(_Exploding())
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    assert members.added[0]["role"] == SpaceRole.SUBSCRIBER.value
+
+
+async def test_the_redeem_works_without_a_space_service_attached():
+    """Legacy boot paths / unit fixtures that never attach one keep
+    today's host-only behaviour rather than crashing."""
+    sender, _issuer, _sf, _if, _repo, members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    result = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert result["role"] == SpaceRole.SUBSCRIBER.value
+    assert len(members.added) == 1
+
+
+async def test_the_ack_roster_mirrors_a_follower_with_its_own_role():
+    """The redeemer seats the host's roster from the ACK snapshot. A
+    ``subscriber`` entry has to stay a subscriber: that row is what the
+    redeemer's own §24.11 gate later reads to refuse the follower
+    household's writes — mirrored as ``member`` it refuses nothing."""
+    coord = _make_coordinator()
+    members = coord._remote_members
+    spaces = coord._spaces
+    await coord._seat_local_after_ack(
+        {
+            "space_id": "sp-1",
+            "role": SpaceRole.MEMBER.value,
+            "space_meta": {
+                "name": "Shared",
+                "owner_instance_id": "issuer-1",
+                "owner_username": "owner",
+                "identity_public_key": "aa" * 32,
+                "roster": [
+                    {
+                        "user_id": "u-follower",
+                        "instance_id": "peer-9",
+                        "display_name": "Fran",
+                        "role": SpaceRole.SUBSCRIBER.value,
+                    },
+                    {
+                        "user_id": "u-boss",
+                        "instance_id": "peer-9",
+                        "display_name": "Boss",
+                        "role": "overlord",
+                    },
+                ],
+            },
+        },
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert spaces is not None
+    roles = {entry["user_id"]: entry["role"] for entry in members.added}
+    assert roles == {"u-follower": SpaceRole.SUBSCRIBER.value, "u-boss": "member"}
+
+
+async def test_the_gossip_runs_before_the_redeemer_joins_space_instances():
+    """Ordering is load-bearing, not incidental.
+
+    ``broadcast_to_space_members`` targets ``space_instances``, so
+    gossiping BEFORE the redeemer's row exists is what keeps the event
+    aimed at the households that were already in the space. The redeemer
+    has no local space row yet — it builds one from the ACK's
+    ``space_meta`` — so a gossip that reached it would land for an
+    unknown space and be dropped with a warning.
+    """
+    sender, issuer, _sf, _if, repo, _members = _wire_pair(
+        {
+            "space_id": "sp-sub",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.SUBSCRIBER.value,
+        },
+    )
+    order: list[str] = []
+
+    class _Ordered:
+        async def broadcast_remote_member_joined(self, space_id, **kwargs):
+            order.append(f"gossip:{len(repo.space_instances)}")
+
+    issuer.attach_space_service(_Ordered())
+    original = repo.add_space_instance
+
+    async def _tracked(space_id, instance_id):
+        order.append("space_instance")
+        await original(space_id, instance_id)
+
+    repo.add_space_instance = _tracked
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    # The gossip ran first, and at that moment the redeemer was not yet
+    # a fan-out target.
+    assert order == ["gossip:0", "space_instance"]
+    assert repo.space_instances == [("sp-sub", "sender-1")]

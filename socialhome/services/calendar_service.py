@@ -1931,6 +1931,13 @@ class SpaceCalendarService(BusPublisherMixin):
         if self._federation is None:
             return
         payload: dict = {
+            # The space this write belongs to, in the payload as well as
+            # the routing field. A mesh-relayed envelope (SPACE_ROUTED)
+            # carries no plaintext routing ``space_id`` — a relay must not
+            # learn which space is being served — so the payload's copy is
+            # the only thing the receiver's §24.11 space-writer gate can
+            # read there. Additive; older peers ignore it.
+            "space_id": space_id,
             "event_id": event.id,
             "calendar_id": event.calendar_id,
             "summary": event.summary,
@@ -1969,7 +1976,9 @@ class SpaceCalendarService(BusPublisherMixin):
         await self._federation.broadcast_to_space_members(
             space_id,
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
-            {"event_id": event_id},
+            # ``space_id`` rides the payload too — see
+            # :meth:`_publish_federation_event_saved`.
+            {"event_id": event_id, "space_id": space_id},
         )
 
     async def _publish_federation_rsvp(
@@ -1993,6 +2002,9 @@ class SpaceCalendarService(BusPublisherMixin):
             else FederationEventType.SPACE_RSVP_DELETED
         )
         payload: dict = {
+            # ``space_id`` rides the payload too — see
+            # :meth:`_publish_federation_event_saved`.
+            "space_id": space_id,
             "event_id": event_id,
             "user_id": user_id,
             "occurrence_at": occurrence_at,

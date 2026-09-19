@@ -401,6 +401,7 @@ async def test_instance_left_removes_row(repo, handlers):
 
 
 async def test_member_banned_persists_and_publishes(bus, repo, handlers):
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
     captured: list[RemoteSpaceMemberBanned] = []
     bus.subscribe(RemoteSpaceMemberBanned, captured.append)
     await handlers._on_banned(
@@ -418,6 +419,7 @@ async def test_member_banned_falls_back_to_from_instance_when_no_banned_by(
     repo,
     handlers,
 ):
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
     await handlers._on_banned(
         _event(
             FederationEventType.SPACE_MEMBER_BANNED,
@@ -429,6 +431,7 @@ async def test_member_banned_falls_back_to_from_instance_when_no_banned_by(
 
 
 async def test_member_unbanned_removes_ban(repo, handlers):
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
     await handlers._on_unbanned(
         _event(
             FederationEventType.SPACE_MEMBER_UNBANNED,
@@ -760,3 +763,64 @@ async def test_catch_up_no_push_without_federation_service(bus, repo, caplog):
     )
     # Direct call — must return silently without raising.
     await h._push_config_to("peer", space)
+
+
+# ── F7: a ban is the host's word, nobody else's ───────────────────────
+
+
+async def test_member_banned_from_a_non_host_is_refused(repo, handlers):
+    """``ban_member`` inserts the ban AND deletes the ``space_members``
+    row. With no authority check, any peer that could reach us — a
+    read-only Follower household seated over the GFS relay included —
+    could ban the space's own owner out of it."""
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="the-real-host")
+    await handlers._on_banned(
+        _event(
+            FederationEventType.SPACE_MEMBER_BANNED,
+            {"user_id": "u-owner"},
+            space_id="sp-1",
+            from_instance="peer-follower",
+        )
+    )
+    assert repo.bans == []
+
+
+async def test_member_unbanned_from_a_non_host_is_refused(repo, handlers):
+    """The mirror image: clearing a real ban is how a banned household
+    walks back in."""
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="the-real-host")
+    await handlers._on_unbanned(
+        _event(
+            FederationEventType.SPACE_MEMBER_UNBANNED,
+            {"user_id": "u-1"},
+            space_id="sp-1",
+            from_instance="peer-follower",
+        )
+    )
+    assert repo.unbans == []
+
+
+async def test_member_banned_for_an_unknown_space_is_refused(repo, handlers):
+    """No local row means no owner to check against. A ban we cannot
+    attribute is a ban we do not apply — unlike the §24.11 writer gate's
+    roster-convergence leniency, there is no legitimate sender here that
+    arrives before the space does."""
+    await handlers._on_banned(
+        _event(
+            FederationEventType.SPACE_MEMBER_BANNED,
+            {"user_id": "u-1"},
+            space_id="sp-unknown",
+        )
+    )
+    assert repo.bans == []
+
+
+async def test_member_unbanned_for_an_unknown_space_is_refused(repo, handlers):
+    await handlers._on_unbanned(
+        _event(
+            FederationEventType.SPACE_MEMBER_UNBANNED,
+            {"user_id": "u-1"},
+            space_id="sp-unknown",
+        )
+    )
+    assert repo.unbans == []

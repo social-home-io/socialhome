@@ -123,6 +123,129 @@ sequenceDiagram
     Note over A,B: both sides ready to<br/>exchange encrypted content
 ```
 
+## Two kinds of follower (v_30)
+
+"Follower" covers two seats that behave identically to a reader and differ
+entirely in how the content reaches them:
+
+| | GFS subscriber | Follower **household** |
+|---|---|---|
+| How they arrived | Walked up on their own through a connection-server listing (`allow_subscribers` on). | Redeemed a `subscriber` **invite link** the owner minted (see [invites.md](./invites.md)). |
+| Seat on the host | None. The connection server holds the subscription; the host knows only "there are subscribers". | A real `space_remote_members` row with `role='subscriber'` (migration `0054`), plus a `space_instances` row. |
+| Delivery | GFS relay of authority-signed, content-key-encrypted public/global events. | The ordinary member fan-out — `broadcast_to_space_members` over `space_instances`, on whatever transport that pair uses (`space_session` relay for a link-joined peer, direct/mesh for a paired one). |
+| Content key | `SPACE_SUBSCRIBER_KEY_HANDOFF`, sealed to the subscriber's published X25519 key. | The §D1b handoff in the redeem ACK's `space_meta`, then every epoch rotation (rotation fans out over `space_instances`). |
+| Applicable space types | public / global only, and only with `allow_subscribers` on. | Any space the owner mints a link for — an invite is the owner deciding for one named link, not a standing public policy. |
+| In the roster | No. | Yes, exactly as a LOCAL subscriber is: `GET /api/spaces/{id}/members` emits `role` verbatim for both. |
+| Revocation | Drop the subscription / turn `allow_subscribers` off; the next epoch rotation locks them out. | Kick or ban, like any member — seat tombstoned, household dropped from `space_instances` when its last seat goes, epoch rotated, and for a link-joined peer with no other shared space the `space_session` row revoked (`revoke_space_session_if_orphaned`). |
+
+**Writes from a Follower household are refused by every household that
+receives them.** It holds a valid content key, so it can produce a
+well-formed, correctly-signed `SPACE_POST_CREATED` whatever its own local
+gate says — and its own local gate *does* refuse, via the ordinary
+`_assert_writable_member` on the redeemer's `space_members` row. Nobody
+takes that on trust: step 12 of the §24.11 pipeline
+(`make_check_space_writer` in `federation/inbound_validator.py`) drops the
+envelope before dispatch.
+
+The rule, precisely:
+
+- **A household that holds only `subscriber` seats in the space — or only
+  tombstoned ones — has every space-content write refused.** The decision
+  is keyed on the signed `from_instance`, never on a payload author field
+  (the sender writes those). A household holding at least one live
+  `member` / `admin` seat may write, even if it also holds a follower
+  seat.
+- **Every receiving household enforces it, not just the host.** Space
+  content fans out peer-to-peer from the *originating* household
+  (`broadcast_to_space_members`), so a member household receives a
+  follower's writes directly — and the follower learns every member
+  household's instance id from the roster snapshot in its own redeem ACK.
+- **The whole write vocabulary**
+  (`SPACE_WRITE_EVENT_TYPES` in `domain/federation.py`): posts, comments,
+  pages, tasks, polls, stickies, calendar events, RSVPs, schedules,
+  gallery items, bazaar listings / bids / offers, zones, location pins,
+  media blobs — and every `*_UPDATED` / `*_DELETED` sibling, because
+  editing or deleting somebody else's row is a write. The classification
+  is exhaustive over the enum and pinned by a test, so a new space event
+  type is refused-by-default until somebody classifies it.
+- **One opt-in:** `SPACE_COMMENT_CREATED`, when the space has
+  `allow_subscriber_comment` on **and** the payload's author names a live
+  `subscriber` seat of that same household. (`allow_subscriber_react` has
+  no inbound surface — space reactions are not federated events.)
+- **A household the receiver holds no roster row for is not gated.** That
+  is roster convergence, not trust: a household seated on the host before
+  the gossip arrived legitimately has no row here. It is also why the seat
+  read includes **tombstones** — a household we kicked must not read like
+  one we have never heard of. A redeem gossips the new seat to every
+  member household (`broadcast_remote_member_joined`) so this leniency
+  stays about lag rather than about followers.
+- **The mesh is not a way around it.** The inner event of a
+  `SPACE_ROUTED` envelope is re-judged by the same gates after the unwrap
+  (`run_post_decrypt_gates`); without that it would reach the handlers
+  with neither this check nor the ban check.
+- **An envelope that names no space is refused.** Every writer we ship
+  sets the routing `space_id`, and the payload carries its own copy for
+  the mesh path (where the routing field is deliberately absent so a relay
+  cannot learn which space is served). One with neither cannot be
+  attributed, and passing it would hand a follower every handler that
+  keys on a bare row id.
+
+## Roster authority
+
+Content is only half the promise. The other half is the roster itself: a
+household that could rewrite seats, bans or members would simply promote
+itself out of the read-only gate above.
+
+**A roster mutation is applied only when it comes from the space's own
+host (`spaces.owner_instance_id == event.from_instance`) or carries a
+valid space-authority signature verified against
+`spaces.identity_public_key`.** Not from a paired peer, not from a member
+household, not from a household holding a Follower seat. Concretely:
+
+- `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_MEMBER_BANNED`,
+  `SPACE_MEMBER_UNBANNED` and the `space_members` half of
+  `SPACE_REMOTE_MEMBER_REMOVED` are **host-only**. An unknown space is
+  refused too — there is no owner to compare the sender against.
+- `SPACE_MEMBER_JOINED` / `SPACE_MEMBER_LEFT` (the v_23 roster gossip) are
+  **authority-signed**, so a delegated admin can act while the owner is
+  offline; the trust root is the signature, not the relay.
+- `SPACE_PRIVATE_INVITE` is the host inviting one of our users, so it is
+  refused for a space we already know under a different owner. Its
+  `_ACCEPT` / `_DECLINE` are bound to the invitation they answer: the
+  signed sender must be the invited household, the named user must be the
+  invited user, and the invitation must still be pending — one invitation,
+  one seat. (`expires_at` is not enforced: it is a 15-minute TTL inherited
+  from the invite token, while the invitee's pending list has no expiry
+  filter, so refusing on it would drop legitimate late accepts.) An
+  accept never *raises* an existing live seat's role — promotion is the
+  host's decision and rides `SPACE_MEMBER_ROLE_CHANGED`.
+- The sender's OWN seat is the one exception, and it is not an exception
+  to the rule: a household may drop the seat it holds
+  (`SPACE_REMOTE_MEMBER_REMOVED` naming its own user) because that is a
+  statement about itself.
+
+One handler registration per event type is not guaranteed —
+`EventDispatchRegistry.dispatch` runs **every** handler bound to a type, so
+a guarded handler does not shadow an unguarded sibling. A protocol test
+(`tests/protocol/test_space_roster_authority.py`) enumerates the real
+registry for each roster-mutating type and drives a forged envelope
+through every handler bound to it.
+
+The §25.6 catch-up sync carries the same rule into the bulk path: a
+`SPACE_SYNC_OFFER` is accepted only for a `sync_id` this household
+actually requested and only from the household it asked, the session pins
+that provider for every chunk, and each chunk's `space_id` is pinned to
+the session's. Without those, an unsolicited offer minted a session with
+no provider and no space, and its chunks wrote members (role included),
+bans and content for any space at all.
+
+Older peers: `role='subscriber'` is unstorable below v_30, so a follower's
+roster gossip is gated on
+`FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`. A sub-v_30 peer
+therefore holds no row for the follower and falls into the
+convergence-leniency branch above — the seat only becomes enforceable
+there once that household upgrades.
+
 ## `allow_subscribers` gates public readability
 
 A space carries three independent dials:

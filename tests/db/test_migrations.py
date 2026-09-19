@@ -778,3 +778,122 @@ async def test_0051_allow_subscribers_columns_default_closed(tmp_path):
         assert row["allow_subscribers"] == 0
     finally:
         await db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_0054_remote_member_role_admits_subscriber(tmp_path):
+    """Migration 0054 widens ``space_remote_members.role`` to admit
+    ``subscriber`` — a remote household that redeemed a Follower link.
+
+    The CHECK is the on-disk authority for the remote-member vocabulary,
+    so a cross-household follower seat is only real once the constraint
+    says so. ``owner`` stays out (ownership is local-only) and garbage
+    stays out, both asserted here so a future rebuild cannot quietly
+    relax the column into a free-text field.
+    """
+    db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, space_type, owner_instance_id,"
+            " owner_username, identity_public_key) VALUES(?,?,?,?,?,?)",
+            ("sp-0054", "Follower space", "global", "inst-host", "host", "00"),
+        )
+        # The value the whole feature turns on.
+        await db.enqueue(
+            "INSERT INTO space_remote_members"
+            "(space_id, instance_id, user_id, role) VALUES(?,?,?,?)",
+            ("sp-0054", "inst-remote", "u-follower", "subscriber"),
+        )
+        row = await db.fetchone(
+            "SELECT role FROM space_remote_members WHERE user_id=?",
+            ("u-follower",),
+        )
+        assert row["role"] == "subscriber"
+
+        # …and the constraint still holds the line on everything else.
+        for bad in ("owner", "moderator", ""):
+            with pytest.raises(sqlite3.IntegrityError):
+                await db.enqueue(
+                    "INSERT INTO space_remote_members"
+                    "(space_id, instance_id, user_id, role) VALUES(?,?,?,?)",
+                    ("sp-0054", "inst-remote", f"u-{bad or 'empty'}", bad),
+                )
+    finally:
+        await db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_0054_rebuild_preserves_rows_index_and_fk(tmp_path):
+    """The 0054 rebuild is value-preserving: a row written under the old
+    shape survives the copy with every column intact, the (instance_id,
+    user_id) index that ``DROP TABLE`` takes with it is recreated, and the
+    ``spaces`` FK still cascades.
+
+    A CHECK rebuild is the one destructive-shaped migration in the tree;
+    this is the test that keeps it honest.
+    """
+    dbfile = tmp_path / "test.db"
+    # Build the pre-0054 shape by applying migrations up to 0053 only.
+    conn = sqlite3.connect(dbfile, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=ON")
+    _ensure_schema_version_for_test(conn)
+    for migration in discover_migrations(MIGRATIONS_DIR):
+        if migration.version > 53:
+            break
+        migration.apply(conn)
+        conn.execute(
+            "INSERT INTO schema_version(version, description) VALUES (?,?)",
+            (migration.version, migration.description),
+        )
+    conn.execute(
+        "INSERT INTO spaces(id, name, space_type, owner_instance_id,"
+        " owner_username, identity_public_key) VALUES(?,?,?,?,?,?)",
+        ("sp-keep", "Kept", "global", "inst-host", "host", "00"),
+    )
+    conn.execute(
+        "INSERT INTO space_remote_members"
+        "(space_id, instance_id, user_id, user_pk, display_name, joined_at,"
+        " role, member_version, tombstoned) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "sp-keep",
+            "inst-a",
+            "u-admin",
+            "pk-a",
+            "Ada",
+            "2026-01-02 03:04:05",
+            "admin",
+            7,
+            1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    db = AsyncDatabase(dbfile, batch_timeout_ms=10)
+    await db.startup()
+    try:
+        row = await db.fetchone(
+            "SELECT * FROM space_remote_members WHERE user_id=?", ("u-admin",)
+        )
+        assert dict(row) == {
+            "space_id": "sp-keep",
+            "instance_id": "inst-a",
+            "user_id": "u-admin",
+            "user_pk": "pk-a",
+            "display_name": "Ada",
+            "joined_at": "2026-01-02 03:04:05",
+            "role": "admin",
+            "member_version": 7,
+            "tombstoned": 1,
+        }
+        idx = await db.fetchall("PRAGMA index_list(space_remote_members)")
+        assert "idx_space_remote_members_instance_user" in {r["name"] for r in idx}, (
+            f"the 0001 index did not survive the rebuild: {[dict(r) for r in idx]}"
+        )
+        # The FK survived the rebuild — deleting the space cascades the row.
+        await db.enqueue("DELETE FROM spaces WHERE id=?", ("sp-keep",))
+        left = await db.fetchall("SELECT 1 FROM space_remote_members")
+        assert left == []
+    finally:
+        await db.shutdown()

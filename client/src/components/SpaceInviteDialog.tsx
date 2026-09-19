@@ -91,11 +91,6 @@ const ROLE_CHOICES: { id: InviteRole; label: string; hint: string }[] = [
   { id: 'admin', label: 'Admin', hint: 'manages members and settings' },
 ]
 
-/** Shown on the Follower option while the link is being published to a
- *  connection server: a published link is by definition redeemed from
- *  another household, and the backend refuses a cross-household
- *  follower/subscriber seat. */
-const FOLLOWER_CROSS_HOUSEHOLD_HINT = "Followers can't join from another household yet"
 
 /** The connection server drops a parked invite blob after this long, so a
  *  published `/join/...` web URL stops resolving even when the local link
@@ -154,13 +149,6 @@ export function openSpaceInvite(
   linksError.value = false
   memberNames.value = {}
   open.value = true
-}
-
-/** Cross-household follower joins aren't supported yet, so the Follower
- *  option is off the table while "Also publish to ..." is on -- the form must
- *  not be able to submit a combination the backend will refuse. */
-function roleBlockedByPublish(id: InviteRole): boolean {
-  return publish.value && id === 'subscriber'
 }
 
 function ttlFor(id: ExpiryId): number {
@@ -387,21 +375,18 @@ export function SpaceInviteDialog() {
                 {roleChoices.map(c => (
                   <label
                     key={c.id}
-                    class={`sh-invite-role ${role.value === c.id ? 'sh-invite-role--active' : ''}${roleBlockedByPublish(c.id) ? ' sh-invite-role--disabled' : ''}`}
+                    class={`sh-invite-role ${role.value === c.id ? 'sh-invite-role--active' : ''}`}
                   >
                     <input
                       type="radio"
                       name="sh-invite-role"
                       value={c.id}
                       checked={role.value === c.id}
-                      disabled={roleBlockedByPublish(c.id)}
                       onChange={() => { role.value = c.id }}
                       data-testid={`invite-role-${c.id}`}
                     />
                     <span class="sh-invite-role__label">{c.label}</span>
-                    <span class="sh-invite-role__hint">
-                      {roleBlockedByPublish(c.id) ? FOLLOWER_CROSS_HOUSEHOLD_HINT : c.hint}
-                    </span>
+                    <span class="sh-invite-role__hint">{c.hint}</span>
                   </label>
                 ))}
               </div>
@@ -459,11 +444,6 @@ export function SpaceInviteDialog() {
                       publish.value = (e.target as HTMLInputElement).checked
                       if (publish.value && !publishTo.value) {
                         publishTo.value = servers.value[0].id
-                      }
-                      // Follower + published is an impossible combination --
-                      // drop back to Member rather than let it submit.
-                      if (publish.value && role.value === 'subscriber') {
-                        role.value = 'member'
                       }
                     }}
                   />

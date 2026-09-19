@@ -49,11 +49,13 @@ import orjson
 
 from ..domain.federation import (
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
+    SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
     FederationEventType,
     InstanceSource,
     RemoteInstance,
 )
+from ..domain.space import SpaceRole
 
 log = logging.getLogger(__name__)
 
@@ -625,6 +627,241 @@ def make_check_deprovisioned_author(*, user_repo) -> InboundStep:
             }
 
     return check_deprovisioned_author
+
+
+#: The seats that may WRITE space content. A household holding at least
+#: one live seat with one of these roles in a space is a writer there;
+#: everything else it holds (``subscriber`` seats, tombstoned seats) does
+#: not add up to write authority. ``owner`` is absent on purpose — the
+#: ``space_remote_members.role`` CHECK has never admitted it (ownership is
+#: local-only), so a row carrying it is a row that cannot exist.
+_WRITER_ROLES: frozenset[str] = frozenset(
+    {
+        SpaceRole.MEMBER.value,
+        SpaceRole.ADMIN.value,
+    }
+)
+
+#: Early-response body for a refused write. ``status: ok`` on purpose: the
+#: envelope was valid and we are done with it, so the sender's outbox must
+#: stop redelivering it rather than retry forever.
+_REFUSED_WRITE = {"status": "ok", "dropped": "subscriber-write"}
+
+
+def make_check_space_writer(
+    *,
+    space_repo,
+    remote_member_repo,
+) -> InboundStep:
+    """Step 12: refuse a space-content write from a reader household.
+
+    A ``subscriber`` seat in ``space_remote_members`` (migration 0054) is
+    the on-disk fact that a household redeemed a **Follower** invite link.
+    Such a household is a full participant on the transport — it sits in
+    ``space_instances``, so ``broadcast_to_space_members`` delivers the
+    content stream and the epoch content key reaches it — and it must not
+    be able to write back. It holds everything needed to produce a
+    perfectly well-formed, correctly-signed
+    :data:`~socialhome.domain.federation.FederationEventType
+    .SPACE_POST_CREATED`; its own household's local gate
+    (``_assert_writable_member``) is its own copy of the rule, and a
+    patched household simply does not run it.
+
+    The shape of the check:
+
+    * **Household-level, on the signed ``from_instance``.** Never on a
+      payload author field: the sender writes those, so an author-keyed
+      gate is bypassed by naming somebody else (or nobody).
+    * **On every receiving household, not only the host.** Space content
+      fans out peer-to-peer from the ORIGINATING household
+      (:meth:`FederationService.broadcast_to_space_members`), so a member
+      household receives a follower's writes directly — and the follower
+      learns every member household's instance id from the roster snapshot
+      in its own redeem ACK. A host-only gate is a gate with a documented
+      way around it.
+    * **Over the whole write vocabulary**
+      (:data:`~socialhome.domain.federation.SPACE_WRITE_EVENT_TYPES`),
+      ``*_UPDATED`` / ``*_DELETED`` included: editing and deleting other
+      people's rows is a write, and the ~30 non-post content types are
+      persisted by handlers with no membership check of their own.
+    * **Also on the mesh.** The same two post-decrypt gates run on the
+      inner event of a ``SPACE_ROUTED`` envelope after the unwrap
+      (:func:`run_post_decrypt_gates`), which does not pass through this
+      pipeline.
+
+    The decision, given the seats that household holds in that space
+    (:meth:`AbstractSpaceRemoteMemberRepo.list_for_instance`, **tombstones
+    included**):
+
+    * **no rows at all → pass.** The only leniency, and it is about
+      roster convergence, not about trust: a household seated on the host
+      before the roster gossip reached us legitimately has no row here,
+      and refusing would drop real members' content whenever a mirror
+      lagged. Tombstones are read precisely so that a household we KICKED
+      does not fall into this branch — ``get`` / ``list_for_space`` filter
+      them, which would make "removed" and "never heard of" the same
+      answer.
+    * **≥1 row and at least one LIVE ``member`` / ``admin`` seat → pass.**
+      A mixed household may write, because a real member of it may.
+    * **otherwise → refuse.** Only-``subscriber`` seats, or only
+      tombstoned ones.
+
+    The single exception is ``SPACE_COMMENT_CREATED`` when the space has
+    ``allow_subscriber_comment`` on AND the payload's author names a LIVE
+    ``subscriber`` seat of that same household — the author is bound to a
+    real row, so the flag cannot be used to smuggle the spoof back in. It
+    is the same admin opt-in that decides what a LOCAL subscriber may do.
+    Its sibling ``allow_subscriber_react`` has no inbound surface at all:
+    space reactions are not federated events (they ride the local row and
+    the §25.6 sync snapshot), so there is nothing here to gate.
+
+    An **unresolvable ``space_id``** (neither the routing field nor the
+    payload names one) is refused. Every writer we ship sets the routing
+    ``space_id`` — ``broadcast_to_space_members`` passes it per peer, the
+    §25.6 resume replay passes it on every ``send_event`` — and the
+    payload carries its own copy for the mesh path, where the routing
+    field is deliberately absent so a relay cannot learn which space. An
+    envelope with neither is a sender that removed it, and passing it
+    would hand a follower every handler that keys on a bare row id (a
+    comment, an RSVP, a calendar delete) with no space to check against.
+
+    Fail-soft applies to **one** thing: a seat lookup that RAISES (a
+    transient DB error) passes, at WARNING, the way
+    :func:`make_check_deprovisioned_author` does — the seat is durable, so
+    the next envelope is gated again. A lookup that *returns* nothing is
+    never treated as an error, and a features lookup that raises leaves
+    the refusal standing (the opt-in is an exception to a "no", so an
+    unreadable flag is a "no").
+    """
+
+    async def check_space_writer(ctx: InboundContext) -> None:
+        event = ctx.event
+        if event is None or event.event_type not in SPACE_WRITE_EVENT_TYPES:
+            return
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        space_id = str(event.space_id or payload.get("space_id") or "")
+        if not space_id:
+            log.warning(
+                "inbound: refused %s from %s — no space_id on the envelope or "
+                "in the payload, so the write cannot be attributed to a space",
+                event.event_type.value,
+                event.from_instance,
+            )
+            ctx.early_response = dict(_REFUSED_WRITE)
+            return
+        try:
+            seats = await remote_member_repo.list_for_instance(
+                space_id,
+                event.from_instance,
+                include_tombstoned=True,
+            )
+        except Exception as exc:
+            log.warning(
+                "inbound: space-writer seat lookup failed for %s in %s: %s",
+                event.from_instance,
+                space_id,
+                exc,
+            )
+            return
+        if not seats:
+            # Roster convergence — see the docstring. Not a trust
+            # decision, and deliberately unavailable to a household we
+            # tombstoned.
+            return
+        live = [s for s in seats if not s.tombstoned]
+        if any(s.role in _WRITER_ROLES for s in live):
+            return
+        if event.event_type is FederationEventType.SPACE_COMMENT_CREATED:
+            if await _subscriber_comment_allowed(
+                space_repo=space_repo,
+                space_id=space_id,
+                live_seats=live,
+                author_user_id=str(payload.get("author") or ""),
+            ):
+                return
+        log.warning(
+            "inbound: refused %s in space %s from %s — that household holds "
+            "only read-only Follower seats here (%d live, %d tombstoned)",
+            event.event_type.value,
+            space_id,
+            event.from_instance,
+            len(live),
+            len(seats) - len(live),
+        )
+        ctx.early_response = dict(_REFUSED_WRITE)
+
+    return check_space_writer
+
+
+async def _subscriber_comment_allowed(
+    *,
+    space_repo,
+    space_id: str,
+    live_seats: list,
+    author_user_id: str,
+) -> bool:
+    """The one opt-in out of the Follower refusal — see the step's docstring.
+
+    Both halves are required: the space's ``allow_subscriber_comment``
+    flag, and an author bound to a LIVE ``subscriber`` seat of the sending
+    household. Without the binding the flag would re-open the author-spoof
+    hole the gate exists to close.
+    """
+    if not author_user_id:
+        return False
+    if not any(
+        s.user_id == author_user_id and s.role == SpaceRole.SUBSCRIBER.value
+        for s in live_seats
+    ):
+        return False
+    try:
+        space = await space_repo.get(space_id)
+    except Exception as exc:
+        # The opt-in is an exception to a refusal, so an unreadable flag
+        # leaves the refusal in place (the inverse of the seat lookup,
+        # where failing soft keeps legitimate content flowing).
+        log.warning(
+            "inbound: space-writer features lookup failed for %s: %s",
+            space_id,
+            exc,
+        )
+        return False
+    return bool(space is not None and space.features.allow_subscriber_comment)
+
+
+async def run_post_decrypt_gates(
+    ctx: InboundContext,
+    *,
+    steps: list[InboundStep],
+) -> bool:
+    """Run the post-decrypt gates on an event that skipped the pipeline.
+
+    A ``SPACE_ROUTED`` envelope is validated as a *routing* envelope, then
+    unwrapped by :class:`~socialhome.federation.routed_envelope
+    .SpaceRoutedHandler`, which synthesises the inner
+    :class:`FederationEvent` and dispatches it directly. That inner event
+    never passes through :class:`InboundPipeline`, so without this seam it
+    is dispatched with no ban check and no space-writer check — a mesh
+    bypass for exactly the households those two steps exist to stop (a
+    §D2 direct-paired Follower is mesh-capable).
+
+    Composing the real steps rather than re-implementing them is the
+    point: the mesh path and the pipeline enforce the same rule by
+    construction, so a future step added to the set is enforced on both.
+
+    Returns ``True`` when the event may be dispatched, ``False`` when a
+    gate refused it (``early_response`` set, or a step raised
+    ``ValueError`` the way the ban check does on a banned instance).
+    """
+    for step in steps:
+        try:
+            await step(ctx)
+        except ValueError as exc:
+            log.warning("routed inner event refused: %s", exc)
+            return False
+        if ctx.early_response is not None:
+            return False
+    return True
 
 
 # ─── Pipeline runner ─────────────────────────────────────────────────────

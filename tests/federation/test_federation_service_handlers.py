@@ -677,8 +677,24 @@ async def test_handle_space_sync_offer_no_manager(svc):
     )
 
 
+def _solicited(svc, *, provider="peer-1", space_id="sp"):
+    """Mark ``sync_id`` "s1"/"s" as one WE asked for.
+
+    An OFFER is only ever an answer to our own ``SPACE_SYNC_BEGIN``, so
+    the requester now looks the sync_id up before it mints a session.
+    """
+    svc._sync_manager.pending_sync_request = MagicMock(
+        return_value=SimpleNamespace(
+            sync_id="s1",
+            space_id=space_id,
+            provider_instance_id=provider,
+        ),
+    )
+
+
 async def test_handle_space_sync_offer_missing_fields(svc):
     svc._sync_manager = MagicMock()
+    _solicited(svc)
     svc._sync_manager.apply_offer = AsyncMock()
     await svc._handle_space_sync_offer(_event("SPACE_SYNC_OFFER", {}))
     svc._sync_manager.apply_offer.assert_not_awaited()
@@ -687,6 +703,7 @@ async def test_handle_space_sync_offer_missing_fields(svc):
 async def test_handle_space_sync_offer_apply_offer_called(svc):
     """apply_offer is awaited with the received SDP."""
     svc._sync_manager = MagicMock()
+    _solicited(svc)
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-answer")
     try:
         await svc._handle_space_sync_offer(
@@ -722,6 +739,7 @@ async def test_offer_handler_spawns_ready_watcher(svc):
         rtc_watcher=None,
     )
     svc._sync_manager = MagicMock()
+    _solicited(svc)
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
     svc._sync_manager.get_session = MagicMock(return_value=record)
     svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
@@ -764,6 +782,7 @@ async def test_offer_handler_emits_direct_failed_on_ice_timeout(svc):
         rtc_watcher=None,
     )
     svc._sync_manager = MagicMock()
+    _solicited(svc)
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
     svc._sync_manager.get_session = MagicMock(return_value=record)
     svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
@@ -807,6 +826,7 @@ async def test_offer_handler_ice_timeout_emits_relay_begin_when_peer_supports(sv
         rtc_watcher=None,
     )
     svc._sync_manager = MagicMock()
+    _solicited(svc)
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
     svc._sync_manager.get_session = MagicMock(return_value=record)
     svc._sync_manager.trigger_relay_sync = AsyncMock(
@@ -866,6 +886,7 @@ async def test_offer_handler_ice_timeout_skips_relay_for_old_peer(svc):
         rtc_watcher=None,
     )
     svc._sync_manager = MagicMock()
+    _solicited(svc)
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
     svc._sync_manager.get_session = MagicMock(return_value=record)
     svc._sync_manager.trigger_relay_sync = AsyncMock()
@@ -929,6 +950,7 @@ async def test_offer_from_unpaired_provider_is_skipped_with_debug_log(svc, caplo
     RTC session, no ANSWER, and no ``unknown instance`` warning."""
     _unpair(svc)
     svc._sync_manager = MagicMock()
+    _solicited(svc, provider="mesh-provider")
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
     caplog.set_level(logging.DEBUG, logger=LOGGER)
     with patch.object(
@@ -955,6 +977,7 @@ async def test_offer_from_confirmed_provider_answers_via_plain_send_event(svc):
     """Paired peer: the ANSWER goes out over plain ``send_event`` with the
     same payload as before — the (b) guard is invisible to it."""
     svc._sync_manager = MagicMock()
+    _solicited(svc, provider="paired-provider")
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
     svc._sync_manager.get_session = MagicMock(return_value=None)
     with patch.object(
@@ -1209,7 +1232,7 @@ async def test_handle_space_sync_chunk_forwards_to_receiver(svc):
     decryption pipeline RTC frames go through."""
     svc._sync_manager = MagicMock()
     svc._sync_manager.get_session = MagicMock(
-        return_value=SimpleNamespace(provider_instance_id="peer-id"),
+        return_value=SimpleNamespace(provider_instance_id="peer-id", space_id="sp"),
     )
     svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
     await svc._handle_space_sync_chunk(
@@ -1222,6 +1245,7 @@ async def test_handle_space_sync_chunk_forwards_to_receiver(svc):
     svc._space_sync_receiver.on_chunk.assert_awaited_once_with(
         "raw-bytes",
         from_instance="peer-id",
+        expected_space_id="sp",
     )
 
 
@@ -1231,7 +1255,7 @@ async def test_handle_space_sync_chunk_rejects_wrong_provider(svc):
     chunks into someone else's sync session."""
     svc._sync_manager = MagicMock()
     svc._sync_manager.get_session = MagicMock(
-        return_value=SimpleNamespace(provider_instance_id="legit-peer"),
+        return_value=SimpleNamespace(provider_instance_id="legit-peer", space_id="sp"),
     )
     svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
     await svc._handle_space_sync_chunk(
@@ -1711,3 +1735,82 @@ async def test_mesh_begin_survives_unwired_route_service(svc):
         await asyncio.sleep(0)
 
     svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+
+
+# ─── F3: an unsolicited sync offer is not a session ────────────────
+
+
+async def test_handle_space_sync_offer_refuses_an_unsolicited_sync_id(svc):
+    """``apply_offer`` MINTS a requester session for any ``sync_id`` it is
+    handed, with an empty ``provider_instance_id`` — and the chunk
+    handler's provider pin used to skip on that empty string. So an
+    unsolicited OFFER bought a peer a session whose chunks were persisted
+    with no provider and no space pinned at all."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.pending_sync_request = MagicMock(return_value=None)
+    svc._sync_manager.apply_offer = AsyncMock()
+    await svc._handle_space_sync_offer(
+        _event(
+            "SPACE_SYNC_OFFER",
+            {"sync_id": "never-asked", "sdp_offer": "x"},
+            space_id="sp",
+        ),
+    )
+    svc._sync_manager.apply_offer.assert_not_awaited()
+
+
+async def test_handle_space_sync_offer_refuses_an_offer_from_another_household(svc):
+    """We asked ONE household. A second one answering with the same
+    sync_id is either a race we don't want or an injection."""
+    svc._sync_manager = MagicMock()
+    _solicited(svc, provider="the-host")
+    svc._sync_manager.apply_offer = AsyncMock()
+    await svc._handle_space_sync_offer(
+        _event(
+            "SPACE_SYNC_OFFER",
+            {"sync_id": "s1", "sdp_offer": "x"},
+            from_instance="someone-else",
+            space_id="sp",
+        ),
+    )
+    svc._sync_manager.apply_offer.assert_not_awaited()
+
+
+async def test_handle_space_sync_offer_pins_the_provider_on_the_session(svc):
+    """The session records WHO is allowed to stream into it, so the chunk
+    handler has something to check."""
+    svc._sync_manager = MagicMock()
+    _solicited(svc)
+    svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-ans")
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    with patch.object(FederationService, "send_event", new_callable=AsyncMock):
+        await svc._handle_space_sync_offer(
+            _event(
+                "SPACE_SYNC_OFFER",
+                {"sync_id": "s1", "sdp_offer": "x"},
+                space_id="sp",
+            ),
+        )
+    assert (
+        svc._sync_manager.apply_offer.await_args.kwargs["provider_instance_id"]
+        == "peer-1"
+    )
+
+
+async def test_handle_space_sync_chunk_refuses_an_unpinned_session(svc):
+    """An empty ``provider_instance_id`` is a REFUSAL, never a skip. The
+    falsy guard was the second half of the unsolicited-offer hole: the
+    session it minted pinned nobody, so every peer passed."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(provider_instance_id="", space_id="sp"),
+    )
+    svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
+    await svc._handle_space_sync_chunk(
+        _event(
+            "SPACE_SYNC_CHUNK",
+            {"sync_id": "s", "chunk": "raw"},
+            from_instance="anyone",
+        ),
+    )
+    svc._space_sync_receiver.on_chunk.assert_not_awaited()

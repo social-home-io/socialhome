@@ -587,7 +587,8 @@ sequenceDiagram
     G->>I: ws {type: envelope, sealed}<br/>(queued up to 24 h if offline)
     Note over I: unseal → anti-tamper → signature →<br/>ts → replay → token → ban
     alt token valid
-        I->>I: consume token, seat remote member,<br/>space_instances, space_session row
+        I->>I: consume token, seat remote member<br/>(role in the same INSERT),<br/>space_instances, space_session row
+        I-->>I: SPACE_MEMBER_JOINED roster gossip<br/>to every member household (v_23,<br/>subscriber roles gated on v_30)
         I->>G: POST /gfs/envelope<br/>{to_instance: R, sealed ACK + space_meta}
         G->>R: ws {type: envelope, sealed}
         Note over R: §CP.F1 age gate, §D1b anti-hijack,<br/>then seat stub + key + roster
@@ -831,20 +832,66 @@ key custody differs. An owner who later wants a link-joined admin to
 hold authority promotes them through the normal path, where the decision
 is about a household the owner can now name.
 
-**Cross-household Follower / `subscriber` links are not supported yet.**
-`space_remote_members.role` carries a CHECK admitting `member` and
-`admin` only (migration 0009: a subscriber has no row there at all), so
-the §D2 / §D2b redeem of a subscriber link is DENIED with a reason
-rather than silently seating a reader as a writer. A subscriber link is
-redeemable on the *issuing* household today; a cross-household
-subscriber seat needs a shape of its own, and that is a documented
-follow-up rather than a gap in this one.
+#### A Follower link works across households (v_30)
 
-The denial **does not consume a use**. The seat check now runs before
-the counter is decremented, so a follower link published to the web can
-no longer be burned to zero by strangers redeeming it from their own
-households — an unsupported redeem costs the link nothing and the owner
-finds it intact.
+A `subscriber` link handed to a household that has never federated with
+the issuer is the flagship case for a published link: give a stranger a
+URL and they can *read* the space. It is a real seat, not a special
+case — the household lands in `space_remote_members` with
+`role='subscriber'` (migration `0054` widened the CHECK to admit it) and
+in `space_instances` alongside every other member household.
+
+**The model, in one line:** a Follower household is a member household
+on the transport and a reader in the roster.
+
+| | Follower household |
+|---|---|
+| Content stream | Same as a member. `broadcast_to_space_members` targets `space_instances`, so posts, comments, calendar, roster and config events all arrive — over whichever transport that pair uses (`space_session` relay for a link-joined peer, direct/mesh for a paired one). |
+| Content key | Same as a member. The §D1b handoff ships the epoch key in the ACK's `space_meta` (`apply_space_content_key_from_metadata`), and every later rotation reaches it because rotation fans out over `space_instances`. |
+| Local seat | The redeeming user gets a local `space_members` row at `role='subscriber'`, so their own household's `_assert_writable_member` / `_reject_subscriber` refuse their writes with the usual message. |
+| Writes, everywhere | Refused **again** by every household that receives them, regardless of what the sending household claims. A follower holds a valid content key, so it can produce a well-formed, correctly-signed write of any content type; the seat the RECEIVER holds for the signed `from_instance` is the authority. Step 12 of the §24.11 pipeline (`make_check_space_writer`) drops it before dispatch, across the whole `SPACE_WRITE_EVENT_TYPES` vocabulary (`*_UPDATED` / `*_DELETED` included) and on the mesh-routed path too. Enforced on member households, not only the host — space content fans out peer-to-peer. `allow_subscriber_comment` still governs comments, exactly as it does for a local follower (and the author must name a live `subscriber` seat of that household). A household the receiver holds no roster row for is not gated, which is why the host gossips the new seat to every member household at redeem time. Full rule: [spaces.md](./spaces.md). |
+| Roster | Listed. `GET /api/spaces/{id}/members` merges `space_remote_members` into the member list and emits `role` verbatim — the same way a LOCAL subscriber is listed today, which is the behaviour this mirrors. |
+| Revocation | Identical to a member's. Kick/ban tombstones the seat, drops the household from `space_instances` when its last seat goes, rotates the epoch key, and — for a link-joined peer with no other shared space — revokes the `space_session` row via `revoke_space_session_if_orphaned`. |
+
+Why a row rather than "no row = no write": the row is what makes the
+household *revocable*. The kick path is keyed on
+`(space_id, instance_id, user_id)` in `space_remote_members` and the SPA's
+member list is built from it, so a follower with no row could be neither
+listed nor kicked — and because `instance_in_any_space` reads
+`space_instances` alone, and the only path that prunes that row is the
+"last remote member gone" check inside the kick, its `space_session` seat
+could never be revoked either. The DB is the authority; absence of a row
+is not.
+
+`owner` remains unmintable and unseatable on either side, and a Follower
+household cannot promote itself: **roster mutations are accepted only
+from the space's host, or under the space-authority signature** — which
+covers the seat it holds, the bans, the members, and the invitation
+family. A `SPACE_PRIVATE_INVITE` is the *host* inviting one of our users,
+so it is refused for a space we already know under a different owner; its
+accept is bound to the invitation it answers (right household, right
+user, still pending — one invitation, one seat) and never raises an
+existing live seat's role. Full rule: [spaces.md](./spaces.md#roster-authority).
+
+A redeem of a follower link consumes a use like any other redeem — there
+is no pre-consume refusal left. (There was one, precisely so that a
+published Follower link could not be burned to zero by strangers
+redeeming something that was going to be denied; with the redeem
+succeeding, the counter is doing its ordinary job again.)
+
+**Older peers.** `role='subscriber'` is not storable below v_30: a
+sub-v_30 household's CHECK rejects it, `apply_member_event` raises, and
+the WHOLE roster event is lost — tombstone included, unhealable because
+the version guard drops the retry at the same `member_version`. So a
+follower's roster gossip is gated on
+`FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE`: a behind household
+simply does not learn about the follower, which is strictly better than
+losing the event that carried it. Receivers also coerce an
+out-of-vocabulary role to `member` rather than dropping the mutation.
+Because that household then holds no row for the follower at all, its own
+space-writer gate treats it as an unconverged mirror and does not refuse
+its writes — the seat becomes enforceable there on upgrade. The host, and
+every v_30 member household, refuses them throughout.
 
 ### Listing and revoking links
 

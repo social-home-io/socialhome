@@ -2115,6 +2115,14 @@ def cmd_gfs_invite_link() -> None:
        a link-joined admin must never hold (the connection server pins a
        space's identity key TOFU-immutably, so that credential could never
        be taken back).
+    10. Followers (v_30): a mints a ``subscriber`` link on a THIRD space
+       and e redeems it into a read-only seat. Assert the seat on BOTH
+       sides (``space_remote_members.role='subscriber'`` on the host —
+       the row every write is judged against, and the row that makes the
+       household listable and kickable — plus ``space_members`` on e),
+       then that it READS (a's post arrives over the relay, decrypted with
+       the content key the ACK carried) and cannot WRITE (403). A Follower
+       link handed to another household used to be refused outright.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -2499,11 +2507,129 @@ def cmd_gfs_invite_link() -> None:
         )
     print("  e is admin on the second space and holds NO signing seed ✓")
 
+    # 10. A ``subscriber`` (Follower) link, on a THIRD space, into a
+    #     read-only seat: e receives the space's content over the relay and
+    #     is refused every write. This is the flagship case for a published
+    #     link — hand it to a stranger so they can *read* the space.
+    fan_space_name = f"Link-follower space {time.time_ns()}"
+    s, fan_space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": fan_space_name,
+            "description": "third space — the follower-link seat",
+            "space_type": "global",
+            "join_mode": "invite_only",
+        },
+    )
+    fan_space = _must("a creates the follower-link space", s, fan_space, ok=(201,))
+    fan_space_id = fan_space["id"]
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        s, payload = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/spaces")
+        rows = payload.get("spaces", []) if isinstance(payload, dict) else []
+        if any(sp.get("space_id") == fan_space_id for sp in rows):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"gfs-invite-link: the follower-link space {fan_space_id} never "
+            "appeared in the GFS directory — a link cannot be published for "
+            "an unlisted space.",
+        )
+    s, fan_link = _request(
+        f"{a_base}/api/spaces/{fan_space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "subscriber", "uses": 1, "publish_to_gfs": gfs_conn_id},
+    )
+    fan_link = _must("a mints a follower link", s, fan_link, ok=(201,))
+    fan_payload = _decode_invite_blob(fan_link["code"])
+    s, fan_joined = _request(
+        f"{e_base}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=_join_body_from_blob(fan_payload),
+        timeout=40.0,
+    )
+    fan_joined = _must("e redeems the follower link", s, fan_joined, ok=(200, 201))
+    if fan_joined.get("role") != "subscriber":
+        raise SystemExit(
+            f"gfs-invite-link: e's follower redeem returned role="
+            f"{fan_joined.get('role')!r}, expected 'subscriber' — a Follower "
+            "link handed to another household used to be refused outright.",
+        )
+    fan_rows = _rows(
+        "e",
+        "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+        (fan_space_id, e["user_id"]),
+    )
+    if not fan_rows or fan_rows[0][0] != "subscriber":
+        raise SystemExit(
+            f"gfs-invite-link: e's space_members row for the follower space is "
+            f"{fan_rows!r}, expected role 'subscriber'",
+        )
+    # The HOST's seat is the authority every write is judged against —
+    # migration 0054 is what lets this row exist at all.
+    host_seat = _rows(
+        "a",
+        "SELECT role FROM space_remote_members WHERE space_id = ? "
+        "AND instance_id = ? AND user_id = ?",
+        (fan_space_id, e["instance_id"], e["user_id"]),
+    )
+    if not host_seat or host_seat[0][0] != "subscriber":
+        raise SystemExit(
+            f"gfs-invite-link: a's space_remote_members seat for e is "
+            f"{host_seat!r}, expected role 'subscriber' — without that row the "
+            "follower household is neither listable nor kickable.",
+        )
+    print("  e holds a read-only Follower seat on a's third space ✓")
+
+    # …and it READS. The content stream reaches a follower household
+    # exactly as it reaches a member: over the pair's relay transport,
+    # decryptable with the content key the ACK's space_meta carried.
+    fan_content = f"A post only a follower should read — {time.time_ns()}"
+    s, fan_post = _request(
+        f"{a_base}/api/spaces/{fan_space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": fan_content},
+    )
+    fan_post = _must("a posts in the follower space", s, fan_post, ok=(201,))
+    fan_seen = _await_space_post(state, "e", fan_space_id, fan_post["id"])
+    if fan_seen.get("content") != fan_content:
+        raise SystemExit(
+            f"gfs-invite-link: the follower decrypted {fan_seen.get('content')!r}, "
+            f"expected {fan_content!r} — a Follower seat receives the content "
+            "stream and the content key like any member.",
+        )
+    print("  the follower received a's post over the relay, decrypted ✓")
+
+    # …and it cannot WRITE. Refused on e's own household by the ordinary
+    # subscriber gate; the host refuses it a second time regardless (step
+    # 12 of the §24.11 pipeline reads the seat asserted above), which is
+    # the half a patched household could not talk its way past.
+    s, refused = _request(
+        f"{e_base}/api/spaces/{fan_space_id}/posts",
+        token=e["token"],
+        method="POST",
+        body={"type": "text", "content": "followers do not get to post"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"gfs-invite-link: the follower's post answered HTTP {s} "
+            f"(expected 403): {refused!r}",
+        )
+    print("  the follower is refused a post (403) ✓")
+
     state["gfs_invite_admin_space_id"] = admin_space_id
+    state["gfs_invite_follower_space_id"] = fan_space_id
     _save(state)
     print(
         "gfs-invite-link: ok (published link → stranger joins over the relay → "
-        "revoke → admin seat without the seed)"
+        "revoke → admin seat without the seed → follower seat that reads but "
+        "cannot write)"
     )
 
 
@@ -3477,6 +3603,46 @@ def cmd_verify() -> None:
                 )
     else:
         print("  (v_29 bootstrap wire skipped — run 'gfs-invite-link')")
+
+    # 0a-bis. v_30 — a cross-household Follower seat. The host's
+    #     ``space_remote_members`` row is the authority every write from
+    #     that household is judged against, and it can only carry
+    #     ``'subscriber'`` from migration 0054 onward; e's own side must
+    #     read the same seat back out of the redeem ACK. Asserting both
+    #     ends is the tripwire for the role being dropped somewhere on the
+    #     wire (the roster mirror silently discards it, so "the redeem
+    #     returned subscriber" alone would not catch a regression).
+    _fan_space = state.get("gfs_invite_follower_space_id")
+    if _fan_space:
+        _host_seat = _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id = ? "
+            "AND instance_id = ? AND user_id = ?",
+            (
+                _fan_space,
+                state["instances"]["e"]["instance_id"],
+                state["instances"]["e"]["user_id"],
+            ),
+        )
+        if not _host_seat or _host_seat[0][0] != "subscriber":
+            failures.append(
+                f"a: the follower seat for e in {_fan_space} reads "
+                f"{_host_seat!r}, expected role 'subscriber' (v_30)",
+            )
+        _fan_seat = _rows(
+            "e",
+            "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+            (_fan_space, state["instances"]["e"]["user_id"]),
+        )
+        if not _fan_seat or _fan_seat[0][0] != "subscriber":
+            failures.append(
+                f"e: the local seat in {_fan_space} reads {_fan_seat!r}, "
+                "expected role 'subscriber' (v_30)",
+            )
+        if _host_seat and _fan_seat and _host_seat[0][0] == _fan_seat[0][0]:
+            print("  the v_30 Follower seat reads 'subscriber' on both sides ✓")
+    else:
+        print("  (v_30 follower seat skipped — run 'gfs-invite-link')")
 
     # 0b. INSTANCE_RESYNC_REQUEST round-trip (v_19, #319 ¶6) — ask a confirmed
     #     v_19+ peer to re-advertise its capabilities via the operator

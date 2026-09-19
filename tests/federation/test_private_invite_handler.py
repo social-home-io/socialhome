@@ -7,6 +7,7 @@ member removed, plus the missing-field skip branches.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -19,7 +20,7 @@ from socialhome.domain.events import (
     RemoteSpaceInviteReceived,
     RemoteSpaceMemberRemoved,
 )
-from socialhome.domain.space import RemoteAdminOutcome
+from socialhome.domain.space import RemoteAdminOutcome, SpaceRole
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
 
@@ -45,6 +46,32 @@ def _event(event_type: str, payload: dict, *, from_instance: str = "peer-1"):
     )
 
 
+def _invitation(
+    invitation_id,
+    *,
+    space_id="sp-a",
+    remote_instance_id="peer-1",
+    remote_user_id="u1",
+    status="pending",
+    expires_at=None,
+):
+    """A ``space_invitations`` row as ``get_invitation_by_token`` returns it.
+
+    The accept path binds every one of these columns to the envelope now,
+    so a test row that omits them is a test that cannot pass.
+    """
+    if expires_at is None:
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+    return {
+        "id": invitation_id,
+        "space_id": space_id,
+        "remote_instance_id": remote_instance_id,
+        "remote_user_id": remote_user_id,
+        "status": status,
+        "expires_at": expires_at,
+    }
+
+
 @pytest.fixture
 def handler():
     bus = _RecordingBus()
@@ -59,6 +86,10 @@ def handler():
     remote_members = AsyncMock()
     remote_members.add = AsyncMock()
     remote_members.remove = AsyncMock()
+    # No live seat for the accepting household by default — the accept path
+    # refuses to re-seat a household that already holds one with a
+    # different role.
+    remote_members.get = AsyncMock(return_value=None)
     cover_repo = AsyncMock()
     cover_repo.set = AsyncMock()
     icon_repo = AsyncMock()
@@ -118,10 +149,7 @@ async def test_accept_unknown_token_noops(handler):
 
 
 async def test_accept_happy_path(handler):
-    handler.space_repo.get_invitation_by_token.return_value = {
-        "id": 42,
-        "space_id": "sp-a",
-    }
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
         {
@@ -141,10 +169,7 @@ async def test_accept_broadcasts_member_joined_gossip(handler):
     """v_23: seating an accepting peer on the host side broadcasts a
     SPACE_MEMBER_JOINED roster gossip to every member household so their
     rosters converge — delegated to SpaceService when wired."""
-    handler.space_repo.get_invitation_by_token.return_value = {
-        "id": 7,
-        "space_id": "sp-a",
-    }
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(7)
     space_service = AsyncMock()
     handler.h.attach_space_service(space_service)
     ev = _event(
@@ -166,10 +191,7 @@ async def test_accept_broadcasts_member_joined_gossip(handler):
 async def test_accept_without_space_service_still_seats(handler):
     """No SpaceService wired (early boot / unit stack) → accept still seats
     the member; the gossip is just skipped."""
-    handler.space_repo.get_invitation_by_token.return_value = {
-        "id": 8,
-        "space_id": "sp-a",
-    }
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(8)
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",
         {"invite_token": "abc", "invitee_user_id": "u1"},
@@ -192,10 +214,9 @@ async def test_decline_unknown_token_noops(handler):
 
 
 async def test_decline_happy_path(handler):
-    handler.space_repo.get_invitation_by_token.return_value = {
-        "id": 5,
-        "space_id": "sp-b",
-    }
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        5, space_id="sp-b"
+    )
     ev = _event(
         "SPACE_PRIVATE_INVITE_DECLINE",
         {"invite_token": "tk", "invitee_user_id": "u1"},
@@ -276,6 +297,60 @@ async def test_left_gossip_does_not_register_broadcast_target(handler):
     handler.space_repo.add_space_instance.assert_not_awaited()
 
 
+async def test_subscriber_gossip_is_mirrored_as_a_follower_seat(handler):
+    """A ``subscriber`` role on the wire is a cross-household Follower
+    (v_30) and is mirrored verbatim — ``space_remote_members.role``
+    admits it since migration 0054."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-fan",
+        "instance_id": "inst-fan",
+        "role": "subscriber",
+        "member_version": 5,
+    }
+    ev = _event("SPACE_MEMBER_JOINED", payload, from_instance="inst-fan")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload)),
+    ):
+        await handler.h._on_space_member_joined(ev)
+
+    assert (
+        handler.remote_members.apply_member_event.await_args.kwargs["role"]
+        == "subscriber"
+    )
+
+
+async def test_out_of_vocabulary_gossip_role_keeps_the_mutation(handler):
+    """A role this household's CHECK rejects — ``owner`` (the host ships
+    the raw ``space_members.role``), or one from a future version — used
+    to raise IntegrityError out of ``apply_member_event`` and take the
+    WHOLE event down with it, tombstone included; the version guard then
+    refused the retry at the same ``member_version``, so a removal lost
+    this way was unhealable. Coerce to the least-privileged real seat and
+    keep the removal: losing "which seat" is recoverable from the next
+    snapshot, losing "they left" is not."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-boss",
+        "instance_id": "inst-boss",
+        "role": "owner",
+        "member_version": 6,
+    }
+    ev = _event("SPACE_MEMBER_LEFT", payload, from_instance="inst-boss")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload)),
+    ):
+        await handler.h._on_space_member_left(ev)
+
+    kwargs = handler.remote_members.apply_member_event.await_args.kwargs
+    assert kwargs["role"] == "member"
+    assert kwargs["tombstoned"] is True
+
+
 async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
     """#115 — the ``space_meta`` blob carries a ``roster`` of every
     member already in the space. The joiner's instance writes each
@@ -327,6 +402,59 @@ async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
         call.kwargs["user_id"] for call in handler.remote_members.add.await_args_list
     }
     assert seated_ids == {"u-pascal", "u-anna"}
+    # The snapshot's role is mirrored, not a blanket ``member``: seating
+    # a Follower as a full member on every OTHER household in the space
+    # is what made those households accept its writes. ``owner`` has no
+    # remote row shape, so it coerces DOWN to ``member``.
+    roles = {
+        call.kwargs["user_id"]: call.kwargs["role"]
+        for call in handler.remote_members.add.await_args_list
+    }
+    assert roles == {"u-pascal": "member", "u-anna": "member"}
+
+
+async def test_invite_roster_mirrors_a_follower_as_a_follower(handler):
+    """A ``subscriber`` entry stays a subscriber in the mirror — that row
+    is what the receiving household's §24.11 space-writer gate reads to
+    refuse the follower's writes."""
+    handler.remote_members.add = AsyncMock()
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        {
+            "space_id": "sp-remote",
+            "invite_token": "tkn",
+            "invitee_user_id": "u-self",
+            "inviter_user_id": "u-pascal",
+            "space_meta": {
+                "name": "Family",
+                "owner_instance_id": "peer-1",
+                "owner_username": "pascal",
+                "identity_public_key": "abc",
+                "roster": [
+                    {
+                        "user_id": "u-follower",
+                        "instance_id": "peer-9",
+                        "display_name": "Fran",
+                        "role": "subscriber",
+                    },
+                    {
+                        "user_id": "u-future",
+                        "instance_id": "peer-9",
+                        "display_name": "Future",
+                        "role": "overlord",
+                    },
+                ],
+            },
+        },
+    )
+    await handler.h._on_invite(ev)
+    roles = {
+        call.kwargs["user_id"]: call.kwargs["role"]
+        for call in handler.remote_members.add.await_args_list
+    }
+    # An out-of-vocabulary role coerces down to the least-privileged real
+    # seat rather than raising out of the whole apply.
+    assert roles == {"u-follower": "subscriber", "u-future": "member"}
 
 
 async def test_invite_with_cover_bytes_writes_to_cover_repo(handler):
@@ -1042,91 +1170,19 @@ async def test_space_location_updated_skips_invalid_mode():
     await h._on_space_location_updated(ev)
 
 
-async def test_role_changed_updates_local_and_remote_member_rows():
-    """Receiver writes the new role to both ``space_members`` (if a
-    local row exists — the affected user's own household) AND
-    ``space_remote_members`` (always — witnesses)."""
-    bus = _RecordingBus()
-    space_repo = AsyncMock()
-    space_repo.get_member = AsyncMock(return_value=object())
-    space_repo.set_role = AsyncMock()
-    remote_members = AsyncMock()
-    remote_members.set_role = AsyncMock()
-    h = PrivateSpaceInviteHandler(
-        bus=bus,  # type: ignore[arg-type]
-        space_repo=space_repo,
-        remote_member_repo=remote_members,
-    )
-    ev = _event(
-        "SPACE_MEMBER_ROLE_CHANGED",
-        {
-            "space_id": "sp-roles",
-            "user_id": "u-bob",
-            "instance_id": "peer-bob",
-            "role": "admin",
-        },
-    )
-    await h._on_role_changed(ev)
-    space_repo.set_role.assert_awaited_once_with("sp-roles", "u-bob", "admin")
-    remote_members.set_role.assert_awaited_once_with(
-        "sp-roles", "peer-bob", "u-bob", "admin"
-    )
-
-
-async def test_role_changed_skips_local_when_not_my_user():
-    """A witness household (no local row for the affected user) only
-    updates ``space_remote_members``."""
-    bus = _RecordingBus()
-    space_repo = AsyncMock()
-    space_repo.get_member = AsyncMock(return_value=None)
-    space_repo.set_role = AsyncMock()
-    remote_members = AsyncMock()
-    remote_members.set_role = AsyncMock()
-    h = PrivateSpaceInviteHandler(
-        bus=bus,  # type: ignore[arg-type]
-        space_repo=space_repo,
-        remote_member_repo=remote_members,
-    )
-    ev = _event(
-        "SPACE_MEMBER_ROLE_CHANGED",
-        {
-            "space_id": "sp-w",
-            "user_id": "u-someone-else",
-            "instance_id": "peer-x",
-            "role": "admin",
-        },
-    )
-    await h._on_role_changed(ev)
-    space_repo.set_role.assert_not_awaited()
-    remote_members.set_role.assert_awaited_once()
-
-
-async def test_role_changed_missing_fields_skipped():
+async def test_the_duplicate_role_change_handler_is_gone():
+    """F2 — ``EventDispatchRegistry.dispatch`` runs EVERY handler bound to
+    an event type, so an unguarded duplicate is not shadowed by its
+    guarded sibling: it applies the mutation the sibling refused. This
+    family's only ``SPACE_MEMBER_ROLE_CHANGED`` handler is the
+    host-authority-gated one in
+    :class:`FederationInboundService`."""
     h = PrivateSpaceInviteHandler(
         bus=_RecordingBus(),  # type: ignore[arg-type]
         space_repo=AsyncMock(),
         remote_member_repo=AsyncMock(),
     )
-    ev = _event("SPACE_MEMBER_ROLE_CHANGED", {"space_id": "sp"})
-    await h._on_role_changed(ev)
-
-
-async def test_role_changed_unknown_role_skipped():
-    h = PrivateSpaceInviteHandler(
-        bus=_RecordingBus(),  # type: ignore[arg-type]
-        space_repo=AsyncMock(),
-        remote_member_repo=AsyncMock(),
-    )
-    ev = _event(
-        "SPACE_MEMBER_ROLE_CHANGED",
-        {
-            "space_id": "sp",
-            "user_id": "u",
-            "instance_id": "p",
-            "role": "owner",  # not allowed for remote members
-        },
-    )
-    await h._on_role_changed(ev)
+    assert not hasattr(h, "_on_role_changed")
 
 
 async def test_key_exchange_rekey_imports_new_epoch_key():
@@ -1265,7 +1321,6 @@ async def test_attach_to_registers_handlers():
         FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
         FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
-        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
         FederationEventType.SPACE_REMOTE_ADMIN_KICK,
         FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
         FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
@@ -1366,3 +1421,279 @@ async def test_invite_refuses_malformed_host_identity_pk(handler, bad):
     await handler.h._on_invite(ev)
 
     handler.space_repo.set_host_identity_pk.assert_not_awaited()
+
+
+# ── Roster authority: who may send us what (F1 / F6 / F8) ─────────────
+
+
+async def test_invite_for_a_space_we_host_is_refused(handler):
+    """F1 — ``SPACE_PRIVATE_INVITE`` is the HOST inviting one of our users.
+    An invitation naming a space *we* host is a household writing itself a
+    ticket it can redeem a moment later with
+    ``SPACE_PRIVATE_INVITE_ACCEPT`` — which seats it, overwriting whatever
+    read-only seat it was actually given."""
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="us"),
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        {
+            "space_id": "sp-ours",
+            "invite_token": "forged",
+            "invitee_user_id": "u-attacker",
+            "inviter_user_id": "u-attacker",
+        },
+    )
+    await handler.h._on_invite(ev)
+    handler.space_repo.save_remote_invitation.assert_not_awaited()
+    assert handler.bus.events == []
+
+
+async def test_invite_for_a_stub_from_a_third_party_is_refused(handler):
+    """Same rule seen from a member household: only the space's own host
+    may invite into it."""
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="the-real-host"),
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        {
+            "space_id": "sp-remote",
+            "invite_token": "forged",
+            "invitee_user_id": "u1",
+            "inviter_user_id": "u2",
+        },
+        from_instance="peer-rogue",
+    )
+    await handler.h._on_invite(ev)
+    handler.space_repo.save_remote_invitation.assert_not_awaited()
+
+
+async def test_invite_from_the_host_of_a_known_stub_is_accepted(handler):
+    """A re-invite for a space we already hold a stub of is the normal
+    case (a second user of ours invited later) and stays green."""
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="peer-1"),
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        {
+            "space_id": "sp-remote",
+            "invite_token": "tkn2",
+            "invitee_user_id": "u-second",
+            "inviter_user_id": "u-host",
+        },
+    )
+    await handler.h._on_invite(ev)
+    handler.space_repo.save_remote_invitation.assert_awaited_once()
+
+
+async def test_accept_from_a_household_other_than_the_invitee_is_refused(handler):
+    """F1 — ``get_invitation_by_token`` matches on the token alone, so the
+    accept has to be bound to the household the invitation was addressed
+    to. Otherwise anyone who learns a token seats themselves."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        1, remote_instance_id="peer-invitee"
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+        from_instance="peer-rogue",
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
+    handler.space_repo.update_invitation_status.assert_not_awaited()
+
+
+async def test_accept_with_a_mismatched_invitee_user_is_refused(handler):
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        2, remote_user_id="u-invited"
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u-somebody-else"},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
+
+
+async def test_accept_of_an_already_used_invitation_is_refused(handler):
+    """One invitation, one seat. Replaying an accepted token is how a
+    household that was later demoted walks its old seat back in."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        3, status="accepted"
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
+
+
+async def test_a_late_accept_of_a_pending_invitation_still_seats(handler):
+    """``space_invitations.expires_at`` is a 15-minute TTL inherited from
+    the invite token, but the invitee's pending list has no expiry filter
+    — every real invite outlives it. Refusing on that column would
+    silently drop the accept of an invitation the UI is still offering,
+    so the one-shot ``status`` is the guard, not the clock."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        4,
+        expires_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_awaited_once()
+
+
+async def test_accept_seats_the_member_role_explicitly(handler):
+    """``add`` defaults to ``member``; the accept path says so out loud so
+    a future default change can't silently promote through this door."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(9)
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+    await handler.h._on_accept(ev)
+    assert (
+        handler.remote_members.add.await_args.kwargs["role"] == SpaceRole.MEMBER.value
+    )
+
+
+async def test_accept_never_raises_an_existing_follower_seat(handler):
+    """F1's payload: ``add``'s ``ON CONFLICT … DO UPDATE SET role`` turns a
+    re-seat into a promotion. A household that already holds a live
+    ``subscriber`` seat cannot climb out of it through an accept — the
+    role change is the host's decision and rides
+    ``SPACE_MEMBER_ROLE_CHANGED``."""
+    from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
+
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(10)
+    handler.remote_members.get = AsyncMock(
+        return_value=SpaceRemoteMember(
+            space_id="sp-a",
+            instance_id="peer-1",
+            user_id="u1",
+            role=SpaceRole.SUBSCRIBER.value,
+        ),
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
+
+
+async def test_decline_from_another_household_is_refused(handler):
+    """A token is not a capability: a third party must not be able to
+    cancel somebody else's pending invitation."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(
+        11, remote_instance_id="peer-invitee"
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_DECLINE",
+        {"invite_token": "tk", "invitee_user_id": "u1"},
+        from_instance="peer-rogue",
+    )
+    await handler.h._on_decline(ev)
+    handler.space_repo.update_invitation_status.assert_not_awaited()
+
+
+async def test_member_removed_does_not_delete_a_local_member_of_a_space_we_host(
+    handler,
+):
+    """F8 — the ``space_remote_members`` half of this handler is scoped to
+    the sender's own household; the ``space_members`` half was not, so any
+    peer could delete any of OUR users from a space WE host."""
+    handler.space_repo.delete_member = AsyncMock()
+    handler.space_repo.list_members = AsyncMock(return_value=[])
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="us"),
+    )
+    ev = _event(
+        "SPACE_REMOTE_MEMBER_REMOVED",
+        {"space_id": "sp-ours", "user_id": "u-victim"},
+        from_instance="peer-rogue",
+    )
+    await handler.h._on_member_removed(ev)
+    handler.space_repo.delete_member.assert_not_awaited()
+    # The sender's OWN seat is still dropped — that half was always safe.
+    handler.remote_members.remove.assert_awaited_once_with(
+        "sp-ours", "peer-rogue", "u-victim"
+    )
+
+
+async def _location_handler(role=SpaceRole.MEMBER.value, *, seat=True):
+    from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
+
+    locations = AsyncMock()
+    locations.upsert = AsyncMock()
+    remote_members = AsyncMock()
+    remote_members.get = AsyncMock(
+        return_value=(
+            SpaceRemoteMember(
+                space_id="sp-a",
+                instance_id="peer-1",
+                user_id="u1",
+                role=role,
+            )
+            if seat
+            else None
+        ),
+    )
+    h = PrivateSpaceInviteHandler(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        space_repo=AsyncMock(),
+        remote_member_repo=remote_members,
+        remote_location_repo=locations,
+    )
+    return h, locations, remote_members
+
+
+async def test_space_location_updated_refuses_a_subscriber_seat():
+    """F6 — the seat lookup had no role filter, so a read-only household
+    wrote pins onto every member's space map."""
+    h, locations, _ = await _location_handler(SpaceRole.SUBSCRIBER.value)
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+    )
+    await h._on_space_location_updated(ev)
+    locations.upsert.assert_not_awaited()
+
+
+async def test_space_location_updated_pins_the_routing_space_id():
+    """F6 — the handler resolved ``payload["space_id"] or event.space_id``,
+    the inverse of the §24.11 writer gate's precedence. Routing ``A`` plus
+    payload ``B`` therefore passed the gate on the space the sender may
+    write and landed the row in the space it may not."""
+    h, locations, _ = await _location_handler()
+    ev = SimpleNamespace(
+        event_type="SPACE_LOCATION_UPDATED",
+        from_instance="peer-1",
+        space_id="sp-a",
+        payload={
+            "space_id": "sp-somewhere-else",
+            "user_id": "u1",
+            "mode": "gps",
+            "lat": 1.0,
+            "lon": 2.0,
+        },
+    )
+    await h._on_space_location_updated(ev)
+    locations.upsert.assert_not_awaited()
+
+
+async def test_space_location_updated_accepts_a_matching_pair():
+    """Both fields present and equal is what every shipping sender emits."""
+    h, locations, _ = await _location_handler()
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+    )
+    await h._on_space_location_updated(ev)
+    locations.upsert.assert_awaited_once()

@@ -210,10 +210,50 @@ class SpaceMembershipInboundHandlers:
             return
         await self._space_repo.remove_space_instance(space_id, event.from_instance)
 
+    async def _is_from_the_host(self, event: "FederationEvent", space_id: str) -> bool:
+        """Whether the §24.11-authenticated sender hosts ``space_id``.
+
+        A ban is a statement about somebody else's standing in a space,
+        and ``ban_member`` both inserts the ban row and deletes the
+        member — so an unauthenticated one is a household evicting the
+        space's own owner. Only the host decides that; an unknown space
+        is refused too, because there is no owner to compare against and
+        the sender picked the id.
+
+        Mirrors the ``SPACE_AGE_GATE_UPDATED`` / ``SPACE_MEMBER_ROLE_CHANGED``
+        host-authority guards. The roster-gossip family
+        (``SPACE_MEMBER_JOINED`` / ``_LEFT``) is the other accepted shape:
+        an authority signature over ``spaces.identity_public_key``, so a
+        delegated admin can act while the owner is offline. Bans have no
+        signing outbound today — when one is added, verify the signature
+        here as a second accepted branch rather than dropping the check.
+        """
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            log.warning(
+                "%s for unknown space %s from %s — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
+            )
+            return False
+        if space.owner_instance_id != event.from_instance:
+            log.warning(
+                "%s for %s from non-host %s (host=%s) — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
+                space.owner_instance_id,
+            )
+            return False
+        return True
+
     async def _on_banned(self, event: "FederationEvent") -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
+            return
+        if not await self._is_from_the_host(event, space_id):
             return
         banned_by = event.payload.get("banned_by")
         reason = str(event.payload.get("reason") or "")[:500]
@@ -235,6 +275,8 @@ class SpaceMembershipInboundHandlers:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
+            return
+        if not await self._is_from_the_host(event, space_id):
             return
         await self._space_repo.unban_member(space_id, user_id)
 

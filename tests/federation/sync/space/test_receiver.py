@@ -626,3 +626,72 @@ async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, ca
         )
 
     assert "gallery item it-1" in caplog.text
+
+
+async def test_on_chunk_refuses_a_chunk_for_another_space(receiver, peer_setup):
+    """F3 — a sync session is for ONE space. Nothing downstream of the
+    signature check looked at which space the chunk claimed, so a
+    provider streaming a session we opened for space A could write
+    members, bans and every content row of space B."""
+    r, space_repo, _ = receiver
+    _peer, kp = peer_setup
+    crypto = _FakeCrypto()
+    plaintext = orjson.dumps({"records": [{"user_id": "u-1", "role": "admin"}]})
+    _, ciphertext = await crypto.encrypt_chunk(
+        space_id="sp-1",
+        sync_id="sync-1",
+        plaintext=plaintext,
+    )
+    envelope = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "sync-1",
+            "resource": "members",
+            "space_id": "sp-1",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 1,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+    await r.on_chunk(
+        serialise_chunk(envelope),
+        from_instance="peer-a",
+        expected_space_id="sp-somewhere-else",
+    )
+    assert space_repo.members == []
+
+
+async def test_on_chunk_accepts_a_chunk_matching_the_session_space(
+    receiver,
+    peer_setup,
+):
+    r, space_repo, _ = receiver
+    _peer, kp = peer_setup
+    crypto = _FakeCrypto()
+    plaintext = orjson.dumps({"records": [{"user_id": "u-1", "role": "member"}]})
+    _, ciphertext = await crypto.encrypt_chunk(
+        space_id="sp-1",
+        sync_id="sync-1",
+        plaintext=plaintext,
+    )
+    envelope = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "sync-1",
+            "resource": "members",
+            "space_id": "sp-1",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 1,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+    await r.on_chunk(
+        serialise_chunk(envelope),
+        from_instance="peer-a",
+        expected_space_id="sp-1",
+    )
+    assert len(space_repo.members) == 1

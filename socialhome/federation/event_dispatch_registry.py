@@ -87,6 +87,20 @@ class EventDispatchRegistry:
                     event.event_type,
                 )
 
+    def handlers_for(
+        self,
+        event_type: FederationEventType,
+    ) -> tuple[EventHandler, ...]:
+        """Every handler bound to ``event_type``, in registration order.
+
+        :meth:`dispatch` runs all of them, so "who applies this event?" is
+        a question with more than one possible answer — and a guarded
+        handler does NOT shadow an unguarded sibling registered next to
+        it. The roster-authority protocol tests enumerate this so a
+        future duplicate fails there rather than in the wild.
+        """
+        return tuple(self._handlers.get(event_type, ()))
+
     def handler_count(self, event_type: FederationEventType) -> int:
         """Number of handlers registered for an event type (useful in tests)."""
         return len(self._handlers.get(event_type, ()))

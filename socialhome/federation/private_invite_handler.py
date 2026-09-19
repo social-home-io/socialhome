@@ -31,7 +31,11 @@ from ..domain.events import (
 )
 from ..crypto import derive_instance_id
 from ..domain.federation import FederationEventType
-from ..domain.space import RemoteAdminOutcome
+from ..domain.space import (
+    RemoteAdminOutcome,
+    SpaceRole,
+    mirrorable_remote_role,
+)
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
 from ..services.space_crypto_service import (
@@ -156,10 +160,15 @@ class PrivateSpaceInviteHandler:
             FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
             self._on_key_exchange_rekey,
         )
-        registry.register(
-            FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
-            self._on_role_changed,
-        )
+        # NOTE — ``SPACE_MEMBER_ROLE_CHANGED`` is deliberately absent.
+        # ``EventDispatchRegistry.dispatch`` runs EVERY handler bound to an
+        # event type, so the unguarded duplicate this family used to
+        # register did not sit behind
+        # ``FederationInboundService._on_space_member_role_changed``'s
+        # host-authority check — it ran alongside it and applied the role
+        # the guarded one had just refused. The guarded handler covers
+        # both sides (our own user's ``space_members`` row and the
+        # ``space_remote_members`` mirror); this one added nothing.
         registry.register(
             FederationEventType.SPACE_REMOTE_ADMIN_KICK,
             self._on_remote_admin_kick,
@@ -285,7 +294,21 @@ class PrivateSpaceInviteHandler:
         await self._space_repo.set_host_identity_pk(space_id, claimed_pk_hex)
 
     async def _on_invite(self, event: "FederationEvent") -> None:
-        """A peer invited one of our users to their private space."""
+        """A peer invited one of our users to their private space.
+
+        **Only the space's host may send this.** The event means "I run
+        space X and I am inviting your user into it", and the row it
+        writes is a bearer ticket: :meth:`_on_accept` looks the token up
+        and seats whoever presents it. A household that could write an
+        invitation for a space it does not host could therefore write
+        itself a ticket for OUR space — or for a space it holds nothing
+        but a read-only Follower seat in — and redeem it a moment later.
+
+        The check is "if we know the space, its owner must be the signer".
+        A space we have never heard of is the normal first-invite case and
+        stays open — that row names a space with no local seats, so it
+        cannot touch one.
+        """
         p = event.payload
         # All fields are in the encrypted payload — envelope plaintext
         # is strictly routing metadata. §25.8.21.
@@ -296,6 +319,16 @@ class PrivateSpaceInviteHandler:
             log.debug(
                 "SPACE_PRIVATE_INVITE from %s missing required fields",
                 event.from_instance,
+            )
+            return
+        known = await self._space_repo.get(space_id)
+        if known is not None and known.owner_instance_id != event.from_instance:
+            log.warning(
+                "SPACE_PRIVATE_INVITE for %s from %s — only the space's host "
+                "(%s) may invite into it; dropping",
+                space_id,
+                event.from_instance,
+                known.owner_instance_id,
             )
             return
         inviter_user_id = str(p.get("inviter_user_id") or "")
@@ -398,6 +431,11 @@ class PrivateSpaceInviteHandler:
                             if entry.get("display_name")
                             else None
                         ),
+                        # The snapshot's role, not a blanket ``member``:
+                        # mirroring a Follower as a full member is what made
+                        # every OTHER household in the space accept that
+                        # household's writes.
+                        role=mirrorable_remote_role(entry.get("role")),
                     )
         await self._bus.publish(
             RemoteSpaceInviteReceived(
@@ -407,9 +445,84 @@ class PrivateSpaceInviteHandler:
             )
         )
 
+    def _accept_matches_invitation(
+        self,
+        event: "FederationEvent",
+        *,
+        invite: dict,
+        invitee_user_id: str,
+    ) -> bool:
+        """Is this envelope the answer to THIS invitation?
+
+        Shared by accept and decline: a token is not a capability, so the
+        household and user that answer must be the ones the invitation
+        was addressed to, and the invitation must still be open. Every
+        refusal logs at WARNING — a legitimate invitee never hits one.
+        """
+        space_id = invite.get("space_id")
+        if invite.get("remote_instance_id") != event.from_instance:
+            log.warning(
+                "%s for %s: token was issued to %s, not to %s — dropping",
+                event.event_type,
+                space_id,
+                invite.get("remote_instance_id"),
+                event.from_instance,
+            )
+            return False
+        if invitee_user_id != str(invite.get("remote_user_id") or ""):
+            log.warning(
+                "%s for %s from %s: answers for %r, invitation names %r — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
+                invitee_user_id,
+                invite.get("remote_user_id"),
+            )
+            return False
+        status = str(invite.get("status") or "pending")
+        if status != "pending":
+            log.warning(
+                "%s for %s from %s: invitation is already %r — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
+                status,
+            )
+            return False
+        # ``expires_at`` is deliberately NOT enforced here. The column is
+        # a 15-minute TTL inherited from the invite TOKEN, while
+        # ``list_pending_remote_invites_for`` surfaces a pending invite to
+        # the invitee with no expiry filter at all — so every real invite
+        # outlives it, and refusing on it would silently drop the
+        # legitimate accept of an invitation the UI is still offering.
+        # The bindings above are the ones that matter: the right
+        # household, the right user, and one seat per invitation.
+        return True
+
     async def _on_accept(self, event: "FederationEvent") -> None:
         """Our peer accepted the invite we sent — seat them as a
-        :class:`SpaceRemoteMember`."""
+        :class:`SpaceRemoteMember`.
+
+        Every field of the invitation is bound to the envelope here.
+        :meth:`AbstractSpaceRepo.get_invitation_by_token` matches on the
+        token ALONE, so on its own it is a bearer credential: whoever
+        presents it gets the seat, for whichever user they name, as often
+        as they like. Three bindings turn it back into a one-shot
+        invitation addressed to one household — the signed
+        ``from_instance`` is the household we invited, the accepted
+        ``invitee_user_id`` is the user we invited, and the invitation is
+        still ``pending``.
+
+        The fourth guard is about the seat rather than the ticket:
+        :meth:`AbstractSpaceRemoteMemberRepo.add` upserts with
+        ``role=excluded.role``, so an accept landing on an existing seat
+        REWRITES its role. A household holding a live read-only
+        ``subscriber`` seat must not climb out of it through this door —
+        promotion is the host's decision and rides
+        ``SPACE_MEMBER_ROLE_CHANGED``. The role is passed explicitly for
+        the same reason: so a future change to ``add``'s default cannot
+        quietly promote through here.
+        """
         p = event.payload
         token = str(p.get("invite_token") or "")
         if not token:
@@ -422,6 +535,27 @@ class PrivateSpaceInviteHandler:
             )
             return
         invitee_user_id = str(p.get("invitee_user_id") or "")
+        if not self._accept_matches_invitation(
+            event,
+            invite=invite,
+            invitee_user_id=invitee_user_id,
+        ):
+            return
+        live_seat = await self._remote_members.get(
+            invite["space_id"],
+            event.from_instance,
+            invitee_user_id,
+        )
+        if live_seat is not None and live_seat.role != SpaceRole.MEMBER.value:
+            log.warning(
+                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s: %s already holds "
+                "a live %r seat — refusing to re-seat them as a member",
+                invite["space_id"],
+                event.from_instance,
+                invitee_user_id,
+                live_seat.role,
+            )
+            return
         invitee_pk = p.get("invitee_public_key")
         invitee_display = p.get("invitee_display_name")
         await self._remote_members.add(
@@ -430,6 +564,7 @@ class PrivateSpaceInviteHandler:
             user_id=invitee_user_id,
             user_pk=str(invitee_pk) if invitee_pk else None,
             display_name=str(invitee_display) if invitee_display else None,
+            role=SpaceRole.MEMBER.value,
         )
         # Register the accepting peer as a space *instance* member too —
         # ``broadcast_to_space_members`` queries ``space_instances``, so
@@ -467,12 +602,25 @@ class PrivateSpaceInviteHandler:
         )
 
     async def _on_decline(self, event: "FederationEvent") -> None:
+        """The invitee turned the invitation down.
+
+        Bound to the envelope exactly like :meth:`_on_accept`: a token is
+        not a capability, so a third party that learns one must not be
+        able to cancel somebody else's pending invitation.
+        """
         p = event.payload
         token = str(p.get("invite_token") or "")
         if not token:
             return
         invite = await self._space_repo.get_invitation_by_token(token)
         if invite is None:
+            return
+        invitee_user_id = str(p.get("invitee_user_id") or "")
+        if not self._accept_matches_invitation(
+            event,
+            invite=invite,
+            invitee_user_id=invitee_user_id,
+        ):
             return
         await self._space_repo.update_invitation_status(
             invite["id"],
@@ -523,14 +671,29 @@ class PrivateSpaceInviteHandler:
         # mirrors what happens to locally-owned spaces when their
         # last member leaves — the row stays as audit trail; the UI
         # treats it as gone.
-        await self._space_repo.delete_member(space_id, user_id)
-        remaining = await self._space_repo.list_members(space_id)
-        if not remaining:
-            local_space = await self._space_repo.get(space_id)
-            # Only dissolve a stub — never our own locally-owned space.
-            if local_space is not None and (
-                local_space.owner_instance_id == event.from_instance
-            ):
+        #
+        # SECURITY — scoped to the SENDER's own space. The
+        # ``space_remote_members`` half above is keyed on
+        # ``event.from_instance`` and so was always self-scoped; this half
+        # deletes by ``(space_id, user_id)`` alone, which let any peer
+        # remove any of OUR users from a space WE host (or from another
+        # household's space we merely mirror). Only the household that
+        # hosts the space can say who is in it.
+        local_space = await self._space_repo.get(space_id)
+        if local_space is None or (
+            local_space.owner_instance_id != event.from_instance
+        ):
+            log.debug(
+                "SPACE_REMOTE_MEMBER_REMOVED for %s from %s — not the host of "
+                "this space; the sender's own seat was dropped, local members "
+                "left alone",
+                space_id,
+                event.from_instance,
+            )
+        else:
+            await self._space_repo.delete_member(space_id, user_id)
+            remaining = await self._space_repo.list_members(space_id)
+            if not remaining:
                 await self._space_repo.mark_dissolved(space_id)
                 # Stop treating the host as a member household of a space
                 # we are no longer in — otherwise every later fan-out still
@@ -555,60 +718,6 @@ class PrivateSpaceInviteHandler:
                 instance_id=event.from_instance,
                 user_id=user_id,
             )
-        )
-
-    async def _on_role_changed(self, event: "FederationEvent") -> None:
-        """Host promoted / demoted a member (#114).
-
-        Three sides see this event:
-
-        * The promoted user's own household — updates the local
-          ``space_members.role`` row so the SPA gates admin controls
-          on the new role.
-        * Other member households (witnesses) — updates the local
-          ``space_remote_members.role`` so the rendered member list
-          shows the new badge.
-        * The host's own broadcast loops back to the host's
-          ``broadcast_to_space_members`` set, but the host's own
-          instance isn't included by construction (see
-          :meth:`AbstractFederationRepo.list_member_instance_ids`).
-
-        Idempotent — the repo set ops upsert. Cross-household admin
-        commands (kick from a non-host instance) are not implemented
-        yet; this event only propagates the role assignment so the
-        UI can surface controls. Actual remote admin operations
-        ride a separate event family in a future PR.
-        """
-        p = event.payload
-        space_id = str(p.get("space_id") or "") or (event.space_id or "")
-        user_id = str(p.get("user_id") or "")
-        member_instance = str(p.get("instance_id") or "")
-        role = str(p.get("role") or "")
-        if not space_id or not user_id or not member_instance or not role:
-            log.debug(
-                "SPACE_MEMBER_ROLE_CHANGED from %s missing required fields",
-                event.from_instance,
-            )
-            return
-        if role not in ("admin", "member"):
-            log.debug(
-                "SPACE_MEMBER_ROLE_CHANGED unknown role %r — skipping",
-                role,
-            )
-            return
-        # We may be the affected member's own household OR a witness.
-        # The local stub for this space uses ``space_members`` for our
-        # own users and ``space_remote_members`` for everyone else;
-        # both paths are upserts so we can update without first knowing
-        # which side we're on.
-        local = await self._space_repo.get_member(space_id, user_id)
-        if local is not None:
-            await self._space_repo.set_role(space_id, user_id, role)
-        await self._remote_members.set_role(
-            space_id,
-            member_instance,
-            user_id,
-            role,
         )
 
     async def _on_space_location_updated(
@@ -637,11 +746,28 @@ class PrivateSpaceInviteHandler:
             )
             return
         p = event.payload
-        space_id = str(p.get("space_id") or "") or getattr(
-            event,
-            "space_id",
-            "",
-        )
+        # Routing field FIRST, and a present-but-different payload copy is
+        # a refusal. The §24.11 writer gate resolves ``event.space_id or
+        # payload["space_id"]``; this handler resolved the inverse, so an
+        # envelope routed for space A carrying a payload for space B was
+        # judged against the space the sender may write and landed its row
+        # in the space it may not.
+        routing_space_id = str(getattr(event, "space_id", "") or "")
+        payload_space_id = str(p.get("space_id") or "")
+        if (
+            routing_space_id
+            and payload_space_id
+            and routing_space_id != payload_space_id
+        ):
+            log.warning(
+                "SPACE_LOCATION_UPDATED from %s: routing space %s does not "
+                "match payload space %s — dropping",
+                event.from_instance,
+                routing_space_id,
+                payload_space_id,
+            )
+            return
+        space_id = routing_space_id or payload_space_id
         user_id = str(p.get("user_id") or "")
         mode = str(p.get("mode") or "")
         if not space_id or not user_id or mode not in ("gps", "zone_only"):
@@ -650,16 +776,21 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        # Only persist if the sender is in fact a remote member of
-        # this space — drop spoofed events from non-members.
+        # Only persist if the sender is in fact a WRITING remote member of
+        # this space — drop spoofed events from non-members, and from a
+        # read-only Follower household, whose seat is a live row like any
+        # other and so passed a bare presence check.
         match = await self._remote_members.get(
             space_id,
             event.from_instance,
             user_id,
         )
-        if match is None:
+        if match is None or match.role not in (
+            SpaceRole.MEMBER.value,
+            SpaceRole.ADMIN.value,
+        ):
             log.debug(
-                "SPACE_LOCATION_UPDATED: %s@%s is not a remote member of %s",
+                "SPACE_LOCATION_UPDATED: %s@%s holds no writing seat in %s",
                 user_id,
                 event.from_instance,
                 space_id,
@@ -1199,7 +1330,16 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
-        role = str(p.get("role") or "member")
+        raw_role = str(p.get("role") or SpaceRole.MEMBER.value)
+        role = mirrorable_remote_role(raw_role)
+        if role != raw_role:
+            log.info(
+                "roster-gossip %s for %s: unknown role %r — mirroring as %r",
+                event.event_type,
+                space_id,
+                raw_role,
+                role,
+            )
         display_name = p.get("display_name")
         user_pk = p.get("user_pk")
         await self._remote_members.apply_member_event(

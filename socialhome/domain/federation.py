@@ -634,6 +634,178 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: envelope); and the four mesh-routing types above.
 
 
+#: Space-content **writes** — every event type that mutates content inside
+#: a space (create, update or delete of a post, comment, page, task, poll,
+#: sticky, calendar event, RSVP, schedule, gallery item, bazaar listing /
+#: bid / offer, zone, location pin, or the media bytes a post references).
+#:
+#: This is the vocabulary the §24.11 ``check_space_writer`` step refuses
+#: from a household that holds only **Follower** seats in the space
+#: (``space_remote_members.role = 'subscriber'``, migration 0054). Such a
+#: household is a full participant on the transport — it sits in
+#: ``space_instances``, so ``broadcast_to_space_members`` delivers the
+#: content stream and the epoch content key reaches it — which means it
+#: holds everything needed to produce a perfectly well-formed, correctly
+#: signed write. The seat the RECEIVER holds for the signed
+#: ``from_instance`` is the only authority that matters, and it is read on
+#: every receiving household, not just the host: space content fans out
+#: peer-to-peer from the ORIGINATING household
+#: (:meth:`FederationService.broadcast_to_space_members`), so a member
+#: household is a first-class enforcement point, not a mirror of one.
+#:
+#: The classification is **exhaustive over the enum**: every ``SPACE_*`` /
+#: ``BAZAAR_*`` type is either here or in
+#: :data:`SPACE_READER_EVENT_TYPES`, pinned by a test that enumerates
+#: ``set(FederationEventType)`` (the same default-deny idiom as
+#: :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES`). A new space event type
+#: fails that test until somebody classifies it on purpose, so the default
+#: for anything unclassified is "somebody must decide", never "a follower
+#: may send it".
+SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        # ── Posts, comments and the bytes they reference ──
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_POST_UPDATED,
+        FederationEventType.SPACE_POST_DELETED,
+        #: The WebP / WebM / file bytes a post or gallery item points at.
+        #: A write: it lands rows in the local media store, and shipping
+        #: it is how a sender puts content bytes on our disk.
+        FederationEventType.SPACE_MEDIA_BLOB,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        FederationEventType.SPACE_COMMENT_UPDATED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+        # ── Pages / tasks / polls / stickies ──
+        FederationEventType.SPACE_PAGE_CREATED,
+        FederationEventType.SPACE_PAGE_UPDATED,
+        FederationEventType.SPACE_PAGE_DELETED,
+        FederationEventType.SPACE_TASK_CREATED,
+        FederationEventType.SPACE_TASK_UPDATED,
+        FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_POLL_CREATED,
+        FederationEventType.SPACE_POLL_VOTE_CAST,
+        FederationEventType.SPACE_POLL_CLOSED,
+        FederationEventType.SPACE_STICKY_CREATED,
+        FederationEventType.SPACE_STICKY_UPDATED,
+        FederationEventType.SPACE_STICKY_DELETED,
+        # ── Calendar, RSVPs and scheduling polls ──
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+        FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+        FederationEventType.SPACE_RSVP_UPDATED,
+        FederationEventType.SPACE_RSVP_DELETED,
+        FederationEventType.SPACE_SCHEDULE_CREATED,
+        FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
+        FederationEventType.SPACE_SCHEDULE_FINALIZED,
+        # ── Gallery ──
+        FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+        FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+        # ── Bazaar (listings live in a space like any other content) ──
+        FederationEventType.BAZAAR_LISTING_CREATED,
+        FederationEventType.BAZAAR_LISTING_UPDATED,
+        FederationEventType.BAZAAR_BID_PLACED,
+        FederationEventType.BAZAAR_OFFER_ACCEPTED,
+        # ── Map: shared location pins and zones ──
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        FederationEventType.SPACE_ZONE_UPSERTED,
+        FederationEventType.SPACE_ZONE_DELETED,
+    }
+)
+
+#: The explicit complement of :data:`SPACE_WRITE_EVENT_TYPES` over the
+#: ``SPACE_*`` / ``BAZAAR_*`` families: space vocabulary a **reader**
+#: household may legitimately send.
+#:
+#: Being listed here is not an authorization — most of these carry their
+#: own: the roster / config family is authority-signed and verified
+#: against ``spaces.identity_public_key``, the admin-action family is
+#: re-decided by the host, ``SPACE_REPORT`` is a report *about* content
+#: rather than content, and the sync / key-exchange / routing families are
+#: transport machinery every seated household needs. What the list means
+#: is "the Follower gate does not fire for this type", and the reason is
+#: recorded here so the decision is reviewable rather than implied by an
+#: omission.
+SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        # ── Space structure / config (authority-signed, verified on apply) ──
+        FederationEventType.SPACE_CREATED,
+        FederationEventType.SPACE_AGE_GATE_UPDATED,
+        FederationEventType.SPACE_CONFIG_CHANGED,
+        FederationEventType.SPACE_CONFIG_CATCH_UP,
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.SPACE_INSTANCE_LEFT,
+        # ── Roster / membership (authority-signed; a leave is a reader's
+        #    own right, and a kick is re-decided by the host) ──
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+        FederationEventType.SPACE_MEMBER_BANNED,
+        FederationEventType.SPACE_MEMBER_UNBANNED,
+        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
+        FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+        FederationEventType.SPACE_REMOTE_ADMIN_KICK,
+        FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
+        # ── Invites / joins (how a household gets a seat at all) ──
+        FederationEventType.SPACE_INVITE,
+        FederationEventType.SPACE_INVITE_VIA,
+        FederationEventType.SPACE_ACCEPT,
+        FederationEventType.SPACE_JOIN_REQUEST,
+        FederationEventType.SPACE_JOIN_REQUEST_VIA,
+        FederationEventType.SPACE_JOIN_REQUEST_REPLY_VIA,
+        FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+        FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+        FederationEventType.SPACE_JOIN_REQUEST_EXPIRED,
+        FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
+        FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM,
+        FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_DENY,
+        FederationEventType.SPACE_PRIVATE_INVITE,
+        FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
+        FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
+        # ── Mesh routing. SPACE_ROUTED is a wrapper, never content: its
+        #    INNER event is re-gated after the unwrap
+        #    (``SpaceRoutedHandler._unwrap_and_dispatch``), which is the
+        #    only reason it can sit on this side of the line. ──
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.SPACE_FIND_ROUTE,
+        FederationEventType.SPACE_ROUTE_FOUND,
+        FederationEventType.SPACE_ROUTE_STALE,
+        # ── Crypto: epoch keys and session teardown ──
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
+        FederationEventType.SPACE_SESSION_CLEANUP,
+        # ── §25.6 catch-up sync. A reader syncs the same way a member
+        #    does; what the chunks may CONTAIN is the exporter's call on
+        #    the sending side, not this gate's. ──
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_SYNC_CHUNK_ACK,
+        FederationEventType.SPACE_SYNC_RESUME,
+        FederationEventType.SPACE_SYNC_COMPLETE,
+        FederationEventType.SPACE_SYNC_OFFER,
+        FederationEventType.SPACE_SYNC_ANSWER,
+        FederationEventType.SPACE_SYNC_ICE,
+        FederationEventType.SPACE_SYNC_DIRECT_READY,
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+        FederationEventType.SPACE_SYNC_REQUEST_MORE,
+        FederationEventType.SPACE_SYNC_REJECTED,
+        FederationEventType.SPACE_PARTITION_GAP,
+        # ── Directory + moderation ──
+        FederationEventType.SPACE_DIRECTORY_SYNC,
+        #: A report is *about* content, not content: the whole point is
+        #: that somebody who can only read still has a way to flag what
+        #: they read.
+        FederationEventType.SPACE_REPORT,
+    }
+)
+
+
 # ─── Pairing state machine (§11) ──────────────────────────────────────────
 
 

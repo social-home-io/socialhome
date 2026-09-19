@@ -1400,6 +1400,12 @@ async def test_rsvp_publishes_federation_event(space_cal_env):
     assert rsvp_calls[0][2]["occurrence_at"] == now.isoformat()
     assert rsvp_calls[1][1].value == "space_rsvp_deleted"
     assert "status" not in rsvp_calls[1][2]
+    # The space rides the PAYLOAD too. A mesh-relayed envelope carries no
+    # plaintext routing ``space_id`` (a relay must not learn which space
+    # is being served), and an RSVP names only its parent event — so
+    # without this copy the receiver's §24.11 space-writer gate cannot
+    # attribute the write to a space at all.
+    assert all(c[2]["space_id"] == "sp-cal" for c in rsvp_calls)
 
 
 async def test_create_event_publishes_federation_event(space_cal_env):
@@ -1447,6 +1453,9 @@ async def test_create_event_publishes_federation_event(space_cal_env):
     assert payload["created_by"] == "uid-alice"
     assert payload["cover_url"] == "https://cdn.example/cover.jpg"
     assert payload["location"] == "Pier 39"
+    # See the RSVP test above: the payload carries the space so a
+    # mesh-relayed envelope stays attributable.
+    assert payload["space_id"] == "sp-cal"
     # Stored event surfaces the field through the read path too.
     assert event.location == "Pier 39"
 

@@ -1257,17 +1257,15 @@ class SqliteSpaceRepo:
     async def get_live_invite_token(self, token: str) -> dict | None:
         """One still-redeemable invite token by its string, or ``None``.
 
-        A **read**: it never touches ``uses_remaining``. Two callers need
-        to know something about a link before deciding to spend one of
-        its uses:
+        A **read**: it never touches ``uses_remaining``. Its caller is
+        ``GET /api/invite-links/{token}/code``, which hands back the full
+        pasteable code for a link that is still live.
 
-        * the cross-household redeem, which must refuse a ``subscriber``
-          seat (``space_remote_members`` has no row shape for one) —
-          refusing *after* the atomic consume meant every stranger who
-          opened a published Follower link burned a use on their own
-          denial;
-        * ``GET /api/invite-links/{token}/code``, which hands back the
-          full pasteable code for a link that is still live.
+        It used to have a second caller: the cross-household redeem
+        peeked here to refuse a ``subscriber`` seat before spending a
+        use, because ``space_remote_members`` had no row shape for a
+        remote reader. Migration 0054 gave it one, so a Follower link now
+        redeems like any other and the peek is gone.
 
         "Live" is the same predicate :meth:`list_live_invite_tokens`
         uses — uses left, and not past ``expires_at`` — with both sides of

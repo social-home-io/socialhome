@@ -6,7 +6,26 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 29
+    assert fc.OURS == 30
+
+
+def test_remote_subscriber_role_capability_threshold():
+    """v_30 — a cross-household Follower seat. A sub-v_30 peer's
+    ``space_remote_members.role`` CHECK rejects ``'subscriber'`` and takes
+    the whole roster event down with it, so the threshold is a real gate,
+    not a nicety. Space-scoped: a behind household silently misses a member
+    of the space."""
+    assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE == 30
+    assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE <= fc.OURS
+    labels = dict(fc.CAPABILITY_FEATURES).values()
+    assert "Cross-household Follower seats" in labels
+    assert "Cross-household Follower seats" in fc.features_missing_below(29)
+    assert "Cross-household Follower seats" not in fc.features_missing_below(30)
+    assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Cross-household Follower seats" in fc.space_features_missing_below(29)
+    assert "Cross-household Follower seats" not in fc.space_features_missing_below(30)
 
 
 def test_route_stale_nack_capability_threshold():

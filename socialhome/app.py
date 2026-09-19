@@ -817,6 +817,18 @@ def _wire_federation_stack(
     # dispatch — backstops the sender-side per-pair gate for events
     # that arrived via mesh relay (Momentum 3-hop).
     federation_service.attach_user_repo(user_repo)
+    # §24.11 step 12 — read-only-Follower gate. A household that
+    # redeemed a Follower invite link sits in ``space_instances`` (so it
+    # receives the content stream and the epoch key) and holds a
+    # ``role='subscriber'`` seat; every space-content write it sends is
+    # refused here rather than trusted to its own local gate. Wired on
+    # EVERY household, not just a host: space content fans out
+    # peer-to-peer from the originating household, so a member household
+    # receives a follower's writes directly.
+    federation_service.attach_space_write_gate(
+        space_repo,
+        space_remote_member_repo,
+    )
 
     async def _get_max_seq(space_id: str) -> int:
         row = await db.fetchone(

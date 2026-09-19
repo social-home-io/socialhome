@@ -157,7 +157,14 @@ async def test_dispatch_space_sync_begin_rejected_emits_failed(env):
 
 
 async def test_dispatch_space_sync_offer_emits_answer(env):
-    svc, _, peer = env
+    svc, sync_mgr, peer = env
+    # An OFFER is an ANSWER to our own BEGIN: record the request first,
+    # or the requester refuses it as unsolicited.
+    sync_mgr.record_sync_request(
+        sync_id="s2",
+        space_id="sp-1",
+        provider_instance_id=peer.id,
+    )
     await svc._dispatch_event(
         _evt(
             FederationEventType.SPACE_SYNC_OFFER,

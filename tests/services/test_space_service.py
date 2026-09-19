@@ -3454,6 +3454,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Admin authoritative config offline",
         "Mesh route-stale nack",
         "Invite-link bootstrap redeem",
+        "Cross-household Follower seats",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3470,6 +3471,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Admin authoritative config offline",
         "Mesh route-stale nack",
         "Invite-link bootstrap redeem",
+        "Cross-household Follower seats",
     )
 
 
@@ -3498,6 +3500,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Admin authoritative config offline",
         "Mesh route-stale nack",
         "Invite-link bootstrap redeem",
+        "Cross-household Follower seats",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3541,6 +3544,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Admin authoritative config offline",
         "Mesh route-stale nack",
         "Invite-link bootstrap redeem",
+        "Cross-household Follower seats",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -4122,6 +4126,46 @@ def _gossip_calls(fed, event_type):
     ]
 
 
+async def test_subscriber_roster_gossip_is_gated_on_v30(stack):
+    """A ``subscriber`` role is not STORABLE below v_30: the receiver's
+    ``space_remote_members.role`` CHECK rejects it and takes the whole
+    roster mutation down with it — tombstone included, unhealable
+    because the version guard drops the retry at the same
+    ``member_version``. So a follower's roster event is gated on
+    ``MIN_FOR_REMOTE_SUBSCRIBER_ROLE``, not on the roster-gossip floor:
+    a sub-v_30 household keeps the pre-v_30 view instead of losing the
+    event that carried one.
+    """
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="S",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    fed = _roster_gossip_fed()
+    stack.space_svc._federation = fed
+
+    await stack.space_svc.subscribe_to_space(bob.user_id, space.id)
+    # Subscribing does not gossip; removing the follower does — and that
+    # LEFT is the event carrying role='subscriber' on the wire.
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+
+    left = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_LEFT)
+    assert len(left) == 1
+    assert left[0].args[2]["role"] == "subscriber"
+    assert (
+        left[0].kwargs.get("min_proto_version")
+        == FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE
+    )
+
+
 async def test_add_member_broadcasts_signed_joined(stack):
     """Seating a local member broadcasts a SPACE_MEMBER_JOINED to member
     households, gated on the roster-gossip capability, with a payload that
@@ -4429,6 +4473,68 @@ async def test_remove_remote_member_broadcasts_left(stack):
     p = left[0].args[2]
     assert p["user_id"] == "ru1"
     assert p["instance_id"] == "peer-x"
+
+
+async def test_a_follower_household_is_kicked_like_any_member(stack):
+    """Revocation is why a Follower household gets a real
+    ``space_remote_members`` row rather than a bare ``space_instances``
+    entry: the kick is keyed on (space_id, instance_id, user_id) FROM that
+    table. The seat is tombstoned, the household drops out of the
+    broadcast set, and — it being a link-joined ``space_session`` peer with
+    no other shared space — its seat is revoked on the way out.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from socialhome.domain.federation import (
+        DeliveryResult,
+        FederationEventType,
+        InstanceSource,
+    )
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    fed = _roster_gossip_fed()
+    fed.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(instance_id="peer-fan", ok=True)
+    )
+    fed.send_event = AsyncMock()
+    stack.space_svc._federation = fed
+    # A §D2b link-joined seat: the one the kick has to tear down.
+    fed_repo = MagicMock()
+    fed_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(source=InstanceSource.SPACE_SESSION)
+    )
+    fed_repo.delete_instance = AsyncMock()
+    stack.space_svc._federation_repo = fed_repo
+
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-fan",
+        user_id="ru-fan",
+        user_pk=None,
+        display_name="Fan",
+    )
+    await remote.set_role(space.id, "peer-fan", "ru-fan", "subscriber")
+    await stack.space_repo.add_space_instance(space.id, "peer-fan")
+    seated = await remote.get(space.id, "peer-fan", "ru-fan")
+    assert seated is not None and seated.role == "subscriber"
+
+    await stack.space_svc.remove_remote_member(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-fan",
+        user_id="ru-fan",
+    )
+
+    assert await remote.get(space.id, "peer-fan", "ru-fan") is None
+    assert "peer-fan" not in await stack.space_repo.list_member_instances(space.id)
+    left = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_LEFT)
+    assert len(left) == 1
+    assert left[0].args[2]["role"] == "subscriber"
+    # Last shared space gone → the space-scoped seat loses its reason to
+    # exist and its session keys go with it.
+    fed_repo.delete_instance.assert_awaited_once_with("peer-fan")
 
 
 async def test_no_seed_skips_gossip_gracefully(stack):
@@ -6514,3 +6620,43 @@ async def test_a_banned_local_redeemer_burns_no_uses(stack):
 
     live = await stack.space_repo.get_live_invite_token(link["token"])
     assert live is not None and live["uses_remaining"] == 5
+
+
+# ─── attach_redeem_coordinator wires the roster-gossip seam both ways ──
+
+
+async def test_attaching_the_redeem_coordinator_hands_it_the_gossip_seam():
+    """A redeem seats a household on the HOST; every other member
+    household learns about it only through the v_23 roster gossip, which
+    the SpaceService (the seed-holder) signs. Without the back-reference
+    the peers hold no row for the new household — and the §24.11
+    space-writer gate is deliberately lenient about a household it has no
+    row for, so a Follower's writes would sail past every peer-side
+    gate."""
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.attached: list[object] = []
+
+        def attach_space_service(self, svc) -> None:
+            self.attached.append(svc)
+
+    svc = SpaceService.__new__(SpaceService)
+    coordinator = _Coordinator()
+    SpaceService.attach_redeem_coordinator(svc, coordinator)
+    assert coordinator.attached == [svc]
+    assert svc._redeem_coordinator is coordinator
+
+
+async def test_attaching_a_coordinator_without_the_seam_still_works():
+    """Legacy fixtures / older coordinators keep working — the back-wire
+    is best-effort, the forward one is what ``redeem_invite_token``
+    needs."""
+
+    class _Old:
+        pass
+
+    svc = SpaceService.__new__(SpaceService)
+    old = _Old()
+    SpaceService.attach_redeem_coordinator(svc, old)
+    assert svc._redeem_coordinator is old

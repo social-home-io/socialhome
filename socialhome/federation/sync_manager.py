@@ -50,6 +50,16 @@ MAX_ACTIVE_SESSIONS_PER_INSTANCE: int = 3
 #: Maximum size of an ICE candidate string in bytes (S-7).
 MAX_ICE_CANDIDATE_BYTES: int = 2048
 
+#: How long a ``SPACE_SYNC_BEGIN`` we issued stays claimable by the
+#: provider's ``SPACE_SYNC_OFFER``. Generous — a provider may be offline
+#: when we ask and answer on its next boot — but finite, so a request the
+#: provider never answers does not sit there for the process's lifetime.
+PENDING_REQUEST_TTL_SECONDS: float = 3600.0
+
+#: Cap on outstanding requests, so a retry storm cannot grow the table
+#: without end. Oldest-first eviction.
+MAX_PENDING_REQUESTS: int = 256
+
 #: Allowed resource types for SPACE_SYNC_REQUEST_MORE (S-12).  Anything
 #: else is silently dropped — never an unknown surface that an attacker
 #: can probe.
@@ -72,6 +82,23 @@ MAX_INSTANCE_SYNC_STATUS_SPACES: int = 100
 
 
 # ─── Dispatch outcomes ────────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class PendingSyncRequest:
+    """A ``SPACE_SYNC_BEGIN`` we sent and have not yet been answered.
+
+    ``sync_id`` is the only thing addressing a sync session, and until a
+    provider answers there is no session — :meth:`SyncSessionManager
+    .apply_offer` MINTS one for whatever id the OFFER carries. Recording
+    what we asked for, and of whom, is what makes an unsolicited offer
+    recognisable: an offer is only ever an answer to our own request.
+    """
+
+    sync_id: str
+    space_id: str
+    provider_instance_id: str
+    created_at: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,6 +145,7 @@ class SyncSessionManager:
         "_check_member",
         "_reject_reason",
         "_on_local_ice",
+        "_requests",
     )
 
     def __init__(
@@ -156,6 +184,51 @@ class SyncSessionManager:
         # ``FederationService`` so the manager stays free of routing
         # knowledge.
         self._on_local_ice = on_local_ice
+        #: ``sync_id`` → the ``SPACE_SYNC_BEGIN`` we sent, until the
+        #: provider answers it with an OFFER. See
+        #: :class:`PendingSyncRequest`.
+        self._requests: dict[str, PendingSyncRequest] = {}
+
+    # ─── Requester-side: the syncs WE asked for ───────────────────────────
+
+    def record_sync_request(
+        self,
+        *,
+        sync_id: str,
+        space_id: str,
+        provider_instance_id: str,
+    ) -> None:
+        """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
+
+        Every requester-side send site calls this, because
+        :meth:`pending_sync_request` refusing is what stops an
+        unsolicited ``SPACE_SYNC_OFFER`` from minting a session.
+        """
+        self._prune_requests()
+        while len(self._requests) >= MAX_PENDING_REQUESTS:
+            self._requests.pop(next(iter(self._requests)))
+        self._requests[sync_id] = PendingSyncRequest(
+            sync_id=sync_id,
+            space_id=space_id,
+            provider_instance_id=provider_instance_id,
+            created_at=time.time(),
+        )
+
+    def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
+        """The request we issued under ``sync_id``, or ``None``.
+
+        ``None`` means we never asked (or asked too long ago), which is
+        the whole point: an OFFER is an ANSWER, so there is no such thing
+        as a legitimate one for an id we did not mint.
+        """
+        self._prune_requests()
+        return self._requests.get(sync_id)
+
+    def _prune_requests(self) -> None:
+        cutoff = time.time() - PENDING_REQUEST_TTL_SECONDS
+        stale = [k for k, v in self._requests.items() if v.created_at < cutoff]
+        for key in stale:
+            del self._requests[key]
 
     # ─── Public registry methods ──────────────────────────────────────────
 
@@ -424,6 +497,7 @@ class SyncSessionManager:
         sdp_offer: str,
         requester_instance_id: str,
         space_id: str,
+        provider_instance_id: str = "",
         sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
     ) -> str:
@@ -434,6 +508,13 @@ class SyncSessionManager:
         an SDP answer via :meth:`SyncRtcSession.create_answer`, and
         returns the answer string for the caller to embed in
         ``SPACE_SYNC_ANSWER``.
+
+        ``provider_instance_id`` PINS the session to the household that
+        may stream into it. It used to be left empty here ("unknown at
+        requester side"), and the chunk handler's origin check skipped on
+        that empty string — so the session accepted chunks from anyone.
+        The caller knows the answer: it is the authenticated sender of
+        the OFFER, matched against the request we recorded.
         """
         record = self._sessions.get(sync_id)
         if record is None:
@@ -441,7 +522,7 @@ class SyncSessionManager:
                 sync_id=sync_id,
                 space_id=space_id,
                 requester_instance_id=requester_instance_id,
-                provider_instance_id="",  # unknown at requester side
+                provider_instance_id=provider_instance_id,
                 sync_mode=sync_mode,
                 role="requester",
                 ice_servers=ice_servers,
@@ -451,7 +532,7 @@ class SyncSessionManager:
                 sync_id=sync_id,
                 space_id=space_id,
                 requester_instance_id=requester_instance_id,
-                provider_instance_id="",
+                provider_instance_id=provider_instance_id,
                 sync_mode=sync_mode,
                 rtc=rtc,
                 created_at=time.time(),
