@@ -695,3 +695,83 @@ async def test_on_chunk_accepts_a_chunk_matching_the_session_space(
         expected_space_id="sp-1",
     )
     assert len(space_repo.members) == 1
+
+
+async def test_dispatch_keeps_a_hidden_anchor_post_out_of_the_joiners_feed(receiver):
+    """A synced bazaar / calendar anchor lands with ``hidden_from_feed``.
+
+    The provider now ships anchor posts (their listings reference them by
+    FK); the joiner must store the flag with the row, or every unannounced
+    listing would surface as a feed card on the household that joined.
+    """
+    r, _space_repo, post_repo = receiver
+    await r._dispatch(
+        "posts",
+        "sp-1",
+        [
+            {
+                "id": "p-anchor",
+                "author": "u-1",
+                "type": "text",
+                "content": "listing card",
+                "hidden_from_feed": True,
+            },
+            {"id": "p-shown", "author": "u-1", "type": "text", "content": "hi"},
+        ],
+    )
+    by_id = {p.id: p for _sid, p in post_repo.saved}
+    assert by_id["p-anchor"].hidden_from_feed is True
+    assert by_id["p-shown"].hidden_from_feed is False
+
+
+async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
+    bus, peer_setup, caplog
+):
+    """A listing the joiner cannot store is logged at WARNING, not DEBUG.
+
+    Regression: the FK failure on an anchor-less listing was swallowed at
+    DEBUG for every unannounced listing on every joiner, so the only
+    trace was the writer's "1/N statements failed" count.
+    """
+    import sqlite3
+
+    peer, _ = peer_setup
+    kp_self = generate_identity_keypair()
+
+    class _RefusingBazaarRepo:
+        async def save_listing(self, listing):
+            raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(kp_self.private_key),
+        crypto=_FakeCrypto(),
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+        bazaar_repo=_RefusingBazaarRepo(),
+    )
+    record = {
+        "post_id": "p-listing",
+        "seller_user_id": "u-1",
+        "mode": "fixed",
+        "title": "Lamp",
+        "status": "active",
+    }
+    with caplog.at_level(
+        logging.WARNING, logger="socialhome.federation.sync.space.receiver"
+    ):
+        await r._dispatch("bazaar", "sp-1", [record])
+    warnings = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "bazaar catch-up" in rec.getMessage()
+    ]
+    assert warnings, caplog.text
+    assert "p-listing" in warnings[0]
+    assert "FOREIGN KEY" in warnings[0]

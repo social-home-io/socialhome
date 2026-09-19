@@ -526,11 +526,14 @@ class SpaceSyncReceiver:
                 if listing is not None:
                     try:
                         await self._bazaar_repo.save_listing(listing)
-                    except Exception as exc:  # pragma: no cover
-                        # FK / CHECK violation (post not yet persisted,
-                        # unknown mode) — log + drop; matches the
-                        # tolerance of the other resources.
-                        log.debug(
+                    except Exception as exc:
+                        # FK / CHECK violation (anchor post missing,
+                        # unknown mode). A listing the joiner cannot store
+                        # is a listing the joiner never sees, so this is a
+                        # WARNING, not DEBUG — until the posts exporter
+                        # shipped anchor posts it fired for every
+                        # unannounced listing, on every joiner, unseen.
+                        log.warning(
                             "bazaar catch-up save_listing failed for post_id=%s: %s",
                             listing.post_id,
                             exc,
@@ -643,6 +646,9 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         edited_at=_parse_iso(r.get("edited_at")) if r.get("edited_at") else None,
         moderated=bool(r.get("moderated", False)),
         file_meta=file_meta,
+        # An unannounced listing / event anchor must stay out of the
+        # joiner's feed exactly as it is out of the provider's.
+        hidden_from_feed=bool(r.get("hidden_from_feed", False)),
     )
 
 

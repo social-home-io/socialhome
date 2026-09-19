@@ -21,7 +21,7 @@ class PostsExporter:
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         # Upper-bound limit; household-scale spaces have well under 1000 posts.
-        posts = await self._repo.list_feed(space_id, limit=1000)
+        posts = await self._repo.list_for_sync(space_id, limit=1000)
         return [_post_to_dict(p) for p in posts]
 
 

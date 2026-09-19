@@ -410,6 +410,13 @@ class AsyncDatabase:
             if isinstance(outcome, BaseException):
                 pending.future.set_exception(outcome)
                 failures += 1
+                # Name the statement, never the params: the SQL text is
+                # ours, the bound values may be someone's content.
+                log.warning(
+                    "DB write statement failed: %s — %.160s",
+                    outcome,
+                    " ".join(pending.sql.split()),
+                )
             else:
                 pending.future.set_result(outcome)
         if failures:

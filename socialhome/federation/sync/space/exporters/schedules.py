@@ -30,7 +30,7 @@ class SchedulesExporter:
         self._post_repo = space_post_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
-        posts = await self._post_repo.list_feed(space_id, limit=1000)
+        posts = await self._post_repo.list_for_sync(space_id, limit=1000)
         out: list[dict[str, Any]] = []
         for p in posts:
             meta = await self._poll_repo.get_schedule_meta(p.id)

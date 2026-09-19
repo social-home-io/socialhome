@@ -58,6 +58,23 @@ class AbstractSpacePostRepo(Protocol):
         before: str | None = None,
         limit: int = 20,
     ) -> list[Post]: ...
+    async def list_for_sync(
+        self,
+        space_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[Post]:
+        """Every non-deleted post of ``space_id``, anchors included.
+
+        The §25.6 catch-up exporters enumerate posts through this, NOT
+        :meth:`list_feed`: the feed query drops ``hidden_from_feed``
+        rows (bazaar listing / calendar event anchors the author chose
+        not to announce), and a joiner that never receives the anchor
+        cannot store the listing that hangs on it —
+        ``bazaar_listings.post_id`` references ``space_posts(id)``.
+        """
+        ...
+
     async def list_since(
         self,
         space_id: str,
@@ -220,6 +237,23 @@ class SqliteSpacePostRepo:
                 "ORDER BY created_at DESC LIMIT ?",
                 (space_id, before, int(limit)),
             )
+        return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
+
+    async def list_for_sync(
+        self,
+        space_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[Post]:
+        # No ``hidden_from_feed`` filter — see the protocol docstring. The
+        # receiver stores the flag with the row, so the joiner's feed stays
+        # exactly as clean as the provider's.
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_posts "
+            "WHERE space_id=? AND deleted=0 "
+            "ORDER BY created_at DESC LIMIT ?",
+            (space_id, int(limit)),
+        )
         return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
 
     async def list_since(
