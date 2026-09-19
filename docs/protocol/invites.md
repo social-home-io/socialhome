@@ -781,6 +781,9 @@ Every redeem path reads the same column — the local `accept_invite_token`,
 the §D2 `_consume_seat_and_build_ack` (whose ACK carries `role`), and the
 §D2b bootstrap redeem, which shares that helper.
 
+An `admin` link is minted the same way but, since 2026-09-19, does not
+grant admin on redeem — see "An `admin`/mod link is approved" below.
+
 Who may mint what:
 
 | Actor | `member` | `subscriber` | `admin` | `owner` |
@@ -799,8 +802,28 @@ space setting: that setting governs people who walked up on their own,
 while an explicit invite is the owner deciding otherwise for one named
 link.
 
-A LOCAL `admin` seat triggers exactly what a promotion triggers, and
-needs no key share — the seed already lives on this household.
+#### An `admin`/mod link is approved, never granted straight through (2026-09-19)
+
+An `admin` link does **not** seat an admin. A link can be forwarded or
+leaked — anyone who saw the URL could redeem it — and admin carries
+kick / ban / config, so redeeming an `admin` link seats the household as
+a **member** now and files a pending **elevation** the owner approves
+with a click. A leaked admin link is therefore at worst a revocable
+member. Member and subscriber links are unchanged: the token is the
+authorization and they seat straight through.
+
+The elevation is a `space_join_requests` row with `requested_role =
+'admin'` (migration 0055) — the same table, review flow, expiry, REST
+surface (`GET /api/spaces/{id}/join-requests`,
+`POST …/{request_id}/approve`) and SPA queue that a join request uses; a
+NULL `requested_role` is the historical "join as member" request. Filed
+on every redeem path (local `accept_invite_token`, the §D2 /
+§D2b `_consume_seat_and_build_ack`, which downgrades the seat to `member`
+before it gossips it and carries `pending_role: "admin"` back in the
+ACK). Approving runs the existing **owner-only** promote — `set_role`
+for a local member, `set_remote_member_role` for a remote one — so an
+admin who is not the owner cannot approve an admin grant either. Denying
+or letting it expire leaves the person a member.
 
 #### An admin met through a link never holds the signing seed
 
@@ -830,7 +853,11 @@ Such an admin therefore manages the space exactly as a delegated admin
 and signs on its own behalf. The admin experience is the same; only the
 key custody differs. An owner who later wants a link-joined admin to
 hold authority promotes them through the normal path, where the decision
-is about a household the owner can now name.
+is about a household the owner can now name. Even then, the promote path
+(`_share_admin_signing_seed`) withholds the seed from a **relay-only**
+(`InstanceSource.SPACE_SESSION`) household — one met purely through a
+connection server — because the TOFU-pin argument above still applies to
+it; such an admin keeps acting through the host.
 
 #### A Follower link works across households (v_30)
 

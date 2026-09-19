@@ -1179,3 +1179,23 @@ async def test_invite_token_remembers_the_minted_total(env):
     rows = await env.repo.list_live_invite_tokens("sp-total")
     assert rows[0]["uses_total"] == 10
     assert rows[0]["uses_remaining"] == 9
+
+
+async def test_save_join_request_records_a_requested_admin_role(env):
+    """An admin/mod invite link seats the redeemer as a member and files a
+    pending elevation here (migration 0055). A NULL requested_role is the
+    historical "join as member" request; 'admin' is a pending promotion the
+    owner approves. The column rides through list_pending_join_requests
+    (SELECT *), so the routes and SPA see it with no query change.
+    """
+    await env.repo.save(_space("sp-elev"))
+    plain = await env.repo.save_join_request("sp-elev", "uid-alice")
+    elev = await env.repo.save_join_request(
+        "sp-elev", "uid-bob", requested_role="admin"
+    )
+    assert plain != elev
+    pending = {
+        r["user_id"]: r for r in await env.repo.list_pending_join_requests("sp-elev")
+    }
+    assert pending["uid-alice"]["requested_role"] is None
+    assert pending["uid-bob"]["requested_role"] == "admin"

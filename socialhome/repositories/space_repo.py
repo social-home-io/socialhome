@@ -239,6 +239,7 @@ class AbstractSpaceRepo(Protocol):
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
+        requested_role: str | None = None,
     ) -> str: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
     async def list_pending_join_request_space_ids_for_user(
@@ -1625,6 +1626,7 @@ class SqliteSpaceRepo:
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
+        requested_role: str | None = None,
     ) -> str:
         """Persist a pending join request. For cross-household (§D2)
         requests pass ``remote_applicant_instance_id`` and optionally
@@ -1638,8 +1640,9 @@ class SqliteSpaceRepo:
             """
             INSERT INTO space_join_requests(
                 id, space_id, user_id, message, expires_at,
-                remote_applicant_instance_id, remote_applicant_pk
-            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                remote_applicant_instance_id, remote_applicant_pk,
+                requested_role
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING
             """,
             (
@@ -1650,6 +1653,7 @@ class SqliteSpaceRepo:
                 expires,
                 remote_applicant_instance_id,
                 remote_applicant_pk,
+                requested_role,
             ),
         )
         return rid

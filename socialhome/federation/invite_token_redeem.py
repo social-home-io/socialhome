@@ -703,10 +703,17 @@ class SpaceInviteTokenRedeemCoordinator:
                             # that household's writes.
                             role=mirrorable_remote_role(entry.get("role")),
                         )
-        return {
+        out: dict = {
             "space_id": space_id,
             "role": role_str,
         }
+        pending = result.get("pending_role")
+        if pending:
+            # An admin/mod link seated a member; the admin role is pending
+            # the owner's approval on the host. Surface it so the SPA can
+            # say so rather than showing a bare member seat.
+            out["pending_role"] = str(pending)
+        return out
 
     # ── Receiver side (the issuer in this exchange) ────────────────────
 
@@ -857,6 +864,17 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return None, REDEEM_DENY_REASON
 
+        # An admin/mod link does NOT grant admin straight through (owner
+        # decision, 2026-09-19). The redeeming household is seated as a
+        # MEMBER now and a pending elevation is filed on the HOST; the owner
+        # approves it with a click (``set_remote_member_role``), and the
+        # relay-only seed guard in ``_share_admin_signing_seed`` keeps the
+        # standing "a link-joined admin never holds the seed" rule. A leaked
+        # admin link is therefore at worst a member on the host.
+        pending_admin = seat == SpaceRole.ADMIN.value
+        if pending_admin:
+            seat = SpaceRole.MEMBER.value
+
         # §13.7 needs no separate check here: the ban is folded into the
         # same atomic UPDATE as the consume above (``redeemer_user_id``),
         # so a banned redeemer never reaches this point and never moves
@@ -919,6 +937,25 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 redeemer_instance_id,
             )
+            if pending_admin and self._space_service is not None:
+                # Host-side pending elevation for the owner to approve.
+                # Fail-soft like the gossip: the member seat is durable, so
+                # a filing that raises must not turn a completed redeem into
+                # a DENY — the owner can still promote from the members list.
+                try:
+                    await self._space_service.file_admin_elevation_request(
+                        space_id,
+                        redeemer_user_id,
+                        remote_instance_id=redeemer_instance_id,
+                        remote_pk=redeemer_pk,
+                    )
+                except Exception:
+                    log.exception(
+                        "invite redeem: filing admin elevation failed for "
+                        "space_id=%s instance=%s",
+                        space_id,
+                        redeemer_instance_id,
+                    )
         except Exception:
             log.exception(
                 "invite redeem: seating remote member failed for"
@@ -953,6 +990,8 @@ class SpaceInviteTokenRedeemCoordinator:
             "space_id": space_id,
             "role": seat,
         }
+        if pending_admin:
+            ack_body["pending_role"] = SpaceRole.ADMIN.value
         if space is not None:
             ack_body["space_meta"] = await build_space_snapshot_for_federation(
                 space,
@@ -988,6 +1027,10 @@ class SpaceInviteTokenRedeemCoordinator:
             {
                 "space_id": str(p.get("space_id") or ""),
                 "role": str(p.get("role") or SpaceRole.MEMBER.value),
+                # An admin/mod link seats a member and leaves the admin role
+                # pending the owner's approval; surface it so the SPA can say
+                # so. Absent for member/subscriber links.
+                "pending_role": p.get("pending_role"),
                 # Forward the host's snapshot so request_redeem can seat the
                 # local stub + membership + roster. Dropping it here was why
                 # a cross-household invite-link redeem never surfaced the
@@ -1461,6 +1504,7 @@ class SpaceInviteTokenRedeemCoordinator:
             {
                 "space_id": space_id,
                 "role": role,
+                "pending_role": body.get("pending_role"),
                 "space_meta": body.get("space_meta"),
             }
         )

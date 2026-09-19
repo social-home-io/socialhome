@@ -27,6 +27,10 @@ interface JoinRequest {
   message?:      string | null
   requested_at:  string
   status?:       string
+  /** Non-null ('admin') when the row is a pending role elevation: the
+   *  applicant is already a member (an admin/mod invite link seated them)
+   *  and is waiting for the owner to approve the admin role. */
+  requested_role?: string | null
 }
 
 const requestsBySpace = signal<Record<string, JoinRequest[]>>({})
@@ -104,7 +108,13 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
             <Avatar name={name} size={32} />
             <div class="sh-join-info">
               <strong>{name}</strong>
-              {r.message && <p class="sh-muted">“{r.message}”</p>}
+              {r.requested_role === 'admin' ? (
+                <p class="sh-join-elevation">
+                  Already a member — wants the <strong>admin</strong> role
+                </p>
+              ) : (
+                r.message && <p class="sh-muted">“{r.message}”</p>
+              )}
               {r.requested_at && (
                 <time
                   class="sh-muted"
@@ -116,7 +126,9 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
               )}
             </div>
             <div class="sh-join-actions">
-              <Button onClick={() => act(r, 'approve')}>Approve</Button>
+              <Button onClick={() => act(r, 'approve')}>
+                {r.requested_role === 'admin' ? 'Make admin' : 'Approve'}
+              </Button>
               <Button variant="secondary" onClick={() => act(r, 'deny')}>
                 Decline
               </Button>

@@ -2358,14 +2358,14 @@ class SpaceJoinRequestDetailView(BaseView):
                 request_id,
                 actor_username=ctx.username,
             )
-            return web.json_response(
-                {
-                    "request_id": request_id,
-                    "status": "approved",
-                    "space_id": member.space_id,
-                    "user_id": member.user_id,
-                }
-            )
+            # ``member`` is None for a §D2 remote applicant (the seat is
+            # finalised on the applicant's household) — return the status
+            # without the seat fields rather than dereferencing None.
+            resp: dict = {"request_id": request_id, "status": "approved"}
+            if member is not None:
+                resp["space_id"] = member.space_id
+                resp["user_id"] = member.user_id
+            return web.json_response(resp)
         if action == "deny":
             await svc.deny_join_request(
                 request_id,

@@ -1392,3 +1392,40 @@ async def test_on_app_challenge_received_push_is_title_only(stack):
     assert "Magnus" in payload.title
     # PushPayload has no body field — title-only is structural (§25.3).
     assert not hasattr(payload, "body")
+
+
+async def test_space_join_approved_for_a_non_local_user_saves_nothing(stack):
+    """A §D2 cross-household applicant — or an admin/mod elevation of one —
+    is approved with a ``user_id`` that has no local ``users`` row. The
+    handler must not try to save a notification for it (the ``notifications``
+    FK to ``users`` would fail and the whole SpaceJoinApproved handler would
+    crash). It notifies the applicant over federation instead.
+    """
+    from socialhome.domain.events import SpaceJoinApproved
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+
+    await stack.provision_user("anna")
+    space_repo = _space_repo(stack.db)
+    space_svc = SpaceService(
+        space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="S")
+
+    # Call the handler DIRECTLY (the bus swallows handler exceptions, which
+    # would hide the crash): it must return cleanly, not raise the users-FK
+    # IntegrityError, and save nothing for the non-local user.
+    await stack.notif_svc.on_space_join_approved(
+        SpaceJoinApproved(
+            space_id=space.id,
+            user_id="remote-user-not-local",
+            request_id="req-1",
+            approved_by="uid-anna",
+        )
+    )
+    rows = await stack.notif_repo.list("remote-user-not-local", limit=50)
+    assert rows == []

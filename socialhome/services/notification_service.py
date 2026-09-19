@@ -1072,6 +1072,13 @@ class NotificationService:
         if space is None:
             return
         recipient = await self._users.get_by_user_id(event.user_id)
+        if recipient is None:
+            # A §D2 cross-household applicant (or an admin/mod elevation of
+            # one): the approved user lives on another household, so there
+            # is no LOCAL user to notify — and a notification row for a
+            # non-local user_id would fail the users FK. The applicant is
+            # told over federation, not by a local notification here.
+            return
         await self._save_notif(
             new_notification(
                 user_id=event.user_id,
@@ -1096,6 +1103,10 @@ class NotificationService:
         because the notification may surface on a lock screen.
         """
         recipient = await self._users.get_by_user_id(event.user_id)
+        if recipient is None:
+            # Cross-household applicant — no local user to notify, and a row
+            # for a non-local user_id would fail the users FK.
+            return
         await self._save_notif(
             new_notification(
                 user_id=event.user_id,

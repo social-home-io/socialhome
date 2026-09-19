@@ -9128,11 +9128,34 @@ hr {
   flex-direction: column;
   gap: var(--sh-space-sm);
   margin-bottom: var(--sh-space-lg);
+  /* A remote (§D2) applicant may render as a raw 32-char user id when its
+     display name isn't in the local roster; without this it does not wrap
+     and pushes the row past a 390px phone viewport. */
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+.sh-join-elevation {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--sh-accent, #b25a00);
 }
 .sh-join-actions {
   display: flex;
   gap: var(--sh-space-sm);
   justify-content: center;
+}
+@media (max-width: 640px) {
+  /* Stack the row on a phone: avatar + name on top, actions below. Two
+     action buttons ("Make admin" / "Decline") beside the avatar leave the
+     name column too narrow to read otherwise. */
+  .sh-join-request {
+    flex-wrap: wrap;
+  }
+  .sh-join-request .sh-join-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
 }
 .sh-join-requests {
   display: flex;

@@ -1024,6 +1024,24 @@ class SpaceService(SpaceMemberGuardMixin):
         """
         if self._federation is None:
             return
+        # A relay-only household (met through a connection server via an
+        # invite link, ``InstanceSource.SPACE_SESSION``) never receives the
+        # signing seed — the standing rule for a link-joined admin. The GFS
+        # pin is TOFU-immutable, so there is no rotation on a later kick;
+        # such an admin acts through the host, not by signing locally. This
+        # keeps that invariant now that an admin/mod elevation is approved
+        # through :meth:`set_remote_member_role` rather than seated directly.
+        if self._federation_repo is not None:
+            peer = await self._federation_repo.get_instance(instance_id)
+            if peer is not None and peer.source is InstanceSource.SPACE_SESSION:
+                log.info(
+                    "delegated-admin: not sharing the signing seed with "
+                    "relay-only household %s for space %s (link-joined admin "
+                    "acts through the host)",
+                    instance_id,
+                    space.id,
+                )
+                return
         if (
             self._own_instance_id is None
             or space.owner_instance_id != self._own_instance_id
@@ -3633,7 +3651,17 @@ class SpaceService(SpaceMemberGuardMixin):
         """
         if issuer_instance_id is None or issuer_instance_id == self._own_instance_id:
             member = await self.accept_invite_token(token, user_id=user_id)
-            return {"space_id": member.space_id, "role": member.role}
+            result: dict = {"space_id": member.space_id, "role": member.role}
+            # An admin/mod link seated them as a member and filed a pending
+            # elevation; tell the SPA so it can say "you're in as a member,
+            # an admin must approve your admin role".
+            for r in await self._spaces.list_pending_join_requests(member.space_id):
+                if r["user_id"] == user_id and (
+                    r.get("requested_role") == SpaceRole.ADMIN.value
+                ):
+                    result["pending_role"] = SpaceRole.ADMIN.value
+                    break
+            return result
         if self._redeem_coordinator is None:
             raise SpacePermissionError(
                 "cross-instance invite redeem is not available on this host",
@@ -3693,6 +3721,17 @@ class SpaceService(SpaceMemberGuardMixin):
         # a blocked minor burns one use, which beats letting them in.)
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        # An ADMIN/mod link does NOT grant admin straight through (owner
+        # decision, 2026-09-19): a link can leak or be forwarded, and admin
+        # carries kick/ban/config. The redeemer is seated as a MEMBER now and
+        # the elevation waits for the owner's click — approving runs the
+        # existing owner-only :meth:`set_role`. A leaked admin link is
+        # therefore at worst a revocable member. Member/subscriber links keep
+        # seating straight through (the token is the authorization).
+        pending_role: str | None = None
+        if seat is SpaceRole.ADMIN:
+            pending_role = SpaceRole.ADMIN.value
+            seat = SpaceRole.MEMBER
         member = SpaceMember(
             space_id=space_id,
             user_id=user_id,
@@ -3707,11 +3746,72 @@ class SpaceService(SpaceMemberGuardMixin):
                 role=seat,
             )
         )
-        # An ADMIN seat on THIS household needs no signing-seed share:
-        # the seed already lives here (see the note in
-        # ``set_remote_member_role``, where the share is the remote-only
-        # half of the same promotion).
+        if pending_role is not None:
+            await self._file_admin_elevation(space_id, user_id)
         return member
+
+    async def _file_admin_elevation(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_instance_id: str | None = None,
+        remote_pk: str | None = None,
+    ) -> None:
+        """Record a pending admin/mod elevation for a just-seated member.
+
+        An admin/mod invite link seats the redeemer as a member and files
+        this; the owner approves it with a click (:meth:`approve_join_request`
+        runs the owner-only :meth:`set_role` / :meth:`set_remote_member_role`).
+        Idempotent — a second admin-link redeem does not stack a second
+        request — and a no-op when the user already holds admin/owner.
+        """
+        if remote_instance_id is None:
+            existing = await self._spaces.get_member(space_id, user_id)
+            if existing is not None and existing.role in (
+                SpaceRole.ADMIN,
+                SpaceRole.OWNER,
+            ):
+                return
+        pending = await self._spaces.list_pending_join_requests(space_id)
+        for r in pending:
+            if r["user_id"] == user_id and (
+                r.get("requested_role") == SpaceRole.ADMIN.value
+            ):
+                return
+        rid = await self._spaces.save_join_request(
+            space_id,
+            user_id,
+            requested_role=SpaceRole.ADMIN.value,
+            remote_applicant_instance_id=remote_instance_id,
+            remote_applicant_pk=remote_pk,
+        )
+        await self._bus.publish(
+            SpaceJoinRequested(
+                space_id=space_id,
+                user_id=user_id,
+                request_id=rid,
+                message=None,
+            )
+        )
+
+    async def file_admin_elevation_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_instance_id: str | None = None,
+        remote_pk: str | None = None,
+    ) -> None:
+        """Public entry for the invite-redeem coordinator to file a pending
+        admin/mod elevation for a household it just seated as a member over
+        the wire. Thin pass-through to :meth:`_file_admin_elevation`."""
+        await self._file_admin_elevation(
+            space_id,
+            user_id,
+            remote_instance_id=remote_instance_id,
+            remote_pk=remote_pk,
+        )
 
     async def request_join(
         self,
@@ -3763,7 +3863,7 @@ class SpaceService(SpaceMemberGuardMixin):
         space_id_row = await self._spaces._db.fetchone(  # type: ignore[attr-defined]
             """
             SELECT space_id, user_id,
-                   remote_applicant_instance_id
+                   remote_applicant_instance_id, requested_role
               FROM space_join_requests WHERE id=?
             """,
             (request_id,),
@@ -3774,6 +3874,51 @@ class SpaceService(SpaceMemberGuardMixin):
         space = await self._require_space(row["space_id"])
         await self._require_admin_or_owner(space, actor_username)
         remote_instance = row.get("remote_applicant_instance_id")
+        # An admin/mod elevation (the applicant is ALREADY a member; an
+        # admin link filed this). Approving is the owner's click that runs
+        # the existing owner-only promote — ``set_role`` for a local member,
+        # ``set_remote_member_role`` for a §D2 one (which federates the
+        # role change and the signing-seed share). ``set_role`` re-checks
+        # owner, so an admin who is not the owner cannot approve an admin
+        # grant here either.
+        if row.get("requested_role") == SpaceRole.ADMIN.value:
+            await self._spaces.update_join_request_status(
+                request_id,
+                "approved",
+                reviewed_by=actor.user_id,
+            )
+            if remote_instance:
+                await self.set_remote_member_role(
+                    row["space_id"],
+                    actor_username=actor_username,
+                    instance_id=remote_instance,
+                    user_id=row["user_id"],
+                    role=SpaceRole.ADMIN.value,
+                )
+                await self._bus.publish(
+                    SpaceJoinApproved(
+                        space_id=row["space_id"],
+                        user_id=row["user_id"],
+                        request_id=request_id,
+                        approved_by=actor.user_id,
+                    )
+                )
+                return None
+            await self.set_role(
+                row["space_id"],
+                actor_username=actor_username,
+                user_id=row["user_id"],
+                role=SpaceRole.ADMIN.value,
+            )
+            await self._bus.publish(
+                SpaceJoinApproved(
+                    space_id=row["space_id"],
+                    user_id=row["user_id"],
+                    request_id=request_id,
+                    approved_by=actor.user_id,
+                )
+            )
+            return await self._spaces.get_member(row["space_id"], row["user_id"])
         # §CP.F1 — a protected minor must not be seated in an over-age space
         # via the request→approve flow either. Check BEFORE flipping the
         # request to "approved" so a blocked minor's request stays pending
