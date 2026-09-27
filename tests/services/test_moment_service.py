@@ -15,6 +15,7 @@ from socialhome.domain.events import (
     MomentReactionChanged,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.moment_service import (
@@ -90,6 +91,7 @@ async def test_delete_and_expiry_remove_media_file(stack, tmp_dir):
         stack.bus,
         own_instance_id=stack.iid,
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
     )
     a = await stack.provision("alice")
 

@@ -47,13 +47,21 @@ from ...federation.space_scope import (
 )
 from ...domain.gallery import GalleryItem
 from ...domain.page import Page
-from ...domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus, Post
+from ...domain.post import (
+    BAZAAR_MAX_IMAGES,
+    BazaarBid,
+    BazaarListing,
+    BazaarMode,
+    BazaarStatus,
+    Post,
+)
 from ...domain.space import SpaceZone
 from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
 from ...infrastructure.event_bus import EventBus
 from ...utils.datetime import parse_iso8601_lenient, parse_iso8601_optional
 from ...utils.timezones import coerce_tz
+from ..inbound_media_store import local_media_refs
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -1157,7 +1165,7 @@ class SpaceContentInboundHandlers:
                 p.get("created_at") or p.get("occurred_at") or "",
             ),
             description=p.get("description"),
-            image_urls=tuple(p.get("image_urls") or ()),
+            image_urls=local_media_refs(p.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
             price=p.get("price"),
             start_price=p.get("start_price"),
             step_price=p.get("step_price"),

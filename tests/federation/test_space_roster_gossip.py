@@ -570,6 +570,82 @@ async def test_a_roster_snapshot_skips_forged_foreign_and_unknown_entries(tmp_di
     await db.shutdown()
 
 
+async def test_a_roster_snapshot_is_verified_off_the_event_loop(tmp_dir, monkeypatch):
+    """Up to thousands of signature checks per snapshot run in a worker
+    thread, not on the event loop."""
+    import threading
+
+    from socialhome.federation import private_invite_handler as handler_mod
+
+    real_verify = handler_mod.verify_authority_event
+    threads: list[int] = []
+
+    def _spy(**kwargs):
+        threads.append(threading.get_ident())
+        return real_verify(**kwargs)
+
+    monkeypatch.setattr(handler_mod, "verify_authority_event", _spy)
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_roster_snapshot(
+        _snapshot(
+            [
+                _entry(j, _signed_payload(j, seed=seed, member_version=3)),
+                _entry(
+                    j,
+                    _signed_payload(
+                        j, seed=seed, member_version=3, user_id="u2", instance_id="p2"
+                    ),
+                ),
+            ]
+        )
+    )
+    assert len(threads) == 2
+    assert threading.get_ident() not in threads
+    assert len(await remote.list_for_space(SPACE_ID)) == 2
+    await db.shutdown()
+
+
+async def test_a_roster_snapshot_for_an_unknown_space_is_dropped(tmp_dir, caplog):
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    payload = dict(_signed_payload(j, seed=seed, member_version=3), space_id="sp-nope")
+    event = _event(
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        {"space_id": "sp-nope", "entries": [_entry(j, payload)]},
+    )
+    event.space_id = "sp-nope"
+    await h._on_space_roster_snapshot(event)
+    assert "unknown space sp-nope" in caplog.text
+    assert await remote.list_for_space("sp-nope") == []
+    await db.shutdown()
+
+
+async def test_a_roster_snapshot_drops_unsigned_and_unknown_suite_entries(
+    tmp_dir, caplog
+):
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    unsigned = {
+        k: v
+        for k, v in _signed_payload(
+            j, seed=seed, member_version=3, user_id="u-n"
+        ).items()
+        if k != "authority_sig"
+    }
+    odd_suite = dict(
+        _signed_payload(j, seed=seed, member_version=3, user_id="u-s"),
+        authority_sig_suite="rot13",
+    )
+    await h._on_space_roster_snapshot(
+        _snapshot([_entry(j, unsigned), _entry(j, odd_suite)])
+    )
+    assert "missing authority signature" in caplog.text
+    assert "unknown authority_sig_suite" in caplog.text
+    assert await remote.list_for_space(SPACE_ID) == []
+    await db.shutdown()
+
+
 async def test_a_roster_snapshot_never_regresses_a_newer_seat(tmp_dir):
     h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
     j = FederationEventType.SPACE_MEMBER_JOINED

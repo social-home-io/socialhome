@@ -54,10 +54,11 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..domain.events import SpacePostCreated
-from ..domain.post import LocationData, Post, PostType
+from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
+from .inbound_media_store import local_media_ref, local_media_refs
 from .space_public_author import verify_signed_author_inner
 
 if TYPE_CHECKING:
@@ -255,14 +256,15 @@ class SpacePublicInbound:
                 )
             except KeyError, TypeError, ValueError:
                 location = None
-        image_urls = inner.get("image_urls")
         return Post(
             id=post_id,
             author=author,
             type=post_type,
             content=inner.get("content"),
-            media_url=inner.get("media_url"),
-            image_urls=tuple(image_urls) if isinstance(image_urls, list) else (),
+            media_url=local_media_ref(inner.get("media_url")),
+            image_urls=local_media_refs(
+                inner.get("image_urls"), limit=FEED_POST_MAX_IMAGES
+            ),
             location=location,
             created_at=parse_iso8601_lenient(inner.get("created_at")),
             hidden_from_feed=bool(inner.get("hidden_from_feed", False)),

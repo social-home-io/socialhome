@@ -42,7 +42,8 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..federation import compat
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_media
+from ..media.cleanup import unlink_unreferenced
+from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .visibility import VisibilityMixin
@@ -106,6 +107,7 @@ class DmService(VisibilityMixin):
         "_media_sync",
         "_audio_transcription",
         "_media_dir",
+        "_media_refs",
         "_pending_transcribe_tasks",
         "_own_instance_id",
     )
@@ -122,6 +124,7 @@ class DmService(VisibilityMixin):
         media_sync: "DmMediaSyncService | None" = None,
         audio_transcription: "AudioTranscriptionService | None" = None,
         media_dir: pathlib.Path | None = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
         own_instance_id: str = "",
         visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
     ) -> None:
@@ -145,6 +148,7 @@ class DmService(VisibilityMixin):
         # transcription task reads the just-uploaded blob from disk.
         self._audio_transcription = audio_transcription
         self._media_dir = media_dir
+        self._media_refs = media_refs
         # Hold strong references to the fire-and-forget transcription
         # tasks so the event loop doesn't GC them mid-flight (the
         # Python-3.11+ behaviour with ``ensure_future`` is that an
@@ -782,11 +786,10 @@ class DmService(VisibilityMixin):
         if msg.sender_user_id != actor.user_id:
             raise PermissionError("only the sender can delete a message")
         await self._convos.soft_delete_message(message_id)
-        # The row is gone; drop the backing media file too (a DM blob is
-        # owned 1:1 by its message — not shared — so this is safe). Best
-        # effort: a missing file never blocks the delete.
-        if self._media_dir is not None:
-            await unlink_media(self._media_dir, msg.media_url)
+        # The row's media is cleared; drop the backing file too unless
+        # another row still references it. Best effort: a missing file
+        # never blocks the delete.
+        await unlink_unreferenced(self._media_dir, self._media_refs, [msg.media_url])
         await self._fan_to_remote(
             conversation_id=msg.conversation_id,
             event_type=FederationEventType.DM_MESSAGE_DELETED,

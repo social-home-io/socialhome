@@ -30,6 +30,7 @@ from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
 from ....domain.post import (
+    BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
     BazaarListing,
     BazaarMode,
@@ -45,6 +46,7 @@ from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
 from ....domain.task import RecurrenceRule, Task, TaskStatus
 from ....infrastructure.event_bus import EventBus
+from ....services.inbound_media_store import local_media_ref, local_media_refs
 from .exporter import ALLOWED_RESOURCES, SENTINEL_RESOURCE, parse_chunk
 
 if TYPE_CHECKING:
@@ -891,7 +893,8 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         type=post_type,
         created_at=_parse_iso(r.get("created_at")),
         content=r.get("content"),
-        media_url=r.get("media_url"),
+        # Media references only in the local-upload shape.
+        media_url=local_media_ref(r.get("media_url")),
         comment_count=int(r.get("comment_count") or 0),
         pinned=bool(r.get("pinned", False)),
         deleted=bool(r.get("deleted", False)),
@@ -902,15 +905,9 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         # joiner's feed exactly as it is out of the provider's.
         hidden_from_feed=bool(r.get("hidden_from_feed", False)),
         # The post's image gallery — the media bytes that follow are
-        # matched against these names. Strings only, feed-capped.
-        image_urls=_image_urls(r.get("image_urls")),
+        # matched against these names. Local-upload references, feed-capped.
+        image_urls=local_media_refs(r.get("image_urls"), limit=FEED_POST_MAX_IMAGES),
     )
-
-
-def _image_urls(raw: Any) -> tuple[str, ...]:
-    if not isinstance(raw, list):
-        return ()
-    return tuple(u for u in raw if isinstance(u, str))[:FEED_POST_MAX_IMAGES]
 
 
 def _comment_from_record(r: dict[str, Any]) -> Comment | None:
@@ -928,7 +925,7 @@ def _comment_from_record(r: dict[str, Any]) -> Comment | None:
         created_at=_parse_iso(r.get("created_at")),
         parent_id=r.get("parent_id"),
         content=r.get("content"),
-        media_url=r.get("media_url"),
+        media_url=local_media_ref(r.get("media_url")),
     )
 
 
@@ -1091,7 +1088,7 @@ def _bazaar_listing_from_record(
         status=status,
         created_at=str(r.get("created_at") or ""),
         description=r.get("description"),
-        image_urls=tuple(r.get("image_urls") or ()),
+        image_urls=local_media_refs(r.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
         price=r.get("price"),
         start_price=r.get("start_price"),
         step_price=r.get("step_price"),

@@ -9,6 +9,7 @@ from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.post import FileMeta, PostType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.post_repo import SqlitePostRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.feed_service import FeedService
@@ -90,6 +91,7 @@ async def test_delete_post_removes_media_files(stack, tmp_dir):
         SqliteUserRepo(stack.db),
         EventBus(),
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
     )
     u = await stack.provision_user("pascal")
     for name in ("p1.webp", "p2.webp"):
@@ -104,6 +106,36 @@ async def test_delete_post_removes_media_files(stack, tmp_dir):
     await svc.delete_post(p.id, actor_user_id=u.user_id)
     assert not (media_dir / "p1.webp").exists()
     assert not (media_dir / "p2.webp").exists()
+
+
+async def test_delete_post_keeps_a_file_another_post_uses(stack, tmp_dir):
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = FeedService(
+        SqlitePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    u = await stack.provision_user("pascal")
+    (media_dir / "shared.webp").write_bytes(b"x")
+    first = await svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.IMAGE,
+        content="",
+        image_urls=["api/media/shared.webp"],
+    )
+    second = await svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.IMAGE,
+        content="",
+        image_urls=["api/media/shared.webp"],
+    )
+    await svc.delete_post(second.id, actor_user_id=u.user_id)
+    assert (media_dir / "shared.webp").exists()
+    await svc.delete_post(first.id, actor_user_id=u.user_id)
+    assert not (media_dir / "shared.webp").exists()
 
 
 async def test_non_author_cannot_edit(stack):

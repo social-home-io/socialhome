@@ -118,3 +118,41 @@ async def test_note_existing_levels(tmp_path, caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
     assert "not replacing" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("api/media/0f3a9c.webp", "api/media/0f3a9c.webp"),
+        ("/api/media/0f3a9c.webp", "api/media/0f3a9c.webp"),
+        ("api/media/0f3a9c.webp?exp=1&sig=x", "api/media/0f3a9c.webp"),
+        ("0f3a9c.webp", None),
+        ("https://example.org/api/media/x.webp", None),
+        ("api/media/../secret", None),
+        ("api/media/a/b.webp", None),
+        ("api/media/.hidden", None),
+        ("api/media/", None),
+        ("api/other/x.webp", None),
+        ("", None),
+        (None, None),
+        (42, None),
+    ],
+)
+def test_local_media_ref(value, expected):
+    assert store.local_media_ref(value) == expected
+
+
+def test_local_media_refs_keeps_only_canonical_strings_capped():
+    raw = [
+        "api/media/a.webp",
+        "https://x/y.webp",
+        7,
+        "/api/media/b.webp",
+        "api/media/c",
+    ]
+    assert store.local_media_refs(raw, limit=2) == (
+        "api/media/a.webp",
+        "api/media/b.webp",
+    )
+    assert store.local_media_refs("api/media/a.webp", limit=4) == ()
+    assert store.local_media_refs(None, limit=4) == ()

@@ -15,6 +15,7 @@ from socialhome.crypto import (
 from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.media_transcode_repo import SqliteMediaTranscodeRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gallery_service import (
@@ -82,6 +83,7 @@ async def env(tmp_dir):
         cfg,
         media_transcode_repo=transcode_repo,
         media_transcode_service=transcode_service,
+        media_refs=SqliteMediaReferenceRepo(db),
     )
     yield svc
     await db.shutdown()
@@ -331,6 +333,36 @@ async def test_delete_item_removes_files_from_disk(env):
     await env.delete_item(item.id, actor_user_id="a-id")
     assert not full.exists()
     assert not thumb.exists()
+
+
+async def test_delete_item_keeps_files_another_item_uses(env):
+    """An item naming another item's files (e.g. one synced from another
+    household) is deleted without taking those files with it."""
+    import dataclasses
+    import io
+
+    from PIL import Image
+
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="T")
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
+    item = await env.upload_item(
+        album.id,
+        data=buf.getvalue(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    copy = dataclasses.replace(item, id="copy-item")
+    await env._repo.create_item(copy)  # type: ignore[attr-defined]
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    full = media_dir / item.url.rsplit("/", 1)[-1]
+    thumb = media_dir / item.thumbnail_url.rsplit("/", 1)[-1]
+
+    await env.delete_item("copy-item", actor_user_id="a-id")
+    assert full.exists() and thumb.exists()
+    await env.delete_item(item.id, actor_user_id="a-id")
+    assert not full.exists() and not thumb.exists()
 
 
 async def test_upload_video_is_async(env):
