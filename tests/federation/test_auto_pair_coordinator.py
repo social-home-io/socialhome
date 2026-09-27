@@ -10,6 +10,7 @@ is mocked with :class:`AsyncMock`.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +18,7 @@ import pytest
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
+    sign_ed25519,
 )
 from socialhome.domain.federation import (
     FederationEvent,
@@ -728,3 +730,133 @@ async def test_on_ack_target_mismatch(coord, fed_repo):
     )
     # instance still PENDING_SENT
     assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT
+
+
+# ── household address checks on the trust-relay flow ───────────────
+
+_BAD_INBOX_URLS = [
+    "file:///etc/passwd",
+    "ftp://a.example/inbox",
+    "javascript:alert(1)",
+    "https:///inbox",
+    "https://user:pw@a.example/inbox",
+]
+
+
+@pytest.mark.parametrize("bad_url", _BAD_INBOX_URLS)
+async def test_on_intro_from_peer_refuses_to_vouch_for_invalid_inbox_url(
+    coord, fed_repo, fed_service, bad_url
+):
+    a = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    c = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[a.id] = a
+    fed_repo.instances[c.id] = c
+    await coord.on_intro_from_peer(
+        _evt(
+            a.id,
+            {
+                "target_id": c.id,
+                "a_dh_pk": "dd" * 16,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "nonce": "n" * 16,
+                "token": "tk",
+                "a_inbox_url": bad_url,
+            },
+        )
+    )
+    # B never signs a vouch over an address it would not itself call.
+    fed_service.send_event.assert_not_awaited()
+
+
+def _vouched_intro(b_kp, *, c_id: str, a_inbox_url: str) -> dict:
+    a_kp = generate_identity_keypair()
+    a_id = derive_instance_id(a_kp.public_key)
+    ts = datetime.now(timezone.utc).isoformat()
+    a_dh = "dd" * 32
+    sig = sign_ed25519(
+        b_kp.private_key,
+        _vouch_blob(
+            a_id=a_id,
+            a_pk_hex=a_kp.public_key.hex(),
+            a_inbox_url=a_inbox_url,
+            a_dh_pk_hex=a_dh,
+            c_id=c_id,
+            ts=ts,
+            nonce="n" * 16,
+        ),
+    )
+    return {
+        "via_b_id": derive_instance_id(b_kp.public_key),
+        "from_a_id": a_id,
+        "from_a_pk": a_kp.public_key.hex(),
+        "from_a_inbox_url": a_inbox_url,
+        "from_a_dh_pk": a_dh,
+        "vouch_sig": sig.hex(),
+        "ts": ts,
+        "nonce": "n" * 16,
+        "token": "tk",
+    }
+
+
+@pytest.mark.parametrize("bad_url", _BAD_INBOX_URLS)
+async def test_on_intro_at_target_rejects_invalid_inbox_url_even_if_vouched(
+    coord, fed_repo, inbox, identity, bad_url
+):
+    b_kp = generate_identity_keypair()
+    b = _make_peer_remote_instance(b_kp.public_key.hex())
+    fed_repo.instances[b.id] = b
+    c_id = derive_instance_id(identity.public_key)
+    await coord.on_intro_at_target(
+        _evt(b.id, _vouched_intro(b_kp, c_id=c_id, a_inbox_url=bad_url)),
+    )
+    assert inbox.list_pending() == []
+
+
+async def test_on_intro_at_target_queues_valid_lan_inbox_url(
+    coord, fed_repo, inbox, identity
+):
+    """Control for the test above — same vouch, a valid LAN address."""
+    b_kp = generate_identity_keypair()
+    b = _make_peer_remote_instance(b_kp.public_key.hex())
+    fed_repo.instances[b.id] = b
+    c_id = derive_instance_id(identity.public_key)
+    await coord.on_intro_at_target(
+        _evt(
+            b.id,
+            _vouched_intro(
+                b_kp,
+                c_id=c_id,
+                a_inbox_url="http://192.168.1.20:8123/federation/inbox/x",
+            ),
+        ),
+    )
+    assert len(inbox.list_pending()) == 1
+
+
+@pytest.mark.parametrize("bad_url", _BAD_INBOX_URLS)
+async def test_on_ack_at_originator_rejects_invalid_c_inbox_url(
+    coord, fed_repo, caplog, bad_url
+):
+    b = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[b.id] = b
+    c_id = derive_instance_id(generate_identity_keypair().public_key)
+    r = await coord.request_via(
+        via_instance_id=b.id,
+        target_instance_id=c_id,
+        target_display_name="",
+        own_inbox_base_url=_OWN_INBOX_BASE,
+    )
+    with caplog.at_level("WARNING"):
+        await coord.on_ack_at_originator(
+            _evt(
+                b.id,
+                {
+                    "token": r["token"],
+                    "c_id": c_id,
+                    "via_b_id": b.id,
+                    "c_inbox_url": bad_url,
+                },
+            )
+        )
+    assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT
+    assert "invalid c_inbox_url" in caplog.text

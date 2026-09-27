@@ -39,6 +39,7 @@ from ..domain.space_bot import (
 from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_service import BazaarServiceError, ListingNotFoundError
+from ..federation.peer_url import InvalidPeerUrlError
 from ..services.dm_service import MediaRequiresDirectPairingError
 from ..services.child_protection_service import (
     ChildProtectionError,
@@ -306,6 +307,11 @@ class BaseView(web.View):
                 "MEDIA_REQUIRES_DIRECT_PAIRING",
                 str(exc),
             )
+        except InvalidPeerUrlError as exc:
+            # Subclasses ValueError — must precede it. The message names
+            # the field + the failed rule (never the URL), so the admin who
+            # scanned a bad pairing code learns why it was refused.
+            return error_response(422, "INVALID_PEER_URL", str(exc))
         except ValueError as exc:
             # §Audit #7: ``str(exc)`` on a ValueError can carry
             # implementation detail (e.g. "Replay detected: msg_id=…"

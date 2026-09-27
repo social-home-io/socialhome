@@ -41,6 +41,7 @@ from ..domain.events import (
 from ..utils.datetime import parse_iso8601_strict
 from .crypto_suite import DEFAULT_SUITE, negotiate
 from .peer_pairing_client import _canonical_body_bytes
+from .peer_url import validate_peer_url
 from ..domain.federation import (
     InstanceSource,
     PairingSession,
@@ -251,7 +252,13 @@ class PairingCoordinator:
         token: str = qr_payload["token"]
         peer_identity_pk_hex: str = qr_payload["identity_pk"]
         peer_dh_pk_hex: str = qr_payload["dh_pk"]
-        peer_inbox_url: str = qr_payload["inbox_url"]
+        # The QR's inbox URL is where the signed peer-accept goes next and
+        # where every later envelope is delivered — refuse a bad one before
+        # any pairing state exists (raises InvalidPeerUrlError → 422).
+        peer_inbox_url: str = validate_peer_url(
+            qr_payload["inbox_url"],
+            field="inbox_url",
+        )
 
         # Generate our ephemeral DH keypair.
         own_dh_kp = generate_x25519_keypair()
@@ -448,7 +455,9 @@ class PairingCoordinator:
         token = str(body["token"])
         peer_identity_pk_hex = str(body["identity_pk"])
         peer_dh_pk_hex = str(body["dh_pk"])
-        peer_inbox_url = str(body["inbox_url"])
+        # B's inbox URL is where our peer-confirm (and every later envelope)
+        # goes — validate before it is stored on the RemoteInstance.
+        peer_inbox_url = validate_peer_url(body["inbox_url"], field="inbox_url")
         verification_code = str(body["verification_code"])
 
         # Look up our PairingSession by token — the invitee's original

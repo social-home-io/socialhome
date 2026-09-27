@@ -88,6 +88,29 @@ sequenceDiagram
 | `home_lon` | no | B's household longitude, truncated to 4 decimal places. |
 | `signature` | yes | Ed25519 signature over the body (TOFU auth). |
 
+### Household inbox URLs
+
+Every inbox URL a household learns from outside — the QR / copy code's
+`inbox_url`, the `PAIRING_PEER_ACCEPT` body's `inbox_url`, the simple-pairing
+`a_inbox_url` / `from_a_inbox_url` / `c_inbox_url`, and `URL_UPDATED` — is
+checked where it enters, before anything is stored or sent
+(`socialhome/federation/peer_url.py::validate_peer_url`):
+
+- scheme `http://` or `https://`;
+- a host is present;
+- no credentials (`user@` / `user:pass@`) in the URL;
+- no whitespace or control characters, a valid port, at most 2048 characters.
+
+Plain `http://` stays allowed on any host: households pair across a LAN by
+address or name (`homeassistant.local`), and envelope content is protected by
+the pairing keys rather than the transport. The outbound pairing client
+re-checks the URL right before each POST and does not follow redirects.
+A scanned code that fails the check is refused by `POST /api/pairing/accept`
+with `422 INVALID_PEER_URL`; a peer-accept body that fails it gets `400`.
+
+Connection-server (GFS) URLs apply the same rules plus a TLS requirement:
+`https://`, or plain `http://` only on loopback / a private network.
+
 When `home_lat` / `home_lon` are present, A records them on B's newly-created
 `remote_instances` row immediately — the map pin is available as soon as the
 pair is confirmed, without waiting for a separate `LOCAL_HOME_LOCATION_CHANGED`
@@ -385,8 +408,8 @@ with that peer's own secret path.
 
 Validation at the receiver: the envelope is already signature-verified
 by the §24.11 inbound pipeline. The handler additionally rejects
-empty URLs and unsupported schemes (anything that isn't `http://` or
-`https://`).
+empty URLs and anything that fails the
+[household inbox URL rules](#household-inbox-urls).
 
 ## TTL + cleanup
 
@@ -423,6 +446,8 @@ the receiver still decrypts with a key it's about to delete.
   client that POSTs `PAIRING_PEER_ACCEPT` / `PAIRING_PEER_CONFIRM`
   bodies directly to the peer's federation `inbox_url`. Signs bodies
   with Ed25519 using this instance's identity seed.
+- `socialhome/federation/peer_url.py` — `validate_peer_url`, the shared
+  household / connection-server URL rules.
 - `socialhome/routes/federation.py` — `FederationInboxView` peeks the
   body's `event_type` and dispatches `PAIRING_PEER_ACCEPT` /
   `PAIRING_PEER_CONFIRM` to the pairing coordinator ahead of the

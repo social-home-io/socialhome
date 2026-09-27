@@ -363,6 +363,36 @@ async def test_url_updated_rejects_bad_scheme(repo, handlers):
     assert repo.instances["peer-a"].remote_inbox_url == original
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "https://user:pw@new.example.com/federation/inbox/wh",
+        "https:///federation/inbox/wh",
+        "http://",
+        "https://new.example.com/inbox\r\nX: y",
+    ],
+)
+async def test_url_updated_rejects_malformed_household_url(repo, handlers, bad_url):
+    """Same household-address rules as pairing: the URL is where every
+    later envelope is POSTed, so credentials / no host / control chars
+    never land in ``remote_inbox_url``."""
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    original = repo.instances["peer-a"].remote_inbox_url
+    await handlers._on_url_updated(
+        _event(FederationEventType.URL_UPDATED, {"inbox_url": bad_url}),
+    )
+    assert repo.instances["peer-a"].remote_inbox_url == original
+
+
+async def test_url_updated_accepts_lan_http(repo, handlers):
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    url = "http://192.168.1.20:8123/api/socialhome/inbox/wh"
+    await handlers._on_url_updated(
+        _event(FederationEventType.URL_UPDATED, {"inbox_url": url}),
+    )
+    assert repo.instances["peer-a"].remote_inbox_url == url
+
+
 async def test_url_updated_unknown_peer_is_noop(repo, handlers):
     # No side-effects even if the instance is not known locally.
     await handlers._on_url_updated(

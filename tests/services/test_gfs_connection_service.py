@@ -861,6 +861,28 @@ async def test_pair_allows_plain_http_on_loopback_or_a_private_network(env, gfs_
     assert conn.gfs_instance_id == "lan-gfs"
 
 
+@pytest.mark.parametrize(
+    "gfs_url",
+    [
+        "https://user:pw@gfs.example.com",
+        "https://user@gfs.example.com",
+        "http://gfs.example.com@127.0.0.1:8081",
+        "https://",
+        "https://gfs.example.com/\r\nX: y",
+    ],
+)
+async def test_pair_rejects_a_malformed_gfs_url(env, gfs_url):
+    """The shared household-address rules apply to the GFS URL too: no
+    credentials in the URL, a host is required, no control characters."""
+    _, repo = env
+    session = _StubSession(method_responses={"GET": (200, {})})
+    svc = GfsConnectionService(repo, http_client=session)
+    with pytest.raises(GfsConnectionError):
+        await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
+    assert session.calls == []
+    assert await repo.list_all() == []
+
+
 async def test_pair_rejects_a_public_plain_http_own_inbox_url(env):
     """The household's own federation base travels to the GFS as the address
     peers will POST to — a public plain-http inbox is the same downgrade

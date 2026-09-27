@@ -350,6 +350,29 @@ async def test_external_url_rejects_non_http(client):
             assert resp.status == 422, bad
 
 
+async def test_external_url_rejects_what_peers_would_refuse(client):
+    """The admin's own base gets the same household-address rules peers
+    apply to it — storing one they'd refuse would silently break pairing."""
+    for bad in (
+        "https://user:pw@home.example.com",
+        "https://home.example.com/in box",
+        "https://:8123",
+    ):
+        resp = await client.put(
+            "/api/admin/federation/external-url",
+            json={"base": bad},
+            headers=_auth(client._tok),
+        )
+        assert resp.status == 422, bad
+    # A LAN name over plain http is still a valid household base.
+    resp = await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": "http://homeassistant.local:8123"},
+        headers=_auth(client._tok),
+    )
+    assert resp.status == 200
+
+
 async def test_external_url_clears_back_to_the_automatic_source(client):
     """An empty value hands control back, rather than storing a blank."""
     await client.put(

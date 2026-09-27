@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from socialhome.crypto import generate_identity_keypair, verify_ed25519
 from socialhome.domain.federation import FederationEventType
@@ -43,10 +44,12 @@ class _FakeClient:
 
     def __init__(self, *, responses: list[_FakeResponse] | None = None) -> None:
         self.calls: list[tuple[str, bytes, dict]] = []
+        self.kwargs: list[dict] = []
         self._responses = list(responses or [])
 
-    def post(self, url, *, data, headers, timeout):
+    def post(self, url, *, data, headers, timeout, **kwargs):
         self.calls.append((url, data, dict(headers)))
+        self.kwargs.append(kwargs)
         if self._responses:
             return self._responses.pop(0)
         return _FakeResponse(status=204)
@@ -214,3 +217,74 @@ async def test_send_rejects_empty_inbox_url():
     assert result.status_code is None
     # No POST was issued.
     assert fake.calls == []
+
+
+# ── inbox URL guard ──
+
+
+def _client_with(fake: _FakeClient) -> PeerPairingClient:
+    async def _factory():
+        return fake
+
+    return PeerPairingClient(
+        own_identity_seed=generate_identity_keypair().private_key,
+        client_factory=_factory,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "file:///etc/passwd",
+        "ftp://peer.example/federation/inbox/wh",
+        "javascript:alert(1)",
+        "https:///federation/inbox/wh",
+        "https://user:pw@peer.example/federation/inbox/wh",
+        "https://user@peer.example/federation/inbox/wh",
+        "https://peer.example/federation/inbox/wh\r\nX: y",
+    ],
+)
+async def test_send_refuses_invalid_inbox_url_without_posting(bad_url):
+    fake = _FakeClient()
+    client = _client_with(fake)
+    accept = await client.send_peer_accept(peer_inbox_url=bad_url, body={"t": "x"})
+    confirm = await client.send_peer_confirm(peer_inbox_url=bad_url, body={"t": "x"})
+    for result in (accept, confirm):
+        assert result.ok is False
+        assert result.status_code is None
+        assert result.error is not None
+    # Nothing left the household.
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "good_url",
+    [
+        "https://peer.example/federation/inbox/wh",
+        # LAN / loopback plain http stays supported (demo harness + home LAN).
+        "http://127.0.0.1:18001/federation/inbox/wh",
+        "http://192.168.1.20:8123/api/socialhome/inbox/wh",
+        "http://homeassistant.local:8123/api/socialhome/inbox/wh",
+    ],
+)
+async def test_send_posts_to_valid_inbox_url(good_url):
+    fake = _FakeClient()
+    client = _client_with(fake)
+    result = await client.send_peer_accept(peer_inbox_url=good_url, body={"t": "x"})
+    assert result.ok is True
+    assert fake.calls[0][0] == good_url
+
+
+async def test_send_does_not_follow_redirects():
+    """A redirect would hand the signed body to a target that never went
+    through the URL check — the POST must pin ``allow_redirects=False``."""
+    fake = _FakeClient(responses=[_FakeResponse(status=307)])
+    client = _client_with(fake)
+    result = await client.send_peer_confirm(
+        peer_inbox_url="https://peer.example/federation/inbox/wh",
+        body={"t": "x"},
+    )
+    assert fake.kwargs[0].get("allow_redirects") is False
+    # A 3xx is not success.
+    assert result.ok is False
+    assert result.status_code == 307

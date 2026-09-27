@@ -64,6 +64,7 @@ from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..services.auto_pair_inbox import AutoPairInbox
+from .peer_url import InvalidPeerUrlError, validate_peer_url
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
@@ -75,6 +76,21 @@ log = logging.getLogger(__name__)
 #: is older than this threshold. Generous enough to survive clock
 #: skew + queue delay.
 INTRO_TTL_SECONDS = 300
+
+
+def _inbox_url_ok(url: str, *, field: str, context: str) -> bool:
+    """Whether a relayed household inbox URL passes :func:`validate_peer_url`.
+
+    Every inbox URL on this flow ends up as a ``remote_inbox_url`` that the
+    receiving household POSTs envelopes to, so each hop checks it before
+    vouching for, queueing, or storing it. Logs the refusal at WARNING.
+    """
+    try:
+        validate_peer_url(url, field=field)
+    except InvalidPeerUrlError as exc:
+        log.warning("auto-pair (%s): invalid %s: %s", context, field, exc)
+        return False
+    return True
 
 
 @dataclass(slots=True)
@@ -323,6 +339,8 @@ class AutoPairCoordinator:
                 (token or "")[:8],
             )
             return
+        if not _inbox_url_ok(a_inbox_url, field="a_inbox_url", context="vouch"):
+            return
         try:
             t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             if (datetime.now(timezone.utc) - t).total_seconds() > INTRO_TTL_SECONDS:
@@ -430,6 +448,12 @@ class AutoPairCoordinator:
                 (nonce or "")[:8],
                 (token or "")[:8],
             )
+            return
+        if not _inbox_url_ok(
+            a_inbox_url,
+            field="from_a_inbox_url",
+            context="target",
+        ):
             return
 
         b = await self._repo.get_instance(via_b_id)
@@ -673,6 +697,8 @@ class AutoPairCoordinator:
             return
         if via_b_id != session.via_instance_id:
             log.warning("auto-pair ack: via mismatch")
+            return
+        if not _inbox_url_ok(c_inbox_url, field="c_inbox_url", context="ack"):
             return
         a_id = derive_instance_id(self._own_identity_pk)
         a_inbox_url = session.a_inbox_url
