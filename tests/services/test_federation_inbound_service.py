@@ -2166,6 +2166,7 @@ async def test_space_media_blob_assembles_chunked_transfer(db, bus, tmp_path):
                 FederationEventType.SPACE_MEDIA_BLOB,
                 {
                     "post_id": "p",
+                    "space_id": "sp-chunked",
                     "transfer_id": "tx-1",
                     "filename": "big.webm",
                     "chunk_index": idx,
@@ -2177,7 +2178,7 @@ async def test_space_media_blob_assembles_chunked_transfer(db, bus, tmp_path):
         )
     assert (tmp_path / "big.webm").read_bytes() == full
     # Partial directory cleaned up.
-    assert not (tmp_path / ".partial" / "tx-1").exists()
+    assert list((tmp_path / ".partial").iterdir()) == []
 
 
 # ─── Space config sequence gate (PR follow-up to #459) ────────────────

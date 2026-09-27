@@ -59,6 +59,27 @@ honoured at flush time rather than resurrected.
 The buffer is bounded by a periodic GC sweep that drops rows older
 than 24 h whose event still hasn't arrived (e.g. cancelled upstream).
 
+### Personal-calendar RSVPs answer one invite
+
+`PERSONAL_CALENDAR_RSVP_UPDATED` / `_DELETED` flow from an invitee's
+household back to the organiser's, carrying the organiser's local
+`event_id` and the responding `user_id`. The organiser applies one only
+when all of these hold, and otherwise drops it with a WARNING:
+
+- the event exists here and was organised here (never an inbound
+  `origin='remote_invite'` mirror — replies flow organiser-ward only);
+- `user_id` is on the event's `attendees` — the list the invite was
+  fanned out from, so the event was actually shared with that user's
+  household;
+- `user_id`'s home household (`remote_users.instance_id`) is the
+  envelope's `from_instance` — so a household never answers for a local
+  member or for another household's invitee.
+
+No extra table records the invitation: the attendee list plus each
+remote user's home instance already prove it
+(`PersonalCalendarInboundHandlers._authorised_rsvp_event`;
+`tests/protocol/test_personal_calendar_rsvp_scope.py`).
+
 ## Feed surface (Phase B) — opt-in (§23.15)
 
 A calendar event can mirror to the space feed as a `PostType.EVENT` post

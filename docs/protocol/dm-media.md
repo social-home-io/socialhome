@@ -119,12 +119,31 @@ video would exceed that as a single base64-encoded payload, so
 
 **Receiver side**: each chunk writes to `<msg_id>.part<idx>` under
 the media root. When `final=true` arrives, the receiver
-concatenates parts 0…N−1 in order into a temp file, atomically
-renames it to `<msg_id>.<ext>`, deletes the parts, then swaps
+concatenates parts 0…N−1 in order into a temp file, moves it to
+`<msg_id>.<ext>` write-once (see below), deletes the parts, then swaps
 `media_url` and broadcasts `dm.media_ready` as in the single-chunk
 case. A re-send from a sender restart overwrites the same part
 files idempotently; a missing chunk at finalisation time logs +
 bails (the outbox retry will resend it).
+
+**Scope + write-once.** The receiver only lands bytes a household was
+entitled to send:
+
+- `message_id` must be a single safe file-name component and
+  `chunk_index` / `chunk_count` must be in range, else the chunk is
+  dropped.
+- If the `conversation_messages` row is already here, the blob must
+  carry the `media_blob_id` that message announced and come from the
+  household the message was sent from (the sender's
+  `remote_users.instance_id` equals `from_instance`). A blob for a local
+  member's message, or from another household in the same group DM, is
+  refused with a WARNING.
+- If the row isn't here yet (the blob overtook its `DM_MESSAGE`), the
+  bytes are accepted — safe because the final file is **write-once**: it
+  is moved into place with a hard link that fails on an existing name
+  (`services/inbound_media_store.py:publish_once`), so an existing
+  `<msg_id>.<ext>` is never replaced. A re-delivery of an attachment
+  that already landed just re-adopts the file on disk.
 
 **Backwards compatibility**: payloads without the `chunk_*` /
 `final` fields (older builds, or any caller that doesn't emit
