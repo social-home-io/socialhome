@@ -94,7 +94,7 @@ Every inbox URL a household learns from outside — the QR / copy code's
 `inbox_url`, the `PAIRING_PEER_ACCEPT` body's `inbox_url`, the simple-pairing
 `a_inbox_url` / `from_a_inbox_url` / `c_inbox_url`, and `URL_UPDATED` — is
 checked where it enters, before anything is stored or sent
-(`socialhome/federation/peer_url.py::validate_peer_url`):
+(`socialhome/peer_url.py::validate_peer_url`):
 
 - scheme `http://` or `https://`;
 - a host is present;
@@ -109,7 +109,10 @@ A scanned code that fails the check is refused by `POST /api/pairing/accept`
 with `422 INVALID_PEER_URL`; a peer-accept body that fails it gets `400`.
 
 Connection-server (GFS) URLs apply the same rules plus a TLS requirement:
-`https://`, or plain `http://` only on loopback / a private network.
+`https://`, or plain `http://` only on loopback / a private network. In the
+other direction, the connection server applies the household rules to the
+`inbox_url` a household registers with (`POST /gfs/register` → `422` on
+failure), since its relay fan-out POSTs there.
 
 When `home_lat` / `home_lon` are present, A records them on B's newly-created
 `remote_instances` row immediately — the map pin is available as soon as the
@@ -446,14 +449,17 @@ the receiver still decrypts with a key it's about to delete.
   client that POSTs `PAIRING_PEER_ACCEPT` / `PAIRING_PEER_CONFIRM`
   bodies directly to the peer's federation `inbox_url`. Signs bodies
   with Ed25519 using this instance's identity seed.
-- `socialhome/federation/peer_url.py` — `validate_peer_url`, the shared
+- `socialhome/peer_url.py` — `validate_peer_url`, the shared
   household / connection-server URL rules.
 - `socialhome/routes/federation.py` — `FederationInboxView` peeks the
   body's `event_type` and dispatches `PAIRING_PEER_ACCEPT` /
   `PAIRING_PEER_CONFIRM` to the pairing coordinator ahead of the
   §24.11 pipeline.
 - `socialhome/routes/pairing.py` — local-only admin routes used by
-  the UI (`/api/pairing/initiate`, `/accept`, `/confirm`).
+  the UI (`/api/pairing/initiate`, `/accept`, `/confirm`). All three
+  require a signed-in admin (bearer token, or ingress headers under haos);
+  none is on the auth middleware's public-path list — the peer's side of
+  the handshake only ever arrives through the federation inbox.
 - `socialhome/services/federation_inbound/pairing.py` — §24.11
   inbound handlers for already-paired peers (covers
   `PAIRING_INTRO_RELAY`, `URL_UPDATED`, `UNPAIR`).

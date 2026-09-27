@@ -64,7 +64,7 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.space import normalize_category, normalize_join_mode
 from ..federation.keywrap_seal import KEM_SUITE_X25519
-from ..federation.peer_url import InvalidPeerUrlError, validate_peer_url
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 
@@ -148,7 +148,7 @@ def _require_secure_url(url: str, *, field: str) -> None:
     there is no public path to sit on and usually no certificate to serve.
 
     The structural rules (http(s) only, a host, no credentials) are the
-    shared household-address rules in :mod:`socialhome.federation.peer_url`.
+    shared household-address rules in :mod:`socialhome.peer_url`.
 
     Raises :class:`GfsConnectionError`, which the pairing route maps to a 4xx
     with this message.

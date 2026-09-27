@@ -38,7 +38,7 @@ import orjson
 
 from ..crypto import sign_ed25519
 from ..domain.federation import FederationEventType
-from .peer_url import InvalidPeerUrlError, validate_peer_url
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
 
 log = logging.getLogger(__name__)
 

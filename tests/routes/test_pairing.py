@@ -14,10 +14,12 @@ from socialhome.app_keys import (
     outbox_repo_key,
     peer_home_sharing_service_key,
 )
+from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
+    generate_x25519_keypair,
 )
 from socialhome.domain.federation import (
     FederationEventType,
@@ -170,6 +172,129 @@ async def test_accept_pairing_rejects_invalid_household_address(client):
     fed_repo = client.server.app[federation_repo_key]
     assert await fed_repo.get_instance(derive_instance_id(peer.public_key)) is None
     assert await fed_repo.get_pairing("tok-bad-url") is None
+
+
+class _RecordingPeerClient:
+    """Stands in for the outbound peer-accept POST so a test can see
+    whether the household tried to call the scanned inbox URL."""
+
+    def __init__(self) -> None:
+        self.accepts: list[str] = []
+
+    async def send_peer_accept(self, *, peer_inbox_url, body):
+        self.accepts.append(peer_inbox_url)
+
+        class _R:
+            ok = True
+            status_code = 200
+            error = None
+
+        return _R()
+
+
+def _record_outbound(client) -> _RecordingPeerClient:
+    rec = _RecordingPeerClient()
+    fed = client.server.app[federation_service_key]
+    fed._pairing.attach_peer_pairing_client(rec)
+    return rec
+
+
+def _scanned_code(token: str) -> tuple[dict, str]:
+    peer = generate_identity_keypair()
+    peer_id = derive_instance_id(peer.public_key)
+    return (
+        {
+            "token": token,
+            "instance_id": peer_id,
+            "identity_pk": peer.public_key.hex(),
+            "dh_pk": generate_x25519_keypair().public_key.hex(),
+            "inbox_url": "https://peer.example/federation/inbox/abc",
+            "display_name": "Peer",
+        },
+        peer_id,
+    )
+
+
+async def _seed_member(db, username: str = "bob") -> str:
+    """Seed a signed-in, non-admin household user; return their token."""
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        (username, f"{username}-id", username.capitalize()),
+    )
+    raw = f"{username}-raw-tok"
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        (f"tok-{username}", f"{username}-id", "t", sha256_token_hash(raw)),
+    )
+    return raw
+
+
+async def test_accept_pairing_requires_sign_in(client):
+    """Starting a pairing from a scanned code is a signed-in admin action:
+    without credentials nothing is stored and nothing is sent anywhere."""
+    rec = _record_outbound(client)
+    code, peer_id = _scanned_code("tok-anon")
+    r = await client.post("/api/pairing/accept", json=code)
+    assert r.status == 401
+    fed_repo = client.server.app[federation_repo_key]
+    assert await fed_repo.get_instance(peer_id) is None
+    assert await fed_repo.get_pairing("tok-anon") is None
+    assert rec.accepts == []
+
+
+async def test_accept_pairing_requires_admin(client):
+    rec = _record_outbound(client)
+    member_tok = await _seed_member(client._db)
+    code, peer_id = _scanned_code("tok-member")
+    r = await client.post(
+        "/api/pairing/accept",
+        json=code,
+        headers=_auth(member_tok),
+    )
+    assert r.status == 403
+    fed_repo = client.server.app[federation_repo_key]
+    assert await fed_repo.get_instance(peer_id) is None
+    assert await fed_repo.get_pairing("tok-member") is None
+    assert rec.accepts == []
+
+
+async def test_accept_pairing_as_admin_stores_and_notifies_peer(client):
+    rec = _record_outbound(client)
+    code, peer_id = _scanned_code("tok-admin")
+    r = await client.post(
+        "/api/pairing/accept",
+        json=code,
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["token"] == "tok-admin"
+    assert len(body["verification_code"]) == 6
+    fed_repo = client.server.app[federation_repo_key]
+    inst = await fed_repo.get_instance(peer_id)
+    assert inst is not None
+    assert inst.status is PairingStatus.PENDING_RECEIVED
+    assert rec.accepts == ["https://peer.example/federation/inbox/abc"]
+
+
+async def test_initiate_pairing_requires_admin(client):
+    member_tok = await _seed_member(client._db)
+    r = await client.post(
+        "/api/pairing/initiate",
+        json={},
+        headers=_auth(member_tok),
+    )
+    assert r.status == 403
+
+
+async def test_confirm_pairing_requires_admin(client):
+    member_tok = await _seed_member(client._db)
+    r = await client.post(
+        "/api/pairing/confirm",
+        json={"token": "t", "verification_code": "000000"},
+        headers=_auth(member_tok),
+    )
+    assert r.status == 403
 
 
 async def test_confirm_pairing_missing_fields(client):

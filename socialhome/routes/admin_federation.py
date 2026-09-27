@@ -33,7 +33,7 @@ from ..app_keys import (
     platform_adapter_key,
     url_update_outbound_key,
 )
-from ..federation.peer_url import InvalidPeerUrlError, validate_peer_url
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..platform.federation_base import (
     INBOX_PATH,
     MANUAL_BASE_KEY,
