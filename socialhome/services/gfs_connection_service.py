@@ -51,13 +51,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ipaddress
 import json
 import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -66,6 +64,7 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.space import normalize_category, normalize_join_mode
 from ..federation.keywrap_seal import KEM_SUITE_X25519
+from ..federation.peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 
@@ -136,24 +135,6 @@ class GfsConnectionError(Exception):
         self.status = status
 
 
-def _is_private_host(host: str) -> bool:
-    """Whether *host* is loopback / link-local / RFC1918-private.
-
-    A literal IP is classified by :mod:`ipaddress`; the bare name
-    ``localhost`` counts as loopback. Everything else — every DNS name — is
-    treated as public. DNS is deliberately NOT resolved: a resolver answer is
-    attacker-influenced and would turn a TLS check into a rebinding oracle.
-    """
-    name = host.strip("[]").lower()
-    if name in {"localhost", "localhost."}:
-        return True
-    try:
-        addr = ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
-
-
 def _require_secure_url(url: str, *, field: str) -> None:
     """Reject a GFS-facing URL that is neither ``https://`` nor LAN-local.
 
@@ -166,20 +147,16 @@ def _require_secure_url(url: str, *, field: str) -> None:
     federation demo harness and most home deployments run — keeps plain HTTP:
     there is no public path to sit on and usually no certificate to serve.
 
+    The structural rules (http(s) only, a host, no credentials) are the
+    shared household-address rules in :mod:`socialhome.federation.peer_url`.
+
     Raises :class:`GfsConnectionError`, which the pairing route maps to a 4xx
     with this message.
     """
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-    if scheme == "https":
-        return
-    if scheme == "http" and _is_private_host(parsed.hostname or ""):
-        return
-    raise GfsConnectionError(
-        f"{field} must use https:// — {url!r} is not. Plain http:// is only "
-        "allowed for a GFS on loopback or a private network (RFC1918, "
-        "fc00::/7, fe80::/10, localhost).",
-    )
+    try:
+        validate_peer_url(url, field=field, require_tls_unless_private=True)
+    except InvalidPeerUrlError as exc:
+        raise GfsConnectionError(str(exc)) from exc
 
 
 class GfsConnectionService:

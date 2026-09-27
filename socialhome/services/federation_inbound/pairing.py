@@ -31,6 +31,7 @@ from ...domain.events import (
     PeerUnpaired,
 )
 from ...domain.federation import FederationEventType, PairingStatus, RemoteInstance
+from ...federation.peer_url import InvalidPeerUrlError, validate_peer_url
 from ...infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
@@ -191,19 +192,18 @@ class PairingInboundHandlers:
 
         The envelope is already signed + origin-verified by the inbound
         pipeline, so the sender is authoritative for their own URL. We
-        still sanity-check the shape (non-empty, http(s) scheme) before
-        persisting; garbage URLs would silently break future deliveries.
+        still apply the shared household-address rules
+        (:func:`~socialhome.federation.peer_url.validate_peer_url`) before
+        persisting — this is where every later envelope is POSTed.
         """
         new_url = str(event.payload.get("inbox_url") or "").strip()
         if not new_url:
             log.debug("URL_UPDATED from %s: empty inbox_url", event.from_instance)
             return
-        if not (new_url.startswith("http://") or new_url.startswith("https://")):
-            log.warning(
-                "URL_UPDATED from %s: rejected scheme in %r",
-                event.from_instance,
-                new_url,
-            )
+        try:
+            validate_peer_url(new_url, field="inbox_url")
+        except InvalidPeerUrlError as exc:
+            log.warning("URL_UPDATED from %s: %s", event.from_instance, exc)
             return
         instance = await self._repo.get_instance(event.from_instance)
         if instance is None:

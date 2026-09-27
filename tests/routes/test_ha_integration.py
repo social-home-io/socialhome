@@ -98,6 +98,17 @@ async def test_put_base_rejects_bad_scheme(client):
     assert r.status == 422
 
 
+async def test_put_base_rejects_url_peers_would_refuse(client):
+    """Same household-address rules peers apply when they receive it."""
+    for bad in ("https://user:pw@ha.example", "https://", "https://ha.example/a b"):
+        r = await client.put(
+            "/api/ha/integration/federation-base",
+            json={"base": bad},
+            headers=_auth(client._tok),
+        )
+        assert r.status == 422, bad
+
+
 async def test_put_base_rejects_empty_string(client):
     r = await client.put(
         "/api/ha/integration/federation-base",

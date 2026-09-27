@@ -33,6 +33,7 @@ from ..app_keys import (
     platform_adapter_key,
     url_update_outbound_key,
 )
+from ..federation.peer_url import InvalidPeerUrlError, validate_peer_url
 from ..platform.federation_base import (
     INBOX_PATH,
     MANUAL_BASE_KEY,
@@ -144,10 +145,14 @@ def _validate_base(raw: str) -> str | None:
         return None
     if base.endswith(INBOX_PATH):
         base = base[: -len(INBOX_PATH)].rstrip("/")
-    # Reject a bare scheme ("https://") left over after stripping.
-    if base in ("http:/", "https:/", "http://", "https://"):
+    # Same household-address rules peers apply when they receive this base
+    # (host required, no credentials, no whitespace) — covers a bare
+    # scheme ("https://") left over after stripping, too.
+    try:
+        validate_peer_url(base, field="base")
+    except InvalidPeerUrlError:
         return None
-    return base or None
+    return base
 
 
 def _redact_ice_server(srv: dict) -> dict:

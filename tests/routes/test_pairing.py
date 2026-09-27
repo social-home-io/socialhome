@@ -148,6 +148,30 @@ async def test_accept_pairing_rejects_malformed(client):
     assert r.status == 422
 
 
+async def test_accept_pairing_rejects_invalid_household_address(client):
+    """A pairing code whose inbox address is not a usable http(s) household
+    URL is refused up front with a specific, admin-readable error — and
+    nothing is stored for it."""
+    peer = generate_identity_keypair()
+    r = await client.post(
+        "/api/pairing/accept",
+        json={
+            "token": "tok-bad-url",
+            "identity_pk": peer.public_key.hex(),
+            "dh_pk": "11" * 32,
+            "inbox_url": "file:///etc/passwd",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_PEER_URL"
+    assert "household address" in body["error"]["detail"]
+    fed_repo = client.server.app[federation_repo_key]
+    assert await fed_repo.get_instance(derive_instance_id(peer.public_key)) is None
+    assert await fed_repo.get_pairing("tok-bad-url") is None
+
+
 async def test_confirm_pairing_missing_fields(client):
     r = await client.post(
         "/api/pairing/confirm",

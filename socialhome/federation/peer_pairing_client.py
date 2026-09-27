@@ -38,6 +38,7 @@ import orjson
 
 from ..crypto import sign_ed25519
 from ..domain.federation import FederationEventType
+from .peer_url import InvalidPeerUrlError, validate_peer_url
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +152,14 @@ class PeerPairingClient:
         event_type: str,
         body: dict,
     ) -> PeerPairingResult:
-        """Sign ``body`` (with ``event_type`` woven in) and POST it."""
+        """Sign ``body`` (with ``event_type`` woven in) and POST it.
+
+        The URL is re-validated here even though every entry point already
+        checked it: this is the last point before a signed body leaves the
+        household, and a stored row may predate the entry-point check.
+        Redirects are not followed — a ``3xx`` would hand the body to a
+        target that never went through :func:`validate_peer_url`.
+        """
         if not peer_inbox_url:
             log.warning("peer-pairing: empty inbox URL for event_type=%s", event_type)
             return PeerPairingResult(
@@ -159,6 +167,11 @@ class PeerPairingClient:
                 status_code=None,
                 error="empty peer inbox URL",
             )
+        try:
+            validate_peer_url(peer_inbox_url, field="peer inbox URL")
+        except InvalidPeerUrlError as exc:
+            log.warning("peer-pairing: refusing %s: %s", event_type, exc)
+            return PeerPairingResult(ok=False, status_code=None, error=str(exc))
 
         envelope_body: dict = {"event_type": event_type, **body}
         signed = sign_peer_body(
@@ -171,6 +184,7 @@ class PeerPairingClient:
                 data=orjson.dumps(signed),
                 headers={"Content-Type": "application/json"},
                 timeout=aiohttp.ClientTimeout(total=self._timeout_s),
+                allow_redirects=False,
             ) as resp:
                 status = resp.status
                 ok = 200 <= status < 300
