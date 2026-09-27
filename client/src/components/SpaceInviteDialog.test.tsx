@@ -205,6 +205,40 @@ describe('SpaceInviteDialog — role picker', () => {
   })
 })
 
+describe('SpaceInviteDialog — the create button stays reachable', () => {
+  // With the publish toggle on, the form outgrows a laptop-height modal.
+  // The primary CTA lives in the sticky ``sh-invite-dialog__submit``
+  // footer row (CSS in app.css) so it stays visible while the fields
+  // scroll behind it — the plain mid-dialog action rows stay static.
+  it('renders "Create invite link" inside the sticky submit row', async () => {
+    mockReads({
+      servers: [{ id: 'gfs-1', display_name: 'Relay One', status: 'active' }],
+    })
+    const result = await openDialog()
+    await waitFor(() => {
+      expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
+        .not.toBeNull()
+    })
+    await act(async () => {
+      fireEvent.click(result.container
+        .querySelector('[data-testid="invite-publish-toggle"]')!)
+    })
+    const row = result.container
+      .querySelector('[data-testid="invite-submit-row"]') as HTMLElement
+    expect(row).not.toBeNull()
+    expect(row.classList.contains('sh-form-actions')).toBe(true)
+    expect(row.classList.contains('sh-invite-dialog__submit')).toBe(true)
+    expect(row.contains(result.getByText('Create invite link'))).toBe(true)
+  })
+
+  it('keeps the post-create action rows out of the sticky footer', async () => {
+    const result = await openDialog()
+    await generate(result)
+    expect(result.container.querySelector('.sh-invite-dialog__submit'))
+      .toBeNull()
+  })
+})
+
 describe('SpaceInviteDialog — publishing to a connection server', () => {
   it('hides the publish toggle when the household has no connection server', async () => {
     const { container } = await openDialog()

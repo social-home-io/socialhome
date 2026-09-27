@@ -14494,6 +14494,23 @@ a.sh-welcome-card:hover {
 .sh-invite-dialog .sh-form-actions {
   position: static;
 }
+/* ...except the create form's "Create invite link" row, which IS the
+ * dialog's primary action. With the publish toggle open the form runs
+ * taller than a laptop-height modal, and a static row left the button
+ * peeking out under the rounded bottom edge until the user scrolled.
+ * Sticky (bottom: 0 against the .sh-modal scrollport) pins it as the
+ * modal footer while the fields scroll behind it; once its natural
+ * position scrolls into view it rides up with the content, so it never
+ * covers the "Active links" list below it. margin-bottom is zeroed:
+ * the base rule's negative bottom margin is only right when the row is
+ * the last thing in the modal body — here it would pull the links
+ * section up under the row. Background, dashed rule and full-bleed side
+ * margins come from the shared .sh-form-actions footer. */
+.sh-invite-dialog .sh-form-actions.sh-invite-dialog__submit {
+  position: sticky;
+  z-index: 1;
+  margin-bottom: 0;
+}
 /* Invite dialog — role picker, publish toggle, and the live-links
  * list. All three stack in the modal's single column, so nothing here
  * sets a fixed width: the 390px phone gets the same layout as the
