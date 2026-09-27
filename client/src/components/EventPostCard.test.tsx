@@ -163,11 +163,27 @@ describe('EventPostCard', () => {
     // UTC printed the day before AND made the single day look like a
     // two-day range ("Apr 30 – May 1").
     const zurich = 'Europe/Zurich'
-    // 22:00Z is 00:00 the next day in Zurich (CEST/CET are both east
-    // of UTC), so this pair is one authored calendar day there.
-    const start = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-    start.setUTCHours(22, 0, 0, 0)
-    const end = new Date(start.getTime() + (23 * 60 + 59) * 60 * 1000)
+    // Zurich midnight is 22:00Z under CEST but 23:00Z under CET, so derive
+    // it from the tz's offset on the day rather than hard-coding either
+    // (a fixed 22:00Z broke whenever "30 days out" crossed into CET).
+    const zurichMidnightAfter = (utcDay: Date): Date => {
+      const noon = new Date(utcDay)
+      noon.setUTCHours(12, 0, 0, 0)
+      const localHour = Number(new Intl.DateTimeFormat('en-US', {
+        timeZone: zurich, hour: 'numeric', hourCycle: 'h23',
+      }).format(noon))
+      const midnight = new Date(noon)
+      midnight.setUTCHours(24 - (localHour - 12), 0, 0, 0)
+      return midnight
+    }
+    const start = zurichMidnightAfter(
+      new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    )
+    // 23:59 local on the same day, even across a DST switch that day.
+    const end = new Date(
+      zurichMidnightAfter(new Date(start.getTime() + 24 * 60 * 60 * 1000))
+        .getTime() - 60 * 1000,
+    )
     const dateOpts: Intl.DateTimeFormatOptions = {
       timeZone: zurich, weekday: 'short', month: 'short', day: 'numeric',
     }
