@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
+from socialhome.domain.events import CalendarEventCreated, CalendarEventDeleted
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
@@ -24,41 +26,82 @@ class _FakeFederationService:
         self._event_registry = _FakeRegistry()
 
 
+class _ScopedRows:
+    """Mimics the repos' §24.11 scoping: a row id belongs to one space."""
+
+    def __init__(self) -> None:
+        self.space_of: dict[str, str | None] = {}
+
+    def claim(self, row_id, space_id) -> bool:
+        """Upsert under ``space_id``; False when the id is another space's."""
+        owner = self.space_of.get(row_id, space_id)
+        if owner != space_id:
+            return False
+        self.space_of[row_id] = space_id
+        return True
+
+    def drop(self, row_id, space_id) -> bool:
+        if self.space_of.get(row_id) != space_id:
+            return False
+        del self.space_of[row_id]
+        return True
+
+
 class _FakePageRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.rows = _ScopedRows()
 
-    async def save(self, page):
+    async def save(self, page, *, space_id):
+        if not self.rows.claim(page.id, space_id):
+            return False
         self.saved.append(page)
+        return True
 
-    async def delete(self, page_id):
+    async def delete(self, page_id, *, space_id):
+        if not self.rows.drop(page_id, space_id):
+            return False
         self.deleted.append(page_id)
+        return True
 
 
 class _FakeStickyRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.rows = _ScopedRows()
 
-    async def save(self, sticky):
+    async def save(self, sticky, *, space_id):
+        if not self.rows.claim(sticky.id, space_id):
+            return False
         self.saved.append(sticky)
+        return True
 
-    async def delete(self, sticky_id):
+    async def delete(self, sticky_id, *, space_id):
+        if not self.rows.drop(sticky_id, space_id):
+            return False
         self.deleted.append(sticky_id)
+        return True
 
 
 class _FakeSpaceTaskRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.rows = _ScopedRows()
 
-    async def save(self, space_id, task):
+    async def save(self, task, *, space_id):
+        if not self.rows.claim(task.id, space_id):
+            return False
         self.saved.append((space_id, task))
-        return task
+        return True
 
-    async def delete(self, task_id):
+    async def delete(self, task_id, *, space_id):
+        if not self.rows.drop(task_id, space_id):
+            return False
         self.deleted.append(task_id)
+        return True
 
 
 class _FakeSpaceCalendarRepo:
@@ -73,23 +116,38 @@ class _FakeSpaceCalendarRepo:
         self.buffer: dict = {}
         self.flush_calls: list[str] = []
 
-    async def save_event(self, space_id, event):
+    async def save_event(self, event, *, space_id):
+        owner = self._events.get(event.id)
+        if owner is not None and owner[0] != space_id:
+            return False
         self.saved.append((space_id, event))
         self._events[event.id] = (space_id, event)
-        return event
+        return True
 
     async def get_event(self, event_id):
         return self._events.get(event_id)
 
-    async def delete_event(self, event_id):
+    async def delete_event(self, event_id, *, space_id):
+        owner = self._events.get(event_id)
+        if owner is None or owner[0] != space_id:
+            return False
         self.deleted.append(event_id)
         self._events.pop(event_id, None)
+        return True
 
-    async def upsert_rsvp(self, rsvp):
+    async def upsert_rsvp(self, rsvp, *, space_id):
+        owner = self._events.get(rsvp.event_id)
+        if owner is None or owner[0] != space_id:
+            return False
         self.rsvps[(rsvp.event_id, rsvp.user_id, rsvp.occurrence_at)] = rsvp
+        return True
 
-    async def remove_rsvp(self, event_id, user_id, *, occurrence_at):
+    async def remove_rsvp(self, event_id, user_id, *, occurrence_at, space_id):
+        owner = self._events.get(event_id)
+        if owner is None or owner[0] != space_id:
+            return False
         self.rsvps.pop((event_id, user_id, occurrence_at), None)
+        return True
 
     async def buffer_pending_rsvp(
         self,
@@ -99,18 +157,24 @@ class _FakeSpaceCalendarRepo:
         occurrence_at,
         status,
         updated_at,
+        space_id,
     ):
         self.buffer[(event_id, user_id, occurrence_at)] = {
             "status": status,
             "updated_at": updated_at,
+            "space_id": space_id,
         }
 
-    async def flush_pending_rsvps(self, event_id):
+    async def flush_pending_rsvps(self, event_id, *, space_id):
         self.flush_calls.append(event_id)
         applied = []
         from socialhome.domain.calendar import CalendarRSVP, RSVPStatus
 
-        keys_to_drop = [k for k in self.buffer if k[0] == event_id]
+        keys_to_drop = [
+            k
+            for k in self.buffer
+            if k[0] == event_id and self.buffer[k].get("space_id") == space_id
+        ]
         for key in keys_to_drop:
             entry = self.buffer.pop(key)
             _, user_id, occ = key
@@ -131,29 +195,49 @@ class _FakeSpaceCalendarRepo:
 
 
 class _FakePollRepo:
+    """Space-scoped poll surface. Posts / slots live in ``sp-1`` unless
+    ``post_space`` / ``slot_space`` say otherwise."""
+
     def __init__(self) -> None:
         self.valid_options: set[tuple[str, str]] = set()
+        self.post_space: dict[str, str] = {}
+        self.slot_space: dict[str, str] = {}
         self.cleared: list[tuple[str, str]] = []
         self.inserted: list[tuple[str, str]] = []
         self.closed: list[str] = []
         self.scheduled: list[dict] = []
+        self.responses: dict[tuple[str, str], str] = {}
+        self.finalized: list[tuple[str, str]] = []
         self.fail_create_schedule = False
 
-    async def option_belongs_to_post(self, *, option_id, post_id):
-        return (post_id, option_id) in self.valid_options
+    def _post_in(self, post_id, space_id) -> bool:
+        return self.post_space.get(post_id, "sp-1") == space_id
 
-    async def clear_user_votes(self, *, post_id, voter_user_id):
+    def _slot_in(self, slot_id, space_id) -> bool:
+        return self.slot_space.get(slot_id, "sp-1") == space_id
+
+    async def cast_vote_in_space(self, *, space_id, post_id, option_id, voter_user_id):
+        if not self._post_in(post_id, space_id):
+            return False
+        if (post_id, option_id) not in self.valid_options:
+            return False
         self.cleared.append((post_id, voter_user_id))
-
-    async def insert_vote(self, *, option_id, voter_user_id):
         self.inserted.append((option_id, voter_user_id))
+        return True
 
-    async def close(self, post_id):
+    async def close_in_space(self, post_id, *, space_id):
+        if not self._post_in(post_id, space_id):
+            return False
         self.closed.append(post_id)
+        return True
 
-    async def create_schedule_poll(self, *, post_id, title, deadline, slots):
+    async def create_schedule_poll_in_space(
+        self, *, space_id, post_id, title, deadline, slots
+    ):
         if self.fail_create_schedule:
-            raise RuntimeError("FK violation simulated")
+            raise RuntimeError("malformed slot simulated")
+        if not self._post_in(post_id, space_id):
+            return False
         self.scheduled.append(
             {
                 "post_id": post_id,
@@ -162,6 +246,26 @@ class _FakePollRepo:
                 "slots": list(slots),
             },
         )
+        return True
+
+    async def upsert_schedule_response_in_space(
+        self, *, space_id, slot_id, user_id, response
+    ):
+        if not self._slot_in(slot_id, space_id):
+            return False
+        self.responses[(slot_id, user_id)] = response
+        return True
+
+    async def delete_schedule_response_in_space(self, *, space_id, slot_id, user_id):
+        if not self._slot_in(slot_id, space_id):
+            return False
+        return self.responses.pop((slot_id, user_id), None) is not None
+
+    async def finalize_schedule_poll_in_space(self, *, space_id, post_id, slot_id):
+        if not self._post_in(post_id, space_id) or not self._slot_in(slot_id, space_id):
+            return False
+        self.finalized.append((post_id, slot_id))
+        return True
 
 
 def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
@@ -279,10 +383,12 @@ async def test_task_saved_missing_fields_drops(repos, handlers):
 
 
 async def test_task_deleted(repos, handlers):
+    repos["task"].rows.claim("t-1", "sp-1")
     await handlers._on_task_deleted(
         _event(
             FederationEventType.SPACE_TASK_DELETED,
             {"id": "t-1"},
+            space_id="sp-1",
         )
     )
     assert repos["task"].deleted == ["t-1"]
@@ -323,10 +429,12 @@ async def test_page_saved_missing_title_drops(repos, handlers):
 
 
 async def test_page_deleted(repos, handlers):
+    repos["page"].rows.claim("p-1", "sp-1")
     await handlers._on_page_deleted(
         _event(
             FederationEventType.SPACE_PAGE_DELETED,
             {"id": "p-1"},
+            space_id="sp-1",
         )
     )
     assert repos["page"].deleted == ["p-1"]
@@ -366,10 +474,12 @@ async def test_sticky_saved_missing_content_drops(repos, handlers):
 
 
 async def test_sticky_deleted(repos, handlers):
+    repos["sticky"].rows.claim("s-1", "sp-1")
     await handlers._on_sticky_deleted(
         _event(
             FederationEventType.SPACE_STICKY_DELETED,
             {"id": "s-1"},
+            space_id="sp-1",
         )
     )
     assert repos["sticky"].deleted == ["s-1"]
@@ -417,10 +527,12 @@ async def test_calendar_saved_missing_end_drops(repos, handlers):
 
 
 async def test_calendar_deleted(repos, handlers):
+    repos["calendar"]._events["e-1"] = ("sp-1", object())
     await handlers._on_calendar_deleted(
         _event(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
             {"id": "e-1"},
+            space_id="sp-1",
         )
     )
     assert repos["calendar"].deleted == ["e-1"]
@@ -524,6 +636,7 @@ async def test_calendar_event_arrival_flushes_buffer(repos, handlers):
         occurrence_at=occ,
         status="going",
         updated_at="2026-05-10T00:00:00+00:00",
+        space_id="sp-1",
     )
     # Event arrives.
     await handlers._on_calendar_saved(
@@ -612,6 +725,7 @@ async def test_poll_vote_clears_and_inserts(repos, handlers):
         _event(
             FederationEventType.SPACE_POLL_VOTE_CAST,
             {"post_id": "p-1", "option_id": "opt-a", "voter_user_id": "u-1"},
+            space_id="sp-1",
         )
     )
     assert repos["poll"].cleared == [("p-1", "u-1")]
@@ -645,6 +759,7 @@ async def test_poll_closed(repos, handlers):
         _event(
             FederationEventType.SPACE_POLL_CLOSED,
             {"post_id": "p-1"},
+            space_id="sp-1",
         )
     )
     assert repos["poll"].closed == ["p-1"]
@@ -671,31 +786,39 @@ async def test_poll_handlers_not_registered_without_poll_repo(bus, repos):
 
 
 class _FakeGalleryRepo:
-    """Stub matching the slice of ``AbstractGalleryRepo`` the handler uses."""
+    """Stub matching the slice of ``AbstractGalleryRepo`` the handler uses.
+    Albums live in ``sp-1`` unless ``album_space`` says otherwise."""
 
     def __init__(self) -> None:
         self.created = []
         self.deleted = []
         self.counts: dict[str, int] = {}
         self.items_by_id: dict[str, object] = {}
+        self.album_space: dict[str, str | None] = {}
         self.fail_create = False
 
-    async def create_item(self, item):
+    def _album_in(self, album_id, space_id) -> bool:
+        return self.album_space.get(album_id, "sp-1") == space_id
+
+    async def create_item_in_space(self, item, *, space_id, bump_count=True):
         if self.fail_create:
             raise RuntimeError("fk-violation simulated")
+        if not self._album_in(item.album_id, space_id):
+            return False
         self.created.append(item)
         self.items_by_id[item.id] = item
-        return item
+        if bump_count:
+            self.counts[item.album_id] = self.counts.get(item.album_id, 0) + 1
+        return True
 
-    async def increment_item_count(self, album_id, delta):
-        self.counts[album_id] = self.counts.get(album_id, 0) + int(delta)
-
-    async def get_item(self, item_id):
-        return self.items_by_id.get(item_id)
-
-    async def delete_item(self, item_id):
+    async def delete_item_in_space(self, item_id, *, space_id):
+        item = self.items_by_id.get(item_id)
+        if item is None or not self._album_in(item.album_id, space_id):
+            return False
         self.deleted.append(item_id)
         self.items_by_id.pop(item_id, None)
+        self.counts[item.album_id] = self.counts.get(item.album_id, 0) - 1
+        return True
 
 
 @pytest.fixture
@@ -784,7 +907,11 @@ async def test_gallery_item_deleted_decrements_count(gallery_handlers):
     )
     gallery.items_by_id["gi-del"] = seeded
     await handlers._on_gallery_item_deleted(
-        _event(FederationEventType.SPACE_GALLERY_ITEM_DELETED, {"id": "gi-del"}),
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+            {"id": "gi-del"},
+            space_id="sp-1",
+        ),
     )
     assert gallery.deleted == ["gi-del"]
     assert gallery.counts == {"alb-1": -1}
@@ -820,17 +947,21 @@ async def test_gallery_handlers_not_registered_without_repo(bus, repos):
 
 
 class _FakeBazaarRepo:
-    """Stub matching the slice of ``AbstractBazaarRepo`` the handler uses."""
+    """Stub matching the slice of ``AbstractBazaarRepo`` the handler uses.
+    Wrapper posts live in ``sp-1`` unless ``post_space`` says otherwise."""
 
     def __init__(self) -> None:
         self.saved: list = []
+        self.post_space: dict[str, str] = {}
         self.fail = False
 
-    async def save_listing(self, listing):
+    async def save_listing(self, listing, *, space_id):
         if self.fail:
-            raise RuntimeError("fk-violation simulated")
+            raise RuntimeError("check-violation simulated")
+        if self.post_space.get(listing.post_id, "sp-1") != space_id:
+            return False
         self.saved.append(listing)
-        return listing
+        return True
 
 
 @pytest.fixture
@@ -954,31 +1085,39 @@ async def test_bazaar_handlers_not_registered_without_repo(bus, repos):
 
 
 class _FakeBazaarRepoWithStatus:
-    """Stub matching the AbstractBazaarRepo slice the F8 handler uses."""
+    """Stub matching the AbstractBazaarRepo slice the F8 handler uses.
+    Listings live in ``sp-1`` unless ``listing_space`` says otherwise."""
 
     def __init__(self) -> None:
         self.sold: list[tuple[str, str, int]] = []
         self.expired: list[str] = []
         self.cancelled: list[str] = []
+        self.listing_space: dict[str, str] = {}
         self.fail = False
 
-    async def save_listing(self, listing):
-        return listing
+    async def get_listing(self, post_id):
+        return SimpleNamespace(
+            post_id=post_id,
+            space_id=self.listing_space.get(post_id, "sp-1"),
+            seller_user_id="u-seller",
+        )
 
-    async def mark_sold(self, post_id, *, winner_user_id, winning_price):
+    async def mark_sold(self, post_id, *, space_id, winner_user_id, winning_price):
         if self.fail:
             raise ValueError("not active")
         self.sold.append((post_id, winner_user_id, int(winning_price)))
 
-    async def mark_expired(self, post_id):
+    async def mark_expired(self, post_id, *, space_id):
         if self.fail:
             raise ValueError("not active")
         self.expired.append(post_id)
+        return True
 
-    async def mark_cancelled(self, post_id):
+    async def mark_cancelled(self, post_id, *, space_id):
         if self.fail:
             raise ValueError("not active")
         self.cancelled.append(post_id)
+        return True
 
 
 @pytest.fixture
@@ -1102,22 +1241,27 @@ class _FakeBazaarRepoWithBids:
         self.placed: list = []
         self.accepted: list[str] = []
         self.existing_bids: dict[str, object] = {}
+        self.listing_space: dict[str, str] = {}
         self.fail_place = False
 
-    async def save_listing(self, listing):
-        return listing
+    async def get_listing(self, post_id):
+        return SimpleNamespace(
+            post_id=post_id,
+            space_id=self.listing_space.get(post_id, "sp-1"),
+            seller_user_id="u-seller",
+        )
 
     async def get_bid(self, bid_id):
         return self.existing_bids.get(bid_id)
 
-    async def place_bid(self, bid):
+    async def place_bid(self, bid, *, space_id):
         if self.fail_place:
             raise ValueError("listing not active")
         self.placed.append(bid)
         self.existing_bids[bid.id] = bid
         return bid
 
-    async def accept_offer(self, bid_id):
+    async def accept_offer(self, bid_id, *, space_id):
         self.accepted.append(bid_id)
 
 
@@ -1242,6 +1386,9 @@ async def test_bazaar_offer_accepted_routes_to_accept_offer(
     bazaar_bids_handlers,
 ):
     handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-winning"] = SimpleNamespace(
+        id="bid-winning", listing_post_id="bzr-1"
+    )
     await handlers._on_bazaar_offer_accepted(
         _event(
             FederationEventType.BAZAAR_OFFER_ACCEPTED,
@@ -1391,3 +1538,659 @@ async def test_calendar_saved_validates_peer_tz(repos, handlers, wire_tz, expect
     )
     _space_id, ev = repos["calendar"]._events["e-tz"]
     assert ev.tz == expected
+
+
+# ─── §24.11 cross-space refusals ─────────────────────────────
+#
+# Every handler below is fed an envelope the pipeline gated on space A
+# that names a row of space B. The write must not land, a WARNING must
+# say so, and no bus event may fire.
+
+
+def _seed_other_space(repos):
+    """Give space ``sp-b`` one row of every kind the handlers mutate."""
+    repos["task"].rows.claim("t-b", "sp-b")
+    repos["page"].rows.claim("p-b", "sp-b")
+    repos["page"].rows.claim("hh-page", None)  # a household (personal) page
+    repos["sticky"].rows.claim("s-b", "sp-b")
+    repos["calendar"]._events["e-b"] = ("sp-b", object())
+
+
+@pytest.fixture
+def other_space(repos):
+    _seed_other_space(repos)
+    return repos
+
+
+async def test_task_saved_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_saved(
+            _event(
+                FederationEventType.SPACE_TASK_UPDATED,
+                {"id": "t-b", "list_id": "l-b", "title": "stolen"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["task"].saved == []
+    assert other_space["task"].rows.space_of["t-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_task_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_deleted(
+            _event(
+                FederationEventType.SPACE_TASK_DELETED,
+                {"id": "t-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["task"].deleted == []
+    assert other_space["task"].rows.space_of["t-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_page_saved_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_page_saved(
+            _event(
+                FederationEventType.SPACE_PAGE_UPDATED,
+                {"id": "p-b", "title": "stolen", "content": "x"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["page"].saved == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_page_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_page_deleted(
+            _event(
+                FederationEventType.SPACE_PAGE_DELETED,
+                {"id": "p-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["page"].deleted == []
+    assert other_space["page"].rows.space_of["p-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_space_page_deleted_cannot_reach_the_personal_pages_table(
+    other_space, handlers, caplog
+):
+    """A SPACE_PAGE_DELETED routed for a space never touches ``pages``.
+
+    The household page id lives in the personal ``pages`` table
+    (``space_id IS NULL``). The repo's delete now picks its table from
+    the gated space, so a space-routed delete can't reach it — this
+    asserts the handler passes that scope through.
+    """
+    with caplog.at_level("WARNING"):
+        await handlers._on_page_deleted(
+            _event(
+                FederationEventType.SPACE_PAGE_DELETED,
+                {"id": "hh-page"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["page"].deleted == []
+    assert other_space["page"].rows.space_of["hh-page"] is None
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_sticky_saved_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_sticky_saved(
+            _event(
+                FederationEventType.SPACE_STICKY_UPDATED,
+                {"id": "s-b", "author": "u-1", "content": "stolen"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["sticky"].saved == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_sticky_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    with caplog.at_level("WARNING"):
+        await handlers._on_sticky_deleted(
+            _event(
+                FederationEventType.SPACE_STICKY_DELETED,
+                {"id": "s-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["sticky"].deleted == []
+    assert other_space["sticky"].rows.space_of["s-b"] == "sp-b"
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_calendar_saved_cross_space_is_refused(
+    bus, other_space, handlers, caplog
+):
+    """No row change, no CalendarEventCreated, no buffer flush."""
+    seen = []
+    bus.subscribe(CalendarEventCreated, lambda e: seen.append(e))
+    with caplog.at_level("WARNING"):
+        await handlers._on_calendar_saved(
+            _event(
+                FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+                {
+                    "id": "e-b",
+                    "calendar_id": "cal-a",
+                    "summary": "stolen",
+                    "created_by": "u-1",
+                    "start": "2026-05-15T18:00:00+00:00",
+                    "end": "2026-05-15T20:00:00+00:00",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert other_space["calendar"].saved == []
+    assert other_space["calendar"].flush_calls == []
+    assert seen == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_calendar_deleted_cross_space_is_refused(
+    bus, other_space, handlers, caplog
+):
+    """No row change and no CalendarEventDeleted on the bus."""
+    seen = []
+    bus.subscribe(CalendarEventDeleted, lambda e: seen.append(e))
+    with caplog.at_level("WARNING"):
+        await handlers._on_calendar_deleted(
+            _event(
+                FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+                {"id": "e-b"},
+                space_id="sp-a",
+            )
+        )
+    assert other_space["calendar"].deleted == []
+    assert "e-b" in other_space["calendar"]._events
+    assert seen == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_rsvp_updated_cross_space_is_refused(other_space, handlers, caplog):
+    occ = "2026-05-15T18:00:00+00:00"
+    with caplog.at_level("WARNING"):
+        await handlers._on_rsvp_updated(
+            _event(
+                FederationEventType.SPACE_RSVP_UPDATED,
+                {
+                    "event_id": "e-b",
+                    "user_id": "u-attacker",
+                    "occurrence_at": occ,
+                    "status": "going",
+                    "updated_at": "2026-05-10T00:00:00+00:00",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert other_space["calendar"].rsvps == {}
+    assert other_space["calendar"].buffer == {}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_rsvp_deleted_cross_space_is_refused(other_space, handlers, caplog):
+    occ = "2026-05-15T18:00:00+00:00"
+    other_space["calendar"].rsvps[("e-b", "u-9", occ)] = object()
+    with caplog.at_level("WARNING"):
+        await handlers._on_rsvp_deleted(
+            _event(
+                FederationEventType.SPACE_RSVP_DELETED,
+                {
+                    "event_id": "e-b",
+                    "user_id": "u-9",
+                    "occurrence_at": occ,
+                    "updated_at": "2026-05-10T00:00:00+00:00",
+                },
+                space_id="sp-a",
+            )
+        )
+    assert ("e-b", "u-9", occ) in other_space["calendar"].rsvps
+    assert other_space["calendar"].buffer == {}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_buffered_rsvp_carries_the_gated_space(repos, handlers):
+    """An out-of-order RSVP is buffered under the space it was gated on."""
+    occ = "2026-05-15T18:00:00+00:00"
+    await handlers._on_rsvp_updated(
+        _event(
+            FederationEventType.SPACE_RSVP_UPDATED,
+            {
+                "event_id": "e-later",
+                "user_id": "u-9",
+                "occurrence_at": occ,
+                "status": "going",
+                "updated_at": "2026-05-10T00:00:00+00:00",
+            },
+            space_id="sp-a",
+        )
+    )
+    assert repos["calendar"].buffer[("e-later", "u-9", occ)]["space_id"] == "sp-a"
+
+
+@pytest.mark.parametrize(
+    "handler_name,payload",
+    [
+        ("_on_task_saved", {"id": "t-1", "list_id": "l-1", "title": "x"}),
+        ("_on_task_deleted", {"id": "t-1"}),
+        ("_on_page_saved", {"id": "p-1", "title": "x"}),
+        ("_on_page_deleted", {"id": "p-1"}),
+        ("_on_sticky_saved", {"id": "s-1", "author": "u", "content": "x"}),
+        ("_on_sticky_deleted", {"id": "s-1"}),
+        (
+            "_on_calendar_saved",
+            {
+                "id": "e-1",
+                "calendar_id": "c-1",
+                "summary": "x",
+                "created_by": "u",
+                "start": "2026-05-15T18:00:00+00:00",
+                "end": "2026-05-15T19:00:00+00:00",
+            },
+        ),
+        ("_on_calendar_deleted", {"id": "e-1"}),
+        (
+            "_on_rsvp_updated",
+            {
+                "event_id": "e-1",
+                "user_id": "u",
+                "occurrence_at": "2026-05-15T18:00:00+00:00",
+                "status": "going",
+                "updated_at": "2026-05-10T00:00:00+00:00",
+            },
+        ),
+        (
+            "_on_rsvp_deleted",
+            {
+                "event_id": "e-1",
+                "user_id": "u",
+                "occurrence_at": "2026-05-15T18:00:00+00:00",
+                "updated_at": "2026-05-10T00:00:00+00:00",
+            },
+        ),
+    ],
+)
+async def test_routing_payload_space_mismatch_is_dropped(
+    repos, handlers, caplog, handler_name, payload
+):
+    """Routing field and payload copy disagree → nothing is written."""
+    evt = _event(
+        FederationEventType.SPACE_TASK_UPDATED,
+        dict(payload, space_id="sp-b"),
+        space_id="sp-a",
+    )
+    with caplog.at_level("WARNING"):
+        await getattr(handlers, handler_name)(evt)
+    assert repos["task"].saved == [] and repos["task"].deleted == []
+    assert repos["page"].saved == [] and repos["page"].deleted == []
+    assert repos["sticky"].saved == [] and repos["sticky"].deleted == []
+    assert repos["calendar"].saved == [] and repos["calendar"].deleted == []
+    assert repos["calendar"].rsvps == {} and repos["calendar"].buffer == {}
+    assert "does not match payload space" in caplog.text
+
+
+# ─── Cross-space refusal: polls, schedules, gallery, zones, bazaar ──────
+#
+# The fakes put every unknown row in ``sp-1``; these tests pin a row to
+# ``sp-b`` and send the event gated for ``sp-a``.
+
+
+async def test_poll_vote_cross_space_is_refused(repos, handlers, caplog):
+    repos["poll"].valid_options.add(("p-b", "o-b"))
+    repos["poll"].post_space["p-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_poll_vote(
+            _event(
+                FederationEventType.SPACE_POLL_VOTE_CAST,
+                {"post_id": "p-b", "option_id": "o-b", "voter_user_id": "u"},
+                space_id="sp-a",
+            )
+        )
+    assert repos["poll"].inserted == [] and repos["poll"].cleared == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_poll_closed_cross_space_is_refused(repos, handlers, caplog):
+    repos["poll"].post_space["p-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_poll_closed(
+            _event(
+                FederationEventType.SPACE_POLL_CLOSED,
+                {"post_id": "p-b"},
+                space_id="sp-a",
+            )
+        )
+    assert repos["poll"].closed == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_schedule_created_cross_space_is_refused(repos, handlers, caplog):
+    repos["poll"].post_space["p-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_schedule_created(
+            _event(
+                FederationEventType.SPACE_SCHEDULE_CREATED,
+                {
+                    "post_id": "p-b",
+                    "title": "x",
+                    "slots": [{"id": "s", "slot_date": "2026-07-01"}],
+                },
+                space_id="sp-a",
+            )
+        )
+    assert repos["poll"].scheduled == []
+    assert "is not in space sp-a" in caplog.text
+
+
+@pytest.mark.parametrize("response", ["yes", "retracted"])
+async def test_schedule_response_cross_space_is_refused(
+    repos, handlers, caplog, response
+):
+    repos["poll"].slot_space["s-b"] = "sp-b"
+    repos["poll"].responses[("s-b", "u")] = "no"
+    with caplog.at_level("WARNING"):
+        await handlers._on_schedule_response_updated(
+            _event(
+                FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
+                {"slot_id": "s-b", "user_id": "u", "response": response},
+                space_id="sp-a",
+            )
+        )
+    assert repos["poll"].responses == {("s-b", "u"): "no"}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_schedule_response_applies_in_space(repos, handlers):
+    await handlers._on_schedule_response_updated(
+        _event(
+            FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
+            {"slot_id": "s-1", "user_id": "u", "response": "maybe"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["poll"].responses == {("s-1", "u"): "maybe"}
+    await handlers._on_schedule_response_updated(
+        _event(
+            FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
+            {"slot_id": "s-1", "user_id": "u", "response": "retracted"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["poll"].responses == {}
+
+
+async def test_schedule_finalized_is_scoped(repos, handlers, caplog):
+    repos["poll"].post_space["p-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_schedule_finalized(
+            _event(
+                FederationEventType.SPACE_SCHEDULE_FINALIZED,
+                {"post_id": "p-b", "slot_id": "s-1"},
+                space_id="sp-a",
+            )
+        )
+    assert repos["poll"].finalized == []
+    assert "is not in space sp-a" in caplog.text
+    await handlers._on_schedule_finalized(
+        _event(
+            FederationEventType.SPACE_SCHEDULE_FINALIZED,
+            {"post_id": "p-1", "slot_id": "s-1"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["poll"].finalized == [("p-1", "s-1")]
+
+
+async def test_gallery_item_saved_cross_space_is_refused(gallery_handlers, caplog):
+    handlers, gallery = gallery_handlers
+    gallery.album_space["alb-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_gallery_item_saved(
+            _event(
+                FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+                {"id": "gi-x", "album_id": "alb-b", "uploaded_by": "u"},
+                space_id="sp-a",
+            ),
+        )
+    assert gallery.created == [] and gallery.counts == {}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_gallery_item_deleted_cross_space_is_refused(gallery_handlers, caplog):
+    handlers, gallery = gallery_handlers
+    gallery.album_space["alb-b"] = "sp-b"
+    gallery.items_by_id["gi-b"] = SimpleNamespace(id="gi-b", album_id="alb-b")
+    with caplog.at_level("WARNING"):
+        await handlers._on_gallery_item_deleted(
+            _event(
+                FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+                {"id": "gi-b"},
+                space_id="sp-a",
+            ),
+        )
+    assert gallery.deleted == [] and "gi-b" in gallery.items_by_id
+    assert "is not in space sp-a" in caplog.text
+
+
+class _FakeZoneRepo:
+    def __init__(self) -> None:
+        self.rows = _ScopedRows()
+        self.upserted: list = []
+        self.deleted: list[str] = []
+
+    async def upsert(self, zone, *, space_id):
+        if not self.rows.claim(zone.id, space_id):
+            return False
+        self.upserted.append(zone)
+        return True
+
+    async def delete(self, zone_id, *, space_id):
+        if not self.rows.drop(zone_id, space_id):
+            return False
+        self.deleted.append(zone_id)
+        return True
+
+
+@pytest.fixture
+def zone_handlers(bus, repos):
+    zones = _FakeZoneRepo()
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        zone_repo=zones,
+    )
+    h.attach_to(_FakeFederationService())
+    return h, zones
+
+
+_ZONE = {
+    "zone_id": "z-1",
+    "name": "Home",
+    "latitude": 47.1,
+    "longitude": 8.5,
+    "radius_m": 100,
+}
+
+
+async def test_zone_upserted_and_deleted_in_space(zone_handlers):
+    handlers, zones = zone_handlers
+    await handlers._on_zone_upserted(
+        _event(FederationEventType.SPACE_ZONE_UPSERTED, dict(_ZONE), space_id="sp-1")
+    )
+    assert [z.id for z in zones.upserted] == ["z-1"]
+    assert zones.upserted[0].space_id == "sp-1"
+    await handlers._on_zone_deleted(
+        _event(
+            FederationEventType.SPACE_ZONE_DELETED, {"zone_id": "z-1"}, space_id="sp-1"
+        )
+    )
+    assert zones.deleted == ["z-1"]
+
+
+async def test_zone_upserted_malformed_or_missing_drops(zone_handlers):
+    handlers, zones = zone_handlers
+    await handlers._on_zone_upserted(
+        _event(
+            FederationEventType.SPACE_ZONE_UPSERTED, {"zone_id": "z"}, space_id="sp-1"
+        )
+    )
+    await handlers._on_zone_upserted(
+        _event(
+            FederationEventType.SPACE_ZONE_UPSERTED,
+            dict(_ZONE, latitude="nope"),
+            space_id="sp-1",
+        )
+    )
+    await handlers._on_zone_upserted(
+        _event(FederationEventType.SPACE_ZONE_UPSERTED, dict(_ZONE))
+    )
+    await handlers._on_zone_deleted(
+        _event(FederationEventType.SPACE_ZONE_DELETED, {}, space_id="sp-1")
+    )
+    assert zones.upserted == [] and zones.deleted == []
+
+
+async def test_zone_cross_space_is_refused(zone_handlers, caplog):
+    handlers, zones = zone_handlers
+    zones.rows.claim("z-1", "sp-b")
+    with caplog.at_level("WARNING"):
+        await handlers._on_zone_upserted(
+            _event(
+                FederationEventType.SPACE_ZONE_UPSERTED, dict(_ZONE), space_id="sp-a"
+            )
+        )
+        await handlers._on_zone_deleted(
+            _event(
+                FederationEventType.SPACE_ZONE_DELETED,
+                {"zone_id": "z-1"},
+                space_id="sp-a",
+            )
+        )
+    assert zones.upserted == [] and zones.deleted == []
+    assert zones.rows.space_of["z-1"] == "sp-b"
+    assert caplog.text.count("is not in space sp-a") == 2
+
+
+async def test_bazaar_listing_created_cross_space_is_refused(bazaar_handlers, caplog):
+    handlers, bazaar = bazaar_handlers
+    bazaar.post_space["bzr-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_listing_created(
+            _event(
+                FederationEventType.BAZAAR_LISTING_CREATED,
+                {
+                    "post_id": "bzr-b",
+                    "seller_user_id": "u",
+                    "mode": "fixed",
+                    "title": "T",
+                },
+                space_id="sp-a",
+            ),
+        )
+    assert bazaar.saved == []
+    assert "is not in space sp-a" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "sold", "winner_user_id": "evil", "winning_price": 1},
+        {"status": "expired"},
+        {"status": "cancelled"},
+    ],
+)
+async def test_bazaar_listing_updated_cross_space_is_refused(
+    bazaar_status_handlers, caplog, payload
+):
+    handlers, bazaar = bazaar_status_handlers
+    bazaar.listing_space["bzr-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_listing_updated(
+            _event(
+                FederationEventType.BAZAAR_LISTING_UPDATED,
+                dict(payload, post_id="bzr-b"),
+                space_id="sp-a",
+            ),
+        )
+    assert bazaar.sold == [] and bazaar.expired == [] and bazaar.cancelled == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_bazaar_bid_placed_cross_space_is_refused(bazaar_bids_handlers, caplog):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.listing_space["bzr-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_bid_placed(
+            _event(
+                FederationEventType.BAZAAR_BID_PLACED,
+                {
+                    "bid_id": "bid-x",
+                    "listing_post_id": "bzr-b",
+                    "bidder_user_id": "u",
+                    "amount": 1,
+                },
+                space_id="sp-a",
+            ),
+        )
+    assert bazaar.placed == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_bazaar_offer_accepted_cross_space_is_refused(
+    bazaar_bids_handlers, caplog
+):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.listing_space["bzr-b"] = "sp-b"
+    bazaar.existing_bids["bid-b"] = SimpleNamespace(id="bid-b", listing_post_id="bzr-b")
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_offer_accepted(
+            _event(
+                FederationEventType.BAZAAR_OFFER_ACCEPTED,
+                {"bid_id": "bid-b"},
+                space_id="sp-a",
+            ),
+        )
+    assert bazaar.accepted == []
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_bazaar_offer_accepted_unknown_bid_is_silent(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    await handlers._on_bazaar_offer_accepted(
+        _event(
+            FederationEventType.BAZAAR_OFFER_ACCEPTED,
+            {"bid_id": "ghost"},
+            space_id="sp-1",
+        ),
+    )
+    assert bazaar.accepted == []
+
+
+@pytest.mark.parametrize(
+    "handler_name,payload",
+    [
+        ("_on_poll_vote", {"post_id": "p", "option_id": "o", "voter_user_id": "u"}),
+        ("_on_poll_closed", {"post_id": "p"}),
+        ("_on_schedule_created", {"post_id": "p", "title": "t", "slots": [{}]}),
+        ("_on_schedule_response_updated", {"slot_id": "s", "user_id": "u"}),
+        ("_on_schedule_finalized", {"post_id": "p", "slot_id": "s"}),
+    ],
+)
+async def test_poll_handlers_need_a_space(repos, handlers, handler_name, payload):
+    """No space at all → nothing is written."""
+    await getattr(handlers, handler_name)(
+        _event(FederationEventType.SPACE_POLL_CLOSED, payload)
+    )
+    poll = repos["poll"]
+    assert not (poll.inserted or poll.closed or poll.scheduled or poll.finalized)
+    assert poll.responses == {}

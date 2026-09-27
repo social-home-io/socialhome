@@ -25,7 +25,7 @@ async def _seed_conflict(client):
     page = new_page(
         title="t", content="mine-version", created_by=client._uid, space_id="sp-1"
     )
-    await repo.save(page)
+    await repo.save(page, space_id=page.space_id)
     conflict_svc = client.app[page_conflict_service_key]
     await conflict_svc.record_base(
         page_id=page.id,
@@ -107,7 +107,7 @@ async def test_resolve_conflict_no_active_conflict_409(client):
         ("aa" * 32,),
     )
     page = new_page(title="t", content="c", created_by=client._uid, space_id="sp-1")
-    await client.app[page_repo_key].save(page)
+    await client.app[page_repo_key].save(page, space_id="sp-1")
     r = await client.post(
         f"/api/spaces/sp-1/pages/{page.id}/resolve-conflict",
         json={"resolution": "mine"},

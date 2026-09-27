@@ -410,12 +410,12 @@ class SqliteTaskRepo:
 
 @runtime_checkable
 class AbstractSpaceTaskRepo(Protocol):
-    async def save_list(self, space_id: str, list_: TaskList) -> TaskList: ...
+    async def save_list(self, list_: TaskList, *, space_id: str) -> bool: ...
     async def get_list(self, list_id: str) -> tuple[str, TaskList] | None: ...
     async def list_lists(self, space_id: str) -> list[TaskList]: ...
-    async def delete_list(self, list_id: str) -> None: ...
+    async def delete_list(self, list_id: str, *, space_id: str) -> bool: ...
 
-    async def save(self, space_id: str, task: Task) -> Task: ...
+    async def save(self, task: Task, *, space_id: str) -> bool: ...
     async def get(self, task_id: str) -> tuple[str, Task] | None: ...
     async def list_by_list(
         self,
@@ -437,7 +437,7 @@ class AbstractSpaceTaskRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[Task]: ...
-    async def delete(self, task_id: str) -> None: ...
+    async def delete(self, task_id: str, *, space_id: str) -> bool: ...
 
 
 class SqliteSpaceTaskRepo:
@@ -448,16 +448,23 @@ class SqliteSpaceTaskRepo:
 
     # ── Space lists ────────────────────────────────────────────────────
 
-    async def save_list(self, space_id: str, list_: TaskList) -> TaskList:
-        await self._db.enqueue(
+    async def save_list(self, list_: TaskList, *, space_id: str) -> bool:
+        """Upsert a task list into ``space_id``.
+
+        ``space_id`` is authoritative (§24.11): a conflict on an id that
+        already belongs to another space is refused, and ``False`` says
+        nothing was written.
+        """
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_task_lists(id, space_id, name, created_by)
             VALUES(?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name
+            WHERE space_task_lists.space_id = excluded.space_id
             """,
             (list_.id, space_id, list_.name, list_.created_by),
         )
-        return list_
+        return n > 0
 
     async def get_list(
         self,
@@ -479,25 +486,38 @@ class SqliteSpaceTaskRepo:
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
 
-    async def delete_list(self, list_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_task_lists WHERE id=?",
-            (list_id,),
+    async def delete_list(self, list_id: str, *, space_id: str) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "DELETE FROM space_task_lists WHERE id=? AND space_id=?",
+            (list_id, space_id),
         )
+        return n > 0
 
     # ── Space tasks ────────────────────────────────────────────────────
 
-    async def save(self, space_id: str, task: Task) -> Task:
-        await self._db.enqueue(
+    async def save(self, task: Task, *, space_id: str) -> bool:
+        """Upsert a task into ``space_id``.
+
+        ``space_id`` is authoritative (§24.11) and guards three things
+        in a single statement: the row's own scope, the parent list's
+        scope (``task.list_id`` comes from the same untrusted payload,
+        so a task must not be filed under another space's list), and
+        the conflict case (an id owned by another space is refused).
+        ``False`` means nothing was written.
+        """
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_tasks(
                 id, list_id, space_id, title, description, due_date,
                 assignees_json, status, position, created_by,
                 rrule, last_spawned_at, recurrence_parent_id,
                 archived_at, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+            ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
-                     COALESCE(?, datetime('now')))
+                     COALESCE(?, datetime('now'))
+               WHERE EXISTS (
+                   SELECT 1 FROM space_task_lists WHERE id=? AND space_id=?
+               )
             ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title,
                 description=excluded.description,
@@ -510,6 +530,7 @@ class SqliteSpaceTaskRepo:
                 recurrence_parent_id=excluded.recurrence_parent_id,
                 archived_at=excluded.archived_at,
                 updated_at=excluded.updated_at
+            WHERE space_tasks.space_id = excluded.space_id
             """,
             (
                 task.id,
@@ -528,9 +549,11 @@ class SqliteSpaceTaskRepo:
                 _iso(task.archived_at),
                 _iso(task.created_at),
                 _iso(task.updated_at),
+                task.list_id,
+                space_id,
             ),
         )
-        return task
+        return n > 0
 
     async def get(self, task_id: str) -> tuple[str, Task] | None:
         row = await self._db.fetchone(
@@ -585,11 +608,12 @@ class SqliteSpaceTaskRepo:
         )
         return [_row_to_task(d) for d in rows_to_dicts(rows)]
 
-    async def delete(self, task_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_tasks WHERE id=?",
-            (task_id,),
+    async def delete(self, task_id: str, *, space_id: str) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "DELETE FROM space_tasks WHERE id=? AND space_id=?",
+            (task_id, space_id),
         )
+        return n > 0
 
 
 # ─── Row → domain helpers for task_comments / task_attachments ───────────

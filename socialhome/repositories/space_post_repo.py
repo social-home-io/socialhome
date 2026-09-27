@@ -45,7 +45,7 @@ from .post_repo import (  # reuse the household post helpers verbatim
 
 @runtime_checkable
 class AbstractSpacePostRepo(Protocol):
-    async def save(self, space_id: str, post: Post) -> Post: ...
+    async def save(self, space_id: str, post: Post) -> Post | None: ...
     async def get(self, post_id: str) -> tuple[str, Post] | None: ...
     async def get_by_linked_event_id(
         self,
@@ -83,28 +83,52 @@ class AbstractSpacePostRepo(Protocol):
         limit: int = 500,
     ) -> list[Post]: ...
     async def soft_delete(
-        self, post_id: str, *, moderated_by: str | None = None
-    ) -> None: ...
-    async def edit(self, post_id: str, new_content: str) -> None: ...
+        self,
+        post_id: str,
+        *,
+        space_id: str,
+        moderated_by: str | None = None,
+    ) -> bool: ...
+    async def edit(
+        self,
+        post_id: str,
+        new_content: str,
+        *,
+        space_id: str,
+    ) -> bool: ...
 
     async def add_reaction(
         self,
         post_id: str,
         emoji: str,
         user_id: str,
+        *,
+        space_id: str,
     ) -> Post: ...
     async def remove_reaction(
         self,
         post_id: str,
         emoji: str,
         user_id: str,
+        *,
+        space_id: str,
     ) -> Post: ...
 
-    async def increment_comment_count(self, post_id: str) -> None: ...
-    async def decrement_comment_count(self, post_id: str) -> None: ...
+    async def increment_comment_count(
+        self,
+        post_id: str,
+        *,
+        space_id: str,
+    ) -> bool: ...
+    async def decrement_comment_count(
+        self,
+        post_id: str,
+        *,
+        space_id: str,
+    ) -> bool: ...
 
     async def list_space_media_urls(self, space_id: str) -> list[str]: ...
-    async def add_comment(self, comment: Comment) -> Comment: ...
+    async def add_comment(self, comment: Comment, *, space_id: str) -> bool: ...
     async def get_comment(self, comment_id: str) -> Comment | None: ...
     async def list_comments(self, post_id: str) -> list[Comment]: ...
     async def list_comments_since(
@@ -114,12 +138,19 @@ class AbstractSpacePostRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[tuple[str, Comment]]: ...
-    async def soft_delete_comment(self, comment_id: str) -> None: ...
+    async def soft_delete_comment(
+        self,
+        comment_id: str,
+        *,
+        space_id: str,
+    ) -> bool: ...
     async def edit_comment(
         self,
         comment_id: str,
         new_content: str,
-    ) -> None: ...
+        *,
+        space_id: str,
+    ) -> bool: ...
 
 
 class SqliteSpacePostRepo:
@@ -130,8 +161,16 @@ class SqliteSpacePostRepo:
 
     # ── Posts ──────────────────────────────────────────────────────────
 
-    async def save(self, space_id: str, post: Post) -> Post:
-        await self._db.enqueue(
+    async def save(self, space_id: str, post: Post) -> Post | None:
+        """Insert or update a space post. ``None`` = refused.
+
+        The ``DO UPDATE`` never touches ``space_id`` and is gated on
+        ``space_posts.space_id = excluded.space_id``, so an id already
+        owned by another space cannot be hijacked by a sender gated for
+        this one: SQLite reports ``rowcount == 0`` for the skipped
+        conflict resolution and the caller sees ``None``.
+        """
+        changed = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_posts(
                 id, space_id, author, bot_id, linked_event_id, type, content,
@@ -155,6 +194,7 @@ class SqliteSpacePostRepo:
                 linked_event_id=excluded.linked_event_id,
                 linked_highlight_id=excluded.linked_highlight_id,
                 hidden_from_feed=excluded.hidden_from_feed
+             WHERE space_posts.space_id = excluded.space_id
             """,
             (
                 post.id,
@@ -180,7 +220,7 @@ class SqliteSpacePostRepo:
                 _iso_or_none(post.created_at),
             ),
         )
-        return post
+        return post if changed else None
 
     async def get(self, post_id: str) -> tuple[str, Post] | None:
         """Return ``(space_id, post)`` — space id lives only on the row."""
@@ -284,26 +324,44 @@ class SqliteSpacePostRepo:
         self,
         post_id: str,
         *,
+        space_id: str,
         moderated_by: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Soft-delete a space post. ``moderated_by`` sets the
         ``moderated=1`` flag so the service layer can distinguish a
         self-delete from an admin removal (§5.2 moderation).
+
+        Scoped to ``space_id`` — returns ``False`` when the post
+        does not live in that space (or does not exist).
         """
-        await self._db.enqueue(
-            """
-            UPDATE space_posts
-               SET deleted=1, content=NULL, media_url=NULL,
-                   moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END
-             WHERE id=?
-            """,
-            (moderated_by, post_id),
+        return (
+            await self._db.enqueue_rowcount(
+                """
+                UPDATE space_posts
+                   SET deleted=1, content=NULL, media_url=NULL,
+                       moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END
+                 WHERE id=? AND space_id=?
+                """,
+                (moderated_by, post_id, space_id),
+            )
+            > 0
         )
 
-    async def edit(self, post_id: str, new_content: str) -> None:
-        await self._db.enqueue(
-            "UPDATE space_posts SET content=?, edited_at=datetime('now') WHERE id=?",
-            (new_content, post_id),
+    async def edit(
+        self,
+        post_id: str,
+        new_content: str,
+        *,
+        space_id: str,
+    ) -> bool:
+        """Replace a post's body. ``False`` = not in ``space_id``."""
+        return (
+            await self._db.enqueue_rowcount(
+                "UPDATE space_posts SET content=?, edited_at=datetime('now') "
+                "WHERE id=? AND space_id=?",
+                (new_content, post_id, space_id),
+            )
+            > 0
         )
 
     async def list_space_media_urls(self, space_id: str) -> list[str]:
@@ -343,11 +401,20 @@ class SqliteSpacePostRepo:
         post_id: str,
         emoji: str,
         user_id: str,
+        *,
+        space_id: str,
     ) -> Post:
+        """Add a reaction inside ``space_id``.
+
+        Both the SELECT and the UPDATE carry ``AND space_id=?`` so a post
+        belonging to another space raises ``KeyError`` instead of being
+        mutated.
+        """
+
         def _run(conn):
             row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=? AND deleted=0",
-                (post_id,),
+                "SELECT * FROM space_posts WHERE id=? AND space_id=? AND deleted=0",
+                (post_id, space_id),
             ).fetchone()
             if row is None:
                 raise KeyError(f"space post {post_id!r} not found or deleted")
@@ -360,12 +427,12 @@ class SqliteSpacePostRepo:
                 raise ValueError("too many distinct reactions on this post")
             reactions.setdefault(emoji, set()).add(user_id)
             conn.execute(
-                "UPDATE space_posts SET reactions=? WHERE id=?",
-                (_encode_reactions(_to_frozenset(reactions)), post_id),
+                "UPDATE space_posts SET reactions=? WHERE id=? AND space_id=?",
+                (_encode_reactions(_to_frozenset(reactions)), post_id, space_id),
             )
             row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=?",
-                (post_id,),
+                "SELECT * FROM space_posts WHERE id=? AND space_id=?",
+                (post_id, space_id),
             ).fetchone()
             return {k: row[k] for k in row.keys()}
 
@@ -377,11 +444,16 @@ class SqliteSpacePostRepo:
         post_id: str,
         emoji: str,
         user_id: str,
+        *,
+        space_id: str,
     ) -> Post:
+        """Remove a reaction inside ``space_id`` — see
+        :meth:`add_reaction` for the scoping rule."""
+
         def _run(conn):
             row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=?",
-                (post_id,),
+                "SELECT * FROM space_posts WHERE id=? AND space_id=?",
+                (post_id, space_id),
             ).fetchone()
             if row is None:
                 raise KeyError(f"space post {post_id!r} not found")
@@ -393,12 +465,12 @@ class SqliteSpacePostRepo:
                 if not bucket:
                     reactions.pop(emoji, None)
                 conn.execute(
-                    "UPDATE space_posts SET reactions=? WHERE id=?",
-                    (_encode_reactions(_to_frozenset(reactions)), post_id),
+                    "UPDATE space_posts SET reactions=? WHERE id=? AND space_id=?",
+                    (_encode_reactions(_to_frozenset(reactions)), post_id, space_id),
                 )
                 row = conn.execute(
-                    "SELECT * FROM space_posts WHERE id=?",
-                    (post_id,),
+                    "SELECT * FROM space_posts WHERE id=? AND space_id=?",
+                    (post_id, space_id),
                 ).fetchone()
             return {k: row[k] for k in row.keys()}
 
@@ -407,42 +479,89 @@ class SqliteSpacePostRepo:
 
     # ── Comment counters ───────────────────────────────────────────────
 
-    async def increment_comment_count(self, post_id: str) -> None:
-        await self._db.enqueue(
-            "UPDATE space_posts SET comment_count = comment_count + 1 WHERE id=?",
-            (post_id,),
+    async def increment_comment_count(
+        self,
+        post_id: str,
+        *,
+        space_id: str,
+    ) -> bool:
+        """Bump the counter for a post in ``space_id``."""
+        return (
+            await self._db.enqueue_rowcount(
+                "UPDATE space_posts SET comment_count = comment_count + 1 "
+                "WHERE id=? AND space_id=?",
+                (post_id, space_id),
+            )
+            > 0
         )
 
-    async def decrement_comment_count(self, post_id: str) -> None:
-        await self._db.enqueue(
-            "UPDATE space_posts "
-            "SET comment_count = MAX(0, comment_count - 1) WHERE id=?",
-            (post_id,),
+    async def decrement_comment_count(
+        self,
+        post_id: str,
+        *,
+        space_id: str,
+    ) -> bool:
+        """Lower the counter for a post in ``space_id``."""
+        return (
+            await self._db.enqueue_rowcount(
+                "UPDATE space_posts "
+                "SET comment_count = MAX(0, comment_count - 1) "
+                "WHERE id=? AND space_id=?",
+                (post_id, space_id),
+            )
+            > 0
         )
 
     # ── Comments ───────────────────────────────────────────────────────
 
-    async def add_comment(self, comment: Comment) -> Comment:
-        await self._db.enqueue(
-            """
-            INSERT INTO space_post_comments(
-                id, post_id, parent_id, author, type, content, media_url,
-                deleted, created_at
-            ) VALUES(?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
-            """,
-            (
-                comment.id,
-                comment.post_id,
-                comment.parent_id,
-                comment.author,
-                comment.type.value,
-                comment.content,
-                comment.media_url,
-                int(comment.deleted),
-                _iso_or_none(comment.created_at),
-            ),
+    async def add_comment(self, comment: Comment, *, space_id: str) -> bool:
+        """Insert a comment, but only onto a post in ``space_id``.
+
+        A reply's ``parent_id`` must name a comment on the *same* post —
+        a thread cannot hang under a comment of another post (or space).
+
+        ``space_post_comments`` has no ``space_id`` of its own — the scope
+        lives on the parent post — so the guard is an ``EXISTS`` sub-select
+        inside the same statement rather than a handler-side pre-read
+        (which would race and could be skipped by a new caller).
+        """
+        return (
+            await self._db.enqueue_rowcount(
+                """
+                INSERT INTO space_post_comments(
+                    id, post_id, parent_id, author, type, content, media_url,
+                    deleted, created_at
+                )
+                SELECT ?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
+                 WHERE EXISTS (
+                     SELECT 1 FROM space_posts WHERE id=? AND space_id=?
+                 )
+                   AND (
+                     ? IS NULL OR EXISTS (
+                         SELECT 1 FROM space_post_comments
+                          WHERE id=? AND post_id=?
+                     )
+                   )
+                """,
+                (
+                    comment.id,
+                    comment.post_id,
+                    comment.parent_id,
+                    comment.author,
+                    comment.type.value,
+                    comment.content,
+                    comment.media_url,
+                    int(comment.deleted),
+                    _iso_or_none(comment.created_at),
+                    comment.post_id,
+                    space_id,
+                    comment.parent_id,
+                    comment.parent_id,
+                    comment.post_id,
+                ),
+            )
+            > 0
         )
-        return comment
 
     async def get_comment(self, comment_id: str) -> Comment | None:
         row = await self._db.fetchone(
@@ -488,28 +607,48 @@ class SqliteSpacePostRepo:
             out.append((d["post_id"], comment))
         return out
 
-    async def soft_delete_comment(self, comment_id: str) -> None:
-        await self._db.enqueue(
-            """
-            UPDATE space_post_comments
-               SET deleted=1, content=NULL, media_url=NULL
-             WHERE id=?
-            """,
-            (comment_id,),
+    async def soft_delete_comment(self, comment_id: str, *, space_id: str) -> bool:
+        """Soft-delete a comment whose parent post is in ``space_id``.
+
+        ``False`` also for a comment that is already deleted, so a replayed
+        delete cannot lower the parent's counter twice.
+        """
+        return (
+            await self._db.enqueue_rowcount(
+                """
+                UPDATE space_post_comments
+                   SET deleted=1, content=NULL, media_url=NULL
+                 WHERE id=? AND deleted=0 AND EXISTS (
+                     SELECT 1 FROM space_posts
+                      WHERE id = space_post_comments.post_id AND space_id=?
+                 )
+                """,
+                (comment_id, space_id),
+            )
+            > 0
         )
 
     async def edit_comment(
         self,
         comment_id: str,
         new_content: str,
-    ) -> None:
-        await self._db.enqueue(
-            """
-            UPDATE space_post_comments
-               SET content=?, edited_at=datetime('now')
-             WHERE id=? AND deleted=0
-            """,
-            (new_content, comment_id),
+        *,
+        space_id: str,
+    ) -> bool:
+        """Edit a comment whose parent post is in ``space_id``."""
+        return (
+            await self._db.enqueue_rowcount(
+                """
+                UPDATE space_post_comments
+                   SET content=?, edited_at=datetime('now')
+                 WHERE id=? AND deleted=0 AND EXISTS (
+                     SELECT 1 FROM space_posts
+                      WHERE id = space_post_comments.post_id AND space_id=?
+                 )
+                """,
+                (new_content, comment_id, space_id),
+            )
+            > 0
         )
 
 

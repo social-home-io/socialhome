@@ -96,6 +96,7 @@ necessary:
 | API response | `SENSITIVE_FIELDS` (in `socialhome/security.py`) never appear in API responses. |
 | WebSocket broadcast | Per-event WS payloads exclude fields that should be local-only. |
 | Presence privacy | GPS is 4dp-truncated; instance_id leakage is gated by opt-in. |
+| Space scope | `test_space_content_scope.py` sends every space-content event type (the `SPACE_WRITE_EVENT_TYPES` vocabulary, enumerated against the real handler registry) gated for one space but naming rows of another space or the household's own rows, plus the same through the §25.6 sync receiver, and asserts every content table is unchanged. A new space-write event type fails the tripwire until it has a cross-space case. |
 
 The encryption-first rule (§25.8.21) is the load-bearing invariant
 behind these tests — see [`principles.md`](./principles.md) for why

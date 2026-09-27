@@ -21,6 +21,7 @@ from ...domain.events import (
     CalendarEventDeleted,
 )
 from ...domain.federation import FederationEventType
+from ...federation.space_scope import log_cross_space_refusal, resolve_space_id
 from ...domain.gallery import GalleryItem
 from ...domain.page import Page
 from ...domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ...repositories.gallery_repo import AbstractGalleryRepo
     from ...repositories.page_repo import AbstractPageRepo
-    from ...repositories.poll_repo import AbstractPollRepo
+    from ...repositories.space_poll_repo import AbstractSpacePollRepo
     from ...repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ...repositories.sticky_repo import AbstractStickyRepo
     from ...repositories.task_repo import AbstractSpaceTaskRepo
@@ -69,7 +70,7 @@ class SpaceContentInboundHandlers:
         sticky_repo: "AbstractStickyRepo",
         task_repo: "AbstractSpaceTaskRepo",
         calendar_repo: "AbstractSpaceCalendarRepo",
-        poll_repo: "AbstractPollRepo | None" = None,
+        poll_repo: "AbstractSpacePollRepo | None" = None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
         zone_repo: "AbstractSpaceZoneRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
@@ -216,12 +217,14 @@ class SpaceContentInboundHandlers:
     # ─── Tasks ───────────────────────────────────────────────────────────
 
     async def _on_task_saved(self, event: "FederationEvent") -> None:
-        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         task_id = str(p.get("id") or p.get("task_id") or "")
         list_id = str(p.get("list_id") or "")
         title = str(p.get("title") or "")
-        if not space_id or not task_id or not list_id or not title:
+        if not task_id or not list_id or not title:
             log.debug("SPACE_TASK_* missing required field")
             return
         try:
@@ -244,13 +247,22 @@ class SpaceContentInboundHandlers:
             due_date=None,  # due_date is a ``date`` — parsing lives in the service
             assignees=tuple(str(a) for a in assignees),
         )
-        await self._task_repo.save(space_id, task)
+        if not await self._task_repo.save(task, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task", row_id=task_id
+            )
 
     async def _on_task_deleted(self, event: "FederationEvent") -> None:
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         task_id = str(event.payload.get("id") or event.payload.get("task_id") or "")
         if not task_id:
             return
-        await self._task_repo.delete(task_id)
+        if not await self._task_repo.delete(task_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task", row_id=task_id
+            )
 
     # ─── Pages ───────────────────────────────────────────────────────────
 
@@ -260,7 +272,9 @@ class SpaceContentInboundHandlers:
         Page timestamps are ISO strings (matches the domain type —
         `Page.created_at`/`updated_at` are `str`).
         """
-        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         page_id = str(p.get("id") or p.get("page_id") or "")
         title = str(p.get("title") or "")
@@ -274,21 +288,32 @@ class SpaceContentInboundHandlers:
             created_by=str(p.get("created_by") or ""),
             created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
             updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
-            space_id=space_id or None,
+            space_id=space_id,
             cover_image_url=p.get("cover_image_url"),
         )
-        await self._page_repo.save(page)
+        if not await self._page_repo.save(page, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="page", row_id=page_id
+            )
 
     async def _on_page_deleted(self, event: "FederationEvent") -> None:
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         page_id = str(event.payload.get("id") or event.payload.get("page_id") or "")
         if not page_id:
             return
-        await self._page_repo.delete(page_id)
+        if not await self._page_repo.delete(page_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="page", row_id=page_id
+            )
 
     # ─── Stickies ────────────────────────────────────────────────────────
 
     async def _on_sticky_saved(self, event: "FederationEvent") -> None:
-        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         sticky_id = str(p.get("id") or p.get("sticky_id") or "")
         author = str(p.get("author") or p.get("created_by") or "")
@@ -308,20 +333,31 @@ class SpaceContentInboundHandlers:
             position_y=float(p.get("position_y") or 0.0),
             created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
             updated_at=now_iso,
-            space_id=space_id or None,
+            space_id=space_id,
         )
-        await self._sticky_repo.save(sticky)
+        if not await self._sticky_repo.save(sticky, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="sticky", row_id=sticky_id
+            )
 
     async def _on_sticky_deleted(self, event: "FederationEvent") -> None:
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         sticky_id = str(event.payload.get("id") or event.payload.get("sticky_id") or "")
         if not sticky_id:
             return
-        await self._sticky_repo.delete(sticky_id)
+        if not await self._sticky_repo.delete(sticky_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="sticky", row_id=sticky_id
+            )
 
     # ─── Calendar events ─────────────────────────────────────────────────
 
     async def _on_calendar_saved(self, event: "FederationEvent") -> None:
-        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         event_id = str(p.get("id") or p.get("event_id") or "")
         calendar_id = str(p.get("calendar_id") or "")
@@ -330,8 +366,7 @@ class SpaceContentInboundHandlers:
         start = parse_iso8601_optional(p.get("start"))
         end = parse_iso8601_optional(p.get("end"))
         if (
-            not space_id
-            or not event_id
+            not event_id
             or not calendar_id
             or not summary
             or not created_by
@@ -371,7 +406,11 @@ class SpaceContentInboundHandlers:
             announce_in_feed=bool(p.get("announce_in_feed", True)),
         )
         is_new = await self._calendar_repo.get_event(event_id) is None
-        await self._calendar_repo.save_event(space_id, ev)
+        if not await self._calendar_repo.save_event(ev, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="calendar event", row_id=event_id
+            )
+            return
         # Publish on the local bus so the calendar→feed bridge (Phase B)
         # can mirror the event into space_posts on inbound federation
         # arrivals too. The bridge guards against duplicates by linked_event_id.
@@ -379,16 +418,23 @@ class SpaceContentInboundHandlers:
             await self._bus.publish(CalendarEventCreated(event=ev))
         # Drain any RSVPs that arrived ahead of this event.
         try:
-            await self._calendar_repo.flush_pending_rsvps(event_id)
+            await self._calendar_repo.flush_pending_rsvps(event_id, space_id=space_id)
         except AttributeError:
             # In-memory test fakes may not implement the buffer.
             pass
 
     async def _on_calendar_deleted(self, event: "FederationEvent") -> None:
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         event_id = str(event.payload.get("id") or event.payload.get("event_id") or "")
         if not event_id:
             return
-        await self._calendar_repo.delete_event(event_id)
+        if not await self._calendar_repo.delete_event(event_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="calendar event", row_id=event_id
+            )
+            return
         # Mirror to the feed bridge so the linked post soft-deletes.
         await self._bus.publish(CalendarEventDeleted(event_id=event_id))
 
@@ -397,6 +443,9 @@ class SpaceContentInboundHandlers:
     async def _on_rsvp_updated(self, event: "FederationEvent") -> None:
         """Apply a peer's RSVP. If the underlying event hasn't propagated
         yet, buffer the RSVP and let it flush on event arrival."""
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         event_id = str(p.get("event_id") or "")
         user_id = str(p.get("user_id") or "")
@@ -411,9 +460,15 @@ class SpaceContentInboundHandlers:
         ):
             log.debug("SPACE_RSVP_UPDATED missing or invalid field")
             return
+        # The parent event decides whether this is an out-of-order
+        # arrival (buffer it) or a cross-space write (refuse it). The
+        # write itself is scoped by the repo regardless of what this
+        # read said — the read only picks between the two outcomes.
         result = await self._calendar_repo.get_event(event_id)
         if result is None:
             # Out-of-order: event hasn't arrived yet — buffer for flush.
+            # The gated space rides along so the buffer can't launder a
+            # write into a space this sender was never gated on.
             try:
                 await self._calendar_repo.buffer_pending_rsvp(
                     event_id=event_id,
@@ -421,25 +476,33 @@ class SpaceContentInboundHandlers:
                     occurrence_at=occurrence_at,
                     status=status,
                     updated_at=updated_at,
+                    space_id=space_id,
                 )
             except AttributeError:
                 log.debug("calendar_repo lacks buffer_pending_rsvp")
             return
-        await self._calendar_repo.upsert_rsvp(
+        if not await self._calendar_repo.upsert_rsvp(
             CalendarRSVP(
                 event_id=event_id,
                 user_id=user_id,
                 status=status,
                 updated_at=updated_at,
                 occurrence_at=occurrence_at,
+            ),
+            space_id=space_id,
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="RSVP for event", row_id=event_id
             )
-        )
 
     async def _on_rsvp_deleted(self, event: "FederationEvent") -> None:
         """Apply a peer's RSVP removal. Like _on_rsvp_updated, buffers
         with status='removed' if the event hasn't propagated yet — so a
         later flush honours the deletion rather than resurrecting the
         RSVP."""
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         event_id = str(p.get("event_id") or "")
         user_id = str(p.get("user_id") or "")
@@ -457,15 +520,20 @@ class SpaceContentInboundHandlers:
                     occurrence_at=occurrence_at,
                     status="removed",
                     updated_at=updated_at,
+                    space_id=space_id,
                 )
             except AttributeError:
                 log.debug("calendar_repo lacks buffer_pending_rsvp")
             return
-        await self._calendar_repo.remove_rsvp(
+        if not await self._calendar_repo.remove_rsvp(
             event_id,
             user_id,
             occurrence_at=occurrence_at,
-        )
+            space_id=space_id,
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="RSVP for event", row_id=event_id
+            )
 
     # ─── Polls ──────────────────────────────────────────────────────────
 
@@ -474,6 +542,9 @@ class SpaceContentInboundHandlers:
         (the old vote is cleared first) matching the local poll service."""
         if self._poll_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         post_id = str(p.get("post_id") or "")
         option_id = str(p.get("option_id") or "")
@@ -481,36 +552,32 @@ class SpaceContentInboundHandlers:
         if not post_id or not option_id or not voter:
             log.debug("SPACE_POLL_VOTE_CAST missing required field")
             return
-        # Guard against posting a vote for an option that doesn't
-        # actually belong to this post on our side — would corrupt
-        # the tally.
-        belongs = await self._poll_repo.option_belongs_to_post(
-            option_id=option_id,
+        # The repo proves, in the same transaction as the write, that the
+        # option belongs to this post (a mismatched pair would corrupt the
+        # tally) and that the post lives in the gated space.
+        if not await self._poll_repo.cast_vote_in_space(
+            space_id=space_id,
             post_id=post_id,
-        )
-        if not belongs:
-            log.debug(
-                "SPACE_POLL_VOTE_CAST option %s not in post %s",
-                option_id,
-                post_id,
+            option_id=option_id,
+            voter_user_id=voter,
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="poll option", row_id=option_id
             )
-            return
-        await self._poll_repo.clear_user_votes(
-            post_id=post_id,
-            voter_user_id=voter,
-        )
-        await self._poll_repo.insert_vote(
-            option_id=option_id,
-            voter_user_id=voter,
-        )
 
     async def _on_poll_closed(self, event: "FederationEvent") -> None:
         if self._poll_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         post_id = str(event.payload.get("post_id") or "")
         if not post_id:
             return
-        await self._poll_repo.close(post_id)
+        if not await self._poll_repo.close_in_space(post_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="poll", row_id=post_id
+            )
 
     async def _on_schedule_created(
         self,
@@ -527,6 +594,9 @@ class SpaceContentInboundHandlers:
         """
         if self._poll_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         post_id = str(p.get("post_id") or "")
         title = str(p.get("title") or "")
@@ -535,15 +605,19 @@ class SpaceContentInboundHandlers:
             log.debug("SPACE_SCHEDULE_CREATED missing required field: %s", p)
             return
         try:
-            await self._poll_repo.create_schedule_poll(
+            if not await self._poll_repo.create_schedule_poll_in_space(
+                space_id=space_id,
                 post_id=post_id,
                 title=title,
                 deadline=p.get("deadline"),
                 slots=list(slots_raw),
-            )
+            ):
+                log_cross_space_refusal(
+                    event, space_id=space_id, what="schedule poll", row_id=post_id
+                )
         except Exception as exc:
-            # FK failure (wrapper post not yet persisted), malformed
-            # slot row, etc. — log + drop; catch-up retries.
+            # Malformed slot row etc. — log + drop; catch-up retries. (A
+            # wrapper post that has not landed yet is a refusal above.)
             log.debug(
                 "SPACE_SCHEDULE_CREATED apply failed for post=%s: %s",
                 post_id,
@@ -557,6 +631,9 @@ class SpaceContentInboundHandlers:
         """Mirror a peer's schedule-poll vote / retraction locally."""
         if self._poll_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         slot_id = str(p.get("slot_id") or "")
         user_id = str(p.get("user_id") or "")
@@ -565,15 +642,21 @@ class SpaceContentInboundHandlers:
             log.debug("SPACE_SCHEDULE_RESPONSE_UPDATED missing field")
             return
         if response == "retracted" or not response:
-            await self._poll_repo.delete_schedule_response(
+            applied = await self._poll_repo.delete_schedule_response_in_space(
+                space_id=space_id,
                 slot_id=slot_id,
                 user_id=user_id,
             )
         else:
-            await self._poll_repo.upsert_schedule_response(
+            applied = await self._poll_repo.upsert_schedule_response_in_space(
+                space_id=space_id,
                 slot_id=slot_id,
                 user_id=user_id,
                 response=response,
+            )
+        if not applied:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="schedule slot", row_id=slot_id
             )
 
     async def _on_schedule_finalized(
@@ -586,14 +669,21 @@ class SpaceContentInboundHandlers:
         """
         if self._poll_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         post_id = str(event.payload.get("post_id") or "")
         slot_id = str(event.payload.get("slot_id") or "")
         if not post_id or not slot_id:
             return
-        await self._poll_repo.finalize_schedule_poll(
+        if not await self._poll_repo.finalize_schedule_poll_in_space(
+            space_id=space_id,
             post_id=post_id,
             slot_id=slot_id,
-        )
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="schedule poll", row_id=post_id
+            )
 
     # ─── Gallery items (§23.119) ─────────────────────────────────────────
 
@@ -603,11 +693,15 @@ class SpaceContentInboundHandlers:
         Carries the §S-9 thumbnail-only projection — the full file is
         fetched lazily by the receiver via the existing on-demand
         media path. The item's ``album_id`` must reference a local
-        album row already (chunked initial sync seeds those); if it
-        doesn't, ``create_item`` raises and we drop the event rather
-        than auto-creating a stub.
+        album row of the gated space already (chunked initial sync seeds
+        those); if it doesn't — unknown album, another space's album, or
+        a household album — the write is refused rather than
+        auto-creating a stub.
         """
         if self._gallery_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
             return
         p = event.payload
         item_id = str(p.get("id") or p.get("item_id") or "")
@@ -634,12 +728,16 @@ class SpaceContentInboundHandlers:
             created_at=p.get("created_at") or p.get("occurred_at"),
         )
         try:
-            await self._gallery_repo.create_item(item)
-            await self._gallery_repo.increment_item_count(album_id, +1)
+            if not await self._gallery_repo.create_item_in_space(
+                item, space_id=space_id
+            ):
+                log_cross_space_refusal(
+                    event, space_id=space_id, what="gallery album", row_id=album_id
+                )
         except Exception as exc:
-            # Foreign-key failure (unknown album, unknown uploader) or a
-            # duplicate id from a prior chunked-sync delivery — log and
-            # drop. Matches the chunked-sync receiver's tolerance.
+            # Foreign-key failure (unknown uploader) or a malformed
+            # record — log and drop. Matches the chunked-sync receiver's
+            # tolerance.
             log.debug(
                 "SPACE_GALLERY_ITEM_CREATED apply failed item=%s: %s",
                 item_id,
@@ -649,18 +747,20 @@ class SpaceContentInboundHandlers:
     async def _on_gallery_item_deleted(self, event: "FederationEvent") -> None:
         if self._gallery_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         item_id = str(event.payload.get("id") or event.payload.get("item_id") or "")
         if not item_id:
             return
-        # Decrement album count if the item exists; ``delete_item``
-        # is idempotent so a duplicate delete from the chunked path
-        # is harmless.
-        existing = await self._gallery_repo.get_item(item_id)
-        if existing is not None:
-            await self._gallery_repo.delete_item(item_id)
-            await self._gallery_repo.increment_item_count(
-                existing.album_id,
-                -1,
+        # Deletes the item and decrements its album's count in one
+        # transaction — only when the item's album lives in the gated
+        # space. A duplicate delete from the chunked path finds nothing.
+        if not await self._gallery_repo.delete_item_in_space(
+            item_id, space_id=space_id
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery item", row_id=item_id
             )
 
     # ─── Space zones (§23.8.7) ─────────────────────────────────────────
@@ -674,11 +774,13 @@ class SpaceContentInboundHandlers:
         """
         if self._zone_repo is None:
             return
-        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         zone_id = str(p.get("zone_id") or p.get("id") or "")
         name = str(p.get("name") or "")
-        if not space_id or not zone_id or not name:
+        if not zone_id or not name:
             log.debug("SPACE_ZONE_UPSERTED missing required field")
             return
         try:
@@ -707,17 +809,26 @@ class SpaceContentInboundHandlers:
                 p.get("updated_at") or p.get("occurred_at") or "",
             ),
         )
-        await self._zone_repo.upsert(zone)
+        if not await self._zone_repo.upsert(zone, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="zone", row_id=zone_id
+            )
 
     async def _on_zone_deleted(self, event: "FederationEvent") -> None:
         if self._zone_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
             return
         zone_id = str(
             event.payload.get("zone_id") or event.payload.get("id") or "",
         )
         if not zone_id:
             return
-        await self._zone_repo.delete(zone_id)
+        if not await self._zone_repo.delete(zone_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="zone", row_id=zone_id
+            )
 
     # ─── Bazaar listings ─────────────────────────────────────────────────
 
@@ -738,14 +849,16 @@ class SpaceContentInboundHandlers:
         """
         if self._bazaar_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         post_id = str(p.get("post_id") or "")
-        space_id = event.space_id or str(p.get("space_id") or "")
         seller_user_id = str(p.get("seller_user_id") or "")
         mode_raw = str(p.get("mode") or "")
         status_raw = str(p.get("status") or "active")
         title = str(p.get("title") or "")
-        if not post_id or not space_id or not seller_user_id or not mode_raw:
+        if not post_id or not seller_user_id or not mode_raw:
             log.debug(
                 "BAZAAR_LISTING_CREATED missing required field: %s",
                 p,
@@ -783,12 +896,16 @@ class SpaceContentInboundHandlers:
             sold_at=p.get("sold_at"),
         )
         try:
-            await self._bazaar_repo.save_listing(listing)
+            if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
+                # The wrapper post is not in this space (or has not landed
+                # yet), or the listing id belongs to another space.
+                log_cross_space_refusal(
+                    event, space_id=space_id, what="bazaar listing", row_id=post_id
+                )
         except Exception as exc:
-            # FK failure (post not landed yet), CHECK failure (unknown
-            # mode/status from a future peer), or any other repo error.
-            # Log + drop — the catch-up enqueue at the next §25.6 sync
-            # picks this up again.
+            # CHECK failure (unknown mode/status from a future peer), or
+            # any other repo error. Log + drop — the catch-up enqueue at
+            # the next §25.6 sync picks this up again.
             log.debug(
                 "BAZAAR_LISTING_CREATED apply failed listing=%s: %s",
                 post_id,
@@ -812,11 +929,20 @@ class SpaceContentInboundHandlers:
         """
         if self._bazaar_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         post_id = str(p.get("post_id") or "")
         status_raw = str(p.get("status") or "")
         if not post_id or not status_raw:
             log.debug("BAZAAR_LISTING_UPDATED missing required field: %s", p)
+            return
+        # The mutators below are scoped to ``space_id`` in SQL regardless;
+        # this read only separates a cross-space attempt (WARNING) from a
+        # benign replay against a terminal state (silent). It also hands
+        # the follow-up seller-ownership check the row it needs.
+        if not await self._listing_in_space(event, post_id, space_id):
             return
         try:
             if status_raw == "sold":
@@ -827,13 +953,14 @@ class SpaceContentInboundHandlers:
                     return
                 await self._bazaar_repo.mark_sold(
                     post_id,
+                    space_id=space_id,
                     winner_user_id=winner,
                     winning_price=int(price_raw),
                 )
             elif status_raw == "expired":
-                await self._bazaar_repo.mark_expired(post_id)
+                await self._bazaar_repo.mark_expired(post_id, space_id=space_id)
             elif status_raw == "cancelled":
-                await self._bazaar_repo.mark_cancelled(post_id)
+                await self._bazaar_repo.mark_cancelled(post_id, space_id=space_id)
             else:
                 log.debug(
                     "BAZAAR_LISTING_UPDATED unknown status %r — skipping",
@@ -858,6 +985,9 @@ class SpaceContentInboundHandlers:
         """
         if self._bazaar_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         p = event.payload
         bid_id = str(p.get("bid_id") or "")
         listing_post_id = str(p.get("listing_post_id") or "")
@@ -873,6 +1003,8 @@ class SpaceContentInboundHandlers:
             existing = None
         if existing is not None:
             return
+        if not await self._listing_in_space(event, listing_post_id, space_id):
+            return
         try:
             await self._bazaar_repo.place_bid(
                 BazaarBid(
@@ -887,6 +1019,7 @@ class SpaceContentInboundHandlers:
                     created_at="",
                     message=p.get("message"),
                 ),
+                space_id=space_id,
             )
         except Exception as exc:
             # Listing not yet persisted (race against F4 catch-up) or
@@ -914,15 +1047,45 @@ class SpaceContentInboundHandlers:
         """
         if self._bazaar_repo is None:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         bid_id = str(event.payload.get("bid_id") or "")
         if not bid_id:
             log.debug("BAZAAR_OFFER_ACCEPTED missing bid_id: %s", event.payload)
             return
+        bid = await self._bazaar_repo.get_bid(bid_id)
+        if bid is None:
+            log.debug("BAZAAR_OFFER_ACCEPTED unknown bid %s", bid_id)
+            return
+        if not await self._listing_in_space(event, bid.listing_post_id, space_id):
+            return
         try:
-            await self._bazaar_repo.accept_offer(bid_id)
+            await self._bazaar_repo.accept_offer(bid_id, space_id=space_id)
         except Exception as exc:
             log.debug(
                 "BAZAAR_OFFER_ACCEPTED apply failed bid=%s: %s",
                 bid_id,
                 exc,
             )
+
+    async def _listing_in_space(
+        self,
+        event: "FederationEvent",
+        post_id: str,
+        space_id: str,
+    ) -> bool:
+        """``True`` when ``post_id`` is a bazaar listing of ``space_id``.
+
+        Logs the cross-space refusal otherwise. Not the security boundary
+        — every bazaar mutator is scoped in SQL — only the switch between
+        "refuse loudly" and "apply (or silently no-op a replay)".
+        """
+        assert self._bazaar_repo is not None
+        listing = await self._bazaar_repo.get_listing(post_id)
+        if listing is None or listing.space_id != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="bazaar listing", row_id=post_id
+            )
+            return False
+        return True

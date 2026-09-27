@@ -79,7 +79,8 @@ async def _seed_listing(env, *, mode: BazaarMode, seller="u-seller") -> str:
             start_price=100,
             step_price=10,
             price=100,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     return pid
 
@@ -138,7 +139,7 @@ async def test_update_listing_non_seller_raises(env):
 
 async def test_update_listing_inactive_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
-    await env.repo.mark_cancelled(pid)
+    await env.repo.mark_cancelled(pid, space_id=_DEFAULT_SPACE_ID)
     with pytest.raises(BazaarServiceError):
         await env.svc.update_listing(
             post_id=pid,
@@ -193,7 +194,7 @@ async def test_cancel_listing_non_seller_raises(env):
 
 async def test_cancel_listing_inactive_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
-    await env.repo.mark_cancelled(pid)
+    await env.repo.mark_cancelled(pid, space_id=_DEFAULT_SPACE_ID)
     with pytest.raises(BazaarServiceError):
         await env.svc.cancel_listing(
             post_id=pid,
@@ -252,7 +253,7 @@ async def test_place_bid_below_floor_raises(env):
 
 async def test_place_bid_on_inactive_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
-    await env.repo.mark_cancelled(pid)
+    await env.repo.mark_cancelled(pid, space_id=_DEFAULT_SPACE_ID)
     with pytest.raises(ValueError):
         await env.svc.place_bid(
             listing_post_id=pid,

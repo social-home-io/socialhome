@@ -526,3 +526,29 @@ async def test_busy_timeout_can_be_disabled(tmp_dir):
         assert await db.fetchval("PRAGMA busy_timeout") == 0
     finally:
         await db.shutdown()
+
+
+async def test_enqueue_rowcount_reports_rows_changed(tmp_dir):
+    """enqueue_rowcount resolves to cursor.rowcount, not lastrowid.
+
+    The space-scoped repo mutators depend on this: an UPDATE whose
+    ``AND space_id=?`` predicate matched nothing must be distinguishable
+    from one that landed, so a cross-space write attempt can be refused
+    and logged instead of silently no-op'ing.
+    """
+    db = AsyncDatabase(tmp_dir / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    await db.enqueue("CREATE TABLE t(id TEXT PRIMARY KEY, scope TEXT, v TEXT)")
+    await db.enqueue("INSERT INTO t(id, scope, v) VALUES('r1','a','x')")
+
+    hit = await db.enqueue_rowcount(
+        "UPDATE t SET v='y' WHERE id=? AND scope=?", ("r1", "a")
+    )
+    miss = await db.enqueue_rowcount(
+        "UPDATE t SET v='z' WHERE id=? AND scope=?", ("r1", "b")
+    )
+    assert hit == 1
+    assert miss == 0
+    row = await db.fetchone("SELECT v FROM t WHERE id='r1'")
+    assert row is not None and row["v"] == "y"
+    await db.shutdown()

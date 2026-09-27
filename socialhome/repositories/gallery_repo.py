@@ -45,6 +45,14 @@ class AbstractGalleryRepo(Protocol):
     ) -> list[GalleryItem]: ...
     async def create_item(self, item: GalleryItem) -> GalleryItem: ...
     async def delete_item(self, item_id: str) -> None: ...
+    async def create_item_in_space(
+        self,
+        item: GalleryItem,
+        *,
+        space_id: str,
+        bump_count: bool = True,
+    ) -> bool: ...
+    async def delete_item_in_space(self, item_id: str, *, space_id: str) -> bool: ...
     async def delete_items_by_source_post(
         self,
         post_id: str,
@@ -308,30 +316,113 @@ class SqliteGalleryRepo:
             -- ``except`` hid it along with the failures that mattered.
             ON CONFLICT DO NOTHING
             """,
-            (
-                item.id,
-                item.album_id,
-                item.uploaded_by,
-                item.item_type,
-                item.url.rsplit("/", 1)[-1],
-                item.thumbnail_url.rsplit("/", 1)[-1],
-                item.width,
-                item.height,
-                item.duration_s,
-                item.caption,
-                item.taken_at,
-                item.sort_order,
-                item.source_post_id,
-                item.created_at or datetime.now(timezone.utc).isoformat(),
-            ),
+            self._item_params(item),
         )
         return item
+
+    @staticmethod
+    def _item_params(item: GalleryItem) -> tuple:
+        return (
+            item.id,
+            item.album_id,
+            item.uploaded_by,
+            item.item_type,
+            item.url.rsplit("/", 1)[-1],
+            item.thumbnail_url.rsplit("/", 1)[-1],
+            item.width,
+            item.height,
+            item.duration_s,
+            item.caption,
+            item.taken_at,
+            item.sort_order,
+            item.source_post_id,
+            item.created_at or datetime.now(timezone.utc).isoformat(),
+        )
 
     async def delete_item(self, item_id: str) -> None:
         await self._db.enqueue(
             "DELETE FROM gallery_items WHERE id=?",
             (item_id,),
         )
+
+    async def create_item_in_space(
+        self,
+        item: GalleryItem,
+        *,
+        space_id: str,
+        bump_count: bool = True,
+    ) -> bool:
+        """Insert ``item`` into an album of ``space_id`` (federation, §24.11).
+
+        ``item.album_id`` comes from the untrusted payload, so the album's
+        space is checked in the same transaction as the insert: an album
+        of another space — or a household album (``space_id IS NULL``) —
+        is refused with ``False``. A redelivered id is an idempotent
+        no-op (``True``, count untouched); an id already used by an item
+        elsewhere is never overwritten. ``item_count`` is bumped only when
+        a row was actually inserted — and not at all with
+        ``bump_count=False`` (the §25.6 sync ships the album's count on
+        the album record itself).
+        """
+        params = self._item_params(item)
+
+        def _run(conn) -> bool:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM gallery_albums WHERE id=? AND space_id=?",
+                    (item.album_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return False
+            cur = conn.execute(
+                """
+                INSERT INTO gallery_items(
+                    id, album_id, uploaded_by, item_type,
+                    filename, thumbnail_filename, width, height,
+                    duration_s, caption, taken_at, sort_order,
+                    source_post_id, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                params,
+            )
+            if cur.rowcount and bump_count:
+                conn.execute(
+                    "UPDATE gallery_albums SET item_count = item_count + 1 "
+                    "WHERE id=? AND space_id=?",
+                    (item.album_id, space_id),
+                )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def delete_item_in_space(self, item_id: str, *, space_id: str) -> bool:
+        """Delete an item whose album lives in ``space_id`` (federation).
+
+        ``False`` when the item is unknown or sits in an album of another
+        space / the household gallery. Decrements the album's
+        ``item_count`` in the same transaction.
+        """
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT i.album_id FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE i.id=? AND a.space_id=?",
+                (item_id, space_id),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute("DELETE FROM gallery_items WHERE id=?", (item_id,))
+            conn.execute(
+                "UPDATE gallery_albums SET item_count=MAX(0, item_count - 1) "
+                "WHERE id=? AND space_id=?",
+                (row[0], space_id),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
 
     async def delete_items_by_source_post(
         self,

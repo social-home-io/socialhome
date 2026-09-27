@@ -89,7 +89,7 @@ async def test_space_task_crud(env):
 
     now = datetime.now(timezone.utc)
     tl = TaskList(id=uuid.uuid4().hex, name="Space Chores", created_by="u1")
-    await env.space_task_repo.save_list(space_id, tl)
+    await env.space_task_repo.save_list(tl, space_id=space_id)
 
     lists = await env.space_task_repo.list_lists(space_id)
     assert any(lst.id == tl.id for lst in lists)
@@ -104,7 +104,7 @@ async def test_space_task_crud(env):
         created_at=now,
         updated_at=now,
     )
-    await env.space_task_repo.save(space_id, task)
+    await env.space_task_repo.save(task, space_id=space_id)
 
     tasks = await env.space_task_repo.list_by_list(tl.id)
     assert any(t.id == task.id for t in tasks)
@@ -112,11 +112,11 @@ async def test_space_task_crud(env):
     all_tasks = await env.space_task_repo.list_by_space(space_id)
     assert any(t.id == task.id for t in all_tasks)
 
-    await env.space_task_repo.delete(task.id)
+    await env.space_task_repo.delete(task.id, space_id=space_id)
     result = await env.space_task_repo.get(task.id)
     assert result is None
 
-    await env.space_task_repo.delete_list(tl.id)
+    await env.space_task_repo.delete_list(tl.id, space_id=space_id)
     result2 = await env.space_task_repo.get_list(tl.id)
     assert result2 is None
 

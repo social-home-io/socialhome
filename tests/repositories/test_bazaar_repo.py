@@ -88,19 +88,24 @@ async def test_bazaar_listing_lifecycle(env):
         created_at=None,
         price=5000,
     )
-    saved = await env.bazaar_repo.save_listing(listing)
+    assert await env.bazaar_repo.save_listing(listing, space_id=_DEFAULT_SPACE_ID)
+    saved = await env.bazaar_repo.get_listing(pid)
     assert saved.title == "Old bike"
 
     active = await env.bazaar_repo.list_active()
     assert any(lst.post_id == pid for lst in active)
 
-    await env.bazaar_repo.mark_sold(pid, winner_user_id="u2", winning_price=4500)
+    await env.bazaar_repo.mark_sold(
+        pid, winner_user_id="u2", winning_price=4500, space_id=_DEFAULT_SPACE_ID
+    )
     got = await env.bazaar_repo.get_listing(pid)
     assert got.status == BazaarStatus.SOLD
     assert got.winner_user_id == "u2"
 
     with pytest.raises(ValueError):
-        await env.bazaar_repo.mark_sold(pid, winner_user_id="u3", winning_price=4000)
+        await env.bazaar_repo.mark_sold(
+            pid, winner_user_id="u3", winning_price=4000, space_id=_DEFAULT_SPACE_ID
+        )
 
 
 async def test_bazaar_bid_state_machine(env):
@@ -119,12 +124,12 @@ async def test_bazaar_bid_state_machine(env):
         created_at=None,
         price=20000,
     )
-    await env.bazaar_repo.save_listing(listing)
+    await env.bazaar_repo.save_listing(listing, space_id=_DEFAULT_SPACE_ID)
 
     bid_a = new_bid(listing_post_id=pid, bidder_user_id="buyer_a", amount=18000)
     bid_b = new_bid(listing_post_id=pid, bidder_user_id="buyer_b", amount=19000)
-    await env.bazaar_repo.place_bid(bid_a)
-    await env.bazaar_repo.place_bid(bid_b)
+    await env.bazaar_repo.place_bid(bid_a, space_id=_DEFAULT_SPACE_ID)
+    await env.bazaar_repo.place_bid(bid_b, space_id=_DEFAULT_SPACE_ID)
 
     await env.bazaar_repo.withdraw_bid(bid_a.id)
     got_a = await env.bazaar_repo.get_bid(bid_a.id)
@@ -133,12 +138,12 @@ async def test_bazaar_bid_state_machine(env):
     with pytest.raises(BidStateError):
         await env.bazaar_repo.withdraw_bid(bid_a.id)
 
-    await env.bazaar_repo.accept_offer(bid_b.id)
+    await env.bazaar_repo.accept_offer(bid_b.id, space_id=_DEFAULT_SPACE_ID)
     got_b = await env.bazaar_repo.get_bid(bid_b.id)
     assert got_b.accepted
 
     with pytest.raises(BidStateError):
-        await env.bazaar_repo.accept_offer(bid_b.id)
+        await env.bazaar_repo.accept_offer(bid_b.id, space_id=_DEFAULT_SPACE_ID)
 
 
 async def test_bazaar_relayed_bid_empty_created_at_does_not_win_tie(env):
@@ -169,11 +174,11 @@ async def test_bazaar_relayed_bid_empty_created_at_does_not_win_tie(env):
         created_at=None,
         price=None,
     )
-    await env.bazaar_repo.save_listing(listing)
+    await env.bazaar_repo.save_listing(listing, space_id=_DEFAULT_SPACE_ID)
 
     # Earlier LOCAL bid — gets a real, populated created_at.
     local_bid = new_bid(listing_post_id=pid, bidder_user_id="buyer_local", amount=5000)
-    await env.bazaar_repo.place_bid(local_bid)
+    await env.bazaar_repo.place_bid(local_bid, space_id=_DEFAULT_SPACE_ID)
 
     # Federation-relayed bid, same amount (tie), payload carried no
     # created_at — mirrors what the inbound handler builds when a relayed
@@ -185,7 +190,7 @@ async def test_bazaar_relayed_bid_empty_created_at_does_not_win_tie(env):
         amount=5000,
         created_at="",
     )
-    await env.bazaar_repo.place_bid(relayed_bid)
+    await env.bazaar_repo.place_bid(relayed_bid, space_id=_DEFAULT_SPACE_ID)
 
     stored = await env.bazaar_repo.get_bid(relayed_bid.id)
     assert stored is not None
@@ -216,17 +221,17 @@ async def test_bazaar_reject_offer(env):
         created_at=None,
         price=30000,
     )
-    await env.bazaar_repo.save_listing(listing)
+    await env.bazaar_repo.save_listing(listing, space_id=_DEFAULT_SPACE_ID)
 
     bid = new_bid(listing_post_id=pid, bidder_user_id="buyer_x", amount=28000)
-    await env.bazaar_repo.place_bid(bid)
+    await env.bazaar_repo.place_bid(bid, space_id=_DEFAULT_SPACE_ID)
 
-    await env.bazaar_repo.accept_offer(bid.id)
+    await env.bazaar_repo.accept_offer(bid.id, space_id=_DEFAULT_SPACE_ID)
     with pytest.raises(BidStateError):
         await env.bazaar_repo.reject_offer(bid.id, reason="changed mind")
 
     bid2 = new_bid(listing_post_id=pid, bidder_user_id="buyer_y", amount=27000)
-    await env.bazaar_repo.place_bid(bid2)
+    await env.bazaar_repo.place_bid(bid2, space_id=_DEFAULT_SPACE_ID)
     await env.bazaar_repo.reject_offer(bid2.id, reason="price too low")
     got = await env.bazaar_repo.get_bid(bid2.id)
     assert got.rejected
@@ -254,7 +259,8 @@ async def test_bazaar_expired_and_cancelled(env):
                 status=BazaarStatus.ACTIVE,
                 created_at=None,
                 price=100,
-            )
+            ),
+            space_id=_DEFAULT_SPACE_ID,
         )
 
     expired = await env.bazaar_repo.list_expired()
@@ -262,10 +268,10 @@ async def test_bazaar_expired_and_cancelled(env):
     assert pid1 in expired_ids
     assert pid2 not in expired_ids
 
-    await env.bazaar_repo.mark_expired(pid1)
+    await env.bazaar_repo.mark_expired(pid1, space_id=_DEFAULT_SPACE_ID)
     assert (await env.bazaar_repo.get_listing(pid1)).status == BazaarStatus.EXPIRED
 
-    await env.bazaar_repo.mark_cancelled(pid2)
+    await env.bazaar_repo.mark_cancelled(pid2, space_id=_DEFAULT_SPACE_ID)
     assert (await env.bazaar_repo.get_listing(pid2)).status == BazaarStatus.CANCELLED
 
 
@@ -286,7 +292,7 @@ async def test_bazaar_currency_validation(env):
         price=100,
     )
     with pytest.raises(ValueError):
-        await env.bazaar_repo.save_listing(listing)
+        await env.bazaar_repo.save_listing(listing, space_id=_DEFAULT_SPACE_ID)
 
 
 # ─── §23.15 auction anti-snipe ─────────────────────────────────────────────
@@ -313,14 +319,16 @@ async def test_auction_antisnipe_extends_end_time(env):
             created_at=None,
             start_price=100,
             step_price=10,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     await env.bazaar_repo.place_bid(
         new_bid(
             listing_post_id=pid,
             bidder_user_id="u2",
             amount=110,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     listing = await env.bazaar_repo.get_listing(pid)
     new_end = datetime.fromisoformat(
@@ -352,14 +360,16 @@ async def test_auction_no_extend_outside_snipe_window(env):
             created_at=None,
             start_price=100,
             step_price=10,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     await env.bazaar_repo.place_bid(
         new_bid(
             listing_post_id=pid,
             bidder_user_id="u2",
             amount=110,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     listing = await env.bazaar_repo.get_listing(pid)
     assert listing.end_time == original_end
@@ -384,14 +394,16 @@ async def test_non_auction_modes_do_not_extend(env):
             status=BazaarStatus.ACTIVE,
             created_at=None,
             price=100,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     await env.bazaar_repo.place_bid(
         new_bid(
             listing_post_id=pid,
             bidder_user_id="u2",
             amount=100,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     listing = await env.bazaar_repo.get_listing(pid)
     assert listing.end_time == close_soon
@@ -414,7 +426,8 @@ async def _seed_listing(env, pid: str, *, seller: str = "u1"):
             status=BazaarStatus.ACTIVE,
             created_at=None,
             price=5000,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
 
 
@@ -544,3 +557,100 @@ async def test_unsave_removes_bookmark(env):
     await env.bazaar_repo.unsave_listing_bookmark(user_id="u-alice", post_id=pid)
     assert not await env.bazaar_repo.is_listing_saved(user_id="u-alice", post_id=pid)
     assert await env.bazaar_repo.list_saved_listings("u-alice") == []
+
+
+# ─── §24.11 space scoping ──────────────────────────────────────────────────
+
+_OTHER_SPACE_ID = "space-bazaar-other"
+
+
+def _listing(pid: str, *, space_id: str = _DEFAULT_SPACE_ID, **kw) -> BazaarListing:
+    fields = dict(
+        post_id=pid,
+        space_id=space_id,
+        seller_user_id="u1",
+        mode=BazaarMode.OFFER,
+        title="Item",
+        end_time="2099-01-01T00:00:00",
+        currency="EUR",
+        status=BazaarStatus.ACTIVE,
+        created_at=None,
+        price=100,
+    )
+    fields.update(kw)
+    return BazaarListing(**fields)
+
+
+@pytest.fixture
+async def other_listing(env):
+    """A listing (with one pending bid) of ``_OTHER_SPACE_ID``, plus a
+    bare post of the default space the tests can point at."""
+    pid = "pid-other"
+    await _seed_post(env.db, pid, _OTHER_SPACE_ID)
+    await _seed_post(env.db, "pid-mine")
+    assert await env.bazaar_repo.save_listing(
+        _listing(pid, space_id=_OTHER_SPACE_ID), space_id=_OTHER_SPACE_ID
+    )
+    bid = new_bid(listing_post_id=pid, bidder_user_id="buyer", amount=90)
+    await env.bazaar_repo.place_bid(bid, space_id=_OTHER_SPACE_ID)
+    return pid, bid.id
+
+
+async def test_save_listing_refuses_a_listing_of_another_space(env, other_listing):
+    pid, _ = other_listing
+    assert not await env.bazaar_repo.save_listing(
+        _listing(pid, title="pwned"), space_id=_DEFAULT_SPACE_ID
+    )
+    got = await env.bazaar_repo.get_listing(pid)
+    assert got.title == "Item"
+    assert got.space_id == _OTHER_SPACE_ID
+
+
+async def test_save_listing_refuses_a_wrapper_post_of_another_space(env):
+    """A new listing must sit on a post of the scoped space."""
+    await _seed_post(env.db, "pid-x", _OTHER_SPACE_ID)
+    await _seed_space(env.db)
+    assert not await env.bazaar_repo.save_listing(
+        _listing("pid-x"), space_id=_DEFAULT_SPACE_ID
+    )
+    assert await env.bazaar_repo.get_listing("pid-x") is None
+
+
+async def test_save_listing_uses_the_scope_not_the_dataclass(env, other_listing):
+    assert await env.bazaar_repo.save_listing(
+        _listing("pid-mine", space_id=_OTHER_SPACE_ID), space_id=_DEFAULT_SPACE_ID
+    )
+    assert (await env.bazaar_repo.get_listing("pid-mine")).space_id == (
+        _DEFAULT_SPACE_ID
+    )
+
+
+async def test_status_mutators_are_scoped(env, other_listing):
+    pid, _ = other_listing
+    assert not await env.bazaar_repo.mark_expired(pid, space_id=_DEFAULT_SPACE_ID)
+    assert not await env.bazaar_repo.mark_cancelled(pid, space_id=_DEFAULT_SPACE_ID)
+    with pytest.raises(ValueError):
+        await env.bazaar_repo.mark_sold(
+            pid, space_id=_DEFAULT_SPACE_ID, winner_user_id="evil", winning_price=1
+        )
+    got = await env.bazaar_repo.get_listing(pid)
+    assert got.status == BazaarStatus.ACTIVE
+    assert got.winner_user_id is None
+    assert await env.bazaar_repo.mark_cancelled(pid, space_id=_OTHER_SPACE_ID)
+
+
+async def test_place_bid_is_scoped(env, other_listing):
+    pid, _ = other_listing
+    evil = new_bid(listing_post_id=pid, bidder_user_id="evil", amount=500)
+    with pytest.raises(ValueError):
+        await env.bazaar_repo.place_bid(evil, space_id=_DEFAULT_SPACE_ID)
+    assert await env.bazaar_repo.get_bid(evil.id) is None
+
+
+async def test_accept_offer_is_scoped(env, other_listing):
+    _pid, bid_id = other_listing
+    with pytest.raises(ValueError):
+        await env.bazaar_repo.accept_offer(bid_id, space_id=_DEFAULT_SPACE_ID)
+    assert not (await env.bazaar_repo.get_bid(bid_id)).accepted
+    await env.bazaar_repo.accept_offer(bid_id, space_id=_OTHER_SPACE_ID)
+    assert (await env.bazaar_repo.get_bid(bid_id)).accepted

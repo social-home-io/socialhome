@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import orjson
+from types import SimpleNamespace
+
 import pytest
 
 from socialhome.crypto import REPLAY_CACHE_WINDOW, ReplayCache
@@ -293,6 +295,38 @@ async def test_ban_check_rejects_banned():
     ctx.envelope = _minimal_envelope(space_id="sp-1")
     with pytest.raises(ValueError, match="banned"):
         await step(ctx)
+
+
+async def test_ban_check_judges_the_payload_space_when_routing_is_absent():
+    """Handlers fall back to ``payload["space_id"]``, so the ban check must
+    too — dropping the routing field cannot dodge a ban."""
+    step = make_ban_check(
+        federation_repo=_FakeBanRepo(banned_combos=[("sp-1", "remote-iid")]),
+    )
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope()
+    ctx.event = SimpleNamespace(payload={"space_id": "sp-1"})
+    with pytest.raises(ValueError, match="banned"):
+        await step(ctx)
+
+
+async def test_ban_check_judges_both_spaces_when_they_differ():
+    step = make_ban_check(
+        federation_repo=_FakeBanRepo(banned_combos=[("sp-2", "remote-iid")]),
+    )
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope(space_id="sp-1")
+    ctx.event = SimpleNamespace(payload={"space_id": "sp-2"})
+    with pytest.raises(ValueError, match="banned"):
+        await step(ctx)
+
+
+async def test_ban_check_passes_unbanned_payload_space():
+    step = make_ban_check(federation_repo=_FakeBanRepo())
+    ctx = InboundContext()
+    ctx.envelope = _minimal_envelope(space_id="sp-1")
+    ctx.event = SimpleNamespace(payload={"space_id": "sp-1"})
+    await step(ctx)
 
 
 # ─── Step 10: persist_replay ─────────────────────────────────────────────

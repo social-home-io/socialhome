@@ -46,16 +46,30 @@ class AbstractStickyRepo(Protocol):
         *,
         limit: int = 500,
     ) -> builtins.list[Sticky]: ...
-    async def update_content(self, sticky_id: str, content: str) -> None: ...
+    async def update_content(
+        self,
+        sticky_id: str,
+        content: str,
+        *,
+        space_id: str | None,
+    ) -> bool: ...
     async def update_position(
         self,
         sticky_id: str,
         x: float,
         y: float,
-    ) -> None: ...
-    async def update_color(self, sticky_id: str, color: str) -> None: ...
-    async def delete(self, sticky_id: str) -> None: ...
-    async def save(self, sticky: Sticky) -> Sticky: ...
+        *,
+        space_id: str | None,
+    ) -> bool: ...
+    async def update_color(
+        self,
+        sticky_id: str,
+        color: str,
+        *,
+        space_id: str | None,
+    ) -> bool: ...
+    async def delete(self, sticky_id: str, *, space_id: str | None) -> bool: ...
+    async def save(self, sticky: Sticky, *, space_id: str | None) -> bool: ...
 
 
 class SqliteStickyRepo:
@@ -163,41 +177,67 @@ class SqliteStickyRepo:
         )
         return [s for s in (_row_to_sticky(d) for d in rows_to_dicts(rows)) if s]
 
-    async def update_content(self, sticky_id: str, content: str) -> None:
+    async def update_content(
+        self,
+        sticky_id: str,
+        content: str,
+        *,
+        space_id: str | None,
+    ) -> bool:
         content = content.strip()
         if not content:
             raise ValueError("sticky content must not be empty")
-        await self._db.enqueue(
-            "UPDATE stickies SET content=?, updated_at=datetime('now') WHERE id=?",
-            (content, sticky_id),
+        n = await self._db.enqueue_rowcount(
+            "UPDATE stickies SET content=?, updated_at=datetime('now') "
+            "WHERE id=? AND space_id IS ?",
+            (content, sticky_id, space_id),
         )
+        return n > 0
 
     async def update_position(
         self,
         sticky_id: str,
         x: float,
         y: float,
-    ) -> None:
-        await self._db.enqueue(
+        *,
+        space_id: str | None,
+    ) -> bool:
+        n = await self._db.enqueue_rowcount(
             "UPDATE stickies SET position_x=?, position_y=?, "
-            "updated_at=datetime('now') WHERE id=?",
-            (float(x), float(y), sticky_id),
+            "updated_at=datetime('now') WHERE id=? AND space_id IS ?",
+            (float(x), float(y), sticky_id, space_id),
         )
+        return n > 0
 
-    async def update_color(self, sticky_id: str, color: str) -> None:
-        await self._db.enqueue(
-            "UPDATE stickies SET color=?, updated_at=datetime('now') WHERE id=?",
-            (color, sticky_id),
+    async def update_color(
+        self,
+        sticky_id: str,
+        color: str,
+        *,
+        space_id: str | None,
+    ) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "UPDATE stickies SET color=?, updated_at=datetime('now') "
+            "WHERE id=? AND space_id IS ?",
+            (color, sticky_id, space_id),
         )
+        return n > 0
 
-    async def save(self, sticky: Sticky) -> Sticky:
+    async def save(self, sticky: Sticky, *, space_id: str | None) -> bool:
         """Upsert a sticky with an externally-provided id.
 
         Used by federation mirroring (§13) where the peer's id must be
         preserved on the local row — don't call :meth:`add` in that
         path because it mints a fresh id.
+
+        ``space_id`` is authoritative (§24.11): it is the scope the
+        inbound pipeline gated the sender on, and it — not
+        ``sticky.space_id`` — decides both the column value and which
+        rows this upsert may touch. A conflict on an id that already
+        belongs to another space (household rows included, via the
+        null-safe ``IS``) is refused and reported as ``False``.
         """
-        await self._db.enqueue(
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO stickies(
                 id, space_id, author, content, color, position_x, position_y,
@@ -210,10 +250,11 @@ class SqliteStickyRepo:
                 position_x=excluded.position_x,
                 position_y=excluded.position_y,
                 updated_at=excluded.updated_at
+            WHERE stickies.space_id IS excluded.space_id
             """,
             (
                 sticky.id,
-                sticky.space_id,
+                space_id,
                 sticky.author,
                 sticky.content,
                 sticky.color,
@@ -223,13 +264,14 @@ class SqliteStickyRepo:
                 sticky.updated_at,
             ),
         )
-        return sticky
+        return n > 0
 
-    async def delete(self, sticky_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM stickies WHERE id=?",
-            (sticky_id,),
+    async def delete(self, sticky_id: str, *, space_id: str | None) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "DELETE FROM stickies WHERE id=? AND space_id IS ?",
+            (sticky_id, space_id),
         )
+        return n > 0
 
 
 def _row_to_sticky(row: dict | None) -> Sticky | None:

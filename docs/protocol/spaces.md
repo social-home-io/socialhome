@@ -197,6 +197,46 @@ The rule, precisely:
   attributed, and passing it would hand a follower every handler that
   keys on a bare row id.
 
+## The routing `space_id` is authoritative for every mutation
+
+The gates above judge a sender against **one** space — the one
+`resolve_space_id(event)` (`socialhome/federation/space_scope.py`)
+returns: the routing field first, the payload copy only as a fallback,
+and a present-but-different payload copy is a refusal rather than a
+tiebreak. That same id is the only space the event's writes may land in.
+Content handlers pass it down and **the repositories enforce it**:
+
+- every space-content mutator takes a `space_id` and scopes its statement
+  with it (`… WHERE id=? AND space_id=?`);
+- an upsert never moves a row between spaces — its `ON CONFLICT` clause
+  does not rewrite `space_id` and does nothing when the existing row
+  belongs to another space;
+- a child row (a comment or reply, an RSVP, a task on a list, a poll vote
+  or schedule answer, a gallery item, a bazaar listing / bid / accepted
+  offer) is written only when its parent resolves to the same space, in
+  the same statement or transaction as the write — never on the strength
+  of a handler-side pre-read;
+- a household's own, non-space rows (personal pages, household stickies,
+  household gallery albums) are never reachable from a space-routed
+  event.
+
+A mutator that matches no row in the gated space reports it; the handler
+drops the event, logs the refusal at WARNING and publishes no bus event.
+The §25.6 catch-up stream (`SpaceSyncReceiver`) is held to the same rule:
+records of a chunk for space A are written into space A or not at all,
+whatever ids or `space_id` they carry. An RSVP that arrives before its
+event is buffered together with the space it was received for and only
+applied to an event of that space.
+
+Local REST callers go through the same scoped mutators with the space
+they already resolved. Where a repository also serves the household
+(non-space) surface — polls and the gallery — federation uses dedicated
+`*_in_space` methods (`AbstractSpacePollRepo`,
+`AbstractGalleryRepo.create_item_in_space` / `delete_item_in_space`).
+`tests/protocol/test_space_content_scope.py` walks every event type in
+`SPACE_WRITE_EVENT_TYPES` against the real handler registry and fails
+until each one has a cross-space case.
+
 ## Roster authority
 
 Content is only half the promise. The other half is the roster itself: a

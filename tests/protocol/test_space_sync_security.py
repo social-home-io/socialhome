@@ -93,9 +93,9 @@ class _Stub:
     ):
         self.saved.append((space_id, user_id, banned_by, reason))
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self.saved.append(comment)
-        return comment
+        return True
 
     async def save_event(self, space_id, event):
         self.saved.append((space_id, event))

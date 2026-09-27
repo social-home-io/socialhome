@@ -411,16 +411,16 @@ async def test_sticky_space_scoped(env):
     assert space_sticky.id in space_ids
     assert space_sticky.id not in household_ids
 
-    await env.sticky_repo.update_content(household.id, "Buy oat milk")
+    await env.sticky_repo.update_content(household.id, "Buy oat milk", space_id=None)
     updated = await env.sticky_repo.get(household.id)
     assert updated.content == "Buy oat milk"
 
-    await env.sticky_repo.update_color(household.id, "#FF0000")
+    await env.sticky_repo.update_color(household.id, "#FF0000", space_id=None)
     colored = await env.sticky_repo.get(household.id)
     assert colored.color == "#FF0000"
 
-    await env.sticky_repo.delete(household.id)
-    await env.sticky_repo.delete(space_sticky.id)
+    await env.sticky_repo.delete(household.id, space_id=None)
+    await env.sticky_repo.delete(space_sticky.id, space_id=space_id)
     assert await env.sticky_repo.get(household.id) is None
     assert await env.sticky_repo.get(space_sticky.id) is None
 

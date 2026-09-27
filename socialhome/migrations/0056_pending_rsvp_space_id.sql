@@ -1,0 +1,17 @@
+-- §24.11 space-scoped federation writes.
+--
+-- ``pending_federated_rsvps`` buffers an inbound RSVP whose calendar
+-- event hasn't propagated yet. Every space-content mutator is scoped to
+-- the space the inbound pipeline gated the sender on; a buffered row has
+-- to carry that scope too, so that when the event lands the buffered
+-- RSVP is only applied if the event belongs to the same space it was
+-- received for.
+--
+-- The buffer is a short-lived federation staging table with no other
+-- carrier for that scope (the parent event does not exist locally yet,
+-- by definition), so the scope is stored alongside the row.
+--
+-- Additive and NULL-defaulted: existing buffered rows keep NULL and are
+-- simply never flushed — they age out through ``gc_pending_rsvps`` like
+-- any other buffered row whose event never arrives.
+ALTER TABLE pending_federated_rsvps ADD COLUMN space_id TEXT;

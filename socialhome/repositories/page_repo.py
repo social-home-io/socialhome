@@ -57,7 +57,7 @@ from ..domain.page import Page, PageVersion  # noqa: F401,E402
 
 @runtime_checkable
 class AbstractPageRepo(Protocol):
-    async def save(self, page: Page) -> Page: ...
+    async def save(self, page: Page, *, space_id: str | None) -> bool: ...
     async def get(self, page_id: str) -> Page | None: ...
     async def list(
         self,
@@ -71,7 +71,7 @@ class AbstractPageRepo(Protocol):
         *,
         limit: int = 500,
     ) -> builtins.list[Page]: ...
-    async def delete(self, page_id: str) -> None: ...
+    async def delete(self, page_id: str, *, space_id: str | None) -> bool: ...
 
     async def acquire_lock(
         self,
@@ -129,9 +129,18 @@ class SqlitePageRepo:
 
     # ── Pages ──────────────────────────────────────────────────────────
 
-    async def save(self, page: Page) -> Page:
-        if page.space_id is None:
-            await self._db.enqueue(
+    async def save(self, page: Page, *, space_id: str | None) -> bool:
+        """Upsert a page into the table its scope selects.
+
+        ``space_id`` is authoritative (§24.11) — for an inbound
+        federation write it is the space the pipeline gated the sender
+        on, and it decides *both* which table is touched (``None`` →
+        the household ``pages`` table, otherwise ``space_pages``) and
+        which rows may be updated. An id that already belongs to
+        another space is refused: ``False`` means nothing was written.
+        """
+        if space_id is None:
+            n = await self._db.enqueue_rowcount(
                 """
                 INSERT INTO pages(
                     id, title, content, cover_image_url, created_by,
@@ -173,7 +182,7 @@ class SqlitePageRepo:
                 ),
             )
         else:
-            await self._db.enqueue(
+            n = await self._db.enqueue_rowcount(
                 """
                 INSERT INTO space_pages(
                     id, space_id, title, content, cover_image_url, created_by,
@@ -194,10 +203,11 @@ class SqlitePageRepo:
                     updated_at=datetime('now'),
                     last_editor_user_id=excluded.last_editor_user_id,
                     last_edited_at=excluded.last_edited_at
+                WHERE space_pages.space_id = excluded.space_id
                 """,
                 (
                     page.id,
-                    page.space_id,
+                    space_id,
                     page.title,
                     page.content,
                     page.cover_image_url,
@@ -215,7 +225,7 @@ class SqlitePageRepo:
                     page.delete_approved_at,
                 ),
             )
-        return page
+        return n > 0
 
     async def get(self, page_id: str) -> Page | None:
         row = await self._db.fetchone(
@@ -276,15 +286,38 @@ class SqlitePageRepo:
         )
         return [p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p]
 
-    async def delete(self, page_id: str) -> None:
-        # Try both tables; whichever matches, wins.
-        await self._db.enqueue("DELETE FROM pages WHERE id=?", (page_id,))
-        await self._db.enqueue("DELETE FROM space_pages WHERE id=?", (page_id,))
-        # Conflict snapshots carry no ON DELETE CASCADE FK, so drop them
-        # explicitly — otherwise a deleted page's full-body snapshots leak.
-        await self._db.enqueue(
-            "DELETE FROM space_page_snapshots WHERE page_id=?", (page_id,)
+    async def delete(self, page_id: str, *, space_id: str | None) -> bool:
+        """Delete a page from the table its scope selects.
+
+        The two tables are never both touched (§24.11): a
+        ``SPACE_PAGE_DELETED`` gated on a space can only ever reach
+        ``space_pages`` — naming a household page id leaves the
+        household's personal page alone. ``space_id=None`` is the
+        household path and likewise cannot reach a space page.
+        """
+        if space_id is None:
+            n = await self._db.enqueue_rowcount(
+                "DELETE FROM pages WHERE id=?",
+                (page_id,),
+            )
+            # Conflict snapshots carry no ON DELETE CASCADE FK, so drop
+            # them explicitly — otherwise a deleted page's full-body
+            # snapshots leak. Household snapshots carry a NULL space_id.
+            await self._db.enqueue(
+                "DELETE FROM space_page_snapshots WHERE page_id=? AND space_id IS NULL",
+                (page_id,),
+            )
+            return n > 0
+        n = await self._db.enqueue_rowcount(
+            "DELETE FROM space_pages WHERE id=? AND space_id=?",
+            (page_id, space_id),
         )
+        if n:
+            await self._db.enqueue(
+                "DELETE FROM space_page_snapshots WHERE page_id=? AND space_id=?",
+                (page_id, space_id),
+            )
+        return n > 0
 
     # ── Locks ──────────────────────────────────────────────────────────
 

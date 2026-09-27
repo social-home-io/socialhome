@@ -128,7 +128,7 @@ async def test_space_calendar_with_rsvps(env):
         end=now + timedelta(hours=1),
         created_by="u1",
     )
-    await env.space_cal_repo.save_event("space-1", event)
+    await env.space_cal_repo.save_event(event, space_id="space-1")
 
     rsvp_going = CalendarRSVP(
         event_id=event.id,
@@ -137,7 +137,7 @@ async def test_space_calendar_with_rsvps(env):
         updated_at=now.isoformat(),
         occurrence_at=now.isoformat(),
     )
-    await env.space_cal_repo.upsert_rsvp(rsvp_going)
+    await env.space_cal_repo.upsert_rsvp(rsvp_going, space_id="space-1")
     rsvps = await env.space_cal_repo.list_rsvps(event.id)
     assert len(rsvps) == 1
     assert rsvps[0].status == RSVPStatus.GOING
@@ -149,7 +149,7 @@ async def test_space_calendar_with_rsvps(env):
         updated_at=now.isoformat(),
         occurrence_at=now.isoformat(),
     )
-    await env.space_cal_repo.upsert_rsvp(rsvp_declined)
+    await env.space_cal_repo.upsert_rsvp(rsvp_declined, space_id="space-1")
     rsvps2 = await env.space_cal_repo.list_rsvps(event.id)
     assert rsvps2[0].status == RSVPStatus.DECLINED
 
@@ -157,6 +157,7 @@ async def test_space_calendar_with_rsvps(env):
         event.id,
         "u1",
         occurrence_at=now.isoformat(),
+        space_id="space-1",
     )
     rsvps3 = await env.space_cal_repo.list_rsvps(event.id)
     assert len(rsvps3) == 0

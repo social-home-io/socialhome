@@ -216,7 +216,7 @@ class BazaarService:
             start_price=start_price,
             step_price=step_price,
         )
-        await self._repo.save_listing(listing)
+        await self._repo.save_listing(listing, space_id=space_id)
         await self._bus.publish(
             BazaarListingCreated(
                 listing_post_id=listing.post_id,
@@ -280,7 +280,7 @@ class BazaarService:
             winning_price=listing.winning_price,
             sold_at=listing.sold_at,
         )
-        await self._repo.save_listing(updated)
+        await self._repo.save_listing(updated, space_id=listing.space_id)
         await self._bus.publish(
             BazaarListingUpdated(
                 listing_post_id=updated.post_id,
@@ -303,7 +303,7 @@ class BazaarService:
             )
         if listing.status is not BazaarStatus.ACTIVE:
             raise BazaarServiceError("listing is not active")
-        await self._repo.mark_cancelled(post_id)
+        await self._repo.mark_cancelled(post_id, space_id=listing.space_id)
         await self._bus.publish(
             BazaarListingCancelled(
                 listing_post_id=post_id,
@@ -353,7 +353,7 @@ class BazaarService:
             amount=int(amount),
             message=message,
         )
-        bid = await self._repo.place_bid(bid)
+        bid = await self._repo.place_bid(bid, space_id=listing.space_id)
         # Reload to surface any anti-snipe extension to subscribers.
         refreshed = await self._repo.get_listing(listing_post_id)
         await self._bus.publish(
@@ -379,11 +379,12 @@ class BazaarService:
         if listing.seller_user_id != actor_user_id:
             raise PermissionError("Only the seller may accept this offer")
         try:
-            await self._repo.accept_offer(bid_id)
+            await self._repo.accept_offer(bid_id, space_id=listing.space_id)
         except BidStateError as exc:
             raise BazaarServiceError(str(exc)) from exc
         await self._repo.mark_sold(
             listing.post_id,
+            space_id=listing.space_id,
             winner_user_id=bid.bidder_user_id,
             winning_price=bid.amount,
         )
@@ -536,6 +537,7 @@ class BazaarService:
         )
         await self._repo.mark_sold(
             offer.listing_post_id,
+            space_id=listing.space_id,
             winner_user_id=offer.offerer_user_id,
             winning_price=offer.amount,
         )
@@ -670,6 +672,7 @@ class BazaarService:
             if listing.mode.value == "auction" and highest is not None:
                 await self._repo.mark_sold(
                     listing.post_id,
+                    space_id=listing.space_id,
                     winner_user_id=highest.bidder_user_id,
                     winning_price=highest.amount,
                 )
@@ -682,7 +685,9 @@ class BazaarService:
                     )
                 )
             else:
-                await self._repo.mark_expired(listing.post_id)
+                await self._repo.mark_expired(
+                    listing.post_id, space_id=listing.space_id
+                )
             await self._bus.publish(
                 BazaarListingExpired(
                     listing_post_id=listing.post_id,

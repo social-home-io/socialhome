@@ -4307,7 +4307,10 @@ class SpaceService(SpaceMemberGuardMixin):
         path so both produce identical state transitions and federation
         broadcasts.
         """
-        await self._posts.save(space_id, post)
+        if await self._posts.save(space_id, post) is None:
+            # ``save`` refuses an id already owned by another space.
+            # Post ids are uuid4 here, so this is a corruption tripwire.
+            raise ValueError(f"post id {post.id!r} already exists in another space")
         await self._bus.publish(
             SpacePostCreated(
                 post=post,
@@ -4427,7 +4430,7 @@ class SpaceService(SpaceMemberGuardMixin):
             if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError("only the author or a space admin can edit")
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
-        await self._posts.edit(post_id, new_content)
+        await self._posts.edit(post_id, new_content, space_id=space_id)
         refreshed = await self._posts.get(post_id)
         assert refreshed is not None  # just edited — must exist
         # Bus fan-out so subscribers (system-album bridge, search index,
@@ -4459,7 +4462,9 @@ class SpaceService(SpaceMemberGuardMixin):
             if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError("only the author or a space admin can delete")
             moderated_by = actor_user_id
-        await self._posts.soft_delete(post_id, moderated_by=moderated_by)
+        await self._posts.soft_delete(
+            post_id, space_id=space_id, moderated_by=moderated_by
+        )
         if moderated_by is not None:
             refreshed = await self._posts.get(post_id)
             assert refreshed is not None  # just soft-deleted — row still exists
@@ -4491,11 +4496,14 @@ class SpaceService(SpaceMemberGuardMixin):
         if not emoji:
             raise ValueError("emoji must not be empty")
         got = await self._posts.get(post_id)
-        if got is not None:
-            space_id, _post = got
-            await self._require_writable_space(space_id)
-            await self._reject_subscriber(space_id, user_id, action="react")
-        return await self._posts.add_reaction(post_id, emoji, user_id)
+        if got is None:
+            raise KeyError(f"space post {post_id!r} not found")
+        space_id, _post = got
+        await self._require_writable_space(space_id)
+        await self._reject_subscriber(space_id, user_id, action="react")
+        return await self._posts.add_reaction(
+            post_id, emoji, user_id, space_id=space_id
+        )
 
     async def remove_reaction(
         self,
@@ -4506,10 +4514,13 @@ class SpaceService(SpaceMemberGuardMixin):
     ) -> Post:
         emoji = unicodedata.normalize("NFC", emoji.strip())
         got = await self._posts.get(post_id)
-        if got is not None:
-            space_id, _post = got
-            await self._reject_subscriber(space_id, user_id, action="react")
-        return await self._posts.remove_reaction(post_id, emoji, user_id)
+        if got is None:
+            raise KeyError(f"space post {post_id!r} not found")
+        space_id, _post = got
+        await self._reject_subscriber(space_id, user_id, action="react")
+        return await self._posts.remove_reaction(
+            post_id, emoji, user_id, space_id=space_id
+        )
 
     async def add_comment(
         self,
@@ -4562,8 +4573,8 @@ class SpaceService(SpaceMemberGuardMixin):
             content=content,
             media_url=media_url,
         )
-        await self._posts.add_comment(comment)
-        await self._posts.increment_comment_count(post_id)
+        await self._posts.add_comment(comment, space_id=space_id)
+        await self._posts.increment_comment_count(post_id, space_id=space_id)
         await self._bus.publish(
             CommentAdded(post_id=post_id, comment=comment, space_id=space_id),
         )
@@ -4607,7 +4618,7 @@ class SpaceService(SpaceMemberGuardMixin):
         _validate_text_length(new_content, limit=MAX_COMMENT_LENGTH)
         if not new_content.strip():
             raise ValueError("comment body cannot be empty")
-        await self._posts.edit_comment(comment_id, new_content)
+        await self._posts.edit_comment(comment_id, new_content, space_id=space_id)
         updated = await self._posts.get_comment(comment_id)
         assert updated is not None
         await self._bus.publish(
@@ -4640,8 +4651,8 @@ class SpaceService(SpaceMemberGuardMixin):
                 raise PermissionError(
                     "only the author or a space admin can delete this comment"
                 )
-        await self._posts.soft_delete_comment(comment_id)
-        await self._posts.decrement_comment_count(comment.post_id)
+        await self._posts.soft_delete_comment(comment_id, space_id=space_id)
+        await self._posts.decrement_comment_count(comment.post_id, space_id=space_id)
         await self._bus.publish(
             CommentDeleted(
                 post_id=comment.post_id,
