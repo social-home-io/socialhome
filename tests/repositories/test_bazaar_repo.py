@@ -174,11 +174,11 @@ async def test_bazaar_relayed_bid_empty_created_at_does_not_win_tie(env):
         created_at=None,
         price=None,
     )
-    await env.bazaar_repo.save_listing(listing)
+    await env.bazaar_repo.save_listing(listing, space_id=_DEFAULT_SPACE_ID)
 
     # Earlier LOCAL bid — gets a real, populated created_at.
     local_bid = new_bid(listing_post_id=pid, bidder_user_id="buyer_local", amount=5000)
-    await env.bazaar_repo.place_bid(local_bid)
+    await env.bazaar_repo.place_bid(local_bid, space_id=_DEFAULT_SPACE_ID)
 
     # Federation-relayed bid, same amount (tie), payload carried no
     # created_at — mirrors what the inbound handler builds when a relayed
@@ -190,7 +190,7 @@ async def test_bazaar_relayed_bid_empty_created_at_does_not_win_tie(env):
         amount=5000,
         created_at="",
     )
-    await env.bazaar_repo.place_bid(relayed_bid)
+    await env.bazaar_repo.place_bid(relayed_bid, space_id=_DEFAULT_SPACE_ID)
 
     stored = await env.bazaar_repo.get_bid(relayed_bid.id)
     assert stored is not None
