@@ -24,8 +24,8 @@ class AbstractSpaceZoneRepo(Protocol):
     async def get(self, zone_id: str) -> SpaceZone | None: ...
     async def get_by_name(self, space_id: str, name: str) -> SpaceZone | None: ...
     async def count_for_space(self, space_id: str) -> int: ...
-    async def upsert(self, zone: SpaceZone) -> None: ...
-    async def delete(self, zone_id: str) -> None: ...
+    async def upsert(self, zone: SpaceZone, *, space_id: str) -> bool: ...
+    async def delete(self, zone_id: str, *, space_id: str) -> bool: ...
 
 
 def _row_to_zone(row: dict | None) -> SpaceZone | None:
@@ -81,8 +81,16 @@ class SqliteSpaceZoneRepo:
         )
         return int(row["c"]) if row is not None else 0
 
-    async def upsert(self, zone: SpaceZone) -> None:
-        await self._db.enqueue(
+    async def upsert(self, zone: SpaceZone, *, space_id: str) -> bool:
+        """Insert or update a zone inside ``space_id``.
+
+        ``space_id`` is authoritative (§24.11) — for an inbound
+        federation write it is the space the pipeline gated the sender
+        on, so it (not ``zone.space_id``) is the column value, and a
+        conflict on an id owned by another space is refused. ``False``
+        means nothing was written.
+        """
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_zones(
                 id, space_id, name, latitude, longitude,
@@ -95,10 +103,11 @@ class SqliteSpaceZoneRepo:
                 radius_m = excluded.radius_m,
                 color = excluded.color,
                 updated_at = excluded.updated_at
+             WHERE space_zones.space_id = excluded.space_id
             """,
             (
                 zone.id,
-                zone.space_id,
+                space_id,
                 zone.name,
                 zone.latitude,
                 zone.longitude,
@@ -109,9 +118,12 @@ class SqliteSpaceZoneRepo:
                 zone.updated_at,
             ),
         )
+        return n > 0
 
-    async def delete(self, zone_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_zones WHERE id=?",
-            (zone_id,),
+    async def delete(self, zone_id: str, *, space_id: str) -> bool:
+        """Delete a zone of ``space_id``. ``False`` = not in that space."""
+        n = await self._db.enqueue_rowcount(
+            "DELETE FROM space_zones WHERE id=? AND space_id=?",
+            (zone_id, space_id),
         )
+        return n > 0

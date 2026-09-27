@@ -95,7 +95,8 @@ async def _seed_listing(env, *, mode: BazaarMode, end_in: timedelta) -> str:
             start_price=100,
             step_price=10,
             price=100,
-        )
+        ),
+        space_id=_DEFAULT_SPACE_ID,
     )
     return pid
 

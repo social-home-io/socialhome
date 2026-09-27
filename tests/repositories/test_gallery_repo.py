@@ -312,3 +312,77 @@ def test_to_thumbnail_dict_excludes_full_url():
     d = item.to_thumbnail_dict()
     assert "thumbnail_url" in d
     assert "url" not in d
+
+
+# ─── §24.11 space-scoped writes (federation inbound) ──────────────────────
+
+
+@pytest.fixture
+async def two_spaces(env):
+    """alb-1 in sp-1, alb-2 in sp-2, alb-home in the household gallery;
+    alb-2 already holds it-2."""
+    db, repo = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-2', 'Y', 'inst-x', 'alice', ?)",
+        ("cd" * 32,),
+    )
+    await repo.create_album(_album("alb-1", space_id="sp-1"))
+    await repo.create_album(_album("alb-2", space_id="sp-2"))
+    await repo.create_album(_album("alb-home", space_id=None))
+    assert await repo.create_item_in_space(
+        _item("it-2", album_id="alb-2"), space_id="sp-2"
+    )
+    return db, repo
+
+
+async def test_create_item_in_space_inserts_and_counts(two_spaces):
+    _db, repo = two_spaces
+    assert await repo.create_item_in_space(
+        _item("it-1", album_id="alb-1"), space_id="sp-1"
+    )
+    assert (await repo.get_item("it-1")).album_id == "alb-1"
+    assert (await repo.get_album("alb-1")).item_count == 1
+
+
+async def test_create_item_in_space_redelivery_is_idempotent(two_spaces):
+    _db, repo = two_spaces
+    assert await repo.create_item_in_space(
+        _item("it-2", album_id="alb-2"), space_id="sp-2"
+    )
+    assert (await repo.get_album("alb-2")).item_count == 1
+
+
+async def test_create_item_in_space_refuses_album_of_another_space(two_spaces):
+    _db, repo = two_spaces
+    assert not await repo.create_item_in_space(
+        _item("it-evil", album_id="alb-2"), space_id="sp-1"
+    )
+    assert await repo.get_item("it-evil") is None
+    assert (await repo.get_album("alb-2")).item_count == 1
+
+
+async def test_create_item_in_space_refuses_household_album(two_spaces):
+    _db, repo = two_spaces
+    assert not await repo.create_item_in_space(
+        _item("it-evil", album_id="alb-home"), space_id="sp-1"
+    )
+    assert await repo.get_item("it-evil") is None
+    assert (await repo.get_album("alb-home")).item_count == 0
+
+
+async def test_delete_item_in_space_is_scoped(two_spaces):
+    _db, repo = two_spaces
+    assert not await repo.delete_item_in_space("it-2", space_id="sp-1")
+    assert await repo.get_item("it-2") is not None
+    assert (await repo.get_album("alb-2")).item_count == 1
+    assert await repo.delete_item_in_space("it-2", space_id="sp-2")
+    assert await repo.get_item("it-2") is None
+    assert (await repo.get_album("alb-2")).item_count == 0
+
+
+async def test_delete_item_in_space_cannot_reach_household_items(two_spaces):
+    _db, repo = two_spaces
+    await repo.create_item(_item("it-home", album_id="alb-home"))
+    assert not await repo.delete_item_in_space("it-home", space_id="sp-1")
+    assert await repo.get_item("it-home") is not None

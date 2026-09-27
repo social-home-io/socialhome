@@ -132,7 +132,7 @@ class PageCollectionView(BaseView):
             content=content,
             created_by=ctx.user_id,
         )
-        p = await repo.save(p)
+        await repo.save(p, space_id=p.space_id)
         await bus.publish(
             PageCreated(
                 page_id=p.id,
@@ -205,7 +205,7 @@ class PageDetailView(BaseView):
         if "cover_image_url" in body:
             kwargs["cover_image_url"] = strip_signature_query(body["cover_image_url"])
         updated = replace(p, **kwargs)
-        updated = await repo.save(updated)
+        await repo.save(updated, space_id=updated.space_id)
         await _snapshot_version(repo, previous=p, editor_user_id=ctx.user_id)
         await bus.publish(
             PageUpdated(
@@ -225,7 +225,7 @@ class PageDetailView(BaseView):
         p = await repo.get(page_id)
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
-        await repo.delete(page_id)
+        await repo.delete(page_id, space_id=p.space_id)
         await bus.publish(PageDeleted(page_id=page_id, space_id=p.space_id))
         return web.json_response({"ok": True})
 
@@ -375,7 +375,7 @@ class PageRevertView(BaseView):
             last_editor_user_id=ctx.user_id,
             last_edited_at=now_iso,
         )
-        await repo.save(reverted)
+        await repo.save(reverted, space_id=reverted.space_id)
         await bus.publish(
             PageUpdated(
                 page_id=reverted.id,
@@ -437,7 +437,7 @@ class PageDeleteApproveView(BaseView):
                 "The user who requested deletion cannot approve it.",
             )
         await repo.approve_delete(page_id, ctx.user_id)
-        await repo.delete(page_id)
+        await repo.delete(page_id, space_id=p.space_id)
         await bus.publish(PageDeleted(page_id=page_id, space_id=p.space_id))
         return web.json_response({"ok": True, "deleted": True})
 
@@ -502,7 +502,7 @@ class SpacePageCollectionView(BaseView):
             created_by=ctx.user_id,
             space_id=space_id,
         )
-        p = await repo.save(p)
+        await repo.save(p, space_id=p.space_id)
         await bus.publish(
             PageCreated(
                 page_id=p.id,
@@ -587,7 +587,7 @@ class SpacePageDetailView(BaseView):
         if "cover_image_url" in body:
             kwargs["cover_image_url"] = strip_signature_query(body["cover_image_url"])
         updated = replace(p, **kwargs)
-        updated = await repo.save(updated)
+        await repo.save(updated, space_id=updated.space_id)
         await _snapshot_version(repo, previous=p, editor_user_id=ctx.user_id)
         await bus.publish(
             PageUpdated(
@@ -609,7 +609,7 @@ class SpacePageDetailView(BaseView):
         p = await self._load(space_id, self.match("pid"))
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
-        await repo.delete(p.id)
+        await repo.delete(p.id, space_id=p.space_id)
         await bus.publish(PageDeleted(page_id=p.id))
         return web.json_response({"ok": True})
 

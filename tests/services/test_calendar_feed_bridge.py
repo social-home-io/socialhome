@@ -170,7 +170,7 @@ async def test_duplicate_create_is_idempotent(env):
         created_by="uid-alice",
         announce_in_feed=True,
     )
-    await env.cal_repo.save_event("sp-feed", ev)
+    await env.cal_repo.save_event(ev, space_id="sp-feed")
     # Fire two CalendarEventCreated bus events with the same event id —
     # simulates federation replay landing at the inbound handler twice.
     await env.bus.publish(CalendarEventCreated(event=ev))

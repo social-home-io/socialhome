@@ -88,9 +88,9 @@ class _FakeSpacePostRepo:
         self.saved.append((space_id, post))
         return post
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self.comments.append(comment)
-        return comment
+        return True
 
 
 class _Stub:
@@ -110,8 +110,9 @@ class _Stub:
     async def create_album(self, album):
         self.saved.append(("album", album))
 
-    async def create_item(self, item):
+    async def create_item_in_space(self, item, *, space_id, bump_count=True):
         self.saved.append(("item", item))
+        return True
 
 
 def _make_peer() -> tuple[RemoteInstance, object]:
@@ -601,6 +602,7 @@ async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await r._persist_album(
             {"id": "al-1", "space_id": "sp-1", "name": "Holiday", "is_system": 0},
+            "sp-1",
         )
 
     assert "gallery album al-1" in caplog.text
@@ -609,7 +611,7 @@ async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
 async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, caplog):
     """Same for items — a missing parent album must not be silent."""
     r, _space_repo, _ = receiver
-    r._gallery_repo.create_item = AsyncMock(side_effect=RuntimeError("boom"))
+    r._gallery_repo.create_item_in_space = AsyncMock(side_effect=RuntimeError("boom"))
 
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await r._persist_gallery_item(
@@ -623,6 +625,7 @@ async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, ca
                 "width": 10,
                 "height": 10,
             },
+            "sp-1",
         )
 
     assert "gallery item it-1" in caplog.text
@@ -739,7 +742,7 @@ async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
     kp_self = generate_identity_keypair()
 
     class _RefusingBazaarRepo:
-        async def save_listing(self, listing):
+        async def save_listing(self, listing, *, space_id):
             raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
 
     r = SpaceSyncReceiver(

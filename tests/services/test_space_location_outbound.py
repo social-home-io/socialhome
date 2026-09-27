@@ -529,7 +529,7 @@ async def _seed_zone(
         created_at="2026-04-28T00:00:00+00:00",
         updated_at="2026-04-28T00:00:00+00:00",
     )
-    await env.zone_repo.upsert(zone)
+    await env.zone_repo.upsert(zone, space_id=zone.space_id)
     return zid
 
 

@@ -38,6 +38,7 @@ from ....domain.post import (
     Post,
     PostType,
 )
+from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
 from ....domain.task import RecurrenceRule, Task, TaskStatus
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
     from ....repositories.page_repo import AbstractPageRepo
-    from ....repositories.poll_repo import AbstractPollRepo
+    from ....repositories.space_poll_repo import AbstractSpacePollRepo
     from ....repositories.profile_picture_repo import (
         AbstractProfilePictureRepo,
     )
@@ -114,7 +115,7 @@ class SpaceSyncReceiver:
         zone_repo: "AbstractSpaceZoneRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
         profile_picture_repo: "AbstractProfilePictureRepo | None" = None,
-        poll_repo: "AbstractPollRepo | None" = None,
+        poll_repo: "AbstractSpacePollRepo | None" = None,
         pending_decrypts: "PendingDecryptsCache | None" = None,
     ) -> None:
         self._bus = bus
@@ -421,41 +422,56 @@ class SpaceSyncReceiver:
         elif resource == "posts":
             for r in records:
                 post = _post_from_record(r)
-                if post is not None:
-                    await self._space_post_repo.save(space_id, post)
+                if post is not None and (
+                    await self._space_post_repo.save(space_id, post) is None
+                ):
+                    log.warning(
+                        "space sync: post %s already exists in another space "
+                        "— refusing the write for %s",
+                        post.id,
+                        space_id,
+                    )
         elif resource == "comments":
             for r in records:
                 comment = _comment_from_record(r)
-                if comment is not None:
-                    await self._space_post_repo.add_comment(comment)
+                if comment is not None and not await self._space_post_repo.add_comment(
+                    comment, space_id=space_id
+                ):
+                    log.warning(
+                        "space sync: comment %s targets post %s outside space "
+                        "%s — refusing the write",
+                        comment.id,
+                        comment.post_id,
+                        space_id,
+                    )
         elif resource in ("tasks", "tasks_archived"):
             for r in records:
                 task = _task_from_record(r)
                 if task is not None:
-                    await self._space_task_repo.save(space_id, task)
+                    await self._space_task_repo.save(task, space_id=space_id)
         elif resource == "pages":
             for r in records:
                 page = _page_from_record(r, space_id)
                 if page is not None:
-                    await self._page_repo.save(page)
+                    await self._page_repo.save(page, space_id=space_id)
         elif resource == "stickies":
             for r in records:
                 sticky = _sticky_from_record(r, space_id)
                 if sticky is not None:
-                    await self._sticky_repo.save(sticky)
+                    await self._sticky_repo.save(sticky, space_id=space_id)
         elif resource == "calendar":
             for r in records:
                 event = _calendar_from_record(r)
                 if event is not None:
-                    await self._space_calendar_repo.save_event(space_id, event)
+                    await self._space_calendar_repo.save_event(event, space_id=space_id)
         elif resource == "gallery":
             # Albums first, then items — preserve the exporter's order.
             for r in records:
                 kind = r.get("kind")
                 if kind == "album":
-                    await self._persist_album(r)
+                    await self._persist_album(r, space_id)
                 elif kind == "item":
-                    await self._persist_gallery_item(r)
+                    await self._persist_gallery_item(r, space_id)
         elif resource == "polls":
             # v1: polls ride along with posts (Post.poll field). The
             # standalone polls stream is informational — nothing to
@@ -483,12 +499,19 @@ class SpaceSyncReceiver:
                     log.debug("schedule record missing required field: %r", r)
                     continue
                 try:
-                    await self._poll_repo.create_schedule_poll(
+                    if not await self._poll_repo.create_schedule_poll_in_space(
+                        space_id=space_id,
                         post_id=post_id,
                         title=title,
                         deadline=r.get("deadline"),
                         slots=list(slots),
-                    )
+                    ):
+                        log.warning(
+                            "space sync: schedule poll %s is not a post of "
+                            "space %s — refusing the write",
+                            post_id,
+                            space_id,
+                        )
                 except Exception as exc:  # pragma: no cover
                     log.debug(
                         "schedule catch-up create failed for post=%s: %s",
@@ -507,8 +530,15 @@ class SpaceSyncReceiver:
                 return
             for r in records:
                 zone = _zone_from_record(r, space_id)
-                if zone is not None:
-                    await self._zone_repo.upsert(zone)
+                if zone is not None and not await self._zone_repo.upsert(
+                    zone, space_id=space_id
+                ):
+                    log.warning(
+                        "space sync: zone %s already exists in another space "
+                        "— refusing the write for %s",
+                        zone.id,
+                        space_id,
+                    )
         elif resource == "bazaar":
             # F4: catch-up bazaar listings so a new joiner sees the
             # full listing card (mode / price / photos / status) — not
@@ -525,7 +555,15 @@ class SpaceSyncReceiver:
                 listing = _bazaar_listing_from_record(r, space_id)
                 if listing is not None:
                     try:
-                        await self._bazaar_repo.save_listing(listing)
+                        if not await self._bazaar_repo.save_listing(
+                            listing, space_id=space_id
+                        ):
+                            log.warning(
+                                "space sync: bazaar listing %s is not a post of "
+                                "space %s — refusing the write",
+                                listing.post_id,
+                                space_id,
+                            )
                     except Exception as exc:
                         # FK / CHECK violation (anchor post missing,
                         # unknown mode). A listing the joiner cannot store
@@ -539,14 +577,13 @@ class SpaceSyncReceiver:
                             exc,
                         )
 
-    async def _persist_album(self, record: dict[str, Any]) -> None:
-        from ....domain.gallery import (
-            GalleryAlbum,
-        )  # local to avoid cycle at module load
-
+    async def _persist_album(self, record: dict[str, Any], space_id: str) -> None:
+        # The album lands in the space this sync stream was gated for —
+        # never the record's own ``space_id`` (another space, or NULL =
+        # the household gallery), which is just untrusted payload.
         album = GalleryAlbum(
             id=str(record["id"]),
-            space_id=record.get("space_id"),
+            space_id=space_id,
             owner_user_id=(
                 # System albums have no human owner; carry NULL.
                 None
@@ -582,9 +619,11 @@ class SpaceSyncReceiver:
                 exc_info=True,
             )
 
-    async def _persist_gallery_item(self, record: dict[str, Any]) -> None:
-        from ....domain.gallery import GalleryItem
-
+    async def _persist_gallery_item(
+        self,
+        record: dict[str, Any],
+        space_id: str,
+    ) -> None:
         item = GalleryItem(
             id=str(record["id"]),
             album_id=str(record.get("album_id") or ""),
@@ -601,7 +640,18 @@ class SpaceSyncReceiver:
             created_at=record.get("created_at"),
         )
         try:
-            await self._gallery_repo.create_item(item)
+            # ``bump_count=False``: the album record already carried its
+            # ``item_count``. The album must belong to this sync's space.
+            if not await self._gallery_repo.create_item_in_space(
+                item, space_id=space_id, bump_count=False
+            ):
+                log.warning(
+                    "sync: gallery item %s names album %s outside space %s "
+                    "— refusing the write",
+                    item.id,
+                    item.album_id,
+                    space_id,
+                )
         except Exception:
             # Same reasoning as ``_persist_album``: redelivery is handled in
             # SQL, so a failure here is real (a missing parent album, a bad

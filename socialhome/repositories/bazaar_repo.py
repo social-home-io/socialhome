@@ -53,7 +53,12 @@ class OfferStateError(Exception):
 @runtime_checkable
 class AbstractBazaarRepo(Protocol):
     # Listings ------------------------------------------------------------
-    async def save_listing(self, listing: BazaarListing) -> BazaarListing: ...
+    async def save_listing(
+        self,
+        listing: BazaarListing,
+        *,
+        space_id: str,
+    ) -> bool: ...
     async def get_listing(self, post_id: str) -> BazaarListing | None: ...
     async def list_active(self) -> list[BazaarListing]: ...
     async def list_active_in_spaces(
@@ -71,18 +76,19 @@ class AbstractBazaarRepo(Protocol):
         self,
         post_id: str,
         *,
+        space_id: str,
         winner_user_id: str,
         winning_price: int,
     ) -> None: ...
-    async def mark_expired(self, post_id: str) -> None: ...
-    async def mark_cancelled(self, post_id: str) -> None: ...
+    async def mark_expired(self, post_id: str, *, space_id: str) -> bool: ...
+    async def mark_cancelled(self, post_id: str, *, space_id: str) -> bool: ...
 
     # Bids / offers -------------------------------------------------------
-    async def place_bid(self, bid: BazaarBid) -> BazaarBid: ...
+    async def place_bid(self, bid: BazaarBid, *, space_id: str) -> BazaarBid: ...
     async def get_bid(self, bid_id: str) -> BazaarBid | None: ...
     async def list_bids(self, post_id: str) -> list[BazaarBid]: ...
     async def highest_bid(self, post_id: str) -> BazaarBid | None: ...
-    async def accept_offer(self, bid_id: str) -> None: ...
+    async def accept_offer(self, bid_id: str, *, space_id: str) -> None: ...
     async def reject_offer(
         self,
         bid_id: str,
@@ -149,17 +155,35 @@ class SqliteBazaarRepo:
 
     # ── Listings ───────────────────────────────────────────────────────
 
-    async def save_listing(self, listing: BazaarListing) -> BazaarListing:
+    async def save_listing(
+        self,
+        listing: BazaarListing,
+        *,
+        space_id: str,
+    ) -> bool:
+        """Upsert a listing inside ``space_id``.
+
+        ``space_id`` is authoritative (§24.11) — for an inbound federation
+        write it is the space the pipeline gated the sender on, so it (not
+        ``listing.space_id``) is the column value. The wrapper post must
+        live in that same space (the FK alone would accept a post of any
+        space), and a conflict on a listing owned by another space is
+        refused. ``False`` means nothing was written.
+        """
         if listing.currency not in BAZAAR_CURRENCIES:
             raise ValueError(f"unsupported currency {listing.currency!r}")
-        await self._db.enqueue(
+        n = await self._db.enqueue_rowcount(
             """
             INSERT INTO bazaar_listings(
                 post_id, space_id, seller_user_id, mode, title, description,
                 image_urls_json, end_time, currency, status,
                 price, start_price, step_price,
                 winner_user_id, winning_price, sold_at, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+            )
+            SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
+             WHERE EXISTS (
+                 SELECT 1 FROM space_posts WHERE id=? AND space_id=?
+             )
             ON CONFLICT(post_id) DO UPDATE SET
                 seller_user_id=excluded.seller_user_id,
                 mode=excluded.mode,
@@ -175,10 +199,11 @@ class SqliteBazaarRepo:
                 winner_user_id=excluded.winner_user_id,
                 winning_price=excluded.winning_price,
                 sold_at=excluded.sold_at
+             WHERE bazaar_listings.space_id = excluded.space_id
             """,
             (
                 listing.post_id,
-                listing.space_id,
+                space_id,
                 listing.seller_user_id,
                 listing.mode.value,
                 listing.title,
@@ -194,9 +219,11 @@ class SqliteBazaarRepo:
                 listing.winning_price,
                 listing.sold_at,
                 listing.created_at,
+                listing.post_id,
+                space_id,
             ),
         )
-        return listing
+        return n > 0
 
     async def get_listing(self, post_id: str) -> BazaarListing | None:
         row = await self._db.fetchone(
@@ -295,10 +322,15 @@ class SqliteBazaarRepo:
         self,
         post_id: str,
         *,
+        space_id: str,
         winner_user_id: str,
         winning_price: int,
     ) -> None:
-        """Atomic status transition ``active`` → ``sold`` with winner stamp."""
+        """Atomic status transition ``active`` → ``sold`` with winner stamp.
+
+        Scoped to ``space_id``: raises ``ValueError`` when the listing is
+        not an active listing of that space.
+        """
 
         def _run(conn):
             cur = conn.execute(
@@ -307,35 +339,46 @@ class SqliteBazaarRepo:
                    SET status='sold',
                        winner_user_id=?, winning_price=?,
                        sold_at=datetime('now')
-                 WHERE post_id=? AND status='active'
+                 WHERE post_id=? AND space_id=? AND status='active'
                 """,
-                (winner_user_id, int(winning_price), post_id),
+                (winner_user_id, int(winning_price), post_id, space_id),
             )
             if cur.rowcount == 0:
                 raise ValueError(
-                    f"listing {post_id!r} is not active (cannot mark sold)"
+                    f"listing {post_id!r} is not active in space {space_id!r} "
+                    "(cannot mark sold)"
                 )
 
         await self._db.transact(_run)
 
-    async def mark_expired(self, post_id: str) -> None:
-        await self._db.enqueue(
-            "UPDATE bazaar_listings SET status='expired' "
-            "WHERE post_id=? AND status='active'",
-            (post_id,),
-        )
+    async def mark_expired(self, post_id: str, *, space_id: str) -> bool:
+        """``active`` → ``expired`` for a listing of ``space_id``.
 
-    async def mark_cancelled(self, post_id: str) -> None:
-        await self._db.enqueue(
-            "UPDATE bazaar_listings SET status='cancelled' "
-            "WHERE post_id=? AND status='active'",
-            (post_id,),
+        ``False`` when no active listing of that space matched.
+        """
+        n = await self._db.enqueue_rowcount(
+            "UPDATE bazaar_listings SET status='expired' "
+            "WHERE post_id=? AND space_id=? AND status='active'",
+            (post_id, space_id),
         )
+        return n > 0
+
+    async def mark_cancelled(self, post_id: str, *, space_id: str) -> bool:
+        """``active`` → ``cancelled`` for a listing of ``space_id``.
+
+        ``False`` when no active listing of that space matched.
+        """
+        n = await self._db.enqueue_rowcount(
+            "UPDATE bazaar_listings SET status='cancelled' "
+            "WHERE post_id=? AND space_id=? AND status='active'",
+            (post_id, space_id),
+        )
+        return n > 0
 
     # ── Bids / offers ──────────────────────────────────────────────────
 
-    async def place_bid(self, bid: BazaarBid) -> BazaarBid:
-        """Insert a new bid. The listing must be ``active``.
+    async def place_bid(self, bid: BazaarBid, *, space_id: str) -> BazaarBid:
+        """Insert a new bid. The listing must be ``active`` and in ``space_id``.
 
         For AUCTION / BID_FROM listings, callers are expected to check the
         minimum-increment rule at the service layer before calling this.
@@ -349,11 +392,14 @@ class SqliteBazaarRepo:
 
         def _run(conn):
             row = conn.execute(
-                "SELECT status, mode, end_time FROM bazaar_listings WHERE post_id=?",
-                (bid.listing_post_id,),
+                "SELECT status, mode, end_time FROM bazaar_listings "
+                "WHERE post_id=? AND space_id=?",
+                (bid.listing_post_id, space_id),
             ).fetchone()
             if row is None:
-                raise ValueError(f"listing {bid.listing_post_id!r} not found")
+                raise ValueError(
+                    f"listing {bid.listing_post_id!r} not found in space {space_id!r}"
+                )
             if row[0] != BazaarStatus.ACTIVE.value:
                 raise ValueError(f"listing {bid.listing_post_id!r} is not active")
             conn.execute(
@@ -396,8 +442,9 @@ class SqliteBazaarRepo:
                         now + timedelta(seconds=SNIPE_EXTEND_SECONDS)
                     ).isoformat()
                     conn.execute(
-                        "UPDATE bazaar_listings SET end_time=? WHERE post_id=?",
-                        (new_end, bid.listing_post_id),
+                        "UPDATE bazaar_listings SET end_time=? "
+                        "WHERE post_id=? AND space_id=?",
+                        (new_end, bid.listing_post_id, space_id),
                     )
 
         await self._db.transact(_run)
@@ -433,24 +480,27 @@ class SqliteBazaarRepo:
         )
         return _row_to_bid(row_to_dict(row))
 
-    async def accept_offer(self, bid_id: str) -> None:
+    async def accept_offer(self, bid_id: str, *, space_id: str) -> None:
         """OFFER: accept this bid and reject every other pending offer.
 
         Enforces the OFFER state machine: only a pending offer (not yet
         accepted / rejected / withdrawn) can be accepted. Sibling pending
         offers transition to ``rejected`` with the standard "another offer
-        was accepted" reason.
+        was accepted" reason. The bid's listing must live in ``space_id``
+        (``ValueError`` otherwise).
         """
 
         def _run(conn):
-            # Check target is pending
+            # Check target is pending, on a listing of this space.
             row = conn.execute(
-                "SELECT listing_post_id, accepted, rejected, withdrawn "
-                "FROM bazaar_bids WHERE id=?",
-                (bid_id,),
+                "SELECT b.listing_post_id, b.accepted, b.rejected, b.withdrawn "
+                "FROM bazaar_bids b "
+                "JOIN bazaar_listings l ON l.post_id = b.listing_post_id "
+                "WHERE b.id=? AND l.space_id=?",
+                (bid_id, space_id),
             ).fetchone()
             if row is None:
-                raise ValueError(f"bid {bid_id!r} not found")
+                raise ValueError(f"bid {bid_id!r} not found in space {space_id!r}")
             listing_post_id = row[0]
             if row[1] or row[2] or row[3]:
                 raise BidStateError(f"bid {bid_id!r} is not pending — cannot accept")

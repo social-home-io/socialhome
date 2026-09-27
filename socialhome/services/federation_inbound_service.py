@@ -69,6 +69,7 @@ from ..crypto import (
     verify_user_identity_assertion,
 )
 from ..domain.user import RemoteUser, UserIdentityAssertion, UserStatus
+from ..federation.space_scope import log_cross_space_refusal, resolve_space_id
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 from ..media.image_processor import ImageProcessor
@@ -1009,7 +1010,7 @@ class FederationInboundService:
     # ── Space content handlers ─────────────────────────────────────────
 
     async def _on_space_post_created(self, event: "FederationEvent") -> None:
-        space_id = event.space_id or str(event.payload.get("space_id") or "")
+        space_id = resolve_space_id(event)
         if not space_id:
             return
         post = self._post_from_payload(event.payload)
@@ -1017,7 +1018,16 @@ class FederationInboundService:
             return
         raw_relay = event.payload.get("public_relay")
         public_relay = raw_relay if isinstance(raw_relay, dict) else None
-        await self._space_post_repo.save(space_id, post)
+        if await self._space_post_repo.save(space_id, post) is None:
+            # The id already exists in another space — the sender was
+            # gated for this one, so refuse rather than hijack the row.
+            log_cross_space_refusal(
+                event,
+                space_id=space_id,
+                what="post",
+                row_id=post.id,
+            )
+            return
         await self._bus.publish(
             SpacePostCreated(
                 post=post,
@@ -1197,7 +1207,21 @@ class FederationInboundService:
         new_content = str(p.get("content") or "")
         if not post_id:
             return
-        await self._space_post_repo.edit(post_id, new_content)
+        gated_space_id = resolve_space_id(event)
+        if not gated_space_id:
+            return
+        if not await self._space_post_repo.edit(
+            post_id,
+            new_content,
+            space_id=gated_space_id,
+        ):
+            log_cross_space_refusal(
+                event,
+                space_id=gated_space_id,
+                what="post",
+                row_id=post_id,
+            )
+            return
         refreshed = await self._space_post_repo.get(post_id)
         if refreshed is None:
             return
@@ -1214,17 +1238,22 @@ class FederationInboundService:
         post_id = str(event.payload.get("post_id") or event.payload.get("id") or "")
         if not post_id:
             return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
         moderated_by = event.payload.get("moderated_by")
-        # Resolve space_id before the soft-delete so we can include it
-        # on the bus event — the row still exists either way (soft-
-        # delete just blanks content), but reading first is cheaper
-        # than a second fetch downstream.
-        got = await self._space_post_repo.get(post_id)
-        await self._space_post_repo.soft_delete(
+        if not await self._space_post_repo.soft_delete(
             post_id,
+            space_id=space_id,
             moderated_by=str(moderated_by) if moderated_by else None,
-        )
-        space_id = got[0] if got is not None else None
+        ):
+            log_cross_space_refusal(
+                event,
+                space_id=space_id,
+                what="post",
+                row_id=post_id,
+            )
+            return
         await self._bus.publish(
             PostDeleted(
                 post_id=post_id,
@@ -1239,6 +1268,9 @@ class FederationInboundService:
         comment_id = str(p.get("comment_id") or p.get("id") or "")
         author = str(p.get("author") or "")
         if not post_id or not comment_id or not author:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
             return
         comment_type_str = str(p.get("type") or "text")
         try:
@@ -1255,13 +1287,23 @@ class FederationInboundService:
             content=p.get("content") or "",
             media_url=p.get("media_url"),
         )
-        await self._space_post_repo.add_comment(comment)
-        await self._space_post_repo.increment_comment_count(post_id)
+        if not await self._space_post_repo.add_comment(comment, space_id=space_id):
+            log_cross_space_refusal(
+                event,
+                space_id=space_id,
+                what="post",
+                row_id=post_id,
+            )
+            return
+        await self._space_post_repo.increment_comment_count(
+            post_id,
+            space_id=space_id,
+        )
         await self._bus.publish(
             CommentAdded(
                 post_id=post_id,
                 comment=comment,
-                space_id=str(p.get("space_id") or event.space_id or "") or None,
+                space_id=space_id,
                 origin_instance_id=event.from_instance,
             ),
         )
@@ -1272,7 +1314,24 @@ class FederationInboundService:
         content = p.get("content")
         if not comment_id or content is None:
             return
-        await self._space_post_repo.edit_comment(comment_id, str(content))
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        # No post id on the wire for this event — the repo's EXISTS
+        # sub-select resolves the comment's parent post and checks it
+        # lives in the gated space in the same statement.
+        if not await self._space_post_repo.edit_comment(
+            comment_id,
+            str(content),
+            space_id=space_id,
+        ):
+            log_cross_space_refusal(
+                event,
+                space_id=space_id,
+                what="comment",
+                row_id=comment_id,
+            )
+            return
         refreshed = await self._space_post_repo.get_comment(comment_id)
         if refreshed is None:
             return
@@ -1280,7 +1339,7 @@ class FederationInboundService:
             CommentUpdated(
                 post_id=refreshed.post_id,
                 comment=refreshed,
-                space_id=str(p.get("space_id") or event.space_id or "") or None,
+                space_id=space_id,
                 origin_instance_id=event.from_instance,
             ),
         )
@@ -1291,13 +1350,29 @@ class FederationInboundService:
         post_id = str(p.get("post_id") or "")
         if not comment_id or not post_id:
             return
-        await self._space_post_repo.soft_delete_comment(comment_id)
-        await self._space_post_repo.decrement_comment_count(post_id)
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        if not await self._space_post_repo.soft_delete_comment(
+            comment_id,
+            space_id=space_id,
+        ):
+            log_cross_space_refusal(
+                event,
+                space_id=space_id,
+                what="comment",
+                row_id=comment_id,
+            )
+            return
+        await self._space_post_repo.decrement_comment_count(
+            post_id,
+            space_id=space_id,
+        )
         await self._bus.publish(
             CommentDeleted(
                 post_id=post_id,
                 comment_id=comment_id,
-                space_id=str(p.get("space_id") or event.space_id or "") or None,
+                space_id=space_id,
                 origin_instance_id=event.from_instance,
             ),
         )

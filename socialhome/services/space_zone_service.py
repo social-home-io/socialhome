@@ -160,7 +160,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             created_at=now,
             updated_at=now,
         )
-        await self._zones.upsert(zone)
+        await self._zones.upsert(zone, space_id=space_id)
         await self._publish_upserted(zone)
         return zone
 
@@ -224,7 +224,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             created_at=existing.created_at,
             updated_at=_now_iso(),
         )
-        await self._zones.upsert(updated)
+        await self._zones.upsert(updated, space_id=space_id)
         await self._publish_upserted(updated)
         return updated
 
@@ -242,7 +242,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         actor = await self._users.get(actor_username)
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
-        await self._zones.delete(zone_id)
+        await self._zones.delete(zone_id, space_id=space_id)
         await self._emit(
             SpaceZoneDeleted(
                 space_id=space_id,

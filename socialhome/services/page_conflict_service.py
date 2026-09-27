@@ -238,7 +238,7 @@ class PageConflictService:
                 content=result.content,
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
-            await self._pages.save(updated)
+            await self._pages.save(updated, space_id=page.space_id)
             await self.record_base(
                 page_id=page_id,
                 space_id=space_id,
@@ -311,7 +311,7 @@ class PageConflictService:
             content=new_body,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
-        await self._pages.save(updated)
+        await self._pages.save(updated, space_id=page.space_id)
 
         # Clear the conflict flag and stamp a fresh base.
         await self._pages.clear_conflict_flag(page_id)

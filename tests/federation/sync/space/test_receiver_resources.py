@@ -75,9 +75,9 @@ class _FakeRepos:
             ) is False and hasattr(args[0], "title") else self.stickies.append(args[0])
         return args[-1]
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self.comments.append(comment)
-        return comment
+        return True
 
     # space_task_repo.save(space_id, task)
     async def save_task(self, space_id, task):
@@ -93,8 +93,9 @@ class _FakeRepos:
     async def create_album(self, album):
         self.gallery_albums.append(album)
 
-    async def create_item(self, item):
+    async def create_item_in_space(self, item, *, space_id, bump_count=True):
         self.gallery_items.append(item)
+        return True
 
 
 class _PostRepoStub:
@@ -105,45 +106,45 @@ class _PostRepoStub:
         self._c.posts.append((space_id, post))
         return post
 
-    async def add_comment(self, comment):
+    async def add_comment(self, comment, *, space_id):
         self._c.comments.append(comment)
-        return comment
+        return True
 
 
 class _TaskRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save(self, space_id, task):
+    async def save(self, task, *, space_id):
         self._c.tasks.append((space_id, task))
-        return task
+        return True
 
 
 class _PageRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save(self, page):
+    async def save(self, page, *, space_id):
         self._c.pages.append(page)
-        return page
+        return True
 
 
 class _StickyRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save(self, sticky):
+    async def save(self, sticky, *, space_id):
         self._c.stickies.append(sticky)
-        return sticky
+        return True
 
 
 class _CalendarRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save_event(self, space_id, event):
+    async def save_event(self, event, *, space_id):
         self._c.calendar.append((space_id, event))
-        return event
+        return True
 
 
 class _GalleryRepoStub:
@@ -153,17 +154,18 @@ class _GalleryRepoStub:
     async def create_album(self, album):
         self._c.gallery_albums.append(album)
 
-    async def create_item(self, item):
+    async def create_item_in_space(self, item, *, space_id, bump_count=True):
         self._c.gallery_items.append(item)
+        return True
 
 
 class _ZoneRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def upsert(self, zone):
+    async def upsert(self, zone, *, space_id):
         self._c.zones.append(zone)
-        return zone
+        return True
 
 
 class _BazaarRepoStub:
@@ -172,9 +174,9 @@ class _BazaarRepoStub:
     def __init__(self, collector):
         self._c = collector
 
-    async def save_listing(self, listing):
+    async def save_listing(self, listing, *, space_id):
         self._c.bazaar_listings.append(listing)
-        return listing
+        return True
 
 
 class _SpaceRepoStub:
@@ -440,6 +442,22 @@ async def test_gallery_album_then_item(setup):
     )
     assert len(c.gallery_albums) == 1 and c.gallery_albums[0].id == "a-1"
     assert len(c.gallery_items) == 1 and c.gallery_items[0].id == "i-1"
+
+
+async def test_gallery_album_lands_in_the_synced_space_not_the_records(setup):
+    """A record's own ``space_id`` (another space, or none = household
+    gallery) is untrusted: the album is filed under the stream's space."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "gallery",
+        [
+            {"kind": "album", "id": "a-x", "space_id": "sp-other", "name": "X"},
+            {"kind": "album", "id": "a-y", "space_id": None, "name": "Y"},
+        ],
+    )
+    assert [a.space_id for a in c.gallery_albums] == ["sp-1", "sp-1"]
 
 
 async def test_tasks_archived_routes_to_task_repo(setup):
@@ -779,9 +797,10 @@ class _FakePollRepo:
     def __init__(self) -> None:
         self.created: list[dict] = []
 
-    async def create_schedule_poll(
+    async def create_schedule_poll_in_space(
         self,
         *,
+        space_id,
         post_id,
         title,
         deadline,
@@ -795,6 +814,7 @@ class _FakePollRepo:
                 "slots": list(slots),
             },
         )
+        return True
 
 
 @pytest.fixture
