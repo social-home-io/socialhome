@@ -111,6 +111,7 @@ from ..domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    mirrorable_remote_role,
     normalize_category,
     normalize_min_age,
 )
@@ -1122,6 +1123,112 @@ class SpaceService(SpaceMemberGuardMixin):
             role=role,
             tombstoned=False,
         )
+        await self._send_roster_snapshot(space, to_instance_id=instance_id)
+
+    async def _send_roster_snapshot(self, space: Space, *, to_instance_id: str) -> None:
+        """Bring a newly-seated household's roster mirror up to date.
+
+        The gossip above tells every *existing* member about the joiner,
+        but the joiner learned the roster from a snapshot taken when its
+        invitation was built — any household seated between that and its
+        accept is missing from its mirror, and a gossip for it was sent
+        before the joiner was a member, so nothing ever fills the gap.
+        That mirror is what the §24.11 authorship rule binds every content
+        author to (``federation/space_authorship.py``), so a gap there
+        drops that household's content on the joiner for good.
+
+        So after seating, the host re-sends each live seat to the joiner
+        ALONE, authority-signed like any roster gossip, at the seat's
+        CURRENT ``member_version`` — no ``roster_sequence`` bump: the
+        receiver's CRDT merge (``apply_member_event``) applies an event for
+        a row it does not hold and drops an equal-version duplicate of one
+        it does, so the replay is idempotent and cannot regress anything.
+        Best effort, like the gossip itself.
+        """
+        if self._federation is None:
+            return
+        if not await self._federation.peer_supports(
+            to_instance_id,
+            min_version=FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP,
+        ):
+            return
+        try:
+            seed = await self.ensure_space_seed(space.id)
+        except Exception:
+            log.exception("roster-snapshot: ensure_space_seed failed for %s", space.id)
+            return
+        if seed is None:
+            return
+        seats: list[tuple[str, str, str | None, str | None, str, int]] = []
+        local = await self._spaces.list_members(space.id)
+        names = {
+            u.user_id: u.display_name
+            for u in await self._users.list_by_ids({m.user_id for m in local})
+        }
+        own = self._own_instance_id or space.owner_instance_id
+        for m in local:
+            seats.append(
+                (
+                    m.user_id,
+                    own,
+                    names.get(m.user_id),
+                    None,
+                    mirrorable_remote_role(m.role),
+                    0,
+                )
+            )
+        if self._remote_members is not None:
+            for r in await self._remote_members.list_for_space(space.id):
+                seats.append(
+                    (
+                        r.user_id,
+                        r.instance_id,
+                        r.display_name,
+                        r.user_pk,
+                        r.role,
+                        r.member_version,
+                    )
+                )
+        subscriber_ok = await self._federation.peer_supports(
+            to_instance_id,
+            min_version=FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
+        )
+        for user_id, inst, display_name, user_pk, role, version in seats:
+            if inst == to_instance_id:
+                continue
+            if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
+                continue
+            payload: dict = {
+                "space_id": space.id,
+                "user_id": user_id,
+                "instance_id": inst,
+                "display_name": display_name,
+                "user_pk": user_pk,
+                "role": role,
+                "member_version": version,
+                "roster_version": version,
+            }
+            payload.update(
+                sign_authority_event(
+                    event_type=FederationEventType.SPACE_MEMBER_JOINED.value,
+                    space_id=space.id,
+                    payload=strip_authority_sig_fields(payload),
+                    space_seed=seed,
+                )
+            )
+            try:
+                await self._federation.send_with_mesh_fallback(
+                    to_instance_id=to_instance_id,
+                    event_type=FederationEventType.SPACE_MEMBER_JOINED,
+                    payload=payload,
+                    space_id=space.id,
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: send to %s failed for %s",
+                    to_instance_id,
+                    space.id,
+                )
 
     async def _emit_member_roster_gossip(
         self,

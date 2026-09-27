@@ -229,6 +229,18 @@ act as one — only moderation (below) reaches a local user's rows.
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post; an existing listing keeps its seller | status (sold / expired / cancelled) and offer acceptance: the seller's household only | — |
 | Zones | moderators only (the local service is admin-only); a new zone's `created_by` bound like a create | moderators | moderators |
 
+Because the mirror is what authors are bound to, it has to be complete on
+every member household, not only on the host. A joiner's first roster is
+the snapshot in its invitation, taken when the invitation was built; a
+household seated between that and the accept would be missing from it for
+good (its seat gossip went out before the joiner was a member). So when the
+host seats a household it also re-sends every live seat to that household
+alone — `SPACE_MEMBER_JOINED`, authority-signed like any roster gossip, at
+each seat's current `member_version` with no `roster_sequence` bump — which
+the receiver's CRDT merge applies for a row it lacks and drops as a
+duplicate for one it has (`SpaceService._send_roster_snapshot`, v_23+
+receivers only).
+
 The bot bridge posts under the shared `system-integration` author, which is
 no member: any writer household may create such a post, only a moderator
 may change one. A refusal is logged at WARNING and answers `status: ok`, so

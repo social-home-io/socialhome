@@ -6812,3 +6812,101 @@ async def test_list_pending_join_requests_resolves_applicant_display_names(stack
     by_user = {r["user_id"]: r for r in rows}
     assert by_user[bob.user_id]["display_name"] == "bob"
     assert by_user["ruid-carol"]["display_name"] == "Carol Remote"
+
+
+# ─── Roster snapshot to a newly-seated household ───────────────────────
+
+
+async def test_a_new_member_household_is_sent_every_existing_seat(stack):
+    """The joiner's roster came from a snapshot taken when its invitation was
+    built; a household seated since is missing from its mirror, and the
+    authorship rule binds content authors to that mirror. After seating, the
+    host re-sends every live seat to the joiner alone — authority-signed, at
+    the seat's current version (no roster_sequence bump)."""
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.services.space_crypto_service import verify_authority_event
+
+    owner = await stack.provision_user("hosty")
+    space = await stack.space_svc.create_space(owner_username="hosty", name="S")
+    fed, fed_repo = _invite_fed()
+    remote = await _wire_remote_members(stack)
+    stack.space_svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        remote_member_repo=remote,
+    )
+    # A household seated AFTER the joiner's invitation was built.
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-early",
+        user_id="u-early",
+        user_pk=None,
+        display_name="Early",
+    )
+    # The joiner itself, seated by the accept.
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-new",
+        user_id="u-new",
+        user_pk=None,
+        display_name="New",
+    )
+    seq_before = (await stack.space_repo.get(space.id)).roster_sequence
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id,
+        instance_id="peer-new",
+        user_id="u-new",
+        user_pk=None,
+        display_name="New",
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_MEMBER_JOINED
+    ]
+    assert {s["to_instance_id"] for s in sent} == {"peer-new"}
+    by_user = {s["payload"]["user_id"]: s["payload"] for s in sent}
+    # Every seat but the joiner's own household's, local owner included.
+    assert set(by_user) == {"u-early", owner.user_id}
+    assert by_user["u-early"]["instance_id"] == "peer-early"
+    assert by_user[owner.user_id]["instance_id"] == stack.iid
+    pub = bytes.fromhex((await stack.space_repo.get(space.id)).identity_public_key)
+    for p in by_user.values():
+        assert verify_authority_event(
+            event_type=FederationEventType.SPACE_MEMBER_JOINED.value,
+            space_id=space.id,
+            payload={
+                k: v
+                for k, v in p.items()
+                if k not in ("authority_sig", "authority_sig_suite")
+            },
+            authority_sig=p["authority_sig"],
+            authority_sig_suite=p["authority_sig_suite"],
+            space_public_key=pub,
+        )
+    # Only the gossip for the joiner itself bumped the roster counter.
+    assert (await stack.space_repo.get(space.id)).roster_sequence == seq_before + 1
+
+
+async def test_no_roster_snapshot_to_a_household_below_roster_gossip(stack):
+    from unittest.mock import AsyncMock
+
+    from socialhome.domain.federation import FederationEventType
+
+    await stack.provision_user("hosty")
+    space = await stack.space_svc.create_space(owner_username="hosty", name="S")
+    fed, fed_repo = _invite_fed()
+    fed.peer_supports = AsyncMock(return_value=False)
+    stack.space_svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        remote_member_repo=(await _wire_remote_members(stack)),
+    )
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id, instance_id="peer-old", user_id="u", user_pk=None, display_name="U"
+    )
+    assert not [
+        c
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_MEMBER_JOINED
+    ]
