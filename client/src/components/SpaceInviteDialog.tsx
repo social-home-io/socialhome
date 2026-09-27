@@ -492,7 +492,8 @@ export function SpaceInviteDialog() {
               </div>
             )}
 
-            <div class="sh-form-actions">
+            <div class="sh-form-actions sh-invite-dialog__submit"
+                 data-testid="invite-submit-row">
               <Button onClick={createToken} loading={loading.value}>
                 Create invite link
               </Button>
