@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'preact/hooks'
 import { api } from '../api'
+import { normaliseTimestamp } from '@/utils/relativeTime'
 
 interface ClusterNode {
   node_id: string
@@ -117,7 +118,7 @@ export function ClusterPanel() {
                 <td><span class={nodePill(n.status)}>{n.status}</span></td>
                 <td>{n.connected_clients}</td>
                 <td>{n.active_sync_sessions}</td>
-                <td>{n.last_seen ? new Date(n.last_seen).toLocaleString() : '—'}</td>
+                <td>{n.last_seen ? new Date(normaliseTimestamp(n.last_seen)).toLocaleString() : '—'}</td>
                 <td class="row-actions">
                   {!n.is_self && (
                     <>

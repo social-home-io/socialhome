@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
@@ -16,6 +18,10 @@ from socialhome.global_server.cluster import (
 )
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
+
+# ``cluster_nodes.added_at`` is SQLite's naive ``datetime('now')`` default
+# shape — UTC, no ``T``, no zone designator. ``last_seen`` must match it.
+_NAIVE_UTC_TS = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
 
 @pytest.fixture
@@ -236,6 +242,35 @@ async def test_handle_heartbeat_without_payload_is_compat(
     peer_row = next(n for n in nodes if n.node_id == "node-b")
     assert peer_row.status == "online"
     assert "node-b" not in enabled_cluster._active_sync_count
+
+
+async def test_handle_heartbeat_last_seen_matches_added_at_naive_utc_shape(
+    enabled_cluster,
+    gfs_db,
+):
+    """``last_seen`` shares ``added_at``'s naive UTC shape.
+
+    Both columns are UTC by the codebase's invariant, but ``last_seen``
+    used to be written as a tz-aware ``isoformat()`` string
+    (``...+00:00``) while ``added_at`` is SQLite's naive
+    ``datetime('now')`` default — a shape mismatch between sibling
+    columns on the same row. A reader that correctly treats one shape
+    as UTC (e.g. the admin UI's ``normaliseTimestamp``) mishandles the
+    other, silently shifting the displayed time by the viewer's UTC
+    offset.
+    """
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.upsert_node(
+        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    )
+    await enabled_cluster.handle_heartbeat("node-b", None)
+    nodes = await repo.list_nodes()
+    peer_row = next(n for n in nodes if n.node_id == "node-b")
+    assert peer_row.last_seen is not None
+    assert _NAIVE_UTC_TS.match(peer_row.last_seen), peer_row.last_seen
+    assert _NAIVE_UTC_TS.match(peer_row.added_at), peer_row.added_at
+    for marker in ("T", "+", "Z"):
+        assert marker not in peer_row.last_seen
 
 
 # ─── connected_clients gossip ─────────────────────────────────────────
