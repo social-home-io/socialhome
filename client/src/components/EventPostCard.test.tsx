@@ -163,10 +163,12 @@ describe('EventPostCard', () => {
     // UTC printed the day before AND made the single day look like a
     // two-day range ("Apr 30 – May 1").
     const zurich = 'Europe/Zurich'
-    // 22:00Z is 00:00 the next day in Zurich (CEST/CET are both east
-    // of UTC), so this pair is one authored calendar day there.
-    const start = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-    start.setUTCHours(22, 0, 0, 0)
+    // 22:00Z is 00:00 the next day in Zurich only under CEST (UTC+2),
+    // so pin the fixture to 1 July of next year — always in the future
+    // and never across a DST switch, whatever day the suite runs.
+    const start = new Date(
+      Date.UTC(new Date().getUTCFullYear() + 1, 6, 1, 22, 0, 0, 0),
+    )
     const end = new Date(start.getTime() + (23 * 60 + 59) * 60 * 1000)
     const dateOpts: Intl.DateTimeFormatOptions = {
       timeZone: zurich, weekday: 'short', month: 'short', day: 'numeric',
