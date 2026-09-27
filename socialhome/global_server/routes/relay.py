@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from aiohttp import web
 
+from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
 from ..public import PUBLISH_MAX_BODY_BYTES
@@ -119,7 +120,9 @@ class RegisterView(GfsBaseView):
     household identity end-to-end and never trust the GFS-served value — all
     omitted by older HFS, in which case that household can't be sealed-to yet.
     Requests without a valid token are rejected with ``401`` so a stale QR
-    can't be replayed.
+    can't be replayed. An ``inbox_url`` that is not a usable household
+    address (:func:`socialhome.peer_url.validate_peer_url`) is rejected with
+    ``422 invalid_inbox_url`` before the token is consumed.
     """
 
     async def post(self) -> web.Response:
@@ -136,6 +139,18 @@ class RegisterView(GfsBaseView):
         token = str(body.get("token") or "")
         if not token:
             raise web.HTTPBadRequest(reason="Missing field: token")
+        # Every relay fan-out later POSTs to this URL, so refuse an unusable
+        # one here with the household-address rules the household itself
+        # applies to a scanned pairing code. Checked BEFORE the single-use
+        # token is consumed, so a household can fix its address and retry;
+        # the error names the rule, never the URL.
+        try:
+            validate_peer_url(inbox_url, field="inbox_url")
+        except InvalidPeerUrlError as exc:
+            return web.json_response(
+                {"error": "invalid_inbox_url", "detail": str(exc)},
+                status=422,
+            )
         if not await token_svc.consume(token):
             return web.json_response(
                 {"error": "invalid_or_expired_token"},

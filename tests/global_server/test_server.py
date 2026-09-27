@@ -205,6 +205,47 @@ async def test_register_returns_pending_when_auto_accept_off(gfs_client):
     assert body["status"] == "pending"
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "file:///etc/passwd",
+        "gopher://inbox.example/x",
+        "http://user:secret@inbox.example/x",
+        "https://",
+        "http://inbox.example/x y",
+        "",
+        12345,
+    ],
+)
+async def test_register_rejects_unusable_inbox_url(gfs_client, bad_url):
+    """The connection server later POSTs to the registered inbox URL, so an
+    unusable one is refused up front: 422, nothing stored, the URL is not
+    echoed back, and the single-use token is not burned."""
+    app = gfs_client.server.app
+    token = await _fresh_pair_token(app, "127.0.0.14")
+    body = {
+        "token": token,
+        "instance_id": "inst-bad-url",
+        "public_key": "aa" * 32,
+        "inbox_url": bad_url,
+    }
+    resp = await gfs_client.post("/gfs/register", json=body)
+    assert resp.status == 422
+    text = await resp.text()
+    if isinstance(bad_url, str) and bad_url:
+        assert bad_url not in text
+    assert await app[gfs_fed_repo_key].get_instance("inst-bad-url") is None
+    # Token survives: the household can fix its address and retry.
+    retry = await gfs_client.post(
+        "/gfs/register",
+        json={**body, "inbox_url": "https://inbox.example/federation/inbox"},
+    )
+    assert retry.status == 200
+    stored = await app[gfs_fed_repo_key].get_instance("inst-bad-url")
+    assert stored is not None
+    assert stored.inbox_url == "https://inbox.example/federation/inbox"
+
+
 async def test_gfs_info_returns_public_key(gfs_client):
     """``GET /gfs/info`` exposes the GFS's Ed25519 public key so HFS
     clients can pin it after scanning the QR (which carries only

@@ -3306,9 +3306,14 @@ def cmd_pair() -> None:
         # degrades into the ordinary ``SPACE_INVITE_TOKEN_REDEEM`` path.
         "e": 0,
     }
+    # Read through the ``/api/connections`` alias (same view, same shape):
+    # every ``/api/pairing/*`` call — the scanner's accept included, since
+    # it requires the admin's token — shares one 5 / 60 s bucket per user,
+    # and b has just spent all five (accept a↔b, initiate b↔c + b↔d,
+    # confirm ×2). A read on ``/api/pairing/connections`` here 429s.
     for label, info in state["instances"].items():
         s, conns = _request(
-            f"http://127.0.0.1:{info['port']}/api/pairing/connections",
+            f"http://127.0.0.1:{info['port']}/api/connections",
             token=info["token"],
         )
         _must(f"connections({label})", s, conns)

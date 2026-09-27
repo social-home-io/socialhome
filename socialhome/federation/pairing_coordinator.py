@@ -41,7 +41,7 @@ from ..domain.events import (
 from ..utils.datetime import parse_iso8601_strict
 from .crypto_suite import DEFAULT_SUITE, negotiate
 from .peer_pairing_client import _canonical_body_bytes
-from .peer_url import validate_peer_url
+from ..peer_url import validate_peer_url
 from ..domain.federation import (
     InstanceSource,
     PairingSession,

@@ -39,7 +39,7 @@ from ..domain.space_bot import (
 from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_service import BazaarServiceError, ListingNotFoundError
-from ..federation.peer_url import InvalidPeerUrlError
+from ..peer_url import InvalidPeerUrlError
 from ..services.dm_service import MediaRequiresDirectPairingError
 from ..services.child_protection_service import (
     ChildProtectionError,

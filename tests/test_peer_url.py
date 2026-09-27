@@ -1,10 +1,10 @@
-"""Tests for :mod:`socialhome.federation.peer_url` — household URL checks."""
+"""Tests for :mod:`socialhome.peer_url` — household URL checks."""
 
 from __future__ import annotations
 
 import pytest
 
-from socialhome.federation.peer_url import (
+from socialhome.peer_url import (
     InvalidPeerUrlError,
     is_private_host,
     validate_peer_url,

@@ -19,6 +19,14 @@ Two policies share one set of structural rules:
   same rules plus ``https://`` unless the host is loopback / LAN-private.
   ``GET /gfs/info`` delivers the key the household pins on first contact,
   so a public plain-http connection server has nothing trustworthy to pin.
+
+The connection server applies the household policy to the ``inbox_url`` a
+household registers with, since its fan-out POSTs there too.
+
+This module sits at the package top level (beside
+:mod:`socialhome.capabilities_sig`, same discipline) and depends only on the
+standard library, so BOTH the household and the connection-server process
+can import it without dragging in each other's stack.
 """
 
 from __future__ import annotations

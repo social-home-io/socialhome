@@ -42,7 +42,7 @@ import logging
 from aiohttp import web
 
 from ..app_keys import db_key, url_update_outbound_key
-from ..federation.peer_url import InvalidPeerUrlError, validate_peer_url
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..security import error_response
 from .base import BaseView
 
@@ -55,7 +55,7 @@ _INSTANCE_CONFIG_KEY = "ha_federation_base"
 def _validate_base(raw: str) -> str | None:
     """Normalize + validate a pushed base URL. Return the cleaned URL
     or ``None`` if it fails the household-address rules peers apply to it
-    (:func:`~socialhome.federation.peer_url.validate_peer_url`).
+    (:func:`~socialhome.peer_url.validate_peer_url`).
     """
     base = raw.strip().rstrip("/")
     if not base:

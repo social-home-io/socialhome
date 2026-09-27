@@ -44,7 +44,6 @@ log = logging.getLogger(__name__)
 # every additional path is an attack surface.
 _DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
     "/healthz",
-    "/api/pairing/accept",  # pairing handshake — uses its own auth
     "/api/auth/token",  # standalone login — issues the token
     "/api/auth/redeem-password-reset",  # admin-issued reset → new password
     # First-boot wizard — the SPA hits these before it has a token.

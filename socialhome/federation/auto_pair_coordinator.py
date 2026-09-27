@@ -64,7 +64,7 @@ from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..services.auto_pair_inbox import AutoPairInbox
-from .peer_url import InvalidPeerUrlError, validate_peer_url
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent

@@ -172,10 +172,14 @@ class PairingInitiateView(BaseView):
 
     Returns 422 ``NOT_CONFIGURED`` if the adapter has no base to offer —
     admin must set the URL before they can issue a QR.
+
+    Admin-only, like every step of the handshake: pairing is a trust
+    decision for the whole household.
     """
 
     async def post(self) -> web.Response:
-        self.user  # auth check
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
         adapter = self.svc(platform_adapter_key)
         base = await adapter.get_federation_base()
         if not base:
@@ -193,11 +197,20 @@ class PairingInitiateView(BaseView):
 
 
 class PairingAcceptView(BaseView):
-    """``POST /api/pairing/accept`` — consume QR payload (public endpoint)."""
+    """``POST /api/pairing/accept`` — consume a scanned QR payload.
+
+    The scan side of the handshake, run by a signed-in admin of THIS
+    household from the SPA. It is not a peer-to-peer endpoint: the peer's
+    reply (``PAIRING_PEER_ACCEPT`` / ``_CONFIRM``) arrives through the
+    envelope-signed federation inbox. It therefore goes through the normal
+    auth middleware (bearer token, or ingress headers under haos) and is
+    admin-only — it creates pairing state and makes this household POST a
+    signed body to the scanned inbox URL.
+    """
 
     async def post(self) -> web.Response:
-        # /api/pairing/accept is on the auth middleware's public-path list
-        # (it IS the auth/handshake entry point) — no current_user check.
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
         adapter = self.svc(platform_adapter_key)
         own_base = await adapter.get_federation_base()
@@ -209,10 +222,14 @@ class PairingAcceptView(BaseView):
 
 
 class PairingConfirmView(BaseView):
-    """``POST /api/pairing/confirm`` — finalise pairing with verification code."""
+    """``POST /api/pairing/confirm`` — finalise pairing with verification code.
+
+    Admin-only, like the rest of the handshake.
+    """
 
     async def post(self) -> web.Response:
-        self.user  # auth check
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
         token = str(body.get("token") or "")
         code = str(body.get("verification_code") or "")
