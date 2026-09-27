@@ -14,6 +14,7 @@ from socialhome.domain.federation import (
     SPACE_READER_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     STRUCTURAL_EVENTS,
+    is_relay_only,
 )
 
 
@@ -217,3 +218,28 @@ def test_a_reader_may_still_speak_the_non_content_vocabulary():
         FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
     ):
         assert event_type in SPACE_READER_EVENT_TYPES
+
+
+# ─── is_relay_only: accepted by the connection server vs delivered ──────
+
+
+def test_relay_only_when_never_delivered_but_relay_accepted():
+    """A household we have only ever handed to the relay has never been
+    proven reachable — that is exactly the relay-only state."""
+    assert is_relay_only("2026-09-20 10:00:00", None) is True
+
+
+def test_relay_only_when_relay_acceptance_is_newer_than_delivery():
+    assert is_relay_only("2026-09-20 10:00:05", "2026-09-20 10:00:00") is True
+
+
+def test_not_relay_only_when_delivery_is_as_recent_as_relay():
+    """A proven delivery at or after the latest relay acceptance means the
+    household is really there — not relay-only."""
+    assert is_relay_only("2026-09-20 10:00:00", "2026-09-20 10:00:00") is False
+    assert is_relay_only("2026-09-20 10:00:00", "2026-09-20 11:00:00") is False
+
+
+def test_not_relay_only_without_any_relay_acceptance():
+    assert is_relay_only(None, None) is False
+    assert is_relay_only(None, "2026-09-20 10:00:00") is False

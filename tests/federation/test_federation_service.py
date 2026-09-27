@@ -28,6 +28,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DeliveryResult,
     FederationEventType,
+    InstanceSource,
     PairingSession,
     PairingStatus,
     RemoteInstance,
@@ -137,7 +138,13 @@ class InMemoryFederationRepo:
         return inst
 
     async def list_social_instances(self):
-        return await self.list_instances(status="confirmed")
+        # Mirrors the SQLite repo: a ``space_session`` row (invite-link
+        # household) is CONFIRMED but not a social peer.
+        return [
+            i
+            for i in await self.list_instances(status="confirmed")
+            if i.source is not InstanceSource.SPACE_SESSION
+        ]
 
     async def list_instances(
         self,
@@ -1107,6 +1114,48 @@ async def test_broadcast_to_all_confirmed_when_no_ids():
 
     assert result.attempted == 3
     assert result.succeeded == 3
+
+
+@pytest.mark.asyncio
+async def test_broadcast_default_targets_social_peers_only():
+    """The ``instance_ids=None`` default must pick the same safe list every
+    targeted fan-out reads (``list_social_instances``): an invite-link
+    household (``space_session``) shares a space, not a social
+    relationship, so a directory/capability broadcast must never reach it
+    — and neither may our own row."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+
+    import os
+
+    social, _ = _make_remote_instance(km, session_key=os.urandom(32))
+    link, _ = _make_remote_instance(km, session_key=os.urandom(32))
+    link = dataclasses.replace(link, source=InstanceSource.SPACE_SESSION)
+    await fed_repo.save_instance(social)
+    await fed_repo.save_instance(link)
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(return_value=mock_resp)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        key_manager=km,
+        http_client=mock_http,
+    )
+    own, _ = _make_remote_instance(km, session_key=os.urandom(32))
+    own = dataclasses.replace(own, id=svc.own_instance_id)
+    await fed_repo.save_instance(own)
+
+    result = await svc.broadcast_to_peers(
+        event_type=FederationEventType.USERS_SYNC,
+        payload={"users": []},
+    )
+
+    assert [r.instance_id for r in result.results] == [social.id]
 
 
 @pytest.mark.asyncio
@@ -3320,6 +3369,67 @@ async def test_a_relay_acceptance_never_marks_the_peer_reachable():
     assert result.via == "gfs_relay"
     assert fed_repo.reachable_calls == []
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_relay_acceptance_is_remembered_for_the_operator():
+    """Acceptance is not delivery, but it is not nothing either: the
+    operator needs to see "the connection server took it at T" beside
+    "last connected", or a relay-only household is indistinguishable
+    from one we never send to. Kept in memory, same UTC shape as the
+    ``last_reachable_at`` column so the two compare directly."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    assert svc.last_relay_accepted_at(inst.id) is None
+    svc.attach_transport(
+        _RelayResultTransport(
+            _TransportSendResult(ok=True, via="gfs_relay", status_code=202),
+        ),
+    )
+
+    await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    ts = svc.last_relay_accepted_at(inst.id)
+    assert ts is not None
+    # Naive UTC "YYYY-MM-DD HH:MM:SS" — SQLite ``datetime('now')`` shape.
+    parsed = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert abs((now - parsed).total_seconds()) < 5
+
+
+@pytest.mark.asyncio
+async def test_a_failed_relay_send_or_a_direct_delivery_is_not_a_relay_acceptance():
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(inst)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+
+    for result in (
+        _TransportSendResult(ok=True, via="rtc"),
+        _TransportSendResult(
+            ok=False,
+            via="gfs_relay",
+            status_code=429,
+            error=DELIVERY_ERROR_RELAY_THROTTLED,
+        ),
+    ):
+        svc.attach_transport(_RelayResultTransport(result))
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.USER_UPDATED,
+            payload={"user_id": "abc"},
+        )
+
+    assert svc.last_relay_accepted_at(inst.id) is None
 
 
 @pytest.mark.asyncio

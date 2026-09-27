@@ -446,7 +446,9 @@ async def _redeliver_envelope(
             # answer would be a presence oracle. That 202 is an
             # ACCEPTANCE, not a delivery, so it cannot clear the
             # household's ``unreachable_since``; an inbound envelope
-            # from them is what proves they are there.
+            # from them is what proves they are there. It IS recorded as
+            # a relay acceptance for the operator's diagnostics.
+            federation_service.note_relay_accepted(entry.instance_id)
             return DeliveryOutcome.SUCCESS
         if result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
             # Deterministic: the frame is over the relay's body cap and

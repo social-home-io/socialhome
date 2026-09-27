@@ -18,7 +18,14 @@ may span any number of paired HFS instances.
 
 `SPACE_CREATED`, `SPACE_DISSOLVED`, `SPACE_CONFIG_CHANGED`,
 `SPACE_MEMBER_JOINED`, `SPACE_MEMBER_LEFT`, `SPACE_MEMBER_BANNED`,
-`SPACE_MEMBER_UNBANNED`, `SPACE_INSTANCE_LEFT`, `SPACE_AGE_GATE_UPDATED`.
+`SPACE_MEMBER_UNBANNED`, `SPACE_INSTANCE_LEFT`, `SPACE_AGE_GATE_UPDATED`,
+`SPACE_MEMBER_PROFILE_UPDATED`.
+
+`SPACE_MEMBER_PROFILE_UPDATED` carries a member's per-space display name
+and picture. A receiver applies it only when its own roster mirror
+(`space_remote_members`) holds a live seat for that user on the sending
+household (looked up under the envelope's authenticated `from_instance`);
+otherwise the event is dropped.
 
 From v_23, `SPACE_MEMBER_JOINED` / `SPACE_MEMBER_LEFT` are the
 **peer-replicated, space-authority-signed roster gossip** — the host emits

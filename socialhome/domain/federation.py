@@ -1096,6 +1096,28 @@ class DeliveryResult:
     retry_after_s: float | None = None
 
 
+def is_relay_only(
+    last_relay_accepted_at: str | None,
+    last_reachable_at: str | None,
+) -> bool:
+    """Whether a peer's recent traffic has only been *accepted by the relay*.
+
+    A connection-server relay ``202`` (``DeliveryResult.via="gfs_relay"``)
+    is an acceptance, never a delivery, so it deliberately does not touch
+    ``last_reachable_at``. The peer is "relay-only" when the relay has
+    taken something for it more recently than any proven delivery (or
+    there has never been one). Both arguments are UTC timestamps in the
+    SQLite ``datetime('now')`` shape (``"YYYY-MM-DD HH:MM:SS"``), which
+    order lexicographically. A delivery in the same second as the latest
+    acceptance counts as delivered.
+    """
+    if not last_relay_accepted_at:
+        return False
+    if not last_reachable_at:
+        return True
+    return last_relay_accepted_at > last_reachable_at
+
+
 @dataclass(slots=True, frozen=True)
 class BroadcastResult:
     """Aggregate result of fan-out to many peers."""

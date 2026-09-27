@@ -759,6 +759,63 @@ async def test_connections_response_reports_the_relay_for_a_link_joined_peer(
     assert row["transport"] == "gfs_relay"
 
 
+def _link_joined_peer(suffix: str) -> RemoteInstance:
+    kp = generate_identity_keypair()
+    return RemoteInstance(
+        id=derive_instance_id(kp.public_key),
+        display_name=f"peer-{suffix}",
+        remote_identity_pk=kp.public_key.hex(),
+        key_self_to_remote="k",
+        key_remote_to_self="k",
+        remote_inbox_url="",
+        local_inbox_id=f"wh-{suffix}",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        relay_via="https://gfs.example.org",
+        remote_keywrap_pk="cc" * 32,
+    )
+
+
+async def test_connections_show_a_peer_only_the_relay_has_accepted_for(client):
+    """ "Accepted by the connection server" is not "delivered". A household
+    whose recent traffic has only been handed to the relay reports
+    ``relay_only`` plus the last acceptance time, so the operator can tell
+    it apart from one that is actually receiving."""
+    peer = _link_joined_peer("relay-only")
+    await client.app[federation_repo_key].save_instance(peer)
+    client.app[federation_service_key].note_relay_accepted(peer.id)
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    row = next(x for x in await r.json() if x["instance_id"] == peer.id)
+    assert row["relay_only"] is True
+    assert row["last_relay_accepted_at"]
+    assert row["last_reachable_at"] is None
+
+
+async def test_connections_relay_only_clears_once_delivery_is_proven(client):
+    peer = _link_joined_peer("relay-proven")
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(peer)
+    client.app[federation_service_key].note_relay_accepted(peer.id)
+    # An inbound envelope from them (or a direct delivery) proves reach.
+    await fed_repo.mark_reachable(peer.id)
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    row = next(x for x in await r.json() if x["instance_id"] == peer.id)
+    assert row["relay_only"] is False
+    assert row["last_relay_accepted_at"]
+
+
+async def test_connections_without_relay_traffic_report_no_relay_state(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-no-relay"))
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    row = next(x for x in await r.json() if x["instance_id"] == "peer-no-relay")
+    assert row["relay_only"] is False
+    assert row["last_relay_accepted_at"] is None
+
+
 async def test_connections_response_transport_https_when_channel_down(client):
     """Same peer, transport service reports not-ready → transport='https'."""
     kp = generate_identity_keypair()
@@ -1173,6 +1230,9 @@ class _StubConfirmSvc:
 
     async def confirm_pairing(self, token: str, code: str):
         return self._inst
+
+    def last_relay_accepted_at(self, instance_id: str) -> str | None:
+        return None
 
 
 async def test_confirm_pairing_reports_real_envelope_counts(client):

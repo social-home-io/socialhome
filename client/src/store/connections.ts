@@ -42,6 +42,14 @@ export interface Connection {
    *  been reached. Distinct from ``last_seen_at`` (inbound activity) —
    *  ``ConnectionDetail`` renders it as "Last connected". */
   last_reachable_at?: string | null
+  /** Last time the connection-server relay ACCEPTED an envelope for this
+   *  peer (naive UTC, in-memory on the backend). Accepted is not
+   *  delivered: the relay answers 202 whether or not the household is
+   *  online, so this never feeds ``last_reachable_at``. */
+  last_relay_accepted_at?: string | null
+  /** True when the relay has taken something for this peer more recently
+   *  than any proven delivery — its recent traffic rides the relay only. */
+  relay_only?: boolean
   /** Undelivered federation envelopes still queued for this peer. A peer
    *  that has been offline for weeks piles these up; the count is what
    *  separates a blip from a household that has been gone for months.
