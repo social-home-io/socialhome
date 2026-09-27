@@ -66,3 +66,119 @@ async def test_collects_basenames_from_every_source(db):
         "hl.webp",
         "mom.webp",
     }
+
+
+async def _seed_parents(db) -> None:
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES('u1', 'u1', 'U1')",
+    )
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key) VALUES('sp1', 'S', 'self', 'u1', 'k')",
+    )
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type) VALUES('fp0', 'u1', 'text')",
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type) "
+        "VALUES('sp0', 'sp1', 'u1', 'text')",
+    )
+    await db.enqueue(
+        "INSERT INTO calendars(id, name, owner_username) VALUES('cal1', 'C', 'u1')",
+    )
+
+
+async def test_collects_the_remaining_media_sources(db):
+    """Comments, bazaar listings, calendar / page covers, task attachments
+    and drafts reference media too — none of them may be swept."""
+    await _seed_parents(db)
+    stmts = [
+        "INSERT INTO post_comments(id, post_id, author, media_url) "
+        "VALUES('c1', 'fp0', 'u1', 'api/media/fcomment.webp')",
+        "INSERT INTO space_post_comments(id, post_id, author, media_url) "
+        "VALUES('c2', 'sp0', 'u1', 'api/media/scomment.webp')",
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, "
+        "title, end_time, currency, image_urls_json) VALUES('sp0', 'sp1', 'u1', "
+        "'fixed', 'T', '2099-01-01', 'USD', '[\"api/media/bazaar.webp\"]')",
+        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt, "
+        "created_by, cover_url) VALUES('e1', 'cal1', 'S', '2026-01-01', "
+        "'2026-01-02', 'u1', '/api/media/calcover.webp')",
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, "
+        "end_dt, created_by, cover_url) VALUES('e2', 'sp1', 'S', '2026-01-01', "
+        "'2026-01-02', 'u1', '/api/media/spcalcover.webp')",
+        "INSERT INTO pages(id, title, created_by, cover_image_url) "
+        "VALUES('pg1', 'P', 'u1', 'api/media/pagecover.webp')",
+        "INSERT INTO space_pages(id, space_id, title, created_by, cover_image_url) "
+        "VALUES('pg2', 'sp1', 'P', 'u1', 'api/media/spagecover.webp')",
+        "INSERT INTO page_edit_history(id, page_id, title, content, edited_by, "
+        "version, cover_image_url) VALUES('h1', 'pg1', 'P', '', 'u1', 1, "
+        "'api/media/oldcover.webp')",
+        "INSERT INTO task_attachments(id, task_id, uploaded_by, url, filename, "
+        "mime, size_bytes) VALUES('a1', 't1', 'u1', 'api/media/attach.pdf', "
+        "'report.pdf', 'application/pdf', 1)",
+        "INSERT INTO post_drafts(id, username, context, media_url) "
+        "VALUES('d1', 'u1', 'feed', 'api/media/draft.webp')",
+    ]
+    for sql in stmts:
+        await db.enqueue(sql)
+    repo = SqliteMediaReferenceRepo(db)
+    expected = {
+        "fcomment.webp",
+        "scomment.webp",
+        "bazaar.webp",
+        "calcover.webp",
+        "spcalcover.webp",
+        "pagecover.webp",
+        "spagecover.webp",
+        "oldcover.webp",
+        "attach.pdf",
+        "draft.webp",
+    }
+    assert await repo.referenced_basenames() == expected
+    for name in expected:
+        assert await repo.is_referenced(name), name
+
+
+async def test_is_referenced_matches_the_whole_file_name(db):
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url) "
+        "VALUES('p1', 'sp1', 'u1', 'image', 'api/media/abc_1.webp')",
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json) "
+        "VALUES('p2', 'sp1', 'u1', 'image', '[\"api/media/x.webp\"]')",
+    )
+    await db.enqueue("INSERT INTO gallery_albums(id, name) VALUES('al1', 'A')")
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, "
+        "filename, thumbnail_filename, width, height) "
+        "VALUES('gi1', 'al1', 'u1', 'photo', 'gal.webp', 'galt.webp', 1, 1)",
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.is_referenced("abc_1.webp")
+    assert await repo.is_referenced("x.webp")
+    assert await repo.is_referenced("galt.webp")
+    # A substring, or a LIKE wildcard, is not a match.
+    assert not await repo.is_referenced("c_1.webp")
+    assert not await repo.is_referenced("abc%.webp")
+    assert not await repo.is_referenced("abcx1.webp")
+    assert not await repo.is_referenced("")
+
+
+async def test_a_deleted_post_no_longer_references_its_images(db):
+    """Soft delete clears ``media_url`` but keeps ``image_urls_json``; a
+    deleted row must not pin the files forever."""
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json, "
+        "deleted) VALUES('p1', 'sp1', 'u1', 'image', '[\"api/media/gone.webp\"]', 1)",
+    )
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, image_urls_json, deleted) "
+        "VALUES('f1', 'u1', 'image', '[\"api/media/fgone.webp\"]', 1)",
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.is_referenced("gone.webp")
+    assert not await repo.is_referenced("fgone.webp")
+    assert await repo.referenced_basenames() == set()

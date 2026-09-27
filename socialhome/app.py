@@ -693,6 +693,7 @@ def _build_repos(db: AsyncDatabase):
         push_sub=SqlitePushSubscriptionRepo(db),
         gallery=SqliteGalleryRepo(db),
         media_transcode=SqliteMediaTranscodeRepo(db),
+        media_reference=SqliteMediaReferenceRepo(db),
         space_key=SqliteSpaceKeyRepo(db),
         search=SqliteSearchRepo(db),
         theme=SqliteThemeRepo(db),
@@ -1544,6 +1545,7 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo,
         bus,
         media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
     )
     space_service = SpaceService(
         space_repo,
@@ -1552,6 +1554,7 @@ def create_app(config: Config | None = None) -> web.Application:
         bus,
         own_instance_id="unknown",  # patched on startup
         media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
     )
     space_service.attach_profile_picture_repo(profile_picture_repo)
     space_service.attach_cover_repo(space_cover_repo)
@@ -1613,6 +1616,7 @@ def create_app(config: Config | None = None) -> web.Application:
         dm_routing_repo=repos.dm_routing,
         media_sync=dm_media_sync_service,
         media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
         visibility_repo=repos.peer_user_visibility,
     )
     report_repo = SqliteReportRepo(db)
@@ -1746,6 +1750,7 @@ def create_app(config: Config | None = None) -> web.Application:
         config,
         media_transcode_repo=repos.media_transcode,
         media_transcode_service=media_transcode_service,
+        media_refs=repos.media_reference,
     )
 
     # ── System "Posts" album bridge (§Gallery) ──────────────────────────
@@ -1899,6 +1904,7 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo,
         bus,
         media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
     )
     highlight_retention_scheduler = HighlightRetentionScheduler(highlight_service)
     # Public-publish service. ``attach_session`` + ``attach_identity``
@@ -1938,6 +1944,7 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo,
         bus,
         media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
     )
     moment_retention_scheduler = MomentRetentionScheduler(moment_service)
 
@@ -2387,6 +2394,7 @@ def create_app(config: Config | None = None) -> web.Application:
             bus,
             own_instance_id=real_instance_id,
             media_dir=pathlib.Path(config.media_path),
+            media_refs=repos.media_reference,
         )
         # §CP.F1: hook child-protection age gate into add_member.
         real_space_service.attach_child_protection(child_protection_service)
@@ -3073,7 +3081,7 @@ def create_app(config: Config | None = None) -> web.Application:
         media_sweep_scheduler = MediaOrphanSweepScheduler(
             MediaOrphanSweepService(
                 media_dir=pathlib.Path(config.media_path),
-                reference_repo=SqliteMediaReferenceRepo(db),
+                reference_repo=repos.media_reference,
                 media_transcode_repo=repos.media_transcode,
             ),
         )

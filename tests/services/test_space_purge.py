@@ -30,6 +30,19 @@ class _FakeGalleryRepo:
         return list(self._names)
 
 
+class _FakeRefs:
+    """Files other rows (outside the purged space) still reference."""
+
+    def __init__(self, *live: str) -> None:
+        self._live = set(live)
+
+    async def referenced_basenames(self) -> set[str]:
+        return set(self._live)
+
+    async def is_referenced(self, basename: str) -> bool:
+        return basename in self._live
+
+
 class _FakeSpaceRepo:
     def __init__(self) -> None:
         self.purged: list[str] = []
@@ -69,6 +82,7 @@ async def test_purge_drops_rows_and_unlinks_files(tmp_path: pathlib.Path):
         post_repo=_FakePostRepo(["api/media/post.webp"]),
         gallery_repo=_FakeGalleryRepo(["gallery.webp"]),
         media_dir=tmp_path,
+        media_refs=_FakeRefs(),
         space_id="sp-1",
     )
     assert space_repo.purged == ["sp-1"]  # rows dropped (cascade)
@@ -98,7 +112,39 @@ async def test_purge_tolerates_missing_files(tmp_path: pathlib.Path):
         post_repo=_FakePostRepo(["api/media/gone.webp"]),
         gallery_repo=None,
         media_dir=tmp_path,
+        media_refs=_FakeRefs(),
         space_id="sp-2",
     )
     assert space_repo.purged == ["sp-2"]
     assert removed == 0  # missing file → no-op, no raise
+
+
+async def test_purge_keeps_files_other_rows_still_reference(tmp_path: pathlib.Path):
+    """A purged space's rows may name files that rows elsewhere use; those
+    stay on disk."""
+    (tmp_path / "borrowed.webp").write_bytes(b"B")
+    (tmp_path / "own.webp").write_bytes(b"O")
+    removed = await purge_space_and_media(
+        space_repo=_FakeSpaceRepo(),
+        post_repo=_FakePostRepo(["api/media/borrowed.webp", "api/media/own.webp"]),
+        gallery_repo=None,
+        media_dir=tmp_path,
+        media_refs=_FakeRefs("borrowed.webp"),
+        space_id="sp-3",
+    )
+    assert removed == 1
+    assert (tmp_path / "borrowed.webp").exists()
+    assert not (tmp_path / "own.webp").exists()
+
+
+async def test_purge_without_a_reference_check_keeps_files(tmp_path: pathlib.Path):
+    (tmp_path / "post.webp").write_bytes(b"P")
+    removed = await purge_space_and_media(
+        space_repo=_FakeSpaceRepo(),
+        post_repo=_FakePostRepo(["api/media/post.webp"]),
+        gallery_repo=None,
+        media_dir=tmp_path,
+        space_id="sp-4",
+    )
+    assert removed == 0
+    assert (tmp_path / "post.webp").exists()

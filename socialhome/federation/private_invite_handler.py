@@ -19,6 +19,7 @@ accept / decline buttons, and on accept wires the invitee as a
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import TYPE_CHECKING
@@ -67,6 +68,82 @@ log = logging.getLogger(__name__)
 #: make us verify — a space roster is far smaller; this only caps the work
 #: a malformed or hostile snapshot can cause.
 _MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
+
+#: Why a roster-gossip authority signature was refused (``None`` = verified).
+_SIG_MISSING = "missing"
+_SIG_SUITE = "suite"
+_SIG_KEY = "key"
+_SIG_FORGED = "forged"
+
+
+def _check_roster_sig(
+    event_type: str,
+    space_id: str,
+    p: dict,
+    space_public_key_hex: str,
+) -> str | None:
+    """Verify one roster-gossip payload's authority signature (sync, CPU).
+
+    Returns ``None`` when it verifies against the space key, else one of
+    the ``_SIG_*`` reasons. The signature covers the payload with the two
+    signature fields stripped, using the SAME
+    :func:`strip_authority_sig_fields` helper the signer used.
+    """
+    authority_sig = str(p.get("authority_sig") or "")
+    authority_sig_suite = str(p.get("authority_sig_suite") or "")
+    if not authority_sig or not authority_sig_suite:
+        return _SIG_MISSING
+    try:
+        verified = verify_authority_event(
+            event_type=event_type,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(p),
+            authority_sig=authority_sig,
+            authority_sig_suite=authority_sig_suite,
+            space_public_key=bytes.fromhex(space_public_key_hex),
+        )
+    except UnsupportedAuthoritySuite:
+        return _SIG_SUITE
+    except Exception:
+        return _SIG_KEY
+    return None if verified else _SIG_FORGED
+
+
+def _log_roster_sig_refusal(
+    reason: str,
+    event_type: object,
+    space_id: str,
+    from_instance: str,
+    p: dict,
+) -> None:
+    if reason == _SIG_MISSING:
+        log.warning(
+            "roster-gossip %s for %s from %s missing authority signature — dropping",
+            event_type,
+            space_id,
+            from_instance,
+        )
+    elif reason == _SIG_SUITE:
+        log.warning(
+            "roster-gossip %s for %s: unknown authority_sig_suite %r — dropping",
+            event_type,
+            space_id,
+            str(p.get("authority_sig_suite") or ""),
+        )
+    elif reason == _SIG_KEY:
+        log.warning(
+            "roster-gossip %s for %s: malformed space public key — dropping",
+            event_type,
+            space_id,
+        )
+    else:
+        log.warning(
+            "roster-gossip %s for %s from %s: authority signature did not "
+            "verify against the space key — dropping",
+            event_type,
+            space_id,
+            from_instance,
+        )
 
 
 class PrivateSpaceInviteHandler:
@@ -1265,52 +1342,19 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return None
-        authority_sig = str(p.get("authority_sig") or "")
-        authority_sig_suite = str(p.get("authority_sig_suite") or "")
-        if not authority_sig or not authority_sig_suite:
-            log.warning(
-                "roster-gossip %s for %s from %s missing authority signature "
-                "— dropping",
-                event.event_type,
-                space_id,
-                event.from_instance,
-            )
-            return None
-        try:
-            verified = verify_authority_event(
-                event_type=(
-                    event.event_type.value
-                    if hasattr(event.event_type, "value")
-                    else str(event.event_type)
-                ),
-                space_id=space_id,
-                payload=strip_authority_sig_fields(p),
-                authority_sig=authority_sig,
-                authority_sig_suite=authority_sig_suite,
-                space_public_key=bytes.fromhex(space.identity_public_key),
-            )
-        except UnsupportedAuthoritySuite:
-            log.warning(
-                "roster-gossip %s for %s: unknown authority_sig_suite %r — dropping",
-                event.event_type,
-                space_id,
-                authority_sig_suite,
-            )
-            return None
-        except Exception:
-            log.warning(
-                "roster-gossip %s for %s: malformed space public key — dropping",
-                event.event_type,
-                space_id,
-            )
-            return None
-        if not verified:
-            log.warning(
-                "roster-gossip %s for %s from %s: authority signature did not "
-                "verify against the space key — dropping",
-                event.event_type,
-                space_id,
-                event.from_instance,
+        reason = _check_roster_sig(
+            (
+                event.event_type.value
+                if hasattr(event.event_type, "value")
+                else str(event.event_type)
+            ),
+            space_id,
+            p,
+            space.identity_public_key,
+        )
+        if reason is not None:
+            _log_roster_sig_refusal(
+                reason, event.event_type, space_id, event.from_instance, p
             )
             return None
         return space_id, p
@@ -1333,12 +1377,25 @@ class PrivateSpaceInviteHandler:
         if result is None:
             return
         space_id, p = result
+        await self._merge_roster_entry(
+            event.event_type, space_id, p, tombstoned=tombstoned
+        )
+
+    async def _merge_roster_entry(
+        self,
+        event_type: object,
+        space_id: str,
+        p: dict,
+        *,
+        tombstoned: bool,
+    ) -> None:
+        """Merge one already-verified roster entry into the mirror."""
         user_id = str(p.get("user_id") or "")
         instance_id = str(p.get("instance_id") or "")
         if not user_id or not instance_id:
             log.warning(
                 "roster-gossip %s for %s missing user_id/instance_id — dropping",
-                event.event_type,
+                event_type,
                 space_id,
             )
             return
@@ -1347,7 +1404,7 @@ class PrivateSpaceInviteHandler:
         except TypeError, ValueError:
             log.warning(
                 "roster-gossip %s for %s: non-integer member_version — dropping",
-                event.event_type,
+                event_type,
                 space_id,
             )
             return
@@ -1356,7 +1413,7 @@ class PrivateSpaceInviteHandler:
         if role != raw_role:
             log.info(
                 "roster-gossip %s for %s: unknown role %r — mirroring as %r",
-                event.event_type,
+                event_type,
                 space_id,
                 raw_role,
                 role,
@@ -1418,6 +1475,7 @@ class PrivateSpaceInviteHandler:
         entries = p.get("entries")
         if not space_id or not isinstance(entries, list):
             return
+        candidates: list[tuple[FederationEventType, dict, bool]] = []
         for entry in entries[:_MAX_ROSTER_SNAPSHOT_ENTRIES]:
             if not isinstance(entry, dict):
                 continue
@@ -1431,15 +1489,46 @@ class PrivateSpaceInviteHandler:
                 tombstoned = True
             else:
                 continue
-            await self._apply_roster_gossip(
-                FederationEvent(
-                    msg_id=str(getattr(event, "msg_id", "") or ""),
-                    event_type=FederationEventType(raw_type),
-                    from_instance=event.from_instance,
-                    to_instance=str(getattr(event, "to_instance", "") or ""),
-                    timestamp=str(getattr(event, "timestamp", "") or ""),
-                    payload=payload,
-                    space_id=space_id,
-                ),
-                tombstoned=tombstoned,
+            candidates.append((FederationEventType(raw_type), payload, tombstoned))
+        if not candidates:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            log.warning(
+                "roster-gossip %s for unknown space %s from %s — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
             )
+            return
+        # Thousands of signature checks are CPU work: batch them off the
+        # event loop, then merge the verified entries in order.
+        reasons = await asyncio.to_thread(
+            self._check_snapshot_sigs_sync,
+            space_id,
+            space.identity_public_key,
+            candidates,
+        )
+        for (entry_type, payload, tombstoned), reason in zip(
+            candidates, reasons, strict=True
+        ):
+            if reason is not None:
+                _log_roster_sig_refusal(
+                    reason, entry_type, space_id, event.from_instance, payload
+                )
+                continue
+            await self._merge_roster_entry(
+                entry_type, space_id, payload, tombstoned=tombstoned
+            )
+
+    @staticmethod
+    def _check_snapshot_sigs_sync(
+        space_id: str,
+        space_public_key_hex: str,
+        candidates: list[tuple[FederationEventType, dict, bool]],
+    ) -> list[str | None]:
+        """Sync body of the snapshot's batch signature check (worker thread)."""
+        return [
+            _check_roster_sig(entry_type.value, space_id, payload, space_public_key_hex)
+            for entry_type, payload, _tombstoned in candidates
+        ]

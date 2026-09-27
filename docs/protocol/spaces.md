@@ -241,6 +241,16 @@ The bot bridge posts under the shared `system-integration` author, which is
 no member: any writer household may create such a post, only a moderator
 may change one.
 
+**Media references.** A received post, comment or bazaar listing (live or
+via the catch-up stream) keeps only media references in the shape a local
+upload stores, `api/media/<name>`; anything else is dropped before the row
+is written (`services/inbound_media_store.py:local_media_ref`). Deleting a
+post only removes that post's own files: a file goes only once no other
+row — in any space, the household feed, DMs, the gallery, a listing — still
+references it (`media/cleanup.py:unlink_unreferenced`,
+`repositories/media_reference_repo.py`). The same rule covers every other
+delete path and the space purge.
+
 ### The §25.6 catch-up stream
 
 A chunk from the space's **host** is taken whole — the host is the roster
@@ -271,16 +281,34 @@ member household, not only on the host:
   Not sent after an invite-link redeem (the ACK's roster is taken at seat
   time, and the redeemer has no space row yet) nor, on the timer, to a
   link-joined household (a timed envelope over the connection-server relay
-  would be new traffic metadata for it).
+  would be new traffic metadata for it). The host signs a snapshot's
+  entries, and the receiver verifies them, in a worker thread, off the
+  event loop.
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a
   bounded, expiring in-memory buffer
-  (`socialhome/federation/pending_seat_buffer.py`: 256 entries, 32 per key,
-  4 MiB, 15 min; media bytes never) and replayed through the same
-  post-decrypt gates and handlers when the seat lands
-  (`SpaceRemoteSeatLive`). A user seated on *another* household, or one who
-  was removed, is known, so that is always a refusal, never held.
+  (`socialhome/federation/pending_seat_buffer.py`: 256 entries, at most 64
+  from any one sending household, 32 per key, 4 MiB, 15 min; media bytes
+  never) and replayed through the same post-decrypt gates and handlers
+  when the seat lands (`SpaceRemoteSeatLive`). A user seated on *another*
+  household, or one who was removed, is known, so that is always a
+  refusal, never held.
+
+Known edges of the snapshot, all self-limiting:
+
+- A **link-joined household** gets no periodic snapshot (see above); its
+  mirror heals when it is seated again or first advertises v_32 after an
+  upgrade, and live gossip keeps reaching it in between.
+- A **v_32 receiver behind an older host** gets no snapshots at all — the
+  host does not send them — and converges on live gossip and the §25.6
+  catch-up stream as before.
+- A **host-local member who leaves** is not in later snapshots (the host
+  lists only its current local members, and has no tombstone row for them).
+  That is harmless: such a seat names the host's own household, which may
+  author in its own space anyway, so a stale one lets nobody write anything
+  they could not already; the live `SPACE_MEMBER_LEFT` gossip still carries
+  the departure.
 
 A refusal is logged at WARNING and answers `status: ok`, so the sender's
 outbox does not retry it; a benign no-op — a replayed delete of a row
@@ -472,7 +500,8 @@ clearly-labelled archive they choose when to remove.
    posts, comments, members, gallery albums/items, calendar, pages,
    tasks, stickies, content keys, the media-outbox rows, location pins —
    drops in one statement. Media **files** (no FK) are collected before
-   the delete and unlinked after (`services/space_purge.py`).
+   the delete and unlinked after, except any a row outside the space still
+   references (`services/space_purge.py`).
 3. **Member** (inbound `SPACE_DISSOLVED` → `_on_dissolved`): verifies the
    event came from the space's `owner_instance_id` (drops it otherwise —
    a non-owner can't dissolve someone else's space), then **archives**

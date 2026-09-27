@@ -3876,3 +3876,32 @@ async def test_space_post_created_keeps_the_image_urls(db, bus, inbound):
     assert urls[0] == "api/media/a.webp"
     assert all(isinstance(u, str) for u in urls)
     assert len(urls) == FEED_POST_MAX_IMAGES
+
+
+async def test_space_post_created_keeps_only_local_media_references(db, bus, inbound):
+    """A received post's media references must look like a local upload
+    (``api/media/<name>``); anything else is dropped before it is stored."""
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-ref"))
+    await _seat(db, "sp-ref", "user-remote")
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "p-ref",
+                "author": "user-remote",
+                "type": "video",
+                "content": "",
+                "media_url": "../../outside.webm",
+                "image_urls": [
+                    "api/media/fine.webp",
+                    "https://tracker.example/pixel.gif",
+                    "api/media/.hidden",
+                ],
+            },
+            space_id="sp-ref",
+        )
+    )
+    got = await SqliteSpacePostRepo(db).get("p-ref")
+    assert got is not None
+    assert got[1].media_url is None
+    assert got[1].image_urls == ("api/media/fine.webp",)

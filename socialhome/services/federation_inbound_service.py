@@ -89,6 +89,8 @@ from ..repositories.profile_picture_repo import compute_picture_hash
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
 from .inbound_media_store import (
     is_safe_media_name,
+    local_media_ref,
+    local_media_refs,
     media_basename,
     note_existing,
     parse_chunk_meta,
@@ -1609,7 +1611,7 @@ class FederationInboundService:
             created_at=parse_iso8601_lenient(p.get("occurred_at")),
             parent_id=p.get("parent_id"),
             content=p.get("content") or "",
-            media_url=p.get("media_url"),
+            media_url=local_media_ref(p.get("media_url")),
         )
         if not await self._space_post_repo.add_comment(comment, space_id=space_id):
             log_cross_space_refusal(
@@ -3137,7 +3139,9 @@ class FederationInboundService:
             author=author,
             type=post_type,
             content=payload.get("content"),
-            media_url=payload.get("media_url"),
+            # Media references only in the local-upload shape
+            # (``api/media/<name>``); anything else is dropped.
+            media_url=local_media_ref(payload.get("media_url")),
             file_meta=None,
             location=location,
             created_at=parse_iso8601_lenient(payload.get("occurred_at")),
@@ -3145,11 +3149,10 @@ class FederationInboundService:
             # → default visible (the historical behaviour).
             hidden_from_feed=bool(payload.get("hidden_from_feed", False)),
             # The multi-image gallery the sender ships (``SpacePostOutbound``).
-            # Strings only, capped at the feed maximum; the bytes follow as
-            # ``SPACE_MEDIA_BLOB``, which is checked against these names.
-            image_urls=tuple(
-                u for u in (payload.get("image_urls") or ()) if isinstance(u, str)
-            )[:FEED_POST_MAX_IMAGES]
-            if isinstance(payload.get("image_urls"), list)
-            else (),
+            # Local-upload references only, capped at the feed maximum; the
+            # bytes follow as ``SPACE_MEDIA_BLOB``, which is checked against
+            # these names.
+            image_urls=local_media_refs(
+                payload.get("image_urls"), limit=FEED_POST_MAX_IMAGES
+            ),
         )

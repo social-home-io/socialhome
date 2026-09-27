@@ -44,7 +44,8 @@ from ..domain.highlight import (
     HighlightFrameReplySnapshot,
     HighlightFrameType,
 )
-from ..media.cleanup import unlink_media
+from ..media.cleanup import unlink_unreferenced
+from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .user_preferences import parse_highlights_preferences
 
 if TYPE_CHECKING:
@@ -76,7 +77,7 @@ class HighlightFrameLimitError(ValueError):
 class HighlightService:
     """Personal highlights: create / view / react / share / expire."""
 
-    __slots__ = ("_highlights", "_users", "_bus", "_media_dir")
+    __slots__ = ("_highlights", "_users", "_bus", "_media_dir", "_media_refs")
 
     def __init__(
         self,
@@ -85,14 +86,15 @@ class HighlightService:
         bus: "EventBus",
         *,
         media_dir: "pathlib.Path | None" = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._highlights = repo
         self._users = user_repo
         self._bus = bus
-        # When set, frame media files are removed on delete / expiry.
-        # A highlight frame owns its media 1:1 (not mirrored), so this
-        # is safe.
+        # When both are set, frame media files are removed on delete /
+        # expiry once no other row references them.
         self._media_dir = media_dir
+        self._media_refs = media_refs
 
     # ── Create / append ─────────────────────────────────────────────────
 
@@ -282,8 +284,7 @@ class HighlightService:
         if highlight.author_user_id != actor_user_id:
             raise HighlightForbiddenError("only the author can delete their frame")
         await self._highlights.delete_frame(frame_id)
-        if self._media_dir is not None:
-            await unlink_media(self._media_dir, frame.media_url)
+        await unlink_unreferenced(self._media_dir, self._media_refs, [frame.media_url])
         await self._bus.publish(
             HighlightFrameRemoved(
                 highlight_id=highlight.id,
@@ -313,9 +314,7 @@ class HighlightService:
             else []
         )
         await self._highlights.delete_highlight(highlight_id)
-        if self._media_dir is not None:
-            for url in frame_urls:
-                await unlink_media(self._media_dir, url)
+        await unlink_unreferenced(self._media_dir, self._media_refs, frame_urls)
         await self._bus.publish(
             HighlightRemoved(
                 highlight_id=highlight.id,
@@ -500,9 +499,7 @@ class HighlightService:
             over_max += await self._highlights.prune_over_max(
                 author_user_id, prefs.max_count
             )
-        if self._media_dir is not None:
-            for url in media_urls:
-                await unlink_media(self._media_dir, url)
+        await unlink_unreferenced(self._media_dir, self._media_refs, media_urls)
         return expired, over_max
 
 

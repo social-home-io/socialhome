@@ -24,11 +24,12 @@ import logging
 import pathlib
 from typing import TYPE_CHECKING
 
-from ..media.cleanup import unlink_media
+from ..media.cleanup import unlink_unreferenced
 
 if TYPE_CHECKING:
     from ..repositories.bazaar_repo import AbstractBazaarRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
 
@@ -74,6 +75,7 @@ async def purge_space_and_media(
     gallery_repo: "AbstractGalleryRepo | None",
     bazaar_repo: "AbstractBazaarRepo | None" = None,
     media_dir: pathlib.Path | None,
+    media_refs: "AbstractMediaReferenceRepo | None" = None,
     space_id: str,
 ) -> int:
     """Hard-delete ``space_id``: collect media → drop rows → unlink files.
@@ -90,11 +92,9 @@ async def purge_space_and_media(
         space_id=space_id,
     )
     await space_repo.purge(space_id)
-    removed = 0
-    if media_dir is not None:
-        for url in media:
-            if await unlink_media(media_dir, url):
-                removed += 1
+    # Rows in this space may name files other rows (another space, the
+    # feed, a DM) still use; only files nothing references any more go.
+    removed = await unlink_unreferenced(media_dir, media_refs, media)
     log.info(
         "purged space %s: dropped content graph, removed %d/%d media file(s)",
         space_id,

@@ -16,6 +16,12 @@ files the sender was not sent for:
   fails atomically on an existing name, with a check-then-replace
   fallback for filesystems without hard links).
 
+A third rule covers the *references* a received row carries
+(``media_url``, ``image_urls``): :func:`local_media_ref` keeps only the
+shape a local upload stores, ``api/media/<safe-name>``, and drops anything
+else — so a row never points outside the media dir, and never at a
+remote URL.
+
 Partial chunk files live under ``media_dir/.partial/<key>`` where ``key``
 (:func:`partial_key`) binds the sending household, so two households can
 never contribute chunks to one assembly.
@@ -35,6 +41,9 @@ log = logging.getLogger(__name__)
 #: A peer-supplied media file name / id that becomes one path component.
 SAFE_MEDIA_NAME: re.Pattern[str] = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}")
 
+#: The path prefix every stored local media reference carries.
+MEDIA_REF_PREFIX: str = "api/media/"
+
 #: Upper bound on ``chunk_count`` for one transfer (512 KiB chunks → 2 GiB).
 MAX_MEDIA_CHUNKS: int = 4096
 
@@ -42,6 +51,38 @@ MAX_MEDIA_CHUNKS: int = 4096
 def is_safe_media_name(name: str) -> bool:
     """``True`` when ``name`` is usable as a single file name under media."""
     return bool(name) and SAFE_MEDIA_NAME.fullmatch(name) is not None
+
+
+def local_media_ref(value: object) -> str | None:
+    """A peer-supplied media reference in the canonical local shape.
+
+    Accepts ``api/media/<name>`` (a leading ``/`` and a ``?query`` are
+    tolerated and dropped) where ``<name>`` is :func:`is_safe_media_name`;
+    returns the normalised ``api/media/<name>``, or ``None`` for anything
+    else — a bare name, another path, a full URL, a non-string.
+    """
+    if not isinstance(value, str):
+        return None
+    path = value.split("?", 1)[0].removeprefix("/")
+    if not path.startswith(MEDIA_REF_PREFIX):
+        return None
+    name = path[len(MEDIA_REF_PREFIX) :]
+    if not is_safe_media_name(name):
+        return None
+    return MEDIA_REF_PREFIX + name
+
+
+def local_media_refs(values: object, *, limit: int) -> tuple[str, ...]:
+    """:func:`local_media_ref` over a peer-supplied list: the canonical
+    references it holds, in order, at most ``limit``. A non-list is empty."""
+    if not isinstance(values, list):
+        return ()
+    out: list[str] = []
+    for v in values:
+        ref = local_media_ref(v)
+        if ref is not None:
+            out.append(ref)
+    return tuple(out[:limit])
 
 
 def media_basename(url: str | None) -> str:

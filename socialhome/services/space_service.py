@@ -25,6 +25,7 @@ of them.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import unicodedata
@@ -82,7 +83,7 @@ from ..domain.federation_capabilities import (
     FederationCapability,
     space_features_missing_below,
 )
-from ..media.cleanup import unlink_media
+from ..media.cleanup import unlink_unreferenced
 from .space_purge import purge_space_and_media
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
@@ -118,6 +119,7 @@ from ..domain.space import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.base import row_to_dict
+from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -253,6 +255,7 @@ class SpaceService(SpaceMemberGuardMixin):
         "_gfs_mirror",
         "_subscriber_keys",
         "_media_dir",
+        "_media_refs",
         "_gallery",
         "_bazaar",
         "_invite_keywrap_pk",
@@ -268,15 +271,18 @@ class SpaceService(SpaceMemberGuardMixin):
         *,
         own_instance_id: str,
         media_dir: "pathlib.Path | None" = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._spaces = space_repo
         self._posts = space_post_repo
         self._users = user_repo
         self._bus = bus
         self._own_instance_id = own_instance_id
-        # When set, a deleted space post's media file(s) are removed once
-        # the post row + its gallery system-album mirror are gone.
+        # When both are set, a deleted space post's media file(s) are
+        # removed once the post row + its gallery system-album mirror are
+        # gone and no other row still references them.
         self._media_dir = media_dir
+        self._media_refs = media_refs
         self._child_protection = None
         self._pictures = None
         self._covers = None
@@ -816,6 +822,7 @@ class SpaceService(SpaceMemberGuardMixin):
             gallery_repo=self._gallery,
             bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
+            media_refs=self._media_refs,
             space_id=space_id,
         )
         for instance_id in member_instances:
@@ -1214,7 +1221,7 @@ class SpaceService(SpaceMemberGuardMixin):
             to_instance_id,
             min_version=FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
         )
-        entries: list[dict] = []
+        unsigned: list[tuple[str, dict]] = []
         for user_id, inst, display_name, user_pk, role, version, gone in seats:
             if inst == to_instance_id:
                 # The receiver's own members live in its ``space_members``.
@@ -1236,17 +1243,14 @@ class SpaceService(SpaceMemberGuardMixin):
                 "member_version": version,
                 "roster_version": version,
             }
-            payload.update(
-                sign_authority_event(
-                    event_type=entry_type.value,
-                    space_id=space.id,
-                    payload=strip_authority_sig_fields(payload),
-                    space_seed=seed,
-                )
-            )
-            entries.append({"event_type": entry_type.value, "payload": payload})
-        if not entries:
+            unsigned.append((entry_type.value, payload))
+        if not unsigned:
             return False
+        # One signature per seat, per household, every tick — CPU work, so
+        # it runs off the event loop.
+        entries = await asyncio.to_thread(
+            self._sign_roster_entries_sync, space.id, seed, unsigned
+        )
         try:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=to_instance_id,
@@ -1260,6 +1264,29 @@ class SpaceService(SpaceMemberGuardMixin):
             )
             return False
         return bool(getattr(result, "ok", True))
+
+    @staticmethod
+    def _sign_roster_entries_sync(
+        space_id: str,
+        seed: bytes,
+        unsigned: list[tuple[str, dict]],
+    ) -> list[dict]:
+        """Sync body of :meth:`send_roster_snapshot`'s batch signing
+        (worker thread): authority-sign each entry exactly like live
+        roster gossip."""
+        entries: list[dict] = []
+        for event_type, payload in unsigned:
+            signed = dict(payload)
+            signed.update(
+                sign_authority_event(
+                    event_type=event_type,
+                    space_id=space_id,
+                    payload=strip_authority_sig_fields(payload),
+                    space_seed=seed,
+                )
+            )
+            entries.append({"event_type": event_type, "payload": signed})
+        return entries
 
     async def send_hosted_roster_snapshots(self) -> int:
         """Periodic self-heal: every space we host → each member household.
@@ -4668,7 +4695,7 @@ class SpaceService(SpaceMemberGuardMixin):
             return
         # Capture media URLs before soft_delete nulls them; unlinked after
         # the PostDeleted publish unmirrors the shared gallery item.
-        media = [post.media_url, *post.image_urls] if self._media_dir else []
+        media = [post.media_url, *post.image_urls]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor must be admin/owner
@@ -4695,9 +4722,10 @@ class SpaceService(SpaceMemberGuardMixin):
         # hook regardless of who deleted the row. ``space_id`` gates the
         # outbound broadcast so household-feed deletes stay local.
         await self._bus.publish(PostDeleted(post_id=post_id, space_id=space_id))
-        if self._media_dir is not None:
-            for url in media:
-                await unlink_media(self._media_dir, url)
+        # The names came with the post — possibly from another household —
+        # so a file goes only when no other row (any space, feed, DM,
+        # gallery, …) still points at it.
+        await unlink_unreferenced(self._media_dir, self._media_refs, media)
 
     async def add_reaction(
         self,
@@ -5102,6 +5130,7 @@ class SpaceService(SpaceMemberGuardMixin):
             gallery_repo=self._gallery,
             bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
+            media_refs=self._media_refs,
             space_id=space_id,
         )
 

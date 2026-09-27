@@ -13,6 +13,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.highlight_service import (
@@ -68,6 +69,7 @@ async def test_delete_highlight_removes_frame_files(db, tmp_dir):
         SqliteUserRepo(db),
         EventBus(),
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(db),
     )
     await _seed_user(db, "u1", "pascal")
     for name in ("h1.webp", "h2.webp"):
@@ -436,6 +438,7 @@ async def test_expire_due_removes_expired_frame_files(db, tmp_dir):
         SqliteUserRepo(db),
         EventBus(),
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(db),
     )
     await _seed_user(db, "u1", "pascal")
     (media_dir / "e.webp").write_bytes(b"x")
@@ -461,6 +464,7 @@ async def test_expire_due_removes_over_max_frame_files(db, tmp_dir):
         SqliteUserRepo(db),
         EventBus(),
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(db),
     )
     # max_count is clamped to a floor of 10, so 11 rows trigger one prune.
     await _seed_user(db, "u1", "pascal", prefs_json='{"highlights": {"max_count": 10}}')

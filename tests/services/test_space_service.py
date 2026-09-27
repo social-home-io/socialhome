@@ -24,6 +24,7 @@ from socialhome.domain.space import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.cp_repo import SqliteCpRepo
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
@@ -402,6 +403,7 @@ async def test_delete_space_post_removes_media_files(stack, tmp_dir):
         EventBus(),
         own_instance_id=stack.iid,
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
     )
     a = await stack.provision_user("anna")
     space = await svc.create_space(owner_username="anna", name="S")
@@ -415,6 +417,70 @@ async def test_delete_space_post_removes_media_files(stack, tmp_dir):
     assert (media_dir / "sp.webp").exists()
     await svc.delete_post(p.id, actor_user_id=a.user_id)
     assert not (media_dir / "sp.webp").exists()
+
+
+async def test_deleting_a_post_keeps_files_another_post_still_uses(stack, tmp_dir):
+    """A post can name a file that belongs to a different post (in this
+    space or another). Deleting it — even as a moderator — only removes
+    files nothing else references."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    other = await svc.create_space(owner_username="anna", name="Other")
+    (media_dir / "victim.webp").write_bytes(b"x")
+    (media_dir / "own.webp").write_bytes(b"x")
+    victim = await svc.create_post(
+        other.id,
+        author_user_id=a.user_id,
+        type=PostType.IMAGE,
+        image_urls=["api/media/victim.webp"],
+    )
+    borrowing = await svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.IMAGE,
+        image_urls=["api/media/victim.webp", "api/media/own.webp"],
+    )
+    await svc.delete_post(borrowing.id, actor_user_id=a.user_id)
+    assert (media_dir / "victim.webp").exists()
+    assert not (media_dir / "own.webp").exists()
+    # Once the last post using it is gone, the file goes too.
+    await svc.delete_post(victim.id, actor_user_id=a.user_id)
+    assert not (media_dir / "victim.webp").exists()
+
+
+async def test_deleting_a_post_without_a_reference_check_keeps_files(stack, tmp_dir):
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    (media_dir / "sp.webp").write_bytes(b"x")
+    p = await svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.IMAGE,
+        image_urls=["api/media/sp.webp"],
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert (media_dir / "sp.webp").exists()
 
 
 async def test_space_location_post_requires_coords(stack):
@@ -2590,7 +2656,13 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     ):
         (media / name).write_bytes(b"X")
     svc = SpaceService(
-        space_repo, post_repo, user_repo, bus, own_instance_id=iid, media_dir=media
+        space_repo,
+        post_repo,
+        user_repo,
+        bus,
+        own_instance_id=iid,
+        media_dir=media,
+        media_refs=SqliteMediaReferenceRepo(db),
     )
     svc.attach_gallery_repo(gallery)
     svc.attach_bazaar_repo(bazaar)
@@ -6904,6 +6976,34 @@ async def test_a_new_member_household_is_sent_one_signed_roster_snapshot(stack):
             space_public_key=pub,
         )
     assert (await stack.space_repo.get(space.id)).roster_sequence == seq_before + 1
+
+
+async def test_roster_snapshot_entries_are_signed_off_the_event_loop(
+    stack, monkeypatch
+):
+    """Signing seats x households every tick is CPU work; it runs in a
+    worker thread, not on the event loop."""
+    import threading
+
+    from socialhome.services import space_service as space_service_mod
+
+    real_sign = space_service_mod.sign_authority_event
+    threads: list[int] = []
+
+    def _spy(**kwargs):
+        threads.append(threading.get_ident())
+        return real_sign(**kwargs)
+
+    monkeypatch.setattr(space_service_mod, "sign_authority_event", _spy)
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-early", "u-early")
+    await _seat(remote, space.id, "peer-new", "u-new")
+    threads.clear()
+    assert await stack.space_svc.send_roster_snapshot(
+        space.id, to_instance_id="peer-new"
+    )
+    assert len(threads) == 2
+    assert threading.get_ident() not in threads
 
 
 async def test_an_invite_link_redeem_sends_no_snapshot(stack):

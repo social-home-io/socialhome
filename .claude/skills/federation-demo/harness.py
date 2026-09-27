@@ -4767,13 +4767,34 @@ def cmd_verify() -> None:
     b = state["instances"]["b"]
     bob_id = b["instance_id"]
 
+    def _patch_share_home(value: bool) -> tuple[int, dict]:
+        """PATCH share_home, riding out an empty ``/api/pairing`` bucket.
+
+        The bucket is 5 calls / 60 s per instance, and verify has already
+        spent it on Alpha by now: 3 capability / connection reads, plus
+        up to 3 transport-probe passes when RTC is slow to settle (that
+        probe runs *before* this step). A 429 here means the demo crowded
+        the limiter, not that the toggle is broken — retry up to 3 times
+        with a 25 s spacer so the sliding window drains (one slot frees
+        every ~12 s on average; 25 s buys two).
+        """
+        s: int = 0
+        r: dict = {}
+        for attempt in range(3):
+            s, r = _request(
+                f"http://127.0.0.1:{a['port']}/api/pairing/connections/{bob_id}",
+                token=a["token"],
+                method="PATCH",
+                body={"share_home": value},
+            )
+            if s == 429 and attempt < 2:
+                time.sleep(25)
+                continue
+            break
+        return s, r
+
     # Flip OFF on Alpha's side.
-    s, r = _request(
-        f"http://127.0.0.1:{a['port']}/api/pairing/connections/{bob_id}",
-        token=a["token"],
-        method="PATCH",
-        body={"share_home": False},
-    )
+    s, r = _patch_share_home(False)
     if s not in (200, 204):
         failures.append(f"share_home OFF patch failed: HTTP {s} {r!r}")
     else:
@@ -4802,31 +4823,8 @@ def cmd_verify() -> None:
         else:
             print("  share_home OFF: Bob's home_lat/home_lon for Alpha is NULL ✓")
 
-        # Flip ON and verify coords are restored. The ``/api/pairing``
-        # bucket is 5 calls / 60 s and verify's earlier
-        # capabilities + transport checks (the latter probes 3×) plus
-        # the share_home OFF PATCH have already eaten ~5 of the
-        # budget on Alpha. A 429 here doesn't mean the share-home
-        # toggle is broken — just that the demo's verify step crowds
-        # the bucket. Retry up to 3 times with a 25 s spacer between
-        # attempts so the sliding window has room to drain (5 / 60s
-        # means one slot frees every ~12 s on average; 25 s buys
-        # two).
-        s2: int = 0
-        r2: dict = {}
-        for attempt in range(3):
-            s2, r2 = _request(
-                f"http://127.0.0.1:{a['port']}/api/pairing/connections/{bob_id}",
-                token=a["token"],
-                method="PATCH",
-                body={"share_home": True},
-            )
-            if s2 in (200, 204):
-                break
-            if s2 == 429 and attempt < 2:
-                time.sleep(25)
-                continue
-            break
+        # Flip ON and verify coords are restored.
+        s2, r2 = _patch_share_home(True)
         if s2 not in (200, 204):
             failures.append(f"share_home ON patch failed: HTTP {s2} {r2!r}")
         else:

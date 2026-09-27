@@ -361,6 +361,69 @@ async def test_comments(setup):
     assert c.comments[0].id == "c-1"
 
 
+async def test_synced_media_references_keep_only_the_local_shape(setup):
+    """A synced row's media references must look like a local upload
+    (``api/media/<name>``); anything else is dropped, never stored."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-m",
+                "author": "u-1",
+                "type": "image",
+                "media_url": "https://elsewhere.example/x.webp",
+                "image_urls": [
+                    "api/media/ok.webp",
+                    "api/media/../escape",
+                    "ok2.webp",
+                    "/api/media/ok3.webp",
+                ],
+            },
+        ],
+    )
+    await _send(
+        r,
+        kp,
+        "comments",
+        [
+            {
+                "id": "c-m",
+                "post_id": "p-m",
+                "author": "u-1",
+                "type": "image",
+                "media_url": "api/media/sub/dir.webp",
+            },
+        ],
+    )
+    await _send(
+        r,
+        kp,
+        "bazaar",
+        [
+            {
+                "post_id": "bzr-m",
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+                "mode": "fixed",
+                "title": "Chair",
+                "image_urls": ["api/media/chair.webp", "file:///etc/passwd"],
+                "end_time": "2026-06-01T00:00:00+00:00",
+                "currency": "USD",
+                "status": "active",
+                "price": 1,
+            },
+        ],
+    )
+    _sid, post = c.posts[0]
+    assert post.media_url is None
+    assert post.image_urls == ("api/media/ok.webp", "api/media/ok3.webp")
+    assert c.comments[0].media_url is None
+    assert c.bazaar_listings[0].image_urls == ("api/media/chair.webp",)
+
+
 async def test_tasks(setup):
     r, c, kp = setup
     await _send(

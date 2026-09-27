@@ -8,6 +8,7 @@ from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import ConversationType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.dm_service import DmService
@@ -103,6 +104,7 @@ async def test_delete_message_removes_media_file(stack, tmp_dir):
         SqliteUserRepo(stack.db),
         EventBus(),
         media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
     )
     await stack.provision_user("anna")
     await stack.provision_user("bob")

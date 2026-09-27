@@ -46,9 +46,10 @@ from ..domain.media_constraints import (
 from ..domain.post import Post, PostType
 from ..domain.space import SpaceRole
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_media
+from ..media.cleanup import unlink_unreferenced
 from ..media.image_processor import ImageProcessor
 from ..repositories.gallery_repo import AbstractGalleryRepo
+from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .media_transcode_service import MediaTranscodeService
@@ -124,6 +125,7 @@ class GalleryService:
         "_bus",
         "_config",
         "_media_dir",
+        "_media_refs",
         "_transcode_repo",
         "_transcode_service",
     )
@@ -137,12 +139,15 @@ class GalleryService:
         *,
         media_transcode_repo: AbstractMediaTranscodeRepo | None = None,
         media_transcode_service: MediaTranscodeService | None = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._repo = repo
         self._space_repo = space_repo
         self._bus = bus
         self._config = config
         self._media_dir = pathlib.Path(config.media_path)
+        # A deleted item's files go only once no other row references them.
+        self._media_refs = media_refs
         # Background video transcode (§async-video). When wired, the
         # video upload path stashes source bytes + enqueues a job and
         # returns a "processing" item immediately; the scheduler
@@ -423,13 +428,12 @@ class GalleryService:
                 )
         await self._repo.delete_item(item_id)
         await self._repo.increment_item_count(item.album_id, -1)
-        # Drop the backing file(s). Only non-system items reach here
-        # (system-album items are delete-blocked above), and those are
-        # own uploads with their own UUID filenames — never shared with a
-        # post — so unlinking is safe. Best effort; a missing file is fine.
-        await unlink_media(self._media_dir, item.url)
-        if item.thumbnail_url and item.thumbnail_url != item.url:
-            await unlink_media(self._media_dir, item.thumbnail_url)
+        # Drop the backing file(s) unless another row still references
+        # them (an item synced from another household may name a file
+        # some other row owns). Best effort; a missing file is fine.
+        await unlink_unreferenced(
+            self._media_dir, self._media_refs, [item.url, item.thumbnail_url]
+        )
         await self._bus.publish(
             GalleryItemDeleted(
                 item_id=item_id,

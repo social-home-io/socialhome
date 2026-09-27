@@ -43,7 +43,8 @@ from ..domain.post import (
 )
 from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_media
+from ..media.cleanup import unlink_unreferenced
+from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.user_repo import AbstractUserRepo
 
@@ -69,7 +70,15 @@ LOCATION_LABEL_MAX = 80
 class FeedService:
     """Household-feed CRUD + reactions + comments."""
 
-    __slots__ = ("_posts", "_users", "_bus", "_household", "_quota", "_media_dir")
+    __slots__ = (
+        "_posts",
+        "_users",
+        "_bus",
+        "_household",
+        "_quota",
+        "_media_dir",
+        "_media_refs",
+    )
 
     def __init__(
         self,
@@ -78,15 +87,18 @@ class FeedService:
         bus: EventBus,
         *,
         media_dir: "pathlib.Path | None" = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._posts = post_repo
         self._users = user_repo
         self._bus = bus
         self._household = None  # set via attach_household_features
         self._quota = None  # set via attach_storage_quota
-        # When set, a deleted post's media file(s) are removed from disk
-        # once the post row + its gallery system-album mirror are gone.
+        # When both are set, a deleted post's media file(s) are removed
+        # from disk once the post row + its gallery system-album mirror
+        # are gone and no other row still references them.
         self._media_dir = media_dir
+        self._media_refs = media_refs
 
     def attach_household_features(self, svc) -> None:
         """Wire :class:`PreferencesService` for toggle enforcement
@@ -208,15 +220,13 @@ class FeedService:
         post = await self._require_post(post_id)
         await self._require_author_or_admin(post.author, actor_user_id)
         # Capture media URLs before soft_delete nulls them.
-        media = [post.media_url, *post.image_urls] if self._media_dir else []
+        media = [post.media_url, *post.image_urls]
         await self._posts.soft_delete(post_id)
         # PostDeleted runs synchronously through the bus; SystemAlbumBridge
         # unmirrors (drops the gallery item that shared this file) within
         # the publish, so afterwards nothing references the blob.
         await self._bus.publish(PostDeleted(post_id=post_id))
-        if self._media_dir is not None:
-            for url in media:
-                await unlink_media(self._media_dir, url)
+        await unlink_unreferenced(self._media_dir, self._media_refs, media)
 
     async def get_post(self, post_id: str) -> Post:
         return await self._require_post(post_id)
