@@ -293,7 +293,7 @@ class FederationInboundService:
         """Register inbound handlers on the federation event registry."""
         from ..domain.federation import FederationEventType as FET
 
-        # Stash so handlers (role-change routing, member-profile gating) can
+        # Stash so handlers (role-change routing, config pinning) can
         # read own_instance_id without threading it through every call.
         self._federation_service = federation_service
         registry = federation_service._event_registry
@@ -1669,36 +1669,26 @@ class FederationInboundService:
         if not space_id or not user_id:
             return
         # SECURITY: a member's per-space display name / picture may only be
-        # mutated by that member's OWN home instance. ``SpaceMemberProfileUpdated``
-        # is a self-profile broadcast (see SpaceMemberProfileFederationOutbound),
-        # so the §24.11-authenticated ``from_instance`` MUST be the member's home
-        # instance — otherwise any confirmed peer could spoof another member's
-        # display fields. We resolve the member's home instance from our OWN
-        # stored roster (never the attacker-supplied payload): the remote-member
-        # mirror records it for a federated member, and a purely-local member's
-        # home is this instance. Drop a mismatch.
-        member_home: str | None = None
-        if self._space_remote_member_repo is not None:
-            remote = await self._space_remote_member_repo.get_including_tombstones(
-                space_id, user_id
+        # updated by the household that member is seated on. The seat is
+        # looked up in our OWN roster mirror under the §24.11-authenticated
+        # ``from_instance`` — never a payload field — so it only exists when
+        # ``user_id`` is a live member of this space on the SENDER's
+        # household. A local member, a member of another household, a
+        # removed member, or an unknown user has no such seat: drop.
+        seat = None
+        if self._space_remote_member_repo is not None and event.from_instance:
+            seat = await self._space_remote_member_repo.get(
+                space_id,
+                event.from_instance,
+                user_id,
             )
-            if remote is not None:
-                member_home = remote.instance_id
-        if member_home is None:
-            # Not in the remote mirror → a local member; their home is us.
-            member_home = (
-                self._federation_service.own_instance_id
-                if self._federation_service is not None
-                else None
-            )
-        if member_home is None or event.from_instance != member_home:
-            log.warning(
-                "SPACE_MEMBER_PROFILE_UPDATED for %s in %s from %s != member home "
-                "%s — dropping (possible spoof)",
+        if seat is None:
+            log.info(
+                "SPACE_MEMBER_PROFILE_UPDATED for %s in %s from %s: no member "
+                "seat on the sending household — dropping",
                 user_id,
                 space_id,
                 event.from_instance,
-                member_home,
             )
             return
         member = await self._space_repo.get_member(space_id, user_id)
