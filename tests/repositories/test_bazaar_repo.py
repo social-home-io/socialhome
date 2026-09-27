@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
+from socialhome.domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus
 from socialhome.repositories.bazaar_repo import (
     BidStateError,
     SqliteBazaarRepo,
@@ -139,6 +139,65 @@ async def test_bazaar_bid_state_machine(env):
 
     with pytest.raises(BidStateError):
         await env.bazaar_repo.accept_offer(bid_b.id)
+
+
+async def test_bazaar_relayed_bid_empty_created_at_does_not_win_tie(env):
+    """Regression: a federation-relayed bid whose payload carries no
+    ``created_at`` must not jump ``highest_bid``'s
+    ``ORDER BY amount DESC, created_at ASC`` tie-break ahead of an earlier
+    LOCAL bid at the same amount.
+
+    ``place_bid``'s INSERT relies on ``COALESCE(?, datetime('now'))`` to
+    default a missing timestamp — but SQLite's ``COALESCE`` only falls
+    through on a real ``NULL``, and an empty string ``''`` is not NULL. A
+    bid built with ``created_at=""`` therefore stores the literal empty
+    string, which sorts *before* any real timestamp on the ``ASC``
+    tie-break, so a same-amount relayed bid always "wins" regardless of
+    arrival order.
+    """
+    pid = uuid.uuid4().hex
+    await _seed_post(env.db, pid)
+    listing = BazaarListing(
+        post_id=pid,
+        space_id=_DEFAULT_SPACE_ID,
+        seller_user_id="u1",
+        mode=BazaarMode.AUCTION,
+        title="Vase",
+        end_time="2099-01-01T00:00:00",
+        currency="USD",
+        status=BazaarStatus.ACTIVE,
+        created_at=None,
+        price=None,
+    )
+    await env.bazaar_repo.save_listing(listing)
+
+    # Earlier LOCAL bid — gets a real, populated created_at.
+    local_bid = new_bid(listing_post_id=pid, bidder_user_id="buyer_local", amount=5000)
+    await env.bazaar_repo.place_bid(local_bid)
+
+    # Federation-relayed bid, same amount (tie), payload carried no
+    # created_at — mirrors what the inbound handler builds when a relayed
+    # BAZAAR_BID_PLACED payload has neither `created_at` nor `occurred_at`.
+    relayed_bid = BazaarBid(
+        id=uuid.uuid4().hex,
+        listing_post_id=pid,
+        bidder_user_id="buyer_remote",
+        amount=5000,
+        created_at="",
+    )
+    await env.bazaar_repo.place_bid(relayed_bid)
+
+    stored = await env.bazaar_repo.get_bid(relayed_bid.id)
+    assert stored is not None
+    assert stored.created_at != "", (
+        "empty created_at defeated COALESCE's datetime('now') default"
+    )
+
+    winner = await env.bazaar_repo.highest_bid(pid)
+    assert winner is not None
+    assert winner.id == local_bid.id, (
+        "earlier local bid must win a tied amount, not the relayed bid"
+    )
 
 
 async def test_bazaar_reject_offer(env):

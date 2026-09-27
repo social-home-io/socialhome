@@ -880,7 +880,11 @@ class SpaceContentInboundHandlers:
                     listing_post_id=listing_post_id,
                     bidder_user_id=bidder,
                     amount=int(amount_raw),
-                    created_at="",  # repo defaults via datetime('now')
+                    # Never the sender's clock: created_at is the
+                    # highest_bid tie-break, so a payload timestamp would
+                    # let a household backdate its bid. The repo stamps
+                    # arrival time for a falsy value (bazaar_repo.place_bid).
+                    created_at="",
                     message=p.get("message"),
                 ),
             )
