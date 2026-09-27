@@ -188,6 +188,7 @@ class FederationService:
         "_space_remote_member_repo",
         "_route_service",
         "_last_mesh_begin_at",
+        "_relay_accepted_at",
         "_routed_handler",
         "_app_fed",
     )
@@ -256,6 +257,12 @@ class FederationService:
         #: SPACE_SYNC_BEGIN. Bounds how far back a cached route has to
         #: reach before we treat it as pre-restart junk (#648).
         self._last_mesh_begin_at: dict[str, float] = {}
+        #: peer instance_id → UTC time (``"YYYY-MM-DD HH:MM:SS"``, the
+        #: ``last_reachable_at`` column shape) the connection-server relay
+        #: last ACCEPTED an envelope for it. In memory only: local operator
+        #: diagnostics, never persisted, never sent anywhere. Bounded by
+        #: the number of paired peers.
+        self._relay_accepted_at: dict[str, str] = {}
         self._routed_handler: SpaceRoutedHandler | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
@@ -771,6 +778,24 @@ class FederationService:
     def own_instance_id(self) -> str:
         return self._own_instance_id
 
+    def note_relay_accepted(self, instance_id: str) -> None:
+        """Record that the connection-server relay accepted an envelope.
+
+        Acceptance is NOT delivery (see :attr:`DeliveryResult.via`), so
+        this never touches reachability — it only lets the operator see
+        "handed to the connection server at T" beside "last connected".
+        """
+        self._relay_accepted_at[instance_id] = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    def last_relay_accepted_at(self, instance_id: str) -> str | None:
+        """UTC time the relay last accepted an envelope for this peer, or
+        ``None`` since this process started. Compare with
+        ``last_reachable_at`` via :func:`~socialhome.domain.federation.is_relay_only`.
+        """
+        return self._relay_accepted_at.get(instance_id)
+
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is
         at least ``min_version``.
@@ -1029,7 +1054,9 @@ class FederationService:
                 # ``ok`` is an ACCEPTANCE; leave the reachability state
                 # exactly as it was and let a real inbound envelope from
                 # that household be what proves it is there.
-                if result.via != "gfs_relay":
+                if result.via == "gfs_relay":
+                    self.note_relay_accepted(to_instance_id)
+                else:
                     await self._federation_repo.mark_reachable(to_instance_id)
                     if was_unreachable:
                         await self._bus.publish(
@@ -1681,17 +1708,25 @@ class FederationService:
     ) -> BroadcastResult:
         """Send to multiple peers (direct-only).
 
-        If ``instance_ids`` is ``None``, sends to all confirmed peers.
+        If ``instance_ids`` is ``None``, sends to every **social** peer —
+        the same selection every targeted fan-out reads
+        (:meth:`AbstractFederationRepo.list_social_instances`, as in
+        :class:`~socialhome.services.peer_outbound.ConfirmedPeerBroadcaster`):
+        CONFIRMED, not a ``space_session`` (invite-link) household, and
+        never our own row. A bare CONFIRMED list would hand a directory /
+        capability broadcast to a household we only share a space with.
         Mesh fallback is deliberately NOT used here — capability /
         directory broadcasts target direct peers by construction.
         Space-content fanout uses :meth:`broadcast_to_space_members`
         which honours mesh routing per-peer.
         """
         if instance_ids is None:
-            instances = await self._federation_repo.list_instances(
-                status=PairingStatus.CONFIRMED.value,
-            )
-            instance_ids = [inst.id for inst in instances]
+            instances = await self._federation_repo.list_social_instances()
+            instance_ids = [
+                inst.id
+                for inst in instances
+                if inst.id and inst.id != self._own_instance_id
+            ]
 
         results: list[DeliveryResult] = []
         for iid in instance_ids:

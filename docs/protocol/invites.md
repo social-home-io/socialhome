@@ -707,7 +707,10 @@ sequenceDiagram
 **Failure handling.** A relay that refuses or is unreachable is an
 ordinary transport failure: `send_event` queues the envelope in
 `federation_outbox`, and redelivery re-uses the same selection point
-rather than POSTing at the empty inbox URL.
+rather than POSTing at the empty inbox URL. A relay `202` is recorded
+only as a local, in-memory relay-acceptance time (`relay_only` on
+`/api/connections`) — never as reachability, and nothing about it goes
+back to the connection server.
 
 **Media does NOT flow to a link-joined member yet.** `space_media_outbox`
 ships blobs as one chunk up to `SINGLE_CHUNK_BYTES_THRESHOLD` (1 MiB) and

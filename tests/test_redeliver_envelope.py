@@ -776,6 +776,8 @@ async def test_redeliver_over_the_relay_does_not_mark_the_peer_reachable(env):
     assert outcome is DeliveryOutcome.SUCCESS
     row = await fed_repo.get_instance(peer.id)
     assert row is not None and row.unreachable_since is not None
+    # …but the operator still sees that the connection server took it.
+    assert svc.last_relay_accepted_at(peer.id) is not None
 
 
 async def test_redeliver_of_a_frame_too_big_for_the_relay_is_permanent(env):

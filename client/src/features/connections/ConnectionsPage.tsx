@@ -969,6 +969,8 @@ export default function ConnectionsPage() {
             intro_relay_enabled: detail.intro_relay_enabled ?? true,
             unreachable_since: detail.unreachable_since ?? null,
             last_reachable_at: detail.last_reachable_at ?? null,
+            last_relay_accepted_at: detail.last_relay_accepted_at ?? null,
+            relay_only: detail.relay_only ?? false,
             queued_envelopes: detail.queued_envelopes ?? 0,
             dropped_envelopes: detail.dropped_envelopes ?? 0,
             paired_at: detail.paired_at ?? null,

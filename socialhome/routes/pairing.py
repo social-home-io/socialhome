@@ -42,6 +42,7 @@ from ..domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
+    is_relay_only,
 )
 from ..security import error_response
 from ..services.peer_home_sharing_service import UnknownInstanceError
@@ -56,6 +57,7 @@ def _instance_dict(
     transport_state: Literal["rtc", "https", "gfs_relay"] | None = None,
     queued_envelopes: int,
     dropped_envelopes: int,
+    last_relay_accepted_at: str | None,
 ) -> dict:
     """Public-shape view of a :class:`RemoteInstance`.
 
@@ -85,6 +87,13 @@ def _instance_dict(
     would describe a healthy-looking peer that in fact has a backlog, and
     nothing in the shape would signal the number was made up. One extra
     indexed ``COUNT(*)`` on a mutation path is cheaper than that trap.
+
+    ``last_relay_accepted_at`` is when the connection-server relay last
+    ACCEPTED an envelope for this peer
+    (:meth:`FederationService.last_relay_accepted_at`, in-memory, local
+    only). Acceptance is not delivery, so it never feeds
+    ``last_reachable_at``; ``relay_only`` is derived from the two via
+    :func:`~socialhome.domain.federation.is_relay_only`.
     """
     status = (
         inst.status.value if isinstance(inst.status, PairingStatus) else inst.status
@@ -131,6 +140,13 @@ def _instance_dict(
         # timestamps already on the row; the SPA renders them locally.
         "last_reachable_at": getattr(inst, "last_reachable_at", None),
         "unreachable_since": getattr(inst, "unreachable_since", None),
+        # "Accepted by the connection server" vs "delivered": a peer whose
+        # recent traffic has only been handed to the relay is relay-only.
+        "last_relay_accepted_at": last_relay_accepted_at,
+        "relay_only": is_relay_only(
+            last_relay_accepted_at,
+            getattr(inst, "last_reachable_at", None),
+        ),
         "source": (inst.source.value if hasattr(inst.source, "value") else inst.source),
         # Monotonic protocol version the peer last advertised via
         # INSTANCE_CAPABILITIES_UPDATED. Useful for an admin "is this
@@ -206,13 +222,15 @@ class PairingConfirmView(BaseView):
                 "UNPROCESSABLE",
                 "token and verification_code are required.",
             )
-        instance = await self.svc(federation_service_key).confirm_pairing(token, code)
+        fed = self.svc(federation_service_key)
+        instance = await fed.confirm_pairing(token, code)
         outbox = self.svc(outbox_repo_key)
         return web.json_response(
             _instance_dict(
                 instance,
                 queued_envelopes=await outbox.count_pending_for(instance.id),
                 dropped_envelopes=await outbox.count_failed_for(instance.id),
+                last_relay_accepted_at=fed.last_relay_accepted_at(instance.id),
             )
         )
 
@@ -279,6 +297,7 @@ class PairingConnectionCollectionView(BaseView):
         instances = await self.svc(federation_repo_key).list_instances()
         transport = self.request.app.get(federation_transport_key)
         outbox = self.svc(outbox_repo_key)
+        fed = self.svc(federation_service_key)
         rows = []
         for inst in instances:
             ts: Literal["rtc", "https", "gfs_relay"] | None = None
@@ -305,6 +324,7 @@ class PairingConnectionCollectionView(BaseView):
                     transport_state=ts,
                     queued_envelopes=queued,
                     dropped_envelopes=dropped,
+                    last_relay_accepted_at=fed.last_relay_accepted_at(inst.id),
                 )
             )
         return web.json_response(rows)
@@ -495,6 +515,9 @@ class PairingConnectionDetailView(BaseView):
                 inst,
                 queued_envelopes=await outbox.count_pending_for(instance_id),
                 dropped_envelopes=await outbox.count_failed_for(instance_id),
+                last_relay_accepted_at=self.svc(
+                    federation_service_key
+                ).last_relay_accepted_at(instance_id),
             )
         )
 

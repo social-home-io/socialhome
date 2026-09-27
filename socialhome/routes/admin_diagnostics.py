@@ -45,6 +45,7 @@ from ..app_keys import (
     federation_transport_key,
     platform_adapter_key,
 )
+from ..domain.federation import is_relay_only
 from ..domain.federation_capabilities import OURS
 from ..security import error_response, sanitise_for_api
 from .admin_federation import _redact_ice_server
@@ -117,8 +118,10 @@ class AdminDiagnosticsView(BaseView):
         # unanswerable from a status chip alone.
         peers: list[dict] = []
         try:
+            fed = self.svc(federation_service_key)
             for inst in await self.svc(federation_repo_key).list_instances():
                 status = getattr(inst.status, "value", inst.status)
+                relay_ts = fed.last_relay_accepted_at(inst.id)
                 peers.append(
                     {
                         "instance_id": inst.id,
@@ -128,6 +131,13 @@ class AdminDiagnosticsView(BaseView):
                         "paired_at": getattr(inst, "paired_at", None),
                         "last_reachable_at": getattr(inst, "last_reachable_at", None),
                         "unreachable_since": getattr(inst, "unreachable_since", None),
+                        # Relay 202 = accepted by the connection server, not
+                        # delivered; relay_only says only the relay has
+                        # taken anything since the last proven delivery.
+                        "last_relay_accepted_at": relay_ts,
+                        "relay_only": is_relay_only(
+                            relay_ts, getattr(inst, "last_reachable_at", None)
+                        ),
                         "capabilities_seen_at": getattr(
                             inst, "capabilities_seen_at", None
                         ),
