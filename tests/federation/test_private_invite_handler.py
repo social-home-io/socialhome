@@ -1328,6 +1328,7 @@ async def test_attach_to_registers_handlers():
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
         FederationEventType.SPACE_MEMBER_JOINED,
         FederationEventType.SPACE_MEMBER_LEFT,
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
         FederationEventType.SPACE_SESSION_CLEANUP,
     }
 

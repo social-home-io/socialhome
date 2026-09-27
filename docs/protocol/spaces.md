@@ -17,9 +17,9 @@ may span any number of paired HFS instances.
 **Lifecycle / membership**
 
 `SPACE_CREATED`, `SPACE_DISSOLVED`, `SPACE_CONFIG_CHANGED`,
-`SPACE_MEMBER_JOINED`, `SPACE_MEMBER_LEFT`, `SPACE_MEMBER_BANNED`,
-`SPACE_MEMBER_UNBANNED`, `SPACE_INSTANCE_LEFT`, `SPACE_AGE_GATE_UPDATED`,
-`SPACE_MEMBER_PROFILE_UPDATED`.
+`SPACE_MEMBER_JOINED`, `SPACE_MEMBER_LEFT`, `SPACE_ROSTER_SNAPSHOT` (v_32),
+`SPACE_MEMBER_BANNED`, `SPACE_MEMBER_UNBANNED`, `SPACE_INSTANCE_LEFT`,
+`SPACE_AGE_GATE_UPDATED`, `SPACE_MEMBER_PROFILE_UPDATED`.
 
 `SPACE_MEMBER_PROFILE_UPDATED` carries a member's per-space display name
 and picture. A receiver applies it only when its own roster mirror
@@ -179,13 +179,16 @@ The rule, precisely:
   `allow_subscriber_comment` on **and** the payload's author names a live
   `subscriber` seat of that same household. (`allow_subscriber_react` has
   no inbound surface — space reactions are not federated events.)
-- **A household the receiver holds no roster row for is not gated.** That
-  is roster convergence, not trust: a household seated on the host before
-  the gossip arrived legitimately has no row here. It is also why the seat
-  read includes **tombstones** — a household we kicked must not read like
-  one we have never heard of. A redeem gossips the new seat to every
-  member household (`broadcast_remote_member_joined`) so this leniency
-  stays about lag rather than about followers.
+- **A household the receiver holds no roster row for is not a writer** —
+  except the space's **host**, the roster authority (a member stub written
+  before roster mirroring may hold no row for it). Its write is **held**
+  (bounded, expiring — see "Keeping the roster mirror complete" below) and
+  replayed through these same gates when a seat for it lands, because the
+  usual cause is a household that joined before the gossip seating it
+  reached us; media bytes are refused outright. This replaced a
+  roster-convergence leniency that passed such writes unchecked. The seat
+  read still includes **tombstones**, so a kicked household is decided
+  from its seat, not treated as unknown.
 - **The mesh is not a way around it.** The inner event of a
   `SPACE_ROUTED` envelope is re-judged by the same gates after the unwrap
   (`run_post_decrypt_gates`); without that it would reach the handlers
@@ -196,6 +199,96 @@ The rule, precisely:
   cannot learn which space is served). One with neither cannot be
   attributed, and passing it would hand a follower every handler that
   keys on a bare row id.
+
+## A household writes only for its own members
+
+Inside one space, a content payload names people: the `author` of a post
+or comment, the `created_by` of a task, page or event, the voter, the
+RSVPing user, the uploader, the seller, the bidder. The sender writes those
+fields, so every handler binds them to the one fact it cannot forge — the
+receiver's own roster mirror, `space_remote_members`, keyed on
+`(space_id, instance_id, user_id)` and looked up under the §24.11-signed
+`from_instance` (`socialhome/federation/space_authorship.py`). A remote
+`user_id` is derived from its home instance's key, so a live seat for
+`(space, from_instance, user)` exists only when that user really is a
+member of this space on the household that signed the envelope. A local
+user of the receiver is never seated remotely, so no remote household can
+act as one — only moderation (below) reaches a local user's rows.
+
+| Family | Create | Edit / state change | Delete |
+|---|---|---|---|
+| Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay) | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
+| Gallery items | uploader seated on the sender (or the host's relay) | — | uploader's household or a moderator |
+| Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
+| Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
+| RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
+| Poll close, schedule create / finalise | the wrapper post's author's household | | |
+| Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
+| Zones | moderators only (the local service is admin-only); a new zone's `created_by` bound like a create | moderators | moderators |
+
+A **read-only (`subscriber`) seat authors nothing**, with the one opt-in
+the Follower gate already has: a comment, when the space turned
+`allow_subscriber_comment` on. It may still change a row it already owns.
+
+**A re-send of an existing post is an edit**, judged like one — the
+author's household or a moderator; a bot post only a moderator — and it
+keeps the row's author and every piece of state other people put on it
+(pin, reactions, comment count, the moderation hold, feed visibility). A
+deleted post stays deleted, and only a moderator may touch a post held by
+moderation.
+
+The bot bridge posts under the shared `system-integration` author, which is
+no member: any writer household may create such a post, only a moderator
+may change one.
+
+### The §25.6 catch-up stream
+
+A chunk from the space's **host** is taken whole — the host is the roster
+and moderation authority. The scheduler also syncs with every confirmed
+co-member household on a timer, so a chunk from any **other** provider is
+held to the same rules as a live event: it may only *add* rows (never
+overwrite one the receiver holds — author, content and moderation state
+stand), each attributed to a member seated on that provider; the roster
+and bans are the host's alone, and zones a moderator's
+(`SpaceSyncReceiver._admit`).
+
+### Keeping the roster mirror complete
+
+The mirror is what authors are bound to, so it has to converge on every
+member household, not only on the host:
+
+- **Roster snapshot (v_32).** The host sends a member household its whole
+  roster in one `SPACE_ROSTER_SNAPSHOT`: every live seat as a
+  `SPACE_MEMBER_JOINED` entry and every removal as `SPACE_MEMBER_LEFT`, each
+  individually authority-signed like live gossip and merged through the
+  same CRDT (`apply_member_event`), so a receiver gains what it lacks and
+  never regresses. A remote seat ships the version the host's mirror holds
+  — which the host keeps equal to the last gossip it announced for that
+  seat — and a host-local member the current `roster_sequence`. Sent when
+  the host seats a household (its invitation's roster may be stale: a
+  demotion or kick in between would otherwise never reach it), when a
+  member household first advertises v_32, and on the periodic sync tick.
+  Not sent after an invite-link redeem (the ACK's roster is taken at seat
+  time, and the redeemer has no space row yet) nor, on the timer, to a
+  link-joined household (a timed envelope over the connection-server relay
+  would be new traffic metadata for it).
+- **Held writes.** A write naming a user the space has **no record of at
+  all** — or, at the Follower gate, coming from a household it holds no
+  row for — may simply have beaten the gossip seating them. It is held in a
+  bounded, expiring in-memory buffer
+  (`socialhome/federation/pending_seat_buffer.py`: 256 entries, 32 per key,
+  4 MiB, 15 min; media bytes never) and replayed through the same
+  post-decrypt gates and handlers when the seat lands
+  (`SpaceRemoteSeatLive`). A user seated on *another* household, or one who
+  was removed, is known, so that is always a refusal, never held.
+
+A refusal is logged at WARNING and answers `status: ok`, so the sender's
+outbox does not retry it; a benign no-op — a replayed delete of a row
+already gone, a status change for a listing already settled — is logged at
+DEBUG. `tests/protocol/test_space_content_authorship.py` runs every
+row-writing event type, and every catch-up resource, against the real
+registry and receiver — each with a positive control and a refused case —
+and fails until a new type or resource has both.
 
 ## The routing `space_id` is authoritative for every mutation
 
@@ -226,7 +319,13 @@ The §25.6 catch-up stream (`SpaceSyncReceiver`) is held to the same rule:
 records of a chunk for space A are written into space A or not at all,
 whatever ids or `space_id` they carry. An RSVP that arrives before its
 event is buffered together with the space it was received for and only
-applied to an event of that space.
+applied to an event of that space; since an RSVP is only accepted for a
+user seated on the sender, no other household can occupy that buffer key
+for the user.
+
+The catch-up stream is not author-bound: the provider re-exports every
+member's rows by design, and a sync session is one the receiver opened,
+for one space, with a provider whose signature it verified.
 
 Local REST callers go through the same scoped mutators with the space
 they already resolved. Where a repository also serves the household
@@ -755,6 +854,14 @@ else is dropped (logged) and nothing is stored. Receipt is logged at
 INFO as the key-blast-radius audit event. Turning the flag back off
 does **not** revoke already-shared seeds — deeper revocation (seed
 rotation) is a later phase.
+
+**Trust boundary.** A seed-holding admin household can sign anything the
+space key signs — roster gossip and roster snapshots included — so it can
+seat, re-role or remove members in every household's roster mirror, and
+through that decide whose content the §24.11 authorship rule accepts.
+Sharing the seed makes that household a co-authority of the space, not
+just an admin; the owner opts into it per space and it is not revoked by
+turning the flag off.
 
 Gated on `FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE`: against
 a sub-v_22 admin household (no handler) the owner SKIPS the send and

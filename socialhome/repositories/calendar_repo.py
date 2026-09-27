@@ -955,6 +955,12 @@ class SqliteSpaceCalendarRepo:
         on and is stored with the row, so the buffer cannot launder a
         cross-space write: :meth:`flush_pending_rsvps` only drains rows
         buffered under the same space as the event that landed.
+
+        The key carries no space, so a row buffered for one space would
+        block the same key for another. That is not a squat surface: the
+        inbound handler accepts an RSVP only for a user seated on the
+        sending household (§24.11 authorship), so the only household that
+        can occupy ``(event, user, occurrence)`` is that user's own.
         """
         await self._db.enqueue(
             """

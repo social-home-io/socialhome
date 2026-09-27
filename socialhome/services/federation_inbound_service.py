@@ -55,7 +55,14 @@ from ..domain.events import (
     HighlightRemoved,
     UserStatusChanged,
 )
-from ..domain.post import Comment, CommentType, LocationData, Post, PostType
+from ..domain.post import (
+    FEED_POST_MAX_IMAGES,
+    Comment,
+    CommentType,
+    LocationData,
+    Post,
+    PostType,
+)
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceConfigEventType, SpaceRole
 from ..domain.highlight import (
@@ -69,7 +76,12 @@ from ..crypto import (
     verify_user_identity_assertion,
 )
 from ..domain.user import RemoteUser, UserIdentityAssertion, UserStatus
-from ..federation.space_scope import log_cross_space_refusal, resolve_space_id
+from ..federation.space_authorship import SpaceAuthorship
+from ..federation.space_scope import (
+    log_cross_space_refusal,
+    log_not_applied,
+    resolve_space_id,
+)
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 from ..media.image_processor import ImageProcessor
@@ -93,6 +105,7 @@ from .space_service import stub_space_from_metadata
 from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
+    from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..domain.federation import FederationEvent
     from ..repositories.bazaar_repo import AbstractBazaarRepo
     from ..repositories.conversation_repo import AbstractConversationRepo
@@ -255,6 +268,7 @@ class FederationInboundService:
         "_space_remote_member_repo",
         "_gallery_repo",
         "_bazaar_repo",
+        "_authorship",
         "_federation_service",
     )
 
@@ -278,6 +292,7 @@ class FederationInboundService:
         space_remote_member_repo=None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
+        pending_seat_buffer: "PendingSeatBuffer | None" = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -307,6 +322,21 @@ class FederationInboundService:
         # listing lives in. Optional so unit-test stacks can omit them.
         self._gallery_repo = gallery_repo
         self._bazaar_repo = bazaar_repo
+        #: §24.11 authorship — binds the author a post / comment names to
+        #: the household that signed it. Built from the roster mirror, so
+        #: without one there is nothing to bind against and every space
+        #: post / comment write is refused (fail closed, see
+        #: :meth:`_space_authorship`).
+        self._authorship: SpaceAuthorship | None = (
+            SpaceAuthorship(
+                space_repo=space_repo,
+                remote_member_repo=space_remote_member_repo,
+                user_repo=user_repo,
+                pending=pending_seat_buffer,
+            )
+            if space_remote_member_repo is not None
+            else None
+        )
         self._federation_service = None
 
     def attach_realtime(self, realtime: "object") -> None:
@@ -1128,6 +1158,66 @@ class FederationInboundService:
         post = self._post_from_payload(event.payload)
         if post is None:
             return
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return
+        # The claimed author must be the sender's own member (or a remote
+        # member's row relayed by the host).
+        existing = await self._space_post_repo.get(post.id)
+        if existing is not None and existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="post", row_id=post.id
+            )
+            return
+        if existing is not None:
+            # A re-send of an existing id is an upsert of that row — an
+            # edit — so it is judged like one (the author's household or a
+            # moderator; a bot post only a moderator), it keeps the row's
+            # author, a deleted post stays deleted, and only a moderator
+            # may touch a post held by moderation. Whatever it carries,
+            # the state other people put on the row is kept.
+            row = existing[1]
+            if row.deleted:
+                log_not_applied(
+                    event, what="post", row_id=post.id, reason="already deleted"
+                )
+                return
+            if (
+                row.author != post.author
+                or not await authorship.may_mutate(event, space_id, row.author)
+                or (
+                    row.moderated and not await authorship.is_moderator(event, space_id)
+                )
+            ):
+                await authorship.hold_or_refuse(
+                    event,
+                    space_id=space_id,
+                    what="post",
+                    row_id=post.id,
+                    user_id=post.author,
+                )
+                return
+            post = replace(
+                post,
+                bot_id=row.bot_id,
+                linked_event_id=row.linked_event_id,
+                linked_highlight_id=row.linked_highlight_id,
+                reactions=row.reactions,
+                comment_count=row.comment_count,
+                pinned=row.pinned,
+                deleted=row.deleted,
+                moderated=row.moderated,
+                hidden_from_feed=row.hidden_from_feed,
+            )
+        elif not await authorship.may_author(event, space_id, post.author):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="post",
+                row_id=post.id,
+                user_id=post.author,
+            )
+            return
         raw_relay = event.payload.get("public_relay")
         public_relay = raw_relay if isinstance(raw_relay, dict) else None
         if await self._space_post_repo.save(space_id, post) is None:
@@ -1138,6 +1228,15 @@ class FederationInboundService:
                 space_id=space_id,
                 what="post",
                 row_id=post.id,
+            )
+            return
+        if existing is not None:
+            await self._bus.publish(
+                PostEdited(
+                    post=post,
+                    space_id=space_id,
+                    origin_instance_id=event.from_instance,
+                )
             )
             return
         await self._bus.publish(
@@ -1414,6 +1513,8 @@ class FederationInboundService:
         gated_space_id = resolve_space_id(event)
         if not gated_space_id:
             return
+        if not await self._owned_post_mutation_allowed(event, gated_space_id, post_id):
+            return
         if not await self._space_post_repo.edit(
             post_id,
             new_content,
@@ -1445,6 +1546,8 @@ class FederationInboundService:
         space_id = resolve_space_id(event)
         if not space_id:
             return
+        if not await self._owned_post_mutation_allowed(event, space_id, post_id):
+            return
         moderated_by = event.payload.get("moderated_by")
         if not await self._space_post_repo.soft_delete(
             post_id,
@@ -1475,6 +1578,23 @@ class FederationInboundService:
             return
         space_id = resolve_space_id(event)
         if not space_id:
+            return
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return
+        # A live seat of any role counts: a Follower's comment reaches
+        # here only through the §24.11 ``allow_subscriber_comment`` opt-in,
+        # which already bound that author to a subscriber seat.
+        if not await authorship.may_author(
+            event, space_id, author, subscriber_comment=True
+        ):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="comment",
+                row_id=comment_id,
+                user_id=author,
+            )
             return
         comment_type_str = str(p.get("type") or "text")
         try:
@@ -1521,6 +1641,8 @@ class FederationInboundService:
         space_id = resolve_space_id(event)
         if not space_id:
             return
+        if not await self._owned_comment_mutation_allowed(event, space_id, comment_id):
+            return
         # No post id on the wire for this event — the repo's EXISTS
         # sub-select resolves the comment's parent post and checks it
         # lives in the gated space in the same statement.
@@ -1557,6 +1679,8 @@ class FederationInboundService:
         space_id = resolve_space_id(event)
         if not space_id:
             return
+        if not await self._owned_comment_mutation_allowed(event, space_id, comment_id):
+            return
         if not await self._space_post_repo.soft_delete_comment(
             comment_id,
             space_id=space_id,
@@ -1584,6 +1708,105 @@ class FederationInboundService:
                 origin_instance_id=event.from_instance,
             ),
         )
+
+    # ── Space content authorship (§24.11) ──────────────────────────────
+
+    def _space_authorship(self, event: "FederationEvent") -> SpaceAuthorship | None:
+        """The authorship binder, or ``None`` (logged) to refuse the write.
+
+        Fail closed: a stack wired without the roster mirror cannot tell
+        whose member a payload names, so it accepts no space content.
+        """
+        if self._authorship is None:
+            log.warning(
+                "%s from %s: no space roster mirror wired — cannot bind the "
+                "author to the sending household; refusing the write",
+                event.event_type,
+                event.from_instance,
+            )
+        return self._authorship
+
+    async def _owned_post_mutation_allowed(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        post_id: str,
+    ) -> bool:
+        """Edit / delete of a space post: the author's household or a
+        moderator (the federated "author or space admin" rule of
+        ``SpaceService.edit_post`` / ``delete_post``).
+
+        Also sorts the benign no-ops (unknown here, already deleted) to
+        DEBUG from the refusals (another space, not the author's
+        household) at WARNING.
+        """
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return False
+        got = await self._space_post_repo.get(post_id)
+        if got is None:
+            log_not_applied(event, what="post", row_id=post_id, reason="unknown here")
+            return False
+        row_space, post = got
+        if row_space != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="post", row_id=post_id
+            )
+            return False
+        if post.deleted:
+            log_not_applied(
+                event, what="post", row_id=post_id, reason="already deleted"
+            )
+            return False
+        if not await authorship.may_mutate(event, space_id, post.author):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="post",
+                row_id=post_id,
+                user_id=post.author,
+            )
+            return False
+        return True
+
+    async def _owned_comment_mutation_allowed(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        comment_id: str,
+    ) -> bool:
+        """Edit / delete of a comment: the author's household or a
+        moderator (``SpaceService.edit_comment`` / ``delete_comment``)."""
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return False
+        comment = await self._space_post_repo.get_comment(comment_id)
+        if comment is None:
+            log_not_applied(
+                event, what="comment", row_id=comment_id, reason="unknown here"
+            )
+            return False
+        parent = await self._space_post_repo.get(comment.post_id)
+        if parent is None or parent[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="comment", row_id=comment_id
+            )
+            return False
+        if comment.deleted:
+            log_not_applied(
+                event, what="comment", row_id=comment_id, reason="already deleted"
+            )
+            return False
+        if not await authorship.may_mutate(event, space_id, comment.author):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="comment",
+                row_id=comment_id,
+                user_id=comment.author,
+            )
+            return False
+        return True
 
     # ── Report handler ─────────────────────────────────────────────────
 
@@ -2921,4 +3144,12 @@ class FederationInboundService:
             # Mirror the host's feed visibility. Absent on an older sender
             # → default visible (the historical behaviour).
             hidden_from_feed=bool(payload.get("hidden_from_feed", False)),
+            # The multi-image gallery the sender ships (``SpacePostOutbound``).
+            # Strings only, capped at the feed maximum; the bytes follow as
+            # ``SPACE_MEDIA_BLOB``, which is checked against these names.
+            image_urls=tuple(
+                u for u in (payload.get("image_urls") or ()) if isinstance(u, str)
+            )[:FEED_POST_MAX_IMAGES]
+            if isinstance(payload.get("image_urls"), list)
+            else (),
         )

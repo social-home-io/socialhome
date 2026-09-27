@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import orjson
 import pytest
 
@@ -183,6 +185,12 @@ class _SpaceRepoStub:
     def __init__(self, collector):
         self._c = collector
 
+    async def get(self, space_id):
+        # The chunks in this file come from the space's host, whose stream
+        # is taken whole; non-host providers are covered in
+        # tests/protocol/test_space_content_authorship.py.
+        return SimpleNamespace(id=space_id, owner_instance_id="peer-a")
+
     async def save_member(self, member):
         self._c.members.append(member)
         return member
@@ -303,6 +311,33 @@ async def test_posts(setup):
     space_id, post = c.posts[0]
     assert space_id == "sp-1"
     assert post.id == "p-1"
+
+
+async def test_posts_keep_their_image_urls(setup):
+    """The exporter ships ``image_urls``; a joiner must keep them — the
+    media bytes that follow are matched against them, and the feed renders
+    from them. Strings only, capped at the feed maximum."""
+    from socialhome.domain.post import FEED_POST_MAX_IMAGES
+
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-img",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp", 3]
+                + [f"api/media/{n}.webp" for n in range(9)],
+            },
+        ],
+    )
+    _sid, post = c.posts[0]
+    assert post.image_urls[0] == "api/media/a.webp"
+    assert all(isinstance(u, str) for u in post.image_urls)
+    assert len(post.image_urls) == FEED_POST_MAX_IMAGES
 
 
 async def test_comments(setup):

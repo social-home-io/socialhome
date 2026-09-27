@@ -9,6 +9,7 @@ import pytest
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.federation.space_scope import (
     log_cross_space_refusal,
+    log_not_applied,
     resolve_space_id,
 )
 
@@ -61,3 +62,14 @@ def test_cross_space_refusal_logs_at_warning(
         log_cross_space_refusal(ev, space_id="space-a", what="post", row_id="p1")
     assert "post p1 is not in space space-a" in caplog.text
     assert caplog.records[0].levelno == logging.WARNING
+
+
+def test_a_benign_no_op_is_logged_at_debug_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ev = _event(space_id="space-a", payload={})
+    with caplog.at_level(logging.DEBUG):
+        log_not_applied(ev, what="comment", row_id="c1", reason="already deleted")
+    records = [r for r in caplog.records if "c1" in r.getMessage()]
+    assert records and all(r.levelno == logging.DEBUG for r in records)
+    assert "already deleted" in records[0].getMessage()

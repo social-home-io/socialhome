@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.events import SpaceRemoteSeatLive
 from ..domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -703,6 +704,13 @@ class SpaceInviteTokenRedeemCoordinator:
                             # that household's writes.
                             role=mirrorable_remote_role(entry.get("role")),
                         )
+                        await self._bus.publish(
+                            SpaceRemoteSeatLive(
+                                space_id=space_id,
+                                instance_id=inst_id,
+                                user_id=user_id,
+                            )
+                        )
         out: dict = {
             "space_id": space_id,
             "role": role_str,
@@ -899,6 +907,13 @@ class SpaceInviteTokenRedeemCoordinator:
                 display_name=redeemer_display,
                 role=seat,
             )
+            await self._bus.publish(
+                SpaceRemoteSeatLive(
+                    space_id=space_id,
+                    instance_id=redeemer_instance_id,
+                    user_id=redeemer_user_id,
+                )
+            )
             # v_23 roster gossip, deliberately BEFORE the redeemer's own
             # ``space_instances`` row exists.
             #
@@ -925,6 +940,9 @@ class SpaceInviteTokenRedeemCoordinator:
                         user_pk=redeemer_pk,
                         display_name=redeemer_display,
                         role=seat,
+                        # The ACK's roster is taken now, at seat time; the
+                        # redeemer has no space row yet to apply one to.
+                        send_snapshot=False,
                     )
                 except Exception:
                     log.exception(

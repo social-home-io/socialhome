@@ -76,3 +76,28 @@ def log_cross_space_refusal(
         row_id,
         space_id,
     )
+
+
+def log_not_applied(
+    event: "FederationEvent",
+    *,
+    what: str,
+    row_id: str,
+    reason: str,
+) -> None:
+    """DEBUG for a write that is a benign no-op, never a security event.
+
+    A replayed delete of a row that is already gone or already deleted, a
+    status change for a listing already in a terminal state, an edit that
+    beat its create here: redelivery and out-of-order arrival produce these
+    all the time, and logging them at WARNING next to real cross-space or
+    foreign-author refusals would bury the ones that matter.
+    """
+    log.debug(
+        "%s from %s: %s %s not applied — %s",
+        getattr(event, "event_type", "?"),
+        getattr(event, "from_instance", "?"),
+        what,
+        row_id,
+        reason,
+    )

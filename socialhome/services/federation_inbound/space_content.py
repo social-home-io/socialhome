@@ -8,11 +8,30 @@ Handlers are lenient: malformed payloads log + return rather than
 raise, because §24.11 has already verified the signature + replay
 cache, and a peer sending a malformed body shouldn't take the inbound
 pipeline down.
+
+Two guards run on every mutation, in this order:
+
+* **Space scope** (``federation/space_scope.py``) — the row must live in
+  the space the envelope was gated for; every repo mutator re-checks it
+  in SQL.
+* **Authorship** (``federation/space_authorship.py``) — the users the
+  payload names (author, creator, voter, seller, bidder …) must be members
+  seated on the household that signed the envelope. Per family: creates
+  bind the claimed author; gallery items change only from the uploader's
+  household or a moderator; tasks / pages / stickies / calendar events
+  are collaborative (any writer household, attribution kept);
+  votes, RSVPs, schedule answers and bids are the voter's own; closing a
+  poll, finalising a schedule and settling a listing are the owner's
+  alone; zones are moderator-only.
+
+A refusal is a WARNING; a benign no-op (a replayed delete, a status change
+for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ...domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
@@ -21,10 +40,14 @@ from ...domain.events import (
     CalendarEventDeleted,
 )
 from ...domain.federation import FederationEventType
-from ...federation.space_scope import log_cross_space_refusal, resolve_space_id
+from ...federation.space_scope import (
+    log_cross_space_refusal,
+    log_not_applied,
+    resolve_space_id,
+)
 from ...domain.gallery import GalleryItem
 from ...domain.page import Page
-from ...domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus
+from ...domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus, Post
 from ...domain.space import SpaceZone
 from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
@@ -35,11 +58,13 @@ from ...utils.timezones import coerce_tz
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
+    from ...federation.space_authorship import SpaceAuthorship
     from ...repositories.bazaar_repo import AbstractBazaarRepo
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ...repositories.gallery_repo import AbstractGalleryRepo
     from ...repositories.page_repo import AbstractPageRepo
     from ...repositories.space_poll_repo import AbstractSpacePollRepo
+    from ...repositories.space_post_repo import AbstractSpacePostRepo
     from ...repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ...repositories.sticky_repo import AbstractStickyRepo
     from ...repositories.task_repo import AbstractSpaceTaskRepo
@@ -47,11 +72,23 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _has_ended(end_time: str | None) -> bool:
+    """``True`` when a listing's ``end_time`` is in the past."""
+    end = parse_iso8601_optional(end_time)
+    if end is None:
+        return False
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return end <= datetime.now(timezone.utc)
+
+
 class SpaceContentInboundHandlers:
     """Register space-content inbound handlers."""
 
     __slots__ = (
         "_bus",
+        "_authorship",
+        "_post_repo",
         "_page_repo",
         "_sticky_repo",
         "_task_repo",
@@ -66,6 +103,8 @@ class SpaceContentInboundHandlers:
         self,
         *,
         bus: EventBus,
+        authorship: "SpaceAuthorship",
+        post_repo: "AbstractSpacePostRepo",
         page_repo: "AbstractPageRepo",
         sticky_repo: "AbstractStickyRepo",
         task_repo: "AbstractSpaceTaskRepo",
@@ -76,6 +115,8 @@ class SpaceContentInboundHandlers:
         bazaar_repo: "AbstractBazaarRepo | None" = None,
     ) -> None:
         self._bus = bus
+        self._authorship = authorship
+        self._post_repo = post_repo
         self._page_repo = page_repo
         self._sticky_repo = sticky_repo
         self._task_repo = task_repo
@@ -247,6 +288,24 @@ class SpaceContentInboundHandlers:
             due_date=None,  # due_date is a ``date`` — parsing lives in the service
             assignees=tuple(str(a) for a in assignees),
         )
+        # Collaborative, like the local rule (``SpaceTaskService`` lets any
+        # space member update, archive or delete any task): an edit needs a
+        # writer household, and the upsert keeps the row's own
+        # ``created_by``, so the claim is only bound for a new task.
+        existing = await self._task_repo.get(task_id)
+        if existing is not None and existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task", row_id=task_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event,
+            space_id,
+            what="task",
+            row_id=task_id,
+            claimed_author=task.created_by if existing is None else "",
+        ):
+            return
         if not await self._task_repo.save(task, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="task", row_id=task_id
@@ -258,6 +317,21 @@ class SpaceContentInboundHandlers:
             return
         task_id = str(event.payload.get("id") or event.payload.get("task_id") or "")
         if not task_id:
+            return
+        existing = await self._task_repo.get(task_id)
+        if existing is None:
+            log_not_applied(
+                event, what="task", row_id=task_id, reason="no such task here"
+            )
+            return
+        if existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task", row_id=task_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="task", row_id=task_id
+        ):
             return
         if not await self._task_repo.delete(task_id, space_id=space_id):
             log_cross_space_refusal(
@@ -291,6 +365,24 @@ class SpaceContentInboundHandlers:
             space_id=space_id,
             cover_image_url=p.get("cover_image_url"),
         )
+        # Collaborative (any member edits a space page locally): an edit
+        # needs a writer household, and the upsert keeps the row's own
+        # ``created_by``. A NEW page is attributed to whoever the payload
+        # names, so that name must be the sender's (or the host's relay).
+        existing = await self._page_repo.get(page_id)
+        if existing is not None and existing.space_id != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="page", row_id=page_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event,
+            space_id,
+            what="page",
+            row_id=page_id,
+            claimed_author=page.created_by if existing is None else "",
+        ):
+            return
         if not await self._page_repo.save(page, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="page", row_id=page_id
@@ -302,6 +394,21 @@ class SpaceContentInboundHandlers:
             return
         page_id = str(event.payload.get("id") or event.payload.get("page_id") or "")
         if not page_id:
+            return
+        existing = await self._page_repo.get(page_id)
+        if existing is None:
+            log_not_applied(
+                event, what="page", row_id=page_id, reason="no such page here"
+            )
+            return
+        if existing.space_id != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="page", row_id=page_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="page", row_id=page_id
+        ):
             return
         if not await self._page_repo.delete(page_id, space_id=space_id):
             log_cross_space_refusal(
@@ -318,8 +425,29 @@ class SpaceContentInboundHandlers:
         sticky_id = str(p.get("id") or p.get("sticky_id") or "")
         author = str(p.get("author") or p.get("created_by") or "")
         content = str(p.get("content") or p.get("text") or "")
-        if not sticky_id or not author or not content:
+        if not sticky_id or not content:
             log.debug("SPACE_STICKY_* missing required field")
+            return
+        existing = await self._sticky_repo.get(sticky_id)
+        if existing is not None and existing.space_id != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="sticky", row_id=sticky_id
+            )
+            return
+        if existing is not None:
+            # Collaborative edit — ``SPACE_STICKY_UPDATED`` carries no
+            # author, and the upsert keeps the row's own anyway.
+            author = existing.author
+        elif not author:
+            log.debug("SPACE_STICKY_CREATED missing author")
+            return
+        if not await self._collaborative_write_allowed(
+            event,
+            space_id,
+            what="sticky",
+            row_id=sticky_id,
+            claimed_author=author if existing is None else "",
+        ):
             return
         now_iso = str(
             p.get("updated_at") or p.get("created_at") or p.get("occurred_at") or "",
@@ -346,6 +474,21 @@ class SpaceContentInboundHandlers:
             return
         sticky_id = str(event.payload.get("id") or event.payload.get("sticky_id") or "")
         if not sticky_id:
+            return
+        existing = await self._sticky_repo.get(sticky_id)
+        if existing is None:
+            log_not_applied(
+                event, what="sticky", row_id=sticky_id, reason="no such sticky here"
+            )
+            return
+        if existing.space_id != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="sticky", row_id=sticky_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="sticky", row_id=sticky_id
+        ):
             return
         if not await self._sticky_repo.delete(sticky_id, space_id=space_id):
             log_cross_space_refusal(
@@ -405,7 +548,24 @@ class SpaceContentInboundHandlers:
             # behaviour for events from un-upgraded peers.
             announce_in_feed=bool(p.get("announce_in_feed", True)),
         )
-        is_new = await self._calendar_repo.get_event(event_id) is None
+        existing = await self._calendar_repo.get_event(event_id)
+        is_new = existing is None
+        if existing is not None and existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="calendar event", row_id=event_id
+            )
+            return
+        # Collaborative (any member edits a space event locally); the
+        # upsert keeps the row's own ``created_by``, so the claim is only
+        # bound for a new event.
+        if not await self._collaborative_write_allowed(
+            event,
+            space_id,
+            what="calendar event",
+            row_id=event_id,
+            claimed_author=created_by if is_new else "",
+        ):
+            return
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
@@ -429,6 +589,24 @@ class SpaceContentInboundHandlers:
             return
         event_id = str(event.payload.get("id") or event.payload.get("event_id") or "")
         if not event_id:
+            return
+        existing = await self._calendar_repo.get_event(event_id)
+        if existing is None:
+            log_not_applied(
+                event,
+                what="calendar event",
+                row_id=event_id,
+                reason="no such event here",
+            )
+            return
+        if existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="calendar event", row_id=event_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="calendar event", row_id=event_id
+        ):
             return
         if not await self._calendar_repo.delete_event(event_id, space_id=space_id):
             log_cross_space_refusal(
@@ -459,6 +637,15 @@ class SpaceContentInboundHandlers:
             or status not in RSVPStatus.ALL
         ):
             log.debug("SPACE_RSVP_UPDATED missing or invalid field")
+            return
+        # An RSVP is the user's own answer: only their household sends it
+        # (or the event's organiser settling a request — see
+        # :meth:`_rsvp_allowed`). Checked before the buffer too, so an early
+        # RSVP cannot squat the (event, user, occurrence) buffer key for
+        # somebody else's member.
+        if not await self._rsvp_allowed(
+            event, space_id, event_id, user_id, occurrence_at, status
+        ):
             return
         # The parent event decides whether this is an out-of-order
         # arrival (buffer it) or a cross-space write (refuse it). The
@@ -511,6 +698,10 @@ class SpaceContentInboundHandlers:
         if not event_id or not user_id or not occurrence_at:
             log.debug("SPACE_RSVP_DELETED missing required field")
             return
+        if not await self._rsvp_allowed(
+            event, space_id, event_id, user_id, occurrence_at, "removed"
+        ):
+            return
         result = await self._calendar_repo.get_event(event_id)
         if result is None:
             try:
@@ -552,6 +743,8 @@ class SpaceContentInboundHandlers:
         if not post_id or not option_id or not voter:
             log.debug("SPACE_POLL_VOTE_CAST missing required field")
             return
+        if not await self._acts_for(event, space_id, voter, "poll vote", post_id):
+            return
         # The repo proves, in the same transaction as the write, that the
         # option belongs to this post (a mismatched pair would corrupt the
         # tally) and that the post lives in the gated space.
@@ -573,6 +766,9 @@ class SpaceContentInboundHandlers:
             return
         post_id = str(event.payload.get("post_id") or "")
         if not post_id:
+            return
+        # Only the poll's author closes it (``PollService.close_poll``).
+        if not await self._post_owner_acts(event, space_id, post_id, what="poll"):
             return
         if not await self._poll_repo.close_in_space(post_id, space_id=space_id):
             log_cross_space_refusal(
@@ -603,6 +799,22 @@ class SpaceContentInboundHandlers:
         slots_raw = p.get("slots") or []
         if not post_id or not title or not slots_raw:
             log.debug("SPACE_SCHEDULE_CREATED missing required field: %s", p)
+            return
+        # The slots belong to the wrapper post: its author's household
+        # creates them.
+        anchor = await self._post_in_space(
+            event, space_id, post_id, what="schedule poll"
+        )
+        if anchor is None:
+            return
+        if not await self._authorship.may_author(event, space_id, anchor.author):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="schedule poll",
+                row_id=post_id,
+                user_id=anchor.author,
+            )
             return
         try:
             if not await self._poll_repo.create_schedule_poll_in_space(
@@ -641,6 +853,10 @@ class SpaceContentInboundHandlers:
         if not slot_id or not user_id:
             log.debug("SPACE_SCHEDULE_RESPONSE_UPDATED missing field")
             return
+        if not await self._acts_for(
+            event, space_id, user_id, "schedule answer", slot_id
+        ):
+            return
         if response == "retracted" or not response:
             applied = await self._poll_repo.delete_schedule_response_in_space(
                 space_id=space_id,
@@ -675,6 +891,11 @@ class SpaceContentInboundHandlers:
         post_id = str(event.payload.get("post_id") or "")
         slot_id = str(event.payload.get("slot_id") or "")
         if not post_id or not slot_id:
+            return
+        # Only the poll's author finalises it (``finalize_schedule_poll``).
+        if not await self._post_owner_acts(
+            event, space_id, post_id, what="schedule poll"
+        ):
             return
         if not await self._poll_repo.finalize_schedule_poll_in_space(
             space_id=space_id,
@@ -727,6 +948,15 @@ class SpaceContentInboundHandlers:
             sort_order=int(p.get("sort_order") or 0),
             created_at=p.get("created_at") or p.get("occurred_at"),
         )
+        if not await self._authorship.may_author(event, space_id, uploaded_by):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="gallery item",
+                row_id=item_id,
+                user_id=uploaded_by,
+            )
+            return
         try:
             if not await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id
@@ -752,6 +982,28 @@ class SpaceContentInboundHandlers:
             return
         item_id = str(event.payload.get("id") or event.payload.get("item_id") or "")
         if not item_id:
+            return
+        item = await self._gallery_repo.get_item(item_id)
+        if item is None:
+            log_not_applied(
+                event, what="gallery item", row_id=item_id, reason="no such item here"
+            )
+            return
+        album = await self._gallery_repo.get_album(item.album_id)
+        if album is None or album.space_id != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery item", row_id=item_id
+            )
+            return
+        # Uploader or a space admin (``GalleryService.delete_item``).
+        if not await self._authorship.may_mutate(event, space_id, item.uploaded_by):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="gallery item",
+                row_id=item_id,
+                user_id=item.uploaded_by,
+            )
             return
         # Deletes the item and decrements its album's count in one
         # transaction — only when the item's album lives in the gated
@@ -793,6 +1045,22 @@ class SpaceContentInboundHandlers:
                 p,
             )
             return
+        if not await self._zone_write_allowed(event, space_id, zone_id):
+            return
+        created_by = str(p.get("created_by") or "")
+        if (
+            created_by
+            and await self._zone_repo.get(zone_id) is None
+            and not await self._authorship.may_author(event, space_id, created_by)
+        ):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="zone",
+                row_id=zone_id,
+                user_id=created_by,
+            )
+            return
         zone = SpaceZone(
             id=zone_id,
             space_id=space_id,
@@ -801,7 +1069,7 @@ class SpaceContentInboundHandlers:
             longitude=longitude,
             radius_m=radius_m,
             color=p.get("color"),
-            created_by=str(p.get("created_by") or ""),
+            created_by=created_by,
             created_at=str(
                 p.get("created_at") or p.get("updated_at") or "",
             ),
@@ -824,6 +1092,8 @@ class SpaceContentInboundHandlers:
             event.payload.get("zone_id") or event.payload.get("id") or "",
         )
         if not zone_id:
+            return
+        if not await self._zone_write_allowed(event, space_id, zone_id):
             return
         if not await self._zone_repo.delete(zone_id, space_id=space_id):
             log_cross_space_refusal(
@@ -895,6 +1165,35 @@ class SpaceContentInboundHandlers:
             winning_price=p.get("winning_price"),
             sold_at=p.get("sold_at"),
         )
+        # The listing hangs off the seller's own wrapper post.
+        anchor = await self._post_in_space(
+            event, space_id, post_id, what="bazaar listing"
+        )
+        if anchor is None:
+            return
+        if await self._bazaar_repo.get_listing(post_id) is not None:
+            # A listing is created once; its status then only moves through
+            # ``BAZAAR_LISTING_UPDATED`` / ``BAZAAR_OFFER_ACCEPTED``. A re-send
+            # would reset the status (a sold listing back to active) and
+            # could hand the listing to another seller.
+            log_not_applied(
+                event,
+                what="bazaar listing",
+                row_id=post_id,
+                reason="listing already here",
+            )
+            return
+        if seller_user_id != anchor.author or not await self._authorship.may_author(
+            event, space_id, seller_user_id
+        ):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="bazaar listing",
+                row_id=post_id,
+                user_id=seller_user_id,
+            )
+            return
         try:
             if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
                 # The wrapper post is not in this space (or has not landed
@@ -942,7 +1241,39 @@ class SpaceContentInboundHandlers:
         # this read only separates a cross-space attempt (WARNING) from a
         # benign replay against a terminal state (silent). It also hands
         # the follow-up seller-ownership check the row it needs.
-        if not await self._listing_in_space(event, post_id, space_id):
+        listing = await self._listing_in_space(event, post_id, space_id)
+        if listing is None:
+            return
+        if listing.status is not BazaarStatus.ACTIVE:
+            log_not_applied(
+                event,
+                what="bazaar listing",
+                row_id=post_id,
+                reason=f"already {listing.status.value}",
+            )
+            return
+        # Only the seller settles their listing (sold / expired / cancelled
+        # are all driven from the seller's household).
+        if not await self._authorship.acts_for(event, space_id, listing.seller_user_id):
+            if status_raw in ("expired", "sold") and _has_ended(listing.end_time):
+                # Every household runs the expiry sweep over the listings it
+                # mirrors; an older one still announces its own result. Each
+                # applies the expiry locally anyway — this is noise, not an
+                # attack on the listing.
+                log_not_applied(
+                    event,
+                    what="bazaar listing",
+                    row_id=post_id,
+                    reason="expiry is announced by the seller's household",
+                )
+                return
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="bazaar listing",
+                row_id=post_id,
+                user_id=listing.seller_user_id,
+            )
             return
         try:
             if status_raw == "sold":
@@ -1003,7 +1334,9 @@ class SpaceContentInboundHandlers:
             existing = None
         if existing is not None:
             return
-        if not await self._listing_in_space(event, listing_post_id, space_id):
+        if await self._listing_in_space(event, listing_post_id, space_id) is None:
+            return
+        if not await self._acts_for(event, space_id, bidder, "bid", bid_id):
             return
         try:
             await self._bazaar_repo.place_bid(
@@ -1058,7 +1391,13 @@ class SpaceContentInboundHandlers:
         if bid is None:
             log.debug("BAZAAR_OFFER_ACCEPTED unknown bid %s", bid_id)
             return
-        if not await self._listing_in_space(event, bid.listing_post_id, space_id):
+        listing = await self._listing_in_space(event, bid.listing_post_id, space_id)
+        if listing is None:
+            return
+        # Only the seller accepts an offer (``BazaarService.accept_offer``).
+        if not await self._acts_for(
+            event, space_id, listing.seller_user_id, "bazaar offer", bid_id
+        ):
             return
         try:
             await self._bazaar_repo.accept_offer(bid_id, space_id=space_id)
@@ -1074,18 +1413,209 @@ class SpaceContentInboundHandlers:
         event: "FederationEvent",
         post_id: str,
         space_id: str,
-    ) -> bool:
-        """``True`` when ``post_id`` is a bazaar listing of ``space_id``.
+    ) -> BazaarListing | None:
+        """The bazaar listing ``post_id`` when it lives in ``space_id``.
 
-        Logs the cross-space refusal otherwise. Not the security boundary
-        — every bazaar mutator is scoped in SQL — only the switch between
-        "refuse loudly" and "apply (or silently no-op a replay)".
+        ``None`` (logged) otherwise: unknown here is DEBUG — out-of-order
+        delivery — another space is the cross-space WARNING. Not the space
+        boundary itself (every bazaar mutator is scoped in SQL); it hands
+        the seller to the ownership checks and separates the log levels.
         """
         assert self._bazaar_repo is not None
         listing = await self._bazaar_repo.get_listing(post_id)
-        if listing is None or listing.space_id != space_id:
+        if listing is None:
+            log_not_applied(
+                event,
+                what="bazaar listing",
+                row_id=post_id,
+                reason="no such listing here",
+            )
+            return None
+        if listing.space_id != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="bazaar listing", row_id=post_id
             )
+            return None
+        return listing
+
+    # ─── Authorship helpers ──────────────────────────────────────────────
+
+    async def _acts_for(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        user_id: str,
+        what: str,
+        row_id: str,
+    ) -> bool:
+        """Strict rule — ``user_id`` is seated on the sender (logged if not)."""
+        if await self._authorship.acts_for(event, space_id, user_id):
+            return True
+        await self._authorship.hold_or_refuse(
+            event, space_id=space_id, what=what, row_id=row_id, user_id=user_id
+        )
+        return False
+
+    async def _rsvp_allowed(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        event_id: str,
+        user_id: str,
+        occurrence_at: str,
+        new_status: str,
+    ) -> bool:
+        """May the sender set ``user_id``'s RSVP to ``new_status``?
+
+        The user's own household always may. Two transitions of somebody
+        ELSE's RSVP are legitimate too, because the calendar service makes
+        them on another household's behalf (``SpaceCalendarService``):
+
+        * **settling a request** on a capacity-limited event —
+          ``requested`` → ``going`` / ``waitlist`` (approve) or → removed
+          (deny) — by the event creator's household or a moderator, the
+          federated form of the route's "event creator or space admin"
+          gate;
+        * **waitlist promotion** — ``waitlist`` → ``going`` when a seat is
+          free here — by any writer household, since the household whose
+          member dropped out is the one that promotes
+          (``_auto_promote_waitlist``).
+
+        Anything else naming somebody else's member is refused.
+        """
+        if await self._authorship.acts_for(event, space_id, user_id):
+            return True
+        got = await self._calendar_repo.get_event(event_id)
+        if got is not None and got[0] == space_id:
+            cal = got[1]
+            current = next(
+                (
+                    r.status
+                    for r in await self._calendar_repo.list_rsvps(
+                        event_id, occurrence_at=occurrence_at
+                    )
+                    if r.user_id == user_id
+                ),
+                None,
+            )
+            if current == RSVPStatus.REQUESTED and new_status in (
+                RSVPStatus.GOING,
+                RSVPStatus.WAITLIST,
+                "removed",
+            ):
+                if await self._authorship.acts_for(
+                    event, space_id, cal.created_by
+                ) or await self._authorship.is_moderator(event, space_id):
+                    return True
+            if (
+                current == RSVPStatus.WAITLIST
+                and new_status == RSVPStatus.GOING
+                and cal.capacity is not None
+            ):
+                going = sum(
+                    1
+                    for r in await self._calendar_repo.list_rsvps(
+                        event_id, occurrence_at=occurrence_at
+                    )
+                    if r.status == RSVPStatus.GOING
+                )
+                if going < cal.capacity and await self._authorship.writes_here(
+                    event, space_id
+                ):
+                    return True
+        await self._authorship.hold_or_refuse(
+            event, space_id=space_id, what="RSVP", row_id=event_id, user_id=user_id
+        )
+        return False
+
+    async def _post_in_space(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        post_id: str,
+        *,
+        what: str,
+    ) -> Post | None:
+        """The space post ``post_id`` when it lives in ``space_id`` (logged
+        otherwise — unknown is DEBUG, another space is WARNING)."""
+        got = await self._post_repo.get(post_id)
+        if got is None:
+            log_not_applied(
+                event, what=what, row_id=post_id, reason="no such post here"
+            )
+            return None
+        row_space, post = got
+        if row_space != space_id:
+            log_cross_space_refusal(event, space_id=space_id, what=what, row_id=post_id)
+            return None
+        return post
+
+    async def _post_owner_acts(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        post_id: str,
+        *,
+        what: str,
+    ) -> bool:
+        """Owner-only state change on a post (close / finalise a poll)."""
+        post = await self._post_in_space(event, space_id, post_id, what=what)
+        if post is None:
             return False
-        return True
+        return await self._acts_for(event, space_id, post.author, what, post_id)
+
+    async def _collaborative_write_allowed(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        *,
+        what: str,
+        row_id: str,
+        claimed_author: str = "",
+    ) -> bool:
+        """Pages / stickies / calendar events: any writer household edits;
+        a new row's claimed author must be the sender's (or relayed by the
+        host)."""
+        if claimed_author:
+            if await self._authorship.may_author(event, space_id, claimed_author):
+                return True
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what=what,
+                row_id=row_id,
+                user_id=claimed_author,
+            )
+            return False
+        if await self._authorship.writes_here(event, space_id):
+            return True
+        log.warning(
+            "%s from %s: %s %s in space %s — the sending household holds no "
+            "writer seat here; refusing the write",
+            event.event_type,
+            event.from_instance,
+            what,
+            row_id,
+            space_id,
+        )
+        return False
+
+    async def _zone_write_allowed(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        zone_id: str,
+    ) -> bool:
+        """Zones are admin-only locally (``SpaceZoneService``): the host or
+        a household holding a live admin seat."""
+        if await self._authorship.is_moderator(event, space_id):
+            return True
+        log.warning(
+            "%s from %s: zone %s in space %s — the sending household does not "
+            "moderate this space; refusing the write",
+            event.event_type,
+            event.from_instance,
+            zone_id,
+            space_id,
+        )
+        return False

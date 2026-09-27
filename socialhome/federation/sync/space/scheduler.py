@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ....domain.events import PairingConfirmed, SpaceSyncComplete
@@ -96,6 +97,7 @@ class SpaceSyncScheduler:
         "_startup_task",
         "_mesh_catchup_done",
         "_mesh_catchup_attempts",
+        "_roster_refresh",
     )
 
     def __init__(
@@ -128,6 +130,17 @@ class SpaceSyncScheduler:
         #: completes on the first attempt and never retries.
         self._mesh_catchup_done: set[tuple[str, str]] = set()
         self._mesh_catchup_attempts: dict[tuple[str, str], int] = {}
+        #: v_32 roster self-heal, run once per tick (see
+        #: :meth:`attach_roster_refresh`).
+        self._roster_refresh: Callable[[], Awaitable[object]] | None = None
+
+    def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
+        """Run ``refresh`` on every periodic tick — the host re-sending each
+        member household the roster of every space it hosts
+        (``SpaceService.send_hosted_roster_snapshots``). Content authors are
+        bound to that roster, so a mirror that missed gossip has to heal on
+        its own, not wait for an operator."""
+        self._roster_refresh = refresh
 
     def wire(self) -> None:
         """Subscribe to the bus events we act on. Idempotent."""
@@ -278,6 +291,12 @@ class SpaceSyncScheduler:
             await self._tick_mesh_catchup()
         except Exception:
             log.exception("space-sync-scheduler: mesh catch-up failed")
+
+        if self._roster_refresh is not None:
+            try:
+                await self._roster_refresh()
+            except Exception:
+                log.exception("space-sync-scheduler: roster refresh failed")
 
         confirmed = [
             inst

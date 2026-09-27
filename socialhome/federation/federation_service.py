@@ -30,6 +30,7 @@ import asyncio
 import orjson as _orjson
 
 if TYPE_CHECKING:
+    from .pending_seat_buffer import PendingSeatBuffer
     from .route_discovery import RouteDiscoveryService
     from .routed_envelope import SpaceRoutedHandler
 
@@ -46,6 +47,7 @@ from ..domain.events import (
     PairingIntroRelayReceived,
     PeerHomeChanged,
     SpaceConfigChanged,
+    SpaceRemoteSeatLive,
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_validator import validate_inbound_media_meta
@@ -96,6 +98,7 @@ from .inbound_validator import (
     make_parse_json,
     make_persist_replay,
     make_verify_signature,
+    run_post_decrypt_gates,
 )
 from .pairing_coordinator import PairingCoordinator
 from .peer_pairing_client import PeerPairingClient
@@ -186,6 +189,7 @@ class FederationService:
         "_user_repo",
         "_space_repo",
         "_space_remote_member_repo",
+        "_pending_seat_buffer",
         "_route_service",
         "_last_mesh_begin_at",
         "_relay_accepted_at",
@@ -247,6 +251,7 @@ class FederationService:
         # seated as a read-only Follower.
         self._space_repo = None
         self._space_remote_member_repo = None
+        self._pending_seat_buffer: "PendingSeatBuffer | None" = None
         # §D2 PR2 mesh-routing primitives — set via :meth:`attach_mesh`.
         # When wired, :meth:`send_with_mesh_fallback` discovers a path
         # through the federation graph and ships SPACE_ROUTED when a
@@ -410,6 +415,7 @@ class FederationService:
                 make_check_space_writer(
                     space_repo=self._space_repo,
                     remote_member_repo=self._space_remote_member_repo,
+                    pending=self._pending_seat_buffer,
                 ),
             )
         return steps
@@ -526,6 +532,48 @@ class FederationService:
         """
         self._space_repo = space_repo
         self._space_remote_member_repo = space_remote_member_repo
+
+    def attach_pending_seat_buffer(self, buffer: "PendingSeatBuffer") -> None:
+        """Hold space writes whose seat has not reached the roster mirror.
+
+        The §24.11 follower gate and the authorship rule both judge a write
+        against ``space_remote_members``; a write that beat the roster
+        gossip naming its household or its author is held in ``buffer``
+        instead of dropped, and replayed — through the same post-decrypt
+        gates, then the handlers — when :class:`SpaceRemoteSeatLive`
+        reports the seat.
+        """
+        self._pending_seat_buffer = buffer
+        self._bus.subscribe(SpaceRemoteSeatLive, self._on_remote_seat_live)
+
+    async def _on_remote_seat_live(self, event: SpaceRemoteSeatLive) -> None:
+        buffer = self._pending_seat_buffer
+        if buffer is None:
+            return
+        for held in buffer.release(
+            space_id=event.space_id,
+            instance_id=event.instance_id,
+            user_id=event.user_id,
+        ):
+            payload = held.payload if isinstance(held.payload, dict) else {}
+            ctx = InboundContext(
+                envelope={
+                    "space_id": held.space_id or payload.get("space_id") or None,
+                    "from_instance": held.from_instance,
+                },
+                event=held,
+            )
+            if not await run_post_decrypt_gates(
+                ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
+            ):
+                continue
+            log.info(
+                "replaying held %s from %s now that the seat landed in %s",
+                held.event_type,
+                held.from_instance,
+                event.space_id,
+            )
+            await self._event_registry.dispatch(held)
 
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""

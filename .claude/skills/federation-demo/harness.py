@@ -4413,6 +4413,30 @@ def cmd_verify() -> None:
                     print(f"  space contains {label} ✓")
                 else:
                     print(f"  space pending acceptance from {label}")
+        # v_32 roster snapshot: every MEMBER household's roster mirror must
+        # hold every other member — content authors are bound to it. Alice
+        # joined before Carol, so without the host's snapshot to the later
+        # joiner (or the gossip to the earlier one) one of them would miss
+        # the other and drop that household's content.
+        for viewer, other in (("a", "c"), ("c", "a")):
+            v = state["instances"][viewer]
+            s, members = _request(
+                f"http://127.0.0.1:{v['port']}/api/spaces/{state['space_id']}/members",
+                token=v["token"],
+            )
+            mlist = (
+                members
+                if isinstance(members, list)
+                else (members or {}).get("members", [])
+            )
+            ids = {m.get("user_id") for m in mlist} if s == 200 else set()
+            if state["instances"][other]["user_id"] in ids:
+                print(f"  {viewer}'s roster mirror has {other} ✓")
+            else:
+                failures.append(
+                    f"{viewer}'s roster mirror lacks {other} ({s}) — the "
+                    "v_32 roster snapshot / gossip did not converge"
+                )
 
     # 5. Trust-relay pair — a ↔ d should be CONFIRMED on both sides
     #    *if* :func:`cmd_relay_pair` was run (excluded from ``all``).

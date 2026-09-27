@@ -24,13 +24,14 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
+    SpaceRemoteSeatLive,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
     RemoteSpaceMemberRemoved,
 )
 from ..crypto import derive_instance_id
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
     RemoteAdminOutcome,
     SpaceRole,
@@ -53,7 +54,6 @@ from ..services.space_service import (
 )
 
 if TYPE_CHECKING:
-    from ..domain.federation import FederationEvent
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
     from ..repositories.space_remote_member_repo import (
         AbstractSpaceRemoteMemberRepo,
@@ -62,6 +62,11 @@ if TYPE_CHECKING:
     from .federation_service import FederationService
 
 log = logging.getLogger(__name__)
+
+#: Upper bound on the entries one ``SPACE_ROSTER_SNAPSHOT`` is allowed to
+#: make us verify — a space roster is far smaller; this only caps the work
+#: a malformed or hostile snapshot can cause.
+_MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
 
 
 class PrivateSpaceInviteHandler:
@@ -196,6 +201,10 @@ class PrivateSpaceInviteHandler:
         registry.register(
             FederationEventType.SPACE_MEMBER_LEFT,
             self._on_space_member_left,
+        )
+        registry.register(
+            FederationEventType.SPACE_ROSTER_SNAPSHOT,
+            self._on_space_roster_snapshot,
         )
         registry.register(
             FederationEventType.SPACE_SESSION_CLEANUP,
@@ -437,6 +446,11 @@ class PrivateSpaceInviteHandler:
                         # household's writes.
                         role=mirrorable_remote_role(entry.get("role")),
                     )
+                    await self._bus.publish(
+                        SpaceRemoteSeatLive(
+                            space_id=space_id, instance_id=inst_id, user_id=user_id
+                        )
+                    )
         await self._bus.publish(
             RemoteSpaceInviteReceived(
                 space_id=space_id,
@@ -565,6 +579,13 @@ class PrivateSpaceInviteHandler:
             user_pk=str(invitee_pk) if invitee_pk else None,
             display_name=str(invitee_display) if invitee_display else None,
             role=SpaceRole.MEMBER.value,
+        )
+        await self._bus.publish(
+            SpaceRemoteSeatLive(
+                space_id=invite["space_id"],
+                instance_id=event.from_instance,
+                user_id=invitee_user_id,
+            )
         )
         # Register the accepting peer as a space *instance* member too —
         # ``broadcast_to_space_members`` queries ``space_instances``, so
@@ -1342,7 +1363,7 @@ class PrivateSpaceInviteHandler:
             )
         display_name = p.get("display_name")
         user_pk = p.get("user_pk")
-        await self._remote_members.apply_member_event(
+        applied = await self._remote_members.apply_member_event(
             space_id=space_id,
             user_id=user_id,
             instance_id=instance_id,
@@ -1352,6 +1373,12 @@ class PrivateSpaceInviteHandler:
             member_version=member_version,
             tombstoned=tombstoned,
         )
+        if applied and not tombstoned:
+            await self._bus.publish(
+                SpaceRemoteSeatLive(
+                    space_id=space_id, instance_id=instance_id, user_id=user_id
+                )
+            )
         # Register the member's household as a broadcast target. Without this a
         # member learned ONLY via roster gossip (not a direct invite/accept) is
         # absent from ``space_instances`` — so this household's
@@ -1375,3 +1402,44 @@ class PrivateSpaceInviteHandler:
     async def _on_space_member_left(self, event: "FederationEvent") -> None:
         """Authority-signed roster LEFT (v_23) — tombstone the member."""
         await self._apply_roster_gossip(event, tombstoned=True)
+
+    async def _on_space_roster_snapshot(self, event: "FederationEvent") -> None:
+        """The host's whole roster for one space (v_32).
+
+        Each entry is an individually authority-signed ``SPACE_MEMBER_JOINED``
+        / ``SPACE_MEMBER_LEFT`` payload; it is verified and merged exactly as
+        if it had arrived as live gossip (:meth:`_apply_roster_gossip`), so
+        trust rests on the space key, never on the sender, and the CRDT
+        version guard makes a stale or repeated entry a no-op. An entry for
+        another space, or of any other type, is skipped.
+        """
+        p = event.payload if isinstance(event.payload, dict) else {}
+        space_id = event.space_id or str(p.get("space_id") or "")
+        entries = p.get("entries")
+        if not space_id or not isinstance(entries, list):
+            return
+        for entry in entries[:_MAX_ROSTER_SNAPSHOT_ENTRIES]:
+            if not isinstance(entry, dict):
+                continue
+            payload = entry.get("payload")
+            raw_type = str(entry.get("event_type") or "")
+            if not isinstance(payload, dict) or payload.get("space_id") != space_id:
+                continue
+            if raw_type == FederationEventType.SPACE_MEMBER_JOINED.value:
+                tombstoned = False
+            elif raw_type == FederationEventType.SPACE_MEMBER_LEFT.value:
+                tombstoned = True
+            else:
+                continue
+            await self._apply_roster_gossip(
+                FederationEvent(
+                    msg_id=str(getattr(event, "msg_id", "") or ""),
+                    event_type=FederationEventType(raw_type),
+                    from_instance=event.from_instance,
+                    to_instance=str(getattr(event, "to_instance", "") or ""),
+                    timestamp=str(getattr(event, "timestamp", "") or ""),
+                    payload=payload,
+                    space_id=space_id,
+                ),
+                tombstoned=tombstoned,
+            )

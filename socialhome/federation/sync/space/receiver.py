@@ -27,8 +27,10 @@ import orjson as _orjson
 
 from ....domain.calendar import CalendarEvent
 from ....domain.events import SpaceSyncComplete
+from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
 from ....domain.post import (
+    FEED_POST_MAX_IMAGES,
     BazaarListing,
     BazaarMode,
     BazaarStatus,
@@ -46,6 +48,7 @@ from ....infrastructure.event_bus import EventBus
 from .exporter import ALLOWED_RESOURCES, SENTINEL_RESOURCE, parse_chunk
 
 if TYPE_CHECKING:
+    from ....federation.space_authorship import SpaceAuthorship
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
@@ -96,6 +99,7 @@ class SpaceSyncReceiver:
         "_profile_picture_repo",
         "_poll_repo",
         "_pending_decrypts",
+        "_authorship",
     )
 
     def __init__(
@@ -117,8 +121,13 @@ class SpaceSyncReceiver:
         profile_picture_repo: "AbstractProfilePictureRepo | None" = None,
         poll_repo: "AbstractSpacePollRepo | None" = None,
         pending_decrypts: "PendingDecryptsCache | None" = None,
+        authorship: "SpaceAuthorship | None" = None,
     ) -> None:
         self._bus = bus
+        #: §24.11 authorship for a chunk streamed by a household that is NOT
+        #: the space's host (see :meth:`_admit`). ``None`` refuses such
+        #: chunks outright rather than trusting them.
+        self._authorship = authorship
         self._encoder = encoder
         self._crypto = crypto
         self._federation_repo = federation_repo
@@ -333,7 +342,7 @@ class SpaceSyncReceiver:
             return
 
         try:
-            await self._dispatch(resource, space_id, records)
+            await self._dispatch(resource, space_id, records, provider=from_instance)
         except Exception:  # pragma: no cover
             log.exception(
                 "sync chunk persist failed (resource=%s space=%s)",
@@ -346,7 +355,12 @@ class SpaceSyncReceiver:
         resource: str,
         space_id: str,
         records: list[dict[str, Any]],
+        *,
+        provider: str,
     ) -> None:
+        records = await self._admit(resource, space_id, records, provider=provider)
+        if not records:
+            return
         if resource == "members":
             for r in records:
                 await self._space_repo.save_member(
@@ -585,6 +599,175 @@ class SpaceSyncReceiver:
                             exc,
                         )
 
+    # ─── Who may stream what (§24.11 authorship) ─────────────────────
+
+    async def _admit(
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
+        *,
+        provider: str,
+    ) -> list[dict[str, Any]]:
+        """The records of this chunk the ``provider`` may write here.
+
+        A chunk from the space's **host** is taken whole: the host is the
+        roster and moderation authority, and its snapshot is the state the
+        space converges on.
+
+        Any other provider is a member household — the §25.6 scheduler
+        syncs with every confirmed co-member on a timer, unasked for by any
+        user — so its records are held to the same rules as a live event
+        (``federation/space_authorship.py``): it may only **add** rows
+        (never overwrite one we hold, whose author, content and moderation
+        state stand), each attributed to a member seated on it; the roster
+        and bans are the host's alone, and zones a moderator's.
+        """
+        space = await self._space_repo.get(space_id)
+        if space is not None and provider and space.owner_instance_id == provider:
+            return records
+        if self._authorship is None:
+            log.warning(
+                "space sync: %d %s record(s) for %s from non-host %s — no "
+                "authorship binder wired; refusing them",
+                len(records),
+                resource,
+                space_id,
+                provider,
+            )
+            return []
+        event = FederationEvent(
+            msg_id=f"sync:{space_id}:{resource}",
+            event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            from_instance=provider,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        admitted: list[dict[str, Any]] = []
+        refused = 0
+        for r in records:
+            if await self._admit_record(resource, space_id, r, event):
+                admitted.append(r)
+            else:
+                refused += 1
+        if refused:
+            log.info(
+                "space sync: kept %d of %d %s record(s) from non-host %s for %s "
+                "(the rest exist already, or name no member of that household)",
+                len(admitted),
+                len(records),
+                resource,
+                provider,
+                space_id,
+            )
+        return admitted
+
+    async def _admit_record(
+        self,
+        resource: str,
+        space_id: str,
+        r: dict[str, Any],
+        event: FederationEvent,
+    ) -> bool:
+        auth = self._authorship
+        assert auth is not None
+        rid = str(r.get("id") or "")
+        match resource:
+            case "members" | "bans":
+                return False
+            case "member_pictures":
+                return await auth.acts_for(
+                    event, space_id, str(r.get("user_id") or ""), any_role=True
+                )
+            case "posts":
+                if not rid or await self._space_post_repo.get(rid) is not None:
+                    return False
+                return await auth.may_author(
+                    event, space_id, str(r.get("author") or "")
+                )
+            case "comments":
+                if not rid or await self._space_post_repo.get_comment(rid) is not None:
+                    return False
+                return await auth.may_author(
+                    event,
+                    space_id,
+                    str(r.get("author") or ""),
+                    subscriber_comment=True,
+                )
+            case "tasks" | "tasks_archived":
+                if not rid or await self._space_task_repo.get(rid) is not None:
+                    return False
+                return await auth.may_author(
+                    event, space_id, str(r.get("created_by") or "")
+                )
+            case "pages":
+                if not rid or await self._page_repo.get(rid) is not None:
+                    return False
+                creator = str(r.get("created_by") or "")
+                if creator:
+                    return await auth.may_author(event, space_id, creator)
+                return await auth.writes_here(event, space_id)
+            case "stickies":
+                if not rid or await self._sticky_repo.get(rid) is not None:
+                    return False
+                return await auth.may_author(
+                    event, space_id, str(r.get("author") or r.get("created_by") or "")
+                )
+            case "calendar":
+                if (
+                    not rid
+                    or await self._space_calendar_repo.get_event(rid) is not None
+                ):
+                    return False
+                return await auth.may_author(
+                    event, space_id, str(r.get("created_by") or "")
+                )
+            case "gallery":
+                if r.get("kind") == "album":
+                    if r.get("is_system"):
+                        return False
+                    owner = str(r.get("owner_user_id") or r.get("owner_id") or "")
+                    return await auth.acts_for(event, space_id, owner)
+                if not rid or await self._gallery_repo.get_item(rid) is not None:
+                    return False
+                return await auth.may_author(
+                    event,
+                    space_id,
+                    str(r.get("uploaded_by") or r.get("uploader") or ""),
+                )
+            case "schedules":
+                post_id = str(r.get("post_id") or "")
+                if self._poll_repo is None or not post_id:
+                    return False
+                if await self._poll_repo.get_schedule_meta(post_id) is not None:
+                    return False
+                return await self._anchor_author_ok(event, space_id, post_id)
+            case "space_zones":
+                return await auth.is_moderator(event, space_id)
+            case "bazaar":
+                post_id = str(r.get("post_id") or "")
+                if self._bazaar_repo is None or not post_id:
+                    return False
+                if await self._bazaar_repo.get_listing(post_id) is not None:
+                    return False
+                got = await self._space_post_repo.get(post_id)
+                seller = str(r.get("seller_user_id") or "")
+                if got is None or got[1].author != seller:
+                    return False
+                return await auth.may_author(event, space_id, seller)
+        return False
+
+    async def _anchor_author_ok(
+        self, event: FederationEvent, space_id: str, post_id: str
+    ) -> bool:
+        assert self._authorship is not None
+        got = await self._space_post_repo.get(post_id)
+        if got is None or got[0] != space_id:
+            return False
+        return await self._authorship.may_author(event, space_id, got[1].author)
+
     async def _persist_album(self, record: dict[str, Any], space_id: str) -> None:
         # The album lands in the space this sync stream was gated for —
         # never the record's own ``space_id`` (another space, or NULL =
@@ -718,7 +901,16 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         # An unannounced listing / event anchor must stay out of the
         # joiner's feed exactly as it is out of the provider's.
         hidden_from_feed=bool(r.get("hidden_from_feed", False)),
+        # The post's image gallery — the media bytes that follow are
+        # matched against these names. Strings only, feed-capped.
+        image_urls=_image_urls(r.get("image_urls")),
     )
+
+
+def _image_urls(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(u for u in raw if isinstance(u, str))[:FEED_POST_MAX_IMAGES]
 
 
 def _comment_from_record(r: dict[str, Any]) -> Comment | None:

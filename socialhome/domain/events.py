@@ -1249,6 +1249,35 @@ class RemoteSpaceInviteAccepted(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class PeerProtoVersionRaised(DomainEvent):
+    """A paired household advertised a higher ``proto_version`` than the
+    one we had on file (``INSTANCE_CAPABILITIES_UPDATED``). Lets senders
+    catch that household up on what it could not receive before — e.g. the
+    host's roster snapshot (v_32)."""
+
+    instance_id: str
+    old_version: int
+    new_version: int
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceRemoteSeatLive(DomainEvent):
+    """A remote member's seat just became live in this household's roster
+    mirror (``space_remote_members``) — seated by an accept / redeem, or
+    learned from authority-signed roster gossip or snapshot.
+
+    Releases the space writes held for that user or that household while
+    their seat had not reached us (:class:`~socialhome.federation
+    .pending_seat_buffer.PendingSeatBuffer`)."""
+
+    space_id: str
+    instance_id: str
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteDeclined(DomainEvent):
     """Mirror of :class:`RemoteSpaceInviteAccepted` for the decline path."""
 

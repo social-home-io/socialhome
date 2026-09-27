@@ -6,6 +6,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -3456,6 +3457,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3474,6 +3476,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     )
 
 
@@ -3504,6 +3507,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3549,6 +3553,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -6812,3 +6817,255 @@ async def test_list_pending_join_requests_resolves_applicant_display_names(stack
     by_user = {r["user_id"]: r for r in rows}
     assert by_user[bob.user_id]["display_name"] == "bob"
     assert by_user["ruid-carol"]["display_name"] == "Carol Remote"
+
+
+# ─── Roster snapshot (v_32) ────────────────────────────────────────────
+
+
+def _snapshots(fed, to=None):
+    """``(to_instance_id, entries)`` of every SPACE_ROSTER_SNAPSHOT sent."""
+    from socialhome.domain.federation import FederationEventType
+
+    out = []
+    for c in fed.send_with_mesh_fallback.await_args_list:
+        kw = c.kwargs
+        if kw.get("event_type") is not FederationEventType.SPACE_ROSTER_SNAPSHOT:
+            continue
+        if to is None or kw["to_instance_id"] == to:
+            out.append((kw["to_instance_id"], kw["payload"]["entries"]))
+    return out
+
+
+async def _hosted_space_with_seats(stack):
+    owner = await stack.provision_user("hosty")
+    space = await stack.space_svc.create_space(owner_username="hosty", name="S")
+    fed, fed_repo = _invite_fed()
+    fed_repo.get_instance = AsyncMock(return_value=None)
+    remote = await _wire_remote_members(stack)
+    stack.space_svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        remote_member_repo=remote,
+    )
+    return owner, space, fed, remote
+
+
+async def _seat(remote, space_id, instance_id, user_id, role="member"):
+    await remote.add(
+        space_id=space_id,
+        instance_id=instance_id,
+        user_id=user_id,
+        user_pk=None,
+        display_name=user_id,
+        role=role,
+    )
+
+
+async def test_a_new_member_household_is_sent_one_signed_roster_snapshot(stack):
+    """After seating, the host sends the joiner its whole roster in ONE
+    event — every seat but the joiner's own household's, local owner
+    included — each entry authority-signed like live gossip, at the seat's
+    own version; the roster counter moves only for the joiner's own seat."""
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.services.space_crypto_service import verify_authority_event
+
+    owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-early", "u-early")
+    await _seat(remote, space.id, "peer-new", "u-new")
+    seq_before = (await stack.space_repo.get(space.id)).roster_sequence
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id,
+        instance_id="peer-new",
+        user_id="u-new",
+        user_pk=None,
+        display_name="New",
+    )
+    snaps = _snapshots(fed)
+    assert [to for to, _ in snaps] == ["peer-new"]
+    entries = snaps[0][1]
+    by_user = {e["payload"]["user_id"]: e for e in entries}
+    assert set(by_user) == {"u-early", owner.user_id}
+    assert by_user["u-early"]["payload"]["instance_id"] == "peer-early"
+    assert by_user[owner.user_id]["payload"]["instance_id"] == stack.iid
+    pub = bytes.fromhex((await stack.space_repo.get(space.id)).identity_public_key)
+    for e in entries:
+        p = e["payload"]
+        assert e["event_type"] == FederationEventType.SPACE_MEMBER_JOINED.value
+        assert verify_authority_event(
+            event_type=e["event_type"],
+            space_id=space.id,
+            payload={
+                k: v
+                for k, v in p.items()
+                if k not in ("authority_sig", "authority_sig_suite")
+            },
+            authority_sig=p["authority_sig"],
+            authority_sig_suite=p["authority_sig_suite"],
+            space_public_key=pub,
+        )
+    assert (await stack.space_repo.get(space.id)).roster_sequence == seq_before + 1
+
+
+async def test_an_invite_link_redeem_sends_no_snapshot(stack):
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-new", "u-new")
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id,
+        instance_id="peer-new",
+        user_id="u-new",
+        user_pk=None,
+        display_name="New",
+        send_snapshot=False,
+    )
+    assert _snapshots(fed) == []
+
+
+async def test_no_roster_snapshot_to_a_household_below_v32(stack):
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+
+    async def _supports(instance_id, *, min_version):
+        return min_version < 32
+
+    fed.peer_supports = _supports
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id, instance_id="peer-old", user_id="u", user_pk=None, display_name="U"
+    )
+    assert _snapshots(fed) == []
+
+
+async def test_the_hosts_mirror_tracks_the_gossip_version(stack):
+    """The host's own mirror must hold the version it announced, or a
+    snapshot built from it ships an older version receivers drop."""
+    from socialhome.domain.federation import FederationEventType
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-x", "u-x")
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id, instance_id="peer-x", user_id="u-x", user_pk=None, display_name="X"
+    )
+    gossip = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_JOINED)[-1]
+    announced = gossip.args[2]["member_version"]
+    row = await remote.get(space.id, "peer-x", "u-x")
+    assert row is not None and row.member_version == announced
+
+
+async def test_a_demotion_before_the_accept_reaches_the_joiner(stack):
+    """u-x is an admin when the joiner's invitation is built, then demoted
+    before the joiner accepts (it missed that gossip — it was not a member
+    yet). The snapshot carries the demotion at a version above the
+    invitation's, so the joiner's merge applies it."""
+    from socialhome.domain.federation import FederationEventType
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-x", "u-x", role="admin")
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id,
+        instance_id="peer-x",
+        user_id="u-x",
+        user_pk=None,
+        display_name="X",
+        role="admin",
+    )
+    invite_version = (await remote.get(space.id, "peer-x", "u-x")).member_version
+    await remote.set_role(space.id, "peer-x", "u-x", "member")
+    space_row = await stack.space_repo.get(space.id)
+    await stack.space_svc._emit_member_roster_gossip(
+        space_row,
+        user_id="u-x",
+        instance_id="peer-x",
+        display_name="X",
+        user_pk=None,
+        role="member",
+        tombstoned=False,
+    )
+    await _seat(remote, space.id, "peer-new", "u-new")
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
+    entry = next(
+        e
+        for e in _snapshots(fed, to="peer-new")[-1][1]
+        if e["payload"]["user_id"] == "u-x"
+    )
+    assert entry["event_type"] == FederationEventType.SPACE_MEMBER_JOINED.value
+    assert entry["payload"]["role"] == "member"
+    assert entry["payload"]["member_version"] > invite_version
+
+
+async def test_a_kick_before_the_accept_reaches_the_joiner_as_a_removal(stack):
+    from socialhome.domain.federation import FederationEventType
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-x", "u-x")
+    invite_version = (await remote.get(space.id, "peer-x", "u-x")).member_version
+    await remote.remove(space.id, "peer-x", "u-x")
+    space_row = await stack.space_repo.get(space.id)
+    await stack.space_svc._emit_member_roster_gossip(
+        space_row,
+        user_id="u-x",
+        instance_id="peer-x",
+        display_name="X",
+        user_pk=None,
+        role="member",
+        tombstoned=True,
+    )
+    await _seat(remote, space.id, "peer-new", "u-new")
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
+    entry = next(
+        e
+        for e in _snapshots(fed, to="peer-new")[-1][1]
+        if e["payload"]["user_id"] == "u-x"
+    )
+    assert entry["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    assert entry["payload"]["member_version"] > invite_version
+
+
+async def test_the_periodic_refresh_skips_link_joined_households(stack):
+    """Timed envelopes to a household seated from an invite link would ride
+    the connection-server relay — new traffic metadata for it."""
+    from socialhome.domain.federation import InstanceSource
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-direct", "u-d")
+    await _seat(remote, space.id, "peer-link", "u-l")
+    for inst in ("peer-direct", "peer-link"):
+        await stack.space_repo.add_space_instance(space.id, inst)
+
+    async def _get_instance(iid):
+        source = (
+            InstanceSource.SPACE_SESSION
+            if iid == "peer-link"
+            else InstanceSource.MANUAL
+        )
+        return SimpleNamespace(id=iid, source=source)
+
+    stack.space_svc._federation_repo.get_instance = _get_instance
+    sent = await stack.space_svc.send_hosted_roster_snapshots()
+    assert sent == 1
+    assert [to for to, _ in _snapshots(fed)] == ["peer-direct"]
+
+
+async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
+    from socialhome.domain.events import PeerProtoVersionRaised
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    await _seat(remote, space.id, "peer-up", "u-up")
+    await _seat(remote, space.id, "peer-other", "u-o")
+    await stack.space_repo.add_space_instance(space.id, "peer-up")
+    await stack.space_svc.on_peer_proto_version_raised(
+        PeerProtoVersionRaised(instance_id="peer-up", old_version=31, new_version=32)
+    )
+    assert [to for to, _ in _snapshots(fed)] == ["peer-up"]
+    # Already past the line — nothing new to send.
+    await stack.space_svc.on_peer_proto_version_raised(
+        PeerProtoVersionRaised(instance_id="peer-up", old_version=32, new_version=33)
+    )
+    assert len(_snapshots(fed)) == 1
+
+
+async def test_only_the_host_sends_a_roster_snapshot(stack):
+    _owner, space, fed, _remote = await _hosted_space_with_seats(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='someone-else' WHERE id=?", (space.id,)
+    )
+    assert not await stack.space_svc.send_roster_snapshot(
+        space.id, to_instance_id="peer-x"
+    )

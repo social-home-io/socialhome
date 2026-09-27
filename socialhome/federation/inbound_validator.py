@@ -662,11 +662,15 @@ _WRITER_ROLES: frozenset[str] = frozenset(
 #: stop redelivering it rather than retry forever.
 _REFUSED_WRITE = {"status": "ok", "dropped": "subscriber-write"}
 
+#: Early-response body for a write held until its household's seat lands.
+_HELD_WRITE = {"status": "ok", "held": "awaiting-seat"}
+
 
 def make_check_space_writer(
     *,
     space_repo,
     remote_member_repo,
+    pending=None,
 ) -> InboundStep:
     """Step 12: refuse a space-content write from a reader household.
 
@@ -708,18 +712,31 @@ def make_check_space_writer(
     (:meth:`AbstractSpaceRemoteMemberRepo.list_for_instance`, **tombstones
     included**):
 
-    * **no rows at all → pass.** The only leniency, and it is about
-      roster convergence, not about trust: a household seated on the host
-      before the roster gossip reached us legitimately has no row here,
-      and refusing would drop real members' content whenever a mirror
-      lagged. Tombstones are read precisely so that a household we KICKED
-      does not fall into this branch — ``get`` / ``list_for_space`` filter
-      them, which would make "removed" and "never heard of" the same
-      answer.
+    * **the space's host → pass.** The host is the roster authority, and
+      a member stub written before roster mirroring may hold no row for
+      it at all; its content is still bound per author downstream.
     * **≥1 row and at least one LIVE ``member`` / ``admin`` seat → pass.**
       A mixed household may write, because a real member of it may.
-    * **otherwise → refuse.** Only-``subscriber`` seats, or only
-      tombstoned ones.
+    * **no row at all → hold** (with a ``pending`` buffer; refuse without,
+      or when it is full) — see below.
+    * **otherwise → refuse.** Only-``subscriber`` seats, or only tombstoned
+      ones.
+
+    "No row at all" used to pass unchecked, as a roster-convergence
+    leniency: a household seated on the host before the roster gossip
+    reached us has no row here yet. It no longer passes — every content
+    handler now binds the users a payload names to a live seat of the
+    SENDING household (:mod:`socialhome.federation.space_authorship`), and
+    what the leniency still let through was the write surface with no
+    author to bind (``SPACE_MEDIA_BLOB`` bytes). The convergence case is
+    kept alive instead: with a ``pending`` buffer wired
+    (:class:`~socialhome.federation.pending_seat_buffer.PendingSeatBuffer`),
+    such a write is HELD — answered ``status: ok, held`` — and replayed
+    through these same gates when a seat for that household lands
+    (``FederationService._on_remote_seat_live``); the host's roster
+    snapshot (v_32) makes sure that seat does land. A full buffer, or media
+    bytes, is a refusal. Tombstones are still read, so a household we
+    KICKED is refused, never held.
 
     The single exception is ``SPACE_COMMENT_CREATED`` when the space has
     ``allow_subscriber_comment`` on AND the payload's author names a LIVE
@@ -778,14 +795,26 @@ def make_check_space_writer(
                 exc,
             )
             return
-        if not seats:
-            # Roster convergence — see the docstring. Not a trust
-            # decision, and deliberately unavailable to a household we
-            # tombstoned.
-            return
         live = [s for s in seats if not s.tombstoned]
         if any(s.role in _WRITER_ROLES for s in live):
             return
+        if await _sender_hosts_space(space_repo, space_id, event.from_instance):
+            return
+        if not seats and pending is not None:
+            # No row at all for this household: it may simply have joined
+            # before the roster gossip seating it reached us. Hold the write
+            # (bounded, expiring) and replay it through these same gates
+            # when the seat lands — ``FederationService._on_remote_seat_live``.
+            if pending.hold(event, space_id=space_id, instance_id=event.from_instance):
+                log.info(
+                    "inbound: holding %s in space %s from %s — no seat for that "
+                    "household has reached us yet",
+                    event.event_type.value,
+                    space_id,
+                    event.from_instance,
+                )
+                ctx.early_response = dict(_HELD_WRITE)
+                return
         if event.event_type is FederationEventType.SPACE_COMMENT_CREATED:
             if await _subscriber_comment_allowed(
                 space_repo=space_repo,
@@ -796,7 +825,7 @@ def make_check_space_writer(
                 return
         log.warning(
             "inbound: refused %s in space %s from %s — that household holds "
-            "only read-only Follower seats here (%d live, %d tombstoned)",
+            "no writer seat here (%d live, %d tombstoned)",
             event.event_type.value,
             space_id,
             event.from_instance,
@@ -806,6 +835,21 @@ def make_check_space_writer(
         ctx.early_response = dict(_REFUSED_WRITE)
 
     return check_space_writer
+
+
+async def _sender_hosts_space(space_repo, space_id: str, sender: str) -> bool:
+    """``True`` when ``sender`` is the household hosting ``space_id``.
+
+    An unreadable space row is a "no": this is an exception to a refusal.
+    """
+    try:
+        space = await space_repo.get(space_id)
+    except Exception as exc:
+        log.warning(
+            "inbound: space-writer host lookup failed for %s: %s", space_id, exc
+        )
+        return False
+    return bool(space is not None and sender and space.owner_instance_id == sender)
 
 
 async def _subscriber_comment_allowed(

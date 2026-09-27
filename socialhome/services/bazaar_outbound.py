@@ -41,6 +41,7 @@ from ..infrastructure.event_bus import EventBus
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..repositories.bazaar_repo import AbstractBazaarRepo
+    from ..repositories.user_repo import AbstractUserRepo
     from .space_media_sync_service import SpaceMediaSyncService
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class BazaarOutbound:
         "_bazaar_repo",
         "_media_sync",
         "_federation_repo",
+        "_users",
     )
 
     def __init__(
@@ -65,8 +67,14 @@ class BazaarOutbound:
         bazaar_repo: "AbstractBazaarRepo",
         media_sync: "SpaceMediaSyncService | None" = None,
         federation_repo=None,
+        user_repo: "AbstractUserRepo | None" = None,
     ) -> None:
         self._bus = bus
+        #: Settlement is the seller's household's to announce: every
+        #: household runs the expiry sweep over every listing it mirrors, and
+        #: receivers accept a listing's status change only from the seller's
+        #: household. ``None`` keeps the historic always-announce behaviour.
+        self._users = user_repo
         self._federation = federation_service
         self._bazaar_repo = bazaar_repo
         self._media_sync = media_sync
@@ -168,7 +176,15 @@ class BazaarOutbound:
         ``bazaar_listings`` row's ``status`` (+ ``winner_user_id`` /
         ``winning_price`` / ``sold_at`` if applicable) by post_id.
         """
+        if not await self._seller_is_ours(event.seller_user_id):
+            return
         await self._fan_status_update(event.listing_post_id)
+
+    async def _seller_is_ours(self, seller_user_id: str) -> bool:
+        """Only the seller's own household announces a settlement."""
+        if self._users is None:
+            return True
+        return await self._users.get_by_user_id(seller_user_id) is not None
 
     async def _on_listing_cancelled(
         self,
@@ -268,6 +284,8 @@ class BazaarOutbound:
         ``status='active'``).
         """
         if not event.space_id:
+            return
+        if not await self._seller_is_ours(event.seller_user_id):
             return
         payload: dict = {
             "bid_id": event.bid_id,

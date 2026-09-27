@@ -22,7 +22,7 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 31
+    assert OURS == 32
     assert FederationCapability.MIN_FOR_INSTANCE_RESYNC == 19
     assert FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED == 20
     assert FederationCapability.MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY == 21
@@ -133,6 +133,7 @@ def test_space_features_missing_below_v13():
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
 
 
@@ -149,6 +150,7 @@ def test_space_features_missing_below_v16():
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
 
 
@@ -162,6 +164,7 @@ def test_space_features_missing_below_v22():
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
 
 
@@ -173,6 +176,7 @@ def test_space_features_missing_below_v23():
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
 
 
@@ -185,33 +189,40 @@ def test_space_features_missing_below_v24():
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
     assert space_features_missing_below(27) == [
         "Mesh route-stale nack",
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
 
 
-def test_space_features_missing_below_v31_is_empty():
-    """Nothing space-scoped lives above v31 — a v31 member lacks none.
-    A v30 member still lacks the authenticated mesh-routed origin; a v29
+def test_space_features_missing_below_v32_is_empty():
+    """Nothing space-scoped lives above v32 — a v32 member lacks none. A
+    v31 member lacks the roster snapshot; a v30 member also the
+    authenticated mesh-routed origin; a v29
     one also lacks cross-household Follower seats, a v28 one the
     invite-link bootstrap redeem."""
     assert space_features_missing_below(28) == [
         "Invite-link bootstrap redeem",
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
     assert space_features_missing_below(29) == [
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
     assert space_features_missing_below(30) == [
         "Authenticated mesh-routed origin",
+        "Space roster snapshot",
     ]
-    assert space_features_missing_below(31) == []
+    assert space_features_missing_below(31) == ["Space roster snapshot"]
+    assert space_features_missing_below(32) == []
 
 
 def test_space_scoped_min_versions_are_capability_constants():

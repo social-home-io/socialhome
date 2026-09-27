@@ -9,6 +9,7 @@ import pytest
 
 from socialhome.domain.events import CalendarEventCreated, CalendarEventDeleted
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 
@@ -26,11 +27,82 @@ class _FakeFederationService:
         self._event_registry = _FakeRegistry()
 
 
+class _AllowAuthorship:
+    """A :class:`SpaceAuthorship` stand-in that lets every write through.
+
+    These tests are about each handler's own shape (field parsing, space
+    scoping, bus events). The authorship rule is covered by
+    ``tests/federation/test_space_authorship.py`` and, end to end, by
+    ``tests/protocol/test_space_content_authorship.py``; the
+    ``_DenyAuthorship`` tests at the bottom prove every handler consults it.
+    """
+
+    def __init__(self, answer: bool = True) -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, str, str]] = []
+        self.refusals: list[str] = []
+
+    async def acts_for(self, event, space_id, user_id, *, any_role=False):
+        self.calls.append(("acts_for", space_id, user_id))
+        return self.answer
+
+    async def may_author(self, event, space_id, user_id, *, subscriber_comment=False):
+        self.calls.append(("may_author", space_id, user_id))
+        return self.answer
+
+    async def may_mutate(self, event, space_id, owner_user_id):
+        self.calls.append(("may_mutate", space_id, owner_user_id))
+        return self.answer
+
+    async def writes_here(self, event, space_id):
+        self.calls.append(("writes_here", space_id, ""))
+        return self.answer
+
+    async def is_moderator(self, event, space_id):
+        self.calls.append(("is_moderator", space_id, ""))
+        return self.answer
+
+    def log_refusal(self, event, *, space_id, what, row_id, user_id):
+        self.refusals.append(row_id)
+
+    async def hold_or_refuse(self, event, *, space_id, what, row_id, user_id):
+        self.refusals.append(row_id)
+
+
+class _FakePostRepo:
+    """``get`` for the wrapper-post lookups (polls, schedules, bazaar).
+    Posts live in ``sp-1`` by ``u-seller`` unless told otherwise."""
+
+    def __init__(self) -> None:
+        self.post_space: dict[str, str] = {}
+        self.author: dict[str, str] = {}
+        self.missing: set[str] = set()
+
+    async def get(self, post_id):
+        if post_id in self.missing:
+            return None
+        return (
+            self.post_space.get(post_id, "sp-1"),
+            SimpleNamespace(id=post_id, author=self.author.get(post_id, "u-seller")),
+        )
+
+
 class _ScopedRows:
     """Mimics the repos' §24.11 scoping: a row id belongs to one space."""
 
     def __init__(self) -> None:
         self.space_of: dict[str, str | None] = {}
+
+    def row(self, row_id):
+        """The stored row's scope + attribution, as ``get`` would return."""
+        if row_id not in self.space_of:
+            return None
+        return SimpleNamespace(
+            id=row_id,
+            space_id=self.space_of[row_id],
+            created_by="u-author",
+            author="u-author",
+        )
 
     def claim(self, row_id, space_id) -> bool:
         """Upsert under ``space_id``; False when the id is another space's."""
@@ -53,6 +125,9 @@ class _FakePageRepo:
         self.deleted = []
         self.rows = _ScopedRows()
 
+    async def get(self, page_id):
+        return self.rows.row(page_id)
+
     async def save(self, page, *, space_id):
         if not self.rows.claim(page.id, space_id):
             return False
@@ -72,6 +147,9 @@ class _FakeStickyRepo:
         self.deleted = []
         self.rows = _ScopedRows()
 
+    async def get(self, sticky_id):
+        return self.rows.row(sticky_id)
+
     async def save(self, sticky, *, space_id):
         if not self.rows.claim(sticky.id, space_id):
             return False
@@ -90,6 +168,10 @@ class _FakeSpaceTaskRepo:
         self.saved = []
         self.deleted = []
         self.rows = _ScopedRows()
+
+    async def get(self, task_id):
+        row = self.rows.row(task_id)
+        return None if row is None else (row.space_id, row)
 
     async def save(self, task, *, space_id):
         if not self.rows.claim(task.id, space_id):
@@ -134,6 +216,13 @@ class _FakeSpaceCalendarRepo:
         self.deleted.append(event_id)
         self._events.pop(event_id, None)
         return True
+
+    async def list_rsvps(self, event_id, *, occurrence_at=None):
+        return [
+            r
+            for (ev, _u, occ), r in self.rsvps.items()
+            if ev == event_id and (occurrence_at is None or occ == occurrence_at)
+        ]
 
     async def upsert_rsvp(self, rsvp, *, space_id):
         owner = self._events.get(rsvp.event_id)
@@ -293,6 +382,8 @@ def repos():
         "task": _FakeSpaceTaskRepo(),
         "calendar": _FakeSpaceCalendarRepo(),
         "poll": _FakePollRepo(),
+        "post": _FakePostRepo(),
+        "auth": _AllowAuthorship(),
     }
 
 
@@ -300,6 +391,8 @@ def repos():
 def handlers(bus, repos):
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -313,6 +406,8 @@ def handlers(bus, repos):
 async def test_attach_registers_all_content_event_types(bus, repos):
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -769,6 +864,8 @@ async def test_poll_handlers_not_registered_without_poll_repo(bus, repos):
     """Deployments without polls skip those events cleanly."""
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -800,6 +897,14 @@ class _FakeGalleryRepo:
     def _album_in(self, album_id, space_id) -> bool:
         return self.album_space.get(album_id, "sp-1") == space_id
 
+    async def get_item(self, item_id):
+        return self.items_by_id.get(item_id)
+
+    async def get_album(self, album_id):
+        return SimpleNamespace(
+            id=album_id, space_id=self.album_space.get(album_id, "sp-1")
+        )
+
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
         if self.fail_create:
             raise RuntimeError("fk-violation simulated")
@@ -826,6 +931,8 @@ def gallery_handlers(bus, repos):
     gallery = _FakeGalleryRepo()
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -931,6 +1038,8 @@ async def test_gallery_handlers_not_registered_without_repo(bus, repos):
     """No gallery_repo → events not registered."""
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -955,6 +1064,9 @@ class _FakeBazaarRepo:
         self.post_space: dict[str, str] = {}
         self.fail = False
 
+    async def get_listing(self, post_id):
+        return None
+
     async def save_listing(self, listing, *, space_id):
         if self.fail:
             raise RuntimeError("check-violation simulated")
@@ -969,6 +1081,8 @@ def bazaar_handlers(bus, repos):
     bazaar = _FakeBazaarRepo()
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1070,6 +1184,8 @@ async def test_bazaar_handlers_not_registered_without_repo(bus, repos):
     """No bazaar_repo → BAZAAR_LISTING_CREATED not registered."""
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1100,6 +1216,7 @@ class _FakeBazaarRepoWithStatus:
             post_id=post_id,
             space_id=self.listing_space.get(post_id, "sp-1"),
             seller_user_id="u-seller",
+            status=BazaarStatus.ACTIVE,
         )
 
     async def mark_sold(self, post_id, *, space_id, winner_user_id, winning_price):
@@ -1125,6 +1242,8 @@ def bazaar_status_handlers(bus, repos):
     bazaar = _FakeBazaarRepoWithStatus()
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1220,6 +1339,8 @@ async def test_bazaar_listing_updated_handler_not_registered_without_repo(
 ):
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1249,6 +1370,7 @@ class _FakeBazaarRepoWithBids:
             post_id=post_id,
             space_id=self.listing_space.get(post_id, "sp-1"),
             seller_user_id="u-seller",
+            status=BazaarStatus.ACTIVE,
         )
 
     async def get_bid(self, bid_id):
@@ -1270,6 +1392,8 @@ def bazaar_bids_handlers(bus, repos):
     bazaar = _FakeBazaarRepoWithBids()
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1407,6 +1531,8 @@ async def test_bazaar_offer_accepted_routes_to_accept_offer(
 async def test_bazaar_bid_handlers_not_registered_without_repo(bus, repos):
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1427,6 +1553,8 @@ def schedule_handlers(bus, repos):
     poll = _FakePollRepo()
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1495,6 +1623,8 @@ async def test_schedule_created_repo_failure_swallowed(schedule_handlers):
 async def test_schedule_created_not_registered_without_poll_repo(bus, repos):
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -1985,6 +2115,9 @@ class _FakeZoneRepo:
         self.upserted: list = []
         self.deleted: list[str] = []
 
+    async def get(self, zone_id):
+        return self.rows.row(zone_id)
+
     async def upsert(self, zone, *, space_id):
         if not self.rows.claim(zone.id, space_id):
             return False
@@ -2003,6 +2136,8 @@ def zone_handlers(bus, repos):
     zones = _FakeZoneRepo()
     h = SpaceContentInboundHandlers(
         bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
         page_repo=repos["page"],
         sticky_repo=repos["sticky"],
         task_repo=repos["task"],
@@ -2194,3 +2329,548 @@ async def test_poll_handlers_need_a_space(repos, handlers, handler_name, payload
     poll = repos["poll"]
     assert not (poll.inserted or poll.closed or poll.scheduled or poll.finalized)
     assert poll.responses == {}
+
+
+# ─── §24.11 authorship ──────────────────────────────────────────────
+#
+# Every handler consults the authorship binder with the RIGHT user: the
+# claimed author on a create, the stored owner on an edit / delete, the
+# voter / bidder / seller for the personal and owner-only actions. With a
+# binder that says "no", nothing is written.
+
+
+class _FullBazaarRepo(_FakeBazaarRepoWithBids):
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved: list = []
+        self.cancelled: list[str] = []
+        self.status = BazaarStatus.ACTIVE
+        self.no_listing = False
+
+    async def get_listing(self, post_id):
+        # ``p-new*`` is a wrapper post with no listing yet.
+        if self.no_listing or post_id.startswith("p-new"):
+            return None
+        return SimpleNamespace(
+            post_id=post_id,
+            space_id=self.listing_space.get(post_id, "sp-1"),
+            seller_user_id="u-seller",
+            status=self.status,
+        )
+
+    async def save_listing(self, listing, *, space_id):
+        self.saved.append(listing)
+        return True
+
+    async def mark_cancelled(self, post_id, *, space_id):
+        self.cancelled.append(post_id)
+        return True
+
+
+@pytest.fixture
+def full(bus, repos):
+    gallery = _FakeGalleryRepo()
+    zones = _FakeZoneRepo()
+    bazaar = _FullBazaarRepo()
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        poll_repo=repos["poll"],
+        gallery_repo=gallery,
+        zone_repo=zones,
+        bazaar_repo=bazaar,
+    )
+    h.attach_to(_FakeFederationService())
+    repos.update(gallery=gallery, zones=zones, bazaar=bazaar)
+    return h, repos
+
+
+def _cal(**extra):
+    return {
+        "id": "e-new",
+        "calendar_id": "sp-1",
+        "summary": "x",
+        "created_by": "u-claimed",
+        "start": "2026-06-10T18:00:00+00:00",
+        "end": "2026-06-10T19:00:00+00:00",
+        **extra,
+    }
+
+
+_OCC = "2026-06-10T18:00:00+00:00"
+
+#: ``(handler, payload, rule, user the rule must be asked about, seed)``
+_BOUND = [
+    (
+        "_on_task_saved",
+        {"id": "t-new", "list_id": "l", "title": "x", "created_by": "u-claimed"},
+        "may_author",
+        "u-claimed",
+        None,
+    ),
+    (
+        "_on_task_saved",
+        {"id": "t-1", "list_id": "l", "title": "x", "created_by": "u-claimed"},
+        "writes_here",
+        "",
+        ("task", "t-1"),
+    ),
+    ("_on_task_deleted", {"id": "t-1"}, "writes_here", "", ("task", "t-1")),
+    (
+        "_on_page_saved",
+        {"id": "pg-new", "title": "x", "created_by": "u-claimed"},
+        "may_author",
+        "u-claimed",
+        None,
+    ),
+    (
+        "_on_page_saved",
+        {"id": "pg-1", "title": "x", "created_by": "u-claimed"},
+        "writes_here",
+        "",
+        ("page", "pg-1"),
+    ),
+    ("_on_page_deleted", {"id": "pg-1"}, "writes_here", "", ("page", "pg-1")),
+    (
+        "_on_sticky_saved",
+        {"id": "st-new", "author": "u-claimed", "content": "x"},
+        "may_author",
+        "u-claimed",
+        None,
+    ),
+    (
+        "_on_sticky_saved",
+        {"id": "st-1", "content": "x"},
+        "writes_here",
+        "",
+        ("sticky", "st-1"),
+    ),
+    ("_on_sticky_deleted", {"id": "st-1"}, "writes_here", "", ("sticky", "st-1")),
+    ("_on_calendar_saved", _cal(), "may_author", "u-claimed", None),
+    (
+        "_on_rsvp_updated",
+        {
+            "event_id": "e-1",
+            "user_id": "u-rsvp",
+            "status": "going",
+            "occurrence_at": _OCC,
+        },
+        "acts_for",
+        "u-rsvp",
+        None,
+    ),
+    (
+        "_on_rsvp_deleted",
+        {"event_id": "e-1", "user_id": "u-rsvp", "occurrence_at": _OCC},
+        "acts_for",
+        "u-rsvp",
+        "rsvp",
+    ),
+    (
+        "_on_poll_vote",
+        {"post_id": "p-1", "option_id": "o-1", "voter_user_id": "u-voter"},
+        "acts_for",
+        "u-voter",
+        None,
+    ),
+    ("_on_poll_closed", {"post_id": "p-1"}, "acts_for", "u-seller", None),
+    (
+        "_on_schedule_created",
+        {"post_id": "p-1", "title": "t", "slots": [{"id": "s"}]},
+        "may_author",
+        "u-seller",
+        None,
+    ),
+    (
+        "_on_schedule_response_updated",
+        {"slot_id": "s-1", "user_id": "u-voter", "response": "yes"},
+        "acts_for",
+        "u-voter",
+        None,
+    ),
+    (
+        "_on_schedule_finalized",
+        {"post_id": "p-1", "slot_id": "s-1"},
+        "acts_for",
+        "u-seller",
+        None,
+    ),
+    (
+        "_on_gallery_item_saved",
+        {"id": "gi-new", "album_id": "alb", "uploaded_by": "u-claimed"},
+        "may_author",
+        "u-claimed",
+        None,
+    ),
+    ("_on_gallery_item_deleted", {"id": "gi-1"}, "may_mutate", "u-up", "gallery"),
+    (
+        "_on_zone_upserted",
+        {"zone_id": "z", "name": "Z", "latitude": 1, "longitude": 1, "radius_m": 9},
+        "is_moderator",
+        "",
+        None,
+    ),
+    ("_on_zone_deleted", {"zone_id": "z"}, "is_moderator", "", ("zones", "z")),
+    (
+        "_on_bazaar_listing_created",
+        {
+            "post_id": "p-new",
+            "seller_user_id": "u-seller",
+            "mode": "offer",
+            "title": "x",
+            "currency": "EUR",
+        },
+        "may_author",
+        "u-seller",
+        None,
+    ),
+    (
+        "_on_bazaar_listing_updated",
+        {"post_id": "p-1", "status": "cancelled"},
+        "acts_for",
+        "u-seller",
+        None,
+    ),
+    (
+        "_on_bazaar_bid_placed",
+        {
+            "bid_id": "b-new",
+            "listing_post_id": "p-1",
+            "bidder_user_id": "u-bidder",
+            "amount": 5,
+        },
+        "acts_for",
+        "u-bidder",
+        None,
+    ),
+    ("_on_bazaar_offer_accepted", {"bid_id": "b-1"}, "acts_for", "u-seller", "bid"),
+]
+
+
+def _seed(repos, seed):
+    if seed is None:
+        return
+    if seed == "gallery":
+        repos["gallery"].items_by_id["gi-1"] = SimpleNamespace(
+            id="gi-1", album_id="alb", uploaded_by="u-up"
+        )
+        return
+    if seed == "rsvp":
+        repos["calendar"].rsvps[("e-1", "u-rsvp", _OCC)] = SimpleNamespace(
+            user_id="u-rsvp", status="going"
+        )
+        return
+    if seed == "bid":
+        repos["bazaar"].existing_bids["b-1"] = SimpleNamespace(
+            id="b-1", listing_post_id="p-1"
+        )
+        return
+    kind, row_id = seed
+    repos[kind].rows.claim(row_id, "sp-1")
+
+
+def _writes(repos) -> tuple:
+    """Everything a handler could have written, in one comparable value."""
+    poll = repos["poll"]
+    return (
+        list(repos["task"].saved),
+        list(repos["task"].deleted),
+        list(repos["page"].saved),
+        list(repos["page"].deleted),
+        list(repos["sticky"].saved),
+        list(repos["sticky"].deleted),
+        list(repos["calendar"].saved),
+        dict(repos["calendar"].rsvps),
+        dict(repos["calendar"].buffer),
+        list(poll.inserted),
+        list(poll.closed),
+        list(poll.scheduled),
+        dict(poll.responses),
+        list(poll.finalized),
+        list(repos["gallery"].created),
+        list(repos["gallery"].deleted),
+        list(repos["zones"].upserted),
+        list(repos["zones"].deleted),
+        list(repos["bazaar"].saved),
+        list(repos["bazaar"].cancelled),
+        list(repos["bazaar"].placed),
+        list(repos["bazaar"].accepted),
+    )
+
+
+def _prime(repos, seed):
+    _seed(repos, seed)
+    repos["calendar"]._events["e-1"] = ("sp-1", object())
+    repos["poll"].valid_options.add(("p-1", "o-1"))
+
+
+_BOUND_IDS = [f"{h}:{rule}:{user or '-'}" for h, _p, rule, user, _s in _BOUND]
+
+
+@pytest.mark.parametrize(
+    ("handler", "payload", "rule", "user", "seed"), _BOUND, ids=_BOUND_IDS
+)
+async def test_each_handler_asks_the_right_rule_about_the_right_user(
+    full, handler, payload, rule, user, seed
+):
+    h, repos = full
+    _prime(repos, seed)
+    before = _writes(repos)
+    await getattr(h, handler)(
+        _event(FederationEventType.SPACE_POST_CREATED, dict(payload), space_id="sp-1")
+    )
+    assert (rule, "sp-1", user) in repos["auth"].calls, repos["auth"].calls
+    # …and with a "yes", the write really lands (the control for the
+    # refusal test below).
+    assert _writes(repos) != before
+
+
+@pytest.mark.parametrize(
+    ("handler", "payload", "rule", "user", "seed"), _BOUND, ids=_BOUND_IDS
+)
+async def test_a_refused_author_writes_nothing(
+    full, handler, payload, rule, user, seed
+):
+    h, repos = full
+    _prime(repos, seed)
+    repos["auth"].answer = False
+    before = _writes(repos)
+    await getattr(h, handler)(
+        _event(FederationEventType.SPACE_POST_CREATED, dict(payload), space_id="sp-1")
+    )
+    assert _writes(repos) == before
+
+
+async def test_a_collaborative_sticky_edit_keeps_the_stored_author(full):
+    """``SPACE_STICKY_UPDATED`` carries no author; the edit applies under
+    the row's own."""
+    h, repos = full
+    repos["sticky"].rows.claim("st-1", "sp-1")
+    await h._on_sticky_saved(
+        _event(
+            FederationEventType.SPACE_STICKY_UPDATED,
+            {"id": "st-1", "content": "edited"},
+            space_id="sp-1",
+        )
+    )
+    assert [s.author for s in repos["sticky"].saved] == ["u-author"]
+
+
+async def test_a_new_sticky_without_an_author_is_dropped(full):
+    h, repos = full
+    await h._on_sticky_saved(
+        _event(
+            FederationEventType.SPACE_STICKY_CREATED,
+            {"id": "st-new", "content": "x"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["sticky"].saved == []
+
+
+async def test_a_new_page_naming_nobody_needs_a_writer_household(full):
+    h, repos = full
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_CREATED,
+            {"id": "pg-new", "title": "x"},
+            space_id="sp-1",
+        )
+    )
+    assert ("writes_here", "sp-1", "") in repos["auth"].calls
+    assert len(repos["page"].saved) == 1
+
+
+async def test_a_listing_must_hang_off_the_sellers_own_post(full):
+    h, repos = full
+    repos["post"].author["p-new"] = "u-other"
+    await h._on_bazaar_listing_created(
+        _event(
+            FederationEventType.BAZAAR_LISTING_CREATED,
+            {
+                "post_id": "p-new",
+                "seller_user_id": "u-seller",
+                "mode": "offer",
+                "title": "x",
+                "currency": "EUR",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert repos["bazaar"].saved == []
+    assert repos["auth"].refusals == ["p-new"]
+
+
+async def test_a_listing_for_a_post_not_here_is_a_quiet_no_op(full, caplog):
+    h, repos = full
+    repos["post"].missing.add("p-1")
+    with caplog.at_level("DEBUG"):
+        await h._on_bazaar_listing_created(
+            _event(
+                FederationEventType.BAZAAR_LISTING_CREATED,
+                {
+                    "post_id": "p-1",
+                    "seller_user_id": "u-seller",
+                    "mode": "offer",
+                    "title": "x",
+                    "currency": "EUR",
+                },
+                space_id="sp-1",
+            )
+        )
+    assert repos["bazaar"].saved == []
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+async def test_a_status_change_on_a_settled_listing_is_debug_not_warning(full, caplog):
+    """A replayed ``BAZAAR_LISTING_UPDATED`` against a listing that is
+    already terminal is delivery noise, not a security event."""
+    h, repos = full
+    repos["bazaar"].status = BazaarStatus.CANCELLED
+    with caplog.at_level("DEBUG"):
+        await h._on_bazaar_listing_updated(
+            _event(
+                FederationEventType.BAZAAR_LISTING_UPDATED,
+                {"post_id": "p-1", "status": "cancelled"},
+                space_id="sp-1",
+            )
+        )
+    assert repos["bazaar"].cancelled == []
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "already cancelled" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("handler", "payload"),
+    [
+        ("_on_task_deleted", {"id": "gone"}),
+        ("_on_page_deleted", {"id": "gone"}),
+        ("_on_sticky_deleted", {"id": "gone"}),
+        ("_on_calendar_deleted", {"id": "gone"}),
+        ("_on_gallery_item_deleted", {"id": "gone"}),
+        ("_on_bazaar_listing_updated", {"post_id": "gone", "status": "expired"}),
+        ("_on_poll_closed", {"post_id": "gone"}),
+    ],
+)
+async def test_a_replayed_delete_of_a_row_not_here_is_debug_only(
+    full, caplog, handler, payload
+):
+    h, repos = full
+    repos["post"].missing.add("gone")
+    repos["bazaar"].no_listing = True
+    with caplog.at_level("DEBUG"):
+        await getattr(h, handler)(
+            _event(FederationEventType.SPACE_POST_DELETED, payload, space_id="sp-1")
+        )
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "gone not applied" in caplog.text
+
+
+async def test_a_zone_from_a_non_moderator_is_refused_at_warning(full, caplog):
+    h, repos = full
+    repos["auth"].answer = False
+    with caplog.at_level("WARNING"):
+        await h._on_zone_deleted(
+            _event(
+                FederationEventType.SPACE_ZONE_DELETED,
+                {"zone_id": "z"},
+                space_id="sp-1",
+            )
+        )
+    assert "does not moderate this space" in caplog.text
+
+
+async def test_a_collaborative_write_from_a_seatless_household_warns(full, caplog):
+    h, repos = full
+    repos["page"].rows.claim("pg-1", "sp-1")
+    repos["auth"].answer = False
+    with caplog.at_level("WARNING"):
+        await h._on_page_deleted(
+            _event(
+                FederationEventType.SPACE_PAGE_DELETED, {"id": "pg-1"}, space_id="sp-1"
+            )
+        )
+    assert repos["page"].deleted == []
+    assert "holds no writer seat here" in caplog.text
+
+
+async def test_a_new_zone_binds_its_claimed_creator(full):
+    h, repos = full
+
+    class _ModeratorButNotAuthor(_AllowAuthorship):
+        async def may_author(self, event, space_id, user_id):
+            self.calls.append(("may_author", space_id, user_id))
+            return False
+
+    h._authorship = _ModeratorButNotAuthor()
+    await h._on_zone_upserted(
+        _event(
+            FederationEventType.SPACE_ZONE_UPSERTED,
+            {
+                "zone_id": "z-new",
+                "name": "Z",
+                "latitude": 1,
+                "longitude": 1,
+                "radius_m": 9,
+                "created_by": "u-claimed",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert repos["zones"].upserted == []
+
+
+async def test_an_existing_listing_is_never_re_created(full, caplog):
+    """A re-sent ``BAZAAR_LISTING_CREATED`` would reset a settled listing's
+    status and could hand it to another seller — it is a quiet no-op."""
+    h, repos = full
+    with caplog.at_level("DEBUG"):
+        await h._on_bazaar_listing_created(
+            _event(
+                FederationEventType.BAZAAR_LISTING_CREATED,
+                {
+                    "post_id": "p-1",
+                    "seller_user_id": "u-seller",
+                    "mode": "offer",
+                    "title": "x",
+                    "currency": "EUR",
+                },
+                space_id="sp-1",
+            )
+        )
+    assert repos["bazaar"].saved == []
+    assert "listing already here" in caplog.text
+
+
+async def test_an_expiry_from_a_non_seller_household_is_debug_noise(full, caplog):
+    """Every household sweeps expiries; an older one still announces its
+    result. Once the listing has ended that is noise, not a refusal."""
+    h, repos = full
+
+    async def _ended(post_id):
+        return SimpleNamespace(
+            post_id=post_id,
+            space_id="sp-1",
+            seller_user_id="u-seller",
+            status=BazaarStatus.ACTIVE,
+            end_time="2000-01-01T00:00:00+00:00",
+        )
+
+    repos["bazaar"].get_listing = _ended
+    repos["auth"].answer = False
+    with caplog.at_level("DEBUG"):
+        await h._on_bazaar_listing_updated(
+            _event(
+                FederationEventType.BAZAAR_LISTING_UPDATED,
+                {"post_id": "p-1", "status": "expired"},
+                space_id="sp-1",
+            )
+        )
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "expiry is announced by the seller's household" in caplog.text
+    assert repos["auth"].refusals == []

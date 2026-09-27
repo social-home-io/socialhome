@@ -689,6 +689,7 @@ class _StubPipelineOwner:
     _user_repo = None
     _space_repo = None
     _space_remote_member_repo = None
+    _pending_seat_buffer = None
     _own_instance_id = "own-1"
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):
@@ -940,20 +941,52 @@ async def test_space_writer_passes_an_admin_seat():
     assert ctx.early_response is None
 
 
-async def test_space_writer_passes_a_household_we_hold_no_row_for():
-    """Roster convergence, and the ONLY leniency left.
-
-    Zero rows means the mirror has not converged (a household seated on
-    the host before the roster gossip reached us). Refusing there would
-    drop real content from real members whenever a roster lagged. A
-    household we hold ANY row for gets no such benefit.
-    """
+async def test_space_writer_refuses_a_household_we_hold_no_row_for():
+    """No seat at all is no writer — the old roster-convergence leniency is
+    gone. Every content handler binds the named author to a live seat of
+    the sender, so a seatless household could not author a row anyway; the
+    leniency only still let through the writes that name nobody (media
+    bytes)."""
     ctx = await _run(
         _writer_step(seats=[]),
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-follower"},
     )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_refuses_a_seatless_media_blob():
+    ctx = await _run(
+        _writer_step(seats=[]),
+        FederationEventType.SPACE_MEDIA_BLOB,
+        {"filename": "x.webp"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_passes_the_host_without_a_mirrored_seat():
+    """The host is the roster authority; a member stub written before roster
+    mirroring can hold no row for it. Its content is still author-bound by
+    the handlers."""
+    ctx = await _run(
+        _writer_step(owner="peer-x", seats=[]),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-host"},
+    )
     assert ctx.early_response is None
+
+
+async def test_space_writer_refuses_when_the_host_lookup_fails():
+    class _Boom:
+        async def get(self, space_id):
+            raise RuntimeError("db down")
+
+    step = make_check_space_writer(
+        space_repo=_Boom(),
+        remote_member_repo=_FakeRemoteMemberRepo({("sp-1", "peer-x"): []}),
+    )
+    ctx = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
+    assert ctx.early_response == REFUSED
 
 
 async def test_space_writer_enforces_on_a_household_that_does_not_host():
@@ -1221,3 +1254,24 @@ def test_the_deprovisioned_author_gate_is_one_of_the_shared_post_decrypt_gates()
     svc._space_remote_member_repo = None
     names = [getattr(s, "__name__", "") for s in svc.post_decrypt_gate_steps()]
     assert "check_deprovisioned_author" in names
+
+
+async def test_space_writer_holds_a_seatless_write_when_a_buffer_is_wired():
+    """A household we hold no row for may have joined before its seat's
+    gossip reached us: its write is held (replayed when the seat lands),
+    not dropped — but only while the buffer takes it."""
+    from socialhome.federation.pending_seat_buffer import PendingSeatBuffer
+
+    buf = PendingSeatBuffer(max_entries=1)
+    step = make_check_space_writer(
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(OWN)}),
+        remote_member_repo=_FakeRemoteMemberRepo({("sp-1", "peer-x"): []}),
+        pending=buf,
+    )
+    held = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
+    assert held.early_response == {"status": "ok", "held": "awaiting-seat"}
+    assert len(buf) == 1
+    full = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
+    assert full.early_response == REFUSED
+    blob = await _run(step, FederationEventType.SPACE_MEDIA_BLOB, {"filename": "f"})
+    assert blob.early_response == REFUSED
