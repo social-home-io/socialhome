@@ -669,9 +669,34 @@ _SYNC_ATTACKS = [
             }
         ],
     ),
-    ("tasks", [{"id": "task-b", "list_id": "list-a", "title": "x", "created_by": "u"}]),
+    (
+        "tasks",
+        [
+            {"id": "task-b", "list_id": "list-a", "title": "x", "created_by": "u"},
+            {"id": "task-new", "list_id": "list-b", "title": "x", "created_by": "u"},
+        ],
+    ),
     ("pages", [{"id": "page-b", "title": "x", "created_by": "u"}]),
-    ("stickies", [{"id": "sticky-home", "author": "u", "content": "x"}]),
+    (
+        "stickies",
+        [
+            {"id": "sticky-home", "author": "u", "content": "x"},
+            {"id": "sticky-b", "author": "u", "content": "x"},
+        ],
+    ),
+    (
+        "comments",
+        [
+            {
+                "id": "cmt-reply",
+                "post_id": "post-a",
+                "parent_id": "cmt-b",
+                "author": "u-evil",
+                "type": "text",
+                "content": "x",
+            }
+        ],
+    ),
     (
         "calendar",
         [

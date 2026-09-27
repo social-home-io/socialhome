@@ -966,6 +966,10 @@ class SqliteSpaceCalendarRepo:
                 updated_at=excluded.updated_at,
                 space_id=excluded.space_id,
                 received_at=datetime('now')
+             -- A row buffered for another space is not ours to rewrite; a
+             -- legacy NULL row is never flushed, so taking it over is safe.
+             WHERE pending_federated_rsvps.space_id IS NULL
+                OR pending_federated_rsvps.space_id = excluded.space_id
             """,
             (event_id, user_id, occurrence_at, status, updated_at, space_id),
         )

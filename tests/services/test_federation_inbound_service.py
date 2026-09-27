@@ -3466,3 +3466,32 @@ async def test_same_space_comment_lifecycle_unchanged(db, bus, inbound, two_spac
     assert (await _comment_row(db, "cmt-new"))["deleted"] == 1
     assert (await _post_row(db, "post-b"))["comment_count"] == 0
     assert [c.comment_id for c in removed] == ["cmt-new"]
+
+
+async def test_replayed_comment_delete_lowers_the_real_parent_once(
+    db, inbound, two_spaces
+):
+    """The counter follows the comment's real post, and only once."""
+    repo = two_spaces
+    await repo.save(
+        "sp-b",
+        Post(
+            id="post-b2",
+            author="u-b",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="other",
+        ),
+    )
+    for pid in ("post-b", "post-b", "post-b2"):
+        await repo.increment_comment_count(pid, space_id="sp-b")
+    for _ in range(2):
+        await inbound._on_space_comment_deleted(
+            _event(
+                FederationEventType.SPACE_COMMENT_DELETED,
+                {"comment_id": "cmt-b", "post_id": "post-b2"},
+                space_id="sp-b",
+            )
+        )
+    assert (await _post_row(db, "post-b"))["comment_count"] == 1
+    assert (await _post_row(db, "post-b2"))["comment_count"] == 1

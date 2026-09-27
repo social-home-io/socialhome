@@ -502,21 +502,36 @@ def make_idempotency_check(*, cache_holder) -> InboundStep:
 
 
 def make_ban_check(*, federation_repo) -> InboundStep:
-    """Step 9: reject space-scoped events from banned instances."""
+    """Step 9: reject space-scoped events from banned instances.
+
+    Judges every space the event could be applied to: the routing
+    ``space_id`` and — once decrypted — the payload copy, which content
+    handlers accept as the fallback when the routing field is absent
+    (``federation/space_scope.py``). Checking only the routing field would
+    let a banned household drop it and name the space in the payload.
+    """
 
     async def ban_check(ctx: InboundContext) -> None:
-        space_id = ctx.envelope.get("space_id")
-        if space_id is None:
+        spaces: list[str] = []
+        routing = ctx.envelope.get("space_id")
+        if routing:
+            spaces.append(str(routing))
+        payload = ctx.event.payload if ctx.event is not None else None
+        if isinstance(payload, dict) and payload.get("space_id"):
+            inner = str(payload["space_id"])
+            if inner not in spaces:
+                spaces.append(inner)
+        if not spaces:
             return
         from_instance = ctx.envelope["from_instance"]
-        banned = await federation_repo.is_instance_banned_from_space(
-            space_id,
-            from_instance,
-        )
-        if banned:
-            raise ValueError(
-                f"Instance {from_instance!r} is banned from space {space_id!r}"
-            )
+        for space_id in spaces:
+            if await federation_repo.is_instance_banned_from_space(
+                space_id,
+                from_instance,
+            ):
+                raise ValueError(
+                    f"Instance {from_instance!r} is banned from space {space_id!r}"
+                )
 
     return ban_check
 

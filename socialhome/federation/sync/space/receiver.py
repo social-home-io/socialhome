@@ -447,23 +447,31 @@ class SpaceSyncReceiver:
         elif resource in ("tasks", "tasks_archived"):
             for r in records:
                 task = _task_from_record(r)
-                if task is not None:
-                    await self._space_task_repo.save(task, space_id=space_id)
+                if task is not None and not await self._space_task_repo.save(
+                    task, space_id=space_id
+                ):
+                    _log_sync_refusal("task", task.id, space_id)
         elif resource == "pages":
             for r in records:
                 page = _page_from_record(r, space_id)
-                if page is not None:
-                    await self._page_repo.save(page, space_id=space_id)
+                if page is not None and not await self._page_repo.save(
+                    page, space_id=space_id
+                ):
+                    _log_sync_refusal("page", page.id, space_id)
         elif resource == "stickies":
             for r in records:
                 sticky = _sticky_from_record(r, space_id)
-                if sticky is not None:
-                    await self._sticky_repo.save(sticky, space_id=space_id)
+                if sticky is not None and not await self._sticky_repo.save(
+                    sticky, space_id=space_id
+                ):
+                    _log_sync_refusal("sticky", sticky.id, space_id)
         elif resource == "calendar":
             for r in records:
                 event = _calendar_from_record(r)
-                if event is not None:
-                    await self._space_calendar_repo.save_event(event, space_id=space_id)
+                if event is not None and not await self._space_calendar_repo.save_event(
+                    event, space_id=space_id
+                ):
+                    _log_sync_refusal("calendar event", event.id, space_id)
         elif resource == "gallery":
             # Albums first, then items — preserve the exporter's order.
             for r in records:
@@ -662,6 +670,17 @@ class SpaceSyncReceiver:
                 item.album_id,
                 exc_info=True,
             )
+
+
+def _log_sync_refusal(what: str, row_id: str, space_id: str) -> None:
+    """WARNING for a sync record the scoped repo refused: the id belongs
+    to another space (or, for a task, its list is not in this space)."""
+    log.warning(
+        "space sync: %s %s is not writable in space %s — refusing the write",
+        what,
+        row_id,
+        space_id,
+    )
 
 
 # ─── Record → domain helpers ────────────────────────────────────────

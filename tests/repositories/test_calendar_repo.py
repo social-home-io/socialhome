@@ -1292,3 +1292,32 @@ async def test_pending_rsvp_buffer_only_flushes_its_own_space(two_space_calendar
         await env.space_cal_repo.flush_pending_rsvps("cev-late", space_id="cs-b") == []
     )
     assert await env.space_cal_repo.list_rsvps("cev-late") == []
+
+
+async def test_pending_rsvp_of_another_space_is_not_overwritten(two_space_calendars):
+    """A sender gated for A cannot rewrite (and so strand) B's buffered RSVP."""
+    env = two_space_calendars
+    occ = datetime(2026, 9, 1, tzinfo=timezone.utc).isoformat()
+    for status, space in ((RSVPStatus.GOING, "cs-b"), (RSVPStatus.DECLINED, "cs-a")):
+        await env.space_cal_repo.buffer_pending_rsvp(
+            event_id="cev-late",
+            user_id="uid-bob",
+            occurrence_at=occ,
+            status=status,
+            updated_at="2026-08-01T00:00:00",
+            space_id=space,
+        )
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert await env.space_cal_repo.save_event(
+        CalendarEvent(
+            id="cev-late",
+            calendar_id="cs-b",
+            summary="later",
+            start=start,
+            end=start,
+            created_by="uid-alice",
+        ),
+        space_id="cs-b",
+    )
+    flushed = await env.space_cal_repo.flush_pending_rsvps("cev-late", space_id="cs-b")
+    assert [r.status for r in flushed] == [RSVPStatus.GOING]

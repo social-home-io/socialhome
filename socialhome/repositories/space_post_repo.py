@@ -608,13 +608,17 @@ class SqliteSpacePostRepo:
         return out
 
     async def soft_delete_comment(self, comment_id: str, *, space_id: str) -> bool:
-        """Soft-delete a comment whose parent post is in ``space_id``."""
+        """Soft-delete a comment whose parent post is in ``space_id``.
+
+        ``False`` also for a comment that is already deleted, so a replayed
+        delete cannot lower the parent's counter twice.
+        """
         return (
             await self._db.enqueue_rowcount(
                 """
                 UPDATE space_post_comments
                    SET deleted=1, content=NULL, media_url=NULL
-                 WHERE id=? AND EXISTS (
+                 WHERE id=? AND deleted=0 AND EXISTS (
                      SELECT 1 FROM space_posts
                       WHERE id = space_post_comments.post_id AND space_id=?
                  )

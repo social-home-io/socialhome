@@ -1364,6 +1364,10 @@ class FederationInboundService:
                 row_id=comment_id,
             )
             return
+        # Decrement the comment's REAL parent, not the payload's post id.
+        deleted = await self._space_post_repo.get_comment(comment_id)
+        if deleted is not None:
+            post_id = deleted.post_id
         await self._space_post_repo.decrement_comment_count(
             post_id,
             space_id=space_id,
