@@ -239,4 +239,36 @@ describe('ClusterPanel', () => {
     removeBtn.click()
     expect(await findByText('boom')).toBeTruthy()
   })
+
+  it('renders last_seen as UTC regardless of the viewer\'s local timezone', async () => {
+    // Backend `cluster_nodes.last_seen` is stored in the naive SQLite
+    // `datetime('now')` shape ("2026-06-11 18:00:00" — no `T`, no zone —
+    // matching its `added_at`/`connected_at` siblings), which is UTC by
+    // the codebase's invariant. `new Date(...)` parses a bare
+    // space-separated string as the *viewer's local time*, so a viewer
+    // west of UTC would see a shifted, wrong wall-clock time unless the
+    // panel normalises it first.
+    const prevTz = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      const body = {
+        node_id: 'node-a',
+        status: 'online',
+        nodes: [
+          {
+            node_id: 'node-a', url: 'https://a.gfs.test', status: 'online',
+            last_seen: '2026-06-11 18:00:00', connected_clients: 0,
+            active_sync_sessions: 0, is_self: true,
+          },
+        ],
+      }
+      stubFetch(async () => body)
+      const { container } = render(<ClusterPanel />)
+      await waitFor(() => expect(container.querySelectorAll('tbody tr')).toHaveLength(1))
+      const expected = new Date('2026-06-11T18:00:00Z').toLocaleString()
+      expect(container.querySelector('tbody tr')?.textContent).toContain(expected)
+    } finally {
+      process.env.TZ = prevTz
+    }
+  })
 })

@@ -19,6 +19,7 @@ import json
 import logging
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -1065,9 +1066,15 @@ class ClusterService:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    """UTC "now" in the naive SQLite ``datetime('now')`` shape.
 
-    return datetime.now(timezone.utc).isoformat()
+    ``cluster_nodes.last_seen`` sits beside ``added_at`` (SQL
+    ``DEFAULT (datetime('now'))``) — both UTC, so they must share the
+    same on-disk shape or an admin-UI reader that assumes one breaks on
+    the other. A tz-aware ``isoformat()`` value used to slip in here
+    while ``added_at`` stayed naive; naive-format both to match.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _client_to_wire(c: ClientInstance) -> dict:
