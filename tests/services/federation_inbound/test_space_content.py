@@ -1160,8 +1160,9 @@ async def test_bazaar_bid_placed_persists_bid(bazaar_bids_handlers):
     assert bid.message == "my offer"
 
 
-async def test_bazaar_bid_placed_preserves_relayed_created_at(bazaar_bids_handlers):
-    """A relayed payload's own timestamp is used, not discarded."""
+async def test_bazaar_bid_placed_ignores_sender_created_at(bazaar_bids_handlers):
+    """A sender-chosen timestamp is ignored — it would let a relayed bid
+    backdate itself to win a tied amount; the repo stamps arrival time."""
     handlers, bazaar = bazaar_bids_handlers
     await handlers._on_bazaar_bid_placed(
         _event(
@@ -1177,7 +1178,7 @@ async def test_bazaar_bid_placed_preserves_relayed_created_at(bazaar_bids_handle
             },
         ),
     )
-    assert bazaar.placed[0].created_at == "2026-01-01T00:00:00+00:00"
+    assert not bazaar.placed[0].created_at
 
 
 async def test_bazaar_bid_placed_missing_created_at_falls_back_to_empty(

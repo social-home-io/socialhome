@@ -880,14 +880,11 @@ class SpaceContentInboundHandlers:
                     listing_post_id=listing_post_id,
                     bidder_user_id=bidder,
                     amount=int(amount_raw),
-                    # Preserve the relayed bid's own timestamp when the
-                    # payload carries one; fall back to "" when absent — a
-                    # falsy created_at is defaulted by the repo itself (a
-                    # real "now", not a literal empty string — see
-                    # bazaar_repo.place_bid).
-                    created_at=str(
-                        p.get("created_at") or p.get("occurred_at") or "",
-                    ),
+                    # Never the sender's clock: created_at is the
+                    # highest_bid tie-break, so a payload timestamp would
+                    # let a household backdate its bid. The repo stamps
+                    # arrival time for a falsy value (bazaar_repo.place_bid).
+                    created_at="",
                     message=p.get("message"),
                 ),
             )
