@@ -21,6 +21,7 @@ const { api } = (await import('@/api')) as unknown as {
 const { cacheDirectoryEntries, directoryCache } = await import(
   '@/store/spaceDirectory'
 )
+const { currentUser } = await import('@/store/auth')
 import type { DirectoryEntry } from '@/types'
 
 function entry(over: Partial<DirectoryEntry>): DirectoryEntry {
@@ -192,5 +193,43 @@ describe('SpacePublicDetailPage onPrimary', () => {
     await waitFor(() => getByText('Send request'))
     // Modal is open; nothing sent yet.
     expect(api.post).not.toHaveBeenCalled()
+  })
+})
+
+describe('SpacePublicDetailPage — unpaired host guidance follows the role', () => {
+  // Pairing is a household-admin action, so only an admin is told to go
+  // pair; a member is told to ask one.
+  const unpaired = () => entry({
+    host_instance_id:  'remote-9',
+    host_display_name: 'Far Household',
+    host_is_paired:    false,
+    scope:             'global',
+  })
+
+  afterEach(() => { currentUser.value = null })
+
+  function asAdmin(isAdmin: boolean) {
+    currentUser.value = {
+      user_id: 'u1', username: 'u', display_name: 'U', is_admin: isAdmin,
+      picture_url: null, bio: null, is_new_member: false,
+    } as unknown as typeof currentUser.value
+  }
+
+  it('an admin is pointed at the Federation settings', async () => {
+    asAdmin(true)
+    cacheDirectoryEntries([unpaired()])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText(/lives on another household/i))
+    expect(container.textContent).toContain('Settings → Federation')
+    expect(container.textContent).not.toContain('Ask a household admin')
+  })
+
+  it('a member is told to ask a household admin', async () => {
+    asAdmin(false)
+    cacheDirectoryEntries([unpaired()])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText(/lives on another household/i))
+    expect(container.textContent).toContain('Ask a household admin')
+    expect(container.textContent).not.toContain('Settings →')
   })
 })

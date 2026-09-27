@@ -24,6 +24,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
+import { currentUser } from '@/store/auth'
 import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
@@ -288,11 +289,21 @@ export default function SpacePublicDetailPage() {
 
       {entry.scope !== 'household' && !entry.host_is_paired && (
         <section class="sh-space-public__section sh-muted">
-          <p>
-            This space lives on another household.  Pair with
-            <strong> {hostLabel(entry)}</strong> from
-            Settings → Connections to join, post, or read.
-          </p>
+          {/* Pairing is a household-admin action — a member is pointed at
+           *  an admin rather than at settings they cannot use. */}
+          {currentUser.value?.is_admin ? (
+            <p>
+              This space lives on another household.  Pair with
+              <strong> {hostLabel(entry)}</strong> from
+              Settings → Federation to join, post, or read.
+            </p>
+          ) : (
+            <p>
+              This space lives on another household.  Ask a household admin
+              to pair with <strong>{hostLabel(entry)}</strong> so you can
+              join, post, or read.
+            </p>
+          )}
         </section>
       )}
 

@@ -1,5 +1,17 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import { LocationProvider } from 'preact-iso'
 import type { DirectoryEntry, Space } from '@/types'
+import { openPairing } from '@/components/PairingFlow'
+import { showToast } from '@/components/Toast'
+
+vi.mock('@/components/PairingFlow', () => ({
+  openPairing: vi.fn(),
+  PairingFlow: () => null,
+}))
+vi.mock('@/components/Toast', () => ({
+  showToast: vi.fn(),
+}))
 
 vi.mock('@/api', () => ({
   api: {
@@ -146,5 +158,89 @@ describe('buildHouseholdEntries', () => {
     )
     expect(entry.allow_subscribers).toBe(false)
     expect(entry.already_member).toBe(true)
+  }, 20000)
+})
+
+// Pairing with another household is admin-only on the backend (a non-admin
+// gets 403), so the browser must not hand a member a pairing button that
+// can only fail. Admins keep the CTA; members get a short "ask an admin".
+describe('pairing affordances follow the household role', () => {
+  const unpairedGlobal: DirectoryEntry = {
+    space_id: 'g9', host_instance_id: 'far-away',
+    host_display_name: 'Far Household', host_is_paired: false,
+    name: 'Far Club', description: null, emoji: null,
+    member_count: 3, scope: 'global', join_mode: 'open',
+    min_age: 0,
+  }
+
+  async function renderAs(isAdmin: boolean, global: DirectoryEntry[] = []) {
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser.value as { is_admin: boolean }).is_admin = isAdmin
+    const { api } = await import('@/api')
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/public_spaces') return Promise.resolve(global)
+      if (url === '/api/me/subscriptions') return Promise.resolve({ subscriptions: [] })
+      if (url === '/api/me/join-requests') return Promise.resolve({ pending_space_ids: [] })
+      return Promise.resolve([])
+    })
+    const { default: SpaceBrowserPage } = await import('./SpaceBrowserPage')
+    const r = render(
+      <LocationProvider>
+        <SpaceBrowserPage />
+      </LocationProvider>,
+    )
+    await waitFor(() => {
+      expect(r.container.querySelector('.sh-browser-tabs')).not.toBeNull()
+    })
+    return r
+  }
+
+  async function openTab(r: ReturnType<typeof render>, label: RegExp) {
+    const tab = [...r.container.querySelectorAll('[role="tab"]')]
+      .find(b => label.test(b.textContent ?? ''))!
+    fireEvent.click(tab)
+  }
+
+  afterEach(() => {
+    cleanup()
+    vi.mocked(openPairing).mockClear()
+    vi.mocked(showToast).mockClear()
+  })
+
+  it('an admin gets the "Pair with another household" button on the friends tab', async () => {
+    const r = await renderAs(true)
+    await openTab(r, /From friends/)
+    const btn = await r.findByRole('button', { name: /Pair with another household/ })
+    fireEvent.click(btn)
+    expect(openPairing).toHaveBeenCalledWith('household')
+    expect(r.container.textContent).not.toContain('Ask a household admin')
+  }, 20000)
+
+  it('a non-admin gets a hint instead of a button that would be refused', async () => {
+    const r = await renderAs(false)
+    await openTab(r, /From friends/)
+    await waitFor(() => {
+      expect(r.container.textContent).toContain('Ask a household admin')
+    })
+    expect(r.queryByRole('button', { name: /Pair with another household/ })).toBeNull()
+  }, 20000)
+
+  it('a non-admin tapping "Connect with … first" is told to ask an admin', async () => {
+    const r = await renderAs(false, [unpairedGlobal])
+    await openTab(r, /Global/)
+    const cta = await r.findByText(/Connect with Far Household first/)
+    fireEvent.click(cta)
+    expect(openPairing).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringContaining('Ask a household admin'),
+      'info',
+    )
+  }, 20000)
+
+  it('an admin tapping "Connect with … first" opens pairing', async () => {
+    const r = await renderAs(true, [unpairedGlobal])
+    await openTab(r, /Global/)
+    fireEvent.click(await r.findByText(/Connect with Far Household first/))
+    expect(openPairing).toHaveBeenCalledWith('household')
   }, 20000)
 })

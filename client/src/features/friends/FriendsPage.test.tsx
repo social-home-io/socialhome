@@ -89,6 +89,20 @@ describe('FriendsPage', () => {
     expect(container.textContent).toContain('No connected households yet')
   })
 
+  it('a non-admin empty state asks for an admin instead of offering pairing', async () => {
+    // The mocked viewer carries no is_admin, i.e. a regular member.
+    apiMock.get.mockResolvedValueOnce(payload({ households: [] }))
+    const { container, queryByText } = render(<FriendsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-friends')).not.toBeNull()
+    })
+    expect(queryByText(/Pair a household/)).toBeNull()
+    expect(container.textContent).toContain('Ask a household admin')
+    // No link into an admin-only page, and never an origin-absolute href
+    // that would skip the ingress prefix.
+    expect(container.querySelector('a[href="/connections"]')).toBeNull()
+  })
+
   it('hides the map when no household has coords', async () => {
     apiMock.get.mockResolvedValueOnce(payload({
       instance: {

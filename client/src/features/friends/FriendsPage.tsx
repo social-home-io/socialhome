@@ -325,8 +325,7 @@ export default function FriendsPage() {
             </Button>
           ) : (
             <p class="sh-muted">
-              Ask an admin — they can pair from{' '}
-              <a href="/connections" class="sh-link">Connections</a>.
+              Ask a household admin to pair with another household.
             </p>
           )}
         </div>

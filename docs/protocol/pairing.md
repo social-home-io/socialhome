@@ -459,7 +459,11 @@ the receiver still decrypts with a key it's about to delete.
   the UI (`/api/pairing/initiate`, `/accept`, `/confirm`). All three
   require a signed-in admin (bearer token, or ingress headers under haos);
   none is on the auth middleware's public-path list — the peer's side of
-  the handshake only ever arrives through the federation inbox.
+  the handshake only ever arrives through the federation inbox. Managing
+  household connections is admin-only throughout: introductions,
+  auto-pair via a trusted peer, the approve / decline queues, per-peer
+  settings and unpairing all answer `403` to a non-admin. Only the
+  connections listing stays readable by every signed-in member.
 - `socialhome/services/federation_inbound/pairing.py` — §24.11
   inbound handlers for already-paired peers (covers
   `PAIRING_INTRO_RELAY`, `URL_UPDATED`, `UNPAIR`).
