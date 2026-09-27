@@ -500,3 +500,112 @@ async def test_handlers_registered(tmp_dir):
         )
     finally:
         await db.shutdown()
+
+
+# ── v_32 roster snapshot ──────────────────────────────────────────────
+
+
+def _snapshot(entries, *, from_instance=OWNER):
+    return _event(
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        {"space_id": SPACE_ID, "entries": entries},
+        from_instance=from_instance,
+    )
+
+
+def _entry(event_type, payload):
+    return {"event_type": event_type.value, "payload": payload}
+
+
+async def test_a_roster_snapshot_seats_every_signed_entry(tmp_dir):
+    """An empty mirror (a household that joined before roster gossip, or
+    missed it) is filled by one snapshot — and learns the removals too."""
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    left = FederationEventType.SPACE_MEMBER_LEFT
+    await h._on_space_roster_snapshot(
+        _snapshot(
+            [
+                _entry(j, _signed_payload(j, seed=seed, member_version=4)),
+                _entry(
+                    left,
+                    _signed_payload(
+                        left,
+                        seed=seed,
+                        member_version=6,
+                        user_id="gone",
+                        instance_id="p-g",
+                    ),
+                ),
+            ]
+        )
+    )
+    assert await remote.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER) is not None
+    gone = await remote.get_including_tombstones(SPACE_ID, "p-g", "gone")
+    assert gone is not None and gone.tombstoned
+    await db.shutdown()
+
+
+async def test_a_roster_snapshot_skips_forged_foreign_and_unknown_entries(tmp_dir):
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    forged = _signed_payload(j, seed=b"\x01" * 32, member_version=3, user_id="u-f")
+    other_space = dict(
+        _signed_payload(j, seed=seed, member_version=3, user_id="u-o"),
+        space_id="sp-else",
+    )
+    await h._on_space_roster_snapshot(
+        _snapshot(
+            [
+                _entry(j, forged),
+                _entry(j, other_space),
+                {"event_type": "space_member_banned", "payload": {}},
+                "not-a-dict",
+                _entry(j, _signed_payload(j, seed=seed, member_version=3)),
+            ]
+        )
+    )
+    rows = await remote.list_for_space(SPACE_ID)
+    assert [r.user_id for r in rows] == [MEMBER_USER]
+    await db.shutdown()
+
+
+async def test_a_roster_snapshot_never_regresses_a_newer_seat(tmp_dir):
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    left = FederationEventType.SPACE_MEMBER_LEFT
+    await h._on_space_member_left(
+        _event(left, _signed_payload(left, seed=seed, member_version=9))
+    )
+    await h._on_space_roster_snapshot(
+        _snapshot([_entry(j, _signed_payload(j, seed=seed, member_version=5))])
+    )
+    assert await remote.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER) is None
+    await db.shutdown()
+
+
+async def test_a_malformed_roster_snapshot_is_ignored(tmp_dir):
+    h, _spaces, remote, db, _seed = await _make_handler(tmp_dir)
+    await h._on_space_roster_snapshot(
+        _event(FederationEventType.SPACE_ROSTER_SNAPSHOT, {"entries": "x"})
+    )
+    assert await remote.list_for_space(SPACE_ID) == []
+    await db.shutdown()
+
+
+async def test_an_applied_seat_announces_itself(tmp_dir):
+    """A seat learned from gossip releases the writes held for it."""
+    from socialhome.domain.events import SpaceRemoteSeatLive
+
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=2))
+    )
+    live = [
+        (e.space_id, e.instance_id, e.user_id)
+        for e in (c.args[0] for c in h._bus.publish.await_args_list)
+        if isinstance(e, SpaceRemoteSeatLive)
+    ]
+    assert live == [(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)]
+    await db.shutdown()

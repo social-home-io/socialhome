@@ -83,6 +83,10 @@ class FederationEventType(str, enum.Enum):
     SPACE_INSTANCE_LEFT = "space_instance_left"
     SPACE_MEMBER_JOINED = "space_member_joined"
     SPACE_MEMBER_LEFT = "space_member_left"
+    #: v_32 — the host's whole roster for one space in one event: a list
+    #: of individually authority-signed ``SPACE_MEMBER_JOINED`` /
+    #: ``SPACE_MEMBER_LEFT`` payloads, merged like live roster gossip.
+    SPACE_ROSTER_SNAPSHOT = "space_roster_snapshot"
     SPACE_MEMBER_BANNED = "space_member_banned"
     SPACE_MEMBER_UNBANNED = "space_member_unbanned"
     #: Host promoted / demoted a member's role (#114). Broadcasts to
@@ -511,6 +515,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: member unable to attribute — or decrypt — anything.
         FederationEventType.SPACE_MEMBER_JOINED,
         FederationEventType.SPACE_MEMBER_LEFT,
+        #: The host's whole roster at once (v_32) — how a link-joined
+        #: member's mirror heals after missing gossip.
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
         FederationEventType.SPACE_MEMBER_BANNED,
         FederationEventType.SPACE_MEMBER_UNBANNED,
         FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
@@ -737,6 +744,7 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #    own right, and a kick is re-decided by the host) ──
         FederationEventType.SPACE_MEMBER_JOINED,
         FederationEventType.SPACE_MEMBER_LEFT,
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
         FederationEventType.SPACE_MEMBER_BANNED,
         FederationEventType.SPACE_MEMBER_UNBANNED,
         FederationEventType.SPACE_MEMBER_ROLE_CHANGED,

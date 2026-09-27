@@ -689,6 +689,7 @@ class _StubPipelineOwner:
     _user_repo = None
     _space_repo = None
     _space_remote_member_repo = None
+    _pending_seat_buffer = None
     _own_instance_id = "own-1"
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):
@@ -1253,3 +1254,24 @@ def test_the_deprovisioned_author_gate_is_one_of_the_shared_post_decrypt_gates()
     svc._space_remote_member_repo = None
     names = [getattr(s, "__name__", "") for s in svc.post_decrypt_gate_steps()]
     assert "check_deprovisioned_author" in names
+
+
+async def test_space_writer_holds_a_seatless_write_when_a_buffer_is_wired():
+    """A household we hold no row for may have joined before its seat's
+    gossip reached us: its write is held (replayed when the seat lands),
+    not dropped — but only while the buffer takes it."""
+    from socialhome.federation.pending_seat_buffer import PendingSeatBuffer
+
+    buf = PendingSeatBuffer(max_entries=1)
+    step = make_check_space_writer(
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(OWN)}),
+        remote_member_repo=_FakeRemoteMemberRepo({("sp-1", "peer-x"): []}),
+        pending=buf,
+    )
+    held = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
+    assert held.early_response == {"status": "ok", "held": "awaiting-seat"}
+    assert len(buf) == 1
+    full = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
+    assert full.early_response == REFUSED
+    blob = await _run(step, FederationEventType.SPACE_MEDIA_BLOB, {"filename": "f"})
+    assert blob.early_response == REFUSED

@@ -870,7 +870,10 @@ async def test_a_sync_stream_for_one_space_cannot_write_another(env, resource, r
     app, db = env
     receiver = app[space_sync_receiver_key]
     before = await _snapshot(db)
-    await receiver._dispatch(resource, GATED, records)
+    # From the host: its chunks are taken whole, so only the space
+    # boundary is left to refuse (the authorship matrix covers non-host
+    # providers).
+    await receiver._dispatch(resource, GATED, records, provider="the-host")
     assert await _snapshot(db) == before
 
 

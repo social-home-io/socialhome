@@ -42,11 +42,11 @@ class _AllowAuthorship:
         self.calls: list[tuple[str, str, str]] = []
         self.refusals: list[str] = []
 
-    async def acts_for(self, event, space_id, user_id):
+    async def acts_for(self, event, space_id, user_id, *, any_role=False):
         self.calls.append(("acts_for", space_id, user_id))
         return self.answer
 
-    async def may_author(self, event, space_id, user_id):
+    async def may_author(self, event, space_id, user_id, *, subscriber_comment=False):
         self.calls.append(("may_author", space_id, user_id))
         return self.answer
 
@@ -63,6 +63,9 @@ class _AllowAuthorship:
         return self.answer
 
     def log_refusal(self, event, *, space_id, what, row_id, user_id):
+        self.refusals.append(row_id)
+
+    async def hold_or_refuse(self, event, *, space_id, what, row_id, user_id):
         self.refusals.append(row_id)
 
 
@@ -2345,7 +2348,8 @@ class _FullBazaarRepo(_FakeBazaarRepoWithBids):
         self.no_listing = False
 
     async def get_listing(self, post_id):
-        if self.no_listing:
+        # ``p-new*`` is a wrapper post with no listing yet.
+        if self.no_listing or post_id.startswith("p-new"):
             return None
         return SimpleNamespace(
             post_id=post_id,
@@ -2412,11 +2416,11 @@ _BOUND = [
     (
         "_on_task_saved",
         {"id": "t-1", "list_id": "l", "title": "x", "created_by": "u-claimed"},
-        "may_mutate",
-        "u-author",
+        "writes_here",
+        "",
         ("task", "t-1"),
     ),
-    ("_on_task_deleted", {"id": "t-1"}, "may_mutate", "u-author", ("task", "t-1")),
+    ("_on_task_deleted", {"id": "t-1"}, "writes_here", "", ("task", "t-1")),
     (
         "_on_page_saved",
         {"id": "pg-new", "title": "x", "created_by": "u-claimed"},
@@ -2515,7 +2519,7 @@ _BOUND = [
     (
         "_on_bazaar_listing_created",
         {
-            "post_id": "p-1",
+            "post_id": "p-new",
             "seller_user_id": "u-seller",
             "mode": "offer",
             "title": "x",
@@ -2684,12 +2688,12 @@ async def test_a_new_page_naming_nobody_needs_a_writer_household(full):
 
 async def test_a_listing_must_hang_off_the_sellers_own_post(full):
     h, repos = full
-    repos["post"].author["p-1"] = "u-other"
+    repos["post"].author["p-new"] = "u-other"
     await h._on_bazaar_listing_created(
         _event(
             FederationEventType.BAZAAR_LISTING_CREATED,
             {
-                "post_id": "p-1",
+                "post_id": "p-new",
                 "seller_user_id": "u-seller",
                 "mode": "offer",
                 "title": "x",
@@ -2699,7 +2703,7 @@ async def test_a_listing_must_hang_off_the_sellers_own_post(full):
         )
     )
     assert repos["bazaar"].saved == []
-    assert repos["auth"].refusals == ["p-1"]
+    assert repos["auth"].refusals == ["p-new"]
 
 
 async def test_a_listing_for_a_post_not_here_is_a_quiet_no_op(full, caplog):
@@ -2819,3 +2823,54 @@ async def test_a_new_zone_binds_its_claimed_creator(full):
         )
     )
     assert repos["zones"].upserted == []
+
+
+async def test_an_existing_listing_is_never_re_created(full, caplog):
+    """A re-sent ``BAZAAR_LISTING_CREATED`` would reset a settled listing's
+    status and could hand it to another seller — it is a quiet no-op."""
+    h, repos = full
+    with caplog.at_level("DEBUG"):
+        await h._on_bazaar_listing_created(
+            _event(
+                FederationEventType.BAZAAR_LISTING_CREATED,
+                {
+                    "post_id": "p-1",
+                    "seller_user_id": "u-seller",
+                    "mode": "offer",
+                    "title": "x",
+                    "currency": "EUR",
+                },
+                space_id="sp-1",
+            )
+        )
+    assert repos["bazaar"].saved == []
+    assert "listing already here" in caplog.text
+
+
+async def test_an_expiry_from_a_non_seller_household_is_debug_noise(full, caplog):
+    """Every household sweeps expiries; an older one still announces its
+    result. Once the listing has ended that is noise, not a refusal."""
+    h, repos = full
+
+    async def _ended(post_id):
+        return SimpleNamespace(
+            post_id=post_id,
+            space_id="sp-1",
+            seller_user_id="u-seller",
+            status=BazaarStatus.ACTIVE,
+            end_time="2000-01-01T00:00:00+00:00",
+        )
+
+    repos["bazaar"].get_listing = _ended
+    repos["auth"].answer = False
+    with caplog.at_level("DEBUG"):
+        await h._on_bazaar_listing_updated(
+            _event(
+                FederationEventType.BAZAAR_LISTING_UPDATED,
+                {"post_id": "p-1", "status": "expired"},
+                space_id="sp-1",
+            )
+        )
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "expiry is announced by the seller's household" in caplog.text
+    assert repos["auth"].refusals == []

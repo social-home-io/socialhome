@@ -58,6 +58,7 @@ from ..domain.user import SYSTEM_AUTHOR
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
+    from .pending_seat_buffer import PendingSeatBuffer
     from ..repositories.space_remote_member_repo import (
         AbstractSpaceRemoteMemberRepo,
     )
@@ -75,7 +76,7 @@ _WRITER_ROLES: frozenset[str] = frozenset(
 class SpaceAuthorship:
     """Bind the users a space-content payload names to the sending household."""
 
-    __slots__ = ("_spaces", "_seats", "_users")
+    __slots__ = ("_spaces", "_seats", "_users", "_pending")
 
     def __init__(
         self,
@@ -83,22 +84,35 @@ class SpaceAuthorship:
         space_repo: "AbstractSpaceRepo",
         remote_member_repo: "AbstractSpaceRemoteMemberRepo",
         user_repo: "AbstractUserRepo",
+        pending: "PendingSeatBuffer | None" = None,
     ) -> None:
         self._spaces = space_repo
         self._seats = remote_member_repo
         self._users = user_repo
+        #: Where a write naming a user we hold no row for at all waits for
+        #: that user's seat (see :meth:`hold_or_refuse`). ``None`` refuses.
+        self._pending = pending
 
     async def acts_for(
         self,
         event: "FederationEvent",
         space_id: str,
         user_id: str,
+        *,
+        any_role: bool = False,
     ) -> bool:
-        """``user_id`` holds a live seat in ``space_id`` on the sender."""
+        """``user_id`` holds a live WRITER seat in ``space_id`` on the sender.
+
+        ``any_role`` also accepts a read-only ``subscriber`` seat — for a
+        change to a row that user already owns, never for a new write.
+        """
         sender = str(event.from_instance or "")
         if not user_id or not sender or not space_id:
             return False
-        return await self._seats.get(space_id, sender, user_id) is not None
+        seat = await self._seats.get(space_id, sender, user_id)
+        if seat is None:
+            return False
+        return any_role or seat.role in _WRITER_ROLES
 
     async def is_host(self, event: "FederationEvent", space_id: str) -> bool:
         """The sender is the household hosting ``space_id``."""
@@ -141,20 +155,50 @@ class SpaceAuthorship:
     async def _is_local_user(self, user_id: str) -> bool:
         return await self._users.get_by_user_id(user_id) is not None
 
+    async def _known_in_space(self, space_id: str, user_id: str) -> bool:
+        """Any row at all — live or removed, on any household."""
+        return (
+            await self._seats.get_including_tombstones(space_id, "", user_id)
+            is not None
+        )
+
     async def may_author(
         self,
         event: "FederationEvent",
         space_id: str,
         user_id: str,
+        *,
+        subscriber_comment: bool = False,
     ) -> bool:
-        """May the sender create a row attributed to ``user_id``?"""
+        """May the sender create a row attributed to ``user_id``?
+
+        ``subscriber_comment`` is the one write a read-only seat may make:
+        a comment, when the space turned ``allow_subscriber_comment`` on.
+        """
         if user_id == SYSTEM_AUTHOR:
             return True
         if await self.acts_for(event, space_id, user_id):
             return True
+        if subscriber_comment and await self._subscriber_may_comment(
+            event, space_id, user_id
+        ):
+            return True
         if not user_id or await self._is_local_user(user_id):
             return False
-        return await self.is_host(event, space_id)
+        # The host relays rows of people it seated — never of a user this
+        # space has no record of anywhere.
+        return await self.is_host(event, space_id) and await self._known_in_space(
+            space_id, user_id
+        )
+
+    async def _subscriber_may_comment(
+        self, event: "FederationEvent", space_id: str, user_id: str
+    ) -> bool:
+        seat = await self._seats.get(space_id, str(event.from_instance or ""), user_id)
+        if seat is None or seat.role != SpaceRole.SUBSCRIBER.value:
+            return False
+        space = await self._spaces.get(space_id)
+        return bool(space is not None and space.features.allow_subscriber_comment)
 
     async def may_mutate(
         self,
@@ -164,10 +208,49 @@ class SpaceAuthorship:
     ) -> bool:
         """May the sender edit / delete a row owned by ``owner_user_id``?"""
         if owner_user_id != SYSTEM_AUTHOR and await self.acts_for(
-            event, space_id, owner_user_id
+            event, space_id, owner_user_id, any_role=True
         ):
             return True
         return await self.is_moderator(event, space_id)
+
+    async def hold_or_refuse(
+        self,
+        event: "FederationEvent",
+        *,
+        space_id: str,
+        what: str,
+        row_id: str,
+        user_id: str,
+    ) -> None:
+        """Refuse a write naming ``user_id`` — or, when this space has no
+        record of that user at all (the roster gossip seating them has not
+        reached us yet), hold it until their seat lands.
+
+        A user seated on ANOTHER household, or one who was removed, is
+        known, so that is always a refusal: those are not a race.
+        """
+        if (
+            self._pending is not None
+            and user_id
+            and user_id != SYSTEM_AUTHOR
+            and not await self._known_in_space(space_id, user_id)
+            and not await self._is_local_user(user_id)
+            and self._pending.hold(event, space_id=space_id, user_id=user_id)
+        ):
+            log.info(
+                "%s from %s: %s %s in space %s names %r, whose seat has not "
+                "reached us yet — holding the write until it does",
+                getattr(event, "event_type", "?"),
+                getattr(event, "from_instance", "?"),
+                what,
+                row_id,
+                space_id,
+                user_id,
+            )
+            return
+        self.log_refusal(
+            event, space_id=space_id, what=what, row_id=row_id, user_id=user_id
+        )
 
     @staticmethod
     def log_refusal(

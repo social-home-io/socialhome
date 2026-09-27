@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from ..federation.routed_envelope import SpaceRoutedHandler
 from ..domain.events import (
     CommentAdded,
+    PeerProtoVersionRaised,
     CommentDeleted,
     CommentUpdated,
     LocalSpaceInviteCreated,
@@ -1106,11 +1107,18 @@ class SpaceService(SpaceMemberGuardMixin):
         user_pk: str | None,
         display_name: str | None,
         role: str = SpaceRole.MEMBER,
+        send_snapshot: bool = True,
     ) -> None:
         """Host-side roster JOINED gossip for a newly-accepted remote member
         (v_23). Called by :meth:`PrivateSpaceInviteHandler._on_accept` after it
         seats the accepting peer, so every member household converges its
-        roster. No-ops gracefully if the space is gone or we hold no seed."""
+        roster. No-ops gracefully if the space is gone or we hold no seed.
+
+        ``send_snapshot`` then brings the joiner's own mirror up to date
+        (:meth:`send_roster_snapshot`) — its invitation's roster was taken
+        when the invitation was built. An invite-link redeem passes
+        ``False``: its ACK carries a roster taken at seat time, and the
+        redeemer has no space row yet to apply a snapshot to."""
         space = await self._spaces.get(space_id)
         if space is None:
             return
@@ -1123,49 +1131,58 @@ class SpaceService(SpaceMemberGuardMixin):
             role=role,
             tombstoned=False,
         )
-        await self._send_roster_snapshot(space, to_instance_id=instance_id)
+        if send_snapshot:
+            await self.send_roster_snapshot(space.id, to_instance_id=instance_id)
 
-    async def _send_roster_snapshot(self, space: Space, *, to_instance_id: str) -> None:
-        """Bring a newly-seated household's roster mirror up to date.
+    async def send_roster_snapshot(self, space_id: str, *, to_instance_id: str) -> bool:
+        """Send household ``to_instance_id`` the whole roster of a space we host.
 
-        The gossip above tells every *existing* member about the joiner,
-        but the joiner learned the roster from a snapshot taken when its
-        invitation was built — any household seated between that and its
-        accept is missing from its mirror, and a gossip for it was sent
-        before the joiner was a member, so nothing ever fills the gap.
-        That mirror is what the §24.11 authorship rule binds every content
-        author to (``federation/space_authorship.py``), so a gap there
-        drops that household's content on the joiner for good.
+        One :data:`FederationEventType.SPACE_ROSTER_SNAPSHOT` carrying every
+        seat — live ones as ``SPACE_MEMBER_JOINED`` entries, removals as
+        ``SPACE_MEMBER_LEFT`` — each individually authority-signed exactly
+        like live roster gossip, so the receiver verifies each against the
+        space key and merges it through the same version-guarded CRDT
+        (``apply_member_event``). Nothing is re-versioned: a remote seat
+        ships the version the host's mirror holds (kept equal to the last
+        gossip for it, see :meth:`_emit_member_roster_gossip`), a local
+        member — which has no per-row version — the current
+        ``roster_sequence``, which is at least every version ever issued. A
+        receiver therefore gains what it lacks and drops the rest as
+        duplicates, never regressing.
 
-        So after seating, the host re-sends each live seat to the joiner
-        ALONE, authority-signed like any roster gossip, at the seat's
-        CURRENT ``member_version`` — no ``roster_sequence`` bump: the
-        receiver's CRDT merge (``apply_member_event``) applies an event for
-        a row it does not hold and drops an equal-version duplicate of one
-        it does, so the replay is idempotent and cannot regress anything.
-        Best effort, like the gossip itself.
+        Why it exists: the §24.11 authorship rule binds every content author
+        to the receiver's roster mirror, and that mirror is only as good as
+        the gossip that reached it — a joiner's invitation snapshot goes
+        stale, a mesh-only or offline household misses gossip, an upgraded
+        household may never have received it. Sent on seat, on a peer's
+        first v_32 advertisement and on the periodic sync tick. v_32+ only;
+        best effort. Returns whether a snapshot was sent.
         """
         if self._federation is None:
-            return
-        if not await self._federation.peer_supports(
+            return False
+        space = await self._spaces.get(space_id)
+        own = self._own_instance_id
+        if space is None or not own or space.owner_instance_id != own:
+            return False
+        if to_instance_id == own or not await self._federation.peer_supports(
             to_instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP,
+            min_version=FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
         ):
-            return
+            return False
         try:
             seed = await self.ensure_space_seed(space.id)
         except Exception:
             log.exception("roster-snapshot: ensure_space_seed failed for %s", space.id)
-            return
+            return False
         if seed is None:
-            return
-        seats: list[tuple[str, str, str | None, str | None, str, int]] = []
+            return False
+        seats: list[tuple[str, str, str | None, str | None, str, int, bool]] = []
         local = await self._spaces.list_members(space.id)
         names = {
             u.user_id: u.display_name
             for u in await self._users.list_by_ids({m.user_id for m in local})
         }
-        own = self._own_instance_id or space.owner_instance_id
+        current = (await self._spaces.get(space.id) or space).roster_sequence
         for m in local:
             seats.append(
                 (
@@ -1174,11 +1191,14 @@ class SpaceService(SpaceMemberGuardMixin):
                     names.get(m.user_id),
                     None,
                     mirrorable_remote_role(m.role),
-                    0,
+                    int(current),
+                    False,
                 )
             )
         if self._remote_members is not None:
-            for r in await self._remote_members.list_for_space(space.id):
+            for r in await self._remote_members.list_for_space_including_tombstones(
+                space.id
+            ):
                 seats.append(
                     (
                         r.user_id,
@@ -1187,17 +1207,25 @@ class SpaceService(SpaceMemberGuardMixin):
                         r.user_pk,
                         r.role,
                         r.member_version,
+                        r.tombstoned,
                     )
                 )
         subscriber_ok = await self._federation.peer_supports(
             to_instance_id,
             min_version=FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
         )
-        for user_id, inst, display_name, user_pk, role, version in seats:
+        entries: list[dict] = []
+        for user_id, inst, display_name, user_pk, role, version, gone in seats:
             if inst == to_instance_id:
+                # The receiver's own members live in its ``space_members``.
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
                 continue
+            entry_type = (
+                FederationEventType.SPACE_MEMBER_LEFT
+                if gone
+                else FederationEventType.SPACE_MEMBER_JOINED
+            )
             payload: dict = {
                 "space_id": space.id,
                 "user_id": user_id,
@@ -1210,25 +1238,76 @@ class SpaceService(SpaceMemberGuardMixin):
             }
             payload.update(
                 sign_authority_event(
-                    event_type=FederationEventType.SPACE_MEMBER_JOINED.value,
+                    event_type=entry_type.value,
                     space_id=space.id,
                     payload=strip_authority_sig_fields(payload),
                     space_seed=seed,
                 )
             )
-            try:
-                await self._federation.send_with_mesh_fallback(
-                    to_instance_id=to_instance_id,
-                    event_type=FederationEventType.SPACE_MEMBER_JOINED,
-                    payload=payload,
-                    space_id=space.id,
+            entries.append({"event_type": entry_type.value, "payload": payload})
+        if not entries:
+            return False
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=to_instance_id,
+                event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                payload={"space_id": space.id, "entries": entries},
+                space_id=space.id,
+            )
+        except Exception:
+            log.exception(
+                "roster-snapshot: send to %s failed for %s", to_instance_id, space.id
+            )
+            return False
+        return bool(getattr(result, "ok", True))
+
+    async def send_hosted_roster_snapshots(self) -> int:
+        """Periodic self-heal: every space we host → each member household.
+
+        Skips households seated from an invite link: those ride the
+        connection-server relay, and a timed envelope there would be new
+        traffic metadata for the relay; they get a snapshot when they
+        advertise a new protocol version instead.
+        """
+        own = self._own_instance_id
+        if self._federation is None or not own:
+            return 0
+        sent = 0
+        for space in await self._spaces.list_all():
+            if space.owner_instance_id != own:
+                continue
+            for inst in await self._spaces.list_member_instances(space.id):
+                if inst == own or await self._is_relay_only_peer(inst):
+                    continue
+                if await self.send_roster_snapshot(space.id, to_instance_id=inst):
+                    sent += 1
+        return sent
+
+    async def on_peer_proto_version_raised(self, event: PeerProtoVersionRaised) -> None:
+        """A member household just upgraded past the roster-snapshot line:
+        send it the roster of every space we host that it belongs to, so a
+        mirror that never received the gossip heals right away."""
+        if (
+            event.old_version >= FederationCapability.MIN_FOR_ROSTER_SNAPSHOT
+            or event.new_version < FederationCapability.MIN_FOR_ROSTER_SNAPSHOT
+        ):
+            return
+        own = self._own_instance_id
+        if not own:
+            return
+        for space in await self._spaces.list_all():
+            if space.owner_instance_id != own:
+                continue
+            if event.instance_id in await self._spaces.list_member_instances(space.id):
+                await self.send_roster_snapshot(
+                    space.id, to_instance_id=event.instance_id
                 )
-            except Exception:
-                log.exception(
-                    "roster-snapshot: send to %s failed for %s",
-                    to_instance_id,
-                    space.id,
-                )
+
+    async def _is_relay_only_peer(self, instance_id: str) -> bool:
+        if self._federation_repo is None:
+            return False
+        instance = await self._federation_repo.get_instance(instance_id)
+        return instance is not None and instance.source is InstanceSource.SPACE_SESSION
 
     async def _emit_member_roster_gossip(
         self,
@@ -1314,6 +1393,34 @@ class SpaceService(SpaceMemberGuardMixin):
         except Exception:
             log.exception("roster-gossip: roster_sequence bump failed for %s", space.id)
             return
+        # Keep our own mirror at the version we are about to announce. The
+        # seat was already written (``add`` / ``set_role`` / ``remove``), but
+        # those never set the gossip version, so our mirror would lag every
+        # member's — and a roster snapshot built from it would then ship an
+        # older version that receivers drop as stale (a demotion or kick
+        # between a joiner's invitation and its accept would never reach
+        # the joiner).
+        if (
+            self._remote_members is not None
+            and instance_id
+            and instance_id != self._own_instance_id
+        ):
+            try:
+                await self._remote_members.apply_member_event(
+                    space_id=space.id,
+                    user_id=user_id,
+                    instance_id=instance_id,
+                    display_name=display_name,
+                    user_pk=user_pk,
+                    role=mirrorable_remote_role(role),
+                    member_version=version,
+                    tombstoned=tombstoned,
+                )
+            except Exception:
+                log.exception(
+                    "roster-gossip: local mirror version update failed for %s",
+                    space.id,
+                )
         event_type = (
             FederationEventType.SPACE_MEMBER_LEFT
             if tombstoned

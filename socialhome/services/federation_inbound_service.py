@@ -98,6 +98,7 @@ from .space_service import stub_space_from_metadata
 from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
+    from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..domain.federation import FederationEvent
     from ..repositories.bazaar_repo import AbstractBazaarRepo
     from ..repositories.conversation_repo import AbstractConversationRepo
@@ -284,6 +285,7 @@ class FederationInboundService:
         space_remote_member_repo=None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
+        pending_seat_buffer: "PendingSeatBuffer | None" = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -323,6 +325,7 @@ class FederationInboundService:
                 space_repo=space_repo,
                 remote_member_repo=space_remote_member_repo,
                 user_repo=user_repo,
+                pending=pending_seat_buffer,
             )
             if space_remote_member_repo is not None
             else None
@@ -1152,27 +1155,55 @@ class FederationInboundService:
         if authorship is None:
             return
         # The claimed author must be the sender's own member (or a remote
-        # member's row relayed by the host). A re-send of an existing id
-        # is an upsert of that row, so it must also keep the row's author:
-        # otherwise a re-create would be an edit (or an un-delete) of a
-        # post by somebody else.
+        # member's row relayed by the host).
         existing = await self._space_post_repo.get(post.id)
         if existing is not None and existing[0] != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="post", row_id=post.id
             )
             return
-        if existing is not None and existing[1].author != post.author:
-            authorship.log_refusal(
-                event,
-                space_id=space_id,
-                what="post",
-                row_id=post.id,
-                user_id=post.author,
+        if existing is not None:
+            # A re-send of an existing id is an upsert of that row — an
+            # edit — so it is judged like one (the author's household or a
+            # moderator; a bot post only a moderator), it keeps the row's
+            # author, a deleted post stays deleted, and only a moderator
+            # may touch a post held by moderation. Whatever it carries,
+            # the state other people put on the row is kept.
+            row = existing[1]
+            if row.deleted:
+                log_not_applied(
+                    event, what="post", row_id=post.id, reason="already deleted"
+                )
+                return
+            if (
+                row.author != post.author
+                or not await authorship.may_mutate(event, space_id, row.author)
+                or (
+                    row.moderated and not await authorship.is_moderator(event, space_id)
+                )
+            ):
+                await authorship.hold_or_refuse(
+                    event,
+                    space_id=space_id,
+                    what="post",
+                    row_id=post.id,
+                    user_id=post.author,
+                )
+                return
+            post = replace(
+                post,
+                bot_id=row.bot_id,
+                linked_event_id=row.linked_event_id,
+                linked_highlight_id=row.linked_highlight_id,
+                reactions=row.reactions,
+                comment_count=row.comment_count,
+                pinned=row.pinned,
+                deleted=row.deleted,
+                moderated=row.moderated,
+                hidden_from_feed=row.hidden_from_feed,
             )
-            return
-        if not await authorship.may_author(event, space_id, post.author):
-            authorship.log_refusal(
+        elif not await authorship.may_author(event, space_id, post.author):
+            await authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="post",
@@ -1190,6 +1221,15 @@ class FederationInboundService:
                 space_id=space_id,
                 what="post",
                 row_id=post.id,
+            )
+            return
+        if existing is not None:
+            await self._bus.publish(
+                PostEdited(
+                    post=post,
+                    space_id=space_id,
+                    origin_instance_id=event.from_instance,
+                )
             )
             return
         await self._bus.publish(
@@ -1538,8 +1578,10 @@ class FederationInboundService:
         # A live seat of any role counts: a Follower's comment reaches
         # here only through the §24.11 ``allow_subscriber_comment`` opt-in,
         # which already bound that author to a subscriber seat.
-        if not await authorship.may_author(event, space_id, author):
-            authorship.log_refusal(
+        if not await authorship.may_author(
+            event, space_id, author, subscriber_comment=True
+        ):
+            await authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="comment",
@@ -1710,7 +1752,7 @@ class FederationInboundService:
             )
             return False
         if not await authorship.may_mutate(event, space_id, post.author):
-            authorship.log_refusal(
+            await authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="post",
@@ -1749,7 +1791,7 @@ class FederationInboundService:
             )
             return False
         if not await authorship.may_mutate(event, space_id, comment.author):
-            authorship.log_refusal(
+            await authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="comment",

@@ -168,6 +168,14 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # the space signing seed (only the owner/seed-holder signs); no
         # actor-username to thread through ``_require_admin``.
         "broadcast_remote_member_joined",
+        # v_32 roster self-heal — driven by the seat hook above, a peer's
+        # protocol upgrade (bus) and the periodic sync tick. Self-gates on
+        # hosting the space (``owner_instance_id == own_instance_id``) and on
+        # holding its signing seed; it only re-sends authority-signed roster
+        # state the members already may see. No actor to authorize.
+        "send_roster_snapshot",
+        "send_hosted_roster_snapshots",
+        "on_peer_proto_version_raised",
         # Internal seam the invite-redeem coordinator calls after it has
         # already consumed the token and seated the household as a member;
         # it only records a pending admin/mod elevation (a join_requests

@@ -275,6 +275,8 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
+from .domain.events import PeerProtoVersionRaised
+from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
@@ -917,6 +919,19 @@ def _wire_federation_stack(
     )
     moment_federation_outbound.wire()
 
+    # §24.11 authorship: the users a space-content payload names must be
+    # seated on the household that signed it. Writes naming a user (or
+    # coming from a household) the roster mirror has no row for at all wait
+    # in the bounded seat buffer until that seat lands, then replay.
+    pending_seat_buffer = PendingSeatBuffer()
+    federation_service.attach_pending_seat_buffer(pending_seat_buffer)
+    space_authorship = SpaceAuthorship(
+        space_repo=space_repo,
+        remote_member_repo=space_remote_member_repo,
+        user_repo=user_repo,
+        pending=pending_seat_buffer,
+    )
+
     inbound_service = FederationInboundService(
         bus=bus,
         conversation_repo=conversation_repo,
@@ -945,6 +960,7 @@ def _wire_federation_stack(
         # household that signed it (§24.11 authorship), and lets the
         # profile / role-change handlers find a remote member's seat.
         space_remote_member_repo=space_remote_member_repo,
+        pending_seat_buffer=pending_seat_buffer,
     )
     inbound_service.attach_to(federation_service)
 
@@ -1014,11 +1030,7 @@ def _wire_federation_stack(
         bus=bus,
         # §24.11 authorship — the users a content payload names must be
         # seated on the household that signed it.
-        authorship=SpaceAuthorship(
-            space_repo=space_repo,
-            remote_member_repo=space_remote_member_repo,
-            user_repo=user_repo,
-        ),
+        authorship=space_authorship,
         post_repo=space_post_repo,
         page_repo=page_repo,
         sticky_repo=sticky_repo,
@@ -1090,6 +1102,7 @@ def _wire_federation_stack(
         profile_picture_repo=profile_picture_repo,
         poll_repo=space_poll_repo,
         pending_decrypts=app[K.pending_decrypts_cache_key],
+        authorship=space_authorship,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,
@@ -1270,6 +1283,7 @@ def _wire_federation_stack(
         bazaar_repo=bazaar_repo,
         media_sync=space_media_sync_service,
         federation_repo=federation_repo,
+        user_repo=user_repo,
     )
 
     # DM history sync: reconcile missed messages when a peer reconnects.
@@ -2552,6 +2566,16 @@ def create_app(config: Config | None = None) -> web.Application:
         # can actually dispatch the validated kick into the service.
         app[K.private_invite_handler_key].attach_space_service(
             real_space_service,
+        )
+        # v_32 roster snapshots: the host re-sends its whole roster to a
+        # member household that just upgraded, and on every periodic sync
+        # tick, so a roster mirror that missed gossip heals by itself.
+        bus.subscribe(
+            PeerProtoVersionRaised,
+            real_space_service.on_peer_proto_version_raised,
+        )
+        app[K.space_sync_scheduler_key].attach_roster_refresh(
+            real_space_service.send_hosted_roster_snapshots
         )
         # Multi-admin approval (quorum) — rebuild with the real instance_id
         # (mirrors the real_space_service rebuild) and wire federation + the

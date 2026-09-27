@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 31
+    assert fc.OURS == 32
 
 
 def test_remote_subscriber_role_capability_threshold():
@@ -208,3 +208,17 @@ def test_named_thresholds_are_monotonic_and_bounded():
     for name, version in named.items():
         assert isinstance(version, int), name
         assert 1 <= version <= fc.OURS, f"{name}={version} out of range"
+
+
+def test_roster_snapshot_capability_threshold():
+    """v_32 — the host's whole roster in one event, so a member household's
+    roster mirror (which every content author is now bound to) heals after
+    missed gossip. Space-scoped: a household without it may attribute
+    content wrongly for the whole space."""
+    assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT == 32
+    assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT <= fc.OURS
+    assert "Space roster snapshot" in fc.features_missing_below(31)
+    assert "Space roster snapshot" not in fc.features_missing_below(32)
+    assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )

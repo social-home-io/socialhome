@@ -472,7 +472,20 @@ from __future__ import annotations
 #:   peers upgrade. An unsigned event naming an origin at v_31+, or one the
 #:   receiver holds no row for, is dropped. Space-scoped (the mesh carries
 #:   space content), so it appears in the per-space compatibility banner.
-OURS: int = 31
+#: * **v_32** (2026-09-27) — :data:`FederationEventType.SPACE_ROSTER_SNAPSHOT`:
+#:   the host sends a member household its whole roster in one event — every
+#:   live seat plus every removal, each entry an individually
+#:   authority-signed ``SPACE_MEMBER_JOINED`` / ``SPACE_MEMBER_LEFT`` payload
+#:   the receiver verifies and merges exactly like live roster gossip. Sent
+#:   when the host seats a household (its invitation snapshot may be stale),
+#:   when a member household first advertises v_32, and on the periodic sync
+#:   tick, so a roster mirror that missed gossip — offline, mesh-only, or a
+#:   pre-gossip join — heals by itself. It matters from v_32 on because v_32
+#:   receivers bind every space-content author to that mirror (§24.11
+#:   authorship). Older-peer fallback: nothing is sent to a sub-v_32
+#:   household; it keeps learning the roster from live gossip only, as
+#:   before, and does not bind authors.
+OURS: int = 32
 
 
 class FederationCapability:
@@ -767,6 +780,11 @@ class FederationCapability:
     #: ``remote_instances`` row for a mesh-only target to gate against.
     MIN_FOR_ROUTED_ORIGIN_SIGNATURE = 31
 
+    #: Minimum proto_version that handles
+    #: :data:`FederationEventType.SPACE_ROSTER_SNAPSHOT` (v_32). The host
+    #: sends a roster snapshot only to households at or above it.
+    MIN_FOR_ROSTER_SNAPSHOT = 32
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -847,6 +865,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
         "Authenticated mesh-routed origin",
     ),
+    (
+        FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
+        "Space roster snapshot",
+    ),
 ]
 
 
@@ -900,6 +922,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM,
         FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
         FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
+        FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
     }
 )
 

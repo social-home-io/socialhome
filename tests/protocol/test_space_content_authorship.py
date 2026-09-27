@@ -36,12 +36,28 @@ from types import MappingProxyType
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, federation_service_key
+from socialhome.app_keys import (
+    db_key,
+    event_bus_key,
+    federation_service_key,
+    space_sync_receiver_key,
+)
 from socialhome.config import Config
+from socialhome.crypto import generate_space_keypair
+from socialhome.domain.events import SpaceRemoteSeatLive
 from socialhome.domain.federation import (
     SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
     FederationEventType,
+)
+from socialhome.federation.inbound_validator import (
+    InboundContext,
+    run_post_decrypt_gates,
+)
+from socialhome.federation.sync.space.exporter import ALLOWED_RESOURCES
+from socialhome.services.space_crypto_service import (
+    sign_authority_event,
+    strip_authority_sig_fields,
 )
 
 from .test_space_content_scope import ATTACKS, CONTENT_TABLES, NOT_ROW_SCOPED
@@ -110,6 +126,7 @@ _SEED = [
             (OTHER, "u-o", "member"),
             (ADMIN, "u-adm", "admin"),
             (THIRD, "u-t", "member"),
+            (AUTHOR, "u-sub", "subscriber"),
         )
     ],
     # Posts: poll/schedule wrapper, a bazaar anchor with listing, a bare
@@ -126,8 +143,27 @@ _SEED = [
             ("post-a-bare", "u-a", "bazaar"),
             ("post-a-sched", "u-a", "schedule"),
             ("post-l", LOCAL_USER, "text"),
+            ("post-bot", "system-integration", "text"),
         )
     ],
+    # A moderator-deleted post and a moderation-held post by u-a, and
+    # state on post-a (pinned, reactions, a comment count) that no
+    # re-send may reset.
+    (
+        "INSERT INTO space_posts(id, space_id, author, type, content, deleted)"
+        " VALUES('post-del', ?, 'u-a', 'text', NULL, 1)",
+        (SP,),
+    ),
+    (
+        "INSERT INTO space_posts(id, space_id, author, type, content, moderated)"
+        " VALUES('post-mod', ?, 'u-a', 'text', 'held', 1)",
+        (SP,),
+    ),
+    (
+        "UPDATE space_posts SET pinned=1, comment_count=3,"
+        " reactions='{\"👍\": [\"u-o\"]}' WHERE id='post-a'",
+        (),
+    ),
     *[
         (
             "INSERT INTO space_post_comments(id, post_id, author, type, content)"
@@ -300,8 +336,34 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         FET.SPACE_POST_CREATED,
         "re-create u-a's post as u-a",
         {"id": "post-a", "author": "u-a", "type": "text", "content": "hijack"},
-        (AUTHOR,),
-        (OTHER, ADMIN),
+        (AUTHOR, ADMIN, HOST),
+        (OTHER, STRANGER),
+    ),
+    (
+        FET.SPACE_POST_CREATED,
+        "re-send a bot post",
+        {
+            "id": "post-bot",
+            "author": "system-integration",
+            "type": "text",
+            "content": "rewritten",
+        },
+        (ADMIN, HOST),
+        (OTHER, AUTHOR, STRANGER),
+    ),
+    (
+        FET.SPACE_POST_CREATED,
+        "re-send a deleted post",
+        {"id": "post-del", "author": "u-a", "type": "text", "content": "back"},
+        (),
+        (AUTHOR, ADMIN, HOST, OTHER),
+    ),
+    (
+        FET.SPACE_POST_CREATED,
+        "re-send a moderation-held post",
+        {"id": "post-mod", "author": "u-a", "type": "text", "content": "unheld"},
+        (ADMIN, HOST),
+        (AUTHOR, OTHER),
     ),
     (
         FET.SPACE_COMMENT_CREATED,
@@ -617,16 +679,16 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
     (
         FET.SPACE_TASK_UPDATED,
         "edit u-a's task",
-        {"id": "task-a", "list_id": "list-a", "title": "edited", "created_by": "u-a"},
-        (AUTHOR, ADMIN, HOST),
-        (OTHER,),
+        {"id": "task-a", "list_id": "list-a", "title": "edited", "created_by": "u-o"},
+        (AUTHOR, OTHER, ADMIN, HOST),
+        (STRANGER,),
     ),
     (
         FET.SPACE_TASK_DELETED,
         "delete u-a's task",
         {"id": "task-a"},
-        (AUTHOR, ADMIN, HOST),
-        (OTHER,),
+        (AUTHOR, OTHER, ADMIN, HOST),
+        (STRANGER,),
     ),
     (
         FET.SPACE_GALLERY_ITEM_DELETED,
@@ -817,3 +879,460 @@ def test_every_space_content_event_type_has_an_authorship_case():
     assert not expected - allowed, sorted(t.value for t in expected - allowed)
     assert not expected - refused, sorted(t.value for t in expected - refused)
     assert ATTACKS.keys() <= allowed
+
+
+async def test_a_re_send_never_resets_a_posts_state(env):
+    """A re-sent ``SPACE_POST_CREATED`` (resume replay, or the author's own
+    household) may refresh the content; it never touches the state other
+    people put on the row — pin, reactions, comment count, the moderation
+    hold."""
+    app, db = env
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "post-a", "author": "u-a", "type": "text", "content": "fresh"},
+        sender=AUTHOR,
+    )
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "post-mod", "author": "u-a", "type": "text", "content": "fresh"},
+        sender=HOST,
+    )
+    a = await db.fetchone(
+        "SELECT content, pinned, comment_count, reactions, deleted, moderated"
+        " FROM space_posts WHERE id='post-a'",
+        (),
+    )
+    assert a["content"] == "fresh"
+    assert (a["pinned"], a["comment_count"], a["deleted"], a["moderated"]) == (
+        1,
+        3,
+        0,
+        0,
+    )
+    assert "u-o" in a["reactions"]
+    held = await db.fetchone(
+        "SELECT content, moderated FROM space_posts WHERE id='post-mod'", ()
+    )
+    assert (held["content"], held["moderated"]) == ("fresh", 1)
+
+
+# ── Subscriber seats and the host relay ──────────────────────────────
+
+
+async def test_a_read_only_seat_cannot_author(env):
+    """A household that also holds a Follower seat may not post as that
+    follower — a read-only seat authors nothing."""
+    app, db = env
+    before = await _snapshot(db)
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "p-sub", "author": "u-sub", "type": "text", "content": "x"},
+        sender=AUTHOR,
+    )
+    assert await _snapshot(db) == before
+
+
+async def test_a_follower_may_comment_only_with_the_opt_in(env):
+    app, db = env
+    comment = {
+        "post_id": "post-a",
+        "comment_id": "c-sub",
+        "author": "u-sub",
+        "type": "text",
+        "content": "x",
+    }
+    await _deliver(app, FET.SPACE_COMMENT_CREATED, comment, sender=AUTHOR)
+    assert (
+        await db.fetchone("SELECT 1 FROM space_post_comments WHERE id='c-sub'", ())
+        is None
+    )
+    await db.enqueue("UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (SP,))
+    await _deliver(app, FET.SPACE_COMMENT_CREATED, comment, sender=AUTHOR)
+    assert await db.fetchone("SELECT 1 FROM space_post_comments WHERE id='c-sub'", ())
+
+
+async def test_the_host_does_not_relay_a_user_the_space_never_had(env):
+    app, db = env
+    before = await _snapshot(db)
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "p-ghost", "author": "u-never", "type": "text", "content": "x"},
+        sender=HOST,
+    )
+    assert await _snapshot(db) == before
+
+
+# ── Writes that beat the roster (held, then replayed) ────────────────
+
+
+async def _seat_lands(app, db, instance_id, user_id, role="member"):
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,?)",
+        (SP, instance_id, user_id, role),
+    )
+    await app[event_bus_key].publish(
+        SpaceRemoteSeatLive(space_id=SP, instance_id=instance_id, user_id=user_id)
+    )
+
+
+async def test_a_post_by_a_member_not_yet_in_the_roster_lands_with_the_seat(env):
+    """u-new joined household-a; its first post beats the gossip seating it.
+    The post is held, not dropped, and lands once the seat does."""
+    app, db = env
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "p-early", "author": "u-new", "type": "text", "content": "hi"},
+        sender=AUTHOR,
+    )
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-early'", ()) is None
+    await _seat_lands(app, db, AUTHOR, "u-new")
+    row = await db.fetchone("SELECT author FROM space_posts WHERE id='p-early'", ())
+    assert row is not None and row["author"] == "u-new"
+
+
+async def test_a_write_from_a_household_not_yet_seated_is_held_at_the_gate(env):
+    """A household that just joined writes before any seat for it reached
+    us: the write gate holds it and the seat releases it through the same
+    gates and handlers."""
+    app, db = env
+    fed = app[federation_service_key]
+    event = _event(
+        FET.SPACE_POST_CREATED,
+        {"id": "p-joiner", "author": "u-j", "type": "text", "content": "hi"},
+        sender="house-joiner",
+    )
+    ctx = InboundContext(
+        envelope={"space_id": SP, "from_instance": "house-joiner"}, event=event
+    )
+    assert not await run_post_decrypt_gates(
+        ctx, steps=fed.post_decrypt_gate_steps(include_ban_check=True)
+    )
+    assert ctx.early_response == {"status": "ok", "held": "awaiting-seat"}
+    await _seat_lands(app, db, "house-joiner", "u-j")
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-joiner'", ())
+
+
+async def test_a_held_write_is_still_refused_if_the_seat_is_someone_elses(env):
+    """Holding is for "we have not heard of this user yet" only: when the
+    seat that lands puts the user on ANOTHER household, the replay is
+    refused like any foreign-author write."""
+    app, db = env
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "p-spoof", "author": "u-late", "type": "text", "content": "x"},
+        sender=OTHER,
+    )
+    await _seat_lands(app, db, AUTHOR, "u-late")
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-spoof'", ()) is None
+
+
+async def test_an_upgraded_household_with_an_empty_mirror_heals_from_a_snapshot(
+    env,
+):
+    """A household whose mirror never received the gossip for household-a's
+    new member gets the host's roster snapshot; the member's held post then
+    lands."""
+    app, db = env
+    kp = generate_space_keypair()
+    await db.enqueue(
+        "UPDATE spaces SET identity_public_key=? WHERE id=?", (kp.public_key.hex(), SP)
+    )
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "p-heal", "author": "u-heal", "type": "text", "content": "x"},
+        sender=AUTHOR,
+    )
+    bare = {
+        "space_id": SP,
+        "user_id": "u-heal",
+        "instance_id": AUTHOR,
+        "display_name": "Heal",
+        "user_pk": None,
+        "role": "member",
+        "member_version": 7,
+        "roster_version": 7,
+    }
+    signed = {
+        **bare,
+        **sign_authority_event(
+            event_type=FET.SPACE_MEMBER_JOINED.value,
+            space_id=SP,
+            payload=strip_authority_sig_fields(bare),
+            space_seed=kp.private_key,
+        ),
+    }
+    await _deliver(
+        app,
+        FET.SPACE_ROSTER_SNAPSHOT,
+        {
+            "space_id": SP,
+            "entries": [
+                {"event_type": FET.SPACE_MEMBER_JOINED.value, "payload": signed}
+            ],
+        },
+        sender=HOST,
+    )
+    assert await db.fetchone(
+        "SELECT 1 FROM space_remote_members WHERE user_id='u-heal'", ()
+    )
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-heal'", ())
+
+
+# ── The §25.6 catch-up stream from a household that is not the host ──
+
+#: Tables the catch-up stream can write, roster + bans included.
+_SYNC_TABLES = (
+    *CONTENT_TABLES,
+    "space_members",
+    "space_bans",
+    "space_member_profile_pictures",
+)
+
+
+async def _sync_snapshot(db) -> dict[str, list[tuple]]:
+    out = {}
+    for table in _SYNC_TABLES:
+        rows = await db.fetchall(f"SELECT * FROM {table} ORDER BY rowid", ())
+        out[table] = [tuple(r) for r in rows]
+    return out
+
+
+#: ``(resource, label, records, allowed providers, refused providers)``.
+#: The host's stream is taken whole; any other provider may only ADD rows,
+#: each attributed to a member seated on it.
+SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
+    (
+        "members",
+        "seat somebody",
+        [{"user_id": "u-evil", "role": "admin", "joined_at": _NOW}],
+        (HOST,),
+        (AUTHOR, ADMIN),
+    ),
+    (
+        "bans",
+        "ban u-a",
+        [{"user_id": "u-a", "banned_by": "u-o"}],
+        (HOST,),
+        (OTHER, ADMIN),
+    ),
+    (
+        "member_pictures",
+        "set u-a's picture",
+        [
+            {
+                "user_id": "u-a",
+                "picture_webp_base64": "UklGRg==",
+                "picture_hash": "h1",
+                "width": 1,
+                "height": 1,
+            }
+        ],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "posts",
+        "a new post by u-a",
+        [{"id": "p-sync", "author": "u-a", "type": "text", "content": "x"}],
+        (AUTHOR, HOST),
+        (OTHER, ADMIN),
+    ),
+    (
+        "posts",
+        "overwrite (and un-moderate) an existing post",
+        [
+            {
+                "id": "post-mod",
+                "author": "u-a",
+                "type": "text",
+                "content": "rewritten",
+                "moderated": False,
+            }
+        ],
+        (HOST,),
+        (AUTHOR, OTHER, ADMIN),
+    ),
+    (
+        "comments",
+        "a new comment by u-a",
+        [
+            {
+                "id": "c-sync",
+                "post_id": "post-a",
+                "author": "u-a",
+                "type": "text",
+                "content": "x",
+            }
+        ],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "tasks",
+        "a new task by u-a",
+        [{"id": "t-sync", "list_id": "list-a", "title": "x", "created_by": "u-a"}],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "tasks_archived",
+        "rewrite u-a's task",
+        [{"id": "task-a", "list_id": "list-a", "title": "rw", "created_by": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "pages",
+        "a new page by u-a",
+        [{"id": "pg-sync", "title": "x", "created_by": "u-a"}],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "stickies",
+        "a new sticky by u-a",
+        [{"id": "st-sync", "author": "u-a", "content": "x"}],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "calendar",
+        "a new event by u-a",
+        [{"id": "ev-sync", "summary": "x", "created_by": "u-a", **_CAL}],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "gallery",
+        "an upload by u-g",
+        [
+            {
+                "kind": "item",
+                "id": "gi-sync",
+                "album_id": "album-a",
+                "uploaded_by": "u-g",
+            }
+        ],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "schedules",
+        "slots on u-a's schedule post",
+        [
+            {
+                "post_id": "post-a-sched",
+                "title": "When?",
+                "slots": [{"id": "slot-sync", "slot_date": "2026-08-01"}],
+            }
+        ],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "space_zones",
+        "move the zone",
+        [
+            {
+                "id": "zone-a",
+                "name": "Moved",
+                "latitude": 2.0,
+                "longitude": 2.0,
+                "radius_m": 50,
+                "created_by": "u-adm",
+            }
+        ],
+        (ADMIN, HOST),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "bazaar",
+        "list u-a's bare anchor",
+        [
+            {
+                "post_id": "post-a-bare",
+                "seller_user_id": "u-a",
+                "mode": "offer",
+                "title": "x",
+                "currency": "EUR",
+                "end_time": _FAR,
+            }
+        ],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "bazaar",
+        "reset u-a's listing",
+        [
+            {
+                "post_id": "post-a-listing",
+                "seller_user_id": "u-a",
+                "mode": "offer",
+                "title": "reset",
+                "currency": "EUR",
+                "end_time": _FAR,
+                "status": "active",
+            }
+        ],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+]
+
+#: Resources a provider streams that write nothing, with the reason.
+_SYNC_NOT_WRITTEN = {"polls": "informational — polls ride on the posts stream"}
+
+
+@pytest.mark.parametrize(
+    ("resource", "records", "provider"),
+    [
+        pytest.param(r, recs, prov, id=f"{r}: {label} <- {prov}")
+        for r, label, recs, _allowed, refused in SYNC_CASES
+        for prov in refused
+    ],
+)
+async def test_a_member_households_sync_stream_cannot_write_for_others(
+    env, resource, records, provider
+):
+    app, db = env
+    before = await _sync_snapshot(db)
+    await app[space_sync_receiver_key]._dispatch(
+        resource, SP, [dict(r) for r in records], provider=provider
+    )
+    after = await _sync_snapshot(db)
+    changed = {t for t in _SYNC_TABLES if before[t] != after[t]}
+    assert not changed, f"{resource} from {provider} wrote {sorted(changed)}"
+
+
+@pytest.mark.parametrize(
+    ("resource", "records", "provider"),
+    [
+        pytest.param(r, recs, prov, id=f"{r}: {label} <- {prov}")
+        for r, label, recs, allowed, _refused in SYNC_CASES
+        for prov in allowed
+    ],
+)
+async def test_the_rightful_sync_stream_still_writes(env, resource, records, provider):
+    app, db = env
+    before = await _sync_snapshot(db)
+    await app[space_sync_receiver_key]._dispatch(
+        resource, SP, [dict(r) for r in records], provider=provider
+    )
+    assert await _sync_snapshot(db) != before, f"{resource} from {provider}"
+
+
+def test_every_sync_resource_has_an_authorship_case():
+    covered = {r for r, *_ in SYNC_CASES}
+    refused = {r for r, _l, _rec, _a, ref in SYNC_CASES if ref}
+    expected = set(ALLOWED_RESOURCES) - _SYNC_NOT_WRITTEN.keys()
+    assert not expected - covered, sorted(expected - covered)
+    assert not expected - refused, sorted(expected - refused)

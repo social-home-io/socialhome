@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import orjson
 import pytest
 
@@ -182,6 +184,12 @@ class _BazaarRepoStub:
 class _SpaceRepoStub:
     def __init__(self, collector):
         self._c = collector
+
+    async def get(self, space_id):
+        # The chunks in this file come from the space's host, whose stream
+        # is taken whole; non-host providers are covered in
+        # tests/protocol/test_space_content_authorship.py.
+        return SimpleNamespace(id=space_id, owner_instance_id="peer-a")
 
     async def save_member(self, member):
         self._c.members.append(member)

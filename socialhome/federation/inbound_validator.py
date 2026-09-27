@@ -662,11 +662,15 @@ _WRITER_ROLES: frozenset[str] = frozenset(
 #: stop redelivering it rather than retry forever.
 _REFUSED_WRITE = {"status": "ok", "dropped": "subscriber-write"}
 
+#: Early-response body for a write held until its household's seat lands.
+_HELD_WRITE = {"status": "ok", "held": "awaiting-seat"}
+
 
 def make_check_space_writer(
     *,
     space_repo,
     remote_member_repo,
+    pending=None,
 ) -> InboundStep:
     """Step 12: refuse a space-content write from a reader household.
 
@@ -713,29 +717,26 @@ def make_check_space_writer(
       it at all; its content is still bound per author downstream.
     * **≥1 row and at least one LIVE ``member`` / ``admin`` seat → pass.**
       A mixed household may write, because a real member of it may.
-    * **otherwise → refuse.** Only-``subscriber`` seats, only tombstoned
-      ones, **or no row at all**.
+    * **no row at all → hold** (with a ``pending`` buffer; refuse without,
+      or when it is full) — see below.
+    * **otherwise → refuse.** Only-``subscriber`` seats, or only tombstoned
+      ones.
 
-    "No row at all" used to pass, as a roster-convergence leniency: a
-    household seated on the host before the roster gossip reached us has
-    no row here yet. That leniency is gone because it bought nothing any
-    more — every content handler now binds the users a payload names to a
-    live seat of the SENDING household
-    (:mod:`socialhome.federation.space_authorship`), so a household we hold
-    no seat for cannot author, edit or delete a single row whatever this
-    gate says. What the leniency still let through was the write surface
-    with no author to bind (``SPACE_MEDIA_BLOB`` bytes). The convergence
-    window this narrows is the one the authorship binding already has: the
-    host seats a joiner and broadcasts the authority-signed
-    ``SPACE_MEMBER_JOINED`` gossip in the same step, before the joiner has
-    its accept ACK, so a joiner's first write normally lands after the
-    gossip; the host itself (which seated it) always accepts it. A member
-    household that nevertheless sees a write before the gossip drops it —
-    at WARNING, ``status: ok``, so the sender does not retry — and gets
-    the row back from the host with a ``space:<id>`` resync (§319.6),
-    whose replay the authorship rule accepts from the host. Tombstones are
-    still read, so a household we KICKED gets the same refusal as one we
-    never heard of.
+    "No row at all" used to pass unchecked, as a roster-convergence
+    leniency: a household seated on the host before the roster gossip
+    reached us has no row here yet. It no longer passes — every content
+    handler now binds the users a payload names to a live seat of the
+    SENDING household (:mod:`socialhome.federation.space_authorship`), and
+    what the leniency still let through was the write surface with no
+    author to bind (``SPACE_MEDIA_BLOB`` bytes). The convergence case is
+    kept alive instead: with a ``pending`` buffer wired
+    (:class:`~socialhome.federation.pending_seat_buffer.PendingSeatBuffer`),
+    such a write is HELD — answered ``status: ok, held`` — and replayed
+    through these same gates when a seat for that household lands
+    (``FederationService._on_remote_seat_live``); the host's roster
+    snapshot (v_32) makes sure that seat does land. A full buffer, or media
+    bytes, is a refusal. Tombstones are still read, so a household we
+    KICKED is refused, never held.
 
     The single exception is ``SPACE_COMMENT_CREATED`` when the space has
     ``allow_subscriber_comment`` on AND the payload's author names a LIVE
@@ -799,6 +800,21 @@ def make_check_space_writer(
             return
         if await _sender_hosts_space(space_repo, space_id, event.from_instance):
             return
+        if not seats and pending is not None:
+            # No row at all for this household: it may simply have joined
+            # before the roster gossip seating it reached us. Hold the write
+            # (bounded, expiring) and replay it through these same gates
+            # when the seat lands — ``FederationService._on_remote_seat_live``.
+            if pending.hold(event, space_id=space_id, instance_id=event.from_instance):
+                log.info(
+                    "inbound: holding %s in space %s from %s — no seat for that "
+                    "household has reached us yet",
+                    event.event_type.value,
+                    space_id,
+                    event.from_instance,
+                )
+                ctx.early_response = dict(_HELD_WRITE)
+                return
         if event.event_type is FederationEventType.SPACE_COMMENT_CREATED:
             if await _subscriber_comment_allowed(
                 space_repo=space_repo,

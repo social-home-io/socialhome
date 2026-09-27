@@ -452,3 +452,54 @@ async def test_bid_placed_without_space_id_skips_broadcast(
         ),
     )
     federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_settlement_is_announced_only_by_the_sellers_household(
+    federation_service,
+    media_sync,
+    federation_repo,
+):
+    """Every household runs the expiry sweep over the listings it mirrors;
+    only the seller's household broadcasts the result."""
+    from socialhome.domain.events import BazaarListingExpired, BazaarOfferAccepted
+
+    bus = EventBus()
+    bazaar_repo = MagicMock()
+    bazaar_repo.get_listing = AsyncMock(return_value=_make_listing())
+    users = MagicMock()
+    users.get_by_user_id = AsyncMock(return_value=None)  # seller is not ours
+    BazaarOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        bazaar_repo=bazaar_repo,
+        media_sync=media_sync,
+        federation_repo=federation_repo,
+        user_repo=users,
+    )
+    await bus.publish(
+        BazaarListingExpired(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            final_status="expired",
+        ),
+    )
+    await bus.publish(
+        BazaarOfferAccepted(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            buyer_user_id="u-b",
+            price=5,
+            space_id="sp-1",
+            bid_id="b-1",
+        ),
+    )
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+    users.get_by_user_id = AsyncMock(return_value=object())  # now it is
+    await bus.publish(
+        BazaarListingExpired(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            final_status="expired",
+        ),
+    )
+    federation_service.broadcast_to_space_members.assert_awaited_once()

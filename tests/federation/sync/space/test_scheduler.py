@@ -581,3 +581,30 @@ async def test_startup_sweep_retries_a_shipped_but_incomplete_sync(
     # Retried, and bounded by the delivered-BEGIN cap rather than running
     # for every pass in the schedule.
     assert len(fed.mesh_catchups) == MAX_MESH_CATCHUP_ATTEMPTS
+
+
+async def test_tick_runs_the_roster_refresh_and_survives_its_failure(
+    bus, queue, sync_manager
+):
+    """Every tick re-sends hosted rosters (v_32 self-heal); a failure there
+    never costs the rest of the tick."""
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=_FakeFederation(),
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(spaces_by_type={}, members_by_space={}),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    calls: list[int] = []
+
+    async def _refresh() -> None:
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    sched.attach_roster_refresh(_refresh)
+    await sched._tick_once()
+    await sched._tick_once()
+    assert calls == [1, 1]
+    assert sync_manager.reap_stale.call_count == 2

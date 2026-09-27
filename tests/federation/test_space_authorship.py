@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -61,6 +62,13 @@ class _Seats:
             and r.instance_id == instance_id
             and (include_tombstoned or not r.tombstoned)
         ]
+
+    async def get_including_tombstones(self, space_id, instance_id, user_id):
+        # Like the real repo: keyed on (space, user); the instance is ignored.
+        for r in self.rows:
+            if (r.space_id, r.user_id) == (space_id, user_id):
+                return r
+        return None
 
 
 class _Users:
@@ -276,3 +284,81 @@ async def test_a_follower_or_removed_household_does_not_write_collaboratively() 
     )
     assert not await a.writes_here(_ev("inst-follower"), SPACE)
     assert not await a.writes_here(_ev("inst-kicked"), SPACE)
+
+
+# ── read-only seats, the host relay, the seat-wait hold ───────────────
+
+
+def _auth(rows, *, allow_comment=False, pending=None, local=frozenset()):
+    return SpaceAuthorship(
+        space_repo=_Spaces(
+            {
+                SPACE: SimpleNamespace(
+                    owner_instance_id=HOST,
+                    features=SimpleNamespace(allow_subscriber_comment=allow_comment),
+                )
+            }
+        ),
+        remote_member_repo=_Seats(rows),
+        user_repo=_Users(set(local)),
+        pending=pending,
+    )
+
+
+async def test_a_read_only_seat_authors_nothing() -> None:
+    a = _auth([_seat(AUTHOR_HOUSE, "u-f", role="subscriber")])
+    assert not await a.acts_for(_ev(AUTHOR_HOUSE), SPACE, "u-f")
+    assert not await a.may_author(_ev(AUTHOR_HOUSE), SPACE, "u-f")
+
+
+async def test_a_read_only_seat_may_still_change_its_own_row() -> None:
+    a = _auth([_seat(AUTHOR_HOUSE, "u-f", role="subscriber")])
+    assert await a.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-f")
+
+
+async def test_a_follower_comment_needs_the_spaces_opt_in() -> None:
+    rows = [_seat(AUTHOR_HOUSE, "u-f", role="subscriber")]
+    off = _auth(rows)
+    on = _auth(rows, allow_comment=True)
+    ev = _ev(AUTHOR_HOUSE)
+    assert not await off.may_author(ev, SPACE, "u-f", subscriber_comment=True)
+    assert await on.may_author(ev, SPACE, "u-f", subscriber_comment=True)
+    assert not await on.may_author(ev, SPACE, "u-f")
+    assert not await on.may_author(
+        _ev(OTHER_HOUSE), SPACE, "u-f", subscriber_comment=True
+    )
+
+
+async def test_the_host_relays_only_users_the_space_has_a_record_of() -> None:
+    a = _auth([_seat(AUTHOR_HOUSE, "u-gone", tombstoned=True)])
+    assert await a.may_author(_ev(HOST), SPACE, "u-gone")
+    assert not await a.may_author(_ev(HOST), SPACE, "u-never")
+
+
+async def test_an_unknown_user_is_held_not_refused() -> None:
+    from socialhome.federation.pending_seat_buffer import PendingSeatBuffer
+
+    buf = PendingSeatBuffer()
+    a = _auth([_seat(AUTHOR_HOUSE, "u-a")], pending=buf)
+    ev = _ev(OTHER_HOUSE)
+    await a.hold_or_refuse(ev, space_id=SPACE, what="post", row_id="p", user_id="u-new")
+    assert len(buf) == 1
+    # A known user (seated elsewhere), a local user and the bot identity
+    # are refusals, never held.
+    b = _auth([_seat(AUTHOR_HOUSE, "u-a")], pending=buf, local={"u-local"})
+    for user in ("u-a", "u-local", "system-integration", ""):
+        await b.hold_or_refuse(
+            ev, space_id=SPACE, what="post", row_id="p", user_id=user
+        )
+    assert len(buf) == 1
+
+
+async def test_without_a_buffer_an_unknown_user_is_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    a = _auth([])
+    with caplog.at_level(logging.WARNING):
+        await a.hold_or_refuse(
+            _ev(OTHER_HOUSE), space_id=SPACE, what="post", row_id="p", user_id="u-new"
+        )
+    assert "refusing the write" in caplog.text

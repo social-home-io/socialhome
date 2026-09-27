@@ -28,6 +28,7 @@ from ...domain.events import (
     PairingAcceptReceived,
     PairingConfirmed,
     PairingIntroReceived,
+    PeerProtoVersionRaised,
     PeerUnpaired,
 )
 from ...domain.federation import FederationEventType, PairingStatus, RemoteInstance
@@ -271,6 +272,14 @@ class PairingInboundHandlers:
         if instance.proto_version == proto_version:
             return
         await self._repo.set_proto_version(event.from_instance, proto_version)
+        if proto_version > instance.proto_version:
+            await self._bus.publish(
+                PeerProtoVersionRaised(
+                    instance_id=event.from_instance,
+                    old_version=instance.proto_version,
+                    new_version=proto_version,
+                )
+            )
         log.info(
             "INSTANCE_CAPABILITIES_UPDATED from %s: proto_version -> %d",
             event.from_instance,

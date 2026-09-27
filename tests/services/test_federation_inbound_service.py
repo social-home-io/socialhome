@@ -454,6 +454,8 @@ async def test_space_post_created_persists(db, bus, inbound):
     captured: list[SpacePostCreated] = []
     bus.subscribe(SpacePostCreated, captured.append)
 
+    await _seat(db, "sp-1", "user-remote")
+
     await inbound._on_space_post_created(
         _event(
             FederationEventType.SPACE_POST_CREATED,
@@ -480,6 +482,16 @@ _SEED_SPACE_SQL = """INSERT INTO spaces(id, name, owner_instance_id, owner_usern
        VALUES(?,?,?,?,?,?,?)"""
 
 
+async def _seat(db, space_id, user_id, instance_id="peer-a", role="member"):
+    """Seat ``user_id`` on ``instance_id`` in ``space_id`` — the §24.11
+    authorship rule binds a post / comment author to such a seat."""
+    await db.enqueue(
+        "INSERT OR IGNORE INTO space_remote_members(space_id, instance_id,"
+        " user_id, role) VALUES(?,?,?,?)",
+        (space_id, instance_id, user_id, role),
+    )
+
+
 def _seed_space_args(space_id):
     return (
         space_id,
@@ -501,6 +513,7 @@ async def test_space_post_created_threads_public_relay(db, bus, inbound):
     bus.subscribe(SpacePostCreated, captured.append)
 
     relay = {"signed": "inner-payload", "sig": "abc"}
+    await _seat(db, "sp-relay", "user-remote")
     await inbound._on_space_post_created(
         _event(
             FederationEventType.SPACE_POST_CREATED,
@@ -525,6 +538,8 @@ async def test_space_post_created_no_public_relay_is_none(db, bus, inbound):
     captured: list[SpacePostCreated] = []
     bus.subscribe(SpacePostCreated, captured.append)
 
+    await _seat(db, "sp-norelay", "user-remote")
+
     await inbound._on_space_post_created(
         _event(
             FederationEventType.SPACE_POST_CREATED,
@@ -547,6 +562,8 @@ async def test_space_post_created_non_dict_public_relay_coerced_to_none(
     await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-badrelay"))
     captured: list[SpacePostCreated] = []
     bus.subscribe(SpacePostCreated, captured.append)
+
+    await _seat(db, "sp-badrelay", "user-remote")
 
     await inbound._on_space_post_created(
         _event(
@@ -584,6 +601,8 @@ async def test_space_post_created_carries_location(db, bus, inbound):
     )
     captured: list[SpacePostCreated] = []
     bus.subscribe(SpacePostCreated, captured.append)
+
+    await _seat(db, "sp-loc", "user-remote")
 
     await inbound._on_space_post_created(
         _event(
@@ -627,6 +646,8 @@ async def test_space_post_created_truncates_full_precision_gps(db, bus, inbound)
     )
     captured: list[SpacePostCreated] = []
     bus.subscribe(SpacePostCreated, captured.append)
+
+    await _seat(db, "sp-trunc", "user-remote")
 
     await inbound._on_space_post_created(
         _event(
@@ -673,6 +694,8 @@ async def test_space_post_created_drops_malformed_location(db, bus, inbound):
     )
     captured: list[SpacePostCreated] = []
     bus.subscribe(SpacePostCreated, captured.append)
+
+    await _seat(db, "sp-loc-bad", "user-remote")
 
     await inbound._on_space_post_created(
         _event(
@@ -1176,6 +1199,8 @@ async def test_space_comment_created_persists_and_publishes(db, bus, inbound):
     )
     captured: list[CommentAdded] = []
     bus.subscribe(CommentAdded, captured.append)
+
+    await _seat(db, "sp-1", "u-r")
 
     await inbound._on_space_comment_added(
         _event(
@@ -3180,6 +3205,9 @@ async def two_spaces(db):
                 JoinMode.INVITE_ONLY.value,
             ),
         )
+    for sid in ("sp-a", "sp-b"):
+        for uid in ("u-evil", "u-a", "u-b"):
+            await _seat(db, sid, uid)
     repo = SqliteSpacePostRepo(db)
     await repo.save(
         "sp-b",

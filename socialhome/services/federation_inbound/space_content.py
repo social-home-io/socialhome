@@ -17,9 +17,9 @@ Two guards run on every mutation, in this order:
 * **Authorship** (``federation/space_authorship.py``) — the users the
   payload names (author, creator, voter, seller, bidder …) must be members
   seated on the household that signed the envelope. Per family: creates
-  bind the claimed author; owned rows (tasks, gallery items) change only
-  from the owner's household or a moderator; pages / stickies / calendar
-  events are collaborative (any writer household, attribution kept);
+  bind the claimed author; gallery items change only from the uploader's
+  household or a moderator; tasks / pages / stickies / calendar events
+  are collaborative (any writer household, attribution kept);
   votes, RSVPs, schedule answers and bids are the voter's own; closing a
   poll, finalising a schedule and settling a listing are the owner's
   alone; zones are moderator-only.
@@ -31,6 +31,7 @@ for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ...domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
@@ -69,6 +70,16 @@ if TYPE_CHECKING:
     from ...repositories.task_repo import AbstractSpaceTaskRepo
 
 log = logging.getLogger(__name__)
+
+
+def _has_ended(end_time: str | None) -> bool:
+    """``True`` when a listing's ``end_time`` is in the past."""
+    end = parse_iso8601_optional(end_time)
+    if end is None:
+        return False
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return end <= datetime.now(timezone.utc)
 
 
 class SpaceContentInboundHandlers:
@@ -277,37 +288,24 @@ class SpaceContentInboundHandlers:
             due_date=None,  # due_date is a ``date`` — parsing lives in the service
             assignees=tuple(str(a) for a in assignees),
         )
-        # Owned row: a new task is authored by its creator's household
-        # (or relayed by the host); an existing one changes only from its
-        # creator's household or a moderator. The upsert never rewrites
-        # ``created_by``, so the claim only matters for a new row.
+        # Collaborative, like the local rule (``SpaceTaskService`` lets any
+        # space member update, archive or delete any task): an edit needs a
+        # writer household, and the upsert keeps the row's own
+        # ``created_by``, so the claim is only bound for a new task.
         existing = await self._task_repo.get(task_id)
-        if existing is None:
-            if not await self._authorship.may_author(event, space_id, task.created_by):
-                self._authorship.log_refusal(
-                    event,
-                    space_id=space_id,
-                    what="task",
-                    row_id=task_id,
-                    user_id=task.created_by,
-                )
-                return
-        else:
-            row_space, row = existing
-            if row_space != space_id:
-                log_cross_space_refusal(
-                    event, space_id=space_id, what="task", row_id=task_id
-                )
-                return
-            if not await self._authorship.may_mutate(event, space_id, row.created_by):
-                self._authorship.log_refusal(
-                    event,
-                    space_id=space_id,
-                    what="task",
-                    row_id=task_id,
-                    user_id=row.created_by,
-                )
-                return
+        if existing is not None and existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task", row_id=task_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event,
+            space_id,
+            what="task",
+            row_id=task_id,
+            claimed_author=task.created_by if existing is None else "",
+        ):
+            return
         if not await self._task_repo.save(task, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="task", row_id=task_id
@@ -326,20 +324,14 @@ class SpaceContentInboundHandlers:
                 event, what="task", row_id=task_id, reason="no such task here"
             )
             return
-        row_space, row = existing
-        if row_space != space_id:
+        if existing[0] != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="task", row_id=task_id
             )
             return
-        if not await self._authorship.may_mutate(event, space_id, row.created_by):
-            self._authorship.log_refusal(
-                event,
-                space_id=space_id,
-                what="task",
-                row_id=task_id,
-                user_id=row.created_by,
-            )
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="task", row_id=task_id
+        ):
             return
         if not await self._task_repo.delete(task_id, space_id=space_id):
             log_cross_space_refusal(
@@ -816,7 +808,7 @@ class SpaceContentInboundHandlers:
         if anchor is None:
             return
         if not await self._authorship.may_author(event, space_id, anchor.author):
-            self._authorship.log_refusal(
+            await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="schedule poll",
@@ -957,7 +949,7 @@ class SpaceContentInboundHandlers:
             created_at=p.get("created_at") or p.get("occurred_at"),
         )
         if not await self._authorship.may_author(event, space_id, uploaded_by):
-            self._authorship.log_refusal(
+            await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="gallery item",
@@ -1005,7 +997,7 @@ class SpaceContentInboundHandlers:
             return
         # Uploader or a space admin (``GalleryService.delete_item``).
         if not await self._authorship.may_mutate(event, space_id, item.uploaded_by):
-            self._authorship.log_refusal(
+            await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="gallery item",
@@ -1061,7 +1053,7 @@ class SpaceContentInboundHandlers:
             and await self._zone_repo.get(zone_id) is None
             and not await self._authorship.may_author(event, space_id, created_by)
         ):
-            self._authorship.log_refusal(
+            await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="zone",
@@ -1173,22 +1165,28 @@ class SpaceContentInboundHandlers:
             winning_price=p.get("winning_price"),
             sold_at=p.get("sold_at"),
         )
-        # The listing hangs off the seller's own wrapper post, and an
-        # existing listing keeps its seller: the upsert would otherwise
-        # hand the listing (and every offer on it) to whoever re-sent it.
+        # The listing hangs off the seller's own wrapper post.
         anchor = await self._post_in_space(
             event, space_id, post_id, what="bazaar listing"
         )
         if anchor is None:
             return
-        current = await self._bazaar_repo.get_listing(post_id)
-        owner = current.seller_user_id if current is not None else anchor.author
-        if (
-            seller_user_id != owner
-            or seller_user_id != anchor.author
-            or not await self._authorship.may_author(event, space_id, seller_user_id)
+        if await self._bazaar_repo.get_listing(post_id) is not None:
+            # A listing is created once; its status then only moves through
+            # ``BAZAAR_LISTING_UPDATED`` / ``BAZAAR_OFFER_ACCEPTED``. A re-send
+            # would reset the status (a sold listing back to active) and
+            # could hand the listing to another seller.
+            log_not_applied(
+                event,
+                what="bazaar listing",
+                row_id=post_id,
+                reason="listing already here",
+            )
+            return
+        if seller_user_id != anchor.author or not await self._authorship.may_author(
+            event, space_id, seller_user_id
         ):
-            self._authorship.log_refusal(
+            await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="bazaar listing",
@@ -1256,9 +1254,26 @@ class SpaceContentInboundHandlers:
             return
         # Only the seller settles their listing (sold / expired / cancelled
         # are all driven from the seller's household).
-        if not await self._acts_for(
-            event, space_id, listing.seller_user_id, "bazaar listing", post_id
-        ):
+        if not await self._authorship.acts_for(event, space_id, listing.seller_user_id):
+            if status_raw in ("expired", "sold") and _has_ended(listing.end_time):
+                # Every household runs the expiry sweep over the listings it
+                # mirrors; an older one still announces its own result. Each
+                # applies the expiry locally anyway — this is noise, not an
+                # attack on the listing.
+                log_not_applied(
+                    event,
+                    what="bazaar listing",
+                    row_id=post_id,
+                    reason="expiry is announced by the seller's household",
+                )
+                return
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="bazaar listing",
+                row_id=post_id,
+                user_id=listing.seller_user_id,
+            )
             return
         try:
             if status_raw == "sold":
@@ -1436,7 +1451,7 @@ class SpaceContentInboundHandlers:
         """Strict rule — ``user_id`` is seated on the sender (logged if not)."""
         if await self._authorship.acts_for(event, space_id, user_id):
             return True
-        self._authorship.log_refusal(
+        await self._authorship.hold_or_refuse(
             event, space_id=space_id, what=what, row_id=row_id, user_id=user_id
         )
         return False
@@ -1508,7 +1523,7 @@ class SpaceContentInboundHandlers:
                     event, space_id
                 ):
                     return True
-        self._authorship.log_refusal(
+        await self._authorship.hold_or_refuse(
             event, space_id=space_id, what="RSVP", row_id=event_id, user_id=user_id
         )
         return False
@@ -1564,7 +1579,7 @@ class SpaceContentInboundHandlers:
         if claimed_author:
             if await self._authorship.may_author(event, space_id, claimed_author):
                 return True
-            self._authorship.log_refusal(
+            await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what=what,

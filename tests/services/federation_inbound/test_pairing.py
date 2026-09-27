@@ -542,3 +542,23 @@ async def test_capabilities_updated_blank_or_missing_name_is_noop(repo, handlers
         )
     )
     assert repo.instances["peer-a"].display_name == "peer-a"
+
+
+async def test_a_raised_proto_version_is_announced_on_the_bus(bus, repo, handlers):
+    """Senders catch an upgraded household up (e.g. the v_32 roster
+    snapshot) — only when the version really went up."""
+    from socialhome.domain.events import PeerProtoVersionRaised
+
+    seen: list = []
+    bus.subscribe(PeerProtoVersionRaised, seen.append)
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    for version in (32, 32, 5):
+        await handlers._on_capabilities_updated(
+            _event(
+                FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+                {"proto_version": version},
+            )
+        )
+    assert [(e.instance_id, e.old_version, e.new_version) for e in seen] == [
+        ("peer-a", 1, 32)
+    ]

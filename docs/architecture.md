@@ -284,9 +284,10 @@ and every `*_UPDATED` / `*_DELETED` sibling), with one opt-in:
 `SPACE_COMMENT_CREATED` when the space has `allow_subscriber_comment`
 on and the payload's author names a live `subscriber` seat of that
 same household. A household the receiver holds **no** roster row for
-is not gated — that is roster convergence, not trust, and it is why a
-removed household is read back **including its tombstones** rather
-than as "never heard of". The same two gates re-run on the inner event
+(the space host excepted) is not a writer: its write is held in a bounded
+buffer and replayed through the same gates once a seat for it lands —
+roster convergence, not trust — and a removed household is read back
+**including its tombstones**, so it is refused, never held. The same two gates re-run on the inner event
 of a `SPACE_ROUTED` envelope after the mesh unwrap
 (`run_post_decrypt_gates`), which would otherwise dispatch without
 passing through the pipeline at all.
@@ -732,9 +733,15 @@ delete, the stored row's owner — and requires a live seat for that user on
 the envelope's signed `from_instance` in `space_remote_members`
 (`socialhome/federation/space_authorship.py`). Moderators (the host, or a
 household holding a live `admin` seat) may edit and delete owned rows;
-collaborative rows (pages, stickies, calendar events) accept any writer
-household; the host may relay a remote member's create. The per-family
-table is in [`docs/protocol/spaces.md`](protocol/spaces.md).
+collaborative rows (tasks, pages, stickies, calendar events) accept any
+writer household; the host may relay a remote member's create. The §25.6
+catch-up stream is held to the same rules unless it comes from the host.
+Because every author is bound to the roster mirror, the mirror must heal on
+its own: the host sends a v_32 roster snapshot on seat, on a member's
+upgrade and on the periodic sync tick, and a write that beat the gossip
+seating its author or household waits in a bounded in-memory buffer until
+the seat lands. The per-family table is in
+[`docs/protocol/spaces.md`](protocol/spaces.md).
 
 ## Spec references
 

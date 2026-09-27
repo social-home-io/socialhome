@@ -67,7 +67,12 @@ class _FakeSpaceRepo:
         self.host_identity_pks[space_id] = pk_hex
 
     async def get(self, space_id):
-        return self.spaces.get(space_id)
+        # Unless a test says otherwise, ``peer-a`` hosts the space — its
+        # chunks are taken whole (non-host providers are covered by the
+        # authorship protocol tests).
+        return self.spaces.get(space_id) or SimpleNamespace(
+            id=space_id, owner_instance_id="peer-a"
+        )
 
     async def save_member(self, member):
         self.members.append(member)
@@ -721,6 +726,7 @@ async def test_dispatch_keeps_a_hidden_anchor_post_out_of_the_joiners_feed(recei
             },
             {"id": "p-shown", "author": "u-1", "type": "text", "content": "hi"},
         ],
+        provider="peer-a",
     )
     by_id = {p.id: p for _sid, p in post_repo.saved}
     assert by_id["p-anchor"].hidden_from_feed is True
@@ -769,7 +775,7 @@ async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
     with caplog.at_level(
         logging.WARNING, logger="socialhome.federation.sync.space.receiver"
     ):
-        await r._dispatch("bazaar", "sp-1", [record])
+        await r._dispatch("bazaar", "sp-1", [record], provider="peer-a")
     warnings = [
         rec.getMessage()
         for rec in caplog.records

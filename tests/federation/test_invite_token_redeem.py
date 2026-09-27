@@ -2278,6 +2278,8 @@ async def test_a_redeem_tells_existing_member_households_about_the_seat():
             "user_pk": "pk-alice",
             "display_name": "Alice",
             "role": SpaceRole.SUBSCRIBER.value,
+            # The ACK already carries a fresh roster; no snapshot on redeem.
+            "send_snapshot": False,
         }
     ]
 
