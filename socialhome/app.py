@@ -936,6 +936,10 @@ def _wire_federation_stack(
         # of this point.
         media_dir=pathlib.Path(config.media_path),
         realtime=None,
+        # SPACE_MEDIA_BLOB scope: which space a gallery item / bazaar
+        # listing the blob is for lives in.
+        gallery_repo=gallery_repo,
+        bazaar_repo=bazaar_repo,
     )
     inbound_service.attach_to(federation_service)
 

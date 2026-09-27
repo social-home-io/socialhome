@@ -372,8 +372,8 @@ NOT_ROW_SCOPED: dict[FederationEventType, str] = {
         "handler already writes to the routing space (roster-authority tests)"
     ),
     FET.SPACE_MEDIA_BLOB: (
-        "writes media bytes keyed by filename, not a space row — the media "
-        "store has no per-space scope to check against"
+        "writes media bytes keyed by filename, not a space row — its scope "
+        "and write-once rules live in test_media_blob_scope.py"
     ),
 }
 

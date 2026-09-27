@@ -245,6 +245,56 @@ class PersonalCalendarInboundHandlers:
 
     # ─── RSVP propagation back to the organiser ─────────────────────────
 
+    async def _authorised_rsvp_event(
+        self,
+        event: "FederationEvent",
+        local_event_id: str,
+        user_id: str,
+    ) -> CalendarEvent | None:
+        """Return the organiser's event iff ``from_instance`` may answer for ``user_id``.
+
+        An RSVP is a reply to an invite this household sent, so it is
+        honoured only when all of these hold — otherwise the event is
+        dropped with a WARNING:
+
+        * the event exists here and is organised here (not an inbound
+          ``remote_invite`` mirror — replies flow organiser-ward only);
+        * ``user_id`` is on the event's ``attendees`` — the same list the
+          outbound fan-out (``CalendarService._publish_federation_event``)
+          routed the invite from;
+        * ``user_id``'s home household is the sending household. That
+          rules out a local member (home = this instance) and any
+          invitee of a third household.
+        """
+        existing = await self._calendar_repo.get_event(local_event_id)
+        if existing is None:
+            log.debug(
+                "%s for unknown event %s",
+                event.event_type,
+                local_event_id,
+            )
+            return None
+        reason: str | None = None
+        if existing.origin == "remote_invite":
+            reason = "event is not organised here"
+        elif user_id not in existing.attendees:
+            reason = "user was not invited"
+        elif await self._user_repo.get_instance_for_user(user_id) != (
+            event.from_instance
+        ):
+            reason = "user does not belong to the sending household"
+        if reason is not None:
+            log.warning(
+                "%s from %s: %s (event=%s user=%s) — refusing",
+                event.event_type,
+                event.from_instance,
+                reason,
+                local_event_id,
+                user_id,
+            )
+            return None
+        return existing
+
     async def _on_rsvp_updated(self, event: "FederationEvent") -> None:
         p = event.payload
         local_event_id = str(p.get("event_id") or "")
@@ -258,15 +308,9 @@ class PersonalCalendarInboundHandlers:
             log.debug("PERSONAL_CALENDAR_RSVP_UPDATED: bad status %r", status)
             return
         # The organiser's row id is in ``event_id`` (the responder
-        # echoes the original event id back). Verify the row exists
-        # locally — a peer can't make us write RSVPs for events we
-        # don't own.
-        existing = await self._calendar_repo.get_event(local_event_id)
+        # echoes the original event id back).
+        existing = await self._authorised_rsvp_event(event, local_event_id, user_id)
         if existing is None:
-            log.debug(
-                "PERSONAL_CALENDAR_RSVP_UPDATED for unknown event %s",
-                local_event_id,
-            )
             return
         if not occurrence_at:
             occurrence_at = existing.start.isoformat()
@@ -287,7 +331,7 @@ class PersonalCalendarInboundHandlers:
         occurrence_at = p.get("occurrence_at")
         if not local_event_id or not user_id:
             return
-        existing = await self._calendar_repo.get_event(local_event_id)
+        existing = await self._authorised_rsvp_event(event, local_event_id, user_id)
         if existing is None:
             return
         await self._calendar_repo.remove_rsvp(

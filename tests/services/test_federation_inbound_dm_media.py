@@ -45,6 +45,31 @@ def _event(event_type, payload):
     )
 
 
+async def _seed_remote_user(db, user_id: str, instance_id: str) -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO remote_instances"
+        "(id, display_name, remote_identity_pk, key_self_to_remote,"
+        " key_remote_to_self, remote_inbox_url, local_inbox_id, status,"
+        " source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            instance_id,
+            instance_id,
+            "00" * 32,
+            "k1",
+            "k2",
+            f"https://{instance_id}/wh",
+            f"wh-{instance_id}",
+            "confirmed",
+            "manual",
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        (user_id, instance_id, user_id, user_id),
+    )
+
+
 @pytest.fixture
 async def inbound_with_media(db, bus, tmp_path):
     media_dir = tmp_path / "media"
@@ -57,6 +82,9 @@ async def inbound_with_media(db, bus, tmp_path):
         user_repo=SqliteUserRepo(db),
         media_dir=media_dir,
     )
+    # The message's sender lives on ``peer-a`` — the household the
+    # blob envelopes come from.
+    await _seed_remote_user(db, "user-remote", "peer-a")
     # Seed a conversation + message row that the blob handler can
     # update.
     await db.enqueue(
@@ -424,3 +452,155 @@ def test_mime_to_ext_known_and_unknown():
     assert _mime_to_ext("image/webp") == ".webp"
     assert _mime_to_ext("application/pdf") == ".pdf"
     assert _mime_to_ext("text/x-unknown") == ".bin"
+
+
+# ── Scope + write-once ──────────────────────────────────────────────────
+
+
+def _blob_event(payload, *, from_instance="peer-a", body=_WEBP_HEADER):
+    return FederationEvent(
+        msg_id="msg-blob",
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        from_instance=from_instance,
+        to_instance="self",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        payload={
+            "mime_type": "image/webp",
+            "bytes_b64": base64.b64encode(body).decode("ascii"),
+            **payload,
+        },
+    )
+
+
+async def _row(db, message_id):
+    return await db.fetchone(
+        "SELECT media_url, media_sync_status FROM conversation_messages WHERE id=?",
+        (message_id,),
+    )
+
+
+async def test_dm_media_blob_from_another_household_is_refused(
+    inbound_with_media, caplog
+):
+    """The message is known and was sent from ``peer-a``; ``peer-b`` (say a
+    household in the same group DM) can't supply its bytes."""
+    svc, media_dir, db = inbound_with_media
+    with caplog.at_level("WARNING"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {"media_blob_id": "m-1", "message_id": "m-1"},
+                from_instance="peer-b",
+            )
+        )
+    assert not (media_dir / "m-1.webp").exists()
+    row = await _row(db, "m-1")
+    assert row["media_sync_status"] == "pending"
+    assert "refusing" in caplog.text
+
+
+async def test_dm_media_blob_for_local_members_message_is_refused(inbound_with_media):
+    svc, media_dir, db = inbound_with_media
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("anna", "u-anna", "Anna"),
+    )
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, type, media_blob_id, media_url, created_at)"
+        " VALUES(?,?,?,?,?,?,?, datetime('now'))",
+        ("m-local", "conv-1", "u-anna", "", "image", "m-local", "api/media/x.webp"),
+    )
+    await svc._on_dm_media_blob(
+        _blob_event({"media_blob_id": "m-local", "message_id": "m-local"})
+    )
+    assert not (media_dir / "m-local.webp").exists()
+    assert (await _row(db, "m-local"))["media_url"] == "api/media/x.webp"
+
+
+async def test_dm_media_blob_with_mismatched_blob_id_is_refused(inbound_with_media):
+    svc, media_dir, db = inbound_with_media
+    await svc._on_dm_media_blob(
+        _blob_event({"media_blob_id": "other-blob", "message_id": "m-1"})
+    )
+    assert not (media_dir / "m-1.webp").exists()
+    assert (await _row(db, "m-1"))["media_sync_status"] == "pending"
+
+
+@pytest.mark.parametrize("bad", ["../escape", "sub/m", ".hidden", "nul\x00"])
+async def test_dm_media_blob_unsafe_message_id_is_refused(inbound_with_media, bad):
+    svc, media_dir, _db = inbound_with_media
+    await svc._on_dm_media_blob(_blob_event({"media_blob_id": bad, "message_id": bad}))
+    assert list(media_dir.iterdir()) == []
+    assert not (media_dir.parent / "escape.webp").exists()
+
+
+async def test_dm_media_blob_never_overwrites_existing_file(inbound_with_media):
+    """Write-once: the sender's own re-delivery re-adopts the file already
+    there instead of replacing it."""
+    svc, media_dir, db = inbound_with_media
+    (media_dir / "m-1.webp").write_bytes(_WEBP_HEADER + b"ORIGINAL")
+    await svc._on_dm_media_blob(
+        _blob_event({"media_blob_id": "m-1", "message_id": "m-1"})
+    )
+    assert (media_dir / "m-1.webp").read_bytes() == _WEBP_HEADER + b"ORIGINAL"
+    row = await _row(db, "m-1")
+    assert row["media_url"] == "api/media/m-1.webp"
+    assert row["media_sync_status"] is None
+
+
+async def test_dm_media_blob_chunked_never_overwrites_existing_file(
+    inbound_with_media,
+):
+    svc, media_dir, _db = inbound_with_media
+    (media_dir / "m-1.webp").write_bytes(b"ORIGINAL")
+    for i, part in enumerate((b"A", b"B")):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {
+                    "media_blob_id": "m-1",
+                    "message_id": "m-1",
+                    "chunk_index": i,
+                    "chunk_count": 2,
+                    "final": i == 1,
+                },
+                body=part,
+            )
+        )
+    assert (media_dir / "m-1.webp").read_bytes() == b"ORIGINAL"
+    assert not list(media_dir.glob("m-1.part*"))
+
+
+async def test_dm_media_blob_before_message_is_written_once(inbound_with_media):
+    """The blob can overtake its DM_MESSAGE; it lands (write-once) and a
+    second copy under the same name doesn't replace it."""
+    svc, media_dir, _db = inbound_with_media
+    await svc._on_dm_media_blob(
+        _blob_event({"media_blob_id": "m-new", "message_id": "m-new"})
+    )
+    assert (media_dir / "m-new.webp").read_bytes() == _WEBP_HEADER
+    await svc._on_dm_media_blob(
+        _blob_event(
+            {"media_blob_id": "m-new", "message_id": "m-new"},
+            from_instance="peer-b",
+            body=b"SECOND",
+        )
+    )
+    assert (media_dir / "m-new.webp").read_bytes() == _WEBP_HEADER
+
+
+@pytest.mark.parametrize(("index", "count"), [(-1, 2), (2, 2), (0, 10**9)])
+async def test_dm_media_blob_out_of_range_chunk_meta_is_refused(
+    inbound_with_media, index, count
+):
+    svc, media_dir, _db = inbound_with_media
+    await svc._on_dm_media_blob(
+        _blob_event(
+            {
+                "media_blob_id": "m-1",
+                "message_id": "m-1",
+                "chunk_index": index,
+                "chunk_count": count,
+            }
+        )
+    )
+    assert list(media_dir.iterdir()) == []

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from socialhome.domain.calendar import Calendar, CalendarEvent
+from socialhome.domain.calendar import Calendar, CalendarEvent, CalendarRSVP
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
@@ -75,9 +75,14 @@ class _FakeCalendarRepo:
 class _FakeUserRepo:
     def __init__(self) -> None:
         self.by_uid: dict[str, User] = {}
+        #: user_id → home instance_id (local users map to ``"self"``).
+        self.home: dict[str, str] = {}
 
     async def get_by_user_id(self, user_id):
         return self.by_uid.get(user_id)
+
+    async def get_instance_for_user(self, user_id):
+        return self.home.get(user_id)
 
 
 def _envelope(event_type, payload, from_instance="i_remote"):
@@ -110,6 +115,10 @@ def env():
         user_id="u-anna",
         display_name="Anna",
     )
+    user_repo.home["u-anna"] = "self"
+    # Invitees who live on the envelope's sending household.
+    for uid in ("u-bob", "u-bob-remote"):
+        user_repo.home[uid] = "i_remote"
     cal_repo.calendars["cal-anna"] = Calendar(
         id="cal-anna",
         name="Anna",
@@ -255,6 +264,7 @@ async def test_inbound_rsvp_writes_to_local_event(env):
         start=now,
         end=now + timedelta(hours=1),
         created_by="u-anna",
+        attendees=("u-bob", "u-bob-remote"),
     )
     await rsvp(
         _envelope(
@@ -310,6 +320,7 @@ async def test_inbound_rsvp_rejects_bad_status(env):
         start=now,
         end=now + timedelta(hours=1),
         created_by="u-anna",
+        attendees=("u-bob", "u-bob-remote"),
     )
     await rsvp(
         _envelope(
@@ -341,6 +352,7 @@ async def test_inbound_rsvp_deleted_clears_row(env):
         start=now,
         end=now + timedelta(hours=1),
         created_by="u-anna",
+        attendees=("u-bob", "u-bob-remote"),
     )
     await rsvp_upd(
         _envelope(
@@ -549,6 +561,7 @@ async def test_inbound_rsvp_updated_defaults_occurrence_to_event_start(env):
         start=now,
         end=now + timedelta(hours=1),
         created_by="u-anna",
+        attendees=("u-bob", "u-bob-remote"),
     )
     await rsvp(
         _envelope(
@@ -699,3 +712,147 @@ async def test_inbound_invite_validates_peer_tz(env, wire_tz, expected):
     assert len(cal_repo.events) == 1
     ev = next(iter(cal_repo.events.values()))
     assert ev.tz == expected
+
+
+# ── RSVP scope: only the invited household, only its own users ────────
+
+
+def _organiser_event(cal_repo, *, attendees=("u-bob",), origin="local"):
+    now = datetime.now(timezone.utc)
+    cal_repo.events["org-evt"] = CalendarEvent(
+        id="org-evt",
+        calendar_id="cal-anna",
+        summary="Picnic",
+        start=now,
+        end=now + timedelta(hours=1),
+        created_by="u-anna",
+        attendees=attendees,
+        origin=origin,
+    )
+    return now
+
+
+def _rsvp_payload(user_id, now, status="accepted"):
+    return {
+        "event_id": "org-evt",
+        "user_id": user_id,
+        "status": status,
+        "occurrence_at": now.isoformat(),
+    }
+
+
+@pytest.mark.parametrize(
+    ("user_id", "from_instance", "attendees"),
+    [
+        # Event never shared with the sending household.
+        ("u-bob", "i_other", ("u-bob",)),
+        # Sender's own user, but not invited to this event.
+        ("u-carl", "i_remote", ("u-bob",)),
+        # A local household member's RSVP.
+        ("u-anna", "i_remote", ("u-bob", "u-anna")),
+        # Invited user who lives on a third household.
+        ("u-dora", "i_remote", ("u-bob", "u-dora")),
+        # Unknown user id.
+        ("u-ghost", "i_remote", ("u-bob", "u-ghost")),
+    ],
+)
+async def test_inbound_rsvp_updated_refused_outside_invite(
+    env, caplog, user_id, from_instance, attendees
+):
+    fed, cal_repo, user_repo = env
+    user_repo.home.update({"u-carl": "i_remote", "u-dora": "i_third"})
+    rsvp = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED
+    ]
+    now = _organiser_event(cal_repo, attendees=attendees)
+    with caplog.at_level("WARNING"):
+        await rsvp(
+            _envelope(
+                FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED,
+                _rsvp_payload(user_id, now),
+                from_instance=from_instance,
+            )
+        )
+    assert cal_repo.rsvps == {}
+    assert "refusing" in caplog.text
+
+
+async def test_inbound_rsvp_updated_refused_on_mirrored_invite(env, caplog):
+    """A mirror row (``origin='remote_invite'``) has its organiser elsewhere;
+    RSVPs flow organiser-ward only, so a peer can't write one here."""
+    fed, cal_repo, _ = env
+    rsvp = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED
+    ]
+    now = _organiser_event(cal_repo, origin="remote_invite")
+    with caplog.at_level("WARNING"):
+        await rsvp(
+            _envelope(
+                FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED,
+                _rsvp_payload("u-bob", now),
+            )
+        )
+    assert cal_repo.rsvps == {}
+    assert "refusing" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("victim", "from_instance"),
+    [
+        ("u-anna", "i_remote"),  # local member's RSVP
+        ("u-bob", "i_other"),  # another household's invitee
+    ],
+)
+async def test_inbound_rsvp_deleted_refused_outside_invite(
+    env, caplog, victim, from_instance
+):
+    fed, cal_repo, _ = env
+    rsvp_del = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_RSVP_DELETED
+    ]
+    now = _organiser_event(cal_repo, attendees=("u-bob", "u-anna"))
+    key = ("org-evt", victim, now.isoformat())
+    cal_repo.rsvps[key] = CalendarRSVP(
+        event_id="org-evt",
+        user_id=victim,
+        status="accepted",
+        updated_at=now.isoformat(),
+        occurrence_at=now.isoformat(),
+    )
+    with caplog.at_level("WARNING"):
+        await rsvp_del(
+            _envelope(
+                FederationEventType.PERSONAL_CALENDAR_RSVP_DELETED,
+                {
+                    "event_id": "org-evt",
+                    "user_id": victim,
+                    "occurrence_at": now.isoformat(),
+                },
+                from_instance=from_instance,
+            )
+        )
+    assert key in cal_repo.rsvps
+    assert "refusing" in caplog.text
+
+
+async def test_inbound_rsvp_deleted_by_invited_user_clears_row(env):
+    fed, cal_repo, _ = env
+    rsvp_del = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_RSVP_DELETED
+    ]
+    now = _organiser_event(cal_repo)
+    key = ("org-evt", "u-bob", now.isoformat())
+    cal_repo.rsvps[key] = CalendarRSVP(
+        event_id="org-evt",
+        user_id="u-bob",
+        status="accepted",
+        updated_at=now.isoformat(),
+        occurrence_at=now.isoformat(),
+    )
+    await rsvp_del(
+        _envelope(
+            FederationEventType.PERSONAL_CALENDAR_RSVP_DELETED,
+            {"event_id": "org-evt", "user_id": "u-bob"},
+        )
+    )
+    assert cal_repo.rsvps == {}

@@ -75,6 +75,15 @@ from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
+from .inbound_media_store import (
+    is_safe_media_name,
+    media_basename,
+    note_existing,
+    parse_chunk_meta,
+    partial_key,
+    publish_once,
+    remove_quietly,
+)
 from .space_crypto_service import (
     UnsupportedAuthoritySuite,
     strip_authority_sig_fields,
@@ -85,7 +94,9 @@ from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
+    from ..repositories.bazaar_repo import AbstractBazaarRepo
     from ..repositories.conversation_repo import AbstractConversationRepo
+    from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -150,6 +161,17 @@ _MEDIA_MIME_EXT: dict[str, str] = {
 
 def _mime_to_ext(mime_type: str) -> str:
     return _MEDIA_MIME_EXT.get(mime_type.lower(), ".bin")
+
+
+def _declared_size(payload: dict, raw: bytes, chunk_count: int) -> int:
+    """Whole-file size of a media blob: the chunk itself, or the sender's
+    ``file_size_bytes`` for a multi-chunk transfer (``-1`` if absent)."""
+    if chunk_count == 1:
+        return len(raw)
+    try:
+        return int(payload.get("file_size_bytes") or -1)
+    except TypeError, ValueError:
+        return -1
 
 
 #: Magic-byte signatures for the MIME types the upload pipeline
@@ -231,6 +253,8 @@ class FederationInboundService:
         "_media_dir",
         "_realtime",
         "_space_remote_member_repo",
+        "_gallery_repo",
+        "_bazaar_repo",
         "_federation_service",
     )
 
@@ -252,6 +276,8 @@ class FederationInboundService:
         media_dir: "pathlib.Path | None" = None,
         realtime: "object | None" = None,
         space_remote_member_repo=None,
+        gallery_repo: "AbstractGalleryRepo | None" = None,
+        bazaar_repo: "AbstractBazaarRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -277,6 +303,10 @@ class FederationInboundService:
         # right table. Optional so legacy test stacks that don't
         # exercise the cross-household path can omit it.
         self._space_remote_member_repo = space_remote_member_repo
+        # Resolve which space a SPACE_MEDIA_BLOB's gallery item / bazaar
+        # listing lives in. Optional so unit-test stacks can omit them.
+        self._gallery_repo = gallery_repo
+        self._bazaar_repo = bazaar_repo
         self._federation_service = None
 
     def attach_realtime(self, realtime: "object") -> None:
@@ -814,6 +844,22 @@ class FederationInboundService:
         except TypeError, ValueError:
             chunk_index = 0
             chunk_count = 1
+        if parse_chunk_meta(chunk_index, chunk_count) is None:
+            log.warning(
+                "DM_MEDIA_BLOB from %s: bad chunk metadata for %s — dropping",
+                event.from_instance,
+                message_id,
+            )
+            return
+        if not is_safe_media_name(message_id):
+            log.warning(
+                "DM_MEDIA_BLOB: rejecting message id %r from %s (unsafe name)",
+                message_id,
+                event.from_instance,
+            )
+            return
+        if not await self._dm_media_in_scope(event, message_id, blob_id):
+            return
         is_final = bool(p.get("final", chunk_index == chunk_count - 1))
         mime_type = str(p.get("mime_type") or "application/octet-stream")
         await self._assemble_dm_chunk(
@@ -824,7 +870,45 @@ class FederationInboundService:
             is_final=is_final,
             mime_type=mime_type,
             conversation_id=str(p.get("conversation_id") or ""),
+            from_instance=event.from_instance,
+            total_size=_declared_size(p, raw, chunk_count),
         )
+
+    async def _dm_media_in_scope(
+        self,
+        event: "FederationEvent",
+        message_id: str,
+        blob_id: str,
+    ) -> bool:
+        """Whether ``from_instance`` may ship the bytes for ``message_id``.
+
+        When the message is already here, only its sender's household may:
+        the blob id must be the one the message announced, and the
+        sender's home instance must be ``from_instance`` — which also
+        rules out a local member's message (home = this instance). A
+        message not seen yet (the blob overtook its ``DM_MESSAGE``) is
+        accepted: the write is write-once, and ``_receive_media_preview``
+        adopts the file when the message lands.
+        """
+        msg = await self._conversation_repo.get_message(message_id)
+        if msg is None:
+            return True
+        reason: str | None = None
+        if msg.media_blob_id != blob_id:
+            reason = "blob id does not match the message"
+        elif await self._user_repo.get_instance_for_user(msg.sender_user_id) != (
+            event.from_instance
+        ):
+            reason = "message was not sent from this household"
+        if reason is None:
+            return True
+        log.warning(
+            "DM_MEDIA_BLOB from %s: %s (message=%s) — refusing",
+            event.from_instance,
+            reason,
+            message_id,
+        )
+        return False
 
     async def _assemble_dm_chunk(
         self,
@@ -836,6 +920,8 @@ class FederationInboundService:
         is_final: bool,
         mime_type: str,
         conversation_id: str,
+        from_instance: str,
+        total_size: int,
     ) -> None:
         """Write one DM media chunk to disk and finalise on the last one.
 
@@ -845,18 +931,40 @@ class FederationInboundService:
         On the final chunk it concatenates the parts, swaps the message
         row's ``media_url``, and pushes the ``dm.media_ready`` WS frame.
         ``self._media_dir`` is guaranteed non-None by the caller.
+
+        Write-once: the final file is moved into place with
+        :func:`publish_once`, so an existing ``<message_id><ext>`` is never
+        replaced — a re-delivery just re-adopts the file already there.
         """
         assert self._media_dir is not None
         data = raw
         ext = _mime_to_ext(mime_type)
+        dest = self._media_dir / f"{message_id}{ext}"
+        tmp_dest = self._media_dir / f"{message_id}.assembled{ext}"
         try:
             await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
-            if chunk_count == 1:
-                # Fast path: no parts to assemble, write straight
-                # to the final destination.
-                dest = self._media_dir / f"{message_id}{ext}"
-                async with aiofiles.open(dest, "wb") as out_f:
+            if await aiofiles.os.path.exists(dest):
+                # Already landed (re-delivery). Don't rewrite; on the
+                # final chunk fall through so the row adopts the file.
+                if not is_final and chunk_count > 1:
+                    return
+                await note_existing(
+                    dest,
+                    incoming_size=total_size,
+                    what="DM_MEDIA_BLOB",
+                    from_instance=from_instance,
+                )
+            elif chunk_count == 1:
+                # Fast path: no parts to assemble.
+                async with aiofiles.open(tmp_dest, "wb") as out_f:
                     await out_f.write(data)
+                if not await publish_once(tmp_dest, dest):
+                    await note_existing(
+                        dest,
+                        incoming_size=total_size,
+                        what="DM_MEDIA_BLOB",
+                        from_instance=from_instance,
+                    )
             else:
                 part_path = self._media_dir / f"{message_id}.part{chunk_index:05d}"
                 async with aiofiles.open(part_path, "wb") as out_f:
@@ -870,8 +978,6 @@ class FederationInboundService:
                 # land yet we have a hole — log + bail; the sender's
                 # outbox retry will resend the missing chunk and the
                 # finalisation will rerun.
-                dest = self._media_dir / f"{message_id}{ext}"
-                tmp_dest = self._media_dir / f"{message_id}.assembled{ext}"
                 async with aiofiles.open(tmp_dest, "wb") as out_f:
                     for i in range(chunk_count):
                         part = self._media_dir / f"{message_id}.part{i:05d}"
@@ -889,7 +995,13 @@ class FederationInboundService:
                             return
                         async with aiofiles.open(part, "rb") as in_f:
                             await out_f.write(await in_f.read())
-                await aiofiles.os.replace(tmp_dest, dest)
+                if not await publish_once(tmp_dest, dest):
+                    await note_existing(
+                        dest,
+                        incoming_size=total_size,
+                        what="DM_MEDIA_BLOB",
+                        from_instance=from_instance,
+                    )
                 # Cleanup part files.
                 for i in range(chunk_count):
                     try:
@@ -1043,25 +1155,35 @@ class FederationInboundService:
         Mirrors :meth:`_on_dm_media_blob`. The sender's
         :class:`SpaceMediaSyncService` ships one or more chunks (each
         carrying ``chunk_index`` / ``chunk_count`` / ``final``); the
-        receiver writes each chunk to a part file
-        ``<media_dir>/.partial/<transfer_id>/<chunk_index>`` and
-        finalises by concatenating into the target filename when the
-        ``final`` chunk arrives.
+        receiver writes each chunk to a part file under
+        ``<media_dir>/.partial/<key>/`` and finalises by moving the
+        assembled bytes into place when the ``final`` chunk arrives.
 
         Without this handler the post lands but the picture is broken
         because the URL points at the receiver's media path with no
         backing file.
 
+        Scope (``docs/protocol/media.md``):
+
+        * The envelope must name one space (:func:`resolve_space_id`).
+        * The correlated row — ``correlation_id`` (``post_id`` on older
+          senders): a post, a bazaar listing or a gallery item — must,
+          when already known here, live in that space and reference
+          ``filename``. Otherwise the blob is refused with a WARNING.
+        * Not yet known (the blob overtook its row on the mesh / §25.6
+          drain) → accepted, because the write below is write-once.
+        * **Write-once:** an existing file under ``filename`` is never
+          replaced (:mod:`inbound_media_store`). Media names are random,
+          so this is what keeps a blob from swapping another space's, a
+          DM's or the household's own file.
+
         Safety:
 
-        * Filename rejected on path-traversal markers (``/``, ``\\``,
-          leading ``.``) — same allowlist as :class:`MediaServeView`.
-        * Each chunk is bounded at the federation envelope's size
-          cap; multi-chunk files are bounded by the sender's
-          single-chunk threshold logic (1 MiB).
-        * Part files live in a sub-directory of the media root so
-          concurrent finalises don't see half-written content via
-          ``MediaServeView`` (which only scans the media root).
+        * ``filename`` must pass :func:`is_safe_media_name` — a single
+          path component, no separators / leading dot / NUL.
+        * Chunk metadata is range-checked; part files are keyed by the
+          sending household so two households' chunks never mix, and
+          live under ``.partial`` which ``MediaServeView`` never serves.
         """
         if self._media_dir is None:
             return
@@ -1072,82 +1194,154 @@ class FederationInboundService:
         raw = self._media_chunk_bytes(event)
         if not filename or raw is None:
             return
-        if "/" in filename or "\\" in filename or filename.startswith("."):
+        if not is_safe_media_name(filename):
             log.warning(
-                "SPACE_MEDIA_BLOB: rejecting filename %r from %s (path traversal)",
+                "SPACE_MEDIA_BLOB: rejecting filename %r from %s (unsafe name)",
                 filename,
                 event.from_instance,
             )
             return
-        transfer_id = str(p.get("transfer_id") or "")
-        if not transfer_id:
-            # First-revision senders that didn't include transfer_id
-            # fall back to a per-blob assembly directory keyed on the
-            # filename. Same-filename concurrent transfers would
-            # collide, but the chunk_index writes are idempotent so
-            # the final concat still produces a consistent file.
-            transfer_id = filename
-        if "/" in transfer_id or "\\" in transfer_id or transfer_id.startswith("."):
+        chunk_meta = parse_chunk_meta(
+            p.get("chunk_index") or 0,
+            p.get("chunk_count") or 1,
+        )
+        if chunk_meta is None:
+            log.warning(
+                "SPACE_MEDIA_BLOB from %s: bad chunk metadata for %s — dropping",
+                event.from_instance,
+                filename,
+            )
             return
+        space_id = resolve_space_id(event)
+        correlation_id = str(p.get("correlation_id") or p.get("post_id") or "")
+        if not space_id or not correlation_id:
+            log.warning(
+                "SPACE_MEDIA_BLOB from %s: %s names no space or row — refusing",
+                event.from_instance,
+                filename,
+            )
+            return
+        if not await self._space_media_in_scope(
+            space_id=space_id,
+            correlation_id=correlation_id,
+            filename=filename,
+        ):
+            log.warning(
+                "SPACE_MEDIA_BLOB from %s: %s is not media of %s in space %s "
+                "— refusing",
+                event.from_instance,
+                filename,
+                correlation_id,
+                space_id,
+            )
+            return
+        transfer_id = str(p.get("transfer_id") or "") or filename
+        chunk_index, chunk_count = chunk_meta
         await self._assemble_space_chunk(
             raw=raw,
             filename=filename,
-            transfer_id=transfer_id,
-            chunk_index=int(p.get("chunk_index") or 0),
-            chunk_count=int(p.get("chunk_count") or 1),
-            final=bool(p.get("final")),
-            post_id=p.get("post_id"),
+            partial_dir=partial_key(event.from_instance, transfer_id),
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+            final=bool(p.get("final")) or chunk_count == 1,
+            post_id=correlation_id,
+            from_instance=event.from_instance,
+            total_size=_declared_size(p, raw, chunk_count),
         )
+
+    async def _space_media_in_scope(
+        self,
+        *,
+        space_id: str,
+        correlation_id: str,
+        filename: str,
+    ) -> bool:
+        """Whether a blob for ``correlation_id`` may land in ``space_id``.
+
+        ``False`` only on positive evidence: the correlated row is known
+        and lives in another space, or is known and does not reference
+        ``filename``. An unknown row is ``True`` — the write is
+        write-once, so accepting it can't replace anything.
+        """
+        found = await self._space_post_repo.get(correlation_id)
+        if found is not None:
+            post_space, post = found
+            if post_space != space_id:
+                return False
+            names = {
+                media_basename(post.media_url),
+                *(media_basename(u) for u in post.image_urls or ()),
+                media_basename(post.file_meta.url if post.file_meta else None),
+            }
+            if filename in names:
+                return True
+            if post.type != PostType.BAZAAR:
+                return False
+            # A bazaar wrapper post carries its photos on the listing row.
+            listing = (
+                await self._bazaar_repo.get_listing(correlation_id)
+                if self._bazaar_repo is not None
+                else None
+            )
+            if listing is None:
+                return True  # listing not here yet
+            return listing.space_id == space_id and filename in {
+                media_basename(u) for u in listing.image_urls
+            }
+        if self._gallery_repo is not None:
+            item = await self._gallery_repo.get_item(correlation_id)
+            if item is not None:
+                album = await self._gallery_repo.get_album(item.album_id)
+                if album is None or album.space_id != space_id:
+                    return False
+                return filename in {
+                    media_basename(item.url),
+                    media_basename(item.thumbnail_url),
+                }
+        return True
 
     async def _assemble_space_chunk(
         self,
         *,
         raw: bytes,
         filename: str,
-        transfer_id: str,
+        partial_dir: str,
         chunk_index: int,
         chunk_count: int,
         final: bool,
         post_id: object,
+        from_instance: str,
+        total_size: int,
     ) -> None:
         """Write one space-media chunk to disk and finalise on the last.
 
-        Source-agnostic core shared by the JSON ``SPACE_MEDIA_BLOB``
-        handler and the binary ``fed-media-v1`` path. ``raw`` is the
-        already-decoded chunk bytes; ``filename`` / ``transfer_id`` have
-        been path-traversal-validated by the caller. ``self._media_dir``
-        is guaranteed non-None by the caller.
+        ``raw`` is the already-decoded chunk bytes; ``filename`` has been
+        validated and scope-checked by the caller; ``partial_dir`` is the
+        sender-bound :func:`partial_key`. ``self._media_dir`` is
+        guaranteed non-None by the caller. Every path ends in
+        :func:`publish_once`, so an existing ``filename`` is never
+        replaced.
         """
         assert self._media_dir is not None
-        data = raw
-        # Single-chunk fast path: write straight to the final filename.
         target = self._media_dir / filename
-        if chunk_count == 1:
-            try:
-                await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
-                async with aiofiles.open(target, "wb") as fh:
-                    await fh.write(data)
-            except OSError as exc:
-                log.warning(
-                    "SPACE_MEDIA_BLOB: write failed for %s: %s",
+        partial_root = self._media_dir / ".partial" / partial_dir
+        if await aiofiles.os.path.exists(target):
+            # Already have it — a re-delivery, or a name that belongs to
+            # something else. Nothing to write; drop any stale parts.
+            if final:
+                await note_existing(
                     target,
-                    exc,
+                    incoming_size=total_size,
+                    what="SPACE_MEDIA_BLOB",
+                    from_instance=from_instance,
                 )
-                return
-            log.info(
-                "SPACE_MEDIA_BLOB: stored %s (%d bytes) for post=%s",
-                filename,
-                len(data),
-                post_id,
-            )
+                await self._drop_space_partials(partial_root, chunk_count)
             return
-        # Multi-chunk: write to a part file under a per-transfer dir.
-        partial_root = self._media_dir / ".partial" / transfer_id
         try:
             await aiofiles.os.makedirs(partial_root, exist_ok=True)
             part_path = partial_root / f"{chunk_index:06d}"
             async with aiofiles.open(part_path, "wb") as fh:
-                await fh.write(data)
+                await fh.write(raw)
         except OSError as exc:
             log.warning(
                 "SPACE_MEDIA_BLOB: part write failed for %s chunk %d: %s",
@@ -1158,48 +1352,58 @@ class FederationInboundService:
             return
         if not final:
             return
-        # Final chunk landed — assemble the parts in index order.
+        # Final chunk landed — assemble the parts in index order into a
+        # temp file next to them, then move it into place write-once.
+        assembled = partial_root / "assembled"
         try:
-            parts = sorted(
-                [
-                    entry.name
-                    for entry in pathlib.Path(partial_root).iterdir()
-                    if entry.is_file()
-                ]
-            )
-            if len(parts) < chunk_count:
-                log.warning(
-                    "SPACE_MEDIA_BLOB: %d/%d chunks present at finalise "
-                    "for %s — leaving partials for next attempt",
-                    len(parts),
-                    chunk_count,
-                    filename,
-                )
-                return
-            async with aiofiles.open(target, "wb") as out:
-                for name in parts:
-                    async with aiofiles.open(partial_root / name, "rb") as inp:
+            for i in range(chunk_count):
+                if not await aiofiles.os.path.isfile(partial_root / f"{i:06d}"):
+                    log.warning(
+                        "SPACE_MEDIA_BLOB: chunk %d/%d missing at finalise "
+                        "for %s — leaving partials for next attempt",
+                        i,
+                        chunk_count,
+                        filename,
+                    )
+                    return
+            async with aiofiles.open(assembled, "wb") as out:
+                for i in range(chunk_count):
+                    async with aiofiles.open(partial_root / f"{i:06d}", "rb") as inp:
                         await out.write(await inp.read())
+            await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
+            published = await publish_once(assembled, target)
         except OSError as exc:
             log.warning(
                 "SPACE_MEDIA_BLOB: finalise failed for %s: %s",
                 filename,
                 exc,
             )
+            await remove_quietly(assembled)
             return
-        # Clean up part files.
-        try:
-            for name in parts:
-                await aiofiles.os.remove(partial_root / name)
-            await aiofiles.os.rmdir(partial_root)
-        except OSError:
-            pass
+        await self._drop_space_partials(partial_root, chunk_count)
+        if not published:
+            await note_existing(
+                target,
+                incoming_size=total_size,
+                what="SPACE_MEDIA_BLOB",
+                from_instance=from_instance,
+            )
+            return
         log.info(
-            "SPACE_MEDIA_BLOB: assembled %s from %d chunk(s) for post=%s",
+            "SPACE_MEDIA_BLOB: stored %s from %d chunk(s) for post=%s",
             filename,
             chunk_count,
             post_id,
         )
+
+    @staticmethod
+    async def _drop_space_partials(partial_root: pathlib.Path, count: int) -> None:
+        for i in range(count):
+            await remove_quietly(partial_root / f"{i:06d}")
+        try:
+            await aiofiles.os.rmdir(partial_root)
+        except OSError:
+            pass
 
     async def _on_space_post_updated(self, event: "FederationEvent") -> None:
         p = event.payload

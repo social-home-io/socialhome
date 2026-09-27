@@ -97,6 +97,8 @@ necessary:
 | WebSocket broadcast | Per-event WS payloads exclude fields that should be local-only. |
 | Presence privacy | GPS is 4dp-truncated; instance_id leakage is gated by opt-in. |
 | Space scope | `test_space_content_scope.py` sends every space-content event type (the `SPACE_WRITE_EVENT_TYPES` vocabulary, enumerated against the real handler registry) gated for one space but naming rows of another space or the household's own rows, plus the same through the §25.6 sync receiver, and asserts every content table is unchanged. A new space-write event type fails the tripwire until it has a cross-space case. |
+| Media blob scope | `test_media_blob_scope.py` sends `SPACE_MEDIA_BLOB` / `DM_MEDIA_BLOB` aimed at another space's rows, another household's or a local member's DM, existing files and unsafe names, and asserts the data directory and message rows are unchanged (write-once). |
+| Calendar RSVP scope | `test_personal_calendar_rsvp_scope.py` sends personal-calendar RSVP updates/deletes for events not shared with the sender, for local members and for other households' invitees, and asserts no RSVP row changes. |
 
 The encryption-first rule (§25.8.21) is the load-bearing invariant
 behind these tests — see [`principles.md`](./principles.md) for why

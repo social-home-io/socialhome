@@ -136,6 +136,45 @@ Both paths converge on the same receiver assembly
 (JSON path), so chunking, part-file reassembly, and the
 `dm.media_ready` WebSocket notify are identical regardless of transport.
 
+## Receiver scope + write-once
+
+Whatever the transport, the receiver writes a chunk only for what the
+sending household was sent it for. Both blob types share
+[`inbound_media_store.py`](../../socialhome/services/inbound_media_store.py):
+
+- **Strict names.** The target name (`filename`, or the DM
+  `message_id`) must be one safe path component — no separators, no
+  leading dot, no NUL or whitespace. `chunk_index` / `chunk_count` must
+  be in range.
+- **Write-once.** Chunks assemble into a temp file that is moved into
+  place with a hard link that fails on an existing name (check-then-
+  replace on filesystems without hard links). A file already present —
+  another space's picture, a DM attachment, the household's own upload,
+  or an earlier copy of the same blob — is never replaced; a same-size
+  re-delivery is a quiet no-op, anything else logs a WARNING.
+- **Space scope (`SPACE_MEDIA_BLOB`).** The envelope must name one space
+  (`resolve_space_id`: routing `space_id`, payload copy as fallback, a
+  mismatch is a refusal) and a `correlation_id` (`post_id` on older
+  senders). When that row is already known — a space post, the bazaar
+  listing behind a bazaar post, or a gallery item — it must live in that
+  space and reference `filename` (post `media_url` / `image_urls` /
+  `file_meta.url`, listing `image_urls`, gallery `url` /
+  `thumbnail_url`); otherwise the blob is refused with a WARNING.
+- **Blob before its row.** The mesh and the §25.6 catch-up can deliver a
+  blob before the post, listing or gallery item it belongs to. Such a
+  blob is accepted — overwriting is the harm, and the write is
+  write-once, so accepting it cannot touch an existing file.
+- **Per-sender assembly.** Space part files live under
+  `media_dir/.partial/<sha256(from_instance, transfer_id)>/`, so two
+  households' chunks never mix into one file. DM rules (sender
+  household, announced `media_blob_id`) are in
+  [`dm-media.md`](./dm-media.md#chunking).
+
+Residual, by design: among the households entitled to deliver a space's
+media (every member household can, which is what lets the §25.6 catch-up
+ship another member's pictures), the first complete copy of a new file
+wins. `tests/protocol/test_media_blob_scope.py` pins these rules.
+
 ## Implementation pointers
 
 - Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py)
