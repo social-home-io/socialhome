@@ -56,6 +56,13 @@ GATED = "sp-a"  # the space the sender is seated in and was gated for
 VICTIM = "sp-b"  # a space the sender must not be able to touch
 LOCAL_USER = "u-local"  # a real local user, so FKs never do the refusing
 SENDER = "peer-seated-in-a"
+VICTIM_HOUSE = "peer-seated-in-b"  # B's own member household (the control)
+#: The users the attack payloads name. SENDER holds a live seat for each of
+#: them in GATED — admin included — so the §24.11 *authorship* rule
+#: (``test_space_content_authorship.py``) passes for every case here and
+#: the only thing left to refuse the write is the space boundary. u-g has
+#: a ``users`` row as well, for the gallery FK.
+SEATED_IN_GATED = ("u-evil", "u-b", "u-b2", "u-g")
 
 #: Every table holding space content, plus the household tables a
 #: space-content event could otherwise reach. Snapshotted whole.
@@ -280,11 +287,11 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
     FET.SPACE_GALLERY_ITEM_CREATED: [
         (
             "upload into B's album",
-            {"id": "gi-new", "album_id": "album-b", "uploaded_by": LOCAL_USER},
+            {"id": "gi-new", "album_id": "album-b", "uploaded_by": "u-g"},
         ),
         (
             "upload into the household album",
-            {"id": "gi-new", "album_id": "album-home", "uploaded_by": LOCAL_USER},
+            {"id": "gi-new", "album_id": "album-home", "uploaded_by": "u-g"},
         ),
     ],
     FET.SPACE_GALLERY_ITEM_DELETED: [
@@ -397,10 +404,13 @@ def _config(tmp_dir) -> Config:
 
 
 _SEED = [
-    (
-        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("local", LOCAL_USER, "Local"),
-    ),
+    *[
+        (
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (name, uid, name),
+        )
+        for name, uid in (("local", LOCAL_USER), ("ug", "u-g"))
+    ],
     *[
         (
             "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
@@ -408,6 +418,24 @@ _SEED = [
             (sid, sid, "the-host", "anna", "00" * 32),
         )
         for sid in (GATED, VICTIM)
+    ],
+    # The strongest attacker: a moderator of GATED that may speak for
+    # every user the victim rows name — but only in GATED.
+    *[
+        (
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (GATED, SENDER, uid, "admin" if uid == "u-evil" else "member"),
+        )
+        for uid in SEATED_IN_GATED
+    ],
+    *[
+        (
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (VICTIM, VICTIM_HOUSE, uid, role),
+        )
+        for uid, role in (("u-b", "member"), ("u-b-admin", "admin"))
     ],
     # Posts: one per space (poll + schedule wrapper), one listing anchor in B.
     *[
@@ -563,11 +591,11 @@ async def _snapshot(db) -> dict[str, list[tuple]]:
     return out
 
 
-def _event(event_type, payload, *, space_id=GATED) -> FederationEvent:
+def _event(event_type, payload, *, space_id=GATED, sender=SENDER) -> FederationEvent:
     return FederationEvent(
         msg_id=f"m-{event_type.value}",
         event_type=event_type,
-        from_instance=SENDER,
+        from_instance=sender,
         to_instance="us",
         timestamp=datetime.now(timezone.utc).isoformat(),
         payload=payload,
@@ -622,8 +650,11 @@ async def test_a_payload_naming_another_space_is_refused_outright(
 
 
 async def test_the_victims_rows_are_still_writable_by_their_own_space(env):
-    """Control: the same envelopes gated for the victim's own space DO land
-    — the refusals above are about the space, not a broken handler."""
+    """Control: the same envelopes gated for the victim's own space, from
+    the victim space's own member household, DO land — the refusals above
+    are about the space, not a broken handler. (Every attacked type also
+    has a same-space positive control in the authorship matrix; its
+    tripwire asserts that.)"""
     app, db = env
     registry = app[federation_service_key]._event_registry
     for event_type, payload in (
@@ -637,7 +668,9 @@ async def test_the_victims_rows_are_still_writable_by_their_own_space(env):
         ),
     ):
         for handler in registry.handlers_for(event_type):
-            await handler(_event(event_type, payload, space_id=VICTIM))
+            await handler(
+                _event(event_type, payload, space_id=VICTIM, sender=VICTIM_HOUSE)
+            )
     post = await db.fetchone("SELECT content FROM space_posts WHERE id='post-b'", ())
     assert post["content"] == "edited"
     assert await db.fetchone("SELECT 1 FROM space_zones WHERE id='zone-b'", ()) is None
@@ -650,6 +683,67 @@ async def test_the_victims_rows_are_still_writable_by_their_own_space(env):
         "SELECT status FROM bazaar_listings WHERE post_id='post-b-listing'", ()
     )
     assert listing["status"] == "cancelled"
+
+
+async def test_an_early_rsvp_from_space_a_cannot_squat_space_bs_rsvp(env):
+    """A household seated in A buffers an RSVP for B's member on an event id
+    that has not arrived yet (and will land in B). The buffer is keyed on
+    (event, user, occurrence) with no space, so a squat there would make
+    B's real RSVP collide and be dropped. It cannot happen: an RSVP is only
+    accepted for a user seated on the SENDING household, so the squat is
+    refused before it reaches the buffer — and B's RSVP, buffered and then
+    flushed when the event lands in B, survives."""
+    app, db = env
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,?)",
+        (GATED, "peer-squatter", "u-squatter", "member"),
+    )
+    registry = app[federation_service_key]._event_registry
+    rsvp = {
+        "event_id": "ev-late",
+        "user_id": "u-b",
+        "status": "declined",
+        "occurrence_at": _OCC,
+        "updated_at": _NOW,
+    }
+    for handler in registry.handlers_for(FET.SPACE_RSVP_UPDATED):
+        await handler(
+            _event(FET.SPACE_RSVP_UPDATED, rsvp, space_id=GATED, sender="peer-squatter")
+        )
+    assert await db.fetchone("SELECT 1 FROM pending_federated_rsvps", ()) is None
+    for handler in registry.handlers_for(FET.SPACE_RSVP_UPDATED):
+        await handler(
+            _event(
+                FET.SPACE_RSVP_UPDATED,
+                dict(rsvp, status="going"),
+                space_id=VICTIM,
+                sender=VICTIM_HOUSE,
+            )
+        )
+    event = {
+        "id": "ev-late",
+        "calendar_id": VICTIM,
+        "summary": "Later",
+        "created_by": "u-b",
+        "start": _OCC,
+        "end": "2026-06-10T19:00:00+00:00",
+    }
+    for handler in registry.handlers_for(FET.SPACE_CALENDAR_EVENT_CREATED):
+        await handler(
+            _event(
+                FET.SPACE_CALENDAR_EVENT_CREATED,
+                event,
+                space_id=VICTIM,
+                sender=VICTIM_HOUSE,
+            )
+        )
+    row = await db.fetchone(
+        "SELECT status FROM space_calendar_rsvps"
+        " WHERE event_id='ev-late' AND user_id='u-b'",
+        (),
+    )
+    assert row is not None and row["status"] == "going"
 
 
 # ── The §25.6 catch-up stream is held to the same rule ───────────────
@@ -717,13 +811,13 @@ _SYNC_ATTACKS = [
                 "kind": "item",
                 "id": "gi-new",
                 "album_id": "album-b",
-                "uploaded_by": LOCAL_USER,
+                "uploaded_by": "u-g",
             },
             {
                 "kind": "item",
                 "id": "gi-new2",
                 "album_id": "album-home",
-                "uploaded_by": LOCAL_USER,
+                "uploaded_by": "u-g",
             },
         ],
     ),

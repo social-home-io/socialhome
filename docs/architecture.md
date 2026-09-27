@@ -725,6 +725,17 @@ whose rows can also be household-owned take `space_id: str | None`
 repositories shared with a household surface (polls, gallery) expose the
 scoped federation writes as separate `*_in_space` methods.
 
+**Federated writes are bound to the sending household's members.** Inside
+the gated space, every inbound content handler resolves the users a
+payload names (author, creator, voter, seller …) — or, for an edit or
+delete, the stored row's owner — and requires a live seat for that user on
+the envelope's signed `from_instance` in `space_remote_members`
+(`socialhome/federation/space_authorship.py`). Moderators (the host, or a
+household holding a live `admin` seat) may edit and delete owned rows;
+collaborative rows (pages, stickies, calendar events) accept any writer
+household; the host may relay a remote member's create. The per-family
+table is in [`docs/protocol/spaces.md`](protocol/spaces.md).
+
 ## Spec references
 
 - §2 — design principles (mirrored in [`principles.md`](./principles.md))

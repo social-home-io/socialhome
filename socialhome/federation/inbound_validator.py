@@ -708,18 +708,34 @@ def make_check_space_writer(
     (:meth:`AbstractSpaceRemoteMemberRepo.list_for_instance`, **tombstones
     included**):
 
-    * **no rows at all → pass.** The only leniency, and it is about
-      roster convergence, not about trust: a household seated on the host
-      before the roster gossip reached us legitimately has no row here,
-      and refusing would drop real members' content whenever a mirror
-      lagged. Tombstones are read precisely so that a household we KICKED
-      does not fall into this branch — ``get`` / ``list_for_space`` filter
-      them, which would make "removed" and "never heard of" the same
-      answer.
+    * **the space's host → pass.** The host is the roster authority, and
+      a member stub written before roster mirroring may hold no row for
+      it at all; its content is still bound per author downstream.
     * **≥1 row and at least one LIVE ``member`` / ``admin`` seat → pass.**
       A mixed household may write, because a real member of it may.
-    * **otherwise → refuse.** Only-``subscriber`` seats, or only
-      tombstoned ones.
+    * **otherwise → refuse.** Only-``subscriber`` seats, only tombstoned
+      ones, **or no row at all**.
+
+    "No row at all" used to pass, as a roster-convergence leniency: a
+    household seated on the host before the roster gossip reached us has
+    no row here yet. That leniency is gone because it bought nothing any
+    more — every content handler now binds the users a payload names to a
+    live seat of the SENDING household
+    (:mod:`socialhome.federation.space_authorship`), so a household we hold
+    no seat for cannot author, edit or delete a single row whatever this
+    gate says. What the leniency still let through was the write surface
+    with no author to bind (``SPACE_MEDIA_BLOB`` bytes). The convergence
+    window this narrows is the one the authorship binding already has: the
+    host seats a joiner and broadcasts the authority-signed
+    ``SPACE_MEMBER_JOINED`` gossip in the same step, before the joiner has
+    its accept ACK, so a joiner's first write normally lands after the
+    gossip; the host itself (which seated it) always accepts it. A member
+    household that nevertheless sees a write before the gossip drops it —
+    at WARNING, ``status: ok``, so the sender does not retry — and gets
+    the row back from the host with a ``space:<id>`` resync (§319.6),
+    whose replay the authorship rule accepts from the host. Tombstones are
+    still read, so a household we KICKED gets the same refusal as one we
+    never heard of.
 
     The single exception is ``SPACE_COMMENT_CREATED`` when the space has
     ``allow_subscriber_comment`` on AND the payload's author names a LIVE
@@ -778,13 +794,10 @@ def make_check_space_writer(
                 exc,
             )
             return
-        if not seats:
-            # Roster convergence — see the docstring. Not a trust
-            # decision, and deliberately unavailable to a household we
-            # tombstoned.
-            return
         live = [s for s in seats if not s.tombstoned]
         if any(s.role in _WRITER_ROLES for s in live):
+            return
+        if await _sender_hosts_space(space_repo, space_id, event.from_instance):
             return
         if event.event_type is FederationEventType.SPACE_COMMENT_CREATED:
             if await _subscriber_comment_allowed(
@@ -796,7 +809,7 @@ def make_check_space_writer(
                 return
         log.warning(
             "inbound: refused %s in space %s from %s — that household holds "
-            "only read-only Follower seats here (%d live, %d tombstoned)",
+            "no writer seat here (%d live, %d tombstoned)",
             event.event_type.value,
             space_id,
             event.from_instance,
@@ -806,6 +819,21 @@ def make_check_space_writer(
         ctx.early_response = dict(_REFUSED_WRITE)
 
     return check_space_writer
+
+
+async def _sender_hosts_space(space_repo, space_id: str, sender: str) -> bool:
+    """``True`` when ``sender`` is the household hosting ``space_id``.
+
+    An unreadable space row is a "no": this is an exception to a refusal.
+    """
+    try:
+        space = await space_repo.get(space_id)
+    except Exception as exc:
+        log.warning(
+            "inbound: space-writer host lookup failed for %s: %s", space_id, exc
+        )
+        return False
+    return bool(space is not None and sender and space.owner_instance_id == sender)
 
 
 async def _subscriber_comment_allowed(

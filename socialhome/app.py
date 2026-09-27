@@ -275,6 +275,7 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
+from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
 from .services.media_transcode_service import MediaTranscodeService
@@ -940,6 +941,10 @@ def _wire_federation_stack(
         # listing the blob is for lives in.
         gallery_repo=gallery_repo,
         bazaar_repo=bazaar_repo,
+        # The roster mirror: binds a space post / comment author to the
+        # household that signed it (§24.11 authorship), and lets the
+        # profile / role-change handlers find a remote member's seat.
+        space_remote_member_repo=space_remote_member_repo,
     )
     inbound_service.attach_to(federation_service)
 
@@ -1007,6 +1012,14 @@ def _wire_federation_stack(
     app[K.private_invite_handler_key] = private_invite_handler
     SpaceContentInboundHandlers(
         bus=bus,
+        # §24.11 authorship — the users a content payload names must be
+        # seated on the household that signed it.
+        authorship=SpaceAuthorship(
+            space_repo=space_repo,
+            remote_member_repo=space_remote_member_repo,
+            user_repo=user_repo,
+        ),
+        post_repo=space_post_repo,
         page_repo=page_repo,
         sticky_repo=sticky_repo,
         task_repo=space_task_repo,

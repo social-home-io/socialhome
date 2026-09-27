@@ -179,13 +179,19 @@ The rule, precisely:
   `allow_subscriber_comment` on **and** the payload's author names a live
   `subscriber` seat of that same household. (`allow_subscriber_react` has
   no inbound surface — space reactions are not federated events.)
-- **A household the receiver holds no roster row for is not gated.** That
-  is roster convergence, not trust: a household seated on the host before
-  the gossip arrived legitimately has no row here. It is also why the seat
-  read includes **tombstones** — a household we kicked must not read like
-  one we have never heard of. A redeem gossips the new seat to every
-  member household (`broadcast_remote_member_joined`) so this leniency
-  stays about lag rather than about followers.
+- **A household the receiver holds no roster row for is refused too** —
+  except the space's **host**, the roster authority (a member stub written
+  before roster mirroring may hold no row for it). This used to be a
+  roster-convergence leniency; it bought nothing once every content
+  handler binds the users a payload names to a seat of the sender (next
+  section), because a seatless household can then author, edit or delete
+  nothing anyway — what it still let through was media bytes. The seat
+  read still includes **tombstones**, so a kicked household is decided
+  from its seat, not treated as unknown. The convergence window is the
+  gossip's: the host seats a joiner and gossips the seat
+  (`broadcast_remote_member_joined`) in the same step, so a joiner's first
+  write normally arrives after it; a member household that nevertheless
+  refused one gets the row back from the host with a `space:<id>` resync.
 - **The mesh is not a way around it.** The inner event of a
   `SPACE_ROUTED` envelope is re-judged by the same gates after the unwrap
   (`run_post_decrypt_gates`); without that it would reach the handlers
@@ -196,6 +202,47 @@ The rule, precisely:
   cannot learn which space is served). One with neither cannot be
   attributed, and passing it would hand a follower every handler that
   keys on a bare row id.
+
+## A household writes only for its own members
+
+Inside one space, a content payload names people: the `author` of a post
+or comment, the `created_by` of a task, page or event, the voter, the
+RSVPing user, the uploader, the seller, the bidder. The sender writes those
+fields, so every handler binds them to the one fact it cannot forge — the
+receiver's own roster mirror, `space_remote_members`, keyed on
+`(space_id, instance_id, user_id)` and looked up under the §24.11-signed
+`from_instance` (`socialhome/federation/space_authorship.py`). A remote
+`user_id` is derived from its home instance's key, so a live seat for
+`(space, from_instance, user)` exists only when that user really is a
+member of this space on the household that signed the envelope. A local
+user of the receiver is never seated remotely, so no remote household can
+act as one — only moderation (below) reaches a local user's rows.
+
+| Family | Create | Edit / state change | Delete |
+|---|---|---|---|
+| Posts, comments | author seated on the sender, or the host relaying a *remote* member's row (§25.6 resume / §319.6 resync replay); a re-send of an existing id must keep its author | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
+| Tasks, gallery items | creator / uploader seated on the sender (or the host's relay) | creator's household or a moderator | creator / uploader's household or a moderator |
+| Pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
+| Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
+| RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
+| Poll close, schedule create / finalise | the wrapper post's author's household | | |
+| Bazaar listing | the seller seated on the sender, on the seller's own wrapper post; an existing listing keeps its seller | status (sold / expired / cancelled) and offer acceptance: the seller's household only | — |
+| Zones | moderators only (the local service is admin-only); a new zone's `created_by` bound like a create | moderators | moderators |
+
+The bot bridge posts under the shared `system-integration` author, which is
+no member: any writer household may create such a post, only a moderator
+may change one. A refusal is logged at WARNING and answers `status: ok`, so
+the sender's outbox does not retry it; a benign no-op — a replayed delete
+of a row already gone, a status change for a listing already settled — is
+logged at DEBUG.
+
+The rule needs nothing new on the wire: every sender we ship already names
+the acting member in the payload (or, for an edit / delete, the receiver
+reads the owner off the stored row), so no protocol version is involved.
+`tests/protocol/test_space_content_authorship.py` runs every row-writing
+event type against the real registry — each with a positive control (the
+rightful household's write lands) and a refused case (another member
+household's changes nothing) — and fails until a new type has both.
 
 ## The routing `space_id` is authoritative for every mutation
 
@@ -226,7 +273,13 @@ The §25.6 catch-up stream (`SpaceSyncReceiver`) is held to the same rule:
 records of a chunk for space A are written into space A or not at all,
 whatever ids or `space_id` they carry. An RSVP that arrives before its
 event is buffered together with the space it was received for and only
-applied to an event of that space.
+applied to an event of that space; since an RSVP is only accepted for a
+user seated on the sender, no other household can occupy that buffer key
+for the user.
+
+The catch-up stream is not author-bound: the provider re-exports every
+member's rows by design, and a sync session is one the receiver opened,
+for one space, with a provider whose signature it verified.
 
 Local REST callers go through the same scoped mutators with the space
 they already resolved. Where a repository also serves the household

@@ -18,7 +18,7 @@ from socialhome.domain.events import (
     SpaceMemberProfileUpdated,
     UserStatusChanged,
 )
-from socialhome.domain.post import Comment, CommentType
+from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceMember
 from socialhome.services.federation_inbound_service import FederationInboundService
 
@@ -58,9 +58,23 @@ def svc():
     # save path used to.
     convo.save_message_returning_created.return_value = (object(), True)
     sp_post = AsyncMock()
+    # A live post / comment by ``u`` in ``sp`` — the §24.11 authorship
+    # pre-read resolves the row's owner before any edit or delete.
+    sp_post.get.return_value = (
+        "sp",
+        Post(id="p", author="u", type=PostType.TEXT, created_at=None, content="x"),
+    )
+    sp_post.get_comment.return_value = Comment(
+        id="c", post_id="p", author="u", type=CommentType.TEXT, created_at=None
+    )
     sp_repo = AsyncMock()
     user_repo = AsyncMock()
+    user_repo.get_by_user_id.return_value = None
     report_svc = AsyncMock()
+    # ``u`` holds a live seat on the sending household.
+    seats = AsyncMock()
+    seats.get.return_value = SimpleNamespace(role="member", tombstoned=False)
+    seats.list_for_instance.return_value = []
     s = FederationInboundService(
         bus=bus,  # type: ignore[arg-type]
         conversation_repo=convo,
@@ -68,6 +82,7 @@ def svc():
         space_repo=sp_repo,
         user_repo=user_repo,
         report_service=report_svc,
+        space_remote_member_repo=seats,
     )
     return SimpleNamespace(
         svc=s,

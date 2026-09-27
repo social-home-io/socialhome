@@ -940,20 +940,52 @@ async def test_space_writer_passes_an_admin_seat():
     assert ctx.early_response is None
 
 
-async def test_space_writer_passes_a_household_we_hold_no_row_for():
-    """Roster convergence, and the ONLY leniency left.
-
-    Zero rows means the mirror has not converged (a household seated on
-    the host before the roster gossip reached us). Refusing there would
-    drop real content from real members whenever a roster lagged. A
-    household we hold ANY row for gets no such benefit.
-    """
+async def test_space_writer_refuses_a_household_we_hold_no_row_for():
+    """No seat at all is no writer — the old roster-convergence leniency is
+    gone. Every content handler binds the named author to a live seat of
+    the sender, so a seatless household could not author a row anyway; the
+    leniency only still let through the writes that name nobody (media
+    bytes)."""
     ctx = await _run(
         _writer_step(seats=[]),
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-follower"},
     )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_refuses_a_seatless_media_blob():
+    ctx = await _run(
+        _writer_step(seats=[]),
+        FederationEventType.SPACE_MEDIA_BLOB,
+        {"filename": "x.webp"},
+    )
+    assert ctx.early_response == REFUSED
+
+
+async def test_space_writer_passes_the_host_without_a_mirrored_seat():
+    """The host is the roster authority; a member stub written before roster
+    mirroring can hold no row for it. Its content is still author-bound by
+    the handlers."""
+    ctx = await _run(
+        _writer_step(owner="peer-x", seats=[]),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-host"},
+    )
     assert ctx.early_response is None
+
+
+async def test_space_writer_refuses_when_the_host_lookup_fails():
+    class _Boom:
+        async def get(self, space_id):
+            raise RuntimeError("db down")
+
+    step = make_check_space_writer(
+        space_repo=_Boom(),
+        remote_member_repo=_FakeRemoteMemberRepo({("sp-1", "peer-x"): []}),
+    )
+    ctx = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
+    assert ctx.early_response == REFUSED
 
 
 async def test_space_writer_enforces_on_a_household_that_does_not_host():

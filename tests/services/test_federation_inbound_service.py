@@ -18,7 +18,7 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.post import Post, PostType
+from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
 from socialhome.repositories import (
     SqliteConversationRepo,
@@ -27,6 +27,9 @@ from socialhome.repositories import (
     SqliteUserRepo,
 )
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
@@ -40,6 +43,9 @@ async def inbound(db, bus):
         space_post_repo=SqliteSpacePostRepo(db),
         space_repo=SqliteSpaceRepo(db),
         user_repo=SqliteUserRepo(db),
+        # The roster mirror the §24.11 authorship rule binds authors to.
+        # Most space tests below send from ``peer-a``, the space's host.
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
     )
     return service
 
@@ -3496,3 +3502,311 @@ async def test_replayed_comment_delete_lowers_the_real_parent_once(
         )
     assert (await _post_row(db, "post-b"))["comment_count"] == 1
     assert (await _post_row(db, "post-b2"))["comment_count"] == 1
+
+
+# ─── §24.11 authorship: posts + comments ────────────────────────────────
+#
+# The space ``sp-auth`` is hosted by ``the-host``; ``peer-a`` seats
+# ``u-a``, ``peer-b`` seats ``u-b``, ``peer-mod`` holds an admin seat.
+
+
+async def _auth_space(db) -> SqliteSpacePostRepo:
+    await db.enqueue(
+        _SEED_SPACE_SQL,
+        (
+            "sp-auth",
+            "Space",
+            "the-host",
+            "owner",
+            "aa" * 32,
+            SpaceType.HOUSEHOLD.value,
+            JoinMode.INVITE_ONLY.value,
+        ),
+    )
+    seats = SqliteSpaceRemoteMemberRepo(db)
+    for inst, uid, role in (
+        ("peer-a", "u-a", "member"),
+        ("peer-b", "u-b", "member"),
+        ("peer-mod", "u-mod", "admin"),
+    ):
+        await seats.add(
+            space_id="sp-auth",
+            instance_id=inst,
+            user_id=uid,
+            user_pk=None,
+            display_name=None,
+            role=role,
+        )
+    repo = SqliteSpacePostRepo(db)
+    await repo.save(
+        "sp-auth",
+        Post(
+            id="p-a",
+            author="u-a",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="A's post",
+        ),
+    )
+    await repo.add_comment(
+        Comment(
+            id="c-a",
+            post_id="p-a",
+            author="u-a",
+            type=CommentType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="A's comment",
+        ),
+        space_id="sp-auth",
+    )
+    return repo
+
+
+async def test_a_post_naming_another_households_member_is_refused(
+    db, bus, inbound, caplog
+):
+    await _auth_space(db)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_post_created(
+            _event(
+                FederationEventType.SPACE_POST_CREATED,
+                {"id": "p-new", "author": "u-a", "type": "text", "content": "x"},
+                from_instance="peer-b",
+                space_id="sp-auth",
+            )
+        )
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-new'", ()) is None
+    assert "not a member of the sending household" in caplog.text
+
+
+async def test_the_host_relays_a_remote_members_post(db, bus, inbound):
+    await _auth_space(db)
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {"id": "p-new", "author": "u-a", "type": "text", "content": "x"},
+            from_instance="the-host",
+            space_id="sp-auth",
+        )
+    )
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-new'", ())
+
+
+async def test_a_re_create_cannot_change_a_posts_author(db, bus, inbound):
+    await _auth_space(db)
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {"id": "p-a", "author": "u-b", "type": "text", "content": "mine"},
+            from_instance="peer-b",
+            space_id="sp-auth",
+        )
+    )
+    row = await db.fetchone("SELECT content FROM space_posts WHERE id='p-a'", ())
+    assert row["content"] == "A's post"
+
+
+@pytest.mark.parametrize(
+    ("sender", "lands"),
+    [("peer-a", True), ("peer-mod", True), ("the-host", True), ("peer-b", False)],
+)
+async def test_a_post_edit_is_the_authors_or_a_moderators(
+    db, bus, inbound, sender, lands
+):
+    await _auth_space(db)
+    await inbound._on_space_post_updated(
+        _event(
+            FederationEventType.SPACE_POST_UPDATED,
+            {"id": "p-a", "content": "edited"},
+            from_instance=sender,
+            space_id="sp-auth",
+        )
+    )
+    row = await db.fetchone("SELECT content FROM space_posts WHERE id='p-a'", ())
+    assert (row["content"] == "edited") is lands
+
+
+@pytest.mark.parametrize(
+    ("sender", "lands"),
+    [("peer-a", True), ("peer-mod", True), ("peer-b", False)],
+)
+async def test_a_comment_delete_is_the_authors_or_a_moderators(
+    db, bus, inbound, sender, lands
+):
+    await _auth_space(db)
+    await inbound._on_space_comment_deleted(
+        _event(
+            FederationEventType.SPACE_COMMENT_DELETED,
+            {"comment_id": "c-a", "post_id": "p-a"},
+            from_instance=sender,
+            space_id="sp-auth",
+        )
+    )
+    row = await db.fetchone(
+        "SELECT deleted FROM space_post_comments WHERE id='c-a'", ()
+    )
+    assert bool(row["deleted"]) is lands
+
+
+async def test_a_comment_edit_from_another_household_is_refused(db, bus, inbound):
+    await _auth_space(db)
+    await inbound._on_space_comment_updated(
+        _event(
+            FederationEventType.SPACE_COMMENT_UPDATED,
+            {"id": "c-a", "content": "edited"},
+            from_instance="peer-b",
+            space_id="sp-auth",
+        )
+    )
+    row = await db.fetchone(
+        "SELECT content FROM space_post_comments WHERE id='c-a'", ()
+    )
+    assert row["content"] == "A's comment"
+
+
+async def test_a_comment_naming_another_households_member_is_refused(db, bus, inbound):
+    await _auth_space(db)
+    await inbound._on_space_comment_added(
+        _event(
+            FederationEventType.SPACE_COMMENT_CREATED,
+            {
+                "post_id": "p-a",
+                "comment_id": "c-new",
+                "author": "u-a",
+                "type": "text",
+                "content": "x",
+            },
+            from_instance="peer-b",
+            space_id="sp-auth",
+        )
+    )
+    assert (
+        await db.fetchone("SELECT 1 FROM space_post_comments WHERE id='c-new'", ())
+        is None
+    )
+
+
+async def test_a_replayed_delete_of_a_deleted_comment_is_debug_only(
+    db, bus, inbound, caplog
+):
+    """A replay of a delete that already happened is delivery noise — it
+    must not read like the cross-space / foreign-author refusals."""
+    await _auth_space(db)
+    event = _event(
+        FederationEventType.SPACE_COMMENT_DELETED,
+        {"comment_id": "c-a", "post_id": "p-a"},
+        from_instance="peer-a",
+        space_id="sp-auth",
+    )
+    await inbound._on_space_comment_deleted(event)
+    with caplog.at_level(logging.DEBUG):
+        await inbound._on_space_comment_deleted(event)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "already deleted" in caplog.text
+    post = await db.fetchone("SELECT comment_count FROM space_posts WHERE id='p-a'", ())
+    assert post["comment_count"] == 0
+
+
+async def test_a_replayed_delete_of_a_deleted_post_is_debug_only(
+    db, bus, inbound, caplog
+):
+    await _auth_space(db)
+    event = _event(
+        FederationEventType.SPACE_POST_DELETED,
+        {"post_id": "p-a"},
+        from_instance="peer-a",
+        space_id="sp-auth",
+    )
+    await inbound._on_space_post_deleted(event)
+    with caplog.at_level(logging.DEBUG):
+        await inbound._on_space_post_deleted(event)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "already deleted" in caplog.text
+
+
+async def test_an_edit_of_an_unknown_post_is_debug_only(db, bus, inbound, caplog):
+    await _auth_space(db)
+    with caplog.at_level(logging.DEBUG):
+        await inbound._on_space_post_updated(
+            _event(
+                FederationEventType.SPACE_POST_UPDATED,
+                {"id": "p-ghost", "content": "x"},
+                from_instance="peer-a",
+                space_id="sp-auth",
+            )
+        )
+        await inbound._on_space_comment_updated(
+            _event(
+                FederationEventType.SPACE_COMMENT_UPDATED,
+                {"id": "c-ghost", "content": "x"},
+                from_instance="peer-a",
+                space_id="sp-auth",
+            )
+        )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+async def test_without_a_roster_mirror_space_content_fails_closed(db, bus, caplog):
+    """A stack wired without the roster mirror cannot bind an author, so
+    it accepts no space post at all — never an unchecked one."""
+    await _auth_space(db)
+    bare = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+    )
+    with caplog.at_level(logging.WARNING):
+        await bare._on_space_post_created(
+            _event(
+                FederationEventType.SPACE_POST_CREATED,
+                {"id": "p-new", "author": "u-a", "type": "text", "content": "x"},
+                from_instance="peer-a",
+                space_id="sp-auth",
+            )
+        )
+        await bare._on_space_post_deleted(
+            _event(
+                FederationEventType.SPACE_POST_DELETED,
+                {"post_id": "p-a"},
+                from_instance="peer-a",
+                space_id="sp-auth",
+            )
+        )
+        await bare._on_space_comment_added(
+            _event(
+                FederationEventType.SPACE_COMMENT_CREATED,
+                {"post_id": "p-a", "comment_id": "c-n", "author": "u-a"},
+                from_instance="peer-a",
+                space_id="sp-auth",
+            )
+        )
+        await bare._on_space_comment_deleted(
+            _event(
+                FederationEventType.SPACE_COMMENT_DELETED,
+                {"comment_id": "c-a", "post_id": "p-a"},
+                from_instance="peer-a",
+                space_id="sp-auth",
+            )
+        )
+    assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-new'", ()) is None
+    row = await db.fetchone("SELECT deleted FROM space_posts WHERE id='p-a'", ())
+    assert row["deleted"] == 0
+    assert "no space roster mirror wired" in caplog.text
+
+
+async def test_a_moderated_comment_on_another_space_is_refused(
+    db, bus, inbound, caplog
+):
+    await _auth_space(db)
+    with caplog.at_level(logging.WARNING):
+        await inbound._on_space_comment_deleted(
+            _event(
+                FederationEventType.SPACE_COMMENT_DELETED,
+                {"comment_id": "c-a", "post_id": "p-a"},
+                from_instance="peer-mod",
+                space_id="sp-other",
+            )
+        )
+    assert "is not in space sp-other" in caplog.text

@@ -13,9 +13,9 @@ a repo that starts filtering rows the gate depends on.
 
 Coverage:
 * **A kicked household is not a stranger.** ``get`` / ``list_for_space``
-  filter tombstones; the gate reads them, because "removed" must not
-  produce the same answer as "never heard of" — the one answer the gate
-  is lenient about.
+  filter tombstones; the gate reads them, so "removed" is decided from the
+  seat itself. A household we hold no seat for at all is refused too (the
+  host excepted) — see ``test_a_household_with_no_seat_is_refused``.
 * **The whole write vocabulary is refused**, ``*_UPDATED`` /
   ``*_DELETED`` included, not just the two events that name an author.
 * **The author field is not an input.** It is written by the sender.
@@ -207,15 +207,27 @@ async def test_an_unattributable_write_is_refused(gate):
     assert refused == REFUSED
 
 
-async def test_a_household_with_no_seat_is_not_gated(gate):
-    """Roster convergence: a household seated on the host before the
-    gossip reached us legitimately has no row here, and refusing would
-    drop real members' content whenever a mirror lagged. This is the ONE
-    leniency, and the tombstone test above is why it cannot be reached by
-    a household we removed."""
+async def test_a_household_with_no_seat_is_refused(gate):
+    """No seat is no writer. The roster-convergence leniency this used to
+    grant is closed: every content handler binds the named users to a live
+    seat of the sender (``test_space_content_authorship.py``), so a
+    seatless household could author nothing anyway, and the gate now
+    refuses the writes that name nobody as well (media bytes)."""
     step, _members, _ = gate
-    refused = await _run(
+    for event_type in (
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_MEDIA_BLOB,
+    ):
+        refused = await _run(step, _write(event_type, sender="never-met-them"))
+        assert refused == REFUSED
+
+
+async def test_the_host_is_a_writer_without_a_mirrored_seat(gate):
+    """The host is the roster authority — a stub from before roster
+    mirroring may hold no row for it."""
+    step, _members, _ = gate
+    passed = await _run(
         step,
-        _write(FederationEventType.SPACE_POST_CREATED, sender="never-met-them"),
+        _write(FederationEventType.SPACE_POST_CREATED, sender="some-other-host"),
     )
-    assert refused is None
+    assert passed is None
