@@ -880,7 +880,14 @@ class SpaceContentInboundHandlers:
                     listing_post_id=listing_post_id,
                     bidder_user_id=bidder,
                     amount=int(amount_raw),
-                    created_at="",  # repo defaults via datetime('now')
+                    # Preserve the relayed bid's own timestamp when the
+                    # payload carries one; fall back to "" when absent — a
+                    # falsy created_at is defaulted by the repo itself (a
+                    # real "now", not a literal empty string — see
+                    # bazaar_repo.place_bid).
+                    created_at=str(
+                        p.get("created_at") or p.get("occurred_at") or "",
+                    ),
                     message=p.get("message"),
                 ),
             )

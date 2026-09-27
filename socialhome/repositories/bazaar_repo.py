@@ -362,7 +362,7 @@ class SqliteBazaarRepo:
                     id, listing_post_id, bidder_user_id, amount, message,
                     accepted, rejected, rejection_reason, withdrawn,
                     created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     bid.id,
@@ -374,7 +374,17 @@ class SqliteBazaarRepo:
                     int(bid.rejected),
                     bid.rejection_reason,
                     int(bid.withdrawn),
-                    bid.created_at,
+                    # A missing created_at defaults in Python, not SQL:
+                    # ``new_bid()`` (the local-bid path) already stamps a
+                    # tz-aware ``datetime.now(timezone.utc).isoformat()``
+                    # value here, and SQLite's ``datetime('now')`` produces
+                    # a *naive* ``"YYYY-MM-DD HH:MM:SS"`` string instead. Two
+                    # shapes in the same column sort incorrectly against
+                    # each other in ``highest_bid``'s ``ORDER BY amount
+                    # DESC, created_at ASC`` tie-break (ASCII ' ' < 'T'), so
+                    # the SQL-side default must match the same shape, not
+                    # just be non-empty.
+                    bid.created_at or datetime.now(timezone.utc).isoformat(),
                 ),
             )
             # Anti-snipe for auction mode (§23.15).

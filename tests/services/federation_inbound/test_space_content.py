@@ -1160,6 +1160,49 @@ async def test_bazaar_bid_placed_persists_bid(bazaar_bids_handlers):
     assert bid.message == "my offer"
 
 
+async def test_bazaar_bid_placed_preserves_relayed_created_at(bazaar_bids_handlers):
+    """A relayed payload's own timestamp is used, not discarded."""
+    handlers, bazaar = bazaar_bids_handlers
+    await handlers._on_bazaar_bid_placed(
+        _event(
+            FederationEventType.BAZAAR_BID_PLACED,
+            {
+                "bid_id": "bid-1",
+                "listing_post_id": "bzr-1",
+                "bidder_user_id": "u-bidder",
+                "amount": 4200,
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+        ),
+    )
+    assert bazaar.placed[0].created_at == "2026-01-01T00:00:00+00:00"
+
+
+async def test_bazaar_bid_placed_missing_created_at_falls_back_to_empty(
+    bazaar_bids_handlers,
+):
+    """No timestamp anywhere in the payload — the handler must NOT invent
+    one; it hands the repo a falsy value so the repo's own default (a
+    real "now", not the historical literal ``""``) can kick in."""
+    handlers, bazaar = bazaar_bids_handlers
+    await handlers._on_bazaar_bid_placed(
+        _event(
+            FederationEventType.BAZAAR_BID_PLACED,
+            {
+                "bid_id": "bid-1",
+                "listing_post_id": "bzr-1",
+                "bidder_user_id": "u-bidder",
+                "amount": 4200,
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+            },
+        ),
+    )
+    assert not bazaar.placed[0].created_at
+
+
 async def test_bazaar_bid_placed_idempotent_on_replay(bazaar_bids_handlers):
     """Replay or out-of-order delivery — drop silently if bid_id already
     landed."""
