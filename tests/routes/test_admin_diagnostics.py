@@ -170,3 +170,37 @@ async def test_diagnostics_download_sets_a_filename(client):
 async def test_diagnostics_plain_get_has_no_attachment_header(client):
     resp = await client.get("/api/admin/diagnostics", headers=_auth(client._tok))
     assert "Content-Disposition" not in resp.headers
+
+
+async def test_diagnostics_distinguishes_relay_acceptance_from_delivery(client):
+    """The bundle carries the local relay-acceptance time and the derived
+    relay-only flag — the answer to "is it delivered, or did the
+    connection server just take it?"."""
+    from socialhome.app_keys import federation_repo_key, federation_service_key
+    from socialhome.domain.federation import (
+        InstanceSource,
+        PairingStatus,
+        RemoteInstance,
+    )
+
+    await client.app[federation_repo_key].save_instance(
+        RemoteInstance(
+            id="r" * 32,
+            display_name="link household",
+            remote_identity_pk="ab" * 32,
+            key_self_to_remote="00",
+            key_remote_to_self="00",
+            remote_inbox_url="",
+            local_inbox_id="wh-relay-diag",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+            relay_via="https://gfs.example.org",
+        ),
+    )
+    client.app[federation_service_key].note_relay_accepted("r" * 32)
+
+    resp = await client.get("/api/admin/diagnostics", headers=_auth(client._tok))
+    body = await resp.json()
+    peer = next(p for p in body["peers"] if p["instance_id"] == "r" * 32)
+    assert peer["relay_only"] is True
+    assert peer["last_relay_accepted_at"]

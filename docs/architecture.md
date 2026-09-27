@@ -237,6 +237,17 @@ household's IP is still in the connection server's HTTP access log. See
 [`principles.md`](./principles.md) for that residual and the rest of the
 metadata this tier concedes.
 
+A tier-4 success is an **acceptance, not a delivery**: the relay answers
+a uniform `202` whether the recipient is online, offline or not one of
+its clients (anything else would be a presence oracle), so
+`DeliveryResult.via="gfs_relay"` never calls `mark_reachable`. What the
+operator sees instead is `FederationService.last_relay_accepted_at` — an
+in-memory, local-only timestamp — surfaced on `/api/connections` and the
+diagnostics bundle beside `last_reachable_at`, with a derived
+`relay_only` flag when the relay has taken traffic more recently than any
+proven delivery. The Manage panel renders it as a "Connection server"
+row with a *Relay only* chip.
+
 The Connections page renders the current per-peer transport tier as
 an inline glyph (⚡ for WebRTC, ☁ for HTTPS), updated live via the
 `peer.transport_changed` WS frame. The Manage detail panel adds a

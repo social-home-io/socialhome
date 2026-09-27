@@ -29,6 +29,13 @@ interface Connection {
    *  dropped a minute ago and one that has been dead for three weeks look
    *  identical, yet one means wait and the other means investigate. */
   last_reachable_at?: string | null
+  /** Last time the connection-server relay ACCEPTED an envelope for this
+   *  peer. Acceptance is not delivery — see ``relay_only``. Absent on
+   *  older API responses and when the relay was never used. */
+  last_relay_accepted_at?: string | null
+  /** The relay has accepted traffic for this peer more recently than any
+   *  proven delivery: "accepted by the connection server", not "delivered". */
+  relay_only?: boolean
   /** Whether our household's home pin is shared with this peer (§23.90).
    *  Defaults to true when absent (old API responses pre-dating the field). */
   share_home?: boolean
@@ -295,6 +302,28 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
               <span class="sh-muted">never</span>
             )}
           </dd>
+          {/* Relay acceptance is shown apart from "Last connected": the
+              connection server answers the same 202 whether or not the
+              household is online, so it must never read as delivery. */}
+          {conn.last_relay_accepted_at && (
+            <><dt>Connection server</dt><dd>
+              {conn.relay_only && (
+                <span class="sh-chip sh-chip--honey" style={{ marginRight: 'var(--sh-space-xs)' }}>
+                  Relay only
+                </span>
+              )}
+              Last accepted {new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString()}
+              <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
+                ({relativeDocsTime(conn.last_relay_accepted_at)})
+              </span>
+              {conn.relay_only && (
+                <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
+                  The connection server accepted these messages, but they are not confirmed as delivered
+                  yet. It holds them for up to 24 hours until this household connects.
+                </span>
+              )}
+            </dd></>
+          )}
           {conn.unreachable_since && (
             <><dt>Unreachable since</dt><dd class="sh-text-warning">
               {new Date(normaliseTimestamp(conn.unreachable_since)).toLocaleString()}

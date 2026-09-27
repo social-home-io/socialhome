@@ -1051,6 +1051,14 @@ describe('ConnectionDetail prop plumbing', () => {
     const conn = await openManage(makeConnection({ dropped_envelopes: 263 }))
     expect(conn.dropped_envelopes).toBe(263)
   })
+
+  it('passes the relay-acceptance state through to the modal', async () => {
+    const conn = await openManage(
+      makeConnection({ last_relay_accepted_at: '2026-09-20 10:00:00', relay_only: true }),
+    )
+    expect(conn.last_relay_accepted_at).toBe('2026-09-20 10:00:00')
+    expect(conn.relay_only).toBe(true)
+  })
 })
 
 describe('a household seated by an invite link (source = space_session)', () => {
