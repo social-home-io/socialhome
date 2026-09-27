@@ -313,6 +313,33 @@ async def test_posts(setup):
     assert post.id == "p-1"
 
 
+async def test_posts_keep_their_image_urls(setup):
+    """The exporter ships ``image_urls``; a joiner must keep them — the
+    media bytes that follow are matched against them, and the feed renders
+    from them. Strings only, capped at the feed maximum."""
+    from socialhome.domain.post import FEED_POST_MAX_IMAGES
+
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-img",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp", 3]
+                + [f"api/media/{n}.webp" for n in range(9)],
+            },
+        ],
+    )
+    _sid, post = c.posts[0]
+    assert post.image_urls[0] == "api/media/a.webp"
+    assert all(isinstance(u, str) for u in post.image_urls)
+    assert len(post.image_urls) == FEED_POST_MAX_IMAGES
+
+
 async def test_comments(setup):
     r, c, kp = setup
     await _send(

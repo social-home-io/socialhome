@@ -18,7 +18,13 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.post import (
+    FEED_POST_MAX_IMAGES,
+    Comment,
+    CommentType,
+    Post,
+    PostType,
+)
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
 from socialhome.repositories import (
     SqliteConversationRepo,
@@ -3838,3 +3844,35 @@ async def test_a_moderated_comment_on_another_space_is_refused(
             )
         )
     assert "is not in space sp-other" in caplog.text
+
+
+async def test_space_post_created_keeps_the_image_urls(db, bus, inbound):
+    """The outbound payload ships ``image_urls`` for a multi-image post; the
+    receiver must keep them — the media-blob scope check looks the bytes up
+    by them, and the feed renders from them. Capped at the feed maximum,
+    strings only."""
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-img"))
+    await _seat(db, "sp-img", "user-remote")
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "p-img",
+                "author": "user-remote",
+                "type": "image",
+                "content": "",
+                "image_urls": [
+                    "api/media/a.webp",
+                    7,
+                    *[f"api/media/{n}.webp" for n in range(10)],
+                ],
+            },
+            space_id="sp-img",
+        )
+    )
+    got = await SqliteSpacePostRepo(db).get("p-img")
+    assert got is not None
+    urls = got[1].image_urls
+    assert urls[0] == "api/media/a.webp"
+    assert all(isinstance(u, str) for u in urls)
+    assert len(urls) == FEED_POST_MAX_IMAGES

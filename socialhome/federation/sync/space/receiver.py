@@ -30,6 +30,7 @@ from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
 from ....domain.post import (
+    FEED_POST_MAX_IMAGES,
     BazaarListing,
     BazaarMode,
     BazaarStatus,
@@ -900,7 +901,16 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         # An unannounced listing / event anchor must stay out of the
         # joiner's feed exactly as it is out of the provider's.
         hidden_from_feed=bool(r.get("hidden_from_feed", False)),
+        # The post's image gallery — the media bytes that follow are
+        # matched against these names. Strings only, feed-capped.
+        image_urls=_image_urls(r.get("image_urls")),
     )
+
+
+def _image_urls(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(u for u in raw if isinstance(u, str))[:FEED_POST_MAX_IMAGES]
 
 
 def _comment_from_record(r: dict[str, Any]) -> Comment | None:

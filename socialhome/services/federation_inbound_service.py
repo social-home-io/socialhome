@@ -55,7 +55,14 @@ from ..domain.events import (
     HighlightRemoved,
     UserStatusChanged,
 )
-from ..domain.post import Comment, CommentType, LocationData, Post, PostType
+from ..domain.post import (
+    FEED_POST_MAX_IMAGES,
+    Comment,
+    CommentType,
+    LocationData,
+    Post,
+    PostType,
+)
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceConfigEventType, SpaceRole
 from ..domain.highlight import (
@@ -3137,4 +3144,12 @@ class FederationInboundService:
             # Mirror the host's feed visibility. Absent on an older sender
             # → default visible (the historical behaviour).
             hidden_from_feed=bool(payload.get("hidden_from_feed", False)),
+            # The multi-image gallery the sender ships (``SpacePostOutbound``).
+            # Strings only, capped at the feed maximum; the bytes follow as
+            # ``SPACE_MEDIA_BLOB``, which is checked against these names.
+            image_urls=tuple(
+                u for u in (payload.get("image_urls") or ()) if isinstance(u, str)
+            )[:FEED_POST_MAX_IMAGES]
+            if isinstance(payload.get("image_urls"), list)
+            else (),
         )
