@@ -22,12 +22,12 @@ import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { SpaceListSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
-import { openPairing } from '@/components/PairingFlow'
+import { openPairing, PairingFlow } from '@/components/PairingFlow'
 import { openSpaceCreate } from '@/components/SpaceCreateDialog'
 import { currentUser } from '@/store/auth'
 import { cacheDirectoryEntries } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
-import { SpaceCard } from './SpaceCard'
+import { hostLabel, SpaceCard } from './SpaceCard'
 import { JoinRequestModal } from './JoinRequestModal'
 
 type Tab = 'household' | 'friends' | 'global'
@@ -229,6 +229,10 @@ function filterBy(entries: DirectoryEntry[], term: string): DirectoryEntry[] {
 export default function SpaceBrowserPage() {
   useTitle('Browse spaces')
   const loc = useLocation()
+  // Refreshing the global directory and pairing with another household
+  // are both household-admin actions.
+  const isAdmin = currentUser.value?.is_admin === true
+  const canRefresh = isAdmin
   const [activeModal, setActiveModal] = useState<DirectoryEntry | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [subscribeBusyIds, setSubscribeBusyIds] = useState<Set<string>>(
@@ -269,7 +273,16 @@ export default function SpaceBrowserPage() {
       return
     }
     if (action.kind === 'pair-first') {
-      // Open the pairing flow pre-targeted at this household.
+      // Pairing is a household-admin decision (the backend refuses it for
+      // anyone else), so a member is pointed at an admin instead of a
+      // dialog that could only fail.
+      if (!isAdmin) {
+        showToast(
+          `Ask a household admin to connect with ${hostLabel(entry)}.`,
+          'info',
+        )
+        return
+      }
       openPairing('household')
       return
     }
@@ -381,8 +394,6 @@ export default function SpaceBrowserPage() {
     friends:   friends.value.length,
     global:    global_.value.length,
   }
-  const me = currentUser.value
-  const canRefresh = me?.is_admin === true
 
   // Empty-state copy depends on whether the bucket is genuinely empty
   // or just filtered out by the search box.  Mixing the two confused
@@ -408,14 +419,16 @@ export default function SpaceBrowserPage() {
           // a connection server — with none paired the directory is empty no
           // matter how often it is polled, so name the other way out too.
           ? 'Try refreshing the directory above, or connect to a connection '
-            + 'server in Settings → Connections.'
+            + 'server in Settings → Federation.'
           : 'Ask a household admin to refresh the global directory.',
       }
     }
     if (tab === 'friends') {
       return {
         lead: 'None of your paired households have shared a public space yet.',
-        hint: 'Pair with another household from Settings → Connections to start sharing.',
+        hint: isAdmin
+          ? 'Pair with another household to start sharing.'
+          : 'Ask a household admin to pair with another household.',
       }
     }
     return {
@@ -521,7 +534,7 @@ export default function SpaceBrowserPage() {
               {!searching && activeTab.value === 'household' && (
                 <Button onClick={openSpaceCreate}>+ Create your first space</Button>
               )}
-              {!searching && activeTab.value === 'friends' && (
+              {!searching && activeTab.value === 'friends' && isAdmin && (
                 <Button
                   variant="secondary"
                   onClick={() => openPairing('household')}
@@ -542,6 +555,10 @@ export default function SpaceBrowserPage() {
           />
         ))}
       </section>
+
+      {/* The pairing dialog mounts per page (it is not in the app shell),
+       *  so the pair CTAs above need it here to open anything. */}
+      {isAdmin && <PairingFlow />}
 
       {activeModal && (
         <JoinRequestModal

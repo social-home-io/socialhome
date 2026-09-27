@@ -813,6 +813,7 @@ export default function ConnectionsPage() {
               </span>
             )}
           </div>
+          {isAdmin && (
           <div class="sh-row" style={{ gap: 'var(--sh-space-xs)' }}>
             {confirmed.length > 0 && (
               <Button variant="secondary"
@@ -831,7 +832,14 @@ export default function ConnectionsPage() {
               + {t('connections.pair')}
             </Button>
           </div>
+          )}
         </div>
+        {!isAdmin && (
+          <p class="sh-muted sh-connections-admin-hint">
+            Managing household connections is admin-only. Ask a household
+            admin to pair with another household or change a connection.
+          </p>
+        )}
         {loading.value ? (
           <Spinner />
         ) : connections.value.length === 0 ? (
@@ -839,9 +847,11 @@ export default function ConnectionsPage() {
             <div aria-hidden="true">🔗</div>
             <h3>{t('connections.no_connections')}</h3>
             <p class="sh-muted">{t('connections.no_connections_hint')}</p>
-            <Button onClick={() => openPairing('household')}>
-              {t('connections.start_pairing')}
-            </Button>
+            {isAdmin && (
+              <Button onClick={() => openPairing('household')}>
+                {t('connections.start_pairing')}
+              </Button>
+            )}
           </div>
         ) : (
           <div class="sh-connection-list">
@@ -882,7 +892,7 @@ export default function ConnectionsPage() {
                   )}
                 </div>
                 <div class="sh-connection-actions">
-                  {c.status === 'confirmed' && (
+                  {isAdmin && c.status === 'confirmed' && (
                     <>
                       {!isSpaceOnly(c) && (
                         <Button variant="secondary"
@@ -907,7 +917,9 @@ export default function ConnectionsPage() {
       <section class="sh-connections-section">
         <div class="sh-section-header">
           <h2>{t('connections.global_servers')}</h2>
-          <Button onClick={() => openPairing('gfs')}>+ {t('gfs.add')}</Button>
+          {isAdmin && (
+            <Button onClick={() => openPairing('gfs')}>+ {t('gfs.add')}</Button>
+          )}
         </div>
         {gfsLoading.value ? (
           <Spinner />
@@ -916,7 +928,9 @@ export default function ConnectionsPage() {
             <div aria-hidden="true">🌐</div>
             <h3>{t('gfs.no_servers')}</h3>
             <p class="sh-muted">{t('gfs.no_servers_hint')}</p>
-            <Button onClick={() => openPairing('gfs')}>+ {t('gfs.add')}</Button>
+            {isAdmin && (
+              <Button onClick={() => openPairing('gfs')}>+ {t('gfs.add')}</Button>
+            )}
           </div>
         ) : (
           <div class="sh-connection-list">
@@ -935,12 +949,14 @@ export default function ConnectionsPage() {
                   )}
                   <span class="sh-muted">{gfs.inbox_url}</span>
                 </div>
-                <div class="sh-connection-actions">
-                  <Button variant="danger"
-                          onClick={() => { disconnectTarget.value = gfs }}>
-                    {t('gfs.disconnect')}
-                  </Button>
-                </div>
+                {isAdmin && (
+                  <div class="sh-connection-actions">
+                    <Button variant="danger"
+                            onClick={() => { disconnectTarget.value = gfs }}>
+                      {t('gfs.disconnect')}
+                    </Button>
+                  </div>
+                )}
               </div>
               )
             })}
@@ -955,8 +971,12 @@ export default function ConnectionsPage() {
       </>
       )}
 
-      <PairingFlow onGfsConnected={loadGfsConnections} />
-      <AutoPairDialog onPaired={() => void loadConnections()} />
+      {isAdmin && (
+        <>
+          <PairingFlow onGfsConnected={loadGfsConnections} />
+          <AutoPairDialog onPaired={() => void loadConnections()} />
+        </>
+      )}
       {detail && (
         <ConnectionDetail
           conn={{

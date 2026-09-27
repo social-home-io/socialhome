@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from socialhome.app_keys import (
+    auto_pair_coordinator_key,
     db_key as _db_key,
     dm_routing_service_key,
     federation_repo_key,
@@ -295,6 +296,123 @@ async def test_confirm_pairing_requires_admin(client):
         headers=_auth(member_tok),
     )
     assert r.status == 403
+
+
+class _SendRecorder:
+    """Replaces the federation service so a test sees what was sent."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_event(self, *, to_instance_id, event_type, payload):
+        self.sent.append(
+            {"to": to_instance_id, "type": event_type, "payload": payload},
+        )
+
+        class _R:
+            ok = True
+
+        return _R()
+
+
+def _record_sends(client) -> _SendRecorder:
+    rec = _SendRecorder()
+    client.app[federation_service_key] = rec
+    return rec
+
+
+async def test_introduce_requires_admin(client):
+    """Asking a peer to introduce this household is a trust decision."""
+    await client.app[federation_repo_key].save_instance(_fake_instance("via-1"))
+    rec = _record_sends(client)
+    member_tok = await _seed_member(client._db)
+    r = await client.post(
+        "/api/pairing/introduce",
+        json={"target_instance_id": "target-1", "via_instance_id": "via-1"},
+        headers=_auth(member_tok),
+    )
+    assert r.status == 403
+    assert rec.sent == []
+
+
+async def test_introduce_as_admin_sends_intro_relay(client):
+    await client.app[federation_repo_key].save_instance(_fake_instance("via-2"))
+    rec = _record_sends(client)
+    r = await client.post(
+        "/api/pairing/introduce",
+        json={
+            "target_instance_id": "target-2",
+            "via_instance_id": "via-2",
+            "message": "hi",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 204
+    assert rec.sent == [
+        {
+            "to": "via-2",
+            "type": FederationEventType.PAIRING_INTRO_RELAY,
+            "payload": {"target_instance_id": "target-2", "message": "hi"},
+        }
+    ]
+
+
+async def test_auto_pair_via_requires_admin(client, monkeypatch):
+    await client.app[federation_repo_key].save_instance(_fake_instance("via-3"))
+    coord = client.app[auto_pair_coordinator_key]
+    calls: list[dict] = []
+
+    async def _request_via(self, **kwargs):
+        calls.append(kwargs)
+        return {"request_id": "r"}
+
+    monkeypatch.setattr(type(coord), "request_via", _request_via)
+    member_tok = await _seed_member(client._db)
+    r = await client.post(
+        "/api/pairing/auto-pair-via",
+        json={"via_instance_id": "via-3", "target_instance_id": "target-3"},
+        headers=_auth(member_tok),
+    )
+    assert r.status == 403
+    assert calls == []
+    # Same body as an admin reaches the coordinator (guard is the only gate).
+    r = await client.post(
+        "/api/pairing/auto-pair-via",
+        json={"via_instance_id": "via-3", "target_instance_id": "target-3"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 202
+    assert [c["via_instance_id"] for c in calls] == ["via-3"]
+
+
+async def test_unpair_requires_admin(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-keep"))
+    member_tok = await _seed_member(client._db)
+    r = await client.delete(
+        "/api/pairing/connections/peer-keep",
+        headers=_auth(member_tok),
+    )
+    assert r.status == 403
+    assert await fed_repo.get_instance("peer-keep") is not None
+
+
+async def test_unpair_requires_sign_in(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-keep-2"))
+    r = await client.delete("/api/pairing/connections/peer-keep-2")
+    assert r.status == 401
+    assert await fed_repo.get_instance("peer-keep-2") is not None
+
+
+async def test_list_connections_stays_readable_for_members(client):
+    """The dashboard network map shows every signed-in member the paired
+    households read-only, so the listing is not admin-gated."""
+    await client.app[federation_repo_key].save_instance(_fake_instance("peer-ro"))
+    member_tok = await _seed_member(client._db)
+    r = await client.get("/api/connections", headers=_auth(member_tok))
+    assert r.status == 200
+    assert [row["instance_id"] for row in await r.json()] == ["peer-ro"]
 
 
 async def test_confirm_pairing_missing_fields(client):

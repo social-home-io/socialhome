@@ -107,9 +107,20 @@ const { wsHandlers, wsMock } = vi.hoisted(() => {
 vi.mock('@/ws', () => ({ ws: wsMock }))
 
 import { api } from '@/api'
+import { currentUser } from '@/store/auth'
 import ConnectionsPage from './ConnectionsPage'
 
 const apiMock = api as unknown as { get: ReturnType<typeof vi.fn> }
+
+// Management controls render for admins only, so every test starts as the
+// admin; a test that wants a member flips it itself. Without this reset a
+// test would inherit whichever role the previous one left behind.
+beforeEach(() => {
+  ;(currentUser as { value: unknown }).value = {
+    user_id: 'u1', username: 'admin', display_name: 'Admin', is_admin: true,
+    picture_url: null, bio: null, is_new_member: false,
+  }
+})
 
 function makeConnection(over: Record<string, unknown> = {}) {
   return {
@@ -1130,5 +1141,78 @@ describe('a household seated by an invite link (source = space_session)', () => 
       expect(container.querySelector('.sh-connection-card')).not.toBeNull()
     })
     expect(queryByText('Pair via a trusted peer')).toBeNull()
+  })
+})
+
+describe('ConnectionsPage — managing household connections is admin-only', () => {
+  // The backend answers 403 to a non-admin on every pairing / unpair /
+  // connection-server write, so the page must not offer those controls to
+  // a member who reaches it by URL. The list itself stays readable.
+  async function setAdmin(isAdmin: boolean) {
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'u', display_name: 'U', is_admin: isAdmin,
+      picture_url: null, bio: null, is_new_member: false,
+    }
+  }
+
+  async function renderAs(isAdmin: boolean) {
+    await setAdmin(isAdmin)
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') return Promise.resolve([makeConnection()])
+      if (url === '/api/gfs/connections') {
+        return Promise.resolve([{
+          id: 'g1', display_name: 'Relay One', inbox_url: 'https://gfs.example',
+          status: 'active',
+        }])
+      }
+      if (url === '/api/admin/federation/external-url') {
+        return Promise.resolve({ base: null, effective: null, source: null })
+      }
+      return Promise.resolve([])
+    })
+    const r = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(r.container.textContent).toContain('Relay One')
+      expect(r.container.textContent).toContain('Household Alpha')
+    })
+    return r
+  }
+
+  function buttonTexts(container: Element): string[] {
+    return [...container.querySelectorAll('button')]
+      .map(b => (b.textContent ?? '').trim())
+  }
+
+  const MANAGE_CONTROLS = [
+    '+ connections.pair', 'Pair via a trusted peer', 'Manage', 'Unpair',
+    '+ gfs.add', 'gfs.disconnect',
+  ]
+
+  it('an admin gets pair, pair-via, manage, unpair and connection-server controls', async () => {
+    const { container } = await renderAs(true)
+    const texts = buttonTexts(container)
+    for (const shown of MANAGE_CONTROLS) expect(texts).toContain(shown)
+    expect(container.textContent)
+      .not.toContain('Managing household connections is admin-only')
+  })
+
+  it('a non-admin sees the households read-only with an admin hint', async () => {
+    const { container } = await renderAs(false)
+    const texts = buttonTexts(container)
+    for (const hidden of MANAGE_CONTROLS) expect(texts).not.toContain(hidden)
+    expect(container.textContent)
+      .toContain('Managing household connections is admin-only')
+  })
+
+  it('a non-admin with no connections gets no start-pairing button', async () => {
+    await setAdmin(false)
+    apiMock.get.mockImplementation(() => Promise.resolve([]))
+    const { container } = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(container.textContent).toContain('connections.no_connections')
+    })
+    expect(buttonTexts(container)).not.toContain('connections.start_pairing')
+    expect(buttonTexts(container)).not.toContain('+ gfs.add')
   })
 })

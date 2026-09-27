@@ -259,10 +259,14 @@ class PairingIntroduceView(BaseView):
              "message"?: str}``. Sends a ``PAIRING_INTRO_RELAY``
     event to the intermediary (``via_instance_id``), which notifies
     its admin and — if accepted — forwards the intro to the target.
+
+    Admin-only: asking to be introduced is a trust decision for the
+    whole household.
     """
 
     async def post(self) -> web.Response:
-        self.user  # auth check
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
         target = str(body.get("target_instance_id") or "")
         via = str(body.get("via_instance_id") or "")
@@ -307,6 +311,8 @@ class PairingConnectionCollectionView(BaseView):
     """``GET /api/pairing/connections`` — list paired instances.
 
     Also mounted on ``GET /api/connections`` for the NetworkMap frontend.
+    Readable by every signed-in member (the dashboard map shows the
+    paired households read-only); every mutation is admin-only.
     """
 
     async def get(self) -> web.Response:
@@ -356,10 +362,14 @@ class AutoPairViaView(BaseView):
     approval on either side of the relay; the target household's
     admin still reviews + approves the incoming request (one click,
     no QR scan) before the pair is established.
+
+    Admin-only, like every other step that changes which households this
+    one trusts.
     """
 
     async def post(self) -> web.Response:
-        self.user  # auth check
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
         via = str(body.get("via_instance_id") or "")
         target = str(body.get("target_instance_id") or "")
@@ -495,7 +505,7 @@ class PairingConnectionDetailView(BaseView):
       this peer.  Handled by :class:`PeerHomeSharingService`.
 
     Both fields are optional and may be combined in a single request.
-    Admin-only.
+    Both methods are admin-only.
     """
 
     async def patch(self) -> web.Response:
@@ -539,7 +549,8 @@ class PairingConnectionDetailView(BaseView):
         )
 
     async def delete(self) -> web.Response:
-        self.user  # auth check
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
         instance_id = self.match("instance_id")
         repo = self.svc(federation_repo_key)
         inst = await repo.get_instance(instance_id)
