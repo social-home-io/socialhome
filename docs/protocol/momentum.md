@@ -21,8 +21,9 @@ Plaintext fields on every envelope: `event_type`, `from_instance`,
 `to_instance`, `moment_id`, `origin_instance_id`, `hop_count`. Routing
 data only — everything else (`content`, `media_url`, `media_type`,
 `duration_ms`, `parent_moment_id`, `expires_at`, `author_user_id`,
-`reactor_user_id`, `emoji`) lives inside the encrypted payload
-(§25.8.21).
+`reactor_user_id`, `emoji`, and the v_35 origin signature
+`origin_identity_pk` / `origin_sig` / `origin_sig_suite`) lives inside the
+encrypted payload (§25.8.21).
 
 ## Retention
 
@@ -125,10 +126,11 @@ couple two trust models and leak block-list shape to peers.
 * **1-hop direct** (``from_instance == origin_instance_id``): the
   sending peer must be the author's home instance. Inbound rejects on
   mismatch.
-* **2/3-hop relay** (``from_instance != origin_instance_id``): trust
-  the ``origin_instance_id`` field as long as it matches the author's
-  home instance lookup. Unknown authors (``USER_UPDATED`` envelope
-  hasn't landed yet) are accepted on first sight.
+* **2/3-hop relay** (``from_instance != origin_instance_id``): the
+  moment must carry its **origin signature** (v_35, below), and the
+  ``origin_instance_id`` must match the author's home instance lookup.
+  Unknown authors (``USER_UPDATED`` envelope hasn't landed yet) are
+  accepted on first sight once the signature verifies.
 * **Never ours:** a moment whose claimed origin is this household, or
   whose author is one of our own users, is refused on every path — those
   only originate here.
@@ -141,13 +143,35 @@ couple two trust models and leak block-list shape to peers.
   the published author is the stored one.
 * Refused events are logged at WARNING and never relayed
   (`tests/protocol/test_moment_scope.py`).
-* **Known limitation — relayed moments are not yet authenticated.** On
-  the 2/3-hop path the receiver cannot tell a genuine relay from a paired
-  household that names a remote origin: the origin field is not signed by
-  the origin. The rules above bind direct deliveries and stop anything
-  claiming this household or its members, but a relayed create or delete
-  for another household's author is taken on the relayer's word. Closing
-  this needs an end-to-end origin signature on the moment (planned).
+
+### Origin signature (v_35)
+
+Moments relayed by another household are checked against the household
+that posted them. Every relay re-sends a moment under its own envelope
+signature, so the §24.11 pipeline proves only the last hop; the origin
+household therefore signs each `MOMENT_CREATED` / `MOMENT_DELETED` it
+authors with its Ed25519 identity key
+(`socialhome/federation/moment_origin.py`, wire shape in
+[`crypto.md`](../crypto.md)). The signature covers the event type, the
+suite and every stored field — never `hop_count` — and relays forward it
+verbatim.
+
+* A receiver handed a moment by a household other than its claimed origin
+  verifies the signature against the key it pins for that origin, or, for
+  a friend-of-friend origin it never paired with, against the shipped
+  `origin_identity_pk` provided `derive_instance_id(pk) ==
+  origin_instance_id`.
+* **Deletes** follow the same rule: a relayed `MOMENT_DELETED` removes a
+  moment only when the origin signed it; the author's own household can
+  still delete directly.
+* **Refused** — unsigned relays naming a v_35+ origin or an origin with no
+  `remote_instances` row, a signature that does not verify, a shipped key
+  that disagrees with the pinned one or does not derive to the origin, and
+  any unknown `origin_sig_suite`. Refused events are logged at WARNING and
+  never relayed (`tests/protocol/test_moment_origin_signature.py`).
+* **Legacy window** — an unsigned relay whose origin this household holds a
+  row for at `proto_version` < 35 is accepted and logged at INFO; it closes
+  as origins upgrade. See [`capabilities.md`](./capabilities.md) (v_35).
 
 ## Mermaid sequence — local author posts a moment
 
@@ -165,13 +189,13 @@ sequenceDiagram
     U->>SA: POST /api/moments<br/>{content, media?, parent_moment_id?}
     SA->>SA: 15-min rate-limit check<br/>+ persist + ``moments.id`` UPSERT
     SA->>Bus: publish MomentCreated
-    Bus->>Fed: outbound subscriber<br/>fans hop=1 to paired peers
-    Fed->>B: encrypted MOMENT_CREATED (hop=1, origin=A)
+    Bus->>Fed: outbound subscriber<br/>signs origin_sig (A identity key)<br/>fans hop=1 to paired peers
+    Fed->>B: encrypted MOMENT_CREATED (hop=1, origin=A, origin_sig)
     Note over B: §24.11 pipeline:<br/>verify, decrypt, persist
     B->>SB: dispatch via _event_registry<br/>save + republish MomentCreated
     SB-->>Fed: relay_inbound → fan hop=2 to B's peers (skip A)
-    Fed->>C: encrypted MOMENT_CREATED (hop=2, origin=A)
-    Note over C: persist + republish<br/>(no further relay; hop_count==2 + relay path → hop=3)
+    Fed->>C: encrypted MOMENT_CREATED (hop=2, origin=A, origin_sig verbatim)
+    Note over C: sender B ≠ origin A → verify origin_sig<br/>against A pinned key (or derived pk)<br/>then persist + republish
 ```
 
 ## Notifications

@@ -6,15 +6,28 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.events import (
     MomentCreated,
     MomentDeleted,
     MomentReactionChanged,
 )
 from socialhome.domain.federation import FederationEventType, RemoteInstance
+from socialhome.federation.moment_origin import verify_moment_origin
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
 )
+
+_KEY = generate_identity_keypair()
+
+
+def _federation() -> MagicMock:
+    federation = MagicMock()
+    federation.own_instance_id = "self"
+    federation.own_identity_seed = _KEY.private_key
+    federation.own_identity_pk = _KEY.public_key
+    federation.send_event = AsyncMock()
+    return federation
 
 
 class _FakeVisibilityRepo:
@@ -58,9 +71,7 @@ def _create_event(
 
 @pytest.fixture
 def stack():
-    federation = MagicMock()
-    federation.own_instance_id = "self"
-    federation.send_event = AsyncMock()
+    federation = _federation()
     federation_repo = MagicMock()
     user_repo = MagicMock()
     bus = MagicMock()
@@ -87,6 +98,15 @@ async def test_create_fans_to_all_paired_with_hop_1(stack):
     assert {c["to_instance_id"] for c in sent} == {"peer-a", "peer-b"}
     assert all(c["event_type"] is FederationEventType.MOMENT_CREATED for c in sent)
     assert all(c["payload"]["hop_count"] == 1 for c in sent)
+    # v_35: every create carries this household's origin signature.
+    assert all(
+        verify_moment_origin(
+            identity_pk=_KEY.public_key,
+            event_type=FederationEventType.MOMENT_CREATED,
+            payload=c["payload"],
+        )
+        for c in sent
+    )
 
 
 async def test_remote_author_skips_origin_fan(stack):
@@ -112,6 +132,32 @@ async def test_delete_fans_with_hop_1(stack):
     kwargs = fed.send_event.call_args.kwargs
     assert kwargs["event_type"] is FederationEventType.MOMENT_DELETED
     assert kwargs["payload"]["hop_count"] == 1
+    assert verify_moment_origin(
+        identity_pk=_KEY.public_key,
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=kwargs["payload"],
+    )
+
+
+async def test_relay_forwards_the_origin_signature_verbatim(stack):
+    out, fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    inbound = {
+        "moment_id": "m-1",
+        "author_user_id": "uid-far",
+        "origin_instance_id": "peer-origin",
+        "hop_count": 1,
+        "origin_sig": "sig",
+        "origin_sig_suite": "ed25519",
+        "origin_identity_pk": "ab" * 32,
+    }
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=inbound,
+        from_instance="peer-origin",
+    )
+    forwarded = fed.send_event.call_args.kwargs["payload"]
+    assert forwarded == {**inbound, "hop_count": 2}
 
 
 async def test_reaction_set_unicasts_to_author_home(stack):
@@ -308,9 +354,7 @@ async def test_list_instances_failure_returns_no_peers(stack):
 
 async def test_moment_created_skips_peer_that_hid_author():
     """A peer that hid the local author must not receive MOMENT_CREATED."""
-    federation = MagicMock()
-    federation.own_instance_id = "self"
-    federation.send_event = AsyncMock()
+    federation = _federation()
     fed_repo = MagicMock()
     user_repo = MagicMock()
     bus = MagicMock()
@@ -337,9 +381,7 @@ async def test_moment_created_skips_peer_that_hid_author():
 
 async def test_moment_deleted_skips_peer_that_hid_author():
     """A peer that hid the local author must not receive MOMENT_DELETED."""
-    federation = MagicMock()
-    federation.own_instance_id = "self"
-    federation.send_event = AsyncMock()
+    federation = _federation()
     fed_repo = MagicMock()
     user_repo = MagicMock()
     bus = MagicMock()
@@ -373,9 +415,7 @@ async def test_moment_deleted_skips_peer_that_hid_author():
 async def test_moment_reaction_suppressed_when_reactor_hidden_from_author_peer():
     """When the local reactor is hidden from the author's home instance,
     no MOMENT_REACTED (or REACTION_REMOVED) envelope is sent."""
-    federation = MagicMock()
-    federation.own_instance_id = "self"
-    federation.send_event = AsyncMock()
+    federation = _federation()
     fed_repo = MagicMock()
     user_repo = MagicMock()
     bus = MagicMock()

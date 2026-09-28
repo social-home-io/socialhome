@@ -299,6 +299,42 @@ key to an unpaired GFS subscriber, GFS-blind: the seed-holder seals the
 authority-signs the sealed envelope so the content-blind GFS relays it
 without learning the key.
 
+**Moment origin signature (v_35)** (`federation/moment_origin.py`) — a
+moment travels up to three hops, and each relay re-sends it under its own
+envelope signature, so the envelope proves only the last hop. The origin
+household therefore signs every `MOMENT_CREATED` / `MOMENT_DELETED` it
+authors with its Ed25519 **identity** key (no new key), and three sibling
+fields ride inside the encrypted payload:
+
+```
+origin_identity_pk : "<64 hex>"   # the origin's Ed25519 identity public key
+origin_sig         : "<b64url>"   # Ed25519 over the signing bytes below
+origin_sig_suite   : "ed25519"    # suite tag; unknown value → reject
+```
+
+```
+b"moment-origin:v1:" + canonical_json({
+    event_type, sig_suite, moment_id, author_user_id, origin_instance_id,
+    occurred_at,
+    # MOMENT_CREATED only:
+    content, media_url, media_type, duration_ms, parent_moment_id, expires_at,
+})   # sort_keys, separators=(",", ":"), UTF-8
+```
+
+`hop_count` is outside the signature (each relay bumps it) and relays
+forward the three fields verbatim. The event type is inside the signed
+object, so a signed create cannot be replayed as a delete. A receiver
+handed a moment by a household other than its claimed origin verifies it
+against the key it pins for that origin, or — for a friend-of-friend
+origin it has never paired with — against the shipped key, accepted only
+when `derive_instance_id(pk) == origin_instance_id` (§4.1.2). Receivers
+check `origin_sig_suite` against `SUPPORTED_MOMENT_ORIGIN_SIG_SUITES` and
+raise `UnsupportedMomentOriginSuite` on anything else — no default. Like
+the routed-origin signature it is Ed25519-only today; the tag plus the
+hard reject make the `"ed25519+mldsa65"` sibling a drop-in. Direct
+deliveries need no origin signature: there the envelope signer *is* the
+origin.
+
 The key-wrap pubkey is **self-signed by the identity** so the seal path
 never trusts the GFS-served value. At identity setup each household
 produces `keywrap_sig = b64url(sign_ed25519(identity_seed,

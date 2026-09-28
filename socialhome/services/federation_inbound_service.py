@@ -83,7 +83,9 @@ from ..domain.user import (
     clean_status_emoji,
     clean_status_text,
 )
+from ..domain.federation_capabilities import FederationCapability
 from ..federation.dm_scope import DmScope, refuse
+from ..federation.moment_origin import check_relayed_moment_origin
 from ..federation.space_authorship import SpaceAuthorship
 from ..federation.space_scope import (
     log_cross_space_refusal,
@@ -2940,6 +2942,8 @@ class FederationInboundService:
         ):
             log.warning("MOMENT_CREATED authority mismatch — dropped")
             return
+        if not await self._moment_origin_verified(event, origin_instance_id):
+            return
         if not await self._moment_row_binds(
             event, moment_id, author_user_id, origin_instance_id
         ):
@@ -3040,6 +3044,8 @@ class FederationInboundService:
             author_user_id,
         ):
             log.warning("MOMENT_DELETED authority mismatch — dropped")
+            return
+        if not await self._moment_origin_verified(event, origin_instance_id):
             return
         if not await self._moment_row_binds(
             event, moment_id, author_user_id, origin_instance_id
@@ -3173,6 +3179,60 @@ class FederationInboundService:
         except Exception:  # pragma: no cover — defensive
             return True
         return home is None or home == origin_instance_id
+
+    async def _moment_origin_verified(
+        self,
+        event: "FederationEvent",
+        origin_instance_id: str,
+    ) -> bool:
+        """A relayed moment must carry its origin household's signature.
+
+        A direct delivery (``from_instance == origin_instance_id``) is bound
+        by the §24.11 envelope signature. A relayed one was re-sent under the
+        relay's own envelope, so ``origin_instance_id`` is only the relay's
+        claim until the origin's identity signature over the moment verifies
+        (v_35, :mod:`socialhome.federation.moment_origin`) — against the key
+        pinned for the origin, or a shipped key bound by
+        ``derive_instance_id`` for a friend-of-friend origin we never paired
+        with. The one exception is the legacy window: an unsigned relay from
+        an origin we hold a row for that predates signing, logged at INFO.
+        Refused events are neither applied nor relayed.
+        """
+        if event.from_instance == origin_instance_id:
+            return True
+        fed = self._federation_service
+        if fed is None:  # no key directory: nothing can be verified
+            return False
+        verdict = check_relayed_moment_origin(
+            event_type=event.event_type,
+            payload=event.payload,
+            origin_instance_id=origin_instance_id,
+            pinned_pk=await fed.peer_identity_public_key(origin_instance_id),
+            origin_signs=await fed.peer_supports(
+                origin_instance_id,
+                min_version=FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE,
+            ),
+        )
+        if not verdict.accepted:
+            log.warning(
+                "%s relayed by %s for origin %s: %s — refusing (moment=%s)",
+                event.event_type,
+                event.from_instance,
+                origin_instance_id,
+                verdict.reason,
+                event.payload.get("moment_id"),
+            )
+            return False
+        if verdict.legacy:
+            log.info(
+                "%s relayed by %s: accepting unsigned moment from pre-v_%d"
+                " origin %s (legacy window — closes when it upgrades)",
+                event.event_type,
+                event.from_instance,
+                FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE,
+                origin_instance_id,
+            )
+        return True
 
     async def _moment_row_binds(
         self,
