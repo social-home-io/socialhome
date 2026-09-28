@@ -8279,6 +8279,15 @@ body.sh-dm-thread-open .sh-messages {
   border-bottom: 1px dashed var(--sh-border);
   gap: var(--sh-space-md);
 }
+/* A toggle row is ``<label><input type=checkbox/> text</label>`` — the
+ * text belongs beside its checkbox, not pushed to the far edge the way a
+ * settings row pushes its action button. */
+.sh-toggle-row {
+  justify-content: flex-start;
+  gap: var(--sh-space-sm);
+  cursor: pointer;
+}
+.sh-toggle-row > input { flex-shrink: 0; }
 .sh-toggle-row:last-child, .sh-settings-row:last-child { border-bottom: none; }
 .sh-settings-avatar {
   display: flex;

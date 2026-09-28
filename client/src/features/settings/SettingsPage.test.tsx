@@ -38,6 +38,16 @@ vi.mock('@/store/auth', () => ({
 
 vi.mock('@/ws', () => ({ ws: { on: vi.fn(() => () => {}) } }))
 
+const { webPushMock } = vi.hoisted(() => ({
+  webPushMock: {
+    currentPushSubscription: vi.fn().mockResolvedValue(null),
+    enableWebPush: vi.fn().mockResolvedValue(true),
+    disableWebPush: vi.fn().mockResolvedValue(undefined),
+    webPushSupported: vi.fn(() => true),
+  },
+}))
+vi.mock('@/utils/webPush', () => webPushMock)
+
 import { userPreferences } from '@/store/userPreferences'
 import { instanceConfig } from '@/store/instance'
 import { spaceLocationRows, spaceLocationLoading } from './SettingsPage'
@@ -377,5 +387,38 @@ describe('SettingsPage — HA notify service (§25.3)', () => {
     expect(
       await findByPlaceholderText('notify.mobile_app_my_phone'),
     ).toBeTruthy()
+  })
+})
+
+describe('SettingsPage — web push toggle', () => {
+  beforeEach(() => {
+    webPushMock.currentPushSubscription.mockReset()
+    webPushMock.enableWebPush.mockReset().mockResolvedValue(true)
+    webPushMock.disableWebPush.mockReset().mockResolvedValue(undefined)
+  })
+
+  it('shows Disable only when this browser holds a live subscription, and Disable removes it', async () => {
+    webPushMock.currentPushSubscription.mockResolvedValue({ endpoint: 'https://p/x' })
+    const { findByRole } = await renderNotificationsTab()
+    fireEvent.click(await findByRole('button', { name: 'Disable' }))
+    await waitFor(() => expect(webPushMock.disableWebPush).toHaveBeenCalledTimes(1))
+    expect(await findByRole('button', { name: 'Enable' })).toBeTruthy()
+  })
+
+  it('Enable subscribes (not just asks for permission)', async () => {
+    webPushMock.currentPushSubscription.mockResolvedValue(null)
+    const { findByRole } = await renderNotificationsTab()
+    fireEvent.click(await findByRole('button', { name: 'Enable' }))
+    await waitFor(() => expect(webPushMock.enableWebPush).toHaveBeenCalledTimes(1))
+    expect(await findByRole('button', { name: 'Disable' })).toBeTruthy()
+  })
+
+  it('a failed disable keeps the toggle on', async () => {
+    webPushMock.currentPushSubscription.mockResolvedValue({ endpoint: 'https://p/x' })
+    webPushMock.disableWebPush.mockRejectedValue(new Error('API 500'))
+    const { findByRole } = await renderNotificationsTab()
+    fireEvent.click(await findByRole('button', { name: 'Disable' }))
+    await waitFor(() => expect(webPushMock.disableWebPush).toHaveBeenCalled())
+    expect(await findByRole('button', { name: 'Disable' })).toBeTruthy()
   })
 })

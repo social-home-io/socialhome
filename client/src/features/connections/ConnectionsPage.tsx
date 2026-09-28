@@ -985,7 +985,6 @@ export default function ConnectionsPage() {
             federated_display_name: detail.federated_display_name,
             local_alias: detail.local_alias ?? null,
             status: detail.status ?? 'confirmed',
-            inbox_url: detail.inbox_url ?? '',
             unreachable_since: detail.unreachable_since ?? null,
             last_reachable_at: detail.last_reachable_at ?? null,
             last_relay_accepted_at: detail.last_relay_accepted_at ?? null,

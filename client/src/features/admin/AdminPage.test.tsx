@@ -130,3 +130,111 @@ describe('RecoveryKitPanel', () => {
     expect(anchorClick).not.toHaveBeenCalled()
   })
 })
+
+describe('ModerationTab', () => {
+  // Shape returned by ``GET /api/admin/reports`` (routes/reports.py
+  // ``_report_dict``) — a plain list, not ``{items: [...]}``.
+  const REPORTS = [
+    {
+      id: 'r1', target_type: 'post', target_id: 'p-9',
+      reporter_user_id: 'u2', reporter_instance_id: null,
+      category: 'spam', notes: 'Selling knock-off watches',
+      status: 'pending', created_at: '2026-09-01T10:00:00+00:00',
+      resolved_by: null, resolved_at: null,
+    },
+    {
+      id: 'r2', target_type: 'highlight', target_id: 'h-1',
+      reporter_user_id: 'remote-u', reporter_instance_id: 'inst-b',
+      category: 'harassment', notes: null,
+      status: 'pending', created_at: '2026-09-02T10:00:00+00:00',
+      resolved_by: null, resolved_at: null,
+    },
+  ]
+
+  async function mockApi(reports: unknown) {
+    const { api } = await import('@/api')
+    const get = api.get as ReturnType<typeof vi.fn>
+    get.mockReset()
+    get.mockImplementation((path: string) => {
+      if (path === '/api/users') {
+        return Promise.resolve([
+          { user_id: 'u2', username: 'bob', display_name: 'Bob' },
+        ])
+      }
+      if (path === '/api/admin/reports') {
+        return reports instanceof Error
+          ? Promise.reject(reports)
+          : Promise.resolve(reports)
+      }
+      if (path === '/api/admin/tokens') return Promise.resolve({ tokens: [] })
+      return Promise.resolve([])
+    })
+    return api
+  }
+
+  async function openTab() {
+    const mod = await import('./AdminPage')
+    const view = render(<mod.default />)
+    fireEvent.click(await view.findByRole('tab', { name: 'Moderation' }))
+    return view
+  }
+
+  afterEach(async () => {
+    const { api } = await import('@/api')
+    ;(api.get as ReturnType<typeof vi.fn>).mockReset()
+    ;(api.get as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    ;(api.post as ReturnType<typeof vi.fn>).mockClear()
+  })
+
+  it('loads the queue from GET /api/admin/reports and renders the real shape', async () => {
+    const api = await mockApi(REPORTS)
+    const view = await openTab()
+    expect(api.get).toHaveBeenCalledWith('/api/admin/reports')
+    expect(api.get).not.toHaveBeenCalledWith('/api/admin/moderation')
+    expect(await view.findByText('Post')).toBeTruthy()
+    expect(view.getByText(/reported as spam by Bob/)).toBeTruthy()
+    expect(view.getByText('Selling knock-off watches')).toBeTruthy()
+    // Remote reporter is anonymised; a highlight target links in-app.
+    expect(view.getByText(/reported as harassment by someone from another household/)).toBeTruthy()
+    expect(view.getByText('Highlight').closest('a')?.getAttribute('href')).toBe('/highlights/h-1')
+  })
+
+  it('resolves via POST /api/admin/reports/{id}/resolve and drops the row', async () => {
+    const api = await mockApi(REPORTS)
+    const view = await openTab()
+    await view.findByText('Post')
+    fireEvent.click(view.getAllByRole('button', { name: 'Resolve' })[0])
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/api/admin/reports/r1/resolve', { dismissed: false },
+    ))
+    await waitFor(() => expect(view.queryByText('Selling knock-off watches')).toBeNull())
+  })
+
+  it('dismisses with {dismissed: true}', async () => {
+    const api = await mockApi(REPORTS)
+    const view = await openTab()
+    await view.findByText('Post')
+    fireEvent.click(view.getAllByRole('button', { name: 'Dismiss' })[1])
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/api/admin/reports/r2/resolve', { dismissed: true },
+    ))
+  })
+
+  it('shows the empty state for an empty list', async () => {
+    await mockApi([])
+    const view = await openTab()
+    expect(await view.findByText(/No pending reports/)).toBeTruthy()
+  })
+
+  it('surfaces a load failure with Retry instead of an empty queue', async () => {
+    const api = await mockApi(new Error('API 500: /api/admin/reports'))
+    const view = await openTab()
+    const alert = await view.findByRole('alert')
+    expect(alert.textContent).toMatch(/Couldn't load the moderation queue/)
+    expect(view.queryByText(/No pending reports/)).toBeNull()
+    await mockApi(REPORTS)
+    fireEvent.click(view.getByRole('button', { name: 'Retry' }))
+    expect(await view.findByText('Post')).toBeTruthy()
+    expect(api.get).toHaveBeenCalledWith('/api/admin/reports')
+  })
+})

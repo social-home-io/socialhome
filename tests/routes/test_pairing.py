@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-
+import dataclasses
 from datetime import datetime, timezone
 
 from socialhome.app_keys import (
@@ -1210,6 +1210,78 @@ async def test_transport_detail_returns_null_when_no_recent_relay(client):
     assert r.status == 200
     body = await r.json()
     assert body["last_relay"] is None
+
+
+async def test_transport_detail_shows_inbox_url_for_confirmed_direct_peer(client):
+    """The Manage panel's "Inbox" row: the admin sees the address their
+    household delivers to for a QR-paired (manual) confirmed peer."""
+    peer = _fake_instance("peer-direct")
+    await client.app[federation_repo_key].save_instance(peer)
+    r = await client.get(
+        f"/api/pairing/connections/{peer.id}/transport-detail",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["inbox_url"] == "https://peer/wh"
+
+
+async def test_transport_detail_hides_inbox_url_for_space_session_peer(client):
+    """A household met through an invite link must never learn — or be
+    shown — another household's address (GFS shielding)."""
+    # Even if a URL were somehow on the row, it must not be surfaced.
+    peer = dataclasses.replace(
+        _link_joined_peer("inbox-hidden"), remote_inbox_url="https://leak/wh"
+    )
+    await client.app[federation_repo_key].save_instance(peer)
+    r = await client.get(
+        f"/api/pairing/connections/{peer.id}/transport-detail",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["inbox_url"] is None
+
+
+async def test_transport_detail_hides_inbox_url_for_relay_only_peer(client):
+    peer = _fake_instance("peer-relay-only")
+    await client.app[federation_repo_key].save_instance(peer)
+    client.app[federation_service_key].note_relay_accepted(peer.id)
+    r = await client.get(
+        f"/api/pairing/connections/{peer.id}/transport-detail",
+        headers=_auth(client._tok),
+    )
+    assert (await r.json())["inbox_url"] is None
+
+
+async def test_transport_detail_inbox_url_null_for_unknown_or_pending_peer(client):
+    pending = RemoteInstance(
+        id="peer-pending",
+        display_name="peer-pending",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_inbox_url="https://pending/wh",
+        local_inbox_id="wh-pending",
+        status=PairingStatus.PENDING_SENT,
+        source=InstanceSource.MANUAL,
+    )
+    await client.app[federation_repo_key].save_instance(pending)
+    for iid in ("peer-pending", "peer-unknown"):
+        r = await client.get(
+            f"/api/pairing/connections/{iid}/transport-detail",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+        assert (await r.json())["inbox_url"] is None
+
+
+async def test_connections_listing_never_carries_inbox_url(client):
+    """The listing is member-readable; the address stays off it."""
+    peer = _fake_instance("peer-listing")
+    await client.app[federation_repo_key].save_instance(peer)
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+    for row in await r.json():
+        assert "inbox_url" not in row
+        assert "remote_inbox_url" not in row
 
 
 async def test_transport_detail_admin_only(client):

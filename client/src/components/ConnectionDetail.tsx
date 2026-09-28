@@ -20,7 +20,6 @@ import {
 
 interface Connection {
   instance_id: string; display_name: string; status: string
-  inbox_url: string
   unreachable_since: string | null; paired_at: string | null
   /** Last moment an outbound envelope to this peer was accepted
    *  (``remote_instances.last_reachable_at``). ``null`` when it has never
@@ -100,6 +99,10 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
   const [alias, setAlias] = useState(conn.local_alias ?? '')
   const [aliasBusy, setAliasBusy] = useState(false)
   const [relay, setRelay] = useState<RelayDetail | null>(null)
+  /** Peer inbox address — only returned (admin-only, via
+   *  ``/transport-detail``) for a confirmed, directly paired household
+   *  that isn't relay-only. ``null`` hides the row. */
+  const [inboxUrl, setInboxUrl] = useState<string | null>(null)
   const [recheckBusy, setRecheckBusy] = useState(false)
   /** Effective display name as currently rendered — handshake name
    *  if no alias is set, else the alias. Shown above the input as
@@ -130,11 +133,15 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
     let cancelled = false
     api.get(`/api/pairing/connections/${conn.instance_id}/transport-detail`)
       .then((body: unknown) => {
-        const b = body as { last_relay: RelayDetail | null }
-        if (!cancelled) setRelay(b?.last_relay ?? null)
+        const b = body as { last_relay: RelayDetail | null, inbox_url?: string | null }
+        if (cancelled) return
+        setRelay(b?.last_relay ?? null)
+        setInboxUrl(b?.inbox_url || null)
       })
       .catch(() => {
-        if (!cancelled) setRelay(null)
+        if (cancelled) return
+        setRelay(null)
+        setInboxUrl(null)
       })
     return () => { cancelled = true }
   }, [conn.instance_id])
@@ -264,7 +271,9 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
         <dl>
           <dt>Instance ID</dt><dd class="sh-mono">{conn.instance_id}</dd>
           <dt>Status</dt><dd class={`sh-status sh-status--${conn.status}`}>{conn.status}</dd>
-          <dt>Inbox</dt><dd class="sh-mono sh-muted">{conn.inbox_url}</dd>
+          {inboxUrl && (
+            <><dt>Inbox</dt><dd class="sh-mono sh-muted">{inboxUrl}</dd></>
+          )}
           {conn.paired_at && <><dt>Paired</dt><dd>{new Date(conn.paired_at).toLocaleString()}</dd></>}
           {conn.proto_version != null && (
             <><dt>Protocol version</dt><dd>v{conn.proto_version}</dd></>

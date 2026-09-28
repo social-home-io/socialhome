@@ -88,6 +88,25 @@ async def test_unsubscribe_removes_subscription(client):
     assert r.status == 404
 
 
+async def test_client_chosen_id_round_trips_subscribe_then_delete(client):
+    """The SPA (``client/src/utils/webPush.ts``) sends its own
+    endpoint-derived ``id`` on subscribe and deletes by that id when the
+    user turns push off — the server row must actually go away."""
+    h = _auth(client._tok)
+    sub_id = "sub-0123456789abcdef0123456789abcdef"
+    r = await client.post(
+        "/api/push/subscribe", json={**_VALID_SUB, "id": sub_id}, headers=h
+    )
+    assert r.status == 201
+    assert (await r.json())["id"] == sub_id
+    r = await client.get("/api/push/subscriptions", headers=h)
+    assert [s["id"] for s in await r.json()] == [sub_id]
+    r = await client.delete(f"/api/push/subscribe/{sub_id}", headers=h)
+    assert r.status == 204
+    r = await client.get("/api/push/subscriptions", headers=h)
+    assert await r.json() == []
+
+
 async def test_unsubscribe_unknown_id_404(client):
     r = await client.delete("/api/push/subscribe/missing", headers=_auth(client._tok))
     assert r.status == 404

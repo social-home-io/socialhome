@@ -34,7 +34,6 @@ export interface Connection {
   paired_at?: string | null
   source?: string
   reachable:     boolean
-  inbox_url?: string
   unreachable_since?: string | null
   /** Last moment an outbound envelope to this peer was accepted
    *  (``remote_instances.last_reachable_at``); ``null`` when it has never

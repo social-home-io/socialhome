@@ -28,6 +28,9 @@ import {
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { userPreferences } from '@/store/userPreferences'
 import { isHomeAssistant } from '@/platform'
+import {
+  currentPushSubscription, disableWebPush, enableWebPush, webPushSupported,
+} from '@/utils/webPush'
 import { UsernameEditor } from './UsernameEditor'
 import { HandleEditor } from './HandleEditor'
 
@@ -53,9 +56,8 @@ const avatarUrl = signal<string | null>(null)
 const haNotifyService = signal('')
 const haNotifySaving = signal(false)
 const onlineStatusVisible = signal(true)
-const pushEnabled = signal(
-  typeof Notification !== 'undefined' ? Notification.permission === 'granted' : false
-)
+const pushEnabled = signal(false)
+const pushBusy = signal(false)
 
 /** Read ``online_status_visible`` from the cached
  *  ``currentUser.preferences_json``. The previous implementation
@@ -838,27 +840,40 @@ function MomentumPanel() {
 }
 
 function NotificationsTab() {
+  // "Enabled" means this browser holds a live push subscription — not
+  // merely that notification permission was granted once.
+  useEffect(() => {
+    currentPushSubscription()
+      .then((sub) => { pushEnabled.value = sub !== null })
+      .catch(() => { pushEnabled.value = false })
+  }, [])
+
   const requestPush = async () => {
-    if (typeof Notification === 'undefined') return
-    const result = await Notification.requestPermission()
-    pushEnabled.value = result === 'granted'
-    if (result === 'granted') {
-      showToast('Push notifications enabled', 'success')
+    pushBusy.value = true
+    try {
+      if (await enableWebPush()) {
+        pushEnabled.value = true
+        showToast('Push notifications enabled', 'success')
+      } else {
+        showToast('Notifications are blocked for this site in your browser', 'info')
+      }
+    } catch (err: unknown) {
+      showToast(`Couldn't enable push: ${(err as Error)?.message ?? err}`, 'error')
+    } finally {
+      pushBusy.value = false
     }
   }
 
   const disablePush = async () => {
+    pushBusy.value = true
     try {
-      const reg = await navigator.serviceWorker.getRegistration()
-      const sub = await reg?.pushManager?.getSubscription()
-      if (sub) {
-        await sub.unsubscribe()
-        await api.post('/api/push/unsubscribe', sub.toJSON())
-      }
+      await disableWebPush()
       pushEnabled.value = false
       showToast('Push notifications disabled', 'info')
     } catch {
       showToast('Failed to disable push', 'error')
+    } finally {
+      pushBusy.value = false
     }
   }
 
@@ -868,15 +883,17 @@ function NotificationsTab() {
       <div class="sh-settings-row">
         <span>Push notifications</span>
         {pushEnabled.value ? (
-          <Button variant="secondary" onClick={disablePush}>Disable</Button>
+          <Button variant="secondary" loading={pushBusy.value} onClick={disablePush}>Disable</Button>
         ) : (
-          <Button onClick={requestPush}>Enable</Button>
+          <Button loading={pushBusy.value} disabled={!webPushSupported()} onClick={requestPush}>Enable</Button>
         )}
       </div>
       <p class="sh-muted">
         {pushEnabled.value
           ? 'You will receive push notifications for new messages and mentions.'
-          : 'Enable push notifications to stay updated when you are away.'}
+          : webPushSupported()
+            ? 'Enable push notifications to stay updated when you are away.'
+            : 'This browser does not support push notifications.'}
       </p>
       {isHomeAssistant() && <HaNotifyServiceRow />}
     </section>
