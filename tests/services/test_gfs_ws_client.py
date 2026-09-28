@@ -1287,3 +1287,18 @@ async def test_stop_on_a_connected_client_returns_promptly_without_cancel(
     assert elapsed < 2.0, f"stop() took {elapsed:.2f}s on a live link"
     assert task.done() and not task.cancelled(), "loop was cancelled, not stopped"
     assert not client.connected
+
+
+async def test_stop_cancels_a_loop_task_that_ends_cancelled():
+    """``stop()``'s fallback: if awaiting the loop task raises (it timed out,
+    or the task was already cancelled) the task is cancelled and dropped,
+    never re-raised into the caller's shutdown path."""
+    client = _make_idle_client()
+    stuck = asyncio.create_task(asyncio.Event().wait())
+    stuck.cancel()
+    client._task = stuck
+
+    await client.stop()
+
+    assert client._task is None
+    assert stuck.cancelled()
