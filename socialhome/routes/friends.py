@@ -31,6 +31,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.federation import PairingStatus
+from ..domain.federation_capabilities import FederationCapability
 from ..media_signer import sign_media_urls_in
 from .base import BaseView
 
@@ -147,6 +148,10 @@ def _instance_safe_dict(inst, *, members: list[dict]) -> dict:
         "reachable": reachable,
         "paired_at": getattr(inst, "paired_at", None),
         "source": (inst.source.value if hasattr(inst.source, "value") else inst.source),
+        # Whether this household's people can be put into a group chat
+        # (v_37+). The new-group picker greys out the others and says why.
+        "supports_group_dm": int(getattr(inst, "proto_version", 1) or 1)
+        >= FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM,
         "members": members,
         "member_count": len(members),
     }

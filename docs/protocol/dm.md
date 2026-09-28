@@ -36,8 +36,11 @@ picture / video / file / **voice-note** attachments — see
 
 **Membership**
 
-`DM_MEMBER_ADDED`, `DM_CONTACT_REQUEST`, `DM_CONTACT_ACCEPTED`,
-`DM_CONTACT_DECLINED`.
+`DM_GROUP_ROSTER` and `DM_GROUP_LEAVE` (v_37, see
+[Group conversations across households](#group-conversations-across-households)),
+`DM_CONTACT_REQUEST`, `DM_CONTACT_ACCEPTED`, `DM_CONTACT_DECLINED`.
+`DM_MEMBER_ADDED` is a reserved name with no handler — group membership
+travels only as `DM_GROUP_ROSTER`.
 
 **History pull**
 
@@ -53,11 +56,16 @@ household and the conversation's remote seats
 (`conversation_remote_members`). It drops the event with a WARNING when:
 
 - **`DM_MESSAGE`** — the sender is not a user of `from_instance` (a
-  local member, a third household's user, or unknown); the message id
+  local member, a third household's user, or unknown) nor seated on it
+  by a group roster; the message id
   already exists in another conversation or from another sender (an edit
   or transcript re-send is honoured only for the sender's own message);
-  the conversation exists here but the sender holds no seat in it; or the
-  conversation is new and no recipient is a local user. An existing
+  the conversation exists here but the sender holds no seat in it; the
+  conversation is new and its id is a group id (a group arrives only with
+  its roster — the roster's catch-up pull fetches a message that overtook
+  it); or the conversation is new and no recipient is a local user. The
+  sender's `recipient_user_ids` never pick who is notified here: that is
+  the conversation's seated local members. An existing
   conversation's seats are never changed by an inbound message — except
   an older 1:1 whose remote seat was never written: it is restored for a
   sender homed on `from_instance` who already wrote in it (exactly one
@@ -74,7 +82,30 @@ household and the conversation's remote seats
 - **`DM_HISTORY_REQUEST`** — `from_instance` holds no seat in the
   conversation (nothing is sent back, not even `DM_HISTORY_COMPLETE`).
 - **`DM_HISTORY_CHUNK` / `_COMPLETE`** — `from_instance` holds no seat;
-  per message, the sender is not a seated user of `from_instance`.
+  per message, the sender is not a seated user of `from_instance` — except
+  that a group's authority may hand over rows of members seated on other
+  households (a newly added household catches up from it), never a row
+  claimed for one of our own users. Such a relayed row only fills a gap:
+  it never updates a row already here (no rewrite, un-delete or rollback
+  of what the member's own household delivered).
+- **`USER_REMOVED`** — for a group the departed user was in, the group
+  stays: their messages in it are cleared, and on the group's authority
+  their seat is taken out with the next roster. (A 1:1 with them is
+  purged, as before.)
+- **`DM_GROUP_ROSTER`** — `from_instance` is not the household the
+  group id commits to, or is not a directly paired, social household
+  (a mesh stranger can mint an id bound to itself; an invite-link or
+  unpairing row doesn't count either); the version is not a whole number
+  in `1 … 2^53` or not newer than the one held; the conversation exists
+  here as a 1:1; or it is new and seats no local user. Per entry: a local
+  entry naming a `user_id` we don't have, or a remote entry naming a
+  person this household knows as homed on another household (or here),
+  is dropped. An entry seating a user on the authority itself that the
+  authority never synced to us holds the whole roster (bounded, expiring)
+  until that user's profile lands, then it is applied by these same
+  rules — the authority's own seats are the ones it could speak for.
+- **`DM_GROUP_LEAVE`** — this household is not the group's authority,
+  or the leaver is not a user seated on `from_instance`.
   A message is inserted when absent; one already here is updated from the
   chunk (the sender's later edit or delete) only when the stored row has
   the same sender in the same conversation.
@@ -82,8 +113,9 @@ household and the conversation's remote seats
   user's old household keep that seat, so messages from the new home are
   refused there until the conversation is re-seated.
 
-Implementation: `socialhome/federation/dm_scope.py` (`DmScope`);
-`tests/protocol/test_dm_scope.py`.
+Implementation: `socialhome/federation/dm_scope.py` (`DmScope`),
+`socialhome/services/dm_group_service.py`;
+`tests/protocol/test_dm_scope.py`, `tests/protocol/test_dm_group_scope.py`.
 
 ## Flow — 1:1 DM
 
@@ -102,19 +134,116 @@ sequenceDiagram
     UB->>B: POST /api/conversations/{id}/read
 ```
 
-## Flow — group DM, member added
+## Group conversations across households
+
+A group conversation (v_37) can seat people from several households.
+
+**The authority.** The household that creates the group is its
+authority. The conversation id is an owner-bound id
+(`federation/owner_bound_id.py`, kind `group-conversation`) committing to
+that household's `instance_id`, so every member household can tell from
+the id alone whose member list counts — no column records it. Only people
+on the authority household add, remove or rename (anyone else gets 403);
+anyone can leave. The authority can only seat people it knows directly: a
+local user, or a person mirrored from a directly paired household at
+v_37+ (anyone else is refused with 422 `GROUP_MEMBER_UNSUPPORTED` and a
+reason the new-group picker shows). A group created before v_37 has a
+plain uuid id: it binds no authority, stays local-only, and can't take
+people from other households.
+
+**The roster.** Every membership change — create, add, remove, rename, a
+member leaving — is applied on the authority as a new snapshot with the
+next `membership_version` and shipped as `DM_GROUP_ROSTER`
+`{conversation_id, version, name, members: [{user_id, instance_id,
+username, display_name}]}` to every member household, plus once more to a
+household the change took out — to that one with an empty member list,
+so it drops every seat and learns nothing about who stays. It travels
+direct (the authority is paired with every member household — it seated
+them), encrypted per peer like every envelope. A receiver applies it only
+from the household the id commits to and only when the version is newer
+(atomically — `apply_group_roster`), so a reordered or replayed roster
+never rolls membership back. It is the **only** thing that ever seats
+anyone in a group: a message never does (#734's rule).
+
+**Leaving.** A member on another household steps out locally and sends
+`DM_GROUP_LEAVE {conversation_id, user_id}` to the authority, which
+accepts it only for a user seated on the sending household and answers
+with the next roster.
+
+**Seats name their user.** A member household may never have paired with
+another member household (both only know the authority), so it holds no
+`remote_users` row for those people. A roster seat therefore carries the
+member's `user_id` and display name (`conversation_remote_members`); a
+message, reaction, typing frame or delete from that member binds to the
+seat — and so to the household that must sign the envelope.
+
+**Delivery — members only.** Messages, edits, deletes and reactions fan
+out from the sending household to every member household itself: direct
+when the two are paired, otherwise over the mesh as `SPACE_ROUTED`,
+E2E-sealed to the member household and origin-signed, so the relays in
+between (never members) see only ciphertext. A household that is not a
+member never gets group content, and a removed one stops getting it with
+the roster that removed it. A member household we are unpairing from, or
+share only a space with (an invite-link row), is not reached at all.
+Typing indicators and calls go direct only (ephemeral), and media stays
+on the direct-pairing rule: a group with a member household the sender
+isn't paired with refuses attachments (`MEDIA_REQUIRES_DIRECT_PAIRING`).
+
+**History.** A household newly seated by a roster pulls the backlog from
+the authority (`DM_HISTORY_REQUEST`, below) — the same full history a
+local member added to a local group sees. The authority's chunks may carry
+other members' rows; the receiver takes those only from the authority and
+never a row claimed for one of its own users.
+
+**Trust.** The authority is trusted for the member list and for the
+catch-up copy of other members' messages, the way a space host is for its
+roster; it can't speak live for a member on another household (their live
+messages must be signed by their own household) or for a receiver's own
+users, and its catch-up rows never overwrite what a member's own household
+delivered.
+
+**Known limits.** Only people on the authority household change the
+member list; if they all leave, the list is frozen (the others keep
+chatting). A leave is sent through the outbox like any event; a roster
+the authority built before it saw the leave can seat the leaver again
+until the next roster. Mesh-routed deliveries have no outbox — a message to a
+member household reached only over the mesh that finds no route is not
+retried (logged at WARNING).
+The per-pair hide list filters what a household sends to a peer, not who
+the authority lists in a roster.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant OA as Owner (HFS A)
+    participant UA as Alice (HFS A, authority)
     participant A as HFS A
     participant B as HFS B
-    participant C as HFS C (new member)
-    OA->>A: POST /api/conversations/group<br/>(add user on HFS C)
-    A->>B: DM_MEMBER_ADDED (user@C)
-    A->>C: DM_MEMBER_ADDED (existing members)
-    Note over C: C pulls history for<br/>catch-up — see below
+    participant C as HFS C
+    participant D as HFS D (not a member)
+    UA->>A: POST /api/conversations/group<br/>{member_user_ids: [bob@B, carl@C]}
+    A->>A: mint id bound to A, snapshot v1
+    A->>B: DM_GROUP_ROSTER v1 (alice, bob, carl)
+    A->>C: DM_GROUP_ROSTER v1
+    Note over B,C: seat the members, pull history from A
+    Note over D: never sent anything
+    UA->>A: DELETE /members/carl
+    A->>B: DM_GROUP_ROSTER v2 (alice, bob)
+    A->>C: DM_GROUP_ROSTER v2 (carl gone → C drops the group)
+    Note over C: later DM_MESSAGE from C → refused (no seat)
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as HFS B (sender)
+    participant A as HFS A (authority)
+    participant R as relay (not a member)
+    participant C as HFS C (never paired with B)
+    B->>A: DM_MESSAGE (direct, paired)
+    B->>R: SPACE_ROUTED(sealed to C, origin-signed by B)
+    R->>C: SPACE_ROUTED (ciphertext only)
+    C->>C: unseal, verify B, sender bound to B's seat
+    Note over B,C: a member leaving: B → A DM_GROUP_LEAVE,<br/>A → everyone DM_GROUP_ROSTER v+1
 ```
 
 ## Flow — history pull

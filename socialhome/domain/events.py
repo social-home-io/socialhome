@@ -1465,6 +1465,23 @@ class DmConversationCreated(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class DmGroupRosterChanged(DomainEvent):
+    """A group conversation's member list or name changed here (v_37).
+
+    Emitted after a membership snapshot was applied — locally by the
+    authority household, or from its ``DM_GROUP_ROSTER``. Drives a
+    ``dm.group.updated`` WS frame so open threads refresh their roster.
+    ``notify_user_ids`` holds the local members before *and* after the
+    change, so a removed member's open tab learns it is out.
+    """
+
+    conversation_id: str
+    name: str | None
+    notify_user_ids: tuple[str, ...]
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Page events (drive FTS5 indexing + conflict bookkeeping) ────────────
 
 

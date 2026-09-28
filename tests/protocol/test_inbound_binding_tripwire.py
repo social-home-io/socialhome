@@ -32,6 +32,7 @@ HERE = pathlib.Path(__file__).parent
 _SPACE_PREFIXES = ("space_", "bazaar_")
 
 _DM = "test_dm_scope.py"
+_DM_GROUP = "test_dm_group_scope.py"
 _USERS = "test_user_sync_scope.py"
 _CAL_EVENT = "test_personal_calendar_event_scope.py"
 _CAL_RSVP = "test_personal_calendar_rsvp_scope.py"
@@ -53,6 +54,8 @@ BOUND: dict[FederationEventType, str] = {
     FET.DM_HISTORY_CHUNK: _DM,
     FET.DM_HISTORY_COMPLETE: _DM,
     FET.DM_MEDIA_BLOB: _MEDIA,
+    FET.DM_GROUP_ROSTER: _DM_GROUP,
+    FET.DM_GROUP_LEAVE: _DM_GROUP,
     FET.DM_CONTACT_REQUEST: _USERS,
     FET.USERS_SYNC: _USERS,
     FET.USER_UPDATED: _USERS,

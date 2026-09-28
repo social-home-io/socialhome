@@ -550,3 +550,143 @@ async def test_insert_message_if_absent_never_rewrites_an_existing_row(env):
     fetched = await env.repo.get_message("m-io-1")
     assert fetched is not None
     assert fetched.content == "original"
+
+
+# ── Group roster snapshots (v_37) ─────────────────────────────────────────
+
+
+def _group(version: int, name: str | None = "Crew") -> Conversation:
+    return Conversation(
+        id="g1",
+        type=ConversationType.GROUP_DM,
+        name=name,
+        created_at=datetime.now(timezone.utc),
+        membership_version=version,
+    )
+
+
+def _seat(instance_id: str, username: str, user_id: str) -> RemoteConversationMember:
+    return RemoteConversationMember(
+        conversation_id="g1",
+        instance_id=instance_id,
+        remote_username=username,
+        joined_at="2026-09-01T00:00:00+00:00",
+        user_id=user_id,
+        display_name=username.title(),
+    )
+
+
+async def test_apply_group_roster_creates_the_group_with_its_seats(env):
+    change = await env.repo.apply_group_roster(
+        _group(1),
+        local_usernames=["alice"],
+        remote_members=[_seat("inst-c", "carol", "u-carol")],
+        at="2026-09-01T00:00:00+00:00",
+    )
+    assert change is not None
+    assert change.created is True
+    assert change.added_local == ("alice",)
+    conv = await env.repo.get("g1")
+    assert conv.type is ConversationType.GROUP_DM
+    assert conv.membership_version == 1
+    assert conv.name == "Crew"
+    seats = await env.repo.list_remote_members("g1")
+    assert [
+        (s.instance_id, s.remote_username, s.user_id, s.display_name) for s in seats
+    ] == [("inst-c", "carol", "u-carol", "Carol")]
+
+
+async def test_apply_group_roster_refuses_a_stale_or_replayed_version(env):
+    await env.repo.apply_group_roster(
+        _group(3),
+        local_usernames=["alice", "bob"],
+        remote_members=[],
+        at="t",
+    )
+    for stale in (3, 2):
+        assert (
+            await env.repo.apply_group_roster(
+                _group(stale, name="Old"),
+                local_usernames=["alice"],
+                remote_members=[_seat("inst-c", "carol", "u-carol")],
+                at="t",
+            )
+            is None
+        )
+    conv = await env.repo.get("g1")
+    assert conv.membership_version == 3 and conv.name == "Crew"
+    active = [m.username for m in await env.repo.list_members("g1") if not m.deleted_at]
+    assert sorted(active) == ["alice", "bob"]
+    assert await env.repo.list_remote_members("g1") == []
+
+
+async def test_apply_group_roster_removes_and_brings_back_members(env):
+    await env.repo.apply_group_roster(
+        _group(1),
+        local_usernames=["alice", "bob"],
+        remote_members=[_seat("inst-c", "carol", "u-carol")],
+        at="t1",
+    )
+    await env.repo.set_last_read("g1", "alice", at="2026-09-02T00:00:00+00:00")
+    change = await env.repo.apply_group_roster(
+        _group(2, name="Renamed"),
+        local_usernames=["alice"],
+        remote_members=[],
+        at="t2",
+    )
+    assert change.removed_local == ("bob",)
+    assert change.removed_remote == (("inst-c", "carol"),)
+    members = {m.username: m for m in await env.repo.list_members("g1")}
+    assert members["bob"].deleted_at == "t2"
+    # The watermark of a member who stays is untouched.
+    assert members["alice"].last_read_at == "2026-09-02T00:00:00+00:00"
+    assert await env.repo.list_remote_members("g1") == []
+    assert (await env.repo.get("g1")).name == "Renamed"
+    back = await env.repo.apply_group_roster(
+        _group(3), local_usernames=["alice", "bob"], remote_members=[], at="t3"
+    )
+    assert back.added_local == ("bob",)
+    members = {m.username: m for m in await env.repo.list_members("g1")}
+    assert members["bob"].deleted_at is None
+
+
+async def test_add_remote_member_keeps_roster_identity_on_a_plain_upsert(env):
+    await env.repo.create(_conv("c9"))
+    await env.repo.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="c9",
+            instance_id="inst-c",
+            remote_username="carol",
+            joined_at="t",
+            user_id="u-carol",
+            display_name="Carol",
+        )
+    )
+    await env.repo.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="c9",
+            instance_id="inst-c",
+            remote_username="carol",
+            joined_at="t",
+        )
+    )
+    (seat,) = await env.repo.list_remote_members("c9")
+    assert (seat.user_id, seat.display_name) == ("u-carol", "Carol")
+
+
+async def test_soft_delete_messages_by_sender_clears_only_theirs(env):
+    await env.repo.create(_conv("c5", ConversationType.GROUP_DM))
+    await env.repo.create(_conv("c6"))
+    for msg in (
+        _message("m1", "c5", sender="u-gone"),
+        _message("m2", "c5", sender="u-gone"),
+        _message("m3", "c5", sender="uid-alice"),
+        _message("m4", "c6", sender="u-gone"),
+    ):
+        await env.repo.save_message(msg)
+    assert await env.repo.soft_delete_messages_by_sender("c5", "u-gone") == 2
+    assert await env.repo.soft_delete_messages_by_sender("c5", "u-gone") == 0
+    by_id = {m.id: m for m in await env.repo.list_messages("c5")}
+    assert by_id["m1"].deleted and by_id["m1"].content == ""
+    assert not by_id["m3"].deleted
+    assert not (await env.repo.get_message("m4")).deleted

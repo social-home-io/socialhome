@@ -563,7 +563,24 @@ from __future__ import annotations
 #:   stores them as the opaque strings ids always were, and an id of any
 #:   other shape keeps today's rules (the legacy window closes as creators
 #:   upgrade). Space-scoped for the compatibility banner.
-OURS: int = 36
+#: * **v_37** (2026-09-28) — group conversations can include people from
+#:   other households. The household that creates a group is its
+#:   **authority** (the conversation id is an owner-bound id over that
+#:   household's ``instance_id``, kind ``group-conversation``) and alone
+#:   ships :data:`FederationEventType.DM_GROUP_ROSTER` — the whole member
+#:   list, a monotonic version and the name — to every member household;
+#:   a member household reports its own user leaving with
+#:   :data:`FederationEventType.DM_GROUP_LEAVE`. Receivers apply a roster
+#:   only from the household the id commits to and only when newer, and a
+#:   group message never seats anyone. Messages, edits, deletes, reactions
+#:   and typing fan out from the sending household to every member
+#:   household — direct when paired, otherwise E2E-sealed over the mesh
+#:   (``SPACE_ROUTED``). ``CALL_OFFER`` carries ``participants`` and
+#:   ``CALL_ANSWER`` / ``CALL_ICE_CANDIDATE`` carry ``to_user`` so group-call
+#:   mesh legs reach callees on other households. **No fallback**: a household below v_37 cannot sit
+#:   in a cross-household group — the authority refuses to add its people
+#:   (the SPA says so in the picker) and never sends it a roster.
+OURS: int = 37
 
 
 class FederationCapability:
@@ -897,6 +914,14 @@ class FederationCapability:
     #: household's new rows keep today's first-come rules).
     MIN_FOR_OWNER_BOUND_CONTENT_ID = 36
 
+    #: Minimum proto_version that understands cross-household group
+    #: conversations (v_37): ``DM_GROUP_ROSTER`` / ``DM_GROUP_LEAVE`` and the
+    #: group-call ``to_user`` routing. The authority household refuses to
+    #: seat a person whose household is below it, and never ships it a
+    #: roster; a callee-to-callee call answer / ICE candidate only goes to a
+    #: household at or above it (an older one would hand it to the caller).
+    MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM = 37
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -997,6 +1022,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
         "Creator-bound content ids",
     ),
+    (
+        FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM,
+        "Cross-household group chats",
+    ),
 ]
 
 
@@ -1031,6 +1060,8 @@ def features_missing_below(version: int) -> list[str]:
 #:   households exchanging the roster, not a shared space.
 #: * ``MIN_FOR_MOMENT_ORIGIN_SIGNATURE`` — moments are household-broadcast
 #:   posts, not space content.
+#: * ``MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM`` — group conversations are not
+#:   spaces; a behind household only keeps its own people out of groups.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,

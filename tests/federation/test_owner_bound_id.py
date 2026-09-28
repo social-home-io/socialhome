@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GROUP_CONVERSATION_KIND,
     GALLERY_ITEM_KIND,
     MOMENT_KIND,
     OWNER_BOUND_ID_SUITE_SHA256,
@@ -134,9 +135,29 @@ _SCOPED_KINDS = [
 
 
 def test_every_kind_is_distinct():
-    kinds = [*_SCOPED_KINDS, MOMENT_KIND]
+    kinds = [*_SCOPED_KINDS, MOMENT_KIND, GROUP_CONVERSATION_KIND]
     assert len(set(kinds)) == len(kinds)
-    assert UNSCOPED_KINDS == {MOMENT_KIND}
+    assert UNSCOPED_KINDS == {MOMENT_KIND, GROUP_CONVERSATION_KIND}
+
+
+def test_a_group_conversation_id_binds_its_authority_household():
+    row_id = mint_owner_bound_id(
+        GROUP_CONVERSATION_KIND, space_id="", owner_user_id="inst-a"
+    )
+    assert is_owner_bound(row_id)
+    check = check_owner_bound_id
+    assert (
+        check(GROUP_CONVERSATION_KIND, row_id, space_id="", owner_user_id="inst-a")
+        is OwnerBinding.VALID
+    )
+    assert (
+        check(GROUP_CONVERSATION_KIND, row_id, space_id="", owner_user_id="inst-b")
+        is OwnerBinding.MISMATCH
+    )
+    assert (
+        check(MOMENT_KIND, row_id, space_id="", owner_user_id="inst-a")
+        is OwnerBinding.MISMATCH
+    )
 
 
 @pytest.mark.parametrize("kind", _SCOPED_KINDS)

@@ -15,6 +15,7 @@ function _friendsPayload(opts: {
   remoteHouseholds?: Array<{
     instance_id: string
     display_name: string
+    supports_group_dm?: boolean
     members: Array<{ user_id: string; remote_username: string; display_name: string }>
   }>
 }) {
@@ -34,6 +35,7 @@ function _friendsPayload(opts: {
   const households = (opts.remoteHouseholds ?? []).map(h => ({
     instance_id: h.instance_id,
     display_name: h.display_name,
+    supports_group_dm: h.supports_group_dm,
     members: h.members.map(m => ({ ...m, picture_url: null })),
   }))
   return {
@@ -243,8 +245,8 @@ describe('NewDmDialog — submit routing', () => {
     )
   })
 
-  it('picking a remote person disables the other local rows — group with a remote isn’t supported yet', async () => {
-    const post = vi.fn()
+  it('a group can mix local people and people from other households', async () => {
+    const post = vi.fn(async () => ({ id: 'cgroup', type: 'group_dm' }))
     const get = vi.fn(async () =>
       _friendsPayload({
         meId: 'u-pascal',
@@ -255,6 +257,7 @@ describe('NewDmDialog — submit routing', () => {
           {
             instance_id: 'z7k63zfi',
             display_name: "Brother's house",
+            supports_group_dm: true,
             members: [
               { user_id: 'u-bro', remote_username: 'bob', display_name: 'Bob' },
             ],
@@ -269,18 +272,58 @@ describe('NewDmDialog — submit routing', () => {
     const { NewDmDialog, openNewDm } = await import('./NewDmDialog')
     openNewDm()
     await new Promise((r) => setTimeout(r, 0))
+    const { container, findByRole, getByText } = render(<NewDmDialog />)
+    await findByRole('dialog')
+    const rows = container.querySelectorAll('.sh-newdm-row')
+    ;(rows[1] as HTMLElement).click()
+    ;(rows[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    const maria = container.querySelectorAll('.sh-newdm-row')[0] as HTMLButtonElement
+    expect(maria.disabled).toBe(false)
+    ;(getByText(/^Start group/) as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(post).toHaveBeenCalledWith('/api/conversations/group', {
+      members: ['maria'],
+      member_user_ids: ['u-bro'],
+    })
+  })
+
+  it('a household too old for group chats is 1:1 only, and the row says why', async () => {
+    const post = vi.fn()
+    const get = vi.fn(async () =>
+      _friendsPayload({
+        meId: 'u-pascal',
+        localMembers: [
+          { user_id: 'u-maria', username: 'maria', display_name: 'Maria' },
+        ],
+        remoteHouseholds: [
+          {
+            instance_id: 'old-inst',
+            display_name: "Gran's house",
+            members: [
+              { user_id: 'u-gran', remote_username: 'gran', display_name: 'Gran' },
+            ],
+          },
+        ],
+      }),
+    )
+    vi.doMock('@/api', () => ({ api: { get, post } }))
+    vi.doMock('@/store/auth', () => ({
+      currentUser: { value: { user_id: 'u-pascal', username: 'pascal' } },
+    }))
+    const { NewDmDialog, openNewDm } = await import('./NewDmDialog')
+    openNewDm()
+    await new Promise((r) => setTimeout(r, 0))
     const { container, findByRole } = render(<NewDmDialog />)
     await findByRole('dialog')
-    // The first row will be local Maria (local block fans first in the
-    // flattener); the remote row is Bob below.
-    const rows = container.querySelectorAll('.sh-newdm-row')
-    expect(rows.length).toBe(2)
-    // Pick Bob (remote) — Maria's row should then be disabled.
-    ;(rows[1] as HTMLElement).click()
+    // Nothing picked yet: Gran is fine for a 1:1.
+    let gran = container.querySelectorAll('.sh-newdm-row')[1] as HTMLButtonElement
+    expect(gran.disabled).toBe(false)
+    ;(container.querySelectorAll('.sh-newdm-row')[0] as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
-    const refreshed = container.querySelectorAll('.sh-newdm-row')
-    const maria = refreshed[0] as HTMLButtonElement
-    expect(maria.disabled).toBe(true)
-    expect(maria.classList.contains('sh-newdm-row--disabled')).toBe(true)
+    gran = container.querySelectorAll('.sh-newdm-row')[1] as HTMLButtonElement
+    expect(gran.disabled).toBe(true)
+    expect(gran.classList.contains('sh-newdm-row--disabled')).toBe(true)
+    expect(gran.textContent).toContain("Gran's house needs a Social Home update")
   })
 })

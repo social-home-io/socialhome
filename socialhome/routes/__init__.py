@@ -89,6 +89,9 @@ from .conversations import (
     ConversationDmView,
     ConversationGapsView,
     ConversationGroupView,
+    ConversationItemView,
+    ConversationLeaveView,
+    ConversationMemberView,
     ConversationMembersView,
     ConversationMessageDeliveryView,
     ConversationMessageReactionListView,
@@ -678,6 +681,12 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/conversations/{id}/members",
         ConversationMembersView,
     )
+    app.router.add_view(
+        "/api/conversations/{id}/members/{user_id}",
+        ConversationMemberView,
+    )
+    app.router.add_view("/api/conversations/{id}/leave", ConversationLeaveView)
+    app.router.add_view("/api/conversations/{id}", ConversationItemView)
 
     # ── Notifications ───────────────────────────────────────────────────
     app.router.add_view("/api/notifications", NotificationCollectionView)

@@ -175,13 +175,34 @@ its original wire shape (single `sdp_offer`).
   ringing TTL.
 - **Authorization.** `answer`, `ice` and `join` only accept participants
   of the call, and `to_user` must be another participant (403 otherwise).
-- **Cross-household.** Group conversations are single-household, so mesh
-  legs are relayed locally only: a callee-to-callee answer addressed to a
-  remote user is not federated (an older peer's `CALL_ANSWER` handler would
-  hand it to the caller). `CALL_ANSWER` gains an informational `from_user`
-  (ignored by older receivers); without it the answer is attributed to the
-  only unanswered callee the sending household hosts. No new event type and
-  no `proto_version` bump.
+- **Cross-household (v_37).** A group conversation can seat people from
+  several households (see [DMs](./dm.md#group-conversations-across-households)),
+  so callees sit on different households:
+  - The `CALL_OFFER` ring carries `participants` (everyone invited). The
+    callee's household keeps only the ids seated in the conversation there
+    and forwards them on `call.ringing`, so the callee opens its legs to
+    the other callees exactly as in a local group.
+  - A callee-to-callee answer addressed to a remote callee goes out as
+    `CALL_ANSWER {from_user, to_user, signed_sdp}` to that callee's
+    household; a leg's ICE candidate as `CALL_ICE_CANDIDATE {from_user,
+    to_user, candidate}`. The receiver hands it to `to_user` only when that
+    user is a participant it hosts and `from_user` is a participant homed
+    on the sending household; it never marks the caller's call answered.
+    An answer without `to_user` (the ring's answer) is honoured only on the
+    caller's household.
+  - Both go only to a v_37+ household: an older one's handler would hand
+    them to the caller, so that one leg stays unconnected instead
+    (WARNING). An older household can't sit in a cross-household group in
+    the first place.
+  - A remote participant's `CALL_HANGUP` / `CALL_DECLINE` in a group call
+    takes only them out (`call.ended {by, over}`), as a local hangup does.
+  - Legs only run between households that are directly paired (call
+    signalling is direct `send_event`); a group member on a household the
+    caller never paired with is not rung.
+
+  `CALL_ANSWER` also carries an informational `from_user` for the ring's
+  answer (ignored by older receivers); without it the answer is attributed
+  to the only unanswered callee the sending household hosts.
 
 ```mermaid
 sequenceDiagram
@@ -203,6 +224,27 @@ sequenceDiagram
     S->>B: call.answered {from_user: c}
     Note over A,C: ICE per leg: POST /ice {to_user} → call.ice_candidate {from_user}
     Note over A,C: three legs, each DTLS-SRTP browser-to-browser
+```
+
+Across households (v_37) — Alice on HFS A, Bob on HFS B, Carol on HFS C,
+all three households paired:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A (caller Alice)
+    participant B as HFS B (Bob)
+    participant C as HFS C (Carol)
+    A->>B: CALL_OFFER {to_user: bob, participants: [alice, bob, carol]}
+    A->>C: CALL_OFFER {to_user: carol, participants: [...]}
+    B->>A: CALL_ANSWER {from_user: bob}
+    C->>A: CALL_ANSWER {from_user: carol}
+    Note over B: bob < carol → Bob offers the B–C leg
+    B->>C: CALL_OFFER {from_user: bob, to_user: carol, late_join}
+    C->>B: CALL_ANSWER {from_user: carol, to_user: bob}
+    C->>B: CALL_ICE_CANDIDATE {from_user: carol, to_user: bob}
+    B->>C: CALL_ICE_CANDIDATE {from_user: bob, to_user: carol}
+    Note over A,C: every to_user frame goes only to a v_37+ household
 ```
 
 ## SDP signature (§26.8)

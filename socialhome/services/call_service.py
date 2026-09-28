@@ -43,6 +43,7 @@ import orjson
 from ..domain.call import CallQualitySample, CallSession
 from ..domain.conversation import ConversationMessage
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..federation.sdp_signing import (
     sign_rtc_offer,
     signed_sdp_from_dict,
@@ -335,6 +336,10 @@ class CallSignalingService:
                             "to_user": remote_user_id,
                             "call_type": call_type,
                             "signed_sdp": signed_offer_for(remote_user_id),
+                            # v_37: every invitee, so a callee on another
+                            # household opens its legs to the others.
+                            # Older receivers ignore it.
+                            "participants": roster,
                         },
                     )
                 except Exception as exc:  # pragma: no cover
@@ -447,10 +452,10 @@ class CallSignalingService:
     ) -> None:
         """Deliver a callee-to-callee mesh-leg answer to *target*.
 
-        Mesh legs are only relayed within this household: group
-        conversations are single-household today, and an older peer's
-        ``CALL_ANSWER`` handler would hand an answer addressed to another
-        callee to the caller instead.
+        A target on another household gets ``CALL_ANSWER`` naming it in
+        ``to_user`` (v_37). A household below v_37 would hand an answer
+        addressed to another callee to the caller instead, so it gets
+        none — that one leg stays unconnected.
         """
         target_instance = await self._instance_of(target)
         if (
@@ -458,12 +463,29 @@ class CallSignalingService:
             and self._federation is not None
             and target_instance != self._federation.own_instance_id
         ):
-            log.warning(
-                "call %s: mesh-leg answer %s -> %s not relayed — cross-household "
-                "mesh legs are not supported",
-                record.call_id,
-                answerer_user_id,
-                target,
+            if not await self._federation.peer_supports(
+                target_instance,
+                min_version=FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM,
+            ):
+                log.warning(
+                    "call %s: mesh-leg answer %s -> %s not sent — household %s "
+                    "is below v_%d and would route it to the caller",
+                    record.call_id,
+                    answerer_user_id,
+                    target,
+                    target_instance,
+                    FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM,
+                )
+                return
+            await self._federation.send_event(
+                to_instance_id=target_instance,
+                event_type=FederationEventType.CALL_ANSWER,
+                payload={
+                    "call_id": record.call_id,
+                    "from_user": answerer_user_id,
+                    "to_user": target,
+                    "signed_sdp": signed_dict,
+                },
             )
             return
         await self._fanout_to_user(
@@ -510,14 +532,29 @@ class CallSignalingService:
                 and self._federation is not None
                 and other_instance != self._federation.own_instance_id
             ):
+                payload: dict[str, Any] = {
+                    "call_id": call_id,
+                    "from_user": from_user_id,
+                    "candidate": candidate,
+                }
+                if to_user_id is not None:
+                    # v_37: one mesh leg — name its end. An older household
+                    # routes by caller/callee only, so a callee-to-callee
+                    # candidate would reach the wrong person there.
+                    if other != record.caller_user_id and not (
+                        await self._federation.peer_supports(
+                            other_instance,
+                            min_version=(
+                                FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM
+                            ),
+                        )
+                    ):
+                        continue
+                    payload["to_user"] = other
                 await self._federation.send_event(
                     to_instance_id=other_instance,
                     event_type=FederationEventType.CALL_ICE_CANDIDATE,
-                    payload={
-                        "call_id": call_id,
-                        "from_user": from_user_id,
-                        "candidate": candidate,
-                    },
+                    payload=payload,
                 )
             else:
                 await self._fanout_to_user(
@@ -786,6 +823,14 @@ class CallSignalingService:
                     event.from_instance, record.participants
                 ):
                     return
+                to_user = payload.get("to_user")
+                if to_user and to_user != record.caller_user_id:
+                    await self._on_mesh_leg_answer(event, record, payload, signed_dict)
+                    return
+                if not await self._is_local_user(record.caller_user_id):
+                    # An answer to the ring only means something on the
+                    # caller's household.
+                    return
                 answerer = await self._inbound_answerer(event, record, payload)
                 if answerer is None or answerer in record.answered:
                     return  # unattributable / a second answer (other device)
@@ -819,11 +864,26 @@ class CallSignalingService:
                 ):
                     return
                 record.last_activity = time.time()
-                target = (
-                    record.callee_user_id
-                    if payload.get("from_user") == record.caller_user_id
-                    else record.caller_user_id
-                )
+                named = payload.get("to_user")
+                if named:
+                    # v_37: one mesh leg — only to one of our participants.
+                    if named not in record.participants or not (
+                        await self._is_local_user(str(named))
+                    ):
+                        log.warning(
+                            "CALL_ICE_CANDIDATE refused: from=%s call_id=%s — "
+                            "to_user is not a participant here",
+                            event.from_instance,
+                            call_id,
+                        )
+                        return
+                    target: str | None = str(named)
+                else:
+                    target = (
+                        record.callee_user_id
+                        if payload.get("from_user") == record.caller_user_id
+                        else record.caller_user_id
+                    )
                 await self._fanout_to_user(
                     target or "",
                     {
@@ -1071,6 +1131,9 @@ class CallSignalingService:
                     record.answered.add(caller)
                 record.last_activity = time.time()
         else:
+            roster = {caller, callee_user} | await self._offered_roster(
+                conversation_id, payload.get("participants")
+            )
             await self._call_repo.save_call(
                 CallSession(
                     id=call_id,
@@ -1079,7 +1142,7 @@ class CallSignalingService:
                     callee_user_id=callee_user,
                     call_type=call_type,
                     status="ringing",
-                    participant_user_ids=tuple(sorted({caller, callee_user})),
+                    participant_user_ids=tuple(sorted(roster)),
                 )
             )
             self._calls[call_id] = CallRecord(
@@ -1089,7 +1152,7 @@ class CallSignalingService:
                 callee_user_id=callee_user,
                 callee_instance_id=event.from_instance,
                 call_type=call_type,
-                participants={caller, callee_user},
+                participants=roster,
                 answered={caller},
             )
         self._per_user.setdefault(callee_user, set()).add(call_id)
@@ -1106,17 +1169,94 @@ class CallSignalingService:
                 },
             )
             return
+        ring: dict[str, Any] = {
+            "type": "call.ringing",
+            "call_id": call_id,
+            "conversation_id": conversation_id,
+            "from_user": caller,
+            "call_type": call_type,
+            "signed_sdp": signed_dict,
+        }
+        record = self._calls.get(call_id)
+        if record is not None and len(record.participants) > 2:
+            # Group call: the callee's client opens its legs to the others.
+            ring["participants"] = sorted(record.participants)
+        await self._fanout_to_user(callee_user, ring)
+
+    async def _offered_roster(
+        self,
+        conversation_id: str,
+        offered: object,
+    ) -> set[str]:
+        """The ring's ``participants`` that are members of the conversation.
+
+        A caller names every invitee so a callee here can open legs to the
+        others; nobody outside the conversation's own seats is taken.
+        """
+        if not isinstance(offered, list) or len(offered) > MAX_CALL_PARTICIPANTS:
+            return set()
+        members = await self._conversation_user_ids(conversation_id)
+        return {u for u in offered if isinstance(u, str) and u in members}
+
+    async def _conversation_user_ids(self, conversation_id: str) -> set[str]:
+        """``user_id`` of everyone seated in the conversation, here or remote."""
+        ids: set[str] = set()
+        for m in await self._conv_repo.list_members(conversation_id):
+            if m.deleted_at is not None:
+                continue
+            u = await self._user_repo.get(m.username)
+            if u is not None:
+                ids.add(u.user_id)
+        for r in await self._conv_repo.list_remote_members(conversation_id):
+            seat_uid = r.user_id
+            if seat_uid:
+                ids.add(seat_uid)
+                continue
+            ru = await self._find_remote_user(r.instance_id, r.remote_username)
+            if ru is not None:
+                ids.add(ru.user_id)
+        return ids
+
+    async def _on_mesh_leg_answer(
+        self,
+        event,
+        record: CallRecord,
+        payload: dict,
+        signed_dict: dict | None,
+    ) -> None:
+        """A callee on another household answers our callee's mesh-leg offer.
+
+        The answerer must be a participant homed on the sending household,
+        the target a participant homed here. It only connects that one leg
+        — the call's answered state is the caller's business.
+        """
+        to_user = str(payload.get("to_user") or "")
+        answerer = payload.get("from_user")
+        if not await self._is_sender_participant(
+            event, record.call_id, answerer, record.participants, field="from_user"
+        ):
+            return
+        if to_user not in record.participants or not await self._is_local_user(to_user):
+            log.warning(
+                "CALL_ANSWER refused: from=%s call_id=%s — to_user is not a "
+                "participant here",
+                event.from_instance,
+                record.call_id,
+            )
+            return
+        record.last_activity = time.time()
         await self._fanout_to_user(
-            callee_user,
+            to_user,
             {
-                "type": "call.ringing",
-                "call_id": call_id,
-                "conversation_id": conversation_id,
-                "from_user": caller,
-                "call_type": call_type,
+                "type": "call.answered",
+                "call_id": record.call_id,
+                "from_user": answerer,
                 "signed_sdp": signed_dict,
             },
         )
+
+    async def _is_local_user(self, user_id: str) -> bool:
+        return await self._user_repo.get_by_user_id(user_id) is not None
 
     async def _on_federated_end(self, event, call_id: str, payload: dict) -> None:
         """Inbound ``CALL_HANGUP`` / ``CALL_END`` / ``CALL_DECLINE`` /
@@ -1133,7 +1273,12 @@ class CallSignalingService:
             event, call_id, ender, participants, field="hanger_user/decliner_user"
         ):
             return
-        if persisted is not None and persisted.status in ("ringing", "active"):
+        group = record is not None and len(record.participants) > 2
+        if (
+            not group
+            and persisted is not None
+            and persisted.status in ("ringing", "active")
+        ):
             declined = event.event_type in (
                 FederationEventType.CALL_DECLINE,
                 FederationEventType.CALL_BUSY,
@@ -1145,6 +1290,16 @@ class CallSignalingService:
                 duration_seconds=_duration_since(persisted.connected_at),
             )
         if record is None:
+            return
+        if len(record.participants) > 2:
+            # Group call: one participant left — the others stay in it
+            # (the local ``hangup`` / ``decline`` rule).
+            await self._leave(
+                record,
+                str(ender),
+                declined=event.event_type
+                in (FederationEventType.CALL_DECLINE, FederationEventType.CALL_BUSY),
+            )
             return
         target = (
             record.callee_user_id
@@ -1293,6 +1448,7 @@ class CallSignalingService:
         if not any(
             r.instance_id == from_instance
             and r.remote_username == caller.remote_username
+            and r.user_id in (None, caller_user_id)
             for r in remotes
         ):
             return "caller is not in the conversation"

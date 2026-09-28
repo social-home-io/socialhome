@@ -70,10 +70,16 @@ SPACE_TASK_KIND: str = "space-task"
 SPACE_PAGE_KIND: str = "space-page"
 SPACE_STICKY_KIND: str = "space-sticky"
 MOMENT_KIND: str = "moment"
+#: A group conversation (v_37). Its "owner" is the **authority household**
+#: — the ``instance_id`` that created the group and alone may change its
+#: member list — not a user: the commitment is over that instance id, so
+#: every member household can tell from the id alone which household's
+#: ``DM_GROUP_ROSTER`` to accept, with nothing stored beside it.
+GROUP_CONVERSATION_KIND: str = "group-conversation"
 
 #: Kinds whose rows belong to no space: minted and checked with
 #: ``space_id=""``. Every other kind needs a space.
-UNSCOPED_KINDS: frozenset[str] = frozenset({MOMENT_KIND})
+UNSCOPED_KINDS: frozenset[str] = frozenset({MOMENT_KIND, GROUP_CONVERSATION_KIND})
 
 _DOMAIN = b"socialhome/owner-bound-id/v1"
 _HEX = frozenset("0123456789abcdef")

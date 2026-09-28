@@ -6,7 +6,19 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 36
+    assert fc.OURS == 37
+
+
+def test_cross_household_group_dm_capability_threshold():
+    """v_37 — group conversations can span households. Not space-scoped:
+    a behind household only keeps its own people out of groups."""
+    assert fc.FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM == 37
+    assert fc.FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Cross-household group chats" in fc.features_missing_below(36)
+    assert "Cross-household group chats" not in fc.features_missing_below(37)
 
 
 def test_owner_bound_content_id_capability_threshold():

@@ -24,6 +24,7 @@ class _FakeRemoteMember:
     def __init__(self, instance_id: str, remote_username: str = ""):
         self.instance_id = instance_id
         self.remote_username = remote_username
+        self.user_id = None
 
 
 class _FakeConvoRepo:

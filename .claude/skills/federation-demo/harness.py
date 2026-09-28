@@ -9356,6 +9356,209 @@ def cmd_unpair() -> None:
     print("unpair: ok")
 
 
+# ─── Step: group-dm (v_37 cross-household group conversations) ───────────
+
+
+def _conv_ids(label: str, info: dict) -> dict[str, dict]:
+    s, rows = _request(
+        f"http://127.0.0.1:{info['port']}/api/conversations", token=info["token"]
+    )
+    _must(f"conversations({label})", s, rows)
+    return {r["id"]: r for r in rows}
+
+
+def _message_texts(label: str, conv_id: str) -> set[str]:
+    return {
+        r[0]
+        for r in _rows(
+            label,
+            "SELECT content FROM conversation_messages WHERE conversation_id=?",
+            (conv_id,),
+        )
+    }
+
+
+def _wait_for(what: str, check, *, timeout: float = 45.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if check():
+            return
+        time.sleep(1.0)
+    raise SystemExit(f"group-dm: timed out waiting for {what}")
+
+
+def _send_group(label: str, info: dict, conv_id: str, text: str) -> None:
+    s, body = _request(
+        f"http://127.0.0.1:{info['port']}/api/conversations/{conv_id}/messages",
+        token=info["token"],
+        method="POST",
+        body={"content": text},
+    )
+    _must(f"send({label})", s, body, ok=(200, 201))
+
+
+def cmd_group_dm() -> None:
+    """A group conversation spanning households a, b and c (v_37).
+
+    1. a (the authority) creates a group with b's and c's admins; b and c
+       see it (``managed_here`` false) and every household's message
+       reaches the other two.
+    2. d — paired with a and b, never a member — holds no row and no text.
+    3. a adds d's admin (when a↔d is paired): d catches up on the history.
+    4. a removes c: c drops the group, and a message sent after that never
+       reaches c. b leaves: a's roster no longer lists b.
+    5. A second group on b with c and d — who are NOT paired with each
+       other — proves the mesh leg: c's message reaches d E2E-sealed, and
+       a (a possible relay, never a member) stores no text of it.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    inst = state["instances"]
+    a, b, c, d = inst["a"], inst["b"], inst["c"], inst["d"]
+    tag = secrets.token_hex(3)
+
+    s, conv = _request(
+        f"http://127.0.0.1:{a['port']}/api/conversations/group",
+        token=a["token"],
+        method="POST",
+        body={
+            "members": [],
+            "member_user_ids": [b["user_id"], c["user_id"]],
+            "name": f"Demo crew {tag}",
+        },
+    )
+    conv = _must("create group (a)", s, conv, ok=(201,))
+    gid = conv["id"]
+    print(f"  a created group {gid[:12]}… with b + c")
+    for label in ("b", "c"):
+        _wait_for(
+            f"{label} to be seated in the group",
+            lambda label=label: gid in _conv_ids(label, inst[label]),
+        )
+        row = _conv_ids(label, inst[label])[gid]
+        if row["type"] != "group_dm" or row["managed_here"] is not False:
+            raise SystemExit(f"group-dm: {label} sees {row} — expected a remote group")
+    print("  b and c are seated (authority = a) ✓")
+
+    texts = {label: f"[group {tag}] hello from {label}" for label in ("a", "b", "c")}
+    for label, text in texts.items():
+        _send_group(label, inst[label], gid, text)
+    for label in ("a", "b", "c"):
+        _wait_for(
+            f"{label} to hold every member's message",
+            lambda label=label: set(texts.values()) <= _message_texts(label, gid),
+        )
+    print("  every member household's message reached the other two ✓")
+
+    if _rows("d", "SELECT 1 FROM conversations WHERE id=?", (gid,)):
+        raise SystemExit("group-dm: non-member d holds the group row")
+    leaked = _rows(
+        "d",
+        "SELECT content FROM conversation_messages WHERE content LIKE ?",
+        (f"%[group {tag}]%",),
+    )
+    if leaked:
+        raise SystemExit(f"group-dm: non-member d holds group content {leaked}")
+    print("  non-member d holds neither the group nor any of its text ✓")
+
+    a_peers = _rows(
+        "a",
+        "SELECT 1 FROM remote_instances WHERE id=? AND status='confirmed'",
+        (d["instance_id"],),
+    )
+    if a_peers:
+        s, body = _request(
+            f"http://127.0.0.1:{a['port']}/api/conversations/{gid}/members",
+            token=a["token"],
+            method="POST",
+            body={"user_ids": [d["user_id"]]},
+        )
+        _must("add d (a)", s, body, ok=(201,))
+        _wait_for("d to be seated", lambda: gid in _conv_ids("d", d))
+        _wait_for(
+            "d to catch up on the history from a",
+            lambda: set(texts.values()) <= _message_texts("d", gid),
+            timeout=90.0,
+        )
+        print("  a added d's admin; d caught up on the whole history ✓")
+    else:
+        print("  a↔d not paired (run relay-pair first) — skipping the add")
+
+    s, body = _request(
+        f"http://127.0.0.1:{a['port']}/api/conversations/{gid}/members/{c['user_id']}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("remove c (a)", s, body)
+    _wait_for("c to drop the group", lambda: gid not in _conv_ids("c", c))
+    after = f"[group {tag}] after carol left"
+    _send_group("a", a, gid, after)
+    _wait_for("b to get the post-removal message", lambda: after in _message_texts("b", gid))
+    time.sleep(3)
+    if after in _message_texts("c", gid):
+        raise SystemExit("group-dm: removed c still received a group message")
+    print("  a removed c: c dropped the group and gets nothing new ✓")
+
+    s, body = _request(
+        f"http://127.0.0.1:{b['port']}/api/conversations/{gid}/leave",
+        token=b["token"],
+        method="POST",
+    )
+    _must("leave (b)", s, body)
+
+    def _b_gone() -> bool:
+        s, rows = _request(
+            f"http://127.0.0.1:{a['port']}/api/conversations/{gid}/members",
+            token=a["token"],
+        )
+        return s == 200 and b["user_id"] not in {r["user_id"] for r in rows}
+
+    _wait_for("a's roster to drop b after DM_GROUP_LEAVE", _b_gone)
+    print("  b left: its DM_GROUP_LEAVE reached the authority, a's roster updated ✓")
+
+    # ── Mesh leg: b's group with c and d (c and d never paired). ──
+    c_d_paired = _rows(
+        "c",
+        "SELECT 1 FROM remote_instances WHERE id=? AND status='confirmed'",
+        (d["instance_id"],),
+    )
+    if c_d_paired:
+        print("  c↔d are paired here — skipping the mesh-leg check")
+    else:
+        s, conv2 = _request(
+            f"http://127.0.0.1:{b['port']}/api/conversations/group",
+            token=b["token"],
+            method="POST",
+            body={"member_user_ids": [c["user_id"], d["user_id"]], "name": "Mesh"},
+        )
+        gid2 = _must("create mesh group (b)", s, conv2, ok=(201,))["id"]
+        for label in ("c", "d"):
+            _wait_for(
+                f"{label} to be seated in b's group",
+                lambda label=label: gid2 in _conv_ids(label, inst[label]),
+            )
+        sealed = f"[group {tag}] c to d across the mesh"
+        _send_group("c", c, gid2, sealed)
+        _wait_for(
+            "d to receive c's message over the mesh",
+            lambda: sealed in _message_texts("d", gid2),
+            timeout=90.0,
+        )
+        relay_copy = _rows(
+            "a",
+            "SELECT 1 FROM conversation_messages WHERE content=?",
+            (sealed,),
+        )
+        if relay_copy:
+            raise SystemExit("group-dm: non-member a stored the mesh-routed text")
+        print(
+            "  c → d (never paired) arrived over the E2E-sealed mesh; "
+            "non-member a stored nothing ✓"
+        )
+    print("group-dm: ok")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -9469,6 +9672,11 @@ def main() -> None:
         # (direct pair), alice declines, c's invitation row is
         # marked declined and the user is NOT seated.
         cmd_remote_invite_decline()
+        # ``group-dm`` (v_37): a group on a with b + c, messages from each
+        # household reach the others, non-member d holds nothing, a adds d
+        # (history catch-up) and removes c, b leaves; then a group on b
+        # with c + d (never paired) proves the E2E-sealed mesh leg.
+        cmd_group_dm()
         # ``replay`` exercises the §24 outbox redelivery path by
         # killing Carol, posting a highlight from Alpha, restarting
         # Carol, and asserting the queued envelope flushes after the

@@ -1032,6 +1032,7 @@ def _wire_federation_stack(
         space_icon_repo=space_icon_repo,
     )
     inbound_service.attach_to(federation_service)
+    inbound_service.attach_groups(dm_service.groups)
 
     # Move-out redirect (move-out): land USER_MOVED redirects + serve the
     # USER_IDENTITY_RESOLVE pull backstop.
@@ -1467,6 +1468,11 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
     )
     dm_history_scheduler.wire()
+    # v_37 cross-household groups: the membership authority's roster /
+    # leave handlers, and a catch-up pull when a roster seats us.
+    dm_service.groups.attach_to(federation_service)
+    dm_service.groups.attach_history(dm_history_scheduler)
+    dm_service.groups.attach_pending(pending_seat_buffer)
     app[K.dm_history_provider_key] = dm_history_provider
     app[K.dm_history_receiver_key] = dm_history_receiver
     app[K.dm_history_scheduler_key] = dm_history_scheduler

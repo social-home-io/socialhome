@@ -23,6 +23,7 @@ import { uploadWithProgress } from '@/components/UploadProgress'
 import { MediaAttachmentChip } from '@/components/MediaAttachmentChip'
 import { MessageContextSheet } from '@/components/MessageContextSheet'
 import { ReactionPicker } from '@/components/ReactionPicker'
+import { GroupInfoDialog } from './GroupInfoDialog'
 import {
   EmojiAutocomplete,
   checkForEmojiTrigger,
@@ -303,9 +304,50 @@ interface ThreadMember {
   is_online: boolean
   is_idle: boolean
   last_seen_at: string | null
+  /** ``null`` for this household's people; the household of a remote
+   *  member otherwise (``household_name`` is null when not paired). */
+  instance_id?: string | null
+  household_name?: string | null
 }
 
 const threadMembers = signal<ThreadMember[]>([])
+/** This thread's row from ``GET /api/conversations`` — type, group name,
+ *  and whether this household keeps the group's member list. */
+interface ThreadInfo {
+  type: string
+  name: string | null
+  managed_here: boolean
+}
+const threadInfo = signal<ThreadInfo | null>(null)
+const groupInfoOpen = signal(false)
+
+/** Refetch the roster. Resolves ``false`` when the viewer is no longer a
+ *  member (403) — they were removed from a group, or left it elsewhere. */
+async function fetchRoster(convId: string): Promise<boolean> {
+  try {
+    const rows = await api.get(`/api/conversations/${convId}/members`) as ThreadMember[]
+    threadMembers.value = rows
+    memberCount.value = rows.length || 2
+    return true
+  } catch (e: any) {
+    if (e?.status === 403) return false
+    return true
+  }
+}
+
+async function fetchThreadInfo(convId: string): Promise<void> {
+  try {
+    const rows = await api.get('/api/conversations') as Array<{
+      id: string; type: string; name?: string | null; managed_here?: boolean
+    }>
+    const row = rows.find(r => r.id === convId)
+    threadInfo.value = row
+      ? { type: row.type, name: row.name ?? null, managed_here: row.managed_here === true }
+      : null
+  } catch {
+    /* keep what we have */
+  }
+}
 /** WhatsApp-style reply target. When set, the composer shows a chip
  *  with the parent message preview and the next send carries
  *  ``reply_to_id``. Cleared after send or by the chip's "×" button. */
@@ -431,6 +473,9 @@ export default function DmThreadPage() {
   const { params } = useRoute()
   const convId = params.id
   const location = useLocation()
+  // Read from the long-lived WS handlers without re-subscribing them.
+  const locationRef = useRef(location)
+  locationRef.current = location
   // Composer ``<input>`` ref — STT (push-to-talk transcription) appends
   // its final transcript here so the user can review + edit before
   // sending. Uncontrolled input + ref keeps the existing FormData send
@@ -642,12 +687,24 @@ export default function DmThreadPage() {
     // 5xx) falls back to "no anchor, no unreads" gracefully.
     let unreadHint = 0
     let lastReadAt: string | null = null
+    threadInfo.value = null
+    groupInfoOpen.value = false
     const summaryPromise = api.get('/api/conversations').then(
-      (rows: Array<{ id: string; unread?: number; last_read_at?: string | null }>) => {
+      (rows: Array<{
+        id: string; unread?: number; last_read_at?: string | null
+        type?: string; name?: string | null; managed_here?: boolean
+      }>) => {
         const row = rows.find(r => r.id === convId)
         if (row) {
           unreadHint = Math.max(0, row.unread ?? 0)
           lastReadAt = row.last_read_at ?? null
+          if (!cancelled) {
+            threadInfo.value = {
+              type: row.type ?? 'dm',
+              name: row.name ?? null,
+              managed_here: row.managed_here === true,
+            }
+          }
         }
       },
     ).catch(() => {
@@ -940,6 +997,19 @@ export default function DmThreadPage() {
       next[idx] = { ...next[idx], reactions: nextReactions }
       messages.value = next
     })
+    // A group's member list or name changed (here or on its home
+    // household): refetch. A 403 means we're no longer in it.
+    const offGroupUpdated = ws.on('dm.group.updated', (e) => {
+      const d = e.data as { conversation_id?: string }
+      if (d.conversation_id !== convId) return
+      void fetchThreadInfo(convId)
+      void fetchRoster(convId).then((stillIn) => {
+        if (stillIn || cancelled) return
+        groupInfoOpen.value = false
+        showToast('You are no longer in this group', 'info')
+        locationRef.current.route('/dms')
+      })
+    })
     const offUserOnline = ws.on('user.online', (e) => {
       const d = e.data as { user_id?: string }
       if (d.user_id) patchMember(d.user_id, { is_online: true, is_idle: false })
@@ -964,7 +1034,7 @@ export default function DmThreadPage() {
       // new id, so the ordering is safe either way.
       activeConvId = null
       offNewMsg(); offMediaReady(); offMessageUpdated()
-      offReaction()
+      offReaction(); offGroupUpdated()
       offUserOnline(); offUserIdle(); offUserOffline()
     }
   }, [convId])
@@ -1476,7 +1546,9 @@ export default function DmThreadPage() {
    *  user_id (which the rest of the thread also surfaces today). */
   const senderName = (user_id: string): string => {
     const m = threadMembers.value.find(x => x.user_id === user_id)
-    return m?.display_name ?? m?.username ?? user_id
+    // Someone who has since left the group (or was removed) is no longer
+    // on the roster — never show their raw id.
+    return m?.display_name ?? m?.username ?? 'Former member'
   }
 
   /** One-line preview of a message's content for the quoted-reply card.
@@ -1651,9 +1723,11 @@ export default function DmThreadPage() {
   // "Chats" as a placeholder so the topbar isn't briefly blank on
   // first entry.
   const peers = threadMembers.value.filter(m => !m.is_self)
+  const isGroupThread = threadInfo.value?.type === 'group_dm'
   const peerTitle =
-    peers.length === 0 ? 'Chats'
-    : peers.length === 1 ? peers[0].display_name
+    isGroupThread && threadInfo.value?.name ? threadInfo.value.name
+    : peers.length === 0 ? 'Chats'
+    : peers.length === 1 && !isGroupThread ? peers[0].display_name
     // Group DM: join the peers with " · " — same shape the inbox
     // uses as the row-title fallback, so the topbar and the inbox
     // entry agree on what to call the conversation.
@@ -1663,7 +1737,7 @@ export default function DmThreadPage() {
   // single peer face to show. Group DMs would need a stacked tile
   // that doesn't fit the TopBar's vertical rhythm; the joined
   // display-name list already reads as a group label.
-  useTitleAvatar(peers.length === 1
+  useTitleAvatar(peers.length === 1 && !isGroupThread
     ? { src: peers[0].picture_url, name: peers[0].display_name }
     : null,
   )
@@ -1800,6 +1874,17 @@ export default function DmThreadPage() {
           )}
           {status && <span class="sh-thread-header-status-line">{status}</span>}
         </div>
+        {isGroupThread && (
+          <button
+            type="button"
+            class="sh-icon-btn sh-thread-group-btn"
+            title="Group info"
+            aria-label="Group info — members, add people, leave"
+            onClick={() => { groupInfoOpen.value = true }}
+          >
+            <span aria-hidden="true">👥</span>
+          </button>
+        )}
         <CallButton convId={convId} />
         <a
           class="sh-thread-history"
@@ -2330,6 +2415,24 @@ export default function DmThreadPage() {
        *  popover positions itself absolutely against the input's
        *  bounding rect, not the parent. */}
       <EmojiAutocomplete />
+      {isGroupThread && threadInfo.value && (
+        <GroupInfoDialog
+          open={groupInfoOpen.value}
+          convId={convId}
+          name={threadInfo.value.name}
+          managedHere={threadInfo.value.managed_here}
+          members={threadMembers.value}
+          onClose={() => { groupInfoOpen.value = false }}
+          onChanged={() => {
+            void fetchThreadInfo(convId)
+            void fetchRoster(convId)
+          }}
+          onLeft={() => {
+            groupInfoOpen.value = false
+            location.route('/dms')
+          }}
+        />
+      )}
       {/* Touch-only long-press menu. Hover users get the inline
        *  ``.sh-message-reply-btn`` chip; this sheet only ever
        *  surfaces when a finger holds a bubble for ≥ 450 ms. */}

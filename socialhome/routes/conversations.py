@@ -9,12 +9,14 @@ from aiohttp import web
 from ..app_keys import (
     conversation_repo_key,
     dm_service_key,
+    federation_repo_key,
     media_signer_key,
     media_transcode_repo_key,
     notification_service_key,
     online_status_service_key,
     user_repo_key,
 )
+from ..domain.conversation import ConversationType
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
@@ -73,10 +75,22 @@ class ConversationCollectionView(BaseView):
                     rm.remote_username,
                 )
                 if ru is None:
-                    # Member row exists but the peer-directory snapshot
-                    # hasn't landed yet — skip the preview entry (the SPA
-                    # falls back to ``member_count`` for the avatar stub)
-                    # rather than synthesising a fake display name.
+                    if rm.user_id is None:
+                        # Member row exists but the peer-directory snapshot
+                        # hasn't landed yet — skip the preview entry (the
+                        # SPA falls back to ``member_count`` for the avatar
+                        # stub) rather than synthesising a fake name.
+                        continue
+                    # A group seat on a household we never paired with:
+                    # the authority's roster named them.
+                    preview.append(
+                        {
+                            "user_id": rm.user_id,
+                            "username": rm.remote_username,
+                            "display_name": rm.display_name or rm.remote_username,
+                            "picture_url": None,
+                        }
+                    )
                     continue
                 preview.append(
                     {
@@ -96,7 +110,19 @@ class ConversationCollectionView(BaseView):
                     if c.last_message_at
                     else None,
                     "members": preview,
-                    "member_count": len(members) + len(remote_members),
+                    "member_count": len(
+                        [
+                            m
+                            for m in members
+                            if m.deleted_at is None
+                            or c.type is not ConversationType.GROUP_DM
+                        ]
+                    )
+                    + len(remote_members),
+                    # Group conversations: whether this household keeps the
+                    # member list (it created the group) — the SPA offers
+                    # add / remove / rename only then; anyone can leave.
+                    "managed_here": svc.groups.is_authority_here(c.id),
                     "unread": unread,
                     # ISO 8601 timestamp the caller last marked-as-read on
                     # this conversation. ``null`` for brand-new threads.
@@ -137,8 +163,22 @@ class ConversationDmView(BaseView):
         return web.json_response({"id": conv.id, "type": conv.type.value}, status=201)
 
 
+def _str_list(value: object) -> list[str]:
+    """A JSON list of strings, or ``[]`` for anything else."""
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str) and v]
+
+
 class ConversationGroupView(BaseView):
-    """POST /api/conversations/group — create a group DM."""
+    """POST /api/conversations/group — create a group DM.
+
+    Body: ``{"members": [local usernames], "member_user_ids": [user_ids],
+    "name": str?}``. ``member_user_ids`` may name people from directly
+    paired households (v_37+); this household becomes the group's
+    authority. A person who can't join is refused with 422
+    ``GROUP_MEMBER_UNSUPPORTED`` and a message naming them.
+    """
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -146,10 +186,60 @@ class ConversationGroupView(BaseView):
         body = await self.body()
         conv = await svc.create_group_dm(
             creator_username=ctx.username,
-            member_usernames=body.get("members", []),
+            member_usernames=_str_list(body.get("members", [])),
+            member_user_ids=_str_list(body.get("member_user_ids", [])),
             name=body.get("name"),
         )
         return web.json_response({"id": conv.id, "type": conv.type.value}, status=201)
+
+
+class ConversationItemView(BaseView):
+    """PATCH /api/conversations/{id} — rename a group (``{"name": str|null}``).
+
+    Only a member on the group's authority household (403 otherwise).
+    """
+
+    async def patch(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        body = await self.body()
+        await svc.rename_group(
+            self.match("id"),
+            actor_username=ctx.username,
+            name=body.get("name"),
+        )
+        return web.json_response({"ok": True})
+
+
+class ConversationLeaveView(BaseView):
+    """POST /api/conversations/{id}/leave — the caller leaves the conversation.
+
+    A 1:1 is hidden for the caller; a group is left for good (the
+    authority household is told when it is another one).
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        await svc.leave(self.match("id"), username=ctx.username)
+        return web.json_response({"ok": True})
+
+
+class ConversationMemberView(BaseView):
+    """DELETE /api/conversations/{id}/members/{user_id} — remove from a group.
+
+    Only a member on the group's authority household (403 otherwise).
+    """
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        await svc.remove_group_member(
+            self.match("id"),
+            actor_username=ctx.username,
+            user_id=unquote(self.match("user_id")),
+        )
+        return web.json_response({"ok": True})
 
 
 class ConversationMessageView(BaseView):
@@ -254,11 +344,53 @@ class ConversationMembersView(BaseView):
     status without a follow-up fetch.
     """
 
+    async def post(self) -> web.Response:
+        """Add people to a group: ``{"usernames": [...], "user_ids": [...]}``.
+
+        Only a member on the group's authority household (403 otherwise);
+        a person who can't join is refused with 422
+        ``GROUP_MEMBER_UNSUPPORTED``.
+        """
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        body = await self.body()
+        await svc.add_group_members(
+            self.match("id"),
+            actor_username=ctx.username,
+            usernames=_str_list(body.get("usernames")),
+            user_ids=_str_list(body.get("user_ids")),
+        )
+        return web.json_response({"ok": True}, status=201)
+
     async def get(self) -> web.Response:
         ctx = self.user
         conv_id = self.match("id")
         repo = self.svc(conversation_repo_key)
         members = await repo.list_members(conv_id)
+        # Members only: the roster names people on other households.
+        if not any(
+            m.username == ctx.username and m.deleted_at is None for m in members
+        ):
+            raise PermissionError("not a member of this conversation")
+        conv = await repo.get(conv_id)
+        if conv is not None and conv.type is ConversationType.GROUP_DM:
+            # Somebody who left a group is no longer on its roster.
+            members = [m for m in members if m.deleted_at is None]
+        fed_repo = self.request.app.get(federation_repo_key)
+        household_names: dict[str, str | None] = {}
+
+        async def _household(instance_id: str) -> str | None:
+            if instance_id not in household_names:
+                inst = (
+                    await fed_repo.get_instance(instance_id)
+                    if fed_repo is not None
+                    else None
+                )
+                household_names[instance_id] = (
+                    inst.effective_display_name if inst is not None else None
+                )
+            return household_names[instance_id]
+
         # See :class:`ConversationCollectionView` for why the remote
         # member roster has to be folded in alongside the local one —
         # the thread header reads its title + avatar from this endpoint,
@@ -296,6 +428,8 @@ class ConversationMembersView(BaseView):
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
+                    "instance_id": None,
+                    "household_name": None,
                 }
             )
         for rm in remote_members:
@@ -304,6 +438,24 @@ class ConversationMembersView(BaseView):
                 rm.remote_username,
             )
             if ru is None:
+                if rm.user_id is None:
+                    continue
+                # A group seat on a household we never paired with: only
+                # what the authority's roster said about them.
+                rows.append(
+                    {
+                        "user_id": rm.user_id,
+                        "username": rm.remote_username,
+                        "display_name": rm.display_name or rm.remote_username,
+                        "picture_url": None,
+                        "is_self": False,
+                        "is_online": False,
+                        "is_idle": False,
+                        "last_seen_at": None,
+                        "instance_id": rm.instance_id,
+                        "household_name": await _household(rm.instance_id),
+                    }
+                )
                 continue
             # Presence for remote users is tracked through the same
             # OnlineStatusService — federation USER_ONLINE / USER_OFFLINE
@@ -327,6 +479,8 @@ class ConversationMembersView(BaseView):
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
+                    "instance_id": rm.instance_id,
+                    "household_name": await _household(rm.instance_id),
                 }
             )
         return self._json(rows)

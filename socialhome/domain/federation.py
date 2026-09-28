@@ -320,6 +320,15 @@ class FederationEventType(str, enum.Enum):
     DM_MESSAGE_DELETED = "dm_message_deleted"
     DM_MESSAGE_REACTION = "dm_message_reaction"
     DM_MEMBER_ADDED = "dm_member_added"
+    #: v_37 — the whole member list of a cross-household group
+    #: conversation, versioned, sent by its authority household (the one
+    #: the owner-bound conversation id commits to) to every member
+    #: household, and once more to a household it just removed. The only
+    #: event that ever seats anyone in a group; see ``docs/protocol/dm.md``.
+    DM_GROUP_ROSTER = "dm_group_roster"
+    #: v_37 — a member household tells the authority that one of its own
+    #: seated users left; the authority answers with a new roster.
+    DM_GROUP_LEAVE = "dm_group_leave"
     DM_CONTACT_REQUEST = "dm_contact_request"
     DM_CONTACT_ACCEPTED = "dm_contact_accepted"
     DM_CONTACT_DECLINED = "dm_contact_declined"
