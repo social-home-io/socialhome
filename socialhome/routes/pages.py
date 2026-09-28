@@ -622,6 +622,9 @@ class PageConflictView(BaseView):
         conflict_svc = self.svc(page_conflict_service_key)
         space_id = self.match("id")
         page_id = self.match("pid")
+        if await self.svc(space_repo_key).get_member(space_id, ctx.user_id) is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        await self.require_space_feature(space_id, "pages")
         body = await self.body()
         resolution = str(body.get("resolution") or "")
         merged = body.get("content")

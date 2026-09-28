@@ -59,6 +59,7 @@ from ..domain.page import Page, PageVersion  # noqa: F401,E402
 class AbstractPageRepo(Protocol):
     async def save(self, page: Page, *, space_id: str | None) -> bool: ...
     async def get(self, page_id: str) -> Page | None: ...
+    async def get_space_page(self, page_id: str, *, space_id: str) -> Page | None: ...
     async def list(
         self,
         *,
@@ -110,10 +111,12 @@ class AbstractPageRepo(Protocol):
         side: str,
         conflict: bool,
     ) -> None: ...
-    async def has_active_conflict(self, page_id: str) -> bool: ...
-    async def last_base_snapshot(self, page_id: str) -> str: ...
-    async def last_theirs_snapshot(self, page_id: str) -> str | None: ...
-    async def clear_conflict_flag(self, page_id: str) -> None: ...
+    async def has_active_conflict(self, page_id: str, *, space_id: str) -> bool: ...
+    async def last_base_snapshot(self, page_id: str, *, space_id: str) -> str: ...
+    async def last_theirs_snapshot(
+        self, page_id: str, *, space_id: str
+    ) -> str | None: ...
+    async def clear_conflict_flag(self, page_id: str, *, space_id: str) -> None: ...
 
 
 class SqlitePageRepo:
@@ -237,6 +240,19 @@ class SqlitePageRepo:
         row = await self._db.fetchone(
             "SELECT * FROM space_pages WHERE id=?",
             (page_id,),
+        )
+        return _row_to_page(row_to_dict(row))
+
+    async def get_space_page(self, page_id: str, *, space_id: str) -> Page | None:
+        """The page ``page_id`` of space ``space_id`` — never a household page.
+
+        :meth:`get` looks in the household ``pages`` table first, so it can
+        answer with a different row than the space page a caller means when
+        the two tables share an id. Space-scoped callers use this.
+        """
+        row = await self._db.fetchone(
+            "SELECT * FROM space_pages WHERE id=? AND space_id=?",
+            (page_id, space_id),
         )
         return _row_to_page(row_to_dict(row))
 
@@ -622,35 +638,37 @@ class SqlitePageRepo:
             (page_id, page_id, MAX_PAGE_SNAPSHOTS),
         )
 
-    async def has_active_conflict(self, page_id: str) -> bool:
+    async def has_active_conflict(self, page_id: str, *, space_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT 1 FROM space_page_snapshots WHERE page_id=? AND conflict=1 LIMIT 1",
-            (page_id,),
+            "SELECT 1 FROM space_page_snapshots"
+            " WHERE page_id=? AND space_id=? AND conflict=1 LIMIT 1",
+            (page_id, space_id),
         )
         return row is not None
 
-    async def last_base_snapshot(self, page_id: str) -> str:
+    async def last_base_snapshot(self, page_id: str, *, space_id: str) -> str:
         row = await self._db.fetchone(
             "SELECT body FROM space_page_snapshots "
-            "WHERE page_id=? AND side='base' "
+            "WHERE page_id=? AND space_id=? AND side='base' "
             "ORDER BY snapshot_at DESC LIMIT 1",
-            (page_id,),
+            (page_id, space_id),
         )
         return str(row["body"]) if row else ""
 
-    async def last_theirs_snapshot(self, page_id: str) -> str | None:
+    async def last_theirs_snapshot(self, page_id: str, *, space_id: str) -> str | None:
         row = await self._db.fetchone(
             "SELECT body FROM space_page_snapshots "
-            "WHERE page_id=? AND side='theirs' AND conflict=1 "
+            "WHERE page_id=? AND space_id=? AND side='theirs' AND conflict=1 "
             "ORDER BY snapshot_at DESC LIMIT 1",
-            (page_id,),
+            (page_id, space_id),
         )
         return str(row["body"]) if row else None
 
-    async def clear_conflict_flag(self, page_id: str) -> None:
+    async def clear_conflict_flag(self, page_id: str, *, space_id: str) -> None:
         await self._db.enqueue(
-            "UPDATE space_page_snapshots SET conflict=0 WHERE page_id=? AND conflict=1",
-            (page_id,),
+            "UPDATE space_page_snapshots SET conflict=0"
+            " WHERE page_id=? AND space_id=? AND conflict=1",
+            (page_id, space_id),
         )
 
 

@@ -12,8 +12,7 @@ from socialhome.repositories.page_repo import new_page
 from .conftest import _auth
 
 
-async def _seed_conflict(client):
-    """Seed a page in sp-1 with an active conflict."""
+async def _seed_space(client, *, member: bool = True) -> None:
     db = client._db
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
@@ -21,6 +20,17 @@ async def _seed_conflict(client):
         "VALUES('sp-1', 'test', 'iid', 'admin', ?, 'household')",
         ("aa" * 32,),
     )
+    if member:
+        await db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role)"
+            " VALUES('sp-1', ?, 'owner')",
+            (client._uid,),
+        )
+
+
+async def _seed_conflict(client, *, member: bool = True):
+    """Seed a page in sp-1 with an active conflict."""
+    await _seed_space(client, member=member)
     repo = client.app[page_repo_key]
     page = new_page(
         title="t", content="mine-version", created_by=client._uid, space_id="sp-1"
@@ -99,13 +109,7 @@ async def test_resolve_conflict_unknown_resolution_422(client):
 
 async def test_resolve_conflict_no_active_conflict_409(client):
     # Seed a page but never record a conflict.
-    db = client._db
-    await db.enqueue(
-        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
-        "identity_public_key, space_type) "
-        "VALUES('sp-1', 'test', 'iid', 'admin', ?, 'household')",
-        ("aa" * 32,),
-    )
+    await _seed_space(client)
     page = new_page(title="t", content="c", created_by=client._uid, space_id="sp-1")
     await client.app[page_repo_key].save(page, space_id="sp-1")
     r = await client.post(
@@ -117,9 +121,23 @@ async def test_resolve_conflict_no_active_conflict_409(client):
 
 
 async def test_resolve_conflict_bad_json_400(client):
+    await _seed_space(client)
     r = await client.post(
         "/api/spaces/sp-1/pages/ghost/resolve-conflict",
         data="not-json",
         headers={**_auth(client._tok), "Content-Type": "application/json"},
     )
     assert r.status == 400
+
+
+async def test_resolve_conflict_requires_space_membership(client):
+    """A signed-in user who is not in the space cannot settle its conflict."""
+    page = await _seed_conflict(client, member=False)
+    r = await client.post(
+        f"/api/spaces/sp-1/pages/{page.id}/resolve-conflict",
+        json={"resolution": "theirs"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+    current = await client.app[page_repo_key].get_space_page(page.id, space_id="sp-1")
+    assert current.content == "mine-version"

@@ -187,7 +187,7 @@ class PageConflictService:
         self,
         *,
         page_id: str,
-        space_id: str | None,
+        space_id: str,
         body: str,
         author_user_id: str,
     ) -> None:
@@ -201,8 +201,8 @@ class PageConflictService:
             conflict=False,
         )
 
-    async def has_active_conflict(self, page_id: str) -> bool:
-        return await self._pages.has_active_conflict(page_id)
+    async def has_active_conflict(self, page_id: str, *, space_id: str) -> bool:
+        return await self._pages.has_active_conflict(page_id, space_id=space_id)
 
     # ─── Main entry point: merge remote body ──────────────────────────────
 
@@ -210,7 +210,7 @@ class PageConflictService:
         self,
         *,
         page_id: str,
-        space_id: str | None,
+        space_id: str,
         remote_body: str,
         remote_author_user_id: str,
     ) -> MergeResult:
@@ -221,12 +221,15 @@ class PageConflictService:
         both sides as conflicting snapshots and leaves the local body
         untouched — the UI will surface the conflict and ask a user to
         resolve it via :meth:`resolve_conflict`.
+
+        Scoped to ``space_id``: only that space's page is read or written,
+        never a household page or another space's page sharing the id.
         """
-        page = await self._pages.get(page_id)
+        page = await self._pages.get_space_page(page_id, space_id=space_id)
         if page is None:
             raise PageNotFoundError(page_id)
 
-        base_body = await self._pages.last_base_snapshot(page_id)
+        base_body = await self._pages.last_base_snapshot(page_id, space_id=space_id)
         mine_body = page.content
 
         result = diff3_merge(base_body, mine_body, remote_body)
@@ -238,7 +241,7 @@ class PageConflictService:
                 content=result.content,
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
-            await self._pages.save(updated, space_id=page.space_id)
+            await self._pages.save(updated, space_id=space_id)
             await self.record_base(
                 page_id=page_id,
                 space_id=space_id,
@@ -289,17 +292,20 @@ class PageConflictService:
         if resolution not in ("mine", "theirs", "merged_content"):
             raise ValueError(f"Unknown resolution: {resolution!r}")
 
-        if not await self.has_active_conflict(page_id):
+        if not await self.has_active_conflict(page_id, space_id=space_id):
             raise NoActiveConflictError(f"page {page_id!r} has no unresolved conflict")
 
-        page = await self._pages.get(page_id)
+        page = await self._pages.get_space_page(page_id, space_id=space_id)
         if page is None:
             raise PageNotFoundError(page_id)
 
         if resolution == "mine":
             new_body = page.content
         elif resolution == "theirs":
-            new_body = await self._pages.last_theirs_snapshot(page_id) or page.content
+            new_body = (
+                await self._pages.last_theirs_snapshot(page_id, space_id=space_id)
+                or page.content
+            )
         else:
             if not merged_content:
                 raise ValueError("merged_content required for 'merged_content'")
@@ -311,10 +317,10 @@ class PageConflictService:
             content=new_body,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
-        await self._pages.save(updated, space_id=page.space_id)
+        await self._pages.save(updated, space_id=space_id)
 
         # Clear the conflict flag and stamp a fresh base.
-        await self._pages.clear_conflict_flag(page_id)
+        await self._pages.clear_conflict_flag(page_id, space_id=space_id)
         await self.record_base(
             page_id=page_id,
             space_id=space_id,
