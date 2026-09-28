@@ -4,6 +4,7 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
+import { currentUser } from '@/store/auth'
 import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
 import { Button } from './Button'
@@ -114,13 +115,24 @@ export function SpaceCreateDialog() {
     }
   }
 
+  // Connecting a global server is a household-admin action (connection
+  // management is admin-only), so a member is pointed at an admin rather
+  // than at a Connections page whose controls they can't use.
+  const isAdmin = currentUser.value?.is_admin === true
+
   // The Global tier is disabled (with an explanatory subtitle) until an
   // active global server connection exists.
   const visibilityOptions = hasActiveGfs.value
     ? VISIBILITY_OPTIONS
     : VISIBILITY_OPTIONS.map((o) =>
       o.value === 'global'
-        ? { ...o, disabled: true, subtitle: 'Connect a global server to publish worldwide.' }
+        ? {
+          ...o,
+          disabled: true,
+          subtitle: isAdmin
+            ? 'Connect a global server to publish worldwide.'
+            : 'Needs a global server connection.',
+        }
         : o,
     )
 
@@ -155,7 +167,11 @@ export function SpaceCreateDialog() {
         />
         {!hasActiveGfs.value && (
           <p class="sh-muted" style={{ marginTop: 'calc(-1 * var(--sh-space-sm))' }}>
-            Want a Global space? <a href={addBase('/connections')}>Connect a global server</a> first.
+            {isAdmin ? (
+              <>Want a Global space? <a href={addBase('/connections')}>Connect a global server</a> first.</>
+            ) : (
+              <>Want a Global space? Ask a household admin to connect a global server first.</>
+            )}
           </p>
         )}
         <RadioCardGroup

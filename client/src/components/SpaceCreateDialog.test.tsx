@@ -16,6 +16,13 @@ vi.mock('@/i18n/i18n', () => ({ t: (k: string) => k }))
 vi.mock('./EmojiField', () => ({ EmojiField: () => null }))
 
 const { SpaceCreateDialog, openSpaceCreate } = await import('./SpaceCreateDialog')
+const { currentUser } = await import('@/store/auth')
+
+function setViewer(isAdmin: boolean) {
+  currentUser.value = {
+    user_id: 'u1', username: 'u', display_name: 'U', is_admin: isAdmin,
+  } as typeof currentUser.value
+}
 
 const nameInput = (c: Element) =>
   c.querySelector('input[placeholder="e.g. Family, Makers Club"]') as HTMLInputElement
@@ -105,6 +112,47 @@ describe('SpaceCreateDialog — Global tier gating', () => {
     gfsConns = [{ status: 'active' }]
     const { container } = await open()
     await waitFor(() => expect(visibility(container, 'global').disabled).toBe(false))
+  })
+})
+
+// Connecting a global server is admin-only (connection management is
+// admin-only on the backend), so only an admin is linked to Connections;
+// a member gets a short "ask a household admin" hint instead.
+describe('SpaceCreateDialog — connect-a-global-server hint is admin-only', () => {
+  beforeEach(() => { post.mockReset(); get.mockClear(); gfsConns = []; cleanup() })
+
+  it('an admin without a global server gets the Connections link (under the ingress base)', async () => {
+    setViewer(true)
+    const { container } = await open()
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/gfs/connections'))
+    const link = [...container.querySelectorAll('a')]
+      .find(a => a.textContent === 'Connect a global server')
+    expect(link).toBeDefined()
+    expect(link!.getAttribute('href')).toMatch(/\/connections$/)
+    expect(container.textContent).not.toContain('Ask a household admin')
+    expect(container.textContent).toContain('Connect a global server to publish worldwide.')
+  })
+
+  it('a non-admin gets an "ask a household admin" hint and no Connections link', async () => {
+    setViewer(false)
+    const { container } = await open()
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/gfs/connections'))
+    expect(container.textContent)
+      .toContain('Ask a household admin to connect a global server first.')
+    expect(container.querySelector('a[href$="/connections"]')).toBeNull()
+    expect(container.textContent).not.toContain('Connect a global server to publish worldwide.')
+    expect(visibility(container, 'global').disabled).toBe(true)
+  })
+
+  it('neither sees the hint once a global server is connected', async () => {
+    gfsConns = [{ status: 'active' }]
+    for (const isAdmin of [true, false]) {
+      cleanup()
+      setViewer(isAdmin)
+      const { container } = await open()
+      await waitFor(() => expect(visibility(container, 'global').disabled).toBe(false))
+      expect(container.textContent).not.toContain('Want a Global space?')
+    }
   })
 })
 

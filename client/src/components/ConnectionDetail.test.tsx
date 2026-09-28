@@ -57,7 +57,6 @@ const _conn = (over: Partial<Record<string, unknown>> = {}) => ({
   local_alias: null,
   status: 'confirmed',
   inbox_url: 'https://x/wh/abc',
-  intro_relay_enabled: true,
   unreachable_since: null,
   paired_at: '2026-05-18T10:00:00+00:00',
   ...over,
@@ -651,5 +650,57 @@ describe('Connection server row — relay acceptance is not delivery', () => {
       <ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />,
     )
     expect(screen.queryByText('Connection server')).toBeNull()
+  })
+})
+
+// Every write this panel makes must hit a route the backend registers. It
+// used to carry an "Allow introduced pairing" checkbox that PATCHed
+// ``/connections/{id}/settings`` — a route that never existed, so the toggle
+// 404'd and the flag it claimed to set was never read by any code path.
+describe('ConnectionDetail — writes only target registered routes', () => {
+  const _users = [
+    { user_id: 'u-anna', username: 'anna', display_name: 'Anna', is_admin: false, visible: true },
+  ]
+
+  it('has no "introduced pairing" toggle and never PATCHes /settings', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    const { container } = render(
+      <ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />,
+    )
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    expect(container.textContent).not.toMatch(/introduced pairing/i)
+    for (const cb of container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
+      fireEvent.click(cb)
+    }
+    for (const [url] of apiPatch.mock.calls) {
+      expect(String(url)).not.toContain('/settings')
+    }
+  })
+
+  it('a visibility tick PATCHes /visible-users with the exact update body', async () => {
+    apiGet.mockImplementation(async (u: string) =>
+      u.endsWith('/visible-users') ? { users: _users } : { last_relay: null })
+    apiPatch.mockResolvedValue({ users: [{ ..._users[0], visible: false }] })
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
+    const cb = await screen.findByRole('checkbox', { name: /Anna/ })
+    fireEvent.click(cb)
+    await waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/pairing/connections/z7k63zfi/visible-users',
+      { updates: [{ user_id: 'u-anna', visible: false }] },
+    )
+  })
+
+  it('a failed visibility save shows an error toast', async () => {
+    const { showToast } = await import('@/components/Toast')
+    ;(showToast as ReturnType<typeof vi.fn>).mockClear()
+    apiGet.mockImplementation(async (u: string) =>
+      u.endsWith('/visible-users') ? { users: _users } : { last_relay: null })
+    apiPatch.mockRejectedValue(new Error('Peer not found.'))
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
+    fireEvent.click(await screen.findByRole('checkbox', { name: /Anna/ }))
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Peer not found.', 'error'))
   })
 })

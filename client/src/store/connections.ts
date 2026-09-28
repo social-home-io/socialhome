@@ -35,7 +35,6 @@ export interface Connection {
   source?: string
   reachable:     boolean
   inbox_url?: string
-  intro_relay_enabled?: boolean
   unreachable_since?: string | null
   /** Last moment an outbound envelope to this peer was accepted
    *  (``remote_instances.last_reachable_at``); ``null`` when it has never

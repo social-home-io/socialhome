@@ -2,8 +2,7 @@
  * ShareHomeToggle — admin-only toggle that controls whether our household's
  * home pin is visible on this peer's Connections → Map (§23.90).
  *
- * Pattern mirrors the `intro_relay_enabled` checkbox in ConnectionDetail.tsx:
- * optimistic local-state flip + PATCH to /api/pairing/connections/{id},
+ * Optimistic local-state flip + PATCH to /api/pairing/connections/{id},
  * revert + toast on error.
  */
 import { useState } from 'preact/hooks'
