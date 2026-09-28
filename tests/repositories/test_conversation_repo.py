@@ -690,3 +690,26 @@ async def test_soft_delete_messages_by_sender_clears_only_theirs(env):
     assert by_id["m1"].deleted and by_id["m1"].content == ""
     assert not by_id["m3"].deleted
     assert not (await env.repo.get_message("m4")).deleted
+
+
+async def test_roster_seats_carry_the_version_they_joined_at(env):
+    await env.repo.apply_group_roster(
+        _group(1),
+        local_usernames=["alice"],
+        remote_members=[_seat("i", "c", "u-c")],
+        at="t",
+    )
+    await env.repo.soft_leave("g1", "alice", left_version=1)
+    (alice,) = await env.repo.list_members("g1")
+    assert (alice.joined_version, alice.left_version) == (1, 1)
+    await env.repo.apply_group_roster(
+        _group(4),
+        local_usernames=["alice", "bob"],
+        remote_members=[_seat("i", "c", "u-c")],
+        at="t",
+    )
+    members = {m.username: m for m in await env.repo.list_members("g1")}
+    assert (members["alice"].joined_version, members["alice"].left_version) == (4, None)
+    assert members["bob"].joined_version == 4
+    (seat,) = await env.repo.list_remote_members("g1")
+    assert seat.joined_version == 1  # still the same seat since v1

@@ -304,6 +304,7 @@ class DmGroupService:
                     instance_id=self._own_instance_id,
                     username=user.username,
                     display_name=user.display_name,
+                    since=m.joined_version,
                 )
             )
         for seat in await self._convos.list_remote_members(conversation_id):
@@ -322,6 +323,7 @@ class DmGroupService:
                     instance_id=seat.instance_id,
                     username=seat.remote_username,
                     display_name=display_name or seat.remote_username,
+                    since=seat.joined_version,
                 )
             )
         return members
@@ -455,7 +457,7 @@ class DmGroupService:
         seats = await self._seats_from(event, conv_id, raw_members)
         if seats is None:
             return
-        local_usernames, remote_members = seats
+        local_usernames, remote_members, stale_leavers = seats
         if existing is None and not local_usernames:
             refuse(event, "no local member in a new group", conversation=conv_id)
             return
@@ -489,6 +491,10 @@ class DmGroupService:
             creator_user_id=None,
             before=before,
         )
+        for user_id in stale_leavers:
+            # The authority still lists someone who left here — it hasn't
+            # seen the leave (or it was lost): say it again.
+            await self.send_leave(conv_id, user_id)
         if change.added_local and self._history is not None:
             # A household newly seated catches up on the backlog from the
             # authority (the same pull a re-paired peer makes).
@@ -501,7 +507,7 @@ class DmGroupService:
         event: "FederationEvent",
         conv_id: str,
         raw_members: list,
-    ) -> tuple[list[str], list[RemoteConversationMember]] | None:
+    ) -> tuple[list[str], list[RemoteConversationMember], list[str]] | None:
         """Local usernames + remote seats a roster names, bound per entry.
 
         An entry on this household must name one of our users by
@@ -512,7 +518,20 @@ class DmGroupService:
         ``user_id`` it merely claims is not enough; while one is missing
         the whole roster is held for that user's sync (``None``). Other bad
         entries are dropped with a WARNING; the rest of the roster stands.
+
+        A local user who left this group here (``left_version`` L) is seated
+        again only by an entry whose ``since`` is newer than L — an explicit
+        re-add. An older ``since`` means the authority built the roster
+        before it saw the leave: the user stays out, and is returned in the
+        third list so the leave is sent again. An entry without ``since``
+        (an authority predating the field) seats them, as before.
         """
+        left_at = {
+            m.username: m.left_version
+            for m in await self._convos.list_members(conv_id)
+            if m.deleted_at is not None and m.left_version is not None
+        }
+        stale_leavers: list[str] = []
         local_usernames: list[str] = []
         remote: dict[tuple[str, str], RemoteConversationMember] = {}
         now = _now_iso()
@@ -530,6 +549,24 @@ class DmGroupService:
                         conversation=conv_id,
                         user=entry.user_id,
                     )
+                    continue
+                left_version = left_at.get(user.username)
+                if (
+                    left_version is not None
+                    and entry.since is not None
+                    and entry.since <= left_version
+                ):
+                    log.info(
+                        "DM_GROUP_ROSTER from %s: %s left %s at v%d and the "
+                        "roster doesn't re-add them (since v%d) — keeping them "
+                        "out, sending the leave again",
+                        event.from_instance,
+                        user.username,
+                        conv_id,
+                        left_version,
+                        entry.since,
+                    )
+                    stale_leavers.append(user.user_id)
                     continue
                 local_usernames.append(user.username)
                 continue
@@ -568,7 +605,7 @@ class DmGroupService:
                 user_id=entry.user_id,
                 display_name=entry.display_name,
             )
-        return local_usernames, list(remote.values())
+        return local_usernames, list(remote.values()), stale_leavers
 
     async def _on_leave(self, event: "FederationEvent") -> None:
         """Authority side: a member household's own user left the group."""
@@ -755,11 +792,17 @@ def _parse_member(raw: object) -> GroupRosterMember | None:
         return None
     user_id, instance_id, username = (str(f) for f in fields)
     display_name = raw.get("display_name")
+    since = raw.get("since")
+    if since is not None and (
+        type(since) is not int or not 1 <= since < MAX_MEMBERSHIP_VERSION
+    ):
+        return None
     return GroupRosterMember(
         user_id=user_id,
         instance_id=instance_id,
         username=username,
         display_name=(str(display_name) if display_name else username)[:80],
+        since=since,
     )
 
 

@@ -1211,7 +1211,11 @@ class DmService(VisibilityMixin):
             )
             return
         user = await self._require_user(username)
-        await self._convos.soft_leave(conversation_id, username)
+        # Remember the version we held: a roster the authority built before
+        # it saw this leave can't seat the user again (only a later re-add).
+        await self._convos.soft_leave(
+            conversation_id, username, left_version=conv.membership_version
+        )
         await self._groups.send_leave(conversation_id, user.user_id)
 
     # ── Internal helpers ───────────────────────────────────────────────

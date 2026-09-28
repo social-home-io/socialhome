@@ -74,6 +74,7 @@ class AbstractConversationRepo(Protocol):
         username: str,
         *,
         at: str | None = None,
+        left_version: int | None = None,
     ) -> None: ...
     async def list_fully_left_conversation_ids(self) -> list[str]: ...
     async def hard_delete(self, conversation_id: str) -> None: ...
@@ -327,6 +328,8 @@ class SqliteConversationRepo:
                 last_read_at=r["last_read_at"],
                 history_visible_from=r["history_visible_from"],
                 deleted_at=r["deleted_at"],
+                joined_version=r["joined_version"],
+                left_version=r["left_version"],
             )
             for r in rows
         ]
@@ -349,6 +352,7 @@ class SqliteConversationRepo:
                 history_visible_from=r["history_visible_from"],
                 user_id=r["user_id"],
                 display_name=r["display_name"],
+                joined_version=r["joined_version"],
             )
             for r in rows
         ]
@@ -374,7 +378,10 @@ class SqliteConversationRepo:
         (``deleted_at``); listed ones are seated, or brought back, with
         their read watermark kept. Remote seats not in ``remote_members``
         are deleted; listed ones are upserted with the roster's ``user_id``
-        / ``display_name``. The name is taken from the snapshot.
+        / ``display_name``. The name is taken from the snapshot. Every seat
+        this snapshot fills (new, or back after leaving) is stamped with its
+        version as ``joined_version``; a returning member's ``left_version``
+        marker is cleared.
         """
         conv = conversation
         wanted_local = list(dict.fromkeys(local_usernames))
@@ -418,15 +425,16 @@ class SqliteConversationRepo:
                 if username not in current:
                     conn.execute(
                         "INSERT INTO conversation_members(conversation_id,"
-                        " username, joined_at) VALUES(?,?,?)",
-                        (conv.id, username, at),
+                        " username, joined_at, joined_version) VALUES(?,?,?,?)",
+                        (conv.id, username, at, conv.membership_version),
                     )
                     added.append(username)
                 elif current[username] is not None:
                     conn.execute(
                         "UPDATE conversation_members SET deleted_at=NULL,"
-                        " joined_at=? WHERE conversation_id=? AND username=?",
-                        (at, conv.id, username),
+                        " left_version=NULL, joined_at=?, joined_version=?"
+                        " WHERE conversation_id=? AND username=?",
+                        (at, conv.membership_version, conv.id, username),
                     )
                     added.append(username)
             removed: list[str] = []
@@ -461,7 +469,7 @@ class SqliteConversationRepo:
                 conn.execute(
                     "INSERT INTO conversation_remote_members(conversation_id,"
                     " instance_id, remote_username, joined_at, user_id,"
-                    " display_name) VALUES(?,?,?,?,?,?)"
+                    " display_name, joined_version) VALUES(?,?,?,?,?,?,?)"
                     " ON CONFLICT(conversation_id, instance_id, remote_username)"
                     " DO UPDATE SET user_id=excluded.user_id,"
                     " display_name=excluded.display_name",
@@ -472,6 +480,7 @@ class SqliteConversationRepo:
                         m.joined_at or at,
                         m.user_id,
                         m.display_name,
+                        conv.membership_version,
                     ),
                 )
             return GroupRosterChange(
@@ -507,8 +516,12 @@ class SqliteConversationRepo:
         username: str,
         *,
         at: str | None = None,
+        left_version: int | None = None,
     ) -> None:
         """Mark a 1:1 DM as hidden from a participant's sidebar.
+
+        ``left_version`` — a group kept by another household: the roster
+        version held when the user left (see ``apply_group_roster``).
 
         For group DMs the spec keeps ``deleted_at`` null — removal for a
         group DM is handled via a separate flow. The service layer decides
@@ -517,10 +530,11 @@ class SqliteConversationRepo:
         await self._db.enqueue(
             """
             UPDATE conversation_members
-               SET deleted_at=COALESCE(?, datetime('now'))
+               SET deleted_at=COALESCE(?, datetime('now')),
+                   left_version=?
              WHERE conversation_id=? AND username=?
             """,
-            (at, conversation_id, username),
+            (at, left_version, conversation_id, username),
         )
 
     async def list_fully_left_conversation_ids(self) -> list[str]:

@@ -155,7 +155,7 @@ people from other households.
 member leaving — is applied on the authority as a new snapshot with the
 next `membership_version` and shipped as `DM_GROUP_ROSTER`
 `{conversation_id, version, name, members: [{user_id, instance_id,
-username, display_name}]}` to every member household, plus once more to a
+username, display_name, since}]}` to every member household, plus once more to a
 household the change took out — to that one with an empty member list,
 so it drops every seat and learns nothing about who stays. It travels
 direct (the authority is paired with every member household — it seated
@@ -169,6 +169,17 @@ anyone in a group: a message never does (#734's rule).
 `DM_GROUP_LEAVE {conversation_id, user_id}` to the authority, which
 accepts it only for a user seated on the sending household and answers
 with the next roster.
+
+A roster the authority built *before* it saw that leave can still arrive
+afterwards — newer than anything held, still listing the leaver. Each
+entry's `since` (the version at which the authority last seated that
+member) settles it: the leaving household remembers the version it held
+when its user left (`left_version`), and an entry whose `since` is not
+newer is stale — the user stays out, the rest of the roster applies, and
+the leave is sent again. Only an explicit re-add after the leave (a newer
+`since`) seats them back. An entry without `since` (an authority predating
+the field) seats them as before. Additive and ungated: an older receiver
+ignores `since`.
 
 **Seats name their user.** A member household may never have paired with
 another member household (both only know the authority), so it holds no
@@ -204,9 +215,7 @@ delivered.
 
 **Known limits.** Only people on the authority household change the
 member list; if they all leave, the list is frozen (the others keep
-chatting). A leave is sent through the outbox like any event; a roster
-the authority built before it saw the leave can seat the leaver again
-until the next roster. Mesh-routed deliveries have no outbox — a message to a
+chatting). Mesh-routed deliveries have no outbox — a message to a
 member household reached only over the mesh that finds no route is not
 retried (logged at WARNING).
 The per-pair hide list filters what a household sends to a peer, not who

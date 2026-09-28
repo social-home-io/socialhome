@@ -152,6 +152,12 @@ class ConversationMember:
     history_visible_from: str | None = None
     # Soft-delete for 1:1 DMs — set when a participant leaves. None = active.
     deleted_at: str | None = None
+    #: Groups: the membership version at which this member was last seated
+    #: (the authority ships it as each roster entry's ``since``).
+    joined_version: int | None = None
+    #: Groups kept by another household: the version held here when this
+    #: user left — a roster not re-adding them after it can't seat them.
+    left_version: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -170,6 +176,8 @@ class RemoteConversationMember:
     #: messages to them. ``None`` on 1:1 seats (``remote_users`` answers).
     user_id: str | None = None
     display_name: str | None = None
+    #: The membership version at which this seat was last filled.
+    joined_version: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -207,11 +215,17 @@ class GroupRosterMember:
     instance_id: str
     username: str
     display_name: str
+    #: The version at which the authority last seated this member; ``None``
+    #: for a seat older than the field (omitted on the wire).
+    since: int | None = None
 
-    def to_wire(self) -> dict[str, str]:
-        return {
+    def to_wire(self) -> dict[str, str | int]:
+        wire: dict[str, str | int] = {
             "user_id": self.user_id,
             "instance_id": self.instance_id,
             "username": self.username,
             "display_name": self.display_name,
         }
+        if self.since is not None:
+            wire["since"] = self.since
+        return wire
