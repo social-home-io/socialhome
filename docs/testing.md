@@ -133,7 +133,10 @@ cd client && pnpm vitest run
 
 `.github/workflows/ci.yml` runs four jobs in parallel:
 
-1. **`test (3.14)`** — `pytest --cov=socialhome --cov-fail-under=90`
+1. **`test (3.14)`** — `pytest --cov=socialhome --cov-branch
+   --cov-fail-under=90 --durations=25` (the whole suite, `tests/protocol/`
+   included, parallel via xdist), then `pytest tests/protocol/ -m security`
+   again as the explicit release-blocker gate
 2. **`lint`** — `ruff check .` + `ruff format --check .`
 3. **`typecheck`** — `mypy socialhome/`
 4. **`frontend`** — `pnpm lint`, `pnpm typecheck`, `pnpm build`
@@ -144,36 +147,46 @@ pass `--no-verify`**: when a hook fails, fix the underlying issue —
 fixtures, factories, and shared utilities are designed so the gate
 is achievable.
 
-## Slow files
+## Keeping the suite fast
 
-A handful of test files take 15–40 s to run. They share one cause:
-each test spins up a fresh ``aiohttp.test_utils.TestServer`` plus a
-new ``GfsApp`` (DB migration, route registration, service factory).
-At ~600 ms × N tests the cost dominates whatever the test itself
-measures. Worst offenders:
+Nearly all of the suite's historical wall time was tests **waiting**, not
+working. Two mechanisms in `tests/conftest.py` (`_fast_test_databases`,
+session-scoped, autouse) remove the costs every test used to pay, at the
+test boundary — production code is untouched:
 
-```
-tests/global_server/test_admin_endpoints.py
-tests/global_server/test_cluster_fanout.py
-tests/global_server/test_cluster_integration.py
-tests/global_server/test_server_error_branches.py
-tests/global_server/test_highlight_public_routes.py
-tests/global_server/test_highlight_rtc_routes.py
-tests/routes/test_error_paths_coverage.py
-```
+- **Migrated-schema template** (`tests/migration_template.py`). The first
+  empty database per worker runs the real migration chain; every later
+  empty database for the same migrations directory is a SQLite
+  backup-API page copy of that result. A database that already has any
+  schema (a test seeding a pre-migration shape, a restart) always runs the
+  real runner. `tests/test_migration_template.py` pins that a restored
+  database is identical to a freshly migrated one. Tests of the runner
+  itself call `socialhome.db.migrations.run_migrations` directly and never
+  see the cache.
+- **1 ms write-batch window.** `AsyncDatabase` holds each write batch open
+  for the whole window, so every *sequential* `enqueue` costs one window.
+  Test databases that ask for the suite's "fast" 10 ms — or never choose a
+  window and get the production 500 ms (`GfsApp`, a bare `Config(...)`) —
+  run with 1 ms instead. A window a test sets on purpose (the batching
+  tests' 200 ms) is kept.
 
-The obvious fix — share the ``TestServer`` across the whole module
-via ``pytest_asyncio.fixture(scope="module", loop_scope="module")``
-— breaks the locally-installed
-``pytest_homeassistant_custom_component`` plugin's ``verify_cleanup``
-(it runs ``shutdown_default_executor()`` after every test, which
-kills the executor the shared server needs). CI doesn't ship that
-plugin and would benefit, but the environment mismatch makes the
-optimisation risky to land.
+Rules for new tests, from the root causes fixed so far:
 
-If a future contributor adds a conditional bypass for the HA plugin
-(or a project-level ``-p no:`` opt-out), pulling these files down to
-<5 s each is the single largest wall-time win available in the suite.
+- **Never wait out a production timeout or back-off.** Shrink the module
+  constant for that test (`monkeypatch.setattr(cluster_mod,
+  "SYNC_RETRY_DELAY_S", 0.01)`, `HELLO_TIMEOUT_SECONDS`,
+  `ICE_BUFFER_TIMEOUT_S`) or pass the constructor knob
+  (`ice_prime_timeout_s=`, `reconnect_delays=`). Release gates the test
+  isn't about (`transport.mark_ice_primed()`).
+- **Never touch the real network.** A hostname like `ha.local` or
+  `gfs.test` that reaches a real client waits out DNS; inject the fake
+  client (`ha_client=_FakeHaClient()`) or swap the factory at the
+  boundary.
+- **A fake server must behave like the real one at shutdown** — e.g. read
+  its WebSocket so it answers the client's CLOSE, or the client's close
+  handshake waits out aiohttp's timeout.
+- Check with `pytest --durations=25`; CI prints the same list, so a new
+  multi-second test is visible in every run.
 
 ## Spec references
 
