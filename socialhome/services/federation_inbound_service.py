@@ -2407,6 +2407,11 @@ class FederationInboundService:
         user_id = str(event.payload.get("user_id") or "")
         if not user_id:
             return
+        # Only the user's home household may remove them — never a local
+        # member, another household's user, or an id we have never seen.
+        if not await self._dm_scope.sent_from(event, user_id):
+            refuse(event, "user is not homed on the sending household", user=user_id)
+            return
         log.info("USER_REMOVED: flagging remote user %s as deprovisioned", user_id)
         await self._user_repo.mark_remote_deprovisioned(user_id)
 
@@ -2473,6 +2478,9 @@ class FederationInboundService:
         p = event.payload
         user_id = str(p.get("user_id") or "")
         if not user_id:
+            return
+        if not await self._dm_scope.sent_from(event, user_id):
+            refuse(event, "user is not homed on the sending household", user=user_id)
             return
         status: UserStatus | None
         if p.get("status_cleared"):
@@ -3072,6 +3080,18 @@ class FederationInboundService:
         user_id = str(payload.get("user_id") or "")
         username = str(payload.get("username") or payload.get("remote_username") or "")
         if not user_id or not username:
+            return
+        # Binding check BEFORE any write — the picture table is shared with
+        # local users, so a refused entry must not touch it either. A user
+        # already known here (local or remote) is only ever published by
+        # their own home household.
+        home = await self._user_repo.get_instance_for_user(user_id)
+        if home is not None and home != instance_id:
+            log.warning(
+                "user sync from %s refused: user %s is homed elsewhere",
+                instance_id,
+                user_id,
+            )
             return
         picture_hash = payload.get("picture_hash")
 

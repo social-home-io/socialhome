@@ -70,6 +70,8 @@ def svc():
     sp_repo = AsyncMock()
     user_repo = AsyncMock()
     user_repo.get_by_user_id.return_value = None
+    # Every user the tests name is homed on the sending household.
+    user_repo.get_instance_for_user.return_value = "peer-1"
     report_svc = AsyncMock()
     # ``u`` holds a live seat on the sending household.
     seats = AsyncMock()

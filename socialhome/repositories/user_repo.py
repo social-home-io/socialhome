@@ -561,6 +561,9 @@ class SqliteUserRepo:
                 handle=COALESCE(excluded.handle, handle),
                 synced_at=excluded.synced_at,
                 deprovisioned_at=NULL
+            -- Defence in depth: never re-home a cached user onto another
+            -- household (the inbound handler refuses that first).
+            WHERE remote_users.instance_id = excluded.instance_id
             ON CONFLICT(instance_id, remote_username) DO UPDATE SET
                 user_id=excluded.user_id,
                 display_name=excluded.display_name,

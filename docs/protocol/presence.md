@@ -117,6 +117,25 @@ paired peer populate its directory without waiting for each user to
 tick over organically. Rate: once every 24 h, plus on demand when a
 new pairing is confirmed.
 
+## Receiver rules
+
+A household speaks only for the users homed on it (the user's home is
+the household their `user_id` is cached under, or this household for its
+own members). The receiver drops the event with a WARNING when:
+
+- `USER_UPDATED` / a `USERS_SYNC` entry names a user already known here
+  and homed elsewhere — a local member or another household's user.
+  Nothing is written, not even the profile picture. The repository
+  upsert also never moves a cached user onto another household.
+- `USER_REMOVED`, `USER_STATUS_UPDATED`, `USER_ONLINE` / `USER_IDLE` /
+  `USER_OFFLINE` and `DM_CONTACT_REQUEST` name a user whose home is not
+  the sending household, or a user this household does not know.
+- `PRESENCE_UPDATED` is keyed on `from_instance` by construction.
+
+A user seen for the first time is accepted from the household that
+syncs it (older peers do not always send the identity anchor needed to
+re-derive the id). `tests/protocol/test_user_sync_scope.py`.
+
 ## Implementation
 
 - `socialhome/services/presence_service.py` — local state +

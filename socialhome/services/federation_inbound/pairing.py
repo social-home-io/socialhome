@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from ...federation.federation_service import FederationService
     from ...repositories.dm_contact_repo import AbstractDmContactRepo
     from ...repositories.federation_repo import AbstractFederationRepo
+    from ...repositories.user_repo import AbstractUserRepo
     from ..peer_unpair_service import PeerUnpairService
 
 log = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class PairingInboundHandlers:
     handshake, which lives in the same family.)
     """
 
-    __slots__ = ("_bus", "_repo", "_dm_contact_repo", "_peer_unpair")
+    __slots__ = ("_bus", "_repo", "_dm_contact_repo", "_peer_unpair", "_user_repo")
 
     def __init__(
         self,
@@ -59,11 +60,15 @@ class PairingInboundHandlers:
         federation_repo: "AbstractFederationRepo",
         peer_unpair: "PeerUnpairService",
         dm_contact_repo: "AbstractDmContactRepo | None" = None,
+        user_repo: "AbstractUserRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._repo = federation_repo
         self._peer_unpair = peer_unpair
         self._dm_contact_repo = dm_contact_repo
+        #: Binds a contact request's requester to the sending household.
+        #: Without it no request is accepted (fail closed).
+        self._user_repo = user_repo
 
     def attach_to(self, federation_service: "FederationService") -> None:
         """Register every handler on the service's event registry."""
@@ -282,7 +287,7 @@ class PairingInboundHandlers:
             # setup enforces locally, so a malicious peer can't store a
             # multi-KB / multi-line / control-char name for layout-DoS or
             # impersonation.
-            clean_name = "".join(c for c in raw_name.strip() if c.isprintable())[:80]
+            clean_name = _clean_display_name(raw_name)
         else:
             clean_name = ""
         if clean_name and clean_name != instance.display_name:
@@ -323,11 +328,25 @@ class PairingInboundHandlers:
         recipient_user_id = str(
             p.get("recipient_user_id") or p.get("to_user_id") or "",
         )
-        requester_display_name = str(
-            p.get("requester_display_name") or requester_user_id,
-        )
+        raw_name = p.get("requester_display_name")
+        requester_display_name = (
+            _clean_display_name(raw_name) if isinstance(raw_name, str) else ""
+        ) or requester_user_id
         if not requester_user_id or not recipient_user_id:
             log.debug("DM_CONTACT_REQUEST missing requester/recipient user id")
+            return
+        # The requester is the sending household's own user — never a local
+        # member, another household's user, or an id we can't place.
+        if (
+            self._user_repo is None
+            or await self._user_repo.get_instance_for_user(requester_user_id)
+            != event.from_instance
+        ):
+            log.warning(
+                "DM_CONTACT_REQUEST from %s refused: requester %s is not homed there",
+                event.from_instance,
+                requester_user_id,
+            )
             return
         try:
             await self._dm_contact_repo.save_request(
@@ -352,3 +371,12 @@ class PairingInboundHandlers:
                 recipient_user_id=recipient_user_id,
             )
         )
+
+
+def _clean_display_name(raw: str) -> str:
+    """Strip non-printable characters and cap a peer-supplied display name.
+
+    The same 80-character limit setup enforces locally, so a peer can't
+    store a multi-KB / multi-line / control-character name.
+    """
+    return "".join(c for c in raw.strip() if c.isprintable())[:80]

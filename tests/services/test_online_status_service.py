@@ -34,6 +34,10 @@ class _FakeUserRepo:
     async def set_last_seen(self, user_id: str, at: str) -> None:
         self.last_seen_calls.append((user_id, at))
 
+    async def get_instance_for_user(self, user_id: str) -> str | None:
+        # Every remote user the tests name is homed on ``inst-peer``.
+        return "inst-peer"
+
 
 def _make() -> tuple[OnlineStatusService, EventBus, _FakeUserRepo, list]:
     bus = EventBus()

@@ -77,8 +77,8 @@ def _event(
     )
 
 
-async def _seed_dm_people(db) -> None:
-    """``user-local`` lives here; ``user-remote`` (``remote``) on ``peer-a``."""
+async def _seed_dm_people(db, remote_user_id: str = "user-remote") -> None:
+    """``user-local`` lives here; ``remote_user_id`` (``remote``) on ``peer-a``."""
     await db.enqueue(
         "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("local", "user-local", "Local"),
@@ -94,7 +94,7 @@ async def _seed_dm_people(db) -> None:
     await db.enqueue(
         "INSERT OR IGNORE INTO remote_users(user_id, instance_id, remote_username,"
         " display_name) VALUES(?,?,?,?)",
-        ("user-remote", "peer-a", "remote", "Remote"),
+        (remote_user_id, "peer-a", "remote", "Remote"),
     )
 
 
@@ -750,7 +750,8 @@ async def test_space_post_created_drops_malformed_location(db, bus, inbound):
 # ─── User status ─────────────────────────────────────────────────────────
 
 
-async def test_user_status_updated_publishes_bus_event(bus, inbound):
+async def test_user_status_updated_publishes_bus_event(db, bus, inbound):
+    await _seed_dm_people(db, "u-1")
     captured: list[UserStatusChanged] = []
     bus.subscribe(UserStatusChanged, captured.append)
 
@@ -766,7 +767,8 @@ async def test_user_status_updated_publishes_bus_event(bus, inbound):
     assert captured[0].status.emoji == "🌴"
 
 
-async def test_user_status_cleared_publishes_none(bus, inbound):
+async def test_user_status_cleared_publishes_none(db, bus, inbound):
+    await _seed_dm_people(db, "u-1")
     captured: list[UserStatusChanged] = []
     bus.subscribe(UserStatusChanged, captured.append)
 
@@ -1082,6 +1084,7 @@ async def test_user_removed_cascades_to_moments_highlights_and_dms(db, bus):
     )
 
     hidden_uid = "u-hidden"
+    await _seed_dm_people(db, hidden_uid)
     other_uid = "u-other"
     now = datetime.now(timezone.utc)
 

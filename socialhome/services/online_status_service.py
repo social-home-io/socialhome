@@ -412,6 +412,16 @@ class OnlineStatusService(VisibilityMixin, SingleTargetSender):
         user_id = str(payload.get("user_id") or "").strip()
         if not user_id:
             return
+        # Only a user's own household reports their online state — never a
+        # local member's, another household's user's, or an unknown id's.
+        if await self._user_repo.get_instance_for_user(user_id) != from_instance:
+            log.warning(
+                "%s from %s refused: user %s is not homed there",
+                event_type,
+                from_instance,
+                user_id,
+            )
+            return
         last_seen_iso = payload.get("last_seen_at")
         last_seen: datetime | None = None
         if isinstance(last_seen_iso, str):
