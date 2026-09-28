@@ -386,3 +386,203 @@ async def test_delete_item_in_space_cannot_reach_household_items(two_spaces):
     await repo.create_item(_item("it-home", album_id="alb-home"))
     assert not await repo.delete_item_in_space("it-home", space_id="sp-1")
     assert await repo.get_item("it-home") is not None
+
+
+# ─── Remote owners / uploaders (a member of another household) ────────────
+
+#: A user of another household: no local ``users`` row, by definition.
+REMOTE_USER = "u-on-another-household"
+
+
+async def test_an_item_uploaded_by_a_remote_member_is_stored(two_spaces):
+    """The uploader of a synced item lives on another household — there is
+    no ``users`` row for them here, and the row must still land (#650)."""
+    _db, repo = two_spaces
+    item = GalleryItem(
+        id="it-remote",
+        album_id="alb-1",
+        uploaded_by=REMOTE_USER,
+        item_type="photo",
+        url="/api/media/r.webp",
+        thumbnail_url="/api/media/r-thumb.jpg",
+        width=10,
+        height=10,
+    )
+    assert await repo.create_item_in_space(item, space_id="sp-1")
+    got = await repo.get_item("it-remote")
+    assert got is not None and got.uploaded_by == REMOTE_USER
+
+
+async def test_create_album_in_space_stores_a_remote_owners_album(two_spaces):
+    _db, repo = two_spaces
+    album = GalleryAlbum(
+        id="alb-remote",
+        space_id=None,  # untrusted — the gated space wins
+        owner_user_id=REMOTE_USER,
+        name="Theirs",
+        description="from next door",
+        item_count=99,  # untrusted — a new album starts empty
+        is_system=True,  # untrusted — a wire album is never the system album
+    )
+    assert await repo.create_album_in_space(album, space_id="sp-1")
+    got = await repo.get_album("alb-remote")
+    assert got is not None
+    assert (got.space_id, got.owner_user_id, got.name, got.description) == (
+        "sp-1",
+        REMOTE_USER,
+        "Theirs",
+        "from next door",
+    )
+    assert got.item_count == 0
+    assert got.is_system is False
+
+
+async def test_create_album_in_space_redelivery_is_idempotent(two_spaces):
+    _db, repo = two_spaces
+    assert await repo.create_album_in_space(
+        _album("alb-new", space_id="sp-1"), space_id="sp-1"
+    )
+    assert await repo.create_album_in_space(
+        GalleryAlbum(id="alb-new", space_id="sp-1", owner_user_id="a-id", name="Re?"),
+        space_id="sp-1",
+    )
+    got = await repo.get_album("alb-new")
+    assert (got.name, got.owner_user_id) == ("Album alb-new", "a-id")
+
+
+async def test_create_album_in_space_refuses_the_same_id_for_another_owner(
+    two_spaces,
+):
+    """An id already held for one owner is not "the same album" when a
+    create names somebody else — that is a refusal, not a redelivery."""
+    _db, repo = two_spaces
+    assert await repo.create_album_in_space(
+        _album("alb-new", space_id="sp-1"), space_id="sp-1"
+    )
+    assert not await repo.create_album_in_space(
+        GalleryAlbum(id="alb-new", space_id="sp-1", owner_user_id="x", name="Re?"),
+        space_id="sp-1",
+    )
+    got = await repo.get_album("alb-new")
+    assert (got.name, got.owner_user_id) == ("Album alb-new", "a-id")
+
+
+async def test_create_album_in_space_never_takes_over_another_spaces_album(
+    two_spaces,
+):
+    _db, repo = two_spaces
+    for victim in ("alb-2", "alb-home"):
+        assert not await repo.create_album_in_space(
+            GalleryAlbum(id=victim, space_id="sp-1", owner_user_id="x", name="Evil"),
+            space_id="sp-1",
+        )
+    assert (await repo.get_album("alb-2")).space_id == "sp-2"
+    assert (await repo.get_album("alb-home")).space_id is None
+
+
+async def test_update_album_in_space_is_scoped(two_spaces):
+    _db, repo = two_spaces
+    assert not await repo.update_album_in_space(
+        "alb-2", {"name": "Evil"}, space_id="sp-1"
+    )
+    assert not await repo.update_album_in_space(
+        "alb-home", {"name": "Evil"}, space_id="sp-1"
+    )
+    assert (await repo.get_album("alb-2")).name == "Album alb-2"
+    assert (await repo.get_album("alb-home")).name == "Album alb-home"
+    assert await repo.update_album_in_space(
+        "alb-2", {"name": "Renamed", "description": "new"}, space_id="sp-2"
+    )
+    got = await repo.get_album("alb-2")
+    assert (got.name, got.description) == ("Renamed", "new")
+
+
+async def test_update_album_in_space_cover_must_be_an_item_of_that_album(
+    two_spaces,
+):
+    """A cover naming another album's item would render that item's
+    thumbnail in this album — possibly another space's picture."""
+    _db, repo = two_spaces
+    assert await repo.update_album_in_space(
+        "alb-1", {"cover_item_id": "it-2", "name": "Kept"}, space_id="sp-1"
+    )
+    got = await repo.get_album("alb-1")
+    assert (got.cover_item_id, got.name) == (None, "Kept")
+    assert await repo.update_album_in_space(
+        "alb-2", {"cover_item_id": "it-2"}, space_id="sp-2"
+    )
+    assert (await repo.get_album("alb-2")).cover_item_id == "it-2"
+
+
+async def test_update_album_in_space_keeps_a_cover_that_has_not_arrived(
+    two_spaces,
+):
+    """The edit can overtake the upload it points at. The cover is kept and
+    takes effect once the item lands (the service renders it only when the
+    item is in this album)."""
+    _db, repo = two_spaces
+    assert await repo.update_album_in_space(
+        "alb-1", {"cover_item_id": "it-later"}, space_id="sp-1"
+    )
+    assert (await repo.get_album("alb-1")).cover_item_id == "it-later"
+
+
+async def test_update_album_in_space_clears_the_cover(two_spaces):
+    _db, repo = two_spaces
+    assert await repo.update_album_in_space(
+        "alb-2", {"cover_item_id": "it-2"}, space_id="sp-2"
+    )
+    assert await repo.update_album_in_space(
+        "alb-2", {"cover_item_id": None}, space_id="sp-2"
+    )
+    assert (await repo.get_album("alb-2")).cover_item_id is None
+
+
+async def test_list_album_media_names_every_file_of_the_album(two_spaces):
+    _db, repo = two_spaces
+    assert sorted(await repo.list_album_media("alb-2")) == [
+        "api/media/it-2-thumb.jpg",
+        "api/media/it-2.webp",
+    ]
+    assert await repo.list_album_media("alb-1") == []
+
+
+async def test_item_filenames_drop_a_query_string(two_spaces):
+    _db, repo = two_spaces
+    item = GalleryItem(
+        id="it-q",
+        album_id="alb-1",
+        uploaded_by="a-id",
+        item_type="photo",
+        url="api/media/q.webp?sig=abc",
+        thumbnail_url="api/media/q-t.webp?sig=def",
+        width=1,
+        height=1,
+    )
+    assert await repo.create_item_in_space(item, space_id="sp-1")
+    got = await repo.get_item("it-q")
+    assert got.url.endswith("/q.webp") and got.thumbnail_url.endswith("/q-t.webp")
+
+
+async def test_the_system_album_is_never_changed_from_the_wire(two_spaces):
+    db, repo = two_spaces
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, is_system, owner_user_id, name)"
+        " VALUES('alb-sys', 'sp-1', 1, NULL, 'Posts')"
+    )
+    assert not await repo.update_album_in_space(
+        "alb-sys", {"name": "Evil"}, space_id="sp-1"
+    )
+    assert not await repo.delete_album_in_space("alb-sys", space_id="sp-1")
+    assert (await repo.get_album("alb-sys")).name == "Posts"
+
+
+async def test_delete_album_in_space_is_scoped_and_takes_its_items(two_spaces):
+    _db, repo = two_spaces
+    assert not await repo.delete_album_in_space("alb-2", space_id="sp-1")
+    assert not await repo.delete_album_in_space("alb-home", space_id="sp-1")
+    assert await repo.get_album("alb-2") is not None
+    assert await repo.delete_album_in_space("alb-2", space_id="sp-2")
+    assert await repo.get_album("alb-2") is None
+    assert await repo.get_item("it-2") is None
+    assert not await repo.delete_album_in_space("alb-2", space_id="sp-2")

@@ -24,6 +24,14 @@ class AbstractGalleryRepo(Protocol):
     async def create_album(self, album: GalleryAlbum) -> GalleryAlbum: ...
     async def update_album(self, album_id: str, patch: dict) -> None: ...
     async def delete_album(self, album_id: str) -> None: ...
+    async def create_album_in_space(
+        self, album: GalleryAlbum, *, space_id: str
+    ) -> bool: ...
+    async def update_album_in_space(
+        self, album_id: str, patch: dict, *, space_id: str
+    ) -> bool: ...
+    async def delete_album_in_space(self, album_id: str, *, space_id: str) -> bool: ...
+    async def list_album_media(self, album_id: str) -> list[str]: ...
     async def list_items(
         self,
         album_id: str,
@@ -191,6 +199,132 @@ class SqliteGalleryRepo:
             (album_id,),
         )
 
+    # ─── §24.11 space-scoped album writes (federation inbound) ────────────
+
+    async def create_album_in_space(
+        self, album: GalleryAlbum, *, space_id: str
+    ) -> bool:
+        """Mirror a member's album into ``space_id`` (federation).
+
+        The album is filed under the gated ``space_id`` — never the
+        payload's own — as an empty, non-system album: its item count
+        grows with the items that follow, and the system "Posts" album is
+        rebuilt locally from posts, never taken off the wire. A redelivered
+        id in this space for the same owner is an idempotent no-op
+        (``True``, row untouched); an id already used by an album of another
+        space, of the household gallery, or of another owner is never taken
+        over (``False``).
+        """
+        now = album.created_at or datetime.now(timezone.utc).isoformat()
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT space_id, owner_user_id FROM gallery_albums WHERE id=?",
+                (album.id,),
+            ).fetchone()
+            if row is not None:
+                return row[0] == space_id and row[1] == album.owner_user_id
+            conn.execute(
+                """
+                INSERT INTO gallery_albums(
+                    id, space_id, retention_exempt, is_system, owner_user_id,
+                    name, description, cover_item_id, item_count,
+                    created_at, updated_at
+                ) VALUES(?, ?, 0, 0, ?, ?, ?, NULL, 0, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    album.id,
+                    space_id,
+                    album.owner_user_id,
+                    album.name,
+                    album.description,
+                    now,
+                    album.updated_at or now,
+                ),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def update_album_in_space(
+        self, album_id: str, patch: dict, *, space_id: str
+    ) -> bool:
+        """Apply a member's album edit — only to a user album of ``space_id``.
+
+        ``False`` for an album of another space, the household gallery, or
+        the system album (which nobody renames). A ``cover_item_id`` naming
+        an item of *another* album is dropped from the patch (the cover
+        would render some other album's picture) rather than failing the
+        rest of the edit; one naming an item not held here yet is kept —
+        the edit can overtake the upload, and the cover is rendered only
+        once that item is in this album. ``None`` clears the cover.
+        """
+        safe = {k: v for k, v in patch.items() if k in self._ALBUM_PATCH_ALLOWED}
+
+        def _run(conn) -> bool:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM gallery_albums"
+                    " WHERE id=? AND space_id=? AND is_system=0",
+                    (album_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return False
+            cover = safe.get("cover_item_id")
+            if cover is not None:
+                held = conn.execute(
+                    "SELECT album_id FROM gallery_items WHERE id=?", (cover,)
+                ).fetchone()
+                if held is not None and held[0] != album_id:
+                    safe.pop("cover_item_id")
+            if safe:
+                set_clause = ", ".join(f"{k}=?" for k in safe)
+                conn.execute(
+                    f"UPDATE gallery_albums SET {set_clause}, updated_at=?"
+                    " WHERE id=? AND space_id=?",
+                    (
+                        *safe.values(),
+                        datetime.now(timezone.utc).isoformat(),
+                        album_id,
+                        space_id,
+                    ),
+                )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def list_album_media(self, album_id: str) -> list[str]:
+        """The ``api/media/`` references of every item file in the album —
+        what an album delete leaves behind for the media cleanup."""
+        rows = await self._db.fetchall(
+            "SELECT filename, thumbnail_filename FROM gallery_items WHERE album_id=?",
+            (album_id,),
+        )
+        out: list[str] = []
+        for r in rows:
+            for name in (r[0], r[1]):
+                if name:
+                    out.append(f"api/media/{name}")
+        return out
+
+    async def delete_album_in_space(self, album_id: str, *, space_id: str) -> bool:
+        """Delete a user album of ``space_id`` and (by cascade) its items.
+
+        ``False`` when the album is unknown, lives elsewhere, or is the
+        system album.
+        """
+
+        def _run(conn) -> bool:
+            cur = conn.execute(
+                "DELETE FROM gallery_albums WHERE id=? AND space_id=? AND is_system=0",
+                (album_id, space_id),
+            )
+            return bool(cur.rowcount)
+
+        return bool(await self._db.transact(_run))
+
     async def set_retention_exempt(
         self,
         album_id: str,
@@ -327,8 +461,8 @@ class SqliteGalleryRepo:
             item.album_id,
             item.uploaded_by,
             item.item_type,
-            item.url.rsplit("/", 1)[-1],
-            item.thumbnail_url.rsplit("/", 1)[-1],
+            _basename(item.url),
+            _basename(item.thumbnail_url),
             item.width,
             item.height,
             item.duration_s,
@@ -506,3 +640,8 @@ class SqliteGalleryRepo:
             if r["thumbnail_filename"]:
                 out.append(r["thumbnail_filename"])
         return out
+
+
+def _basename(url: str) -> str:
+    """The stored file name of an ``api/media/<name>`` URL — no path, no query."""
+    return url.rsplit("/", 1)[-1].split("?", 1)[0]

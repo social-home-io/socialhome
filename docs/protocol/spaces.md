@@ -60,6 +60,62 @@ deterministic across receivers). Toggling
 `delegated_admin_authority` itself stays **owner-only**. See "Authority
 signing" below.
 
+**Gallery (§23.119)**
+
+`SPACE_GALLERY_ALBUM_CREATED` / `SPACE_GALLERY_ALBUM_UPDATED` /
+`SPACE_GALLERY_ALBUM_DELETED` (v_33), `SPACE_GALLERY_ITEM_CREATED`,
+`SPACE_GALLERY_ITEM_DELETED`. An item names its album by id, and a
+receiver files it only into an album it already holds **for that space**
+(`AbstractGalleryRepo.create_item_in_space`) — so the album has to arrive
+first. Until v_33 albums reached another household only in the §25.6
+initial sync: an album created after the other households joined existed
+on its creator's household alone, and every item uploaded into it was
+refused everywhere else (the picture bytes arrived over the media outbox,
+the gallery rows never did). The album events carry
+`{id, owner_user_id, name, description, cover_item_id, created_at,
+updated_at}` inside the encrypted payload. The receiver:
+
+- files the album under the gated space as an empty, non-system album,
+  owned by a member seated on the sender (never the shared bot identity),
+  within the local per-space album limit;
+- treats an id it already holds as a redelivery of that album only for the
+  same owner (a quiet no-op) — naming another owner or space is refused at
+  WARNING, so an id can never be re-claimed for somebody else;
+- remembers album deletes (a bounded in-memory record,
+  `services/gallery_tombstones.py` — no table), so a delete that overtakes
+  its create, or a replay / sync from a household that missed the delete,
+  does not bring the album back;
+- ignores an edit's `cover_item_id` when it names an item of another album,
+  keeps one naming an item not held yet (rendered once it lands in this
+  album), and clears the cover on an explicit `null`;
+- removes the files an album or item delete leaves unreferenced
+  (`media/cleanup.unlink_unreferenced`), stores item media only in the
+  canonical `api/media/<name>` shape (`local_media_ref`), and re-publishes
+  what it applied on the local bus with its origin, so this household's
+  screens refresh while the outbound bridge never sends it back;
+- never lets the wire touch the system "Posts" album (every household
+  rebuilds its own from the posts).
+
+A `SPACE_SYNC_RESUME` replay sends the space's recent album deletes, every
+album (plus an update for each edited since `since`), then the items.
+An item carries its full `url` as well as the thumbnail
+(`GalleryItem.to_federation_dict`): both files follow over the media
+outbox, and the `SPACE_MEDIA_BLOB` scope check accepts only files the
+receiver's row names — without the `url` it refused the full-size picture
+of every federated item.
+Sent ungated — see the v_33 row in [`capabilities.md`](./capabilities.md).
+
+```mermaid
+sequenceDiagram
+    participant D as Member household (uploader)
+    participant C as Other member household
+    D->>C: SPACE_GALLERY_ALBUM_CREATED {id, owner_user_id, name, …}
+    Note over C: owner seated on D? file album under the gated space
+    D->>C: SPACE_GALLERY_ITEM_CREATED {id, album_id, uploaded_by, url, thumbnail_url, …}
+    Note over C: album held for this space + uploader seated on D → row lands
+    D->>C: SPACE_MEDIA_BLOB (thumbnail + full bytes, media outbox)
+```
+
 **Key exchange**
 
 `SPACE_KEY_EXCHANGE`, `SPACE_KEY_EXCHANGE_ACK`,
@@ -170,7 +226,8 @@ The rule, precisely:
 - **The whole write vocabulary**
   (`SPACE_WRITE_EVENT_TYPES` in `domain/federation.py`): posts, comments,
   pages, tasks, polls, stickies, calendar events, RSVPs, schedules,
-  gallery items, bazaar listings / bids / offers, zones, location pins,
+  gallery albums and items, bazaar listings / bids / offers, zones,
+  location pins,
   media blobs — and every `*_UPDATED` / `*_DELETED` sibling, because
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
@@ -218,6 +275,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Family | Create | Edit / state change | Delete |
 |---|---|---|---|
 | Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay) | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
+| Gallery albums (v_33) | owner seated on the sender (or the host's relay) | the stored owner's household or a moderator (the payload's owner is ignored) | same as edit |
 | Gallery items | uploader seated on the sender (or the host's relay) | — | uploader's household or a moderator |
 | Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
@@ -359,7 +417,9 @@ Local REST callers go through the same scoped mutators with the space
 they already resolved. Where a repository also serves the household
 (non-space) surface — polls and the gallery — federation uses dedicated
 `*_in_space` methods (`AbstractSpacePollRepo`,
-`AbstractGalleryRepo.create_item_in_space` / `delete_item_in_space`).
+`AbstractGalleryRepo.create_item_in_space` / `delete_item_in_space` /
+`create_album_in_space` / `update_album_in_space` /
+`delete_album_in_space`).
 `tests/protocol/test_space_content_scope.py` walks every event type in
 `SPACE_WRITE_EVENT_TYPES` against the real handler registry and fails
 until each one has a cross-space case.

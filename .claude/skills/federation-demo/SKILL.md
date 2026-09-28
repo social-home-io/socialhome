@@ -366,7 +366,13 @@ Phases added after the initial publish are documented inline in
   outbox + chunked SPACE_MEDIA_BLOB stream).
 * ``space-gallery-media-blob`` — same as above, exercised through
   the gallery upload path. Thumbnail + full bytes both land on
-  the remote member's media path via the shared media outbox.
+  the remote member's media path via the shared media outbox, **and the
+  metadata rows land too** (v_33): d holds c's freshly-created album
+  (``SPACE_GALLERY_ALBUM_CREATED``) and the item uploaded into it; dave
+  then uploads into that album from d and c must hold the item row
+  attributed to dave plus its bytes (a remote uploader); c renames the
+  album and d's copy follows (``_UPDATED``). Before v_33 the step passed on
+  bytes alone while d refused the item for naming an album it never got.
 * ``space-sync-catchup-media`` — newcomer joining a long-running
   space gets the historical post + gallery bytes too, not just
   the metadata rows. Catch-up enqueues happen after the §25.6

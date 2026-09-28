@@ -35,6 +35,7 @@ from socialhome.app import create_app
 from socialhome.app_keys import db_key, federation_service_key
 from socialhome.config import Config
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.gallery import GalleryItem
 
 pytestmark = pytest.mark.security
 
@@ -288,3 +289,60 @@ async def test_legitimate_blobs_still_land(env):
     )
     assert row["media_url"] == "api/media/m-pending.webp"
     assert row["media_sync_status"] is None
+
+
+async def test_a_federated_gallery_items_full_file_and_thumbnail_both_land(env):
+    """Regression: once a live ``SPACE_GALLERY_ITEM_CREATED`` lands, the scope
+    check has positive evidence — the row — and accepts only the files the
+    row references. The item went out as the thumbnail-only projection, so
+    the row carried no full ``url`` and the full-size picture was refused
+    (and the gallery had nothing to open on zoom). The payload is built with
+    the sender's real serializer, not a hand-written dict."""
+    app, db, root = env
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, owner_user_id, name)"
+        " VALUES('album-a', ?, 'u-rem', 'Theirs')",
+        (GATED,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?, ?, 'u-rem', 'member')",
+        (GATED, SENDER),
+    )
+    item = GalleryItem(
+        id="gi-a",
+        album_id="album-a",
+        uploaded_by="u-rem",
+        item_type="photo",
+        url="api/media/ga-full.webp",
+        thumbnail_url="api/media/ga-thumb.webp",
+        width=4,
+        height=3,
+    )
+    for handler in app[federation_service_key]._event_registry.handlers_for(
+        FET.SPACE_GALLERY_ITEM_CREATED
+    ):
+        await handler(
+            FederationEvent(
+                msg_id="m-item",
+                event_type=FET.SPACE_GALLERY_ITEM_CREATED,
+                from_instance=SENDER,
+                to_instance="us",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                payload={**item.to_federation_dict(), "space_id": GATED},
+                space_id=GATED,
+            )
+        )
+    row = await db.fetchone(
+        "SELECT filename, thumbnail_filename FROM gallery_items WHERE id='gi-a'", ()
+    )
+    assert row is not None
+    assert (row["filename"], row["thumbnail_filename"]) == (
+        "ga-full.webp",
+        "ga-thumb.webp",
+    )
+    for name in ("ga-thumb.webp", "ga-full.webp"):
+        await _send(app, FET.SPACE_MEDIA_BLOB, _space("gi-a", name), space_id=GATED)
+    media = root / "media"
+    assert (media / "ga-thumb.webp").read_bytes() == WEBP
+    assert (media / "ga-full.webp").read_bytes() == WEBP

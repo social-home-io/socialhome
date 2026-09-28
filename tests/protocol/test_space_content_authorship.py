@@ -97,16 +97,14 @@ def _config(tmp_dir) -> Config:
 
 
 _SEED = [
-    # ``gallery_items.uploaded_by`` is FK'd to ``users``, so the gallery
-    # cases use u-g, who has a users row (to keep the FK from doing the
-    # refusing) AND a seat on AUTHOR — the seat is what the rule reads.
-    *[
-        (
-            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
-            (name, uid, name),
-        )
-        for name, uid in (("local", LOCAL_USER), ("ug", "u-g"))
-    ],
+    # u-g is the gallery cases' member: seated on AUTHOR and, like every
+    # remote member, with no ``users`` row here — the gallery columns carry
+    # no FK to it (migration 0046), and a users row would make u-g one of
+    # OUR people, whose rows the host may never relay.
+    (
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("local", LOCAL_USER, "local"),
+    ),
     (
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
         " identity_public_key) VALUES(?,?,?,?,?)",
@@ -240,6 +238,11 @@ _SEED = [
         "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
         " item_count) VALUES('album-a', ?, ?, 'Album', 1)",
         (SP, LOCAL_USER),
+    ),
+    (
+        "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
+        " item_count) VALUES('album-g', ?, 'u-g', 'Theirs', 0)",
+        (SP,),
     ),
     (
         "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
@@ -410,8 +413,22 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         FET.SPACE_GALLERY_ITEM_CREATED,
         "upload by u-g",
         {"id": "gi-new", "album_id": "album-a", "uploaded_by": "u-g"},
-        (AUTHOR,),
+        (AUTHOR, HOST),
         (OTHER, ADMIN),
+    ),
+    (
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        "album by u-g",
+        {"id": "album-new", "owner_user_id": "u-g", "name": "Trip"},
+        (AUTHOR, HOST),
+        (OTHER, ADMIN),
+    ),
+    (
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        "album by our local user",
+        {"id": "album-new", "owner_user_id": LOCAL_USER, "name": "Trip"},
+        (),
+        (AUTHOR, HOST, ADMIN),
     ),
     (
         FET.BAZAAR_LISTING_CREATED,
@@ -697,6 +714,27 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR, ADMIN, HOST),
         (OTHER,),
     ),
+    (
+        FET.SPACE_GALLERY_ALBUM_UPDATED,
+        "rename u-g's album",
+        {"id": "album-g", "name": "Renamed"},
+        (AUTHOR, ADMIN, HOST),
+        (OTHER, STRANGER),
+    ),
+    (
+        FET.SPACE_GALLERY_ALBUM_UPDATED,
+        "rename our local user's album",
+        {"id": "album-a", "name": "Renamed"},
+        (ADMIN, HOST),
+        (AUTHOR, OTHER),
+    ),
+    (
+        FET.SPACE_GALLERY_ALBUM_DELETED,
+        "delete u-g's album",
+        {"id": "album-g"},
+        (AUTHOR, ADMIN, HOST),
+        (OTHER, STRANGER),
+    ),
     # ── Collaborative rows: any writer household; attribution is kept ──
     (
         FET.SPACE_PAGE_UPDATED,
@@ -836,6 +874,188 @@ async def test_collaborative_edits_keep_the_original_attribution(env):
         "SELECT summary, created_by FROM space_calendar_events WHERE id='ev-a'", ()
     )
     assert (ev["summary"], ev["created_by"]) == ("edited", "u-a")
+
+
+async def test_a_remote_members_new_album_and_its_upload_both_land(env):
+    """Regression: a member of another household makes an album after this
+    household joined and uploads into it. Before v_33 only the item was
+    federated, it named an album nobody else held, and every other member
+    household refused it — the bytes arrived, the gallery stayed empty."""
+    app, db = env
+    item = {
+        "id": "gi-late",
+        "album_id": "album-late",
+        "uploaded_by": "u-g",
+        "thumbnail_url": "/api/media/t.webp",
+        "width": 4,
+        "height": 3,
+    }
+    await _deliver(app, FET.SPACE_GALLERY_ITEM_CREATED, item, sender=AUTHOR)
+    assert (
+        await db.fetchone("SELECT 1 FROM gallery_items WHERE id='gi-late'", ()) is None
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": "album-late", "owner_user_id": "u-g", "name": "Late"},
+        sender=AUTHOR,
+    )
+    await _deliver(app, FET.SPACE_GALLERY_ITEM_CREATED, item, sender=AUTHOR)
+    album = await db.fetchone(
+        "SELECT space_id, owner_user_id, item_count FROM gallery_albums"
+        " WHERE id='album-late'",
+        (),
+    )
+    assert (album["space_id"], album["owner_user_id"], album["item_count"]) == (
+        SP,
+        "u-g",
+        1,
+    )
+    row = await db.fetchone(
+        "SELECT album_id, uploaded_by FROM gallery_items WHERE id='gi-late'", ()
+    )
+    assert (row["album_id"], row["uploaded_by"]) == ("album-late", "u-g")
+
+
+async def test_an_album_id_held_for_one_owner_is_never_claimed_for_another(env, caplog):
+    """An album create naming an id this household already holds is only
+    ever a redelivery of that album. Claimed for a different owner it is
+    refused — loudly — and the stored owner stands, so the claimant gains
+    no owner rights (rename, cover, delete-with-items) over it."""
+    app, db = env
+    with caplog.at_level("WARNING"):
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ALBUM_CREATED,
+            {"id": "album-g", "owner_user_id": "u-o", "name": "Mine now"},
+            sender=OTHER,
+        )
+    row = await db.fetchone(
+        "SELECT owner_user_id, name FROM gallery_albums WHERE id='album-g'", ()
+    )
+    assert (row["owner_user_id"], row["name"]) == ("u-g", "Theirs")
+    assert "already held for another owner" in caplog.text
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_UPDATED,
+        {"id": "album-g", "name": "Renamed by the claimant"},
+        sender=OTHER,
+    )
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-g"}, sender=OTHER
+    )
+    row = await db.fetchone("SELECT name FROM gallery_albums WHERE id='album-g'", ())
+    assert row is not None and row["name"] == "Theirs"
+
+
+async def test_a_redelivered_album_from_its_owners_household_is_quiet(env, caplog):
+    app, db = env
+    with caplog.at_level("WARNING"):
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ALBUM_CREATED,
+            {"id": "album-g", "owner_user_id": "u-g", "name": "Theirs"},
+            sender=AUTHOR,
+        )
+    assert "album-g" not in caplog.text
+
+
+async def test_an_album_delete_that_overtakes_its_create_keeps_it_deleted(env):
+    app, db = env
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-racy"}, sender=AUTHOR
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": "album-racy", "owner_user_id": "u-g", "name": "Late"},
+        sender=AUTHOR,
+    )
+    assert (
+        await db.fetchone("SELECT 1 FROM gallery_albums WHERE id='album-racy'", ())
+        is None
+    )
+
+
+async def test_federated_gallery_deletes_remove_the_files(env, tmp_dir):
+    """An item delete takes its files; an album delete takes every item's
+    files — each unless another row still names it."""
+    app, db = env
+    media = tmp_dir / "media"
+    media.mkdir(exist_ok=True)
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": "album-files", "owner_user_id": "u-g", "name": "Files"},
+        sender=AUTHOR,
+    )
+    for n in (1, 2):
+        for kind in ("full", "thumb"):
+            (media / f"{kind}{n}.webp").write_bytes(b"x")
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": f"gi-files-{n}",
+                "album_id": "album-files",
+                "uploaded_by": "u-g",
+                "url": f"api/media/full{n}.webp",
+                "thumbnail_url": f"api/media/thumb{n}.webp",
+            },
+            sender=AUTHOR,
+        )
+    (media / "f.webp").write_bytes(b"x")  # gi-a's file, still referenced
+    await _deliver(
+        app, FET.SPACE_GALLERY_ITEM_DELETED, {"id": "gi-files-1"}, sender=AUTHOR
+    )
+    assert not (media / "full1.webp").exists()
+    assert not (media / "thumb1.webp").exists()
+    assert (media / "full2.webp").exists()
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-files"}, sender=AUTHOR
+    )
+    assert not (media / "full2.webp").exists()
+    assert not (media / "thumb2.webp").exists()
+    assert (media / "f.webp").exists()
+
+
+async def test_a_synced_album_and_upload_of_a_remote_member_both_land(env):
+    """§25.6 sync receiver, real SQLite: the host streams an album owned by
+    a member of another household and that member's upload into it. Neither
+    user has a ``users`` row here; both rows must land (#650)."""
+    app, db = env
+    receiver = app[space_sync_receiver_key]
+    await receiver._dispatch(
+        "gallery",
+        SP,
+        [
+            {
+                "kind": "album",
+                "id": "album-sync",
+                "owner_user_id": "u-g",
+                "name": "Synced",
+                "item_count": 1,
+            },
+            {
+                "kind": "item",
+                "id": "gi-sync-g",
+                "album_id": "album-sync",
+                "uploaded_by": "u-g",
+                "thumbnail_url": "/api/media/t.webp",
+                "width": 1,
+                "height": 1,
+            },
+        ],
+        provider=HOST,
+    )
+    album = await db.fetchone(
+        "SELECT owner_user_id FROM gallery_albums WHERE id='album-sync'", ()
+    )
+    assert album is not None and album["owner_user_id"] == "u-g"
+    item = await db.fetchone(
+        "SELECT uploaded_by FROM gallery_items WHERE id='gi-sync-g'", ()
+    )
+    assert item is not None and item["uploaded_by"] == "u-g"
 
 
 async def test_a_squatted_buffered_rsvp_cannot_drop_the_real_one(env):

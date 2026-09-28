@@ -4,10 +4,14 @@ Albums hold photos and videos. An album lives either at the household
 level (``space_id is None``) or inside a specific space — that scoping
 controls who can view, upload, and delete.
 
-Per §25.6.2 S-9: only ``thumbnail_filename`` is sent on Tier-1 sync;
-the full ``filename`` is fetched lazily via the ``gallery_item_full``
-on-demand resource. The :func:`GalleryItem.to_thumbnail_dict` helper
-captures the thumbnail-only projection for that path.
+§25.6.2 S-9 describes a thumbnail-only Tier-1 projection with the full
+file fetched lazily via a ``gallery_item_full`` on-demand resource. That
+resource was never built: the sender pushes the full file to every member
+household over the media outbox instead, so the federated item carries
+its full ``url`` too (:func:`GalleryItem.to_federation_dict`) — the
+receiver's row must name the file its ``SPACE_MEDIA_BLOB`` delivers.
+:func:`GalleryItem.to_thumbnail_dict` remains the thumbnail-only
+projection.
 """
 
 from __future__ import annotations
@@ -38,6 +42,24 @@ class GalleryAlbum:
     created_at: str | None = None
     updated_at: str | None = None
 
+    def to_federation_dict(self) -> dict:
+        """The album as ``SPACE_GALLERY_ALBUM_CREATED`` / ``_UPDATED`` carry it.
+
+        Only what a member household renders. ``item_count`` stays out (the
+        receiver counts the items it actually holds), and so do
+        ``is_system`` (the system album never federates) and
+        ``retention_exempt`` (a per-household purge setting).
+        """
+        return {
+            "id": self.id,
+            "owner_user_id": self.owner_user_id,
+            "name": self.name,
+            "description": self.description,
+            "cover_item_id": self.cover_item_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
 
 @dataclass(slots=True, frozen=True)
 class GalleryItem:
@@ -61,6 +83,19 @@ class GalleryItem:
     # source post.
     source_post_id: str | None = None
     created_at: str | None = None
+
+    def to_federation_dict(self) -> dict:
+        """The item as ``SPACE_GALLERY_ITEM_CREATED`` carries it to a member.
+
+        The thumbnail projection **plus** the full ``url``. The sender pushes
+        both files to every member household over the media outbox anyway
+        (no on-demand fetch path exists), and a receiver's row must name the
+        full file: the gallery opens it on zoom, and the ``SPACE_MEDIA_BLOB``
+        scope check accepts only the files the row references — without the
+        ``url`` it refused the full-size picture of every federated item.
+        The §25.6 sync exporter has always shipped it (``asdict``).
+        """
+        return {**self.to_thumbnail_dict(), "url": self.url}
 
     def to_thumbnail_dict(self) -> dict:
         """S-9: thumbnail-only projection used in Tier-1 sync.

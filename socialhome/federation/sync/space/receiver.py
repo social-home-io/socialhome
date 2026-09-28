@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
+    from ....services.gallery_tombstones import GalleryAlbumTombstones
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_poll_repo import AbstractSpacePollRepo
     from ....repositories.profile_picture_repo import (
@@ -102,6 +103,7 @@ class SpaceSyncReceiver:
         "_poll_repo",
         "_pending_decrypts",
         "_authorship",
+        "_gallery_tombstones",
     )
 
     def __init__(
@@ -124,8 +126,12 @@ class SpaceSyncReceiver:
         poll_repo: "AbstractSpacePollRepo | None" = None,
         pending_decrypts: "PendingDecryptsCache | None" = None,
         authorship: "SpaceAuthorship | None" = None,
+        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
     ) -> None:
         self._bus = bus
+        #: Space albums deleted here — a sync from a household that missed
+        #: the delete must not bring one (or its items) back.
+        self._gallery_tombstones = gallery_tombstones
         #: §24.11 authorship for a chunk streamed by a household that is NOT
         #: the space's host (see :meth:`_admit`). ``None`` refuses such
         #: chunks outright rather than trusting them.
@@ -770,7 +776,15 @@ class SpaceSyncReceiver:
             return False
         return await self._authorship.may_author(event, space_id, got[1].author)
 
+    def _album_deleted_here(self, space_id: str, album_id: str) -> bool:
+        return self._gallery_tombstones is not None and (
+            self._gallery_tombstones.is_deleted(space_id, album_id)
+        )
+
     async def _persist_album(self, record: dict[str, Any], space_id: str) -> None:
+        if self._album_deleted_here(space_id, str(record["id"])):
+            log.debug("sync: gallery album %s was deleted here — skipped", record["id"])
+            return
         # The album lands in the space this sync stream was gated for —
         # never the record's own ``space_id`` (another space, or NULL =
         # the household gallery), which is just untrusted payload.
@@ -817,13 +831,17 @@ class SpaceSyncReceiver:
         record: dict[str, Any],
         space_id: str,
     ) -> None:
+        album_id = str(record.get("album_id") or "")
+        if self._album_deleted_here(space_id, album_id):
+            return  # its album was deleted here; so was the item
         item = GalleryItem(
             id=str(record["id"]),
-            album_id=str(record.get("album_id") or ""),
+            album_id=album_id,
             uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
             item_type=str(record.get("item_type") or "photo"),
-            url=str(record.get("url") or ""),
-            thumbnail_url=str(record.get("thumbnail_url") or ""),
+            # Only the canonical local ``api/media/<name>`` shape is stored.
+            url=local_media_ref(record.get("url")) or "",
+            thumbnail_url=local_media_ref(record.get("thumbnail_url")) or "",
             width=int(record.get("width") or 0),
             height=int(record.get("height") or 0),
             duration_s=record.get("duration_s"),

@@ -7164,8 +7164,16 @@ def cmd_space_gallery_media_blob() -> None:
     2. c uploads an image into that album.
     3. After settle, d's media path contains the thumbnail + full
        bytes — same filenames as on c.
-    4. b (the relay) saw ``SPACE_ROUTED`` envelopes but NEVER the
-       inner ``SPACE_GALLERY_ITEM_CREATED`` or ``SPACE_MEDIA_BLOB``.
+    4. d holds the METADATA too: the album row (v_33
+       ``SPACE_GALLERY_ALBUM_CREATED`` — before it, an album made after
+       dave joined never reached d, and d refused the item as naming an
+       unknown album while the bytes still landed) and the item row.
+    5. The other direction — a remote uploader: dave uploads into c's
+       album on d; c must hold that item's row, attributed to dave, plus
+       its bytes.
+    6. c renames the album; d's copy follows (``_UPDATED``).
+    7. b (the relay) saw ``SPACE_ROUTED`` envelopes but NEVER the
+       inner ``SPACE_GALLERY_*`` or ``SPACE_MEDIA_BLOB``.
 
     Closes the gap Pascal called out: galleries previously federated
     only the URL strings (``to_thumbnail_dict``); receivers got
@@ -7180,6 +7188,7 @@ def cmd_space_gallery_media_blob() -> None:
             "space-gallery-media-blob: run 'remote-invite-routed' first",
         )
     c = state["instances"]["c"]
+    d = state["instances"]["d"]
 
     b_log_path = _instance_dir("b") / "log.txt"
     b_log_before_size = b_log_path.stat().st_size if b_log_path.exists() else 0
@@ -7253,11 +7262,128 @@ def cmd_space_gallery_media_blob() -> None:
             )
         print(f"  d.media has {filename} ✓")
 
-    # 5. Relay-encryption invariant: b sees SPACE_ROUTED but never
-    #    the inner SPACE_GALLERY_ITEM_CREATED or SPACE_MEDIA_BLOB.
+    # 4. The metadata rows, not just the bytes (v_33).
+    def _gallery_items_on(label: str, inst: dict) -> list[dict]:
+        s_, got = _request(
+            f"http://127.0.0.1:{inst['port']}/api/gallery/albums/{album_id}/items",
+            token=inst["token"],
+        )
+        if s_ != 200:
+            raise SystemExit(
+                f"space-gallery-media-blob: {label} has no album {album_id} "
+                f"(HTTP {s_}: {got}) — SPACE_GALLERY_ALBUM_CREATED didn't land"
+            )
+        return got if isinstance(got, list) else got.get("items", [])
+
+    s, d_album = _request(
+        f"http://127.0.0.1:{d['port']}/api/gallery/albums/{album_id}",
+        token=d["token"],
+    )
+    _must("d holds c's album", s, d_album, ok=(200,))
+    if d_album.get("name") != "Demo Album":
+        raise SystemExit(
+            f"space-gallery-media-blob: d's album is named {d_album.get('name')!r}"
+        )
+    print(f"  d holds album {album_id} ✓")
+    d_items = {i["id"]: i for i in _gallery_items_on("d", d)}
+    if item_id not in d_items:
+        raise SystemExit(
+            f"space-gallery-media-blob: d has the bytes but no row for item "
+            f"{item_id} (items on d: {sorted(d_items)}) — the item was refused"
+        )
+    print(f"  d holds item {item_id} (uploaded_by={d_items[item_id]['uploaded_by']}) ✓")
+
+    # 5. A remote uploader: dave uploads into c's album from d.
+    s, d_me = _request(f"http://127.0.0.1:{d['port']}/api/me", token=d["token"])
+    _must("d /api/me", s, d_me, ok=(200,))
+    dave_id = d_me["user_id"]
+    img2 = Image.new("RGB", (24, 24), color=(200, 60, 30))
+    buf2 = BytesIO()
+    img2.save(buf2, format="PNG")
+    body2 = (
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="dave.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode()
+        + buf2.getvalue()
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    upload_req2 = urllib.request.Request(
+        f"http://127.0.0.1:{d['port']}/api/gallery/albums/{album_id}/items",
+        data=body2,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {d['token']}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    with urllib.request.urlopen(upload_req2) as resp:
+        dave_item = json.loads(resp.read())
+    dave_item_id = dave_item["id"]
+    print(f"  dave (d) uploaded gallery item {dave_item_id} into c's album")
+
+    # 6. c renames the album while dave's upload is in flight.
+    s, patched = _request(
+        f"http://127.0.0.1:{c['port']}/api/gallery/albums/{album_id}",
+        token=c["token"],
+        method="PATCH",
+        body={"name": "Demo Album (renamed)"},
+    )
+    _must("c renames album", s, patched, ok=(200, 204))
+
+    deadline = time.monotonic() + 60
+    c_row = None
+    d_name = None
+    while time.monotonic() < deadline:
+        c_items = {i["id"]: i for i in _gallery_items_on("c", c)}
+        c_row = c_items.get(dave_item_id)
+        _s, d_album = _request(
+            f"http://127.0.0.1:{d['port']}/api/gallery/albums/{album_id}",
+            token=d["token"],
+        )
+        d_name = d_album.get("name") if isinstance(d_album, dict) else None
+        if c_row is not None and d_name == "Demo Album (renamed)":
+            break
+        time.sleep(2)
+    if c_row is None:
+        raise SystemExit(
+            f"space-gallery-media-blob: c never stored dave's item {dave_item_id} "
+            f"— a remote member's upload didn't reach the host's gallery"
+        )
+    if c_row["uploaded_by"] != dave_id:
+        raise SystemExit(
+            f"space-gallery-media-blob: dave's item on c is attributed to "
+            f"{c_row['uploaded_by']!r}, expected {dave_id!r}"
+        )
+    print(f"  c holds dave's item {dave_item_id} (uploaded_by={dave_id[:12]}…) ✓")
+    for url in {dave_item.get("url") or "", dave_item.get("thumbnail_url") or ""}:
+        if not url:
+            continue
+        filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
+        deadline = time.monotonic() + 30
+        c_path = _instance_dir("c") / "media" / filename
+        while not c_path.is_file() and time.monotonic() < deadline:
+            time.sleep(2)
+        if not c_path.is_file():
+            raise SystemExit(
+                f"space-gallery-media-blob: dave's {filename} missing from c"
+            )
+        print(f"  c.media has dave's {filename} ✓")
+    if d_name != "Demo Album (renamed)":
+        raise SystemExit(
+            f"space-gallery-media-blob: d's album is still named {d_name!r} "
+            f"— SPACE_GALLERY_ALBUM_UPDATED didn't land"
+        )
+    print("  d's album followed c's rename ✓")
+
+    # 7. Relay-encryption invariant: b sees SPACE_ROUTED but never
+    #    the inner SPACE_GALLERY_* or SPACE_MEDIA_BLOB.
     if b_log_path.exists():
         b_log_after = b_log_path.read_text(errors="replace")[b_log_before_size:]
         for forbidden in (
+            "SPACE_GALLERY_ALBUM_CREATED",
+            "SPACE_GALLERY_ALBUM_UPDATED",
             "SPACE_GALLERY_ITEM_CREATED",
             "SPACE_MEDIA_BLOB",
         ):

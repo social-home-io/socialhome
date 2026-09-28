@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 32
+    assert fc.OURS == 33
 
 
 def test_remote_subscriber_role_capability_threshold():
@@ -222,3 +222,15 @@ def test_roster_snapshot_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
+
+
+def test_gallery_album_sync_capability_threshold():
+    """v_33 — the gallery-album lifecycle events. Space-scoped: a behind
+    member household never sees an album made after it joined, nor what is
+    uploaded into it, so the per-space banner names the gap."""
+    assert fc.FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC == 33
+    assert fc.FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Shared gallery albums" in dict(fc.CAPABILITY_FEATURES).values()

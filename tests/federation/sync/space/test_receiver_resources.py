@@ -15,6 +15,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import serialise_chunk
+from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.infrastructure.event_bus import EventBus
 
@@ -226,7 +227,12 @@ def peer():
 
 
 @pytest.fixture
-def setup(bus, peer):
+def tombstones():
+    return GalleryAlbumTombstones()
+
+
+@pytest.fixture
+def setup(bus, peer, tombstones):
     peer_inst, peer_kp = peer
     collector = _FakeRepos()
     self_kp = generate_identity_keypair()
@@ -244,6 +250,7 @@ def setup(bus, peer):
         gallery_repo=_GalleryRepoStub(collector),
         zone_repo=_ZoneRepoStub(collector),
         bazaar_repo=_BazaarRepoStub(collector),
+        gallery_tombstones=tombstones,
     )
     return r, collector, peer_kp
 
@@ -1019,3 +1026,49 @@ async def test_schedules_skipped_when_no_poll_repo_wired(bus, peer):
             },
         ],
     )
+
+
+async def test_a_synced_album_deleted_here_is_not_brought_back(setup, tombstones):
+    """A sync from a household that missed the delete re-sends the album and
+    its items; neither comes back."""
+    r, c, kp = setup
+    tombstones.record("sp-1", "a-gone")
+    await _send(
+        r,
+        kp,
+        "gallery",
+        [
+            {"kind": "album", "id": "a-gone", "owner_user_id": "u-1", "name": "G"},
+            {
+                "kind": "item",
+                "id": "i-gone",
+                "album_id": "a-gone",
+                "uploaded_by": "u-1",
+                "thumbnail_url": "api/media/g.webp",
+            },
+            {"kind": "album", "id": "a-kept", "owner_user_id": "u-1", "name": "K"},
+        ],
+    )
+    assert [a.id for a in c.gallery_albums] == ["a-kept"]
+    assert c.gallery_items == []
+
+
+async def test_synced_item_media_references_are_normalised(setup):
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "gallery",
+        [
+            {
+                "kind": "item",
+                "id": "i-n",
+                "album_id": "a-1",
+                "uploaded_by": "u-1",
+                "url": "https://elsewhere.example/x.webp",
+                "thumbnail_url": "/api/media/t.webp?sig=1",
+            },
+        ],
+    )
+    item = c.gallery_items[0]
+    assert (item.url, item.thumbnail_url) == ("", "api/media/t.webp")

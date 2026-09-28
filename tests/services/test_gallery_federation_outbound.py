@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from socialhome.domain.events import GalleryItemDeleted, GalleryItemUploaded
+from socialhome.domain.events import (
+    GalleryAlbumCreated,
+    GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
+    GalleryItemDeleted,
+    GalleryItemUploaded,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.infrastructure.event_bus import EventBus
@@ -19,25 +25,20 @@ class _FakeFederationService:
     def __init__(self, own_instance_id: str = "own-inst") -> None:
         self._own_instance_id = own_instance_id
         self.sent: list[tuple] = []
+        self.broadcasts: list[tuple] = []
+        self.members: dict[str, list[str]] = {}
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         # Kept for back-compat — older tests still call this path.
         self.sent.append((to_instance_id, event_type, payload, space_id))
 
-    async def send_with_mesh_fallback(
-        self,
-        *,
-        to_instance_id,
-        event_type,
-        payload,
-        space_id=None,
-    ):
-        # Gallery outbound now uses mesh-fallback so members joined
-        # via §D1b mesh path receive the event too.
-        from socialhome.domain.federation import DeliveryResult
-
-        self.sent.append((to_instance_id, event_type, payload, space_id))
-        return DeliveryResult(instance_id=to_instance_id, ok=True)
+    async def broadcast_to_space_members(self, space_id, event_type, payload):
+        """The real one fans out per member household (self excluded) via
+        ``send_with_mesh_fallback``; recorded here per target."""
+        self.broadcasts.append((space_id, event_type))
+        for iid in self.members.get(space_id, []):
+            if iid != self._own_instance_id:
+                self.sent.append((iid, event_type, payload, space_id))
 
 
 class _FakeSpaceRepo:
@@ -91,9 +92,9 @@ def _item(item_id: str, album_id: str) -> GalleryItem:
 def env():
     bus = EventBus()
     fed = _FakeFederationService()
-    space_repo = _FakeSpaceRepo(
-        {"sp-A": ["own-inst", "peer-1", "peer-2"], "sp-B": ["peer-3"]},
-    )
+    members = {"sp-A": ["own-inst", "peer-1", "peer-2"], "sp-B": ["peer-3"]}
+    fed.members = members
+    space_repo = _FakeSpaceRepo(members)
     gallery = _FakeGalleryRepo(
         albums={
             "alb-space-A": _album("alb-space-A", space_id="sp-A"),
@@ -143,8 +144,9 @@ async def test_space_item_fanouts_to_peers_excluding_self(env):
     types = {entry[1] for entry in fed.sent}
     assert types == {FederationEventType.SPACE_GALLERY_ITEM_CREATED}
     payload = fed.sent[0][2]
-    # §S-9 thumbnail-only projection — full ``url`` excluded.
-    assert "url" not in payload
+    # The full ``url`` rides along: the receiver's row must name the
+    # full file, or its SPACE_MEDIA_BLOB is refused and zoom has nothing.
+    assert payload["url"] == "/api/media/it-1.jpg"
     assert {"id", "album_id", "thumbnail_url", "uploaded_by"} <= set(payload)
     assert all(entry[3] == "sp-A" for entry in fed.sent)
 
@@ -259,3 +261,142 @@ async def test_uploaded_event_enqueues_media_blob_for_peers():
         "api/media/thumb.webp",
         "api/media/full.webp",
     }
+
+
+# ─── Albums (v_33) ───────────────────────────────────────────────────────
+
+
+async def test_a_space_album_created_fans_out_its_descriptor(env):
+    """An item names its album by id, so the album has to reach the other
+    member households before anything uploaded into it can land there."""
+    bus, fed, _ = env
+    await bus.publish(
+        GalleryAlbumCreated(album_id="alb-space-A", space_id="sp-A", owner_id="alice")
+    )
+    assert {e[0] for e in fed.sent} == {"peer-1", "peer-2"}
+    assert {e[1] for e in fed.sent} == {FederationEventType.SPACE_GALLERY_ALBUM_CREATED}
+    payload = fed.sent[0][2]
+    assert payload["id"] == "alb-space-A"
+    assert payload["owner_user_id"] == "alice"
+    assert payload["name"] == "Album alb-space-A"
+    assert payload["space_id"] == "sp-A"
+    assert all(e[3] == "sp-A" for e in fed.sent)
+
+
+async def test_a_household_album_never_federates(env):
+    bus, fed, _ = env
+    await bus.publish(
+        GalleryAlbumCreated(album_id="alb-house", space_id=None, owner_id="alice")
+    )
+    await bus.publish(GalleryAlbumUpdated(album_id="alb-house", space_id=None))
+    await bus.publish(GalleryAlbumDeleted(album_id="alb-house", space_id=None))
+    assert fed.sent == []
+
+
+async def test_the_system_album_never_federates(env):
+    """Every household rebuilds its own "Posts" album from the posts."""
+    bus, fed, gallery = env
+    gallery.albums["alb-sys"] = GalleryAlbum(
+        id="alb-sys", space_id="sp-A", owner_user_id=None, name="Posts", is_system=True
+    )
+    await bus.publish(
+        GalleryAlbumCreated(album_id="alb-sys", space_id="sp-A", owner_id="")
+    )
+    await bus.publish(GalleryAlbumUpdated(album_id="alb-sys", space_id="sp-A"))
+    assert fed.sent == []
+
+
+async def test_an_album_edit_fans_out_the_new_state(env):
+    bus, fed, gallery = env
+    gallery.albums["alb-space-A"] = GalleryAlbum(
+        id="alb-space-A",
+        space_id="sp-A",
+        owner_user_id="alice",
+        name="Renamed",
+        description="new",
+        cover_item_id="it-1",
+    )
+    await bus.publish(GalleryAlbumUpdated(album_id="alb-space-A", space_id="sp-A"))
+    assert {e[1] for e in fed.sent} == {FederationEventType.SPACE_GALLERY_ALBUM_UPDATED}
+    payload = fed.sent[0][2]
+    assert (payload["name"], payload["description"], payload["cover_item_id"]) == (
+        "Renamed",
+        "new",
+        "it-1",
+    )
+
+
+async def test_an_album_edit_raced_by_a_delete_sends_nothing(env):
+    bus, fed, gallery = env
+    gallery.albums.pop("alb-space-A")
+    await bus.publish(GalleryAlbumUpdated(album_id="alb-space-A", space_id="sp-A"))
+    assert fed.sent == []
+
+
+async def test_a_space_album_deleted_fans_out_by_id(env):
+    """The row is gone by the time the event runs, so the space comes
+    from the domain event itself."""
+    bus, fed, gallery = env
+    gallery.albums.pop("alb-space-A")
+    await bus.publish(GalleryAlbumDeleted(album_id="alb-space-A", space_id="sp-A"))
+    assert {e[0] for e in fed.sent} == {"peer-1", "peer-2"}
+    assert {e[1] for e in fed.sent} == {FederationEventType.SPACE_GALLERY_ALBUM_DELETED}
+    assert fed.sent[0][2] == {"id": "alb-space-A", "space_id": "sp-A"}
+
+
+async def test_fan_out_goes_through_broadcast_to_space_members(env):
+    """One call per event — the member-only fan-out with mesh fallback —
+    rather than a hand-rolled loop over the member list."""
+    bus, fed, _ = env
+    await bus.publish(
+        GalleryAlbumCreated(album_id="alb-space-A", space_id="sp-A", owner_id="alice")
+    )
+    await bus.publish(GalleryItemDeleted(item_id="it-1", album_id="alb-space-A"))
+    assert fed.broadcasts == [
+        ("sp-A", FederationEventType.SPACE_GALLERY_ALBUM_CREATED),
+        ("sp-A", FederationEventType.SPACE_GALLERY_ITEM_DELETED),
+    ]
+
+
+async def test_changes_applied_from_another_household_are_not_sent_back(env):
+    """The inbound handlers re-publish what they applied (so this
+    household's screens refresh); those carry the origin and never echo."""
+    bus, fed, _ = env
+    origin = "peer-1"
+    await bus.publish(
+        GalleryAlbumCreated(
+            album_id="alb-space-A",
+            space_id="sp-A",
+            owner_id="alice",
+            origin_instance_id=origin,
+        )
+    )
+    await bus.publish(
+        GalleryAlbumUpdated(
+            album_id="alb-space-A", space_id="sp-A", origin_instance_id=origin
+        )
+    )
+    await bus.publish(
+        GalleryAlbumDeleted(
+            album_id="alb-space-A", space_id="sp-A", origin_instance_id=origin
+        )
+    )
+    await bus.publish(
+        GalleryItemUploaded(
+            item_id="it-1",
+            album_id="alb-space-A",
+            item_type="photo",
+            uploader="alice",
+            space_id="sp-A",
+            origin_instance_id=origin,
+        )
+    )
+    await bus.publish(
+        GalleryItemDeleted(
+            item_id="it-1",
+            album_id="alb-space-A",
+            space_id="sp-A",
+            origin_instance_id=origin,
+        )
+    )
+    assert fed.sent == []

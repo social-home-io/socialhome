@@ -236,8 +236,8 @@ themselves moments and link to the conversation root via
 
 | Table | Purpose |
 |---|---|
-| `gallery_albums` | Album shells. `space_id IS NULL` for household-level albums. `retention_exempt` opts the album out of space retention sweeps. `is_system` marks the auto-managed "Posts" album that mirrors every photo and video shared via the feed (one per scope, enforced by a partial unique index on `COALESCE(space_id, '__household__')`); `owner_user_id` is `NULL` for that row. |
-| `gallery_items` | Album items — type (`photo` / `video`), filename + thumbnail filename, dimensions, duration, caption, taken_at, sort order. `source_post_id` is set when the row was mirrored from a feed post (drives O(1) cleanup on post-delete via `idx_gallery_items_source_post`); `NULL` for direct user uploads. |
+| `gallery_albums` | Album shells. `space_id IS NULL` for household-level albums. `retention_exempt` opts the album out of space retention sweeps. `is_system` marks the auto-managed "Posts" album that mirrors every photo and video shared via the feed (one per scope, enforced by a partial unique index on `COALESCE(space_id, '__household__')`); `owner_user_id` is `NULL` for that row. A space album is mirrored on every member household — seeded by the §25.6 initial sync and kept current by the `SPACE_GALLERY_ALBUM_*` events (v_33) — so `owner_user_id` is often a user of **another** household and carries no FK (`0046`); the system album never federates, each household rebuilds its own. |
+| `gallery_items` | Album items — type (`photo` / `video`), filename + thumbnail filename, dimensions, duration, caption, taken_at, sort order. `source_post_id` is set when the row was mirrored from a feed post (drives O(1) cleanup on post-delete via `idx_gallery_items_source_post`); `NULL` for direct user uploads. `uploaded_by` carries no FK either (`0046`): a synced item's uploader lives on the household that uploaded it, the same reason `space_posts.author` carries none. |
 
 ## Media transcoding
 

@@ -17,8 +17,9 @@ Two guards run on every mutation, in this order:
 * **Authorship** (``federation/space_authorship.py``) — the users the
   payload names (author, creator, voter, seller, bidder …) must be members
   seated on the household that signed the envelope. Per family: creates
-  bind the claimed author; gallery items change only from the uploader's
-  household or a moderator; tasks / pages / stickies / calendar events
+  bind the claimed author; gallery albums and items change only from the
+  owner's / uploader's household or a moderator; tasks / pages / stickies /
+  calendar events
   are collaborative (any writer household, attribution kept);
   votes, RSVPs, schedule answers and bids are the voter's own; closing a
   poll, finalising a schedule and settling a listing are the owner's
@@ -38,6 +39,11 @@ from ...domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
 from ...domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
+    GalleryAlbumCreated,
+    GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
+    GalleryItemDeleted,
+    GalleryItemUploaded,
 )
 from ...domain.federation import FederationEventType
 from ...federation.space_scope import (
@@ -45,7 +51,7 @@ from ...federation.space_scope import (
     log_not_applied,
     resolve_space_id,
 )
-from ...domain.gallery import GalleryItem
+from ...domain.gallery import GalleryAlbum, GalleryItem
 from ...domain.page import Page
 from ...domain.post import (
     BAZAAR_MAX_IMAGES,
@@ -58,10 +64,13 @@ from ...domain.post import (
 from ...domain.space import SpaceZone
 from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
+from ...domain.user import SYSTEM_AUTHOR
 from ...infrastructure.event_bus import EventBus
+from ...media.cleanup import unlink_unreferenced
 from ...utils.datetime import parse_iso8601_lenient, parse_iso8601_optional
 from ...utils.timezones import coerce_tz
-from ..inbound_media_store import local_media_refs
+from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
+from ..inbound_media_store import local_media_ref, local_media_refs
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -69,7 +78,11 @@ if TYPE_CHECKING:
     from ...federation.space_authorship import SpaceAuthorship
     from ...repositories.bazaar_repo import AbstractBazaarRepo
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
+    import pathlib
+
     from ...repositories.gallery_repo import AbstractGalleryRepo
+    from ...repositories.media_reference_repo import AbstractMediaReferenceRepo
+    from ..gallery_tombstones import GalleryAlbumTombstones
     from ...repositories.page_repo import AbstractPageRepo
     from ...repositories.space_poll_repo import AbstractSpacePollRepo
     from ...repositories.space_post_repo import AbstractSpacePostRepo
@@ -105,6 +118,9 @@ class SpaceContentInboundHandlers:
         "_gallery_repo",
         "_zone_repo",
         "_bazaar_repo",
+        "_media_dir",
+        "_media_refs",
+        "_album_tombstones",
     )
 
     def __init__(
@@ -121,6 +137,9 @@ class SpaceContentInboundHandlers:
         gallery_repo: "AbstractGalleryRepo | None" = None,
         zone_repo: "AbstractSpaceZoneRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
+        media_dir: "pathlib.Path | None" = None,
+        media_refs: "AbstractMediaReferenceRepo | None" = None,
+        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
     ) -> None:
         self._bus = bus
         self._authorship = authorship
@@ -133,6 +152,13 @@ class SpaceContentInboundHandlers:
         self._gallery_repo = gallery_repo
         self._zone_repo = zone_repo
         self._bazaar_repo = bazaar_repo
+        #: Where a federated gallery delete removes the files it leaves
+        #: unreferenced. Without both, files are kept for the orphan sweep.
+        self._media_dir = media_dir
+        self._media_refs = media_refs
+        #: Space albums deleted here — a replayed or overtaken create must
+        #: not bring one back.
+        self._album_tombstones = gallery_tombstones
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry
@@ -211,11 +237,23 @@ class SpaceContentInboundHandlers:
                 self._on_schedule_finalized,
             )
 
-        # Gallery items — only registered when a gallery_repo is wired.
-        # Albums still ride the chunked initial sync (§4.2.3); we only
-        # push individual *items* per-event so SPACE_SYNC_RESUME has
-        # something to replay.
+        # Gallery — only registered when a gallery_repo is wired. Albums
+        # federate their own lifecycle (v_33): an item lands only in an
+        # album this household already holds for the space, so an album
+        # made after the members joined must reach them first.
         if self._gallery_repo is not None:
+            registry.register(
+                FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+                self._on_gallery_album_created,
+            )
+            registry.register(
+                FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+                self._on_gallery_album_updated,
+            )
+            registry.register(
+                FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+                self._on_gallery_album_deleted,
+            )
             registry.register(
                 FederationEventType.SPACE_GALLERY_ITEM_CREATED,
                 self._on_gallery_item_saved,
@@ -914,17 +952,232 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="schedule poll", row_id=post_id
             )
 
+    # ─── Gallery albums (§23.119, v_33) ──────────────────────────────────
+
+    async def _on_gallery_album_created(self, event: "FederationEvent") -> None:
+        """Mirror a member's new album into the gated space.
+
+        The album is filed under the space the envelope was gated for and
+        starts empty and non-system (``create_album_in_space``); its owner
+        must be a member seated on the sending household, the same rule as
+        any other create — never the shared bot identity. An album id held
+        here already is only ever a redelivery of that same album: for its
+        owner a quiet no-op, for anybody else a refusal. An album deleted
+        here (or whose delete overtook this create) is not brought back,
+        and the local per-space album limit holds for federated albums too.
+        """
+        if self._gallery_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        album_id = str(p.get("id") or "")
+        owner = str(p.get("owner_user_id") or "")
+        name = str(p.get("name") or "").strip()
+        if not album_id or not owner or not name or owner == SYSTEM_AUTHOR:
+            log.debug("SPACE_GALLERY_ALBUM_CREATED missing or invalid owner / name")
+            return
+        if not _album_text_ok(name, p.get("description")):
+            log.debug("SPACE_GALLERY_ALBUM_CREATED %s over the size limits", album_id)
+            return
+        held = await self._gallery_repo.get_album(album_id)
+        if held is not None:
+            if held.space_id == space_id and held.owner_user_id == owner:
+                return  # a redelivery of the album we hold
+            log.warning(
+                "%s from %s: gallery album %s is already held for another "
+                "owner or space here — refusing the write",
+                event.event_type,
+                event.from_instance,
+                album_id,
+            )
+            return
+        if self._album_tombstones is not None and self._album_tombstones.is_deleted(
+            space_id, album_id
+        ):
+            log_not_applied(
+                event,
+                what="gallery album",
+                row_id=album_id,
+                reason="deleted here already",
+            )
+            return
+        if not await self._authorship.may_author(event, space_id, owner):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="gallery album",
+                row_id=album_id,
+                user_id=owner,
+            )
+            return
+        existing = await self._gallery_repo.list_albums(
+            space_id, limit=ALBUMS_PER_SPACE + 1
+        )
+        if len(existing) >= ALBUMS_PER_SPACE:
+            log.warning(
+                "%s from %s: space %s already holds %d albums — refusing album %s",
+                event.event_type,
+                event.from_instance,
+                space_id,
+                ALBUMS_PER_SPACE,
+                album_id,
+            )
+            return
+        album = GalleryAlbum(
+            id=album_id,
+            space_id=space_id,
+            owner_user_id=owner,
+            name=name,
+            description=p.get("description"),
+            created_at=p.get("created_at"),
+            updated_at=p.get("updated_at"),
+        )
+        if not await self._gallery_repo.create_album_in_space(album, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery album", row_id=album_id
+            )
+            return
+        await self._bus.publish(
+            GalleryAlbumCreated(
+                album_id=album_id,
+                space_id=space_id,
+                owner_id=owner,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _gallery_album_mutable(
+        self, event: "FederationEvent", space_id: str, album_id: str
+    ) -> bool:
+        """The album is a user album of ``space_id`` the sender may change.
+
+        The owner is read from the stored row — never the payload — and the
+        rule is the local "owner or space admin" one
+        (``GalleryService._require_album_owner_or_admin``).
+        """
+        assert self._gallery_repo is not None
+        album = await self._gallery_repo.get_album(album_id)
+        if album is None:
+            log_not_applied(
+                event,
+                what="gallery album",
+                row_id=album_id,
+                reason="no such album here",
+            )
+            return False
+        if album.space_id != space_id or album.is_system:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery album", row_id=album_id
+            )
+            return False
+        owner = album.owner_user_id or ""
+        if not await self._authorship.may_mutate(event, space_id, owner):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="gallery album",
+                row_id=album_id,
+                user_id=owner,
+            )
+            return False
+        return True
+
+    async def _on_gallery_album_updated(self, event: "FederationEvent") -> None:
+        """Apply a member's rename / description / cover edit.
+
+        A ``cover_item_id`` of ``None`` clears the cover; a key that is
+        absent leaves it as it is.
+        """
+        if self._gallery_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        p = event.payload
+        album_id = str(p.get("id") or "")
+        if not space_id or not album_id:
+            return
+        if not await self._gallery_album_mutable(event, space_id, album_id):
+            return
+        patch: dict = {}
+        name = str(p.get("name") or "").strip()
+        if name:
+            patch["name"] = name
+        if "description" in p:
+            patch["description"] = p.get("description")
+        if "cover_item_id" in p:
+            cover = p.get("cover_item_id")
+            patch["cover_item_id"] = str(cover) if cover else None
+        if not patch:
+            return
+        if not _album_text_ok(patch.get("name", ""), patch.get("description")):
+            log.debug("SPACE_GALLERY_ALBUM_UPDATED %s over the size limits", album_id)
+            return
+        if not await self._gallery_repo.update_album_in_space(
+            album_id, patch, space_id=space_id
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery album", row_id=album_id
+            )
+            return
+        await self._bus.publish(
+            GalleryAlbumUpdated(
+                album_id=album_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_gallery_album_deleted(self, event: "FederationEvent") -> None:
+        """Remove a member's album — and, by cascade, the items in it, with
+        their files unless another row still names them.
+
+        A delete for an album not held here yet is remembered, so the
+        create it overtook does not bring the album back.
+        """
+        if self._gallery_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        album_id = str(event.payload.get("id") or "")
+        if not space_id or not album_id:
+            return
+        if await self._gallery_repo.get_album(album_id) is None:
+            if self._album_tombstones is not None:
+                self._album_tombstones.record(space_id, album_id)
+        if not await self._gallery_album_mutable(event, space_id, album_id):
+            return
+        media = await self._gallery_repo.list_album_media(album_id)
+        if not await self._gallery_repo.delete_album_in_space(
+            album_id, space_id=space_id
+        ):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery album", row_id=album_id
+            )
+            return
+        await unlink_unreferenced(self._media_dir, self._media_refs, media)
+        await self._bus.publish(
+            GalleryAlbumDeleted(
+                album_id=album_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
     # ─── Gallery items (§23.119) ─────────────────────────────────────────
 
     async def _on_gallery_item_saved(self, event: "FederationEvent") -> None:
         """Mirror a remote upload into the local ``gallery_items`` table.
 
-        Carries the §S-9 thumbnail-only projection — the full file is
-        fetched lazily by the receiver via the existing on-demand
-        media path. The item's ``album_id`` must reference a local
-        album row of the gated space already (chunked initial sync seeds
-        those); if it doesn't — unknown album, another space's album, or
-        a household album — the write is refused rather than
+        Carries the thumbnail and the full ``url``
+        (``GalleryItem.to_federation_dict``); both files follow over the
+        media outbox, and the ``SPACE_MEDIA_BLOB`` scope check accepts only
+        files this row names. Only the canonical local ``api/media/<name>``
+        shape is stored (``local_media_ref``); anything else stores nothing.
+        The item's ``album_id`` must reference a local album row of the
+        gated space already (the initial sync, or a
+        ``SPACE_GALLERY_ALBUM_CREATED`` ahead of the item, seeds those);
+        if it doesn't — unknown album, another space's album, or a
+        household album — the write is refused rather than
         auto-creating a stub.
         """
         if self._gallery_repo is None:
@@ -937,7 +1190,6 @@ class SpaceContentInboundHandlers:
         album_id = str(p.get("album_id") or "")
         uploaded_by = str(p.get("uploaded_by") or p.get("uploader") or "")
         item_type = str(p.get("item_type") or "photo")
-        thumbnail_url = str(p.get("thumbnail_url") or "")
         if not item_id or not album_id or not uploaded_by:
             log.debug("SPACE_GALLERY_ITEM_* missing required field")
             return
@@ -946,8 +1198,8 @@ class SpaceContentInboundHandlers:
             album_id=album_id,
             uploaded_by=uploaded_by,
             item_type=item_type,
-            url=str(p.get("url") or ""),
-            thumbnail_url=thumbnail_url,
+            url=local_media_ref(p.get("url")) or "",
+            thumbnail_url=local_media_ref(p.get("thumbnail_url")) or "",
             width=int(p.get("width") or 0),
             height=int(p.get("height") or 0),
             duration_s=p.get("duration_s"),
@@ -965,6 +1217,7 @@ class SpaceContentInboundHandlers:
                 user_id=uploaded_by,
             )
             return
+        is_new = await self._gallery_repo.get_item(item_id) is None
         try:
             if not await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id
@@ -972,14 +1225,27 @@ class SpaceContentInboundHandlers:
                 log_cross_space_refusal(
                     event, space_id=space_id, what="gallery album", row_id=album_id
                 )
+                return
         except Exception as exc:
-            # Foreign-key failure (unknown uploader) or a malformed
-            # record — log and drop. Matches the chunked-sync receiver's
-            # tolerance.
+            # A malformed record — log and drop. (The uploader is never an
+            # FK: they may live on another household, migration 0046.)
+            # Matches the chunked-sync receiver's tolerance.
             log.debug(
                 "SPACE_GALLERY_ITEM_CREATED apply failed item=%s: %s",
                 item_id,
                 exc,
+            )
+            return
+        if is_new:
+            await self._bus.publish(
+                GalleryItemUploaded(
+                    item_id=item_id,
+                    album_id=album_id,
+                    item_type=item_type,
+                    uploader=uploaded_by,
+                    space_id=space_id,
+                    origin_instance_id=event.from_instance,
+                )
             )
 
     async def _on_gallery_item_deleted(self, event: "FederationEvent") -> None:
@@ -1022,6 +1288,20 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="gallery item", row_id=item_id
             )
+            return
+        # Same rule as ``GalleryService.delete_item``: the files go unless
+        # another row still names them.
+        await unlink_unreferenced(
+            self._media_dir, self._media_refs, [item.url, item.thumbnail_url]
+        )
+        await self._bus.publish(
+            GalleryItemDeleted(
+                item_id=item_id,
+                album_id=item.album_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     # ─── Space zones (§23.8.7) ─────────────────────────────────────────
 
@@ -1627,3 +1907,12 @@ class SpaceContentInboundHandlers:
             space_id,
         )
         return False
+
+
+def _album_text_ok(name: str, description: object) -> bool:
+    """The limits ``GalleryService`` enforces on a local album, for the wire."""
+    if len(name) > NAME_MAX:
+        return False
+    if description is None:
+        return True
+    return isinstance(description, str) and len(description) <= DESCRIPTION_MAX

@@ -485,7 +485,24 @@ from __future__ import annotations
 #:   authorship). Older-peer fallback: nothing is sent to a sub-v_32
 #:   household; it keeps learning the roster from live gossip only, as
 #:   before, and does not bind authors.
-OURS: int = 32
+#: * **v_33** (2026-09-28) — gallery albums federate their lifecycle:
+#:   :data:`FederationEventType.SPACE_GALLERY_ALBUM_CREATED` /
+#:   ``_UPDATED`` / ``_DELETED``. Until v_33 an album reached another
+#:   household only in the §25.6 initial sync, so an album created after
+#:   the others joined existed on its creator's household alone — and every
+#:   ``SPACE_GALLERY_ITEM_CREATED`` uploaded into it was refused everywhere
+#:   else (its ``album_id`` named no local album): the member households
+#:   got the picture bytes and no gallery rows. The ``SPACE_SYNC_RESUME``
+#:   replay now also re-sends the album of every item it replays, ahead of
+#:   the item. **Ungated, fail-soft.** Senders always emit: a mesh-only
+#:   member household routinely has no ``remote_instances`` row to gate on
+#:   (the v_31 reasoning), and a sub-v_33 receiver rejects the unknown
+#:   event type — over HTTPS a 400 the outbox drops as permanent; over the
+#:   mesh any sub-v_33 hop drops the unknown ``inner_event_type`` — which
+#:   leaves it exactly where it was: the album and its items arrive only
+#:   with the next full sync. Space-scoped, so it appears in the per-space
+#:   compatibility banner.
+OURS: int = 33
 
 
 class FederationCapability:
@@ -785,6 +802,13 @@ class FederationCapability:
     #: sends a roster snapshot only to households at or above it.
     MIN_FOR_ROSTER_SNAPSHOT = 32
 
+    #: Minimum proto_version that handles the gallery-album lifecycle
+    #: events (:data:`FederationEventType.SPACE_GALLERY_ALBUM_CREATED` /
+    #: ``_UPDATED`` / ``_DELETED``, v_33). Informational for senders — the
+    #: events are sent ungated (see the v_33 history entry); it labels the
+    #: gap in the per-space compatibility banner.
+    MIN_FOR_GALLERY_ALBUM_SYNC = 33
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -869,6 +893,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
         "Space roster snapshot",
     ),
+    (
+        FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
+        "Shared gallery albums",
+    ),
 ]
 
 
@@ -923,6 +951,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
         FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
         FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
+        FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
     }
 )
 

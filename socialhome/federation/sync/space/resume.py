@@ -18,10 +18,11 @@ Resource types replayed today:
 * ``SPACE_STICKY_CREATED``       — corkboard notes.
 * ``SPACE_CALENDAR_EVENT_CREATED`` — calendar events (RRULEs included).
 * ``SPACE_GALLERY_ITEM_CREATED`` — gallery items, joined via
-  ``gallery_items.album_id`` → ``gallery_albums.space_id``. Albums
-  themselves still ride the chunked initial sync (§4.2.3) — they're
-  structural, rare, and a per-event push would race with the album
-  pre-sync.
+  ``gallery_items.album_id`` → ``gallery_albums.space_id``. Each
+  replayed item's album goes out first as ``SPACE_GALLERY_ALBUM_CREATED``
+  (v_33, once per album, never the system album): the receiver files an
+  item only into an album it already holds, and an album created while it
+  was offline is exactly the one it lacks.
 
 The replay payload for every type matches what its corresponding
 ``federation_inbound_*`` handler reads, so the receiver applies a
@@ -39,13 +40,14 @@ from ....domain.federation import FederationEventType
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
     from ....domain.federation import FederationEvent
-    from ....domain.gallery import GalleryItem
+    from ....domain.gallery import GalleryAlbum, GalleryItem
     from ....domain.page import Page
     from ....domain.post import Comment, Post
     from ....domain.sticky import Sticky
     from ....domain.task import Task
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
+    from ....services.gallery_tombstones import GalleryAlbumTombstones
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
@@ -56,6 +58,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+#: A space holds at most ``gallery_service.ALBUMS_PER_SPACE`` albums; the
+#: repo caps a listing at the same 200.
+MAX_ALBUMS_REPLAYED: int = 200
 
 #: Hard cap on rows replayed per resource type per single
 #: ``SPACE_SYNC_RESUME``. Receivers that need older events re-issue the
@@ -84,6 +90,7 @@ class SpaceSyncResumeProvider:
         "_sticky_repo",
         "_space_calendar_repo",
         "_gallery_repo",
+        "_gallery_tombstones",
     )
 
     def __init__(
@@ -97,6 +104,7 @@ class SpaceSyncResumeProvider:
         sticky_repo: "AbstractStickyRepo | None" = None,
         space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
+        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
     ) -> None:
         self._federation = federation_service
         self._space_repo = space_repo
@@ -106,6 +114,7 @@ class SpaceSyncResumeProvider:
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
         self._gallery_repo = gallery_repo
+        self._gallery_tombstones = gallery_tombstones
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -365,22 +374,67 @@ class SpaceSyncResumeProvider:
         *,
         to: str,
     ) -> int:
-        """Replay missed ``SPACE_GALLERY_ITEM_CREATED`` events.
+        """Replay the space's gallery: albums first, then missed items.
 
-        Albums themselves still ride the chunked initial sync path —
-        they're rare and structural — so resume only re-emits items.
-        Receivers FK back to the album row already mirrored on
-        first-pair sync; an item whose album is unknown locally drops
-        cleanly via the inbound handler's broad-except.
+        The receiver files an item only into an album it already holds for
+        the space, and an album made, edited or deleted while it was away is
+        state it simply lacks — whether or not anything was uploaded since.
+        So, in order:
+
+        * every album delete recorded since ``since`` as
+          ``SPACE_GALLERY_ALBUM_DELETED`` (:class:`GalleryAlbumTombstones`);
+        * every non-system album of the space as
+          ``SPACE_GALLERY_ALBUM_CREATED`` — an idempotent no-op for one the
+          receiver holds;
+        * those edited since ``since`` as ``SPACE_GALLERY_ALBUM_UPDATED``;
+        * the items newer than ``since`` as ``SPACE_GALLERY_ITEM_CREATED``.
+
+        The system "Posts" album is skipped: every household rebuilds its
+        own from the posts.
         """
         if self._gallery_repo is None:
             return 0
+        sent = 0
+        if self._gallery_tombstones is not None:
+            sent += await self._send_each(
+                [
+                    {"id": album_id}
+                    for album_id in self._gallery_tombstones.deleted_since(
+                        space_id, since
+                    )
+                ],
+                FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+                dict,
+                space_id=space_id,
+                to=to,
+            )
+        albums = [
+            a
+            for a in await self._gallery_repo.list_albums(
+                space_id, limit=MAX_ALBUMS_REPLAYED
+            )
+            if a.space_id == space_id and not a.is_system
+        ]
+        sent += await self._send_each(
+            albums,
+            FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+            _gallery_album_to_payload,
+            space_id=space_id,
+            to=to,
+        )
+        sent += await self._send_each(
+            [a for a in albums if _changed_since(a.updated_at, since)],
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            _gallery_album_to_payload,
+            space_id=space_id,
+            to=to,
+        )
         items = await self._gallery_repo.list_items_since(
             space_id,
             since,
             limit=MAX_PER_RESOURCE,
         )
-        return await self._send_each(
+        return sent + await self._send_each(
             items,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,
             _gallery_item_to_payload,
@@ -510,14 +564,15 @@ def _calendar_to_payload(event: "CalendarEvent") -> dict:
     }
 
 
-def _gallery_item_to_payload(item: "GalleryItem") -> dict:
-    """§S-9 thumbnail-only projection — full file fetched on demand.
+def _gallery_album_to_payload(album: "GalleryAlbum") -> dict:
+    """Same shape as the live ``GalleryFederationOutbound`` album push."""
+    return album.to_federation_dict()
 
-    Mirrors ``GalleryItem.to_thumbnail_dict`` so receivers see the
-    same shape on resume replay as on the live per-event push from
-    ``GalleryFederationOutbound``.
-    """
-    return item.to_thumbnail_dict()
+
+def _gallery_item_to_payload(item: "GalleryItem") -> dict:
+    """Same shape as the live ``GalleryFederationOutbound`` item push —
+    ``GalleryItem.to_federation_dict`` (thumbnail projection + full ``url``)."""
+    return item.to_federation_dict()
 
 
 def _iso(value) -> str:
@@ -527,3 +582,20 @@ def _iso(value) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _changed_since(value: str | None, since: str) -> bool:
+    """``value`` is later than ``since`` — or either is unreadable, where
+    re-sending an unchanged album is harmless and skipping a change is not."""
+    if not value:
+        return False
+    try:
+        a = datetime.fromisoformat(value)
+        b = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=timezone.utc)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=timezone.utc)
+    return a > b
