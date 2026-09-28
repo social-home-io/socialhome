@@ -132,9 +132,17 @@ own members). The receiver drops the event with a WARNING when:
   the sending household, or a user this household does not know.
 - `PRESENCE_UPDATED` is keyed on `from_instance` by construction.
 
-A user seen for the first time is accepted from the household that
-syncs it (older peers do not always send the identity anchor needed to
-re-derive the id). `tests/protocol/test_user_sync_scope.py`.
+A user seen for the first time is taken only when its `user_id`
+re-derives from the sender's pinned identity key —
+`derive_user_id(sender_pk, identity_anchor or username)`, the construction
+every household mints its users with — so a household can introduce only
+its own users and never pre-claim another household's id. Senders ship the
+bare `identity_anchor` on every user publication (inside the identity
+binding when the peer supports it, on its own otherwise). Legacy window: a
+peer still on an older build sends no anchor before capabilities are
+exchanged, so its anchor-derived users land on the first later publication
+that carries the anchor (a profile update or re-pair); their DMs and
+invites in that window are refused. `tests/protocol/test_user_sync_scope.py`.
 
 ## Implementation
 

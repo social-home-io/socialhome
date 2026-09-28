@@ -25,6 +25,7 @@ from PIL import Image
 from socialhome.app import create_app
 from socialhome.app_keys import db_key, event_bus_key, federation_service_key
 from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 from socialhome.domain.events import (
     DmContactRequested,
     UserCameOnline,
@@ -39,6 +40,9 @@ FET = FederationEventType
 
 PEER = "peer-bob"
 OTHER = "peer-dora"
+#: Each household's pinned identity key (distinct, so ids derive apart).
+PEER_PK = bytes([0x11]) * 32
+OTHER_PK = bytes([0x22]) * 32
 
 
 def _config(tmp_dir) -> Config:
@@ -56,7 +60,9 @@ def _config(tmp_dir) -> Config:
     )
 
 
-async def _seed_peer(db, instance_id: str, user_id: str, username: str) -> None:
+async def _seed_peer(
+    db, instance_id: str, user_id: str, username: str, pk: bytes
+) -> None:
     await db.enqueue(
         "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
         " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
@@ -64,7 +70,7 @@ async def _seed_peer(db, instance_id: str, user_id: str, username: str) -> None:
         (
             instance_id,
             instance_id,
-            "00" * 32,
+            pk.hex(),
             "k1",
             "k2",
             f"https://{instance_id}/wh",
@@ -100,8 +106,8 @@ async def env(aiohttp_client, tmp_dir):
         " height) VALUES(?,?,?,?,?)",
         ("u-anna", b"anna-avatar", "h-anna", 16, 16),
     )
-    await _seed_peer(db, PEER, "u-bob", "bob")
-    await _seed_peer(db, OTHER, "u-dora", "dora")
+    await _seed_peer(db, PEER, "u-bob", "bob", PEER_PK)
+    await _seed_peer(db, OTHER, "u-dora", "dora", OTHER_PK)
     published: list[object] = []
     bus = app[event_bus_key]
     for event_type in (
@@ -239,9 +245,61 @@ async def test_the_home_household_updates_and_removes_its_own_user(env):
 
 
 async def test_a_new_user_of_the_sending_household_lands(env):
+    """A first-seen user lands when its id derives from the sender's key —
+    from the username (legacy ids) or from the shipped identity anchor."""
     app, db, _ = env
+    by_name = derive_user_id(PEER_PK, "carl")
+    by_anchor = derive_user_id(PEER_PK, "anchor-uuid-erin")
     await _send(
-        app, FET.USERS_SYNC, {"users": [{"user_id": "u-carl", "username": "carl"}]}
+        app,
+        FET.USERS_SYNC,
+        {
+            "users": [
+                {"user_id": by_name, "username": "carl"},
+                {
+                    "user_id": by_anchor,
+                    "username": "erin",
+                    "identity_anchor": "anchor-uuid-erin",
+                },
+            ]
+        },
     )
     rows = {r[0]: r for r in (await _state(db))["remote_users"]}
-    assert rows["u-carl"][1] == PEER
+    assert rows[by_name][1] == PEER
+    assert rows[by_anchor][1] == PEER
+
+
+@pytest.mark.parametrize(
+    ("user_id", "extra"),
+    [
+        pytest.param(derive_user_id(PEER_PK, "carl"), {}, id="another's derived id"),
+        pytest.param("u-made-up", {}, id="an id that derives from nothing"),
+        pytest.param(
+            derive_user_id(PEER_PK, "anchor-x"),
+            {"identity_anchor": "anchor-x"},
+            id="another's anchor",
+        ),
+    ],
+)
+async def test_a_first_seen_id_is_never_claimed_by_another_household(
+    env, user_id, extra
+):
+    """A household can only introduce users whose id derives from its own key:
+    it cannot pre-claim another household's user before their home syncs."""
+    app, db, _ = env
+    before = await _state(db)
+    await _send(
+        app,
+        FET.USERS_SYNC,
+        {"users": [{"user_id": user_id, "username": "carl", **extra}]},
+        from_instance=OTHER,
+    )
+    assert await _state(db) == before
+    if user_id != "u-made-up":
+        await _send(
+            app,
+            FET.USERS_SYNC,
+            {"users": [{"user_id": user_id, "username": "carl", **extra}]},
+        )
+        rows = {r[0]: r for r in (await _state(db))["remote_users"]}
+        assert rows[user_id][1] == PEER

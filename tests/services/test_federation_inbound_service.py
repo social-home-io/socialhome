@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from PIL import Image as PILImage
 
+from socialhome.crypto import derive_user_id
 from socialhome.domain.events import (
     CommentAdded,
     DmMessageCreated,
@@ -1352,22 +1353,25 @@ async def test_users_sync_upserts_remote_users(db, inbound):
             "2026-01-01T00:00:00+00:00",
         ),
     )
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    r1, r2 = derive_user_id(_PK_AA, "alice"), derive_user_id(_PK_AA, "bob")
     await inbound._on_users_sync(
         _event(
             FederationEventType.USERS_SYNC,
             {
                 "users": [
-                    {"user_id": "u-r1", "username": "alice", "display_name": "Alice"},
-                    {"user_id": "u-r2", "username": "bob", "display_name": "Bob"},
+                    {"user_id": r1, "username": "alice", "display_name": "Alice"},
+                    {"user_id": r2, "username": "bob", "display_name": "Bob"},
                 ]
             },
             from_instance="peer-a",
         )
     )
     rows = await db.fetchall(
-        "SELECT user_id, instance_id, remote_username FROM remote_users ORDER BY user_id",
+        "SELECT user_id, instance_id, remote_username FROM remote_users"
+        " ORDER BY remote_username",
     )
-    assert [r["user_id"] for r in rows] == ["u-r1", "u-r2"]
+    assert [r["user_id"] for r in rows] == [r1, r2]
     assert rows[0]["instance_id"] == "peer-a"
     assert rows[0]["remote_username"] == "alice"
 
@@ -1412,27 +1416,30 @@ async def test_users_sync_one_bad_user_does_not_drop_the_rest(
         await real(self, instance_id, payload)
 
     monkeypatch.setattr(type(inbound), "_upsert_remote_user", flaky)
+    inbound._federation_service = _BindingFakeFederation({"peer-a": _PK_AA})
+    ids = {n: derive_user_id(_PK_AA, n) for n in ("alice", "bob", "carol")}
     with caplog.at_level(logging.WARNING):
         await inbound._on_users_sync(
             _event(
                 FederationEventType.USERS_SYNC,
-                {
-                    "users": [
-                        {"user_id": "u-r1", "username": "alice"},
-                        {"user_id": "u-r2", "username": "bob"},
-                        {"user_id": "u-r3", "username": "carol"},
-                    ]
-                },
+                {"users": [{"user_id": ids[n], "username": n} for n in ids]},
                 from_instance="peer-a",
             )
         )
 
-    rows = await db.fetchall("SELECT user_id FROM remote_users ORDER BY user_id")
-    assert [r["user_id"] for r in rows] == ["u-r1", "u-r3"]
+    rows = await db.fetchall(
+        "SELECT remote_username FROM remote_users ORDER BY remote_username"
+    )
+    assert [r["remote_username"] for r in rows] == ["alice", "carol"]
     assert any("boom" in r.getMessage() for r in caplog.records)
 
 
 # ─── USERS_SYNC — per-user identity binding (proto v_25) ──────────
+
+
+#: The pinned identity key the ``"aa" * 32`` peer rows above carry.
+_PK_AA = bytes.fromhex("aa" * 32)
+_PK_AB = bytes.fromhex("ab" * 32)
 
 
 class _BindingFakeFederation:
@@ -1584,10 +1591,10 @@ async def test_users_sync_stores_identity_anchor_for_anchored_user(db, bus):
     assert row["identity_anchor"] == anchor
 
 
-async def test_users_sync_forged_anchor_not_stored_but_upserted(db, bus, caplog):
+async def test_users_sync_forged_anchor_refuses_the_new_user(db, bus, caplog):
     """A forged anchor — one whose derivation doesn't match the asserted
-    user_id — fails verify and is rejected fail-soft: no pubkey/anchor stored,
-    but the legacy upsert still lands."""
+    user_id — means the first-seen user can't be bound to the sender: nothing
+    is stored for it at all."""
     import logging
 
     from socialhome.crypto import generate_identity_keypair
@@ -1625,11 +1632,7 @@ async def test_users_sync_forged_anchor_not_stored_but_upserted(db, bus, caplog)
         "FROM remote_users WHERE user_id=?",
         (uid,),
     )
-    # Legacy upsert still happened; the unverified key + anchor were NOT stored.
-    assert row is not None
-    assert row["display_name"] == "Alice"
-    assert row["user_identity_public_key"] is None
-    assert row["identity_anchor"] is None
+    assert row is None
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
@@ -1831,26 +1834,27 @@ async def test_users_sync_absent_binding_stores_no_key(db, bus):
         space_repo=SqliteSpaceRepo(db),
         user_repo=SqliteUserRepo(db),
     )
-    service._federation_service = _BindingFakeFederation({})
+    service._federation_service = _BindingFakeFederation({iid: _PK_AB})
+    leg = derive_user_id(_PK_AB, "leg")
 
     await service._on_users_sync(
         _event(
             FederationEventType.USERS_SYNC,
-            {"users": [{"user_id": "u-leg", "username": "leg", "display_name": "Leg"}]},
+            {"users": [{"user_id": leg, "username": "leg", "display_name": "Leg"}]},
             from_instance=iid,
         )
     )
     row = await db.fetchone(
         "SELECT user_identity_public_key FROM remote_users WHERE user_id=?",
-        ("u-leg",),
+        (leg,),
     )
     assert row is not None
     assert row["user_identity_public_key"] is None
 
 
-async def test_users_sync_binding_skipped_when_federation_unattached(db, bus):
-    """A binding-bearing entry on a service with no federation handle attached
-    upserts the legacy row but stores no key (fail-soft, no raise)."""
+async def test_users_sync_new_user_refused_when_federation_unattached(db, bus):
+    """Without a federation handle the sender's key can't be resolved, so a
+    first-seen user can't be bound to it and is not stored (no raise)."""
     from socialhome.crypto import generate_identity_keypair
 
     instance_kp = generate_identity_keypair()
@@ -1874,8 +1878,7 @@ async def test_users_sync_binding_skipped_when_federation_unattached(db, bus):
         "SELECT user_identity_public_key FROM remote_users WHERE user_id=?",
         (uid,),
     )
-    assert row is not None
-    assert row["user_identity_public_key"] is None
+    assert row is None
 
 
 async def test_user_updated_stores_handle(db, bus):
@@ -1889,11 +1892,12 @@ async def test_user_updated_stores_handle(db, bus):
         space_repo=SqliteSpaceRepo(db),
         user_repo=SqliteUserRepo(db),
     )
+    service._federation_service = _BindingFakeFederation({"peer-a": _PK_AB})
     await service._on_user_updated(
         _event(
             FederationEventType.USER_UPDATED,
             {
-                "user_id": "u-h1",
+                "user_id": derive_user_id(_PK_AB, "bob"),
                 "username": "bob",
                 "display_name": "Bob",
                 "handle": "bobby",
@@ -1903,7 +1907,7 @@ async def test_user_updated_stores_handle(db, bus):
     )
     rows = await db.fetchall(
         "SELECT user_id, handle FROM remote_users WHERE user_id=?",
-        ("u-h1",),
+        (derive_user_id(_PK_AB, "bob"),),
     )
     assert len(rows) == 1
     assert rows[0]["handle"] == "bobby"
@@ -1920,12 +1924,13 @@ async def test_user_updated_without_handle_does_not_null_existing(db, bus):
         space_repo=SqliteSpaceRepo(db),
         user_repo=SqliteUserRepo(db),
     )
+    service._federation_service = _BindingFakeFederation({"peer-a": _PK_AB})
     # First a handle-bearing update lands the handle.
     await service._on_user_updated(
         _event(
             FederationEventType.USER_UPDATED,
             {
-                "user_id": "u-h2",
+                "user_id": derive_user_id(_PK_AB, "bob"),
                 "username": "bob",
                 "display_name": "Bob",
                 "handle": "bobby",
@@ -1938,7 +1943,7 @@ async def test_user_updated_without_handle_does_not_null_existing(db, bus):
         _event(
             FederationEventType.USER_UPDATED,
             {
-                "user_id": "u-h2",
+                "user_id": derive_user_id(_PK_AB, "bob"),
                 "username": "bob",
                 "display_name": "Bob Smith",
                 "bio": "updated",
@@ -1948,15 +1953,15 @@ async def test_user_updated_without_handle_does_not_null_existing(db, bus):
     )
     row = await db.fetchone(
         "SELECT handle, display_name FROM remote_users WHERE user_id=?",
-        ("u-h2",),
+        (derive_user_id(_PK_AB, "bob"),),
     )
     assert row["handle"] == "bobby"  # untouched, not nulled
     assert row["display_name"] == "Bob Smith"  # other fields still update
 
 
-async def test_users_sync_binding_skipped_when_sender_key_unknown(db, bus, caplog):
-    """A binding from a sender whose pinned key can't be resolved is rejected
-    fail-soft with a WARNING; the legacy row is still upserted."""
+async def test_users_sync_new_user_refused_when_sender_key_unknown(db, bus, caplog):
+    """A first-seen user from a sender whose pinned key can't be resolved is
+    not stored (WARNING) — its id can't be bound to that household."""
     import logging
 
     from socialhome.crypto import generate_identity_keypair
@@ -1987,9 +1992,7 @@ async def test_users_sync_binding_skipped_when_sender_key_unknown(db, bus, caplo
         "WHERE user_id=?",
         (uid,),
     )
-    assert row is not None
-    assert row["display_name"] == "Alice"
-    assert row["user_identity_public_key"] is None
+    assert row is None
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 

@@ -73,6 +73,7 @@ from ..domain.highlight import (
 )
 from ..crypto import (
     UnsupportedUserSigSuite,
+    derive_user_id,
     verify_user_identity_assertion,
 )
 from ..domain.user import RemoteUser, UserIdentityAssertion, UserStatus
@@ -3264,6 +3265,10 @@ class FederationInboundService:
                 user_id,
             )
             return
+        if home is None and not await self._derives_from_sender(
+            instance_id, user_id, username, payload
+        ):
+            return
         picture_hash = payload.get("picture_hash")
 
         # If the peer shipped fresh picture bytes, revalidate and store
@@ -3321,6 +3326,44 @@ class FederationInboundService:
         # re-verified outside the original §24.11 envelope (Phase 3/4), so we
         # check the instance signature here too — not just the user self-sig.
         await self._store_user_identity_binding(instance_id, user_id, payload)
+
+    async def _derives_from_sender(
+        self,
+        instance_id: str,
+        user_id: str,
+        username: str,
+        payload: dict,
+    ) -> bool:
+        """A first-seen ``user_id`` must derive from the sender's pinned key.
+
+        ``derive_user_id(sender_pk, identity_anchor or username)`` — the same
+        construction every household mints its users with — so a household
+        can only introduce its own users and never pre-claim somebody else's
+        id before that user's home syncs it. Refused (WARNING) when the key
+        can't be resolved or the id doesn't derive.
+        """
+        sender_pk = (
+            await self._federation_service.peer_identity_public_key(instance_id)
+            if self._federation_service is not None
+            else None
+        )
+        raw_anchor = payload.get("identity_anchor")
+        seed = raw_anchor if isinstance(raw_anchor, str) and raw_anchor else username
+        derived = ""
+        if sender_pk is not None:
+            try:
+                derived = derive_user_id(sender_pk, seed)
+            except ValueError:
+                derived = ""
+        if derived and derived == user_id:
+            return True
+        log.warning(
+            "user sync from %s refused: new user %s does not derive from the "
+            "sender's identity key",
+            instance_id,
+            user_id,
+        )
+        return False
 
     async def _store_user_identity_binding(
         self,
