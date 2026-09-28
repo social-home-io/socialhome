@@ -1030,6 +1030,7 @@ class ClusterService:
         try:
             async with active.post(
                 f"{peer_url.rstrip('/')}/cluster/sync",
+                allow_redirects=False,
                 data=canonical,
                 headers={
                     "Content-Type": "application/json",
@@ -1038,7 +1039,8 @@ class ClusterService:
                 },
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
-                if resp.status >= 400:
+                # >= 300: a redirect is not followed, so it is not a sync.
+                if resp.status >= 300:
                     raise RuntimeError(f"peer {peer_url} returned {resp.status}")
         finally:
             if own_session:
@@ -1049,6 +1051,7 @@ class ClusterService:
             async with aiohttp.ClientSession() as sess:
                 async with sess.get(
                     f"{peer_url.rstrip('/')}/cluster/health",
+                    allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     return 200 <= resp.status < 300

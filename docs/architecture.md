@@ -223,6 +223,16 @@ event needs and whether the peer is reachable:
 | 3 — cold | HTTPS inbox `POST /federation/inbox/{id}` | Fallback before/while DataChannel is down, and for peers behind a blocked UDP path. |
 | 4 — no address | Connection-server envelope relay `POST {gfs}/gfs/envelope` | Households seated from an invite link (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. |
 
+**Redirects.** Every outbound POST to a household inbox — tier 3, outbox
+redelivery, and the connection server's HTTPS-inbox fan-out — goes through
+`socialhome/peer_http.post_to_peer`, which never lets aiohttp follow a `3xx`.
+At most one hop is followed by hand, and only when it stays on the stored
+address: same host, same scheme and port or an `http`→`https` upgrade (a
+downgrade is refused), a target that passes `validate_peer_url`, status
+301/302/307/308. Anything else is a failed delivery, logged at WARNING with
+host names only. Calls to a connection server (and GFS cluster peers) pass
+`allow_redirects=False` outright; `tests/test_peer_http.py` guards both.
+
 Tier 4 is a `TransportStrategy` like the others
 (`federation/gfs_relay_transport.GfsRelayTransport`), selected in
 `FederationTransport.send` on `source = space_session` and never for a

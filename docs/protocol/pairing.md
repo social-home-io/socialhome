@@ -114,7 +114,9 @@ checked where it enters, before anything is stored or sent
 Plain `http://` stays allowed on any host: households pair across a LAN by
 address or name (`homeassistant.local`), and envelope content is protected by
 the pairing keys rather than the transport. The outbound pairing client
-re-checks the URL right before each POST and does not follow redirects.
+re-checks the URL right before each POST and does not follow redirects;
+the envelope transport that later POSTs to the stored inbox URL follows at
+most one same-host hop (see `docs/architecture.md`, Redirects).
 A scanned code that fails the check is refused by `POST /api/pairing/accept`
 with `422 INVALID_PEER_URL`; a peer-accept body that fails it gets `400`.
 

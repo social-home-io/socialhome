@@ -834,3 +834,51 @@ async def test_redeliver_throttled_by_the_relay_stays_transient(env):
     outcome = await _redeliver_envelope(svc, fed_repo, entry)
 
     assert outcome is DeliveryOutcome.TRANSIENT
+
+
+async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
+    """The stored inbox URL is where the envelope goes — a 3xx elsewhere is
+    a failed attempt, not a new destination."""
+    svc, fed_repo, kek = env
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x06" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh-redirect",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    await fed_repo.save_instance(peer)
+
+    class _Redirect:
+        status = 308
+        headers = {"Location": "https://elsewhere.example/wh"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    calls: list[tuple[str, dict]] = []
+
+    class _Client:
+        def post(self, url, **kw):
+            calls.append((url, kw))
+            return _Redirect()
+
+    svc._http_client = _Client()
+    entry = _OutboxEntry(
+        id="e-3xx",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+    assert outcome is DeliveryOutcome.TRANSIENT
+    assert [u for u, _ in calls] == ["https://x/wh"]
+    assert calls[0][1]["allow_redirects"] is False

@@ -485,6 +485,8 @@ async def test_send_event_to_peer():
     assert posted_json["to_instance"] == inst.id
     # event_type is stored as a string on the wire
     assert posted_json["event_type"] == FederationEventType.USER_UPDATED.value
+    # Never follow a peer's redirect blindly (see socialhome/peer_http.py).
+    assert call_kwargs.kwargs["allow_redirects"] is False
 
 
 @pytest.mark.asyncio

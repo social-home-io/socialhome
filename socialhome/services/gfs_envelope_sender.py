@@ -151,6 +151,7 @@ class GfsEnvelopeSender:
         try:
             async with self._gfs.client().post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=GFS_ENVELOPE_TIMEOUT_S),
             ) as resp:

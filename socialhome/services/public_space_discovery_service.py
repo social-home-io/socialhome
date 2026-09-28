@@ -215,7 +215,11 @@ class PublicSpaceDiscoveryService:
         # *this household's own* API route — polling it 404'd forever.
         url = f"{gfs_url.rstrip('/')}/gfs/spaces"
         try:
-            async with client.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with client.get(
+                url,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
                 if resp.status != 200:
                     # INFO, not DEBUG: a directory that never answers means
                     # the Global tab stays permanently empty — that must be

@@ -40,6 +40,7 @@ from ..crypto import (
     b64url_encode,
 )
 from ..db import AsyncDatabase
+from ..peer_http import post_to_peer
 from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
@@ -1130,7 +1131,8 @@ class FederationService:
         else:
             try:
                 client = await self._get_http_client()
-                async with client.post(
+                async with post_to_peer(
+                    client,
                     instance.remote_inbox_url,
                     json=envelope_dict,
                     timeout=_aiohttp_timeout(10),

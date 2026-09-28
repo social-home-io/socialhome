@@ -432,6 +432,7 @@ class SpaceSubscriberKeyOutbound:
         url = f"{gfs_base_url}/gfs/spaces/{space_id}/subscribers"
         async with self._http_session.get(
             url,
+            allow_redirects=False,
             params=params,
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:

@@ -333,6 +333,7 @@ class GfsConnectionService:
         try:
             async with client.get(
                 info_url,
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
@@ -381,6 +382,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 register_url,
+                allow_redirects=False,
                 json=register_body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -439,6 +441,7 @@ class GfsConnectionService:
         try:
             async with client.get(
                 info_url,
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
@@ -736,6 +739,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 publish_url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -936,6 +940,7 @@ class GfsConnectionService:
             # signed unpublish into a permanent 400.
             async with client.post(
                 unpublish_url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1005,6 +1010,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1078,6 +1084,7 @@ class GfsConnectionService:
             # signed revoke into a permanent 400.
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1163,6 +1170,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1229,6 +1237,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1350,6 +1359,7 @@ class GfsConnectionService:
             try:
                 async with self._http_client.post(
                     url,
+                    allow_redirects=False,
                     json=body,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
@@ -1579,6 +1589,7 @@ class GfsConnectionService:
         try:
             async with self._client().post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1692,6 +1703,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1749,6 +1761,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 f"{conn.inbox_url}/gfs/appeal",
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -1814,6 +1827,7 @@ class GfsConnectionService:
         try:
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
@@ -1870,10 +1884,11 @@ class GfsConnectionService:
         try:
             async with client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
-                if resp.status >= 400:
+                if resp.status >= 300:
                     log.debug(
                         "GFS signaling-session release HTTP %d",
                         resp.status,

@@ -374,7 +374,8 @@ class _FakeSession:
     def program(self, url: str, status: int, payload: dict) -> None:
         self.responses[url] = _FakeResp(status, payload)
 
-    def get(self, url, *, params=None, timeout=None):
+    def get(self, url, *, params=None, timeout=None, allow_redirects=True):
+        assert allow_redirects is False, "GFS calls must not follow redirects"
         self.gets.append((url, dict(params or {})))
         return self.responses.get(url, _FakeResp(404, {"error": "not found"}))
 

@@ -156,6 +156,7 @@ class MomentPublicOutbound:
         try:
             async with self._http_client.post(
                 f"{conn.inbox_url}{path}",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
