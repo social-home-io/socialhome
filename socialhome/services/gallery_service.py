@@ -47,7 +47,11 @@ from ..domain.media_constraints import (
 )
 from ..domain.post import Post, PostType
 from ..domain.space import SpaceRole
-from ..federation.owner_bound_id import GALLERY_ALBUM_KIND, mint_owner_bound_id
+from ..federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    mint_owner_bound_id,
+)
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
 from ..media.image_processor import ImageProcessor
@@ -399,6 +403,7 @@ class GalleryService:
         if is_video:
             item = await self._upload_video(
                 album_id=album_id,
+                space_id=album.space_id,
                 data=data,
                 content_type=content_type or "video/mp4",
                 caption=caption,
@@ -407,6 +412,7 @@ class GalleryService:
         else:
             item = await self._upload_photo(
                 album_id=album_id,
+                space_id=album.space_id,
                 data=data,
                 content_type=content_type,
                 caption=caption,
@@ -470,6 +476,7 @@ class GalleryService:
         self,
         *,
         album_id: str,
+        space_id: str | None,
         data: bytes,
         content_type: str,
         caption: str | None,
@@ -495,7 +502,7 @@ class GalleryService:
 
         w, h = await self._read_dims(self._media_dir / out_name)
         return GalleryItem(
-            id=uuid.uuid4().hex,
+            id=_item_id(space_id, uploader_user_id),
             album_id=album_id,
             uploaded_by=uploader_user_id,
             item_type="photo",
@@ -514,6 +521,7 @@ class GalleryService:
         self,
         *,
         album_id: str,
+        space_id: str | None,
         data: bytes,
         content_type: str,
         caption: str | None,
@@ -554,7 +562,7 @@ class GalleryService:
         self._transcode_service.nudge()
 
         return GalleryItem(
-            id=uuid.uuid4().hex,
+            id=_item_id(space_id, uploader_user_id),
             album_id=album_id,
             uploaded_by=uploader_user_id,
             item_type="video",
@@ -781,3 +789,13 @@ class GalleryService:
 def _with_cover(album: GalleryAlbum, cover_url: str | None) -> GalleryAlbum:
     """Return a copy of *album* with ``cover_url`` filled in."""
     return replace(album, cover_url=cover_url)
+
+
+def _item_id(space_id: str | None, uploader_user_id: str) -> str:
+    """A new upload's id: owner-bound (v_36) when it federates with a space
+    album — no other household can announce it first as theirs."""
+    if space_id is None:
+        return uuid.uuid4().hex
+    return mint_owner_bound_id(
+        GALLERY_ITEM_KIND, space_id=space_id, owner_user_id=uploader_user_id
+    )

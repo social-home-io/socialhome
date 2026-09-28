@@ -48,6 +48,7 @@ from ....domain.task import RecurrenceRule, Task, TaskStatus
 from ....infrastructure.event_bus import EventBus
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     OwnerBinding,
@@ -891,13 +892,14 @@ class SpaceSyncReceiver:
 _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "posts": (SPACE_POST_KIND, ("author",)),
     "comments": (SPACE_COMMENT_KIND, ("author",)),
+    "gallery": (GALLERY_ITEM_KIND, ("uploaded_by", "uploader")),
 }
 
 
 def _claims_bound_id(resource: str, space_id: str, r: dict[str, Any]) -> bool:
     """Is ``r`` a claim on an owner-bound id for somebody else? (Logged.)"""
     bound = _BOUND_RESOURCES.get(resource)
-    if bound is None:
+    if bound is None or (resource == "gallery" and r.get("kind") != "item"):
         return False
     kind, owner_fields = bound
     owner = next((str(r[f]) for f in owner_fields if r.get(f)), "")

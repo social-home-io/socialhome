@@ -37,6 +37,7 @@ from socialhome.app import create_app
 from socialhome.app_keys import db_key, space_sync_receiver_key
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.owner_bound_id import (
+    GALLERY_ITEM_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     mint_owner_bound_id,
@@ -116,6 +117,26 @@ KINDS: list[Kind] = [
             "author": who,
             "type": "text",
             "content": "x",
+        },
+    ),
+    Kind(
+        "gallery item",
+        GALLERY_ITEM_KIND,
+        FET.SPACE_GALLERY_ITEM_CREATED,
+        lambda rid, who: {
+            "id": rid,
+            "album_id": "album-g",
+            "uploaded_by": who,
+            "item_type": "photo",
+        },
+        "gallery_items",
+        "uploaded_by",
+        "gallery",
+        lambda rid, who: {
+            "kind": "item",
+            "id": rid,
+            "album_id": "album-g",
+            "uploaded_by": who,
         },
     ),
 ]
@@ -207,5 +228,6 @@ async def test_every_kind_is_covered():
     expected = {
         SPACE_POST_KIND,
         SPACE_COMMENT_KIND,
+        GALLERY_ITEM_KIND,
     }
     assert covered == expected, sorted(expected - covered)

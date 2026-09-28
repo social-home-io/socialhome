@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
     OwnerBinding,
     check_owner_bound_id,
     is_owner_bound,
@@ -364,6 +365,44 @@ async def test_system_album_upload_blocked(env):
             caption=None,
             uploader_user_id="a-id",
         )
+
+
+async def test_a_space_upload_id_commits_to_its_uploader(env):
+    """v_36: a space upload federates, so its id is owner-bound to the
+    uploader in the album's space; a household upload keeps a plain id."""
+    import io
+
+    from PIL import Image
+
+    space_album = await env.create_album(
+        space_id="sp-1", owner_user_id="b-id", name="Trip"
+    )
+    home_album = await env.create_album(space_id=None, owner_user_id="a-id", name="H")
+    ids = []
+    for album_id, uploader in ((space_album.id, "a-id"), (home_album.id, "a-id")):
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), (1, 2, 3)).save(buf, format="JPEG")
+        item = await env.upload_item(
+            album_id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id=uploader,
+        )
+        ids.append(item.id)
+    assert (
+        check_owner_bound_id(
+            GALLERY_ITEM_KIND, ids[0], space_id="sp-1", owner_user_id="a-id"
+        )
+        is OwnerBinding.VALID
+    )
+    assert (
+        check_owner_bound_id(
+            GALLERY_ITEM_KIND, ids[0], space_id="sp-1", owner_user_id="b-id"
+        )
+        is OwnerBinding.MISMATCH
+    )
+    assert not is_owner_bound(ids[1])
 
 
 async def test_delete_item_removes_files_from_disk(env):

@@ -48,8 +48,10 @@ from ...domain.events import (
 from ...domain.federation import FederationEventType
 from ...federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
     OwnerBinding,
     check_owner_bound_id,
+    owner_bound_id_refused,
 )
 from ...federation.space_scope import (
     log_cross_space_refusal,
@@ -1278,6 +1280,14 @@ class SpaceContentInboundHandlers:
             sort_order=int(p.get("sort_order") or 0),
             created_at=p.get("created_at") or p.get("occurred_at"),
         )
+        if owner_bound_id_refused(
+            GALLERY_ITEM_KIND,
+            item_id,
+            space_id=space_id,
+            owner_user_id=uploaded_by,
+            context=f"{event.event_type} from {event.from_instance}",
+        ):
+            return
         if not await self._authorship.may_author(event, space_id, uploaded_by):
             await self._authorship.hold_or_refuse(
                 event,
