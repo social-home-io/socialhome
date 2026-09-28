@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import math
 import uuid
 
 import pillow_heif
@@ -37,6 +36,11 @@ from ..domain.media_constraints import (
 pillow_heif.register_heif_opener()
 
 log = logging.getLogger(__name__)
+
+#: Hard cap on WebP encodes one :meth:`ImageProcessor.fit_within` spends
+#: (full-size try + binary search + min-dimension fallback). Ten halvings of
+#: a ~2000 px range land within a few pixels of the largest fitting size.
+_FIT_MAX_ENCODES: int = 10
 
 # MIME type → tuple of (offset, magic_bytes)
 MAGIC_BYTES: dict[str, tuple[int, bytes]] = {
@@ -206,10 +210,12 @@ class ImageProcessor:
 
         For images that must travel inside a size-capped envelope (a space
         cover / icon in an invite snapshot). The image is shrunk, never
-        cropped, at :data:`THUMBNAIL_WEBP_QUALITY`; each step scales the
-        longest side by the square root of the overshoot (encoded size is
-        roughly proportional to area), so a 4x-too-big image typically fits
-        on the first re-encode.
+        cropped, and never upscaled, at :data:`THUMBNAIL_WEBP_QUALITY`. A
+        full-size re-encode is tried first; failing that, the longest side
+        is binary-searched between *min_dimension* and the source's, keeping
+        the largest rendition that fits — so the result lands just under the
+        budget instead of well below it. At most :data:`_FIT_MAX_ENCODES`
+        encodes are spent, bounding the worst case.
 
         Raises
         ------
@@ -239,23 +245,42 @@ class ImageProcessor:
             raise ValueError(f"Cannot open image to fit it: {exc}") from exc
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA" if "transparency" in img.info else "RGB")
-        size = len(data)
-        dim = max(img.size)
-        while True:
-            # 0.9 of the area-proportional guess, and always at least a
-            # 15% step, so the loop converges in a handful of encodes.
-            dim = int(dim * min(0.85, 0.9 * math.sqrt(max_bytes / size)))
-            if dim < min_dimension:
-                return None
+        src_dim = max(img.size)
+        encodes = 0
+
+        def encode(dim: int) -> bytes:
+            nonlocal encodes
+            encodes += 1
             out = io.BytesIO()
             self._resize(img, dim).save(
                 out,
                 format="WEBP",
                 quality=THUMBNAIL_WEBP_QUALITY,
             )
-            size = len(out.getvalue())
-            if size <= max_bytes:
-                return out.getvalue()
+            return out.getvalue()
+
+        full = encode(src_dim)
+        if len(full) <= max_bytes:
+            return full
+        # Invariant: ``hi`` is known too big; ``best`` (if set) is the
+        # rendition at ``lo``, the largest dimension known to fit. Leave one
+        # encode spare for the min-dimension fallback below.
+        lo, hi = min_dimension - 1, src_dim
+        best: bytes | None = None
+        while hi - lo > 1 and encodes < _FIT_MAX_ENCODES - 1:
+            mid = (lo + hi) // 2
+            out = encode(mid)
+            if len(out) <= max_bytes:
+                lo, best = mid, out
+            else:
+                hi = mid
+        if best is None and hi > min_dimension:
+            # The budget ran out before any probe fitted; the smallest
+            # acceptable rendition is the last resort.
+            out = encode(min_dimension)
+            if len(out) <= max_bytes:
+                best = out
+        return best
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

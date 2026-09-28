@@ -6,6 +6,7 @@ import random
 import pytest
 from PIL import Image as _Image
 
+from socialhome.media import image_processor
 from socialhome.media.image_processor import ImageProcessor, MAGIC_BYTES
 
 
@@ -220,3 +221,48 @@ async def test_fit_within_converts_palette_images():
     fitted = await ImageProcessor().fit_within(data, 8 * 1024)
     assert fitted is not None
     assert len(fitted) <= 8 * 1024
+
+
+@pytest.mark.parametrize("budget", [64 * 1024, 16 * 1024])
+async def test_fit_within_lands_close_to_the_budget(budget):
+    """The rendition uses most of the budget instead of undershooting it —
+    a 64 KiB invite-link cover must not come back as a 25 KiB thumbnail."""
+    data = _noise_webp(1600, 1000)
+    assert len(data) > 4 * budget
+    fitted = await ImageProcessor().fit_within(data, budget)
+    assert fitted is not None
+    assert len(fitted) <= budget
+    assert len(fitted) >= 0.7 * budget, f"{len(fitted) / budget:.2f} of budget"
+    img = _Image.open(_io.BytesIO(fitted))
+    assert img.format == "WEBP"
+    assert img.size[0] <= 1600 and img.size[1] <= 1000
+
+
+async def test_fit_within_keeps_the_source_size_when_only_reencoding_is_needed():
+    """A lossless source a re-encode alone brings under the bound keeps its
+    dimensions — the search never upscales, and doesn't shrink needlessly."""
+    img = _Image.new("RGB", (400, 300), color="red")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG", compress_level=0)
+    data = buf.getvalue()
+    bound = 16 * 1024
+    assert len(data) > bound
+    fitted = await ImageProcessor().fit_within(data, bound)
+    assert fitted is not None
+    assert len(fitted) <= bound
+    assert _Image.open(_io.BytesIO(fitted)).size == (400, 300)
+
+
+async def test_fit_within_falls_back_to_the_minimum_when_the_search_runs_out(
+    monkeypatch,
+):
+    """With the encode budget spent and no probe fitting, the min-dimension
+    rendition is still tried before giving up."""
+    monkeypatch.setattr(image_processor, "_FIT_MAX_ENCODES", 3)
+    data = _noise_webp(1600, 1000)
+    fitted = await ImageProcessor().fit_within(data, 4 * 1024, min_dimension=32)
+    assert fitted is not None
+    assert len(fitted) <= 4 * 1024
+    assert max(_Image.open(_io.BytesIO(fitted)).size) == 32
+    # And when even that does not fit, the answer is still ``None``.
+    assert await ImageProcessor().fit_within(data, 40, min_dimension=32) is None
