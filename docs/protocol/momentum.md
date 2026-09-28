@@ -140,9 +140,14 @@ couple two trust models and leak block-list shape to peers.
   moment authored here, from a reactor homed on the sending household;
   the published author is the stored one.
 * Refused events are logged at WARNING and never relayed
-  (`tests/protocol/test_moment_scope.py`). Relayed authenticity rests on
-  the origin field plus the author's home lookup; an end-to-end origin
-  signature would be a protocol change.
+  (`tests/protocol/test_moment_scope.py`).
+* **Known limitation — relayed moments are not yet authenticated.** On
+  the 2/3-hop path the receiver cannot tell a genuine relay from a paired
+  household that names a remote origin: the origin field is not signed by
+  the origin. The rules above bind direct deliveries and stop anything
+  claiming this household or its members, but a relayed create or delete
+  for another household's author is taken on the relayer's word. Closing
+  this needs an end-to-end origin signature on the moment (planned).
 
 ## Mermaid sequence — local author posts a moment
 
