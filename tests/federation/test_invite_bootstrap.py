@@ -8,6 +8,7 @@ test so a regression names itself.
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -20,12 +21,18 @@ from socialhome.crypto import (
     generate_x25519_keypair,
     sign_ed25519,
 )
+from socialhome.domain.media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+)
 from socialhome.federation.invite_bootstrap import (
     BOOTSTRAP_SIG_SUITE_ED25519,
     KIND_REDEEM,
     KIND_REDEEM_ACK,
+    MAX_INNER_BYTES,
     MAX_SEALED_BLOB_BYTES,
     SUPPORTED_BOOTSTRAP_SIG_SUITES,
+    BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
     UnsupportedBootstrapSigSuite,
     canonical_signing_bytes,
@@ -553,3 +560,60 @@ def test_verify_peer_keywrap_rejects_empty_signature(redeemer):
         )
         is None
     )
+
+
+# ── size caps on the seal side ────────────────────────────────────────
+
+
+def test_seal_refuses_a_body_over_the_inner_cap(redeemer, issuer):
+    """A body the receiver would refuse after unsealing is never sealed."""
+    body = _redeem_body(redeemer, padding="x" * MAX_INNER_BYTES)
+    with pytest.raises(BootstrapEnvelopeTooLarge, match="bootstrap body is"):
+        _seal(redeemer, issuer, body)
+
+
+def test_seal_refuses_a_blob_over_the_sealed_cap(redeemer, issuer):
+    """Under the plaintext cap but over the sealed one once base64'd — the
+    receiver drops such a blob before it unseals, so the sender must not
+    produce it (the §D2b ACK used to, with a big space cover)."""
+    body = _redeem_body(redeemer, padding="x" * (200 * 1024))
+    with pytest.raises(BootstrapEnvelopeTooLarge, match="sealed bootstrap blob"):
+        _seal(redeemer, issuer, body)
+
+
+def test_the_bootstrap_image_bounds_leave_room_for_the_snapshot(redeemer, issuer):
+    """Both images at their §D2b bounds, plus a 200-member roster, still seal
+    under the cap and open on the other side."""
+    roster = [
+        {
+            "user_id": f"{i:032x}",
+            "instance_id": "a" * 32,
+            "display_name": f"Member number {i}",
+            "role": "member",
+            "joined_at": "2026-09-28T00:00:00+00:00",
+            "user_pk": "b" * 64,
+            "member_version": i,
+        }
+        for i in range(200)
+    ]
+    body = _redeem_body(
+        redeemer,
+        kind=KIND_REDEEM_ACK,
+        space_meta={
+            "cover_webp_base64": base64.b64encode(
+                b"\xff" * SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+            ).decode("ascii"),
+            "icon_webp_base64": base64.b64encode(
+                b"\xff" * SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+            ).decode("ascii"),
+            "roster": roster,
+        },
+    )
+    envelope = _seal(redeemer, issuer, body)
+    assert len(envelope["sealed"]["ciphertext"]) <= MAX_SEALED_BLOB_BYTES
+    opened = open_bootstrap_envelope(
+        envelope=envelope,
+        keywrap_private_key=issuer.keywrap_priv,
+        expected_kinds=frozenset({KIND_REDEEM_ACK}),
+    )
+    assert len(opened["space_meta"]["roster"]) == 200

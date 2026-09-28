@@ -186,6 +186,33 @@ SPACE_ICON_MAX_DIMENSION: int = 256
 #: sends what the GFS would refuse to keep.
 SPACE_IMAGE_EMBED_MAX_BYTES: int = 1536 * 1024
 
+#: Largest cover / icon (raw WebP bytes) a household embeds in the space
+#: snapshot (``build_space_snapshot_for_federation``) it hands a paired peer
+#: or a mesh-routed invitee: the §D1b private invite and the §D2 redeem ACK.
+#: That snapshot rides ONE federation envelope — base64 in the payload, again
+#: inside the encrypted envelope, and a third time when ``SPACE_ROUTED`` seals
+#: it for a relay hop — against a ~1 MiB per-envelope budget (the HTTPS
+#: inbox's ``DEFAULT_JSON_MAX_BYTES``). A bigger image is re-encoded smaller
+#: until it fits (see :meth:`ImageProcessor.fit_within`) rather than sinking
+#: the invite; a typical 1200 px cover is already under it and ships as-is.
+SPACE_COVER_SNAPSHOT_MAX_BYTES: int = 256 * 1024
+SPACE_ICON_SNAPSHOT_MAX_BYTES: int = 64 * 1024
+
+#: The same bound for the §D2b invite-LINK bootstrap ACK, which travels sealed
+#: through the connection server's ``/gfs/envelope`` relay: its sealed blob is
+#: capped at ``invite_bootstrap.MAX_SEALED_BLOB_BYTES`` (256 KiB of base64
+#: ciphertext, ~192 KiB of plaintext) and the relay body at 320 KiB. Both
+#: images at these bounds cost ~107 KiB of base64, leaving ~85 KiB for the
+#: config, content key and member roster. The joiner gets a smaller rendition
+#: of a big cover; the join itself never fails on the art.
+SPACE_COVER_BOOTSTRAP_MAX_BYTES: int = 64 * 1024
+SPACE_ICON_BOOTSTRAP_MAX_BYTES: int = 16 * 1024
+
+#: Smallest longest-side an image is shrunk to while fitting it into one of
+#: the byte bounds above. Below this the art is no longer worth shipping, so
+#: it is omitted instead (logged at WARNING).
+SPACE_IMAGE_FIT_MIN_DIMENSION: int = 64
+
 #: ``data:`` URI prefix the publish embeds images under.
 SPACE_IMAGE_DATA_URI_PREFIX: str = "data:image/webp;base64,"
 

@@ -133,6 +133,14 @@ SUPPORTED_BOOTSTRAP_SIG_SUITES: frozenset[str] = frozenset(
 )
 
 
+class BootstrapEnvelopeTooLarge(ValueError):
+    """Raised by :func:`seal_bootstrap_envelope` when the body would seal
+    past :data:`MAX_INNER_BYTES` / :data:`MAX_SEALED_BLOB_BYTES` — a blob
+    the receiver refuses before it even unseals it. The sender gets to
+    shrink the body (or say why it can't) instead of shipping it into a
+    silent drop."""
+
+
 class UnsupportedBootstrapSigSuite(ValueError):
     """Raised when a bootstrap body advertises (or omits) a signature
     suite this build doesn't know. Receivers MUST reject rather than
@@ -141,9 +149,13 @@ class UnsupportedBootstrapSigSuite(ValueError):
 
 
 #: Hard cap on a sealed bootstrap blob. The request is a few hundred
-#: bytes; the ACK carries ``space_meta`` (cover + icon bytes + roster),
-#: which the §D1b snapshot already bounds well under this. Checked
-#: BEFORE the unseal so a flood costs us a length compare, not an AEAD.
+#: bytes; the ACK carries ``space_meta`` (cover + icon bytes + roster).
+#: The images are bounded by ``SPACE_*_BOOTSTRAP_MAX_BYTES``
+#: (``domain/media_constraints``) so the ACK fits, and
+#: :func:`seal_bootstrap_envelope` refuses to produce a blob over this
+#: (:class:`BootstrapEnvelopeTooLarge`) rather than hand the relay one the
+#: receiver would drop. Checked BEFORE the unseal on the receiving side so
+#: a flood costs us a length compare, not an AEAD.
 MAX_SEALED_BLOB_BYTES: int = 256 * 1024
 
 #: Hard cap on the unsealed plaintext, for the same reason one hop in.
@@ -319,10 +331,21 @@ def seal_bootstrap_envelope(
             "substitution)",
         )
     signed = sign_bootstrap_body(body, identity_seed=identity_seed)
+    plaintext = json.dumps(signed).encode("utf-8")
+    if len(plaintext) > MAX_INNER_BYTES:
+        raise BootstrapEnvelopeTooLarge(
+            f"bootstrap body is {len(plaintext)} bytes (> {MAX_INNER_BYTES})",
+        )
     sealed = seal_to_keywrap(
         recipient_keywrap_pub=keywrap_pub,
-        plaintext=json.dumps(signed).encode("utf-8"),
+        plaintext=plaintext,
     )
+    ciphertext_len = len(sealed["ciphertext"])
+    if ciphertext_len > MAX_SEALED_BLOB_BYTES:
+        raise BootstrapEnvelopeTooLarge(
+            f"sealed bootstrap blob is {ciphertext_len} bytes "
+            f"(> {MAX_SEALED_BLOB_BYTES})",
+        )
     # IDENTITY-FREE OUTER SHAPE: only the recipient is named, and only
     # because the relay has to route on something. The sender's
     # instance_id lives inside the ciphertext.
@@ -559,6 +582,7 @@ __all__ = [
     "SUPPORTED_BOOTSTRAP_SIG_SUITES",
     "UnsupportedBootstrapSigSuite",
     "MAX_SEALED_BLOB_BYTES",
+    "BootstrapEnvelopeTooLarge",
     "MAX_INNER_BYTES",
     "TIMESTAMP_SKEW_SECONDS",
     "KIND_REDEEM",

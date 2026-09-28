@@ -218,6 +218,26 @@ def _make_demo_webp() -> bytes:
     return buf.getvalue()
 
 
+def _make_noisy_png(width: int, height: int) -> bytes:
+    """A PNG of pure noise — WebP's worst case, so the space cover the
+    backend transcodes from a 1200x800 one is ~500 KiB, the size that used
+    to push the §D2b invite-link ACK past the connection server's relay
+    cap."""
+    import io
+    import random
+
+    from PIL import Image
+
+    img = Image.frombytes(
+        "RGB",
+        (width, height),
+        random.Random(width * height).randbytes(width * height * 3),
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 # ─── Instance lifecycle ────────────────────────────────────────────────────
 
 
@@ -2541,6 +2561,33 @@ def cmd_gfs_invite_link() -> None:
             "would not be exercised. Re-run from a clean 'up'.",
         )
 
+    # 0b. Give the space a BIG cover. A 1200 px WebP is dimension-capped,
+    #     not byte-capped, and the ACK used to embed it verbatim: a ~500 KiB
+    #     cover sealed past the 256 KiB bootstrap-blob cap, the relay
+    #     answered 413, and e's join timed out (504) after a had already
+    #     spent the token and seated e.
+    s, cover = _upload_file(
+        f"{a_base}/api/spaces/{space_id}/cover",
+        token=a["token"],
+        filename="cover.png",
+        content=_make_noisy_png(1200, 800),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    _must("a sets a large space cover", s, cover)
+    host_cover = _rows(
+        "a",
+        "SELECT length(bytes_webp) FROM space_covers WHERE space_id = ?",
+        (space_id,),
+    )
+    host_cover_len = host_cover[0][0] if host_cover else 0
+    if host_cover_len < 400 * 1024:
+        raise SystemExit(
+            f"gfs-invite-link: a's stored cover is {host_cover_len} bytes — the "
+            "step needs a ~500 KiB one to prove the join survives a big cover.",
+        )
+    print(f"  a's space has a {host_cover_len // 1024} KiB cover")
+
     # 1. Mint a published member link.
     s, link = _request(
         f"{a_base}/api/spaces/{space_id}/invite-tokens",
@@ -2675,6 +2722,36 @@ def cmd_gfs_invite_link() -> None:
     # here: ``/api/spaces`` returns the SPACE's shape and carries no
     # per-user role field, so reading one off it is always ``None``.
     print(f"  e's /api/spaces shows {mine.get('name')!r} (role member) ✓")
+
+    # 5b. The big cover did not sink the join, and e still got art: a
+    #     size-bounded WebP rendition under a's own cover hash.
+    e_cover = _rows(
+        "e",
+        "SELECT bytes_webp, hash FROM space_covers WHERE space_id = ?",
+        (space_id,),
+    )
+    a_hash = _rows("a", "SELECT cover_hash FROM spaces WHERE id = ?", (space_id,))
+    if not e_cover or e_cover[0][0][8:12] != b"WEBP":
+        raise SystemExit(
+            "gfs-invite-link: e holds no WebP cover for the space — the ACK "
+            "shipped none (the big cover should ship as a smaller rendition).",
+        )
+    if len(e_cover[0][0]) > 64 * 1024 or e_cover[0][1] != a_hash[0][0]:
+        raise SystemExit(
+            f"gfs-invite-link: e's cover is {len(e_cover[0][0])} bytes under "
+            f"hash {e_cover[0][1]!r} — expected <= 64 KiB "
+            "(SPACE_COVER_BOOTSTRAP_MAX_BYTES) under a's hash "
+            f"{a_hash[0][0]!r}.",
+        )
+    if not _log_lines_matching("a", "shipping a", offset=a_off):
+        raise SystemExit(
+            "gfs-invite-link: a never logged shrinking the cover for the ACK "
+            "('space snapshot: cover … shipping a N-byte rendition').",
+        )
+    print(
+        f"  e got a {len(e_cover[0][0]) // 1024} KiB rendition of the "
+        f"{host_cover_len // 1024} KiB cover under a's hash ✓",
+    )
 
     # 6. The relay stayed a relay (#677). The routing envelope is
     #    ``{to_instance, sealed}`` — one id and a ciphertext — so the

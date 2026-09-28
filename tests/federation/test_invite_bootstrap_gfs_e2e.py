@@ -14,8 +14,10 @@ crossed it, never saw the token, the space, the users or who was asking.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -23,6 +25,7 @@ import aiohttp
 import orjson
 import pytest
 from aiohttp import web
+from PIL import Image
 from aiohttp.test_utils import TestServer
 
 from socialhome.capabilities_sig import sign_capabilities
@@ -48,13 +51,22 @@ from socialhome.domain.space import JoinMode, SpaceType
 from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.invite_bootstrap import InviteBootstrapHint
+from socialhome.domain.space import SpacePermissionError
+from socialhome.federation import invite_token_redeem as redeem_module
+from socialhome.federation.invite_bootstrap import (
+    KIND_REDEEM_ACK,
+    BootstrapEnvelopeTooLarge,
+    InviteBootstrapHint,
+    seal_bootstrap_envelope,
+)
+from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.federation.gfs_relay_transport import (
     GfsRelayTransport,
     seal_relay_envelope,
 )
 from socialhome.federation.invite_token_redeem import (
+    BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
     SpaceInviteTokenRedeemCoordinator,
 )
 from socialhome.federation.transport import (
@@ -69,6 +81,8 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
+from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
+from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
@@ -112,6 +126,8 @@ class _FakeGfs:
         self.sockets: dict[str, object] = {}
         self.url = ""
         self._tasks: set[asyncio.Task] = set()
+        #: Envelopes refused with 413 — over the real relay's body cap.
+        self.too_large = 0
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -133,7 +149,16 @@ class _FakeGfs:
         )
 
     async def _envelope(self, request: web.Request) -> web.Response:
-        body = await request.json()
+        raw = await request.read()
+        # The real relay's body cap: a blob over it never reaches the
+        # recipient, whatever it carries.
+        if len(raw) > ENVELOPE_MAX_BODY_BYTES:
+            self.too_large += 1
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=ENVELOPE_MAX_BODY_BYTES,
+                actual_size=len(raw),
+            )
+        body = json.loads(raw)
         to_instance = str(body.get("to_instance") or "")
         self.mailbox.append((to_instance, body))
         target = self.sockets.get(to_instance)
@@ -239,6 +264,10 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         own_instance_id=instance_id,
     )
     space_service.attach_federation(federation, federation_repo, remote_members)
+    cover_repo = SqliteSpaceCoverRepo(db)
+    icon_repo = SqliteSpaceIconRepo(db)
+    space_service.attach_cover_repo(cover_repo)
+    space_service.attach_icon_repo(icon_repo)
     # The §D1b/§D2b inbound family, including the SPACE_SESSION_CLEANUP
     # teardown leg the kick path fires.
     private_invites = PrivateSpaceInviteHandler(
@@ -255,6 +284,8 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         space_remote_member_repo=remote_members,
         user_repo=user_repo,
         federation_repo=federation_repo,
+        cover_repo=cover_repo,
+        icon_repo=icon_repo,
     )
     envelope_sender = GfsEnvelopeSender(gfs_service=gfs_service, gfs_repo=gfs_repo)
     coordinator.attach_bootstrap(
@@ -328,6 +359,8 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         space_repo=space_repo,
         federation_repo=federation_repo,
         remote_members=remote_members,
+        cover_repo=cover_repo,
+        icon_repo=icon_repo,
         space_service=space_service,
         coordinator=coordinator,
         user_id=user_id,
@@ -438,6 +471,178 @@ async def test_a_joins_bs_space_through_the_connection_server(households, gfs):
 
     # The token is spent — a second paste of the same link fails.
     assert await b.space_repo.consume_invite_token(TOKEN_MARKER) is None
+
+
+def _noisy_image(width: int, height: int) -> bytes:
+    """A PNG of pure noise — the worst case for WebP, so the cover the
+    host stores from it is several hundred KiB even at 1200 px."""
+    img = Image.frombytes(
+        "RGB",
+        (width, height),
+        random.Random(width * height).randbytes(width * height * 3),
+    )
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+async def test_a_space_with_a_big_cover_is_still_joinable_by_link(households, gfs):
+    """A ~500 KiB cover used to push the sealed ACK past the relay's body
+    cap: the relay refused it, the redeemer waited out its timeout with a
+    504, and the issuer had already spent the token and seated them."""
+    a, b = households
+    space, hint = await _mint_invite(b, gfs.url)
+    await b.space_service.set_cover(
+        space.id,
+        actor_username=b.username,
+        raw_bytes=_noisy_image(1200, 800),
+    )
+    await b.space_service.set_icon(
+        space.id,
+        actor_username=b.username,
+        raw_bytes=_noisy_image(256, 256),
+    )
+    host_cover = await b.cover_repo.get(space.id)
+    assert host_cover is not None
+    assert len(host_cover[0]) > 400 * 1024  # the shape that broke the join
+
+    result = await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=hint,
+    )
+    await gfs.drain()
+
+    assert result["space_id"] == space.id
+    assert gfs.too_large == 0
+    assert await a.space_repo.get_member(space.id, a.user_id) is not None
+    # The joiner still gets art: a size-bounded rendition of the cover and
+    # the icon, each a WebP that decodes, under the host's own hashes.
+    seated = await a.space_repo.get(space.id)
+    assert seated is not None
+    host_space = await b.space_repo.get(space.id)
+    assert seated.cover_hash == host_space.cover_hash
+    for repo in (a.cover_repo, a.icon_repo):
+        got = await repo.get(space.id)
+        assert got is not None
+        webp, _hash = got
+        assert webp[8:12] == b"WEBP"
+        Image.open(io.BytesIO(webp)).verify()
+
+
+def _ack_overflows(*, with_images_only: bool):
+    """A ``seal_bootstrap_envelope`` stand-in whose ACK does not fit — only
+    while it still carries images, or always (a roster too big for the
+    relay on its own). Every other body seals normally."""
+
+    def _seal(**kw):
+        body = kw["body"]
+        if body.get("kind") == KIND_REDEEM_ACK:
+            meta = body.get("space_meta") or {}
+            if not with_images_only or "cover_webp_base64" in meta:
+                raise BootstrapEnvelopeTooLarge("test: over the relay cap")
+        return seal_bootstrap_envelope(**kw)
+
+    return _seal
+
+
+async def test_an_ack_that_still_overflows_drops_the_images_not_the_join(
+    households,
+    gfs,
+    monkeypatch,
+):
+    """Belt and braces: if the bounded ACK still does not fit, the images go
+    and the join goes through."""
+    a, b = households
+    space, hint = await _mint_invite(b, gfs.url)
+    await b.space_service.set_cover(
+        space.id,
+        actor_username=b.username,
+        raw_bytes=_noisy_image(300, 200),
+    )
+    monkeypatch.setattr(
+        redeem_module,
+        "seal_bootstrap_envelope",
+        _ack_overflows(with_images_only=True),
+    )
+
+    result = await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=hint,
+    )
+
+    assert result["space_id"] == space.id
+    assert await a.space_repo.get_member(space.id, a.user_id) is not None
+    assert await a.cover_repo.get(space.id) is None
+
+
+async def test_a_space_too_big_for_the_relay_is_refused_clearly(
+    households,
+    gfs,
+    monkeypatch,
+    caplog,
+):
+    """When not even the image-less ACK fits, the joiner is told so in plain
+    words right away — not a 504 after the timeout."""
+    a, b = households
+    space, hint = await _mint_invite(b, gfs.url)
+    monkeypatch.setattr(
+        redeem_module,
+        "seal_bootstrap_envelope",
+        _ack_overflows(with_images_only=False),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(SpacePermissionError) as exc_info:
+            await a.space_service.redeem_invite_token(
+                TOKEN_MARKER,
+                user_id=a.user_id,
+                issuer_instance_id=b.instance_id,
+                bootstrap=hint,
+            )
+
+    assert str(exc_info.value) == BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
+    assert await a.space_repo.get(space.id) is None
+    assert "does not fit the relay even without images" in caplog.text
+
+
+async def test_a_reply_the_relay_refuses_is_logged_on_the_issuer(
+    households,
+    gfs,
+    caplog,
+):
+    """The redeemer only sees its own timeout, so the issuer's log is the
+    one place a refused ACK shows up — it used to be discarded silently."""
+    a, b = households
+    _space, hint = await _mint_invite(b, gfs.url)
+    a.coordinator._timeout = 0.5
+    real_send = b.coordinator._relay_sender.send_sealed_envelope
+
+    async def _refuse_to_a(*, to_instance_id, envelope, gfs_url=""):
+        if to_instance_id == a.instance_id:
+            return False
+        return await real_send(
+            to_instance_id=to_instance_id,
+            envelope=envelope,
+            gfs_url=gfs_url,
+        )
+
+    b.coordinator._relay_sender = SimpleNamespace(send_sealed_envelope=_refuse_to_a)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(TimeoutError):
+            await a.space_service.redeem_invite_token(
+                TOKEN_MARKER,
+                user_id=a.user_id,
+                issuer_instance_id=b.instance_id,
+                bootstrap=hint,
+            )
+        await gfs.drain()
+
+    assert "the connection server refused our" in caplog.text
 
 
 async def test_the_connection_server_sees_only_a_recipient_and_ciphertext(
