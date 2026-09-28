@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
+from socialhome.federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicFollowRepo,
@@ -474,3 +475,27 @@ async def test_inbound_public_delete_naming_another_author_is_refused(db):
         {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
     )
     assert await moment_repo.get("m-bob") is not None
+
+
+async def test_inbound_public_claim_of_another_authors_bound_id_is_refused(db):
+    """v_36: a moment id commits to its author. A validly signed create or
+    delete naming another author's bound id is neither stored nor
+    tombstoned, so the real author's moment still lands."""
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    theirs = mint_owner_bound_id(MOMENT_KIND, space_id="", owner_user_id="u-owner")
+    delete = _signed_envelope({"moment_id": theirs, "author_user_id": "u-remote"})
+    await inbound.handle(
+        {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
+    )
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create(theirs)},
+        gfs_id="g1",
+    )
+    assert await moment_repo.get(theirs, include_deleted=True) is None
+    assert created == []
+    own = mint_owner_bound_id(MOMENT_KIND, space_id="", owner_user_id="u-remote")
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create(own)},
+        gfs_id="g1",
+    )
+    assert await moment_repo.get(own) is not None

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..crypto import b64url_decode, verify_ed25519
+from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..infrastructure.event_bus import EventBus
@@ -70,6 +71,8 @@ class MomentPublicInbound:
                 env.get("moment_id"),
                 env.get("author_user_id"),
             )
+            return
+        if _moment_id_refused(env, "create"):
             return
         stored = await self._moments.get(str(env["moment_id"]), include_deleted=True)
         if stored is not None and stored.deleted_at is not None:
@@ -128,6 +131,8 @@ class MomentPublicInbound:
         if not moment_id:
             return
         author_user_id = str(env.get("author_user_id") or "")
+        if _moment_id_refused(env, "delete"):
+            return  # never tombstoned: it would refuse the real moment
         stored = await self._moments.get(moment_id, include_deleted=True)
         if stored is not None and stored.author_user_id != author_user_id:
             log.warning(
@@ -167,6 +172,17 @@ class MomentPublicInbound:
             if row.gfs_id == gfs_id:
                 return row.followed_instance_pk
         return None
+
+
+def _moment_id_refused(envelope: dict, what: str) -> bool:
+    """An owner-bound moment id (v_36) claimed for another author."""
+    return owner_bound_id_refused(
+        MOMENT_KIND,
+        str(envelope.get("moment_id") or ""),
+        space_id="",
+        owner_user_id=str(envelope.get("author_user_id") or ""),
+        context=f"moment_public.inbound {what}",
+    )
 
 
 def _verify(envelope: dict, pubkey_hex: str | None) -> bool:
