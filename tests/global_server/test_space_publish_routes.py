@@ -27,7 +27,12 @@ from socialhome.global_server import create_gfs_app
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
 )
+from socialhome.domain.media_constraints import (
+    SPACE_IMAGE_DATA_URI_MAX_CHARS,
+    SPACE_IMAGE_DATA_URI_PREFIX,
+)
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.public import SPACE_PUBLISH_MAX_BODY_BYTES
 
 
 @pytest.fixture
@@ -1164,41 +1169,117 @@ async def test_publish_allow_subscribers_is_covered_by_the_signature(gfs_client)
     assert resp.status == 403
 
 
+def _big_cover_body(space_id: str, *, cover_url: str, icon_url: str = "") -> dict:
+    return {
+        "space_id": space_id,
+        "owning_instance": "owner.home",
+        "name": "Big Cover",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": cover_url,
+        "min_age": 0,
+        "category": "general",
+        "accent_color": "#D2542A",
+        "icon_url": icon_url,
+        "primary_color": "#D2542A",
+    }
+
+
+def _max_image_uri(fill: str = "A") -> str:
+    """A ``data:`` URI exactly at the shared per-image bound."""
+    return SPACE_IMAGE_DATA_URI_PREFIX + fill * (
+        SPACE_IMAGE_DATA_URI_MAX_CHARS - len(SPACE_IMAGE_DATA_URI_PREFIX)
+    )
+
+
 async def test_publish_space_with_a_large_cover_is_not_rejected_as_too_large(
     gfs_client,
 ):
-    """A publish carrying a big cover data URI must be READ, not bounced.
+    """A publish carrying a maximal cover + icon must be READ, not bounced.
 
     The publish embeds the space's cover + icon as base64 ``data:`` URIs; a
     1200px WebP cover can base64 to over a megabyte. aiohttp's default 1 MiB
     ``client_max_size`` rejected that with "400 Invalid JSON body: Content
     Too Large" before the handler ran, so a space with a cover simply could
-    not be published. The GFS now raises the limit
-    (``GFS_MAX_REQUEST_BYTES``); a ~2 MiB body reaches the handler and
-    publishes.
+    not be published. The route now reads under its own
+    ``SPACE_PUBLISH_MAX_BODY_BYTES``; a body with BOTH images at the shared
+    bound (~4 MiB) publishes and both images are stored intact.
     """
-    from socialhome.global_server.server import GFS_MAX_REQUEST_BYTES
-
-    assert GFS_MAX_REQUEST_BYTES > 1024 * 1024  # bigger than aiohttp's default
     seed, _pk = await _register_owner(gfs_client.server.app, auto_accept=True)
-    big_cover = "data:image/webp;base64," + "A" * (2 * 1024 * 1024)
+    cover, icon = _max_image_uri("A"), _max_image_uri("B")
     body = _sign_publish_body(
-        {
-            "space_id": "sp-big",
-            "owning_instance": "owner.home",
-            "name": "Big Cover",
-            "description": "",
-            "about_markdown": "",
-            "cover_url": big_cover,
-            "min_age": 0,
-            "category": "general",
-            "accent_color": "#D2542A",
-            "icon_url": "",
-            "primary_color": "#D2542A",
-        },
-        seed=seed,
+        _big_cover_body("sp-big", cover_url=cover, icon_url=icon), seed=seed
     )
+    assert len(json.dumps(body)) > 1024 * 1024  # past aiohttp's default
     resp = await gfs_client.post("/gfs/spaces/sp-big/publish", json=body)
     # The whole point: it is READ and accepted, not 400 "Content Too Large".
     assert resp.status == 200, await resp.text()
     assert (await resp.json())["status"] == "active"
+    stored = await gfs_client.server.app[gfs_fed_repo_key].get_space("sp-big")
+    assert stored.cover_url == cover
+    assert stored.icon_url == icon
+
+
+async def test_publish_space_drops_an_image_over_the_shared_bound(gfs_client):
+    """An image past ``SPACE_IMAGE_DATA_URI_MAX_CHARS`` is not stored — the
+    GFS keeps the same bound the household embeds under, so its DB can't be
+    bloated by an oversized image — but the listing itself still publishes
+    (a truncated data URI would be a broken image, so it is dropped)."""
+    seed, _pk = await _register_owner(gfs_client.server.app, auto_accept=True)
+    body = _sign_publish_body(
+        _big_cover_body("sp-over", cover_url=_max_image_uri() + "A"), seed=seed
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-over/publish", json=body)
+    assert resp.status == 200, await resp.text()
+    stored = await gfs_client.server.app[gfs_fed_repo_key].get_space("sp-over")
+    assert stored is not None
+    assert stored.cover_url == ""
+    assert stored.name == "Big Cover"
+
+
+async def test_publish_space_body_over_the_route_cap_is_413(gfs_client):
+    """The raised ceiling is still a ceiling: a body past
+    ``SPACE_PUBLISH_MAX_BODY_BYTES`` is refused with 413 before it is parsed
+    — whether it declares its length or streams chunked."""
+    await _register_owner(gfs_client.server.app, auto_accept=True)
+    oversized = b'{"pad":"' + b"A" * SPACE_PUBLISH_MAX_BODY_BYTES + b'"}'
+    resp = await gfs_client.post(
+        "/gfs/spaces/sp-huge/publish",
+        data=oversized,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 413
+
+    async def _chunks():
+        for off in range(0, len(oversized), 256 * 1024):
+            yield oversized[off : off + 256 * 1024]
+
+    resp = await gfs_client.post(
+        "/gfs/spaces/sp-huge/publish",
+        data=_chunks(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 413
+
+
+async def test_publish_space_non_object_body_is_400(gfs_client):
+    resp = await gfs_client.post("/gfs/spaces/sp-x/publish", json=["not", "a", "dict"])
+    assert resp.status == 400
+
+
+async def test_other_gfs_routes_keep_the_default_body_limit(gfs_client):
+    """The larger ceiling is scoped to the publish route: every other GFS
+    route (here the unauthenticated ``/gfs/register``) still refuses a body
+    past aiohttp's 1 MiB default rather than buffering it."""
+    big = {"instance_id": "x", "pad": "A" * (2 * 1024 * 1024)}
+    resp = await gfs_client.post("/gfs/register", json=big)
+    assert resp.status in (400, 413)
+    assert "Too Large" in await resp.text()
+
+
+def test_space_publish_cap_fits_two_maximal_images_and_metadata():
+    """The household's embed bound and the GFS route cap agree: two maximal
+    images plus generous metadata fit, so art can never sink a publish."""
+    assert 2 * SPACE_IMAGE_DATA_URI_MAX_CHARS + 512 * 1024 < (
+        SPACE_PUBLISH_MAX_BODY_BYTES
+    )

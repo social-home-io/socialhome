@@ -31,6 +31,7 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..crypto import b64url_decode, verify_ed25519
+from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import (
     normalize_category,
     normalize_join_mode,
@@ -57,6 +58,7 @@ MAX_ABOUT_MARKDOWN_CHARS: int = 8000
 #: Max display_name length accepted by ``update_instance`` (chars). Mirrors
 #: the household-name bound on the HFS side.
 MAX_DISPLAY_NAME_CHARS: int = 80
+
 
 #: Max simultaneous in-flight subscriber deliveries for ONE relayed event.
 #: Sequential fan-out let a single accepted (and anonymously replayable)
@@ -142,6 +144,24 @@ INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
 #: seed-holder on ITS reconnect) still backstops them, so the cap costs latency,
 #: never correctness.
 MAX_RECONNECT_NOTIFIES: int = 50
+
+
+def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | None:
+    """*uri*, or ``""`` when it exceeds ``SPACE_IMAGE_DATA_URI_MAX_CHARS``.
+
+    Applied AFTER the publish signature verifies over the full value. Logged
+    at WARNING so an operator can see why a listing has no art.
+    """
+    if uri and len(uri) > SPACE_IMAGE_DATA_URI_MAX_CHARS:
+        log.warning(
+            "GFS: dropping oversized %s for space %s (%d chars > %d)",
+            kind,
+            space_id,
+            len(uri),
+            SPACE_IMAGE_DATA_URI_MAX_CHARS,
+        )
+        return ""
+    return uri
 
 
 def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
@@ -1208,6 +1228,12 @@ class GfsFederationService:
         # reject so a slightly-long About still publishes.
         if about_markdown and len(about_markdown) > MAX_ABOUT_MARKDOWN_CHARS:
             about_markdown = about_markdown[:MAX_ABOUT_MARKDOWN_CHARS]
+        # Same for the embedded cover / icon ``data:`` URIs, against the bound
+        # the household side embeds under (``SPACE_IMAGE_EMBED_MAX_BYTES``).
+        # A truncated data URI is a broken image, so an oversized one is
+        # dropped instead — the space still lists, just without that art.
+        cover_url = _bounded_image_uri(cover_url, space_id=space_id, kind="cover")
+        icon_url = _bounded_image_uri(icon_url, space_id=space_id, kind="icon")
         existing = await self._repo.get_space(space_id)
         # Owner is immutable after first publish. space_id is a public,
         # owner-chosen UUID that travels in discovery links, so a registered

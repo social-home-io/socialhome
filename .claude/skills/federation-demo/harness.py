@@ -868,15 +868,19 @@ def cmd_gfs_cluster() -> None:
     # Each registered instance signs a publish (the GFS verifies it against
     # that instance's key) for a fresh space, fired across both node ports so
     # the two processes' ``upsert_space`` writes collide on the shared DB.
+    big_covers: dict[int, tuple[str, str]] = {}
+
     def _publish(i: int) -> tuple[int, int]:
         iid, seed = clients[i]
         space_id = generate_identity_keypair().public_key.hex()[:32]
         authority_pk = generate_identity_keypair().public_key.hex()
         # A couple of publishes carry a ~1.5 MiB cover data URI — the shape
-        # that used to be rejected by the GFS's 1 MiB default before
-        # ``client_max_size`` was raised (a space with a cover could not
-        # publish). Exercises that on the real cluster, not just a unit test.
+        # aiohttp's 1 MiB default body limit used to bounce with "400 Content
+        # Too Large" (a space with a cover could not publish). The publish
+        # route now reads under its own ``SPACE_PUBLISH_MAX_BODY_BYTES``.
+        # Exercises that on the real cluster, not just a unit test.
         cover = ("data:image/webp;base64," + "A" * (1_500_000)) if i < 2 else ""
+        big_covers[i] = (space_id, cover)
         body = {
             "space_id": space_id,
             "owning_instance": iid,
@@ -923,6 +927,22 @@ def cmd_gfs_cluster() -> None:
         f"  {n} concurrent space publishes across all nodes — all accepted, "
         "0 'database is locked' ✓"
     )
+
+    # 3c. The large-cover publishes were stored intact, and a DIFFERENT node
+    # serves them (shared DB) — the cover is not silently dropped or cut.
+    for i in (0, 1):
+        space_id, cover = big_covers[i]
+        other = urls[(i + 1) % len(urls)]
+        code, detail = _request(f"{other}/gfs/spaces/{space_id}", timeout=10.0)
+        got = (detail or {}).get("cover_url") if isinstance(detail, dict) else None
+        if code != 200 or got != cover:
+            _gfs_cluster_down(preserve_logs=True)
+            raise SystemExit(
+                f"gfs-cluster: large-cover space {space_id} via {other} → "
+                f"HTTP {code}, cover_url {len(got or '')} chars (want "
+                f"{len(cover)}) — the ~1.5 MiB cover did not survive the publish.",
+            )
+    print("  ~1.5 MiB cover publishes stored intact, served by another node ✓")
 
     # 4. Cross-node visibility: a client registered via one node is in the
     # shared DB every other node reads.

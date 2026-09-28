@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict
 
@@ -11,7 +10,7 @@ from aiohttp import web
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
-from ..public import PUBLISH_MAX_BODY_BYTES
+from ..public import PUBLISH_MAX_BODY_BYTES, SPACE_PUBLISH_MAX_BODY_BYTES
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -26,11 +25,6 @@ _SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
 #: reached the SQLite bind and produced a 500 + ERROR traceback on every
 #: unauthenticated hit — a log-volume DoS.
 _MAX_WIRE_ID_CHARS = 128
-
-#: Read granularity for the bounded ``/gfs/publish`` body read. Large enough
-#: that a legitimate payload is a handful of chunks, small enough that an
-#: oversized body is refused within one chunk of the cap.
-_BODY_CHUNK_BYTES = 64 * 1024
 
 
 def _require_short_str(value: object, field: str) -> str:
@@ -258,7 +252,9 @@ class PublishView(GfsBaseView):
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_federation_key)
         session = self.request.app.get(K.gfs_http_session_key)
-        body = await self._bounded_body()
+        # Unauthenticated until the authority signature inside the payload
+        # verifies, so the bytes are bounded BEFORE they are buffered.
+        body = await self.bounded_json(PUBLISH_MAX_BODY_BYTES)
         try:
             space_id = body["space_id"]
             event_type = body["event_type"]
@@ -290,40 +286,6 @@ class PublishView(GfsBaseView):
         return web.json_response(
             {"status": "published", "delivered_to": len(delivered)},
         )
-
-    async def _bounded_body(self) -> dict:
-        """Read + parse the JSON body under :data:`PUBLISH_MAX_BODY_BYTES`.
-
-        The endpoint is unauthenticated until the authority signature inside
-        the payload verifies, so the bytes are bounded BEFORE they are buffered
-        or parsed: a declared ``Content-Length`` over the cap is refused
-        outright, and the read itself is capped so a chunked body (which
-        declares no length at all) cannot exceed it either.
-        """
-        declared = self.request.content_length
-        if declared is not None and declared > PUBLISH_MAX_BODY_BYTES:
-            raise web.HTTPRequestEntityTooLarge(
-                max_size=PUBLISH_MAX_BODY_BYTES,
-                actual_size=declared,
-            )
-        raw = bytearray()
-        # ``StreamReader.read(n)`` returns only what is buffered, so the cap is
-        # enforced by accumulating chunk by chunk and bailing the moment the
-        # total crosses it — the rest of the body is never buffered.
-        async for chunk in self.request.content.iter_chunked(_BODY_CHUNK_BYTES):
-            raw += chunk
-            if len(raw) > PUBLISH_MAX_BODY_BYTES:
-                raise web.HTTPRequestEntityTooLarge(
-                    max_size=PUBLISH_MAX_BODY_BYTES,
-                    actual_size=len(raw),
-                )
-        try:
-            parsed = json.loads(raw)
-        except ValueError as exc:
-            raise web.HTTPBadRequest(reason=f"Invalid JSON body: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise web.HTTPBadRequest(reason="Invalid JSON body: expected an object")
-        return parsed
 
 
 class SubscribeView(GfsBaseView):
@@ -484,7 +446,12 @@ class SpacePublishView(GfsBaseView):
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_federation_key)
         space_id = self.request.match_info["space_id"]
-        body = await self.body_or_400()
+        # A per-route cap, not the app-wide ``client_max_size``: the body
+        # embeds the cover + icon as ``data:`` URIs and legitimately runs past
+        # aiohttp's 1 MiB default (which bounced a space WITH a cover as "400
+        # Content Too Large"). Bounded before buffering, so the ceiling is
+        # raised for this route only — every other GFS route keeps 1 MiB.
+        body = await self.bounded_json(SPACE_PUBLISH_MAX_BODY_BYTES)
         try:
             owning_instance = body["owning_instance"]
             name = body["name"]

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 import qrcode  # type: ignore[import-untyped]
 from aiohttp import web
 
+from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import SPACE_CATEGORIES
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
@@ -94,6 +95,17 @@ RATE_LIMIT_WINDOW_SECONDS: float = 60.0
 #: base64-expanded that is ~55 KiB, so 256 KiB leaves ~5× headroom while
 #: keeping a flood's per-request memory cost trivial.
 PUBLISH_MAX_BODY_BYTES: int = 256 * 1024
+
+#: Hard body cap on ``POST /gfs/spaces/{id}/publish``, enforced by a bounded
+#: read before the bytes are buffered or parsed. The publish embeds the
+#: space's cover + icon as base64 ``data:`` URIs (each at most
+#: ``SPACE_IMAGE_DATA_URI_MAX_CHARS``, ~2 MiB), which overran aiohttp's 1 MiB
+#: app-wide default and bounced a space WITH a cover as "400 Content Too
+#: Large" before the handler ran. Two maximal images plus 1 MiB for the rest
+#: of the metadata. Scoped to this route (and ``/cluster/sync``, which
+#: replicates the stored listing to sibling nodes) — every other GFS route
+#: keeps the 1 MiB default.
+SPACE_PUBLISH_MAX_BODY_BYTES: int = 2 * SPACE_IMAGE_DATA_URI_MAX_CHARS + 1024 * 1024
 
 
 # ─── Client IP resolution ───────────────────────────────────────────────

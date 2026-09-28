@@ -174,3 +174,23 @@ SPACE_COVER_MAX_DIMENSION: int = 1200
 #: Space icon (avatar) resized to this longest side — small, like a
 #: profile picture, since it renders as a circular chip.
 SPACE_ICON_MAX_DIMENSION: int = 256
+
+#: Largest cover / icon (raw WebP bytes) a household embeds in a GFS space
+#: publish, and the largest the GFS stores. The publish ships both images as
+#: base64 ``data:`` URIs so the GFS's public page renders them on its own
+#: origin; a dimension-capped WebP (1200 px cover at the thumbnail quality) is
+#: typically a few hundred KiB, so this only bites a pathological image (a
+#: noisy RGBA cover can reach ~2.3 MB). An image over it is left OUT of the
+#: listing (the space still publishes, just without that art) rather than
+#: sinking the whole publish. Shared by both ends so the household never
+#: sends what the GFS would refuse to keep.
+SPACE_IMAGE_EMBED_MAX_BYTES: int = 1536 * 1024
+
+#: ``data:`` URI prefix the publish embeds images under.
+SPACE_IMAGE_DATA_URI_PREFIX: str = "data:image/webp;base64,"
+
+#: Longest embedded-image ``data:`` URI: the prefix plus the base64 (4/3,
+#: padded) of :data:`SPACE_IMAGE_EMBED_MAX_BYTES`.
+SPACE_IMAGE_DATA_URI_MAX_CHARS: int = len(SPACE_IMAGE_DATA_URI_PREFIX) + 4 * -(
+    -SPACE_IMAGE_EMBED_MAX_BYTES // 3
+)

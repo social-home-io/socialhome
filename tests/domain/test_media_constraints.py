@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+
 from socialhome.domain.media_constraints import (
+    SPACE_IMAGE_DATA_URI_MAX_CHARS,
+    SPACE_IMAGE_DATA_URI_PREFIX,
+    SPACE_IMAGE_EMBED_MAX_BYTES,
     CAPTION_MAX,
     IMAGE_ACCEPTED_MIMES,
     IMAGE_MAX_DIMENSION,
@@ -59,3 +64,14 @@ def test_shared_constants():
     # lower quality; any higher and the constant is redundant.
     assert 1 <= THUMBNAIL_WEBP_QUALITY < IMAGE_WEBP_QUALITY
     assert CAPTION_MAX == 300
+
+
+def test_space_image_embed_bound():
+    """The data-URI bound is exactly the prefix + base64 of the byte bound,
+    so the GFS stores precisely what a household embeds and nothing more."""
+    uri = SPACE_IMAGE_DATA_URI_PREFIX + base64.b64encode(
+        b"\0" * SPACE_IMAGE_EMBED_MAX_BYTES
+    ).decode("ascii")
+    assert len(uri) == SPACE_IMAGE_DATA_URI_MAX_CHARS
+    # Far above a real dimension-capped cover, yet bounded.
+    assert 512 * 1024 < SPACE_IMAGE_EMBED_MAX_BYTES <= 2 * 1024 * 1024

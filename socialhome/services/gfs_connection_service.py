@@ -62,6 +62,10 @@ import aiohttp
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
+from ..domain.media_constraints import (
+    SPACE_IMAGE_DATA_URI_PREFIX,
+    SPACE_IMAGE_EMBED_MAX_BYTES,
+)
 from ..domain.space import normalize_category, normalize_join_mode
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
@@ -845,14 +849,11 @@ class GfsConnectionService:
                 accent = theme.accent_color or accent
         return primary, accent
 
-    #: Largest cover/icon (raw WebP bytes) the publish body will embed. Kept
-    #: comfortably under the GFS request limit (``GFS_MAX_REQUEST_BYTES``, 8
-    #: MiB) so cover + icon + metadata can never overrun it and fail the whole
-    #: publish. A dimension-capped cover (``SPACE_COVER_MAX_DIMENSION`` = 1200
-    #: px) is far smaller than this; an image over it is simply left out of
-    #: the directory listing — the space still publishes, just without art —
-    #: rather than sinking the publish with a "Content Too Large".
-    _MAX_EMBEDDED_IMAGE_BYTES: int = 3 * 1024 * 1024
+    #: Largest cover/icon (raw WebP bytes) the publish body will embed — the
+    #: shared protocol bound the GFS also stores under. Two images at this
+    #: size, base64'd, plus metadata stay under the GFS's per-route
+    #: ``SPACE_PUBLISH_MAX_BODY_BYTES``, so art can never sink the publish.
+    _MAX_EMBEDDED_IMAGE_BYTES: int = SPACE_IMAGE_EMBED_MAX_BYTES
 
     async def _image_data_uri(self, repo, space, *, icon: bool = False) -> str:
         """A ``data:image/webp;base64,…`` URI for the space's cover/icon, or
@@ -861,7 +862,9 @@ class GfsConnectionService:
 
         Bounded: an image whose raw bytes exceed
         :data:`_MAX_EMBEDDED_IMAGE_BYTES` is omitted (``""``) so it cannot
-        push the publish body past the GFS request limit and fail the publish.
+        push the publish body past the GFS request limit and fail the publish;
+        the omission is logged at WARNING so an operator can see why the
+        listing has no art.
         """
         has = getattr(space, "icon_hash" if icon else "cover_hash", None)
         if repo is None or not has:
@@ -880,7 +883,7 @@ class GfsConnectionService:
                 self._MAX_EMBEDDED_IMAGE_BYTES,
             )
             return ""
-        return "data:image/webp;base64," + base64.b64encode(webp).decode("ascii")
+        return SPACE_IMAGE_DATA_URI_PREFIX + base64.b64encode(webp).decode("ascii")
 
     async def unpublish_space(self, space_id: str, gfs_id: str) -> None:
         """Unpublish a space from a GFS.
