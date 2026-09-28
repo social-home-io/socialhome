@@ -4354,7 +4354,7 @@ def cmd_verify() -> None:
             ]
             needle = state["bazaar_listing_id"]
             if any(needle in (m_body or "") for m_body in bodies):
-                print(f"  b received a→b bazaar-inquiry DM ✓")
+                print("  b received a→b bazaar-inquiry DM ✓")
             else:
                 failures.append(
                     f"b: bazaar-inquiry DM body missing listing id "
@@ -5627,7 +5627,7 @@ def cmd_visibility() -> None:
             f"visibility precheck: ada {ada_user_id} not yet visible to Beta "
             f"(saw {sorted(seen)!r}) — federation may not have settled yet",
         )
-    print(f"  pre-check: Beta sees ada via /api/friends ✓")
+    print("  pre-check: Beta sees ada via /api/friends ✓")
 
     # 3b. Resolve Bob's user_id from Alpha's federated view (Alpha
     #     mirrors Beta's users in ``remote_users`` after the USERS_SYNC
@@ -5714,7 +5714,7 @@ def cmd_visibility() -> None:
             f"visibility precheck: Beta should have ada's pre-hide "
             f"highlight before we hide her — saw {sorted(beta_pre_caps)!r}",
         )
-    print(f"  pre-hide: Beta has ada's highlight ✓ (cascade-target seeded)")
+    print("  pre-hide: Beta has ada's highlight ✓ (cascade-target seeded)")
 
     # 4. Hide ada from Beta.
     s, body = _request(
@@ -5729,7 +5729,7 @@ def cmd_visibility() -> None:
         raise SystemExit(
             f"visibility: hide PATCH did not flip ada to hidden — got {body!r}",
         )
-    print(f"  a hid ada from Beta — USER_REMOVED fan-out queued")
+    print("  a hid ada from Beta — USER_REMOVED fan-out queued")
 
     # 5. Wait for USER_REMOVED to land and Beta's mirror to drop ada.
     time.sleep(4)
@@ -5739,7 +5739,7 @@ def cmd_visibility() -> None:
             f"visibility: Beta still sees ada {ada_user_id} after hide — "
             f"saw {sorted(seen_after_hide)!r}",
         )
-    print(f"  post-hide: Beta no longer lists ada ✓")
+    print("  post-hide: Beta no longer lists ada ✓")
 
     # 5a. Cascade purge. USER_REMOVED inbound on Beta hard-deletes
     #     every moment / highlight authored by ada plus every DM
@@ -5934,7 +5934,7 @@ def cmd_visibility() -> None:
         body={"updates": [{"user_id": ada_user_id, "visible": True}]},
     )
     _must("unhide ada(a→b)", s, body)
-    print(f"  a re-exposed ada to Beta — USER_UPDATED fan-out queued")
+    print("  a re-exposed ada to Beta — USER_UPDATED fan-out queued")
 
     # 7. Wait for USER_UPDATED to land and Beta to repopulate the row.
     #    Outbox redelivery + USER_UPDATED inbound + remote_users insert
@@ -5951,7 +5951,7 @@ def cmd_visibility() -> None:
             f"visibility: Beta still doesn't see ada after un-hide within 30s — "
             f"saw {sorted(seen_after_show)!r}",
         )
-    print(f"  post-unhide: Beta sees ada again ✓")
+    print("  post-unhide: Beta sees ada again ✓")
 
     state["visibility_ran"] = True
     _save(state)
@@ -6433,7 +6433,6 @@ def cmd_invite_redeem_routed() -> None:
         raise SystemExit("run 'up' first")
     c = state["instances"]["c"]
     d = state["instances"]["d"]
-    b = state["instances"]["b"]
 
     # 1. d creates a private space + mints a token.
     s, space = _request(
@@ -6845,7 +6844,6 @@ def cmd_space_post_routed() -> None:
     if not space_id:
         raise SystemExit("run 'remote-invite-routed' first to seat dave")
     c = state["instances"]["c"]
-    d = state["instances"]["d"]
 
     # Truncate b's log so the post-run scan is bounded to this step.
     b_log_path = _instance_dir("b") / "log.txt"
@@ -6942,7 +6940,6 @@ def cmd_space_media_blob() -> None:
             "space-media-blob: run 'remote-invite-routed' first to seat dave",
         )
     c = state["instances"]["c"]
-    d = state["instances"]["d"]
 
     # Truncate b's log so the post-run scan is bounded to this
     # step. b is the mesh relay between c and d; the encryption
@@ -7028,7 +7025,7 @@ def cmd_space_media_blob() -> None:
             f"d has {len(d_bytes)}B",
         )
     print(f"  d.media has {filename} ({len(d_bytes)} bytes) ✓")
-    print(f"  bytes match between c and d ✓")
+    print("  bytes match between c and d ✓")
 
     # 6. The mesh relay (b) MUST never have dispatched the inner
     #    SPACE_MEDIA_BLOB — same encryption invariant the
@@ -7081,7 +7078,6 @@ def cmd_space_gallery_media_blob() -> None:
             "space-gallery-media-blob: run 'remote-invite-routed' first",
         )
     c = state["instances"]["c"]
-    d = state["instances"]["d"]
 
     b_log_path = _instance_dir("b") / "log.txt"
     b_log_before_size = b_log_path.stat().st_size if b_log_path.exists() else 0
