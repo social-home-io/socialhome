@@ -3,8 +3,8 @@
  *
  * Drops a single marker on the existing LocationMap (height 160 for
  * feed-card density) and shows the optional label + a 4dp coord
- * summary. The "Open in OSM" link mirrors LocationMessage so the user
- * can pop the pin into a full map in a new tab.
+ * summary. The "Open in OSM" link lets the user pop the pin into a full
+ * map in a new tab.
  *
  * No live updates — location posts are one-shot pins. The composer's
  * LocationPicker captured the coords at post time; this component is

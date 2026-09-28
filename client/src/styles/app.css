@@ -5181,25 +5181,6 @@ body.sh-dm-thread-open .sh-messages {
   40%           { opacity: 1; }
 }
 
-/* Composer for DMs */
-.sh-dm-composer-full { border-top: 1px solid var(--sh-border); padding: var(--sh-space-sm); background: var(--sh-bg); }
-.sh-dm-input-row {
-  display: flex;
-  gap: var(--sh-space-xs);
-  align-items: flex-end;
-}
-.sh-dm-input-row input,
-.sh-dm-input-row textarea {
-  flex: 1;
-  min-height: 40px;
-  max-height: 150px;
-  resize: none;
-  padding: var(--sh-space-xs) var(--sh-space-md);
-}
-.sh-dm-type-picker {
-  display: inline-flex;
-  gap: 2px;
-}
 .sh-attach-btn, .sh-icon-btn {
   background: transparent;
   border: 1px solid transparent;
@@ -5215,27 +5196,6 @@ body.sh-dm-thread-open .sh-messages {
   transition: background var(--sh-transition-fast), color var(--sh-transition-fast);
 }
 .sh-attach-btn:hover, .sh-icon-btn:hover { background: var(--sh-bg-secondary); color: var(--sh-primary); }
-.sh-dm-media-preview {
-  display: flex;
-  gap: var(--sh-space-xs);
-  padding: var(--sh-space-xs);
-  border-bottom: 1px solid var(--sh-border);
-  flex-wrap: wrap;
-}
-.sh-dm-thumb {
-  position: relative;
-  width: 64px;
-  height: 64px;
-  border-radius: var(--sh-radius-md);
-  overflow: hidden;
-  background: var(--sh-bg-secondary);
-  border: 1px solid var(--sh-border);
-}
-.sh-dm-thumb img, .sh-dm-thumb video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
 
 /* Inline call event row inside a thread */
 .sh-call-event {
@@ -8859,9 +8819,6 @@ body.sh-dm-thread-open .sh-messages {
   border-radius: var(--sh-radius-md);
   margin-bottom: var(--sh-space-md);
 }
-
-.sh-countdown { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-weight: 600; }
-.sh-countdown--ended { color: var(--sh-text-muted); text-decoration: line-through; }
 
 /* Read-receipts */
 .sh-read-receipt {
@@ -13255,12 +13212,6 @@ a.sh-welcome-card:hover {
   text-align: center;
 }
 
-/* Location message */
-.sh-location-msg {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
 .sh-location-card {
   display: flex;
   gap: var(--sh-space-sm);
@@ -13269,8 +13220,6 @@ a.sh-welcome-card:hover {
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
 }
-.sh-location-pin { font-size: 1.5rem; color: var(--sh-danger); }
-.sh-location-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .sh-location-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -13315,51 +13264,6 @@ a.sh-welcome-card:hover {
   padding: var(--sh-space-md) 0;
   text-align: center;
 }
-
-/* Mention */
-.sh-mention {
-  color: var(--sh-primary);
-  background: var(--sh-primary-soft);
-  padding: 1px 6px;
-  border-radius: var(--sh-radius-sm);
-  font-weight: 600;
-  text-decoration: none;
-}
-.sh-mention--user {}
-.sh-mention--here, .sh-mention-badge--here { color: var(--sh-warning); background: color-mix(in srgb, var(--sh-warning) 15%, transparent); }
-.sh-mention-badge {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--sh-radius-full);
-  font-size: 0.65rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  margin-left: var(--sh-space-xs);
-  background: var(--sh-primary);
-  color: #fff;
-  letter-spacing: 0.05em;
-}
-.sh-mention-dropdown {
-  position: absolute;
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-lg);
-  padding: var(--sh-space-xs);
-  min-width: 220px;
-  max-height: 240px;
-  overflow-y: auto;
-  z-index: var(--sh-z-dropdown);
-}
-.sh-mention-option {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-xs) var(--sh-space-sm);
-  cursor: pointer;
-  border-radius: var(--sh-radius-sm);
-}
-.sh-mention-option:hover { background: var(--sh-bg-secondary); }
 
 /* Slack-style ``:shortcode`` autocomplete shown as the user types. */
 .sh-emoji-autocomplete {
@@ -13616,37 +13520,6 @@ a.sh-welcome-card:hover {
   text-decoration: none;
 }
 
-/* Context menu (right-click) */
-.sh-context-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--sh-z-dropdown);
-}
-.sh-context-menu {
-  position: absolute;
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-lg);
-  padding: var(--sh-space-xs);
-  min-width: 200px;
-  animation: sh-fade-in 120ms var(--sh-ease-out);
-}
-.sh-context-item {
-  display: block;
-  padding: var(--sh-space-xs) var(--sh-space-sm);
-  border-radius: var(--sh-radius-sm);
-  cursor: pointer;
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text);
-  border: none;
-  background: transparent;
-  text-align: left;
-  width: 100%;
-}
-.sh-context-item:hover { background: var(--sh-bg-secondary); }
-.sh-context-item--danger { color: var(--sh-danger); }
-
 /* QuickSwitcher (⌘K) */
 .sh-switcher-overlay {
   position: fixed;
@@ -13689,48 +13562,6 @@ a.sh-welcome-card:hover {
 }
 .sh-switcher-item:hover { background: var(--sh-bg-secondary); }
 
-/* Keyboard shortcuts help */
-.sh-shortcuts-help {
-  padding: var(--sh-space-md);
-  background: var(--sh-bg-secondary);
-  border-radius: var(--sh-radius-md);
-}
-.sh-shortcuts-list {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: var(--sh-space-xs) var(--sh-space-md);
-}
-.sh-shortcuts-list kbd {
-  font-family: var(--sh-font-family-mono);
-  padding: 2px 8px;
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border-strong);
-  border-bottom-width: 2px;
-  border-radius: var(--sh-radius-sm);
-  font-size: var(--sh-font-size-xs);
-}
-
-/* WebSocket indicator */
-.sh-ws-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sh-space-xs);
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-muted);
-}
-.sh-ws-indicator::before {
-  content: '';
-  width: 8px;
-  height: 8px;
-  border-radius: var(--sh-radius-full);
-  background: var(--sh-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-success) 25%, transparent);
-}
-.sh-ws-indicator.sh-ws--disconnected::before {
-  background: var(--sh-danger);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-danger) 25%, transparent);
-  animation: sh-pulse-slow 1.5s infinite;
-}
 @keyframes sh-pulse-slow {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.4; }
@@ -14053,22 +13884,6 @@ a.sh-welcome-card:hover {
 .sh-skeleton-lines { display: flex; flex-direction: column; gap: 4px; }
 .sh-skeleton-body { display: flex; flex-direction: column; gap: 4px; margin-top: var(--sh-space-sm); }
 
-/* Link preview */
-.sh-link-preview {
-  display: flex;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm);
-  background: var(--sh-bg-secondary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  text-decoration: none;
-  color: inherit;
-  margin-top: var(--sh-space-sm);
-}
-.sh-link-preview:hover { border-color: var(--sh-primary); text-decoration: none; }
-.sh-link-preview-img { width: 96px; aspect-ratio: 1; object-fit: cover; border-radius: var(--sh-radius-sm); flex-shrink: 0; }
-.sh-link-preview-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-
 /* Profile card popover */
 .sh-profile-card {
   background: var(--sh-bg);
@@ -14080,18 +13895,6 @@ a.sh-welcome-card:hover {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-sm);
-}
-.sh-profile-header { display: flex; align-items: center; gap: var(--sh-space-sm); }
-.sh-profile-bio { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
-.sh-profile-actions { display: flex; gap: var(--sh-space-xs); }
-.sh-profile-close {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--sh-text-muted);
-  margin-left: auto;
-  font-size: 1.25rem;
-  line-height: 1;
 }
 
 /* Switch (on/off) */
@@ -14332,7 +14135,6 @@ a.sh-welcome-card:hover {
 
 /* Diff inline */
 .sh-diff { font-family: var(--sh-font-family-mono); font-size: var(--sh-font-size-sm); line-height: 1.5; white-space: pre-wrap; }
-.sh-diff-sign { color: var(--sh-text-muted); padding-right: var(--sh-space-xs); }
 
 /* Confirm dialog actions */
 .sh-confirm-message { padding: var(--sh-space-md) 0; color: var(--sh-text); }
@@ -14378,29 +14180,6 @@ a.sh-welcome-card:hover {
   border: 2px solid var(--sh-bg);
   box-shadow: var(--sh-shadow-sm);
 }
-.sh-theme-toggle { display: inline-flex; gap: 0; }
-
-/* Skin picker (emoji skin tone) */
-.sh-skin-picker {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--sh-bg-secondary);
-  border-radius: var(--sh-radius-full);
-}
-.sh-skin-btn {
-  background: transparent;
-  border: none;
-  font-size: 1.1rem;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--sh-radius-full);
-  cursor: pointer;
-}
-.sh-skin-btn--active {
-  background: var(--sh-primary);
-  box-shadow: var(--sh-shadow-sm);
-}
 
 /* Draft banner + edit-lock banner + permission banner */
 .sh-draft-banner, .sh-permission-banner, .sh-flag-warning, .sh-restricted-banner {
@@ -14413,8 +14192,6 @@ a.sh-welcome-card:hover {
 }
 .sh-permission-banner { border-color: var(--sh-primary); background: color-mix(in srgb, var(--sh-primary) 10%, transparent); }
 .sh-flag-warning { border-color: var(--sh-danger); background: color-mix(in srgb, var(--sh-danger) 10%, transparent); }
-.sh-restricted-info { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); margin-bottom: var(--sh-space-sm); }
-.sh-content-filtered { opacity: 0.5; pointer-events: none; filter: saturate(0.5); }
 
 /* Filter chips (e.g. search type filters) */
 .sh-filter-chips {
@@ -14668,19 +14445,6 @@ a.sh-welcome-card:hover {
   font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-sm);
 }
-.sh-share-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sh-space-xs);
-  padding: var(--sh-space-xs) var(--sh-space-sm);
-  background: transparent;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  cursor: pointer;
-  color: var(--sh-text);
-  font: inherit;
-}
-.sh-share-btn:hover { border-color: var(--sh-primary); color: var(--sh-primary); }
 
 /* STT mic button */
 .sh-stt-btn {
@@ -14807,16 +14571,6 @@ a.sh-welcome-card:hover {
 .sh-message-audio__transcript--pending {
   opacity: 0.5;
   animation: sh-voice-pulse 1.8s ease-in-out infinite;
-}
-
-/* Mute toggle (audio feeds) */
-.sh-mute-toggle {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  padding: var(--sh-space-xs);
-  border-radius: var(--sh-radius-full);
-  font-size: 1rem;
 }
 
 /* Error state */

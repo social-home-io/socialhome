@@ -6,7 +6,7 @@
  * Selecting one (click, Enter, or Tab) replaces the ``:smi`` token
  * with the emoji glyph. Escape closes the popover.
  *
- * Mirrors the shape of :mod:`MentionAutocomplete`. Module-level signals
+ * Module-level signals
  * keep the popover state global — only one autocomplete is open at a
  * time across the page.
  *
