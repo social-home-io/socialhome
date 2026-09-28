@@ -607,3 +607,119 @@ async def test_federated_offer_for_foreign_conversation_is_not_stored(client):
         headers=_auth(bob_tok),
     )
     assert r.status == 404
+
+
+# ─── group-call mesh (§26.4) ──────────────────────────────────────────
+
+
+async def _group_conv(client) -> tuple[str, str]:
+    bob_tok = await _seed_bob(client, conv_id="conv-g")
+    await client._db.enqueue(
+        "UPDATE conversations SET type='group_dm' WHERE id=?", ("conv-g",)
+    )
+    carol_tok = await _seed_carol(client, "conv-g")
+    return bob_tok, carol_tok
+
+
+async def _group_call(client) -> tuple[str, str, str]:
+    """admin calls bob + carol in a group DM with one offer each."""
+    bob_tok, carol_tok = await _group_conv(client)
+    r = await client.post(
+        "/api/calls",
+        json={
+            "conversation_id": "conv-g",
+            "call_type": "video",
+            "sdp_offers": {"bob-uid": "offer-bob", "carol-uid": "offer-carol"},
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["participants"] == sorted([client._uid, "bob-uid", "carol-uid"])
+    return body["call_id"], bob_tok, carol_tok
+
+
+async def test_group_call_with_per_callee_offers_and_mesh_signalling(client):
+    cid, bob_tok, carol_tok = await _group_call(client)
+    # Both callees answer the caller — the second is not a 409.
+    for tok in (bob_tok, carol_tok):
+        r = await client.post(
+            f"/api/calls/{cid}/answer", json={"sdp_answer": "ans"}, headers=_auth(tok)
+        )
+        assert r.status == 200
+    # bob opens his leg to carol; carol answers it, addressed to bob.
+    r = await client.post(
+        f"/api/calls/{cid}/join",
+        json={"sdp_offers": {"carol-uid": "leg-offer"}},
+        headers=_auth(bob_tok),
+    )
+    assert (await r.json())["joined"] == ["carol-uid"]
+    r = await client.post(
+        f"/api/calls/{cid}/answer",
+        json={"sdp_answer": "leg-ans", "to_user": "bob-uid"},
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 200
+    r = await client.post(
+        f"/api/calls/{cid}/ice",
+        json={"candidate": {"candidate": "c"}, "to_user": "bob-uid"},
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 204
+    # bob leaving doesn't end the call for the other two.
+    r = await client.post(f"/api/calls/{cid}/hangup", json={}, headers=_auth(bob_tok))
+    assert r.status == 204
+    svc = client.server.app[call_signaling_service_key]
+    assert svc.get_call(cid).present == {client._uid, "carol-uid"}
+
+
+async def test_group_call_ice_and_answer_targets_must_be_participants(client):
+    cid, bob_tok, _carol_tok = await _group_call(client)
+    r = await client.post(
+        f"/api/calls/{cid}/ice",
+        json={"candidate": {}, "to_user": "stranger-uid"},
+        headers=_auth(bob_tok),
+    )
+    assert r.status == 403
+    r = await client.post(
+        f"/api/calls/{cid}/answer",
+        json={"sdp_answer": "x", "to_user": "stranger-uid"},
+        headers=_auth(bob_tok),
+    )
+    assert r.status == 403
+
+
+async def test_initiate_rejects_a_non_object_sdp_offers(client):
+    await _seed_bob(client)
+    r = await client.post(
+        "/api/calls",
+        json={"conversation_id": "conv-ab", "sdp_offers": ["x"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_initiate_refuses_a_call_over_the_mesh_cap(client, monkeypatch):
+    monkeypatch.setattr("socialhome.services.call_service.MAX_CALL_PARTICIPANTS", 2)
+    await _group_conv(client)
+    r = await client.post(
+        "/api/calls",
+        json={"conversation_id": "conv-g", "sdp_offer": "v=0\r\n"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"] == "too_many_participants"
+
+
+async def test_a_mesh_legs_worth_of_ice_is_not_rate_limited(client):
+    """Regression: ICE fell under the broad ``/api/calls`` 10/min limit, so
+    a group call's legs (several candidates each) got 429s within seconds
+    and never connected."""
+    cid, bob_tok, _carol_tok = await _group_call(client)
+    for i in range(40):
+        r = await client.post(
+            f"/api/calls/{cid}/ice",
+            json={"candidate": {"candidate": f"c{i}"}, "to_user": "carol-uid"},
+            headers=_auth(bob_tok),
+        )
+        assert r.status == 204, (i, r.status)

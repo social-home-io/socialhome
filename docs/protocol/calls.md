@@ -48,9 +48,10 @@ sequenceDiagram
 
 ## Browser side
 
-The SPA owns the only `RTCPeerConnection`
-(`client/src/features/calls/callSession.ts`); the backend relays
-whatever SDP / ICE the browsers produce and never touches media.
+The SPA owns the `RTCPeerConnection`s — one per remote participant, so a
+1:1 call has one (`client/src/features/calls/callSession.ts`; group calls
+below); the backend relays whatever SDP / ICE the browsers produce and
+never touches media. The steps below are for one leg.
 
 - **Caller** — `getUserMedia` → `createOffer` /
   `setLocalDescription` → `POST /api/calls {sdp_offer}`. Local ICE
@@ -137,8 +138,72 @@ record, and inbound events move it through the same states as local ones:
 - Only the first answer wins: a second `POST /answer` gets 409, and the
   answerer's other devices receive `call.answered` so they stop ringing.
 
-Group calls still share one offer across all callees and the browser holds
-a single peer connection, so today only 1:1 calls connect reliably.
+## Group calls (full mesh)
+
+A group call is a full WebRTC mesh: every browser holds one
+`RTCPeerConnection` ("leg") per other participant and sends its own
+audio/video on each. There is no media server, so each extra person costs
+every participant one more upload — calls are capped at
+**`MAX_CALL_PARTICIPANTS` = 6 people** (caller included). A larger
+conversation gets 422 `too_many_participants`; the SPA refuses before
+touching the network. A 1:1 call is simply a mesh with one leg and keeps
+its original wire shape (single `sdp_offer`).
+
+- **Caller → callees.** The caller creates one offer per callee and posts
+  `POST /api/calls {sdp_offers: {user_id: sdp}}`. Each callee rings with
+  its own offer; `call.ringing` carries `participants` (everyone invited,
+  caller included). A callee with no offer is not rung.
+- **Answers.** Every callee answers the caller once
+  (`POST /answer {sdp_answer}`); `call.answered` names `from_user` so the
+  caller applies it to the right leg. A second answer from the *same*
+  callee (another of their devices) is 409.
+- **Callee ↔ callee legs.** Of each callee pair, the one with the lower
+  `user_id` offers, right after answering the caller, through
+  `POST /api/calls/{id}/join {sdp_offers}`. The other gets
+  `call.peer_join {joiner_user_id, signed_sdp}` — kept while it is still
+  ringing — and answers with `POST /answer {sdp_answer, to_user}`, which
+  is relayed to the offering callee only.
+- **ICE per leg.** `POST /ice {candidate, to_user}` goes to that
+  participant only; `call.ice_candidate` names `from_user`. Without
+  `to_user` (older clients) a candidate still fans out to everyone.
+- **Leaving.** Hangup / decline in a group call takes only the leaver out;
+  the others get `call.ended` / `call.declined` with `by` (drop that leg)
+  and `over` (the whole call is finished for them). The call closes once
+  fewer than two participants are left. When the caller leaves, invites
+  nobody has answered are withdrawn, so a still-ringing callee stops
+  ringing. A leg nobody answers is dropped by the browser after the 90 s
+  ringing TTL.
+- **Authorization.** `answer`, `ice` and `join` only accept participants
+  of the call, and `to_user` must be another participant (403 otherwise).
+- **Cross-household.** Group conversations are single-household, so mesh
+  legs are relayed locally only: a callee-to-callee answer addressed to a
+  remote user is not federated (an older peer's `CALL_ANSWER` handler would
+  hand it to the caller). `CALL_ANSWER` gains an informational `from_user`
+  (ignored by older receivers); without it the answer is attributed to the
+  only unanswered callee the sending household hosts. No new event type and
+  no `proto_version` bump.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Alice (caller)
+    participant S as HFS
+    participant B as Bob (uid-b)
+    participant C as Carol (uid-c)
+    A->>S: POST /api/calls {sdp_offers: {b, c}}
+    S->>B: call.ringing {offer for b, participants}
+    S->>C: call.ringing {offer for c, participants}
+    B->>S: POST /answer {sdp_answer}
+    S->>A: call.answered {from_user: b}
+    B->>S: POST /join {sdp_offers: {c}}  (b < c offers)
+    S->>C: call.peer_join {joiner: b} (kept while ringing)
+    C->>S: POST /answer {sdp_answer}
+    S->>A: call.answered {from_user: c}
+    C->>S: POST /answer {sdp_answer, to_user: b}
+    S->>B: call.answered {from_user: c}
+    Note over A,C: ICE per leg: POST /ice {to_user} → call.ice_candidate {from_user}
+    Note over A,C: three legs, each DTLS-SRTP browser-to-browser
+```
 
 ## SDP signature (§26.8)
 
@@ -177,6 +242,8 @@ binds the caller to the sender and the callee to the conversation.
 - `POST /api/calls` — 10/min (creation)
 - `POST /api/calls/{id}/decline` — 10/min
 - `POST /api/calls/{id}/hangup` — 30/min
+- `POST /api/calls/{id}/ice` — 300/min (a mesh trickles several candidates
+  per leg within seconds; the 10/min `/api/calls` limit used to 429 them)
 
 These limits are per-user, enforced at the route layer.
 
@@ -189,7 +256,8 @@ These limits are per-user, enforced at the route layer.
 - `socialhome/repositories/call_repo.py`.
 - `socialhome/routes/calls.py` — `/api/calls/*` routes and the ICE
   server config.
-- `client/src/features/calls/callSession.ts` — browser WebRTC session;
+- `client/src/features/calls/callSession.ts` — browser WebRTC session
+  (one leg per remote participant);
   `client/src/store/calls.ts` — `call.*` WS frames;
   `client/src/features/calls/InCallPage.tsx` /
   `IncomingCallDialog.tsx` — UI.

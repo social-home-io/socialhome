@@ -64,6 +64,12 @@ RINGING_TTL_SECONDS: int = 90
 #: Hard cap on simultaneous in-flight calls per user (DoS guard).
 MAX_CALLS_PER_USER: int = 16
 
+#: Most people in one call, caller included. Group calls are a full
+#: WebRTC mesh — every browser sends its own audio/video to each of the
+#: others — so each extra person costs every participant one more upload.
+#: Six keeps a video mesh usable on a home uplink.
+MAX_CALL_PARTICIPANTS: int = 6
+
 
 # ─── Exceptions ──────────────────────────────────────────────────────────
 
@@ -77,8 +83,13 @@ class CallConversationError(ValueError):
 
 
 class CallAlreadyAnsweredError(RuntimeError):
-    """Raised when a call that is no longer ringing is answered again
-    (another device of the callee, or another member of a group call)."""
+    """Raised when a callee who already answered answers again (another
+    of their devices)."""
+
+
+class CallTooLargeError(ValueError):
+    """Raised when a call would have more than
+    :data:`MAX_CALL_PARTICIPANTS` people in it."""
 
 
 @dataclass(slots=True)
@@ -100,9 +111,18 @@ class CallRecord:
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     pending_signals: list[dict] = field(default_factory=list)
-    # Group-call mesh participants (§26.4). 1:1 calls keep this at
-    # {caller, callee}; group calls grow as members accept.
+    # Group-call mesh participants (§26.4): everyone invited. 1:1 calls
+    # keep this at {caller, callee}.
     participants: set[str] = field(default_factory=set)
+    # Who is in the call: the caller plus every callee that answered it.
+    answered: set[str] = field(default_factory=set)
+    # Who hung up / declined / had their invite withdrawn. The call is
+    # over once fewer than two participants are left.
+    left: set[str] = field(default_factory=set)
+
+    @property
+    def present(self) -> set[str]:
+        return self.participants - self.left
 
 
 # ─── Service ──────────────────────────────────────────────────────────────
@@ -188,7 +208,8 @@ class CallSignalingService:
         caller_user_id: str,
         conversation_id: str,
         call_type: str,
-        sdp_offer: str,
+        sdp_offer: str | None = None,
+        sdp_offers: dict[str, str] | None = None,
     ) -> dict:
         """Begin a call inside *conversation_id* (§26.2).
 
@@ -196,6 +217,11 @@ class CallSignalingService:
         * For 1:1 DMs resolves the single callee; group DMs fan out to
           every other member (and leave ``callee_user_id=None`` on the
           record so the group mesh handles individual ring events).
+        * Group calls are a mesh: *sdp_offers* carries one offer per
+          callee (``{user_id: sdp}``); a callee missing from it gets
+          *sdp_offer*, and a callee with neither is not rung. The ring
+          frame lists every ``participants`` so callees can open their
+          legs to each other (see :meth:`join_call`).
         * Persists the call row; emits a ``call_event`` system message
           in the DM thread (``event="started"``).
         * Ships ``CALL_OFFER`` to each remote participant and pushes
@@ -203,7 +229,8 @@ class CallSignalingService:
         """
         if call_type not in ("audio", "video"):
             raise ValueError(f"Invalid call_type: {call_type!r}")
-        if not sdp_offer:
+        offers = {k: v for k, v in (sdp_offers or {}).items() if v}
+        if not sdp_offer and not offers:
             raise ValueError("Empty SDP offer")
         self._enforce_user_cap(caller_user_id)
 
@@ -218,9 +245,16 @@ class CallSignalingService:
             conversation_id,
             exclude_username=caller_username,
         )
+        # A callee we hold no offer for can't be connected — don't ring them.
+        local_callees = [u for u in local_callees if offers.get(u.user_id) or sdp_offer]
+        remote_callees = [r for r in remote_callees if offers.get(r[1]) or sdp_offer]
         if not local_callees and not remote_callees:
             raise CallConversationError(
                 "Conversation has no other participants to call",
+            )
+        if 1 + len(local_callees) + len(remote_callees) > MAX_CALL_PARTICIPANTS:
+            raise CallTooLargeError(
+                f"Calls are limited to {MAX_CALL_PARTICIPANTS} people",
             )
 
         call_id = "call-" + secrets.token_urlsafe(16)
@@ -247,6 +281,7 @@ class CallSignalingService:
             callee_instance_id=primary_callee_instance,
             call_type=call_type,
             participants=set(participants),
+            answered={caller_user_id},
         )
         self._calls[call_id] = record
         self._per_user.setdefault(caller_user_id, set()).add(call_id)
@@ -263,8 +298,13 @@ class CallSignalingService:
         await self._call_repo.save_call(session)
         await self._emit_call_event_message(session, event="started")
 
-        signed = sign_rtc_offer(sdp_offer, "offer", identity_seed=self._own_seed)
-        signed_dict = signed_sdp_to_dict(signed)
+        roster = sorted(participants)
+
+        def signed_offer_for(user_id: str) -> dict:
+            sdp = offers.get(user_id) or sdp_offer or ""
+            return signed_sdp_to_dict(
+                sign_rtc_offer(sdp, "offer", identity_seed=self._own_seed)
+            )
 
         # Ring every local callee.
         for u in local_callees:
@@ -277,7 +317,8 @@ class CallSignalingService:
                     "conversation_id": conversation_id,
                     "from_user": caller_user_id,
                     "call_type": call_type,
-                    "signed_sdp": signed_dict,
+                    "signed_sdp": signed_offer_for(u.user_id),
+                    "participants": roster,
                 },
             )
         # Federate each remote callee.
@@ -293,7 +334,7 @@ class CallSignalingService:
                             "from_user": caller_user_id,
                             "to_user": remote_user_id,
                             "call_type": call_type,
-                            "signed_sdp": signed_dict,
+                            "signed_sdp": signed_offer_for(remote_user_id),
                         },
                     )
                 except Exception as exc:  # pragma: no cover
@@ -309,6 +350,7 @@ class CallSignalingService:
             "conversation_id": conversation_id,
             "callee_user_id": primary_callee_id,
             "callee_instance_id": primary_callee_instance,
+            "participants": roster,
         }
 
     async def answer_call(
@@ -317,29 +359,49 @@ class CallSignalingService:
         call_id: str,
         answerer_user_id: str,
         sdp_answer: str,
+        to_user_id: str | None = None,
     ) -> dict:
-        """Submit the SDP answer for a ringing call."""
+        """Submit an SDP answer.
+
+        Without *to_user_id* (or with the caller) this answers the ring:
+        the answerer joins the call and the caller gets the answer. In a
+        group call every callee answers the caller once — a second answer
+        from the same callee (another of their devices) is refused with
+        :class:`CallAlreadyAnsweredError`.
+
+        With another participant as *to_user_id* it answers that
+        participant's mesh-leg offer (``call.peer_join``, see
+        :meth:`join_call`) and is relayed to them only.
+        """
         record = self._calls.get(call_id)
         if record is None:
             raise CallNotFoundError(call_id)
+        target = to_user_id or record.caller_user_id
         if (
             answerer_user_id not in record.participants
-            or answerer_user_id == record.caller_user_id
+            or target not in record.participants
+            or target == answerer_user_id
+            or answerer_user_id in record.left
         ):
-            raise PermissionError("Only a callee may answer this call")
-        if record.status != "ringing":
-            raise CallAlreadyAnsweredError(call_id)
-        record.status = "in_progress"
+            raise PermissionError("Only a participant may answer this call")
         record.last_activity = time.time()
-
-        await self._call_repo.transition(
-            call_id,
-            status="active",
-            connected_at=_now_iso(),
-        )
-
         signed = sign_rtc_offer(sdp_answer, "answer", identity_seed=self._own_seed)
         signed_dict = signed_sdp_to_dict(signed)
+
+        if target != record.caller_user_id:
+            await self._relay_mesh_answer(record, answerer_user_id, target, signed_dict)
+            return {"call_id": call_id, "status": record.status}
+
+        if answerer_user_id in record.answered:
+            raise CallAlreadyAnsweredError(call_id)
+        record.answered.add(answerer_user_id)
+        if record.status == "ringing":
+            record.status = "in_progress"
+            await self._call_repo.transition(
+                call_id,
+                status="active",
+                connected_at=_now_iso(),
+            )
 
         caller_instance = await self._instance_of(record.caller_user_id)
         if (
@@ -352,6 +414,10 @@ class CallSignalingService:
                 event_type=FederationEventType.CALL_ANSWER,
                 payload={
                     "call_id": call_id,
+                    # Informational for older receivers (they route every
+                    # answer to the caller anyway); lets a newer caller
+                    # household tell which callee answered.
+                    "from_user": answerer_user_id,
                     "signed_sdp": signed_dict,
                 },
             )
@@ -360,16 +426,55 @@ class CallSignalingService:
             {
                 "type": "call.answered",
                 "call_id": call_id,
+                "from_user": answerer_user_id,
                 "signed_sdp": signed_dict,
             },
         )
         # Stop the ring on the answerer's other devices (the frame carries
-        # no SDP — only the caller applies an answer).
+        # no SDP — only the offering side applies an answer).
         await self._fanout_to_user(
             answerer_user_id,
             {"type": "call.answered", "call_id": call_id},
         )
         return {"call_id": call_id, "status": record.status}
+
+    async def _relay_mesh_answer(
+        self,
+        record: CallRecord,
+        answerer_user_id: str,
+        target: str,
+        signed_dict: dict,
+    ) -> None:
+        """Deliver a callee-to-callee mesh-leg answer to *target*.
+
+        Mesh legs are only relayed within this household: group
+        conversations are single-household today, and an older peer's
+        ``CALL_ANSWER`` handler would hand an answer addressed to another
+        callee to the caller instead.
+        """
+        target_instance = await self._instance_of(target)
+        if (
+            target_instance
+            and self._federation is not None
+            and target_instance != self._federation.own_instance_id
+        ):
+            log.warning(
+                "call %s: mesh-leg answer %s -> %s not relayed — cross-household "
+                "mesh legs are not supported",
+                record.call_id,
+                answerer_user_id,
+                target,
+            )
+            return
+        await self._fanout_to_user(
+            target,
+            {
+                "type": "call.answered",
+                "call_id": record.call_id,
+                "from_user": answerer_user_id,
+                "signed_sdp": signed_dict,
+            },
+        )
 
     async def add_ice_candidate(
         self,
@@ -377,16 +482,27 @@ class CallSignalingService:
         call_id: str,
         from_user_id: str,
         candidate: dict,
+        to_user_id: str | None = None,
     ) -> None:
-        """Trickle a single ICE candidate to the other side."""
+        """Trickle a single ICE candidate.
+
+        With *to_user_id* the candidate goes to that participant only —
+        one mesh leg. Without it (older clients) it fans out to every
+        other participant.
+        """
         record = self._calls.get(call_id)
         if record is None:
             raise CallNotFoundError(call_id)
+        if from_user_id not in record.participants:
+            raise PermissionError("Not a participant in this call")
+        if to_user_id is not None:
+            if to_user_id not in record.participants or to_user_id == from_user_id:
+                raise PermissionError("ICE target is not another participant")
+            others = [to_user_id]
+        else:
+            others = [u for u in record.participants if u != from_user_id]
         record.last_activity = time.time()
 
-        # For 1:1 calls deliver to the one other participant; for group
-        # calls fan out to every peer except the sender.
-        others = [u for u in record.participants if u != from_user_id]
         for other in others:
             other_instance = await self._instance_of(other)
             if (
@@ -415,9 +531,9 @@ class CallSignalingService:
                 )
 
     async def decline(self, *, call_id: str, decliner_user_id: str) -> None:
-        """A callee refuses a ringing call (§26.8). Emits
-        ``CALL_DECLINE`` + a ``call_event`` row in the DM thread.
-        """
+        """A callee refuses a ringing call (§26.8). In a 1:1 call that
+        ends it (``declined`` row + ``call_event``); in a group call only
+        the decliner leaves. Emits ``CALL_DECLINE`` to a remote caller."""
         record = self._calls.get(call_id)
         if record is None:
             return
@@ -426,15 +542,8 @@ class CallSignalingService:
             or decliner_user_id == record.caller_user_id
         ):
             raise PermissionError("Only a callee may decline")
-        record.status = "declined"
-
-        session = await self._call_repo.transition(
-            call_id,
-            status="declined",
-            ended_at=_now_iso(),
-        )
-        if session is not None:
-            await self._emit_call_event_message(session, event="declined")
+        if decliner_user_id in record.answered or decliner_user_id in record.left:
+            return  # already in the call (hang up instead) / already gone
 
         caller = record.caller_user_id
         caller_instance = await self._instance_of(caller)
@@ -448,60 +557,90 @@ class CallSignalingService:
                 event_type=FederationEventType.CALL_DECLINE,
                 payload={"call_id": call_id, "decliner_user": decliner_user_id},
             )
-        await self._fanout_to_user(
-            caller or "",
-            {
-                "type": "call.declined",
-                "call_id": call_id,
-                "by": decliner_user_id,
-            },
-        )
-        self._cleanup_call(call_id)
+        await self._leave(record, decliner_user_id, declined=True)
 
     async def hangup(self, *, call_id: str, hanger_user_id: str) -> None:
-        """Terminate a call. Writes ``ended`` with a duration + fires
-        ``CALL_HANGUP`` to every other peer."""
+        """Leave a call. A 1:1 call ends (``ended`` with a duration); a
+        group call ends once fewer than two people are left. Fires
+        ``CALL_HANGUP`` once to each other participant's household."""
         record = self._calls.get(call_id)
         if record is None:
             return
         if hanger_user_id not in record.participants:
             raise PermissionError("Not a participant in this call")
-        record.status = "ended"
+        if hanger_user_id in record.left:
+            return
 
-        persisted = await self._call_repo.get_call(call_id)
-        duration = _duration_since(persisted.connected_at if persisted else None)
-        session = await self._call_repo.transition(
-            call_id,
-            status="ended",
-            ended_at=_now_iso(),
-            duration_seconds=duration,
-        )
-        if session is not None:
-            await self._emit_call_event_message(session, event="ended")
-
-        others = [u for u in record.participants if u != hanger_user_id]
-        for other in others:
+        notified: set[str] = set()
+        for other in sorted(record.present - {hanger_user_id}):
             other_instance = await self._instance_of(other)
             if (
                 other_instance
                 and self._federation is not None
                 and other_instance != self._federation.own_instance_id
+                and other_instance not in notified
             ):
+                notified.add(other_instance)
                 await self._federation.send_event(
                     to_instance_id=other_instance,
                     event_type=FederationEventType.CALL_HANGUP,
                     payload={"call_id": call_id, "hanger_user": hanger_user_id},
                 )
-            else:
-                await self._fanout_to_user(
-                    other,
-                    {
-                        "type": "call.ended",
-                        "call_id": call_id,
-                        "by": hanger_user_id,
-                    },
-                )
-        self._cleanup_call(call_id)
+        await self._leave(record, hanger_user_id, declined=False)
+
+    async def _leave(self, record: CallRecord, user_id: str, *, declined: bool) -> None:
+        """*user_id* hung up or declined: tell the others, and close the
+        call once fewer than two participants are left.
+
+        When the caller leaves, invites nobody has answered yet are
+        withdrawn — a ringing callee stops ringing instead of joining an
+        empty call. Each remaining local participant gets ``call.ended``
+        / ``call.declined`` with ``by`` (so a mesh client can drop just
+        that leg) and ``over`` (the call is finished for them).
+        """
+        before = record.present
+        record.left.add(user_id)
+        if user_id == record.caller_user_id:
+            record.left |= record.participants - record.answered
+        over = len(record.present) < 2
+        frame_type = "call.declined" if declined else "call.ended"
+        for other in sorted(before - {user_id}):
+            await self._fanout_to_user(
+                other,
+                # ``over``: the whole call is finished for the receiver
+                # (as opposed to one participant leaving it).
+                {
+                    "type": frame_type,
+                    "call_id": record.call_id,
+                    "by": user_id,
+                    "over": over,
+                },
+            )
+        if not over:
+            return
+        record.status = "ended"
+        never_answered = record.answered <= {record.caller_user_id}
+        persisted = await self._call_repo.get_call(record.call_id)
+        if declined and never_answered:
+            session = await self._call_repo.transition(
+                record.call_id,
+                status="declined",
+                ended_at=_now_iso(),
+            )
+            event = "declined"
+        else:
+            session = await self._call_repo.transition(
+                record.call_id,
+                status="ended",
+                ended_at=_now_iso(),
+                duration_seconds=_duration_since(
+                    persisted.connected_at if persisted else None
+                ),
+            )
+            event = "ended"
+        if session is not None:
+            await self._emit_call_event_message(session, event=event)
+        self._cleanup_call(record.call_id)
 
     async def join_call(
         self,
@@ -510,10 +649,16 @@ class CallSignalingService:
         joiner_user_id: str,
         sdp_offers: dict[str, str],
     ) -> dict:
-        """Late-join an in-progress group call (spec §26.8 lines 26532-26605).
+        """Offer mesh legs into a group call (spec §26.8 lines 26532-26605).
 
-        Membership-verified: the joiner must be a member of the call's
-        conversation. Fans one ``CALL_OFFER`` per existing participant.
+        Used both by a late joiner and by a callee opening its legs to the
+        other callees right after answering the caller (the lower
+        ``user_id`` of each callee pair offers — see
+        ``docs/protocol/calls.md``). Membership-verified: the joiner must
+        be a member of the call's conversation. Fans one offer per named
+        participant still in the call (``call.peer_join`` locally,
+        ``CALL_OFFER`` with ``late_join`` to a remote one); the receiver
+        answers it with ``POST /answer {to_user: joiner}``.
         """
         session = await self._call_repo.get_call(call_id)
         if session is None:
@@ -529,23 +674,33 @@ class CallSignalingService:
                 "User is not a member of this conversation",
             )
 
+        already = joiner_user_id in session.participant_user_ids
         participants = set(session.participant_user_ids) | {joiner_user_id}
+        if len(participants) > MAX_CALL_PARTICIPANTS:
+            raise CallTooLargeError(
+                f"Calls are limited to {MAX_CALL_PARTICIPANTS} people",
+            )
         joined: list[str] = []
         record = self._calls.get(call_id)
         if record is not None:
-            record.participants = participants
+            record.participants |= participants
+            record.answered.add(joiner_user_id)
+            record.left.discard(joiner_user_id)
             record.last_activity = time.time()
             self._per_user.setdefault(joiner_user_id, set()).add(call_id)
-        await self._call_repo.transition(
-            call_id,
-            status=session.status,
-            participant_user_ids=tuple(sorted(participants)),
-        )
+        if not already:
+            await self._call_repo.transition(
+                call_id,
+                status=session.status,
+                participant_user_ids=tuple(sorted(participants)),
+            )
 
         for participant_id, sdp_offer in sdp_offers.items():
             if participant_id == joiner_user_id:
                 continue
             if participant_id not in session.participant_user_ids:
+                continue
+            if record is not None and participant_id in record.left:
                 continue
             signed = sign_rtc_offer(
                 sdp_offer,
@@ -631,22 +786,26 @@ class CallSignalingService:
                     event.from_instance, record.participants
                 ):
                     return
-                if record.status != "ringing":
-                    return  # a second answer (other device / group member)
-                record.status = "in_progress"
+                answerer = await self._inbound_answerer(event, record, payload)
+                if answerer is None or answerer in record.answered:
+                    return  # unattributable / a second answer (other device)
+                record.answered.add(answerer)
                 record.last_activity = time.time()
-                # Caller-side row: without this it stays ``ringing`` and
-                # the stale-call sweep marks the live call missed at 90 s.
-                await self._call_repo.transition(
-                    call_id,
-                    status="active",
-                    connected_at=_now_iso(),
-                )
+                if record.status == "ringing":
+                    record.status = "in_progress"
+                    # Caller-side row: without this it stays ``ringing`` and
+                    # the stale-call sweep marks the live call missed at 90 s.
+                    await self._call_repo.transition(
+                        call_id,
+                        status="active",
+                        connected_at=_now_iso(),
+                    )
                 await self._fanout_to_user(
                     record.caller_user_id,
                     {
                         "type": "call.answered",
                         "call_id": call_id,
+                        "from_user": answerer,
                         "signed_sdp": signed_dict,
                     },
                 )
@@ -670,6 +829,7 @@ class CallSignalingService:
                     {
                         "type": "call.ice_candidate",
                         "call_id": call_id,
+                        "from_user": sender,
                         "candidate": payload.get("candidate"),
                     },
                 )
@@ -907,6 +1067,8 @@ class CallSignalingService:
             record = self._calls.get(call_id)
             if record is not None:
                 record.participants |= {caller, callee_user}
+                if payload.get("late_join"):
+                    record.answered.add(caller)
                 record.last_activity = time.time()
         else:
             await self._call_repo.save_call(
@@ -928,6 +1090,7 @@ class CallSignalingService:
                 callee_instance_id=event.from_instance,
                 call_type=call_type,
                 participants={caller, callee_user},
+                answered={caller},
             )
         self._per_user.setdefault(callee_user, set()).add(call_id)
 
@@ -996,6 +1159,42 @@ class CallSignalingService:
             },
         )
         self._cleanup_call(call_id)
+
+    async def _inbound_answerer(
+        self,
+        event,
+        record: CallRecord,
+        payload: dict,
+    ) -> str | None:
+        """Which callee a ``CALL_ANSWER`` is from.
+
+        Newer households name it (``from_user``, bound to the sending
+        household); an older one doesn't, and the answer is attributed to
+        the only not-yet-answered callee that household hosts — ``None``
+        (dropped) when that is ambiguous.
+        """
+        named = payload.get("from_user")
+        if named:
+            if not await self._is_sender_participant(
+                event, record.call_id, named, record.participants, field="from_user"
+            ):
+                return None
+            return str(named)
+        candidates = [
+            u
+            for u in sorted(record.participants - record.answered)
+            if await self._instance_of(u) == event.from_instance
+        ]
+        if len(candidates) != 1:
+            log.warning(
+                "CALL_ANSWER refused: from=%s call_id=%s — no from_user and %d "
+                "unanswered callees on that household",
+                event.from_instance,
+                record.call_id,
+                len(candidates),
+            )
+            return None
+        return candidates[0]
 
     async def _known_call(
         self,

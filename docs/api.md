@@ -513,10 +513,10 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/webrtc/ice_servers` | STUN/TURN config (alias: `/api/calls/ice-servers`). |
-| GET / POST | `/api/calls` | List / initiate. |
+| GET / POST | `/api/calls` | List / initiate. Body `{conversation_id, call_type, sdp_offer}` for 1:1, or `sdp_offers: {user_id: sdp}` (one offer per callee) for a group mesh; a callee with no offer is not rung. Response carries `participants` (everyone invited, caller included). 422 `too_many_participants` above 6 people (`MAX_CALL_PARTICIPANTS`). |
 | GET | `/api/calls/active` | Current active call. |
-| POST | `/api/calls/{id}/{answer\|join\|decline\|hangup}` | Lifecycle. `answer` returns 409 `already_answered` once the call is no longer ringing (another device or group member answered first). |
-| POST | `/api/calls/{id}/ice` | Trickle ICE candidate. |
+| POST | `/api/calls/{id}/{answer\|join\|decline\|hangup}` | Lifecycle. `answer {sdp_answer}` answers the caller; a second answer from the same callee (another device) is 409 `already_answered`. `answer {sdp_answer, to_user}` answers another participant's mesh-leg offer and is relayed to them only. `join {sdp_offers}` offers mesh legs to named participants (`call.peer_join`) — used by a late joiner and by a callee opening legs to higher-id callees. In a group call `decline` / `hangup` take only that participant out (frames carry `by` + `over`); the call closes once fewer than two are left. `to_user` must be another participant (403). |
+| POST | `/api/calls/{id}/ice` | Trickle ICE candidate. Optional `to_user` targets one mesh leg; without it the candidate fans out to every other participant. |
 | POST | `/api/calls/{id}/quality` | Report RTT / jitter / loss. |
 
 ## HFS — Push
@@ -894,6 +894,7 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/calls` | 10 / min / user |
 | `POST /api/calls/{id}/decline` | 10 / min / user |
 | `POST /api/calls/{id}/hangup` | 30 / min / user |
+| `POST /api/calls/{id}/ice` | 300 / min / user — every leg of a group-call mesh trickles several candidates within seconds |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/signaling-session{,/release}` | 60 / min / paired instance |
 | `GET /` + `GET /spaces/{id}` + `GET /join/{token}` (GFS public pages) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |

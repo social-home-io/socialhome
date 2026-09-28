@@ -21,8 +21,8 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import {
   callConversation, callEndReason, callId as sessionCallId, callPhase,
-  callType, getPeerConnection, hangupCall, hasCamera, isCallLive, localStream,
-  remoteStream, resetCall, type CallPhase,
+  callPeers, callType, getPeerConnection, hangupCall, hasCamera, isCallLive,
+  localStream, resetCall, type CallPeer, type CallPhase, type PeerState,
 } from './callSession'
 
 const durationSeconds  = signal<number>(0)
@@ -44,8 +44,40 @@ function formatDuration(sec: number): string {
   return `${m}:${s}`
 }
 
+const PEER_STATUS: Partial<Record<PeerState, string>> = {
+  ringing:      'Ringing…',
+  connecting:   'Connecting…',
+  reconnecting: 'Reconnecting…',
+}
+
 function videoOn(stream: MediaStream | null): boolean {
   return stream?.getVideoTracks().some(t => t.enabled) ?? false
+}
+
+/** One remote participant of a group call: their video (or initial when
+ *  they send none), name and connection state. */
+function PeerTile({ peer, muted }: { peer: CallPeer, muted: boolean }) {
+  const ref = useRef<HTMLVideoElement>(null)
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = peer.stream
+  }, [peer.stream])
+  const video = (peer.stream?.getVideoTracks().length ?? 0) > 0
+  const status = PEER_STATUS[peer.state]
+  return (
+    <div class="sh-incall-tile" data-state={peer.state}>
+      <video ref={ref} class="sh-incall-tile-video" autoplay playsinline muted={muted}
+             hidden={!video} />
+      {!video && (
+        <span class="sh-incall-tile-avatar" aria-hidden="true">
+          {peer.name.trim().charAt(0).toUpperCase() || '?'}
+        </span>
+      )}
+      <span class="sh-incall-tile-name">
+        {peer.name}
+        {status && <span class="sh-incall-tile-status"> · {status}</span>}
+      </span>
+    </div>
+  )
 }
 
 export default function InCallPage() {
@@ -60,7 +92,9 @@ export default function InCallPage() {
   const phase: CallPhase = ours ? callPhase.value : 'idle'
   if (ours && callConversation.value) convRef.current = callConversation.value
   const local  = ours ? localStream.value : null
-  const remote = ours ? remoteStream.value : null
+  const peers  = ours ? callPeers.value : []
+  const group  = peers.length > 1
+  const remote = !group ? (peers[0]?.stream ?? null) : null
 
   const leave = () => {
     const conv = convRef.current
@@ -138,9 +172,8 @@ export default function InCallPage() {
     cameraOff.value = !videoOn(s)
   }
   const toggleSpeaker = () => {
-    if (!remoteRef.current) return
-    remoteRef.current.muted = !remoteRef.current.muted
-    speakerMuted.value = remoteRef.current.muted
+    speakerMuted.value = !speakerMuted.value
+    if (remoteRef.current) remoteRef.current.muted = speakerMuted.value
   }
   // Tearing the session down flips the phase to ``ended``; the effect
   // above routes back to the thread.
@@ -175,7 +208,8 @@ export default function InCallPage() {
     )
   }
 
-  const status = STATUS_COPY[phase]
+  // A group call shows each participant's state on their own tile.
+  const status = group ? undefined : STATUS_COPY[phase]
   return (
     <div class="sh-incall">
       <header class="sh-incall-header">
@@ -188,7 +222,19 @@ export default function InCallPage() {
         )}
       </header>
 
-      <video ref={remoteRef} class="sh-incall-remote" autoplay playsinline />
+      {group ? (
+        <div class="sh-incall-grid" data-count={peers.length}
+             role="list" aria-label="Call participants">
+          {peers.map(p => (
+            <div role="listitem" key={p.userId} class="sh-incall-grid-cell">
+              <PeerTile peer={p} muted={speakerMuted.value} />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <video ref={remoteRef} class="sh-incall-remote" autoplay playsinline
+               muted={speakerMuted.value} />
+      )}
       {status && (
         <p class="sh-incall-status" role="status" aria-live="polite">{status}</p>
       )}
