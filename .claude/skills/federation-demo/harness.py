@@ -20,6 +20,7 @@ Usage::
     python .claude/skills/federation-demo/harness.py pair    # all pairwise pairings
     python .claude/skills/federation-demo/harness.py traffic # generate posts/moments/...
     python .claude/skills/federation-demo/harness.py verify  # assertions across all 3
+    python .claude/skills/federation-demo/harness.py unpair  # a unpairs c; both drop it; re-pair
     python .claude/skills/federation-demo/harness.py down    # stop + wipe data dirs
     python .claude/skills/federation-demo/harness.py all     # everything in order
 
@@ -8828,6 +8829,150 @@ def cmd_owner_offline_ban() -> None:
     print("owner-offline-ban: ok")
 
 
+def _pairing_call(label: str, url: str, **kw) -> tuple[int, Any]:
+    """``_request`` that waits out the per-user ``/api/pairing`` bucket.
+
+    Every ``/api/pairing/*`` write shares one 5 / 60 s bucket per user, so a
+    step that unpairs and re-pairs on the heels of an earlier pairing step
+    can hit 429. Wait one window and retry once, rather than failing on a
+    rate limit the step isn't testing.
+    """
+    s, body = _request(url, **kw)
+    if s == 429:
+        print(f"  {label}: /api/pairing rate-limited — waiting out the window")
+        time.sleep(61)
+        s, body = _request(url, **kw)
+    return s, body
+
+
+def _peer_ids(info: dict, *, confirmed_only: bool = False) -> set[str]:
+    s, conns = _request(
+        f"http://127.0.0.1:{info['port']}/api/connections",
+        token=info["token"],
+    )
+    _must("connections", s, conns)
+    return {
+        c["instance_id"]
+        for c in conns
+        if not confirmed_only or c["status"] == "confirmed"
+    }
+
+
+def cmd_unpair() -> None:
+    """Unpair a↔c from a's side; BOTH households drop the pairing.
+
+    a's ``DELETE /api/pairing/connections/{c}`` must send c a signed
+    ``UNPAIR`` before a forgets c's keys — so c's connections list loses a
+    too (pre-fix c kept a's row forever and kept retrying deliveries).
+    Shared space membership is NOT part of the pairing: every
+    ``space_instances`` row either side held before the unpair is still
+    there after it. Finishes by re-pairing a↔c so the topology the rest
+    of the chain assumes is restored.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    a, c = state["instances"]["a"], state["instances"]["c"]
+    if c["instance_id"] not in _peer_ids(a) or a["instance_id"] not in _peer_ids(c):
+        raise SystemExit("unpair: a↔c must be paired first (run 'pair')")
+
+    def _space_rows(label: str, peer_iid: str) -> set[str]:
+        return {
+            r[0]
+            for r in _rows(
+                label,
+                "SELECT space_id FROM space_instances WHERE instance_id=?",
+                (peer_iid,),
+            )
+        }
+
+    spaces_on_a = _space_rows("a", c["instance_id"])
+    spaces_on_c = _space_rows("c", a["instance_id"])
+
+    started = time.monotonic()
+    s, resp = _pairing_call(
+        "a",
+        f"http://127.0.0.1:{a['port']}/api/pairing/connections/{c['instance_id']}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("a unpairs c", s, resp, ok=(200,))
+    if resp.get("peer_notified") is not True:
+        raise SystemExit(f"unpair: a could not tell c (response={resp!r})")
+    print(f"  a unpaired c in {time.monotonic() - started:.1f}s (peer_notified) ✓")
+
+    if c["instance_id"] in _peer_ids(a):
+        raise SystemExit("unpair: a still lists c after its own unpair")
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline and a["instance_id"] in _peer_ids(c):
+        time.sleep(1.0)
+    if a["instance_id"] in _peer_ids(c):
+        raise SystemExit(
+            "unpair: c still lists a 20s after a unpaired — the UNPAIR never "
+            "reached c (or c ignored it)"
+        )
+    print("  c dropped a on the inbound UNPAIR ✓")
+
+    for label, peer_iid in (("a", c["instance_id"]), ("c", a["instance_id"])):
+        queued = _rows(
+            label,
+            "SELECT COUNT(*) FROM federation_outbox WHERE instance_id=?",
+            (peer_iid,),
+        )[0][0]
+        if queued:
+            raise SystemExit(f"unpair: {label} still queues {queued} envelope(s)")
+    print("  neither side queues envelopes for the other ✓")
+
+    if _space_rows("a", c["instance_id"]) != spaces_on_a or (
+        _space_rows("c", a["instance_id"]) != spaces_on_c
+    ):
+        raise SystemExit(
+            "unpair: shared space membership changed — the pairing and the "
+            "space are separate relationships"
+        )
+    print(
+        f"  shared spaces kept (a: {len(spaces_on_a)}, c: {len(spaces_on_c)}) ✓"
+    )
+
+    # Restore the topology later steps assume.
+    time.sleep(2)
+    s, qr = _pairing_call(
+        "a",
+        f"http://127.0.0.1:{a['port']}/api/pairing/initiate",
+        token=a["token"],
+        method="POST",
+    )
+    _must("re-pair initiate(a)", s, qr, ok=(201,))
+    s, ack = _pairing_call(
+        "c",
+        f"http://127.0.0.1:{c['port']}/api/pairing/accept",
+        token=c["token"],
+        method="POST",
+        body=qr,
+    )
+    _must("re-pair accept(c)", s, ack)
+    s, conf = _pairing_call(
+        "a",
+        f"http://127.0.0.1:{a['port']}/api/pairing/confirm",
+        token=a["token"],
+        method="POST",
+        body={"token": ack["token"], "verification_code": ack["verification_code"]},
+    )
+    _must("re-pair confirm(a)", s, conf)
+    deadline = time.monotonic() + 20.0
+    def _repaired() -> bool:
+        return c["instance_id"] in _peer_ids(a, confirmed_only=True) and (
+            a["instance_id"] in _peer_ids(c, confirmed_only=True)
+        )
+
+    while time.monotonic() < deadline and not _repaired():
+        time.sleep(1.0)
+    if not _repaired():
+        raise SystemExit("unpair: re-pairing a↔c did not land on both sides")
+    print("  a↔c re-paired ✓")
+    print("unpair: ok")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -8947,6 +9092,12 @@ def main() -> None:
         # backoff window. Runs last so the kill-restart cycle can't
         # destabilise the earlier topology assertions.
         cmd_replay()
+        # ``unpair`` tears a↔c down from a's side and asserts BOTH
+        # households dropped the pairing (a's signed UNPAIR reached c),
+        # neither queues envelopes for the other, and shared space
+        # membership is untouched — then re-pairs a↔c. Runs last: it
+        # churns a pairing every earlier step relies on.
+        cmd_unpair()
         return
     fn = globals().get(f"cmd_{cmd.replace('-', '_')}")
     if fn is None:

@@ -300,3 +300,21 @@ async def test_clear_relay_paths_whole_conversation(env):
     await env.repo.clear_relay_paths("c1")  # sender_user_id=None
     assert await env.repo.get_relay_paths("c1", "u1") is None
     assert await env.repo.get_relay_paths("c1", "u2") is None
+
+
+# ── forget_discovered_via (unpair) ─────────────────────────────────────────
+
+
+async def test_forget_discovered_via_drops_only_that_sources_announcements(env):
+    for peer, via in (("x", "gone"), ("y", "gone"), ("x", "kept"), ("gone", "kept")):
+        await env.repo.upsert_network_discovery(
+            peer_instance_id=peer,
+            discovered_via=via,
+            seen_at="2026-01-01T00:00:00+00:00",
+            hop_count=1,
+        )
+    await env.repo.forget_discovered_via("gone")
+    assert await env.repo.list_known_peers("gone") == []
+    # Other sources' announcements — including ones naming the unpaired
+    # household — are theirs to keep.
+    assert sorted(await env.repo.list_known_peers("kept")) == ["gone", "x"]

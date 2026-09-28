@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import orjson
 
 from socialhome.app_keys import (
     auto_pair_coordinator_key,
@@ -13,8 +18,10 @@ from socialhome.app_keys import (
     federation_repo_key,
     federation_service_key,
     federation_transport_key,
+    key_manager_key,
     outbox_repo_key,
     peer_home_sharing_service_key,
+    peer_unpair_service_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -1624,3 +1631,100 @@ async def test_confirm_pairing_reports_real_envelope_counts(client):
     assert body["instance_id"] == "peer-confirm-counts"
     assert body["queued_envelopes"] == 2
     assert body["dropped_envelopes"] == 3
+
+
+# ─── Unpair tells the peer (UNPAIR) before forgetting it ──────────────────
+
+
+class _CaptureTransport:
+    """Stands in for :class:`FederationTransport`: records the envelope and
+    whether the peer's row (session key + inbox URL) still existed when it
+    went out."""
+
+    def __init__(self, repo, *, hang: bool = False) -> None:
+        self._repo = repo
+        self._hang = hang
+        self.sent: list[tuple[dict, bool]] = []
+
+    async def send(self, *, instance, envelope_dict):
+        present = await self._repo.get_instance(instance.id) is not None
+        self.sent.append((envelope_dict, present))
+        if self._hang:
+            await asyncio.sleep(3600)
+        return SimpleNamespace(ok=True, via="https", status_code=202, error=None)
+
+    async def close_all(self) -> None:  # app cleanup closes the transport
+        return None
+
+
+def _keyed_instance(client, iid: str, session_key: bytes) -> RemoteInstance:
+    wrapped = client.app[key_manager_key].encrypt(session_key)
+    return dataclasses.replace(
+        _fake_instance(iid),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+    )
+
+
+async def test_unpair_sends_signed_unpair_before_deleting_the_row(client):
+    fed_repo = client.app[federation_repo_key]
+    fed_svc = client.app[federation_service_key]
+    session_key = b"\x11" * 32
+    await fed_repo.save_instance(_keyed_instance(client, "peer-u1", session_key))
+    await client.app[outbox_repo_key].enqueue(
+        instance_id="peer-u1",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    transport = _CaptureTransport(fed_repo)
+    fed_svc._transport = transport
+
+    r = await client.delete(
+        "/api/pairing/connections/peer-u1",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert await r.json() == {"ok": True, "peer_notified": True}
+
+    assert len(transport.sent) == 1
+    env, row_present_at_send = transport.sent[0]
+    assert row_present_at_send, "UNPAIR must go out while the peer's keys exist"
+    assert env["event_type"] == FederationEventType.UNPAIR.value
+    assert env["from_instance"] == fed_svc.own_instance_id
+    assert env["to_instance"] == "peer-u1"
+    # Encryption-first: nothing but the routing fields in plaintext.
+    assert "payload" not in env
+    plain = fed_svc._encoder.decrypt_payload(env["encrypted_payload"], session_key)
+    assert orjson.loads(plain) == {}
+    unsigned = {k: v for k, v in env.items() if k != "signatures"}
+    assert fed_svc._encoder.verify_signatures_all(
+        orjson.dumps(unsigned),
+        suite=env["sig_suite"],
+        signatures=env["signatures"],
+        ed_public_key=fed_svc.own_identity_pk,
+        pq_public_key=None,
+    )
+
+    assert await fed_repo.get_instance("peer-u1") is None
+    assert await client.app[outbox_repo_key].count_pending_for("peer-u1") == 0
+
+
+async def test_unpair_unreachable_peer_still_succeeds_promptly(client):
+    fed_repo = client.app[federation_repo_key]
+    fed_svc = client.app[federation_service_key]
+    await fed_repo.save_instance(_keyed_instance(client, "peer-u2", b"\x12" * 32))
+    fed_svc._transport = _CaptureTransport(fed_repo, hang=True)
+    client.app[peer_unpair_service_key]._notify_timeout_s = 0.2
+    seen: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, seen.append)
+
+    started = time.monotonic()
+    r = await client.delete(
+        "/api/pairing/connections/peer-u2",
+        headers=_auth(client._tok),
+    )
+    assert time.monotonic() - started < 3.0
+    assert r.status == 200
+    assert await r.json() == {"ok": True, "peer_notified": False}
+    assert await fed_repo.get_instance("peer-u2") is None
+    assert [e.instance_id for e in seen] == ["peer-u2"]

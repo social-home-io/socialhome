@@ -24,6 +24,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import PairingInboundHandlers
+from socialhome.services.peer_unpair_service import PeerUnpairService
 
 
 class _FakeRegistry:
@@ -140,18 +141,60 @@ def repo():
     return _FakeFederationRepo()
 
 
+class _FakeOutboxRepo:
+    def __init__(self) -> None:
+        self.rows: dict[str, list[str]] = {}
+
+    async def delete_for_instance(self, iid):
+        self.rows.pop(iid, None)
+
+
+class _FakeRoutingRepo:
+    def __init__(self) -> None:
+        self.discovered_via: dict[str, list[str]] = {}
+
+    async def forget_discovered_via(self, iid):
+        self.discovered_via.pop(iid, None)
+
+
+class _NoSendFederation:
+    async def send_event(self, **kw):
+        raise AssertionError("an inbound UNPAIR must never be echoed back")
+
+
 @pytest.fixture
-def handlers(bus, repo):
-    h = PairingInboundHandlers(bus=bus, federation_repo=repo)
+def outbox():
+    return _FakeOutboxRepo()
+
+
+@pytest.fixture
+def routing():
+    return _FakeRoutingRepo()
+
+
+@pytest.fixture
+def peer_unpair(bus, repo, outbox, routing):
+    return PeerUnpairService(
+        bus=bus,
+        federation=_NoSendFederation(),
+        federation_repo=repo,
+        outbox_repo=outbox,
+        routing_repo=routing,
+    )
+
+
+@pytest.fixture
+def handlers(bus, repo, peer_unpair):
+    h = PairingInboundHandlers(bus=bus, federation_repo=repo, peer_unpair=peer_unpair)
     fed = _FakeFederationService()
     h.attach_to(fed)
     return h
 
 
-async def test_attach_registers_pairing_event_types(bus, repo):
+async def test_attach_registers_pairing_event_types(bus, repo, peer_unpair):
     """attach_to wires the pairing-family events (six pairing-lifecycle
     events plus the proto_version capability announcement)."""
-    h = PairingInboundHandlers(bus=bus, federation_repo=repo)
+    h = PairingInboundHandlers(bus=bus, federation_repo=repo, peer_unpair=peer_unpair)
     fed = _FakeFederationService()
     h.attach_to(fed)
     types = {t for t, _ in fed._event_registry.registered}
@@ -311,6 +354,32 @@ async def test_unpair_deletes_instance_and_publishes(bus, repo, handlers):
     )
     assert "peer-a" not in repo.instances
     assert captured[0].instance_id == "peer-a"
+
+
+async def test_inbound_unpair_cleans_up_like_a_local_unpair(
+    repo, outbox, routing, handlers
+):
+    """Symmetric with ``DELETE /api/pairing/connections/{id}``: the same
+    :meth:`PeerUnpairService.forget` drops the queued envelopes and the mesh
+    hints the peer announced — and never sends an UNPAIR back."""
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    outbox.rows["peer-a"] = ["m1"]
+    routing.discovered_via["peer-a"] = ["peer-x"]
+    await handlers._on_unpair(_event(FederationEventType.UNPAIR, {}))
+    assert outbox.rows == {}
+    assert routing.discovered_via == {}
+
+
+async def test_inbound_unpair_ignores_an_instance_named_in_the_payload(repo, handlers):
+    """Only the signer (``from_instance``) is unpaired — a payload naming
+    another household is not an authority to drop that pairing."""
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    repo.instances["peer-b"] = _sample_instance("peer-b", PairingStatus.CONFIRMED)
+    await handlers._on_unpair(
+        _event(FederationEventType.UNPAIR, {"instance_id": "peer-b"}),
+    )
+    assert "peer-a" not in repo.instances
+    assert "peer-b" in repo.instances
 
 
 async def test_unpair_unknown_peer_is_noop(bus, handlers):

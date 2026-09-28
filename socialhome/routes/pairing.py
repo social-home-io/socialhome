@@ -28,7 +28,6 @@ from ..app_keys import (
     auto_pair_coordinator_key,
     auto_pair_inbox_key,
     dm_routing_service_key,
-    event_bus_key,
     federation_repo_key,
     federation_service_key,
     federation_transport_key,
@@ -36,10 +35,10 @@ from ..app_keys import (
     pairing_relay_queue_key,
     peer_home_sharing_service_key,
     peer_user_visibility_repo_key,
+    peer_unpair_service_key,
     platform_adapter_key,
     user_repo_key,
 )
-from ..domain.events import PeerUnpaired
 from ..domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -555,13 +554,10 @@ class PairingConnectionDetailView(BaseView):
         if not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         instance_id = self.match("instance_id")
-        repo = self.svc(federation_repo_key)
-        inst = await repo.get_instance(instance_id)
-        if inst is None:
+        notified = await self.svc(peer_unpair_service_key).unpair(instance_id)
+        if notified is None:
             return error_response(404, "NOT_FOUND", "Instance not found.")
-        await repo.delete_instance(instance_id)
-        await self.svc(event_bus_key).publish(PeerUnpaired(instance_id=instance_id))
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "peer_notified": notified})
 
 
 def _relay_request_dict(req) -> dict:

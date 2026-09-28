@@ -75,6 +75,7 @@ class AbstractOutboxRepo(Protocol):
     async def count_pending_for(self, instance_id: str) -> int: ...
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
+    async def delete_for_instance(self, instance_id: str) -> None: ...
 
 
 class SqliteOutboxRepo:
@@ -318,6 +319,18 @@ class SqliteOutboxRepo:
             (row["id"],),
         )
         return True
+
+    async def delete_for_instance(self, instance_id: str) -> None:
+        """Delete every outbox row (any status) addressed to ``instance_id``.
+
+        Called when the pairing is torn down: redelivery needs the peer's
+        ``remote_instances`` row, so rows for an unpaired peer can never be
+        delivered — NEVER_DROP included.
+        """
+        await self._db.enqueue(
+            "DELETE FROM federation_outbox WHERE instance_id=?",
+            (instance_id,),
+        )
 
 
 def _row_to_entry(row: dict) -> OutboxEntry:
