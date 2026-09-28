@@ -1532,6 +1532,17 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # candidates within seconds (5 legs × several candidates), and
             # the broad ``/api/calls`` limit below would 429 them.
             "/api/calls/*/ice": (300, 60),
+            # The rest of an in-call browser's traffic gets its own buckets
+            # too: under the broad 10/min ``/api/calls`` limit a callee who
+            # had been in a call within the last minute (``quality`` is
+            # sampled every 10 s) got 429 on ``POST /join`` and its
+            # callee-to-callee leg was never offered. A group callee
+            # answers the ring plus one leg per other callee (≤ 4) and
+            # offers its own legs in one ``join``.
+            "/api/calls/*/answer": (60, 60),
+            "/api/calls/*/join": (30, 60),
+            "/api/calls/*/quality": (30, 60),
+            "/api/calls/ice-servers": (30, 60),
             # Map tiles — *looser* than the default, and listed ahead of
             # any broader prefix because ``_pick`` returns the first
             # match in insertion order. Leaflet's ``<img>`` loads all

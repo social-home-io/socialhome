@@ -723,3 +723,41 @@ async def test_a_mesh_legs_worth_of_ice_is_not_rate_limited(client):
             headers=_auth(bob_tok),
         )
         assert r.status == 204, (i, r.status)
+
+
+async def test_a_callees_mesh_signalling_is_not_starved_by_quality_samples(client):
+    """Regression (live three-household group call): ``answer``, ``join``,
+    ``quality`` and ``ice-servers`` all shared the ``/api/calls`` 10/min
+    bucket. A browser samples call quality every 10 s, so a callee who had
+    been in a call within the last minute got 429 on ``POST /join`` — the
+    callee-to-callee leg was silently never offered."""
+    cid, bob_tok, _carol_tok = await _group_call(client)
+    bob = _auth(bob_tok)
+    # A minute of quality samples from the call Bob was just in (this one
+    # stands in for it) plus two page loads' ICE-server fetches.
+    for _ in range(6):
+        r = await client.post(
+            f"/api/calls/{cid}/quality", json={"rtt_ms": 1}, headers=bob
+        )
+        assert r.status == 204
+    for _ in range(2):
+        r = await client.get("/api/calls/ice-servers", headers=bob)
+        assert r.status == 200
+    # Then the whole callee side of a group call: answer the ring, offer
+    # the leg to Carol, answer a peer's leg.
+    r = await client.post(
+        f"/api/calls/{cid}/answer", json={"sdp_answer": "ans"}, headers=bob
+    )
+    assert r.status == 200
+    r = await client.post(
+        f"/api/calls/{cid}/join",
+        json={"sdp_offers": {"carol-uid": "leg-offer"}},
+        headers=bob,
+    )
+    assert r.status == 200, r.status
+    r = await client.post(
+        f"/api/calls/{cid}/answer",
+        json={"sdp_answer": "leg-ans", "to_user": "carol-uid"},
+        headers=bob,
+    )
+    assert r.status == 200, r.status

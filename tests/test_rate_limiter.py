@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 
-from socialhome.rate_limiter import RateLimiter
+from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
+
+from socialhome.rate_limiter import RateLimiter, build_rate_limit_middleware
 
 
 async def test_allows_within_limit():
@@ -92,3 +96,33 @@ async def test_check_uses_first_two_path_segments_as_bucket():
         )
         is True
     )
+
+
+async def _hit(mw, path: str, user: str = "u1") -> int:
+    request = make_mocked_request("POST", path)
+    request["user"] = SimpleNamespace(user_id=user)
+
+    async def handler(_req):
+        return web.Response(status=204)
+
+    return (await mw(request, handler)).status
+
+
+async def test_each_limit_rule_counts_only_its_own_requests():
+    """Regression (live group call): every ``/api/calls/*`` request landed in
+    one ``api/calls`` bucket whatever rule it matched, so 300/min of trickle
+    ICE (or the quality sampler) used up the 10/min an initiate or a
+    ``join`` is checked against — and the next call 429'd."""
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={"/api/calls/*/ice": (300, 60), "/api/calls": (3, 60)},
+    )
+    for _ in range(20):
+        assert await _hit(mw, "/api/calls/c1/ice") == 204
+    for _ in range(3):
+        assert await _hit(mw, "/api/calls") == 204
+    assert await _hit(mw, "/api/calls") == 429
+    # …and the broad rule's spend doesn't eat the specific one either.
+    assert await _hit(mw, "/api/calls/c1/ice") == 204
+    # Unmatched paths keep their per-first-two-segments default bucket.
+    assert await _hit(mw, "/api/feed/posts") == 204
