@@ -87,6 +87,11 @@ from ..domain.user import (
 from ..domain.federation_capabilities import FederationCapability
 from ..federation.dm_scope import DmScope, refuse
 from ..federation.moment_origin import check_relayed_moment_origin
+from ..federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    owner_bound_id_refused,
+)
 from ..federation.space_authorship import SpaceAuthorship
 from ..federation.space_scope import (
     log_cross_space_refusal,
@@ -1355,6 +1360,16 @@ class FederationInboundService:
         post = self._post_from_payload(event.payload)
         if post is None:
             return
+        # v_36: an owner-bound id commits to its author and space, so a
+        # claim of it for anybody else is refused before it can hold the id.
+        if owner_bound_id_refused(
+            SPACE_POST_KIND,
+            post.id,
+            space_id=space_id,
+            owner_user_id=post.author,
+            context=f"{event.event_type} from {event.from_instance}",
+        ):
+            return
         authorship = self._space_authorship(event)
         if authorship is None:
             return
@@ -1775,6 +1790,14 @@ class FederationInboundService:
             return
         space_id = resolve_space_id(event)
         if not space_id:
+            return
+        if owner_bound_id_refused(
+            SPACE_COMMENT_KIND,
+            comment_id,
+            space_id=space_id,
+            owner_user_id=author,
+            context=f"{event.event_type} from {event.from_instance}",
+        ):
             return
         authorship = self._space_authorship(event)
         if authorship is None:

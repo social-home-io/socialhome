@@ -30,6 +30,7 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.services.space_public_author import author_signing_bytes
+from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
@@ -220,6 +221,32 @@ async def test_author_self_cert_mismatch_dropped(env):
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
+
+
+async def test_a_bound_post_id_claimed_by_another_author_is_dropped(env, caplog):
+    """v_36: a post id commits to its author. Another household's user can
+    sign a valid inner for an id it has seen, but not one bound to itself —
+    the claim is dropped, and the real author's post still lands."""
+    post_id = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+    )
+    eve = generate_identity_keypair()
+    eve_user_id = derive_user_id(eve.public_key, "bob")
+    squat = await _make_envelope(
+        env,
+        post_id=post_id,
+        author_user_id=eve_user_id,
+        author_pk=eve.public_key,
+        author_sign_seed=eve.private_key,
+    )
+    with caplog.at_level(logging.WARNING):
+        await env["inbound"].handle(_frame(squat), gfs_id="g1")
+    assert await env["post_repo"].get(post_id) is None
+    assert "not bound to" in caplog.text
+    genuine = await _make_envelope(env, post_id=post_id)
+    await env["inbound"].handle(_frame(genuine), gfs_id="g1")
+    got = await env["post_repo"].get(post_id)
+    assert got is not None and got[1].author == env["author_user_id"]
 
 
 async def test_anchor_derived_author_accepted(env):

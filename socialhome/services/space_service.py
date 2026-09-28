@@ -41,6 +41,11 @@ from ..federation.invite_code import (
     build_invite_payload,
     encode_invite_blob,
 )
+from ..federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    mint_owner_bound_id,
+)
 
 if TYPE_CHECKING:
     import pathlib
@@ -4497,7 +4502,11 @@ class SpaceService(SpaceMemberGuardMixin):
             )
 
         post = Post(
-            id=uuid.uuid4().hex,
+            # Owner-bound (v_36): no other household can announce this
+            # id first as its own user's post.
+            id=mint_owner_bound_id(
+                SPACE_POST_KIND, space_id=space_id, owner_user_id=author.user_id
+            ),
             author=author.user_id,
             type=post_type,
             created_at=datetime.now(timezone.utc),
@@ -4810,7 +4819,9 @@ class SpaceService(SpaceMemberGuardMixin):
             if parent is None or parent.post_id != post_id:
                 raise KeyError(f"parent comment {parent_id!r} not in this post")
         comment = Comment(
-            id=uuid.uuid4().hex,
+            id=mint_owner_bound_id(
+                SPACE_COMMENT_KIND, space_id=space_id, owner_user_id=author_user_id
+            ),
             post_id=post.id,
             author=author_user_id,
             type=ctype,
