@@ -9,6 +9,7 @@ and gets exercised end-to-end in :file:`tests/scenarios/`.
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 
@@ -286,7 +287,13 @@ async def test_inbound_delete_removes_local_row_on_valid_signature(db):
     inbound = MomentPublicInbound(
         bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
     )
-    envelope = _signed_envelope({"moment_id": "m-9", "author_user_id": "u-remote"})
+    envelope = _signed_envelope(
+        {
+            "moment_id": "m-9",
+            "author_user_id": "u-remote",
+            "instance_id": "inst-remote",
+        }
+    )
     await inbound.handle(
         {"type": "incoming_public_moment_delete", "payload": envelope},
         gfs_id="g1",
@@ -452,7 +459,9 @@ async def test_inbound_public_replay_after_delete_is_refused(db):
     create = {"type": "incoming_public_moment", "payload": _public_create("m-r")}
     await inbound.handle(create, gfs_id="g1")
     assert await moment_repo.get("m-r") is not None
-    delete = _signed_envelope({"moment_id": "m-r", "author_user_id": "u-remote"})
+    delete = _signed_envelope(
+        {"moment_id": "m-r", "author_user_id": "u-remote", "instance_id": "inst-remote"}
+    )
     await inbound.handle(
         {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
     )
@@ -499,3 +508,105 @@ async def test_inbound_public_claim_of_another_authors_bound_id_is_refused(db):
         gfs_id="g1",
     )
     assert await moment_repo.get(own) is not None
+
+
+# ── A stored moment binds its author and origin (household-path parity) ──
+
+
+async def _stored(moment_repo, moment_id: str):
+    return await moment_repo.get(moment_id, include_deleted=True)
+
+
+async def test_inbound_public_create_naming_another_author_for_a_held_id_is_refused(
+    db, caplog
+):
+    """A legacy id this household already holds keeps its author: a validly
+    signed create from somebody else for that id is refused, not upserted."""
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-held")},
+        gfs_id="g1",
+    )
+    await db.enqueue("UPDATE moments SET author_user_id='u-first' WHERE id='m-held'")
+    created.clear()
+    with caplog.at_level(logging.WARNING):
+        await inbound.handle(
+            {"type": "incoming_public_moment", "payload": _public_create("m-held")},
+            gfs_id="g1",
+        )
+    row = await _stored(moment_repo, "m-held")
+    assert row is not None and row.author_user_id == "u-first"
+    assert created == []
+    assert "belongs to another author" in caplog.text
+
+
+async def test_inbound_public_create_naming_another_origin_for_a_held_id_is_refused(db):
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-o")},
+        gfs_id="g1",
+    )
+    await db.enqueue(
+        "UPDATE moments SET origin_instance_id='inst-first', content='orig'"
+        " WHERE id='m-o'"
+    )
+    created.clear()
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-o")},
+        gfs_id="g1",
+    )
+    row = await _stored(moment_repo, "m-o")
+    assert row is not None and row.content == "orig"
+    assert created == []
+
+
+async def test_inbound_public_redelivery_from_the_same_author_still_lands(db):
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    frame = {"type": "incoming_public_moment", "payload": _public_create("m-again")}
+    await inbound.handle(frame, gfs_id="g1")
+    await inbound.handle(frame, gfs_id="g1")
+    assert await moment_repo.get("m-again") is not None
+    assert len(created) == 2
+
+
+async def test_inbound_public_delete_naming_another_origin_is_refused(db):
+    """A delete must name the stored origin too — else it is not applied
+    and leaves no tombstone."""
+    inbound, moment_repo, _ = await _public_inbound_env(db)
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-d")},
+        gfs_id="g1",
+    )
+    for instance in ("inst-elsewhere", None):
+        env = {"moment_id": "m-d", "author_user_id": "u-remote"}
+        if instance:
+            env["instance_id"] = instance
+        await inbound.handle(
+            {
+                "type": "incoming_public_moment_delete",
+                "payload": _signed_envelope(env),
+            },
+            gfs_id="g1",
+        )
+    row = await _stored(moment_repo, "m-d")
+    assert row is not None and row.deleted_at is None
+
+
+async def test_inbound_public_early_delete_binds_its_origin(db):
+    """A delete for a moment not held yet tombstones it under the sending
+    household's origin, so the create from that author stays refused."""
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    delete = _signed_envelope(
+        {"moment_id": "m-e", "author_user_id": "u-remote", "instance_id": "inst-remote"}
+    )
+    await inbound.handle(
+        {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
+    )
+    row = await _stored(moment_repo, "m-e")
+    assert row is not None and row.origin_instance_id == "inst-remote"
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-e")},
+        gfs_id="g1",
+    )
+    assert await moment_repo.get("m-e") is None
+    assert created == []

@@ -150,7 +150,16 @@ unscoped `moment` kind). The public inbound refuses an
 `incoming_public_moment` or `incoming_public_moment_delete` naming a
 bound id for any other author — validly signed or not — before it is
 stored or tombstoned, so nobody can pre-empt another author's moment
-id. Legacy (uuid4) ids are unchanged. See [`momentum.md`](./momentum.md).
+id. See [`momentum.md`](./momentum.md).
+
+**Stored row wins** — as on the household path: a moment id this
+household already holds (live, or a delete's tombstone) keeps its author
+and origin, whatever the id's shape. A public create or delete naming
+another author or origin for it is refused at WARNING — never upserted
+over the held row, never tombstoned. A delete's origin is its
+`origin_instance_id`, else the sending household's `instance_id`; a
+delete for a moment not held yet leaves a tombstone under that origin,
+so a later create stays refused (the "deletes stick" rule).
 
 ## Signature canonicalisation
 
