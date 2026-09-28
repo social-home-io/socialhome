@@ -9,15 +9,16 @@
  *
  * Flow:
  *   1. ``openCallTypePicker(conversationId)`` flips the open signal.
- *   2. User picks Audio or Video — the dialog POSTs ``/api/calls`` with
- *      the chosen ``call_type`` and routes to the in-call page.
+ *   2. User picks Audio or Video — :func:`startCall` acquires media,
+ *      creates the SDP offer, POSTs ``/api/calls`` with the chosen
+ *      ``call_type`` and the dialog routes to the in-call page.
  *   3. The chosen ``call_type`` is fixed at offer time on the backend
  *      (spec §26.5); mid-call camera enable/disable is handled by
  *      :func:`InCallPage.toggleCamera`.
  */
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
-import { api } from '@/api'
+import { startCall } from '@/features/calls/callSession'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 
@@ -39,15 +40,12 @@ export function CallTypePickerDialog() {
     if (!convId || submitting.value) return
     submitting.value = true
     try {
-      const r = await api.post('/api/calls', {
-        conversation_id: convId,
-        call_type: callType,
-        sdp_offer: 'v=0\r\n',
-      }) as { call_id: string }
+      // Acquires the mic/camera, creates the real SDP offer and posts it.
+      const callId = await startCall(convId, callType)
       open.value = false
-      loc.route(`/calls/${r.call_id}`)
+      loc.route(`/calls/${callId}`)
     } catch (err: unknown) {
-      showToast(`Call failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(`Couldn't start the call: ${(err as Error)?.message ?? err}`, 'error')
       submitting.value = false
     }
   }

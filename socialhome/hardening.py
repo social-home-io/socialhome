@@ -166,14 +166,16 @@ _SECURITY_HEADERS: dict[str, str] = {
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
-    # ``geolocation=(self)`` allows our same-origin SPA to call
-    # ``navigator.geolocation.getCurrentPosition()`` for the
-    # location-share post composer (and the existing DM
-    # ShareLocationButton). Cross-origin embeds still can't request
-    # geolocation. ``camera`` / ``microphone`` stay denied — those go
-    # through getUserMedia in the calls path and the spec doesn't yet
-    # need them.
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=(self)",
+    # Each feature is allowed for our own origin only, so cross-origin
+    # embeds can never request it:
+    #
+    # * ``geolocation`` — ``navigator.geolocation.getCurrentPosition()``
+    #   for the location-share post composer + DM ShareLocationButton.
+    # * ``camera`` / ``microphone`` — ``getUserMedia`` for voice/video
+    #   calls (§26), voice notes, push-to-talk STT and the pairing QR
+    #   scanner. ``()`` here made the browser reject every one of those
+    #   with ``NotAllowedError`` before the user was even prompted.
+    "Permissions-Policy": "camera=(self), microphone=(self), geolocation=(self)",
     "X-XSS-Protection": "0",
 }
 

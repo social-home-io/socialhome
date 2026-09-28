@@ -7,7 +7,9 @@ endpoints, and the ICE-server config route.
 
 from __future__ import annotations
 
+from socialhome.app_keys import call_signaling_service_key
 from socialhome.auth import sha256_token_hash
+from socialhome.domain.federation import FederationEventType
 
 from .conftest import _auth
 
@@ -479,3 +481,129 @@ async def test_quality_guard_non_member_is_403(client):
         headers=_auth("eve-tok"),
     )
     assert r.status == 403
+
+
+# ─── Callee side of a cross-household call ───────────────────────────────
+
+
+async def _seed_remote_carol(client, conv_id: str) -> None:
+    """Carol lives on the paired ``carol-house`` and is in *conv_id*."""
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO remote_instances"
+        "(id, display_name, remote_identity_pk, key_self_to_remote,"
+        " key_remote_to_self, remote_inbox_url, local_inbox_id, status,"
+        " source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "carol-house",
+            "Carol's",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://carol/wh",
+            "wh-carol",
+            "confirmed",
+            "manual",
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        ("carol-uid", "carol-house", "carol", "Carol"),
+    )
+    await db.enqueue(
+        "INSERT INTO conversation_remote_members"
+        "(conversation_id, instance_id, remote_username) VALUES(?,?,?)",
+        (conv_id, "carol-house", "carol"),
+    )
+
+
+class _InboundEvent:
+    def __init__(self, event_type, from_instance, payload):
+        self.event_type = event_type
+        self.from_instance = from_instance
+        self.payload = payload
+
+
+async def test_callee_can_answer_ice_and_hangup_a_federated_call(client, monkeypatch):
+    """Bob (local) is rung by a ``CALL_OFFER`` from carol's household. Every
+    callee-side route authorises against the persisted ``call_sessions``
+    row — before it was written on the inbound offer, all of them 404'd
+    and a cross-household call could ring but never be answered."""
+    bob_tok = await _seed_bob(client, conv_id="conv-x")
+    await _seed_remote_carol(client, "conv-x")
+    svc = client.app[call_signaling_service_key]
+    sent = []
+
+    async def _send_event(_self, *, to_instance_id, event_type, payload, **_kw):
+        sent.append((to_instance_id, event_type, payload))
+
+    monkeypatch.setattr(type(svc._federation), "send_event", _send_event)
+    await svc.handle_federated_signal(
+        _InboundEvent(
+            FederationEventType.CALL_OFFER,
+            "carol-house",
+            {
+                "call_id": "call-fed-1",
+                "conversation_id": "conv-x",
+                "from_user": "carol-uid",
+                "to_user": "bob-uid",
+                "call_type": "video",
+            },
+        )
+    )
+
+    r = await client.post(
+        "/api/calls/call-fed-1/answer",
+        json={"sdp_answer": "v=0\r\nans\r\n"},
+        headers=_auth(bob_tok),
+    )
+    assert r.status == 200
+    assert [(t, e) for t, e, _p in sent] == [
+        ("carol-house", FederationEventType.CALL_ANSWER),
+    ]
+    r = await client.post(
+        "/api/calls/call-fed-1/answer",
+        json={"sdp_answer": "v=0\r\nagain\r\n"},
+        headers=_auth(bob_tok),
+    )
+    assert r.status == 409  # a second device can't re-answer
+    r = await client.post(
+        "/api/calls/call-fed-1/ice",
+        json={"candidate": {"candidate": "x", "sdpMid": "0"}},
+        headers=_auth(bob_tok),
+    )
+    assert r.status == 204
+    r = await client.post("/api/calls/call-fed-1/hangup", headers=_auth(bob_tok))
+    assert r.status == 204
+    assert sent[-1][:2] == ("carol-house", FederationEventType.CALL_HANGUP)
+    r = await client.get("/api/conversations/conv-x/calls", headers=_auth(bob_tok))
+    [row] = (await r.json())["calls"]
+    assert row["status"] == "ended"
+    assert row["call_type"] == "video"
+
+
+async def test_federated_offer_for_foreign_conversation_is_not_stored(client):
+    """An offer naming a conversation the sending household isn't in
+    neither rings nor leaves a row behind (the callee's routes 404)."""
+    bob_tok = await _seed_bob(client, conv_id="conv-y")
+    svc = client.app[call_signaling_service_key]
+    await svc.handle_federated_signal(
+        _InboundEvent(
+            FederationEventType.CALL_OFFER,
+            "mallory-house",
+            {
+                "call_id": "call-fed-2",
+                "conversation_id": "conv-y",
+                "from_user": "mallory-uid",
+                "to_user": "bob-uid",
+                "call_type": "audio",
+            },
+        )
+    )
+    r = await client.post(
+        "/api/calls/call-fed-2/answer",
+        json={"sdp_answer": "v=0\r\n"},
+        headers=_auth(bob_tok),
+    )
+    assert r.status == 404

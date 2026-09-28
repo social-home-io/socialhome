@@ -10,6 +10,7 @@ from socialhome.hardening import (
     DEFAULT_MEDIA_MAX_BYTES,
     build_body_size_middleware,
     build_cors_deny_middleware,
+    build_security_headers_middleware,
 )
 
 # pytest-homeassistant-custom-component (a transitive dev dep when this
@@ -277,3 +278,31 @@ async def test_genuine_cross_origin_still_denied_when_origin_host_differs(
         },
     )
     assert r.status == 403
+
+
+# ─── Security-headers middleware ─────────────────────────────────────────
+
+
+async def test_permissions_policy_allows_same_origin_camera_and_microphone(
+    aiohttp_client,
+):
+    """Calls, voice notes, STT and the QR scanner all call getUserMedia
+    from the same-origin SPA — ``camera=()`` / ``microphone=()`` made the
+    browser reject every one of them with NotAllowedError. Same-origin is
+    allowed; cross-origin embeds stay denied."""
+
+    async def echo(request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app = web.Application(middlewares=[build_security_headers_middleware()])
+    app.router.add_get("/", echo)
+    tc = await aiohttp_client(app)
+    r = await tc.get("/")
+    policy = {
+        part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip()
+        for part in r.headers["Permissions-Policy"].split(",")
+    }
+    assert policy["camera"] == "(self)"
+    assert policy["microphone"] == "(self)"
+    assert policy["geolocation"] == "(self)"
+    assert r.headers["X-Frame-Options"] == "DENY"

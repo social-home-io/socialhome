@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 
-vi.mock('@/api', () => {
-  const m = { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }
-  return { api: m }
-})
-vi.mock('./Toast', () => ({ showToast: vi.fn() }))
+// The SDP offer / media handshake lives in callSession (covered by its own
+// test); the picker only has to start the chosen call type and route.
+const startCall = vi.fn()
+vi.mock('@/features/calls/callSession', () => ({
+  startCall: (...a: unknown[]) => startCall(...a),
+}))
+const showToast = vi.fn()
+vi.mock('./Toast', () => ({ showToast: (...a: unknown[]) => showToast(...a) }))
 
 const routeSpy = vi.fn()
 vi.mock('preact-iso', () => ({
@@ -13,15 +16,11 @@ vi.mock('preact-iso', () => ({
 }))
 
 import { CallTypePickerDialog, openCallTypePicker } from './CallTypePickerDialog'
-import { api } from '@/api'
-
-const apiMock = api as unknown as {
-  post: ReturnType<typeof vi.fn>
-}
 
 describe('CallTypePickerDialog', () => {
   beforeEach(() => {
-    apiMock.post.mockReset()
+    startCall.mockReset()
+    showToast.mockReset()
     routeSpy.mockReset()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
   })
@@ -38,33 +37,37 @@ describe('CallTypePickerDialog', () => {
     expect(await findByLabelText('Start video call')).toBeTruthy()
   })
 
-  it('POSTs an audio call when the Audio tile is clicked', async () => {
-    apiMock.post.mockResolvedValueOnce({ call_id: 'call-aud' })
+  it('starts an audio call when the Audio tile is clicked', async () => {
+    startCall.mockResolvedValueOnce('call-aud')
     openCallTypePicker('conv-aud')
     const { findByLabelText } = render(<CallTypePickerDialog />)
-    const tile = await findByLabelText('Start audio call')
-    fireEvent.click(tile)
+    fireEvent.click(await findByLabelText('Start audio call'))
     await new Promise(r => setTimeout(r, 0))
-    expect(apiMock.post).toHaveBeenCalledWith('/api/calls', {
-      conversation_id: 'conv-aud',
-      call_type: 'audio',
-      sdp_offer: 'v=0\r\n',
-    })
+    expect(startCall).toHaveBeenCalledWith('conv-aud', 'audio')
     expect(routeSpy).toHaveBeenCalledWith('/calls/call-aud')
   })
 
-  it('POSTs a video call when the Video tile is clicked', async () => {
-    apiMock.post.mockResolvedValueOnce({ call_id: 'call-vid' })
+  it('starts a video call when the Video tile is clicked', async () => {
+    startCall.mockResolvedValueOnce('call-vid')
     openCallTypePicker('conv-vid')
     const { findByLabelText } = render(<CallTypePickerDialog />)
-    const tile = await findByLabelText('Start video call')
+    fireEvent.click(await findByLabelText('Start video call'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(startCall).toHaveBeenCalledWith('conv-vid', 'video')
+    expect(routeSpy).toHaveBeenCalledWith('/calls/call-vid')
+  })
+
+  it('stays open and explains why when the call cannot start', async () => {
+    startCall.mockRejectedValueOnce(new Error('Microphone access is blocked.'))
+    openCallTypePicker('conv-err')
+    const { findByLabelText } = render(<CallTypePickerDialog />)
+    const tile = await findByLabelText('Start audio call') as HTMLButtonElement
     fireEvent.click(tile)
     await new Promise(r => setTimeout(r, 0))
-    expect(apiMock.post).toHaveBeenCalledWith('/api/calls', {
-      conversation_id: 'conv-vid',
-      call_type: 'video',
-      sdp_offer: 'v=0\r\n',
-    })
-    expect(routeSpy).toHaveBeenCalledWith('/calls/call-vid')
+    expect(routeSpy).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith(
+      "Couldn't start the call: Microphone access is blocked.", 'error',
+    )
+    expect(tile.disabled).toBe(false)
   })
 })
