@@ -411,6 +411,9 @@ async def test_0042_preserves_data(tmp_path):
             "last_read_at",
             "history_visible_from",
             "deleted_at",
+            # Added later, by 0059 (group member versions).
+            "joined_version",
+            "left_version",
         },
         "calendars": {"id", "name", "color", "owner_username", "calendar_type"},
         "platform_tokens": {

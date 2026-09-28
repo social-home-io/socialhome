@@ -686,3 +686,87 @@ async def test_a_member_household_we_share_only_a_space_with_is_not_reached(env,
     sent.clear()
     await app[dm_service_key].send_message(group, sender_username="ula", content="x")
     assert CARL not in {inst for inst, _, _ in sent + meshed}
+
+
+# ─── The leave race ───────────────────────────────────────────────────────
+
+
+def _with_since(payload: dict, since: dict[str, int]) -> dict:
+    for m in payload["members"]:
+        if m["user_id"] in since:
+            m["since"] = since[m["user_id"]]
+    return payload
+
+
+def _ula_active(state) -> bool:
+    return any(m[1] == "ula" and m[2] == 1 for m in state["members"])
+
+
+async def test_a_roster_built_before_the_leave_never_reseats_the_leaver(env, group):
+    """ula leaves here while the authority, not having seen the leave yet,
+    ships a newer roster still listing her (since v1). She stays out, and the
+    leave is sent again; only an explicit re-add after it brings her back."""
+    app, db, own, sent, _ = env
+    await app[dm_service_key].leave(group, username="ula")
+    assert not _ula_active(await _state(db))
+    sent.clear()
+    stale = _with_since(_roster(group, 2, own, name="Renamed"), {"u-ula": 1})
+    await _send(app, FET.DM_GROUP_ROSTER, stale, from_instance=AUTH)
+    state = await _state(db)
+    assert not _ula_active(state)
+    # The rest of the roster still applies.
+    assert (group, "group_dm", "Renamed", 2) in state["conversations"]
+    leaves = [(i, p) for i, et, p in sent if et is FET.DM_GROUP_LEAVE]
+    assert leaves == [(AUTH, {"conversation_id": group, "user_id": "u-ula"})]
+    # The authority saw the leave: ula is gone from v3.
+    gone = _roster(group, 3, own)
+    gone["members"] = [m for m in gone["members"] if m["user_id"] != "u-ula"]
+    await _send(app, FET.DM_GROUP_ROSTER, gone, from_instance=AUTH)
+    # A later explicit re-add (since v4, after the leave) seats her again.
+    readd = _with_since(_roster(group, 4, own), {"u-ula": 4})
+    await _send(app, FET.DM_GROUP_ROSTER, readd, from_instance=AUTH)
+    assert _ula_active(await _state(db))
+
+
+async def test_a_re_add_the_authority_made_after_the_leave_is_honoured(env, group):
+    """The authority processed the leave (v2) and re-added her at v3 —
+    even if the roster that dropped her never reached us."""
+    app, db, own, _, _ = env
+    await app[dm_service_key].leave(group, username="ula")
+    readd = _with_since(_roster(group, 3, own), {"u-ula": 3})
+    await _send(app, FET.DM_GROUP_ROSTER, readd, from_instance=AUTH)
+    assert _ula_active(await _state(db))
+
+
+async def test_the_authority_names_when_each_member_joined(env, own_group):
+    """Every roster entry carries ``since`` — the version at which that
+    member was last seated — so a leaver's household can tell a stale
+    roster from a re-add."""
+    app, _, _, sent, _ = env
+    svc = app[dm_service_key]
+    await svc.remove_group_member(own_group, actor_username="ula", user_id="u-bob")
+    await svc.add_group_members(own_group, actor_username="ula", user_ids=["u-bob"])
+    rosters = [p for _i, et, p in sent if et is FET.DM_GROUP_ROSTER]
+    last = rosters[-1]
+    assert last["version"] == 3
+    since = {m["user_id"]: m.get("since") for m in last["members"]}
+    assert since["u-bob"] == 3
+    assert since["u-ula"] == since["u-anna"] == 1
+
+
+async def test_a_roster_without_since_keeps_the_pre_field_behaviour(env, group):
+    """An authority predating ``since`` can't say when anyone joined: its
+    roster seats a listed user as before (the race stays open for it)."""
+    app, db, own, _, _ = env
+    await app[dm_service_key].leave(group, username="ula")
+    await _send(app, FET.DM_GROUP_ROSTER, _roster(group, 2, own), from_instance=AUTH)
+    assert _ula_active(await _state(db))
+
+
+@pytest.mark.parametrize("since", [0, True, "3", 2**63])
+async def test_a_malformed_since_drops_that_entry(env, since):
+    app, db, own, _, _ = env
+    conv = _group_id(AUTH)
+    payload = _with_since(_roster(conv, 1, own), {"u-bob": since})
+    await _send(app, FET.DM_GROUP_ROSTER, payload, from_instance=AUTH)
+    assert all(s[3] != "u-bob" for s in (await _state(db))["seats"])

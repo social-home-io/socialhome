@@ -105,19 +105,19 @@ def build_rate_limit_middleware(
     """
     limits = limits or {}
 
-    def _pick(path: str) -> tuple[int, int]:
+    def _pick(path: str) -> tuple[str | None, int, int]:
         # Two key flavours:
         #   * literal prefix — most specific wins via insertion order
         #     (callers list narrower prefixes first).
         #   * fnmatch-style with ``*`` — matches the whole path; great
         #     for ``/api/spaces/*/ban`` style action endpoints.
-        for pattern, pair in limits.items():
+        for pattern, (limit, window_s) in limits.items():
             if "*" in pattern:
                 if fnmatch.fnmatchcase(path, pattern):
-                    return pair
+                    return pattern, limit, window_s
             elif path.startswith(pattern):
-                return pair
-        return default_limit, default_window_s
+                return pattern, limit, window_s
+        return None, default_limit, default_window_s
 
     @web.middleware
     async def middleware(request: "web.Request", handler) -> "web.StreamResponse":
@@ -127,9 +127,20 @@ def build_rate_limit_middleware(
         # protected handler anyway.
         if not user:
             return await handler(request)
-        limit, window_s = _pick(request.path)
+        rule, limit, window_s = _pick(request.path)
         user_id = getattr(user, "user_id", None) or str(user)
-        if not await limiter.check(user_id, request.path, limit, window_s):
+        # A request counts only against the rule it matched: a looser rule
+        # (``/api/calls/*/ice``, 300/min) must not use up a tighter one
+        # sharing its first path segments (``/api/calls``, 10/min) — they
+        # used to share one ``api/calls`` bucket. Unmatched paths keep the
+        # per-first-two-segments default bucket.
+        if rule is not None:
+            allowed = limiter.is_allowed(
+                f"{user_id}:rule:{rule}", limit=limit, window_s=window_s
+            )
+        else:
+            allowed = await limiter.check(user_id, request.path, limit, window_s)
+        if not allowed:
             return error_response(
                 429,
                 "RATE_LIMITED",

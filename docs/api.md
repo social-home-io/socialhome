@@ -899,6 +899,10 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/calls/{id}/decline` | 10 / min / user |
 | `POST /api/calls/{id}/hangup` | 30 / min / user |
 | `POST /api/calls/{id}/ice` | 300 / min / user — every leg of a group-call mesh trickles several candidates within seconds |
+| `POST /api/calls/{id}/answer` | 60 / min / user — a group callee answers the ring plus one leg per other callee |
+| `POST /api/calls/{id}/join` | 30 / min / user |
+| `POST /api/calls/{id}/quality` | 30 / min / user — the call page samples every 10 s; on the broad `/api/calls` bucket it starved `join` |
+| `GET /api/calls/ice-servers` | 30 / min / user |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/signaling-session{,/release}` | 60 / min / paired instance |
 | `GET /` + `GET /spaces/{id}` + `GET /join/{token}` (GFS public pages) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |
