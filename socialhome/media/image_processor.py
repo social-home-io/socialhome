@@ -172,6 +172,27 @@ class ImageProcessor:
         img.save(out, format="WEBP", quality=THUMBNAIL_WEBP_QUALITY)
         return out.getvalue()
 
+    async def is_valid_webp(self, data: bytes, *, max_dimension: int) -> bool:
+        """``True`` when *data* is a WebP that fully decodes and whose
+        longest side is at most *max_dimension*.
+
+        For image bytes another household sent us (a space cover / icon in
+        a snapshot or a config change): the dimension is read from the
+        header BEFORE any pixel is decoded, so an oversized or
+        decompression-bomb image costs a header parse, not a decode.
+        """
+        return await asyncio.to_thread(self._is_valid_webp_sync, data, max_dimension)
+
+    def _is_valid_webp_sync(self, data: bytes, max_dimension: int) -> bool:
+        try:
+            img = Image.open(io.BytesIO(data))
+            if img.format != "WEBP" or max(img.size) > max_dimension:
+                return False
+            img.load()
+        except Exception:
+            return False
+        return True
+
     async def fit_within(
         self,
         data: bytes,

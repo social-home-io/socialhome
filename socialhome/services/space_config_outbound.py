@@ -30,13 +30,21 @@ from typing import TYPE_CHECKING
 from ..domain.events import CpSpaceAgeGateChanged, SpaceConfigChanged
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_SNAPSHOT_MAX_BYTES,
+)
 from ..domain.space import SpaceConfigEventType
 from ..infrastructure.event_bus import EventBus
 from .space_crypto_service import sign_authority_event, strip_authority_sig_fields
-from .space_service import _space_metadata_for_federation
+from .space_service import _space_metadata_for_federation, embed_space_images
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
+    from ..repositories.space_icon_repo import AbstractSpaceIconRepo
     from ..repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -60,7 +68,7 @@ _ROSTER_EVENT_TYPES = {
 class SpaceConfigOutbound:
     """Bus-event → federation broadcaster for space config changes."""
 
-    __slots__ = ("_bus", "_federation", "_space_repo")
+    __slots__ = ("_bus", "_federation", "_space_repo", "_cover_repo", "_icon_repo")
 
     def __init__(
         self,
@@ -68,10 +76,16 @@ class SpaceConfigOutbound:
         bus: EventBus,
         federation_service: "FederationService",
         space_repo: "AbstractSpaceRepo",
+        cover_repo: "AbstractSpaceCoverRepo | None" = None,
+        icon_repo: "AbstractSpaceIconRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
         self._space_repo = space_repo
+        #: A cover / icon change ships the image bytes themselves, read
+        #: from here — before, members only ever got the new hash.
+        self._cover_repo = cover_repo
+        self._icon_repo = icon_repo
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceConfigChanged, self._on_config_changed)
@@ -161,13 +175,88 @@ class SpaceConfigOutbound:
         is_owner = bool(own) and space.owner_instance_id == own
         if seed is None and not is_owner:
             return
+        min_proto_version: int | None = (
+            FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS
+            if seed is not None
+            else None
+        )
+        # A cover / icon change ships the new image itself (it used to ship
+        # only the hash, so no member ever received the new picture). Inside
+        # ``space_meta`` — the encrypted payload, and under the authority
+        # signature — bounded per transport: a paired / mesh-routed member
+        # takes the snapshot bound, a link-joined member behind the
+        # connection-server relay the much tighter bootstrap bound, so it is
+        # sent its own (smaller) variant. Any other edit ships no bytes.
+        cover = event.event_type == SpaceConfigEventType.COVER_UPDATED.value
+        icon = event.event_type == SpaceConfigEventType.ICON_UPDATED.value
+        payload = await self._build_payload(
+            space,
+            event.event_type,
+            seed=seed,
+            own=own,
+            cover=cover,
+            icon=icon,
+            cover_max_bytes=SPACE_COVER_SNAPSHOT_MAX_BYTES,
+            icon_max_bytes=SPACE_ICON_SNAPSHOT_MAX_BYTES,
+        )
+        kwargs: dict = {}
+        if min_proto_version is not None:
+            kwargs["min_proto_version"] = min_proto_version
+        if _carries_image(payload):
+            kwargs["relay_payload"] = await self._build_payload(
+                space,
+                event.event_type,
+                seed=seed,
+                own=own,
+                cover=cover,
+                icon=icon,
+                cover_max_bytes=SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+                icon_max_bytes=SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+            )
+        try:
+            await self._federation.broadcast_to_space_members(
+                space.id,
+                FederationEventType.SPACE_CONFIG_CHANGED,
+                payload,
+                **kwargs,
+            )
+        except Exception:
+            log.exception(
+                "SPACE_CONFIG_CHANGED broadcast failed for space=%s",
+                space.id,
+            )
+
+    async def _build_payload(
+        self,
+        space,
+        event_type: str,
+        *,
+        seed: bytes | None,
+        own: str,
+        cover: bool,
+        icon: bool,
+        cover_max_bytes: int,
+        icon_max_bytes: int,
+    ) -> dict:
+        """One ``SPACE_CONFIG_CHANGED`` payload, images bounded as given."""
         meta = _space_metadata_for_federation(space)
-        min_proto_version: int | None = None
+        if cover or icon:
+            await embed_space_images(
+                meta,
+                space,
+                cover_repo=self._cover_repo,
+                icon_repo=self._icon_repo,
+                cover_max_bytes=cover_max_bytes,
+                icon_max_bytes=icon_max_bytes,
+                cover=cover,
+                icon=icon,
+            )
         if seed is not None:
             # Record THIS household as the author of the edit (the v_24 LWW
             # tie-break key) inside the signed bytes, then sign over the bare
-            # meta. ``strip_authority_sig_fields`` is used identically on the
-            # verify side so the canonical signing bytes match.
+            # meta — image bytes included, so a relay cannot swap the
+            # picture. ``strip_authority_sig_fields`` is used identically on
+            # the verify side so the canonical signing bytes match.
             meta["config_author_instance"] = own
             signed = sign_authority_event(
                 event_type="space_config_changed",
@@ -176,11 +265,10 @@ class SpaceConfigOutbound:
                 space_seed=seed,
             )
             meta.update(signed)
-            min_proto_version = FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS
-        payload: dict = {
+        return {
             "space_id": space.id,
             "sequence": space.config_sequence,
-            "event_type": event.event_type,
+            "event_type": event_type,
             # Flat legacy shape kept for back-compat with pre-§D1b peers
             # that read these fields directly.
             "name": space.name,
@@ -193,22 +281,8 @@ class SpaceConfigOutbound:
             # Modern shape — what stub_space_from_metadata consumes.
             "space_meta": meta,
         }
-        try:
-            if min_proto_version is not None:
-                await self._federation.broadcast_to_space_members(
-                    space.id,
-                    FederationEventType.SPACE_CONFIG_CHANGED,
-                    payload,
-                    min_proto_version=min_proto_version,
-                )
-            else:
-                await self._federation.broadcast_to_space_members(
-                    space.id,
-                    FederationEventType.SPACE_CONFIG_CHANGED,
-                    payload,
-                )
-        except Exception:
-            log.exception(
-                "SPACE_CONFIG_CHANGED broadcast failed for space=%s",
-                space.id,
-            )
+
+
+def _carries_image(payload: dict) -> bool:
+    meta = payload.get("space_meta") or {}
+    return bool(meta.get("cover_webp_base64") or meta.get("icon_webp_base64"))

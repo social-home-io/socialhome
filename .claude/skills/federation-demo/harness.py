@@ -151,6 +151,22 @@ def _must(
     return body
 
 
+def _http_get_bytes(
+    url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 15.0,
+) -> tuple[int, bytes]:
+    """GET ``url`` and return ``(status, raw body)`` — for image endpoints."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
 def _upload_file(
     url: str,
     *,
@@ -3349,6 +3365,58 @@ def cmd_gfs_invite_link_content() -> None:
             "particular is a lie — there is no inbox URL to fall back to.",
         )
     print("  e's /api/connections labels a: space_session over gfs_relay ✓")
+
+    # 6. A cover change AFTER the join reaches the link-joined member. It
+    #    used to ride SPACE_CONFIG_CHANGED as a cover_hash only, so e kept
+    #    the rendition from its join forever. A ~350 KiB cover is over the
+    #    relay's bootstrap bound, so e must get the smaller relay variant.
+    s, new_cover = _upload_file(
+        f"{a_base}/api/spaces/{space_id}/cover",
+        token=a["token"],
+        filename="cover2.png",
+        content=_make_noisy_png(1000, 700),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    new_cover = _must("a changes the space cover", s, new_cover)
+    new_hash = new_cover["cover_hash"]
+    deadline = time.time() + 30
+    e_cover: list = []
+    while time.time() < deadline:
+        e_cover = _rows(
+            "e",
+            "SELECT hash, bytes_webp FROM space_covers WHERE space_id = ?",
+            (space_id,),
+        )
+        if e_cover and e_cover[0][0] == new_hash:
+            break
+        time.sleep(0.5)
+    else:
+        raise SystemExit(
+            f"gfs-invite-link-content: e still holds cover "
+            f"{(e_cover[0][0] if e_cover else None)!r} 30 s after a changed it "
+            f"to {new_hash!r} — the cover change never reached the "
+            "link-joined member.",
+        )
+    e_bytes = bytes(e_cover[0][1])
+    if e_bytes[8:12] != b"WEBP" or len(e_bytes) > 64 * 1024:
+        raise SystemExit(
+            f"gfs-invite-link-content: e's new cover is {len(e_bytes)} bytes "
+            "(or not a WebP) — expected the relay-bounded (≤ 64 KiB) rendition.",
+        )
+    s, served = _http_get_bytes(
+        f"{e_base}/api/spaces/{space_id}/cover?v={new_hash}",
+        token=e["token"],
+    )
+    if s != 200 or served != e_bytes:
+        raise SystemExit(
+            f"gfs-invite-link-content: e's GET /cover answered HTTP {s} with "
+            f"{len(served or b'')} bytes, not the {len(e_bytes)}-byte new cover.",
+        )
+    print(
+        f"  a's cover change reached e over the relay "
+        f"({len(e_bytes) // 1024} KiB rendition, served by e's /cover) ✓"
+    )
 
     state["gfs_invite_post_id"] = post_id
     state["gfs_invite_post_content"] = content

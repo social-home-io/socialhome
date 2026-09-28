@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from PIL import Image as PILImage
 
 from socialhome.domain.events import (
     CommentAdded,
@@ -32,7 +35,10 @@ from socialhome.repositories import (
     SqliteSpaceRepo,
     SqliteUserRepo,
 )
+from socialhome.domain.media_constraints import SPACE_COVER_MAX_DIMENSION
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
+from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
@@ -2309,6 +2315,152 @@ async def test_space_config_changed_applies_when_sequence_advances(
     )
     assert row["name"] == "Renamed"
     assert row["config_sequence"] == 6
+
+
+# ─── A cover / icon change lands the new image on the member ──────────
+
+
+def _real_webp(width: int = 48, height: int = 24, colour=(10, 200, 90)) -> bytes:
+    out = io.BytesIO()
+    PILImage.new("RGB", (width, height), colour).save(out, format="WEBP")
+    return out.getvalue()
+
+
+@pytest.fixture
+async def image_inbound(db, bus):
+    covers = SqliteSpaceCoverRepo(db)
+    icons = SqliteSpaceIconRepo(db)
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        space_cover_repo=covers,
+        space_icon_repo=icons,
+    )
+    return SimpleNamespace(service=service, covers=covers, icons=icons)
+
+
+async def _seed_cover_space(db, image_inbound, *, seq=5):
+    await _seed_space(db, space_id="sp-img", from_instance="peer-a", seq=seq)
+    await db.enqueue(
+        "UPDATE spaces SET cover_hash=?, icon_hash=? WHERE id=?",
+        ("h-old", "i-old", "sp-img"),
+    )
+    old = _real_webp(colour=(0, 0, 0))
+    await image_inbound.covers.set(
+        "sp-img", bytes_webp=old, hash="h-old", width=0, height=0
+    )
+    await image_inbound.icons.set(
+        "sp-img", bytes_webp=old, hash="i-old", width=0, height=0
+    )
+    return old
+
+
+def _image_event(*, sequence=6, **meta_extra):
+    ev = _cfg_event(
+        space_id="sp-img",
+        from_instance="peer-a",
+        sequence=sequence,
+        name="Cfg Space",
+    )
+    ev.payload["space_meta"].update(meta_extra)
+    return ev
+
+
+async def test_a_cover_change_lands_the_new_cover(db, image_inbound):
+    await _seed_cover_space(db, image_inbound)
+    new = _real_webp()
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            cover_hash="h-new",
+            icon_hash="i-old",
+            cover_webp_base64=base64.b64encode(new).decode("ascii"),
+        ),
+    )
+    assert await image_inbound.covers.get("sp-img") == (new, "h-new")
+
+
+async def test_an_icon_change_lands_the_new_icon(db, image_inbound):
+    old = await _seed_cover_space(db, image_inbound)
+    new = _real_webp(32, 32)
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            cover_hash="h-old",
+            icon_hash="i-new",
+            icon_webp_base64=base64.b64encode(new).decode("ascii"),
+        ),
+    )
+    assert await image_inbound.icons.get("sp-img") == (new, "i-new")
+    assert await image_inbound.covers.get("sp-img") == (old, "h-old")
+
+
+async def test_a_cleared_cover_is_removed_on_the_member(db, image_inbound):
+    await _seed_cover_space(db, image_inbound)
+    await image_inbound.service._on_space_config_changed(
+        _image_event(cover_hash=None, icon_hash="i-old"),
+    )
+    assert await image_inbound.covers.get("sp-img") is None
+
+
+async def test_a_rename_keeps_the_stored_cover(db, image_inbound):
+    """A config change that carries no bytes and an unchanged hash never
+    touches the stored image."""
+    old = await _seed_cover_space(db, image_inbound)
+    await image_inbound.service._on_space_config_changed(
+        _image_event(cover_hash="h-old", icon_hash="i-old"),
+    )
+    assert await image_inbound.covers.get("sp-img") == (old, "h-old")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"definitely not an image",
+        # A PNG is an image, but never what a host ships for a cover.
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 64,
+    ],
+)
+async def test_bytes_that_are_not_a_webp_are_refused(db, image_inbound, payload):
+    old = await _seed_cover_space(db, image_inbound)
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            cover_hash="h-new",
+            icon_hash="i-old",
+            cover_webp_base64=base64.b64encode(payload).decode("ascii"),
+        ),
+    )
+    assert await image_inbound.covers.get("sp-img") == (old, "h-old")
+
+
+async def test_a_cover_over_the_dimension_cap_is_refused(db, image_inbound):
+    old = await _seed_cover_space(db, image_inbound)
+    huge = _real_webp(SPACE_COVER_MAX_DIMENSION + 1, 10)
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            cover_hash="h-new",
+            icon_hash="i-old",
+            cover_webp_base64=base64.b64encode(huge).decode("ascii"),
+        ),
+    )
+    assert await image_inbound.covers.get("sp-img") == (old, "h-old")
+
+
+async def test_a_stale_cover_change_never_lands(db, image_inbound):
+    """The image rides the same last-writer-wins gate as the config it came
+    with: an out-of-order older change cannot roll the picture back."""
+    old = await _seed_cover_space(db, image_inbound, seq=9)
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            sequence=8,
+            cover_hash="h-new",
+            icon_hash="i-old",
+            cover_webp_base64=base64.b64encode(_real_webp()).decode("ascii"),
+        ),
+    )
+    assert await image_inbound.covers.get("sp-img") == (old, "h-old")
 
 
 async def test_space_config_changed_dropped_on_stale_sequence(

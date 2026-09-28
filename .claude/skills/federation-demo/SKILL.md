@@ -1007,6 +1007,12 @@ relay the redeem used (``GfsRelayTransport``, selected in
 5. ``GET /api/connections`` on e labels a ``source=space_session``
    with transport ``gfs_relay``. ``https`` in particular would be a
    lie: there is no inbox URL to fall back to.
+6. a changes the space cover after the join (a ~350 KiB one). e's
+   ``space_covers`` row must pick up the new ``cover_hash`` within 30 s,
+   hold a WebP ≤ 64 KiB (the relay-bounded variant of the
+   ``SPACE_CONFIG_CHANGED`` image), and serve those bytes from its own
+   ``GET /api/spaces/{id}/cover``. A cover change used to ship only its
+   hash, so every member kept the picture from its join.
 
 ``verify`` re-asserts the durable half of both steps (gated on the
 ``gfs_invite_space_id`` state key, so it self-skips when the chain was

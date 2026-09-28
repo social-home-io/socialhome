@@ -7,11 +7,14 @@ member removed, plus the missing-field skip branches.
 
 from __future__ import annotations
 
+import io
+
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from PIL import Image
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.events import (
@@ -31,6 +34,12 @@ class _RecordingBus:
 
     async def publish(self, event) -> None:
         self.events.append(event)
+
+
+def _real_webp(width: int, height: int) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (9, 99, 199)).save(buf, format="WEBP")
+    return buf.getvalue()
 
 
 def _event(event_type: str, payload: dict, *, from_instance: str = "peer-1"):
@@ -464,7 +473,7 @@ async def test_invite_with_cover_bytes_writes_to_cover_repo(handler):
     Without ``cover_hash`` the write is skipped (defensive)."""
     import base64
 
-    fake_webp = b"RIFF\x00\x00\x00\x00WEBPVP8L"
+    fake_webp = _real_webp(64, 32)
     ev = _event(
         "SPACE_PRIVATE_INVITE",
         {
@@ -496,7 +505,7 @@ async def test_invite_with_icon_bytes_writes_to_icon_repo(handler):
     the emoji fallback. Mirrors the cover-bytes path."""
     import base64
 
-    fake_webp = b"RIFF\x00\x00\x00\x00WEBPVP8L-icon"
+    fake_webp = _real_webp(32, 32)
     ev = _event(
         "SPACE_PRIVATE_INVITE",
         {

@@ -33,6 +33,31 @@ them on every roster mutation and broadcasts to every member household so
 each household's roster converges (not just the host's). See "Roster gossip"
 below.
 
+**A cover / icon change carries the image.** `SPACE_CONFIG_CHANGED` for a
+`cover_updated` / `icon_updated` edit ships the new WebP bytes in `space_meta`
+(`cover_webp_base64` / `icon_webp_base64`, the same keys the join snapshot
+uses), not just `cover_hash` / `icon_hash`. Before, every member (paired or
+link-joined) kept the image from its join time. The bytes sit inside the
+encrypted payload, and under the authority signature when the edit is signed.
+They go only to space members (`broadcast_to_space_members`) and only on the
+edit that changed the image, so a rename ships no bytes. They are bounded per
+transport through `embed_space_images` / `ImageProcessor.fit_within`. A paired
+or mesh-routed member gets the image under `SPACE_*_SNAPSHOT_MAX_BYTES`
+(256 KiB cover / 64 KiB icon, ~1 MiB envelope). A member seated from an
+invite link (`space_session`) sits behind the connection-server relay
+(~232 KiB envelope), so `broadcast_to_space_members(..., relay_payload=…)`
+sends it a separately signed variant under `SPACE_*_BOOTSTRAP_MAX_BYTES`
+(64 / 16 KiB). The member applies the image only after the change passes
+the owner / authority and last-writer-wins gates, so an out-of-order older
+change cannot roll the picture back (`apply_space_images_from_config_change`).
+Before storing, it checks the bytes: at most `SPACE_IMAGE_EMBED_MAX_BYTES`, and
+a WebP that fully decodes (Pillow, off the event loop) within 1200 px / 256 px.
+The join-snapshot path runs the same check. A shrunken rendition does not
+digest to the host's hash, so the bytes are stored under the announced hash,
+which works as a version tag. A cleared hash removes the stored image. No
+protocol version is involved: an older member ignores the extra keys, as it
+always ignored them on this event, and keeps today's hash-only behaviour.
+
 From v_24, `SPACE_CONFIG_CHANGED` is itself **space-authority-signed**: the
 emitter (owner host OR a seed-holding delegated admin) signs the config
 `space_meta` with the space's Ed25519 seed, and the receiver
