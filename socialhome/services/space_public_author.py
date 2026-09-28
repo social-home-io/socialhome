@@ -35,6 +35,7 @@ from ..crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from ..federation.owner_bound_id import SPACE_POST_KIND, owner_bound_id_refused
 
 if TYPE_CHECKING:
     from ..domain.post import Post
@@ -218,6 +219,17 @@ def verify_signed_author_inner(inner: dict) -> bool:
     author_pk_hex = str(inner.get("author_pk") or "")
     username = str(inner.get("author_username") or "")
     if not (post_id and author_user_id and author_pk_hex and username):
+        return False
+    # v_36: a space post id commits to its author and space, so a validly
+    # signed inner claiming another author's new post id is refused here —
+    # at the relaying seed-holder and at every subscriber alike.
+    if owner_bound_id_refused(
+        SPACE_POST_KIND,
+        post_id,
+        space_id=str(inner.get("space_id") or ""),
+        owner_user_id=author_user_id,
+        context="space public relay",
+    ):
         return False
     # Author self-cert: the user id MUST be derivable from author_pk + the
     # derivation input — the immutable ``identity_anchor`` (uuid) when the block

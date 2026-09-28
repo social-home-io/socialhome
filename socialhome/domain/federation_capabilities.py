@@ -544,7 +544,26 @@ from __future__ import annotations
 #:   :data:`FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE`, logged
 #:   at INFO. A present signature must verify, under a known suite, at any
 #:   version. Not space-scoped (moments are household-broadcast).
-OURS: int = 35
+#: * **v_36** (2026-09-28) — new posts, photos, events and moments can only
+#:   be announced by the household that created them. The v_34 owner-bound
+#:   id (``federation/owner_bound_id.py``) now covers every other federated
+#:   row with an owner: space posts (so the bazaar listing / poll / schedule
+#:   rows hung off a wrapper post) and comments, gallery items, calendar
+#:   events, tasks, pages, stickies, and moments — the last with the
+#:   unscoped ``moment`` kind (no space component; the commitment binds the
+#:   author alone). Every receiver path that files a new row — the live
+#:   create handlers, the §25.6 sync receiver (the host's stream too), the
+#:   host relay / ``SPACE_SYNC_RESUME`` replay (which arrive as live events),
+#:   the public-space GFS relay and the GFS public-moment inbound — refuses
+#:   a claim of a bound id for anybody but the owner it commits to, and an
+#:   unknown suite nibble. A moment create *or delete* naming a bound id for
+#:   another author is neither stored, tombstoned nor relayed, so it can no
+#:   longer pre-empt the real moment. **Ungated, wire-compatible** — the
+#:   v_34 reasoning: senders always mint bound ids, a sub-v_36 receiver
+#:   stores them as the opaque strings ids always were, and an id of any
+#:   other shape keeps today's rules (the legacy window closes as creators
+#:   upgrade). Space-scoped for the compatibility banner.
+OURS: int = 36
 
 
 class FederationCapability:
@@ -869,6 +888,15 @@ class FederationCapability:
     #: target is routinely a household the origin holds no row for.
     MIN_FOR_MOMENT_ORIGIN_SIGNATURE = 35
 
+    #: Minimum proto_version that mints owner-bound ids for every federated
+    #: row with an owner — space posts, comments, gallery items, calendar
+    #: events, tasks, pages, stickies and moments — and refuses a claim of
+    #: one for anybody but its creator (v_36). Informational, like
+    #: :attr:`MIN_FOR_OWNER_BOUND_ALBUM_ID`: senders never gate on it; it
+    #: labels the gap in the per-space compatibility banner (a behind
+    #: household's new rows keep today's first-come rules).
+    MIN_FOR_OWNER_BOUND_CONTENT_ID = 36
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -965,6 +993,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE,
         "Signed relayed moments",
     ),
+    (
+        FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
+        "Creator-bound content ids",
+    ),
 ]
 
 
@@ -1023,6 +1055,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
         FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
         FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
+        FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
     }
 )
 

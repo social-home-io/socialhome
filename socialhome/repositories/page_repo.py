@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..federation.owner_bound_id import SPACE_PAGE_KIND, mint_owner_bound_id
 from .base import row_to_dict, rows_to_dicts
 
 
@@ -723,7 +724,16 @@ def new_page(
 ) -> Page:
     now = datetime.now(timezone.utc).isoformat()
     return Page(
-        id=uuid.uuid4().hex,
+        # A space page federates, so its id is owner-bound (v_36): only
+        # the creator's household can announce it. A household page never
+        # leaves the household.
+        id=(
+            uuid.uuid4().hex
+            if space_id is None
+            else mint_owner_bound_id(
+                SPACE_PAGE_KIND, space_id=space_id, owner_user_id=created_by
+            )
+        ),
         title=title,
         content=content,
         created_by=created_by,

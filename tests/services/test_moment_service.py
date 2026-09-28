@@ -9,6 +9,11 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.moment import Moment
+from socialhome.federation.owner_bound_id import (
+    MOMENT_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from socialhome.domain.events import (
     MomentCreated,
     MomentDeleted,
@@ -79,6 +84,21 @@ async def test_create_text_moment_persists_and_publishes(stack):
     assert m.content == "hello"
     assert m.origin_instance_id == stack.iid
     assert len(captured) == 1
+
+
+async def test_a_moment_id_commits_to_its_author(stack):
+    """v_36: the id is owner-bound to the author (no space), so no other
+    household can announce it first as a moment of its own user."""
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="hi")
+    assert (
+        check_owner_bound_id(MOMENT_KIND, m.id, space_id="", owner_user_id=a.user_id)
+        is OwnerBinding.VALID
+    )
+    assert (
+        check_owner_bound_id(MOMENT_KIND, m.id, space_id="", owner_user_id="u-x")
+        is OwnerBinding.MISMATCH
+    )
 
 
 async def test_delete_and_expiry_remove_media_file(stack, tmp_dir):

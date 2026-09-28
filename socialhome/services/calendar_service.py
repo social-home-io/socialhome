@@ -36,6 +36,7 @@ from ..domain.events import (
     UserProvisioned,
 )
 from ..domain.federation import FederationEventType
+from ..federation.owner_bound_id import SPACE_CALENDAR_EVENT_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
 from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
@@ -1225,7 +1226,11 @@ class SpaceCalendarService(BusPublisherMixin):
             raise ValueError("end must be at or after start")
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
         event = CalendarEvent(
-            id=uuid.uuid4().hex,
+            # Owner-bound (v_36): no other household can announce this id
+            # first as its own user's event.
+            id=mint_owner_bound_id(
+                SPACE_CALENDAR_EVENT_KIND, space_id=space_id, owner_user_id=created_by
+            ),
             calendar_id=space_id,  # space-scoped events use space_id as calendar_id
             summary=summary,
             description=description,

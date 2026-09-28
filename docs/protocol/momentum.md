@@ -139,6 +139,17 @@ couple two trust models and leak block-list shape to peers.
   moment id this household holds is applied only when the stored author
   and origin match the payload. A delete tombstone (below) still binds
   its id to its author and origin.
+* **Creator-bound id (v_36):** because the first household to name a
+  moment id here decides whose it is (the stored row, or a delete's
+  tombstone), a moment's id commits to its author
+  (`federation/owner_bound_id.py`, the unscoped `moment` kind — no space
+  component, the commitment covers the author alone). A `MOMENT_CREATED`
+  or `MOMENT_DELETED` naming a bound id for any other author, or under an
+  unknown suite nibble, is refused at WARNING before either binding could
+  form: not stored, not tombstoned, not relayed — the public (GFS) inbound
+  applies the same check. The author's own early delete still sticks. A
+  legacy (uuid4) id keeps the first-come rule. See
+  [`capabilities.md`](./capabilities.md) (v_36).
 * **Reactions** (`MOMENT_REACTED` / `_REMOVED`) are honoured only for a
   moment authored here, from a reactor homed on the sending household;
   the published author is the stored one.

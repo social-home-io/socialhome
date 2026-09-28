@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..federation.owner_bound_id import SPACE_STICKY_KIND, mint_owner_bound_id
 from .base import row_to_dict, rows_to_dicts
 
 
@@ -93,7 +94,15 @@ class SqliteStickyRepo:
             raise ValueError("sticky content must not be empty")
         now = datetime.now(timezone.utc).isoformat()
         sticky = Sticky(
-            id=uuid.uuid4().hex,
+            # A space sticky federates, so its id is owner-bound (v_36):
+            # only the author's household can announce it.
+            id=(
+                uuid.uuid4().hex
+                if space_id is None
+                else mint_owner_bound_id(
+                    SPACE_STICKY_KIND, space_id=space_id, owner_user_id=author
+                )
+            ),
             author=author,
             content=content,
             color=color,

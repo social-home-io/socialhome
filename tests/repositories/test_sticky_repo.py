@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.federation.owner_bound_id import (
+    SPACE_STICKY_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+    is_owner_bound,
+)
 from socialhome.repositories.sticky_repo import SqliteStickyRepo, DEFAULT_COLOR
 
 
@@ -255,3 +261,24 @@ async def test_save_upsert_refuses_cross_space_id(two_spaces):
     assert await two_spaces.repo.save(stolen, space_id="space-a") is False
     assert await _snapshot(two_spaces, "st-b") == before
     assert [s.id for s in await two_spaces.repo.list(space_id="space-a")] == ["st-a"]
+
+
+async def test_a_space_sticky_id_commits_to_its_author(env):
+    """v_36: a space sticky federates, so its id is owner-bound to its
+    author in its space; a household sticky keeps a plain id."""
+    await _make_space(env.db, "sp-1")
+    sticky = await env.repo.add(author="uid-alice", content="x", space_id="sp-1")
+    assert (
+        check_owner_bound_id(
+            SPACE_STICKY_KIND, sticky.id, space_id="sp-1", owner_user_id="uid-alice"
+        )
+        is OwnerBinding.VALID
+    )
+    assert (
+        check_owner_bound_id(
+            SPACE_STICKY_KIND, sticky.id, space_id="sp-1", owner_user_id="uid-bob"
+        )
+        is OwnerBinding.MISMATCH
+    )
+    home = await env.repo.add(author="uid-alice", content="y")
+    assert not is_owner_bound(home.id)

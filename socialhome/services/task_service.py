@@ -36,6 +36,7 @@ from ..domain.task import (
     TaskList,
     TaskStatus,
 )
+from ..federation.owner_bound_id import SPACE_TASK_KIND, mint_owner_bound_id
 from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
@@ -671,7 +672,11 @@ class SpaceTaskService(BusPublisherMixin):
                 raise ValueError(f"invalid due_date: {due_date!r}") from exc
         now = datetime.now(timezone.utc)
         task = Task(
-            id=uuid.uuid4().hex,
+            # Owner-bound (v_36): only the creator's household can
+            # announce this id.
+            id=mint_owner_bound_id(
+                SPACE_TASK_KIND, space_id=space_id, owner_user_id=created_by
+            ),
             list_id=list_id,
             title=title,
             status=TaskStatus.TODO,

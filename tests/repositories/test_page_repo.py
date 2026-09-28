@@ -7,6 +7,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.federation.owner_bound_id import (
+    SPACE_PAGE_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+    is_owner_bound,
+)
 from socialhome.repositories.page_repo import (
     PageLockError,
     PageNotFoundError,
@@ -338,3 +344,22 @@ async def test_page_delete_drops_only_its_own_space_snapshots(scoped):
     assert await scoped.page_repo.delete("pg-b", space_id="space-b") is True
     rows = await scoped.db.fetchall("SELECT page_id FROM space_page_snapshots")
     assert [r["page_id"] for r in rows] == ["pg-a"]
+
+
+def test_a_space_page_id_commits_to_its_creator():
+    """v_36: a space page federates, so its id is owner-bound to its
+    creator in its space; a household page keeps a plain id."""
+    page = new_page(title="W", content="x", created_by="u1", space_id="sp-1")
+    assert (
+        check_owner_bound_id(
+            SPACE_PAGE_KIND, page.id, space_id="sp-1", owner_user_id="u1"
+        )
+        is OwnerBinding.VALID
+    )
+    assert (
+        check_owner_bound_id(
+            SPACE_PAGE_KIND, page.id, space_id="sp-1", owner_user_id="u2"
+        )
+        is OwnerBinding.MISMATCH
+    )
+    assert not is_owner_bound(new_page(title="H", content="x", created_by="u1").id)

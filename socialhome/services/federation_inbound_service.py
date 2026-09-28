@@ -87,6 +87,12 @@ from ..domain.user import (
 from ..domain.federation_capabilities import FederationCapability
 from ..federation.dm_scope import DmScope, refuse
 from ..federation.moment_origin import check_relayed_moment_origin
+from ..federation.owner_bound_id import (
+    MOMENT_KIND,
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    owner_bound_id_refused,
+)
 from ..federation.space_authorship import SpaceAuthorship
 from ..federation.space_scope import (
     log_cross_space_refusal,
@@ -1355,6 +1361,16 @@ class FederationInboundService:
         post = self._post_from_payload(event.payload)
         if post is None:
             return
+        # v_36: an owner-bound id commits to its author and space, so a
+        # claim of it for anybody else is refused before it can hold the id.
+        if owner_bound_id_refused(
+            SPACE_POST_KIND,
+            post.id,
+            space_id=space_id,
+            owner_user_id=post.author,
+            context=f"{event.event_type} from {event.from_instance}",
+        ):
+            return
         authorship = self._space_authorship(event)
         if authorship is None:
             return
@@ -1775,6 +1791,14 @@ class FederationInboundService:
             return
         space_id = resolve_space_id(event)
         if not space_id:
+            return
+        if owner_bound_id_refused(
+            SPACE_COMMENT_KIND,
+            comment_id,
+            space_id=space_id,
+            owner_user_id=author,
+            context=f"{event.event_type} from {event.from_instance}",
+        ):
             return
         authorship = self._space_authorship(event)
         if authorship is None:
@@ -2951,6 +2975,8 @@ class FederationInboundService:
         if not (moment_id and author_user_id and origin_instance_id):
             log.debug("MOMENT_CREATED missing required fields: %s", p)
             return
+        if self._moment_id_refused(event, moment_id, author_user_id):
+            return
         if not await self._moment_authority_matches(
             event.from_instance,
             origin_instance_id,
@@ -3055,6 +3081,10 @@ class FederationInboundService:
         author_user_id = str(p.get("author_user_id") or "")
         origin_instance_id = str(p.get("origin_instance_id") or "")
         if not (moment_id and author_user_id and origin_instance_id):
+            return
+        # A delete for a bound id naming anybody but its author is not
+        # remembered — it would otherwise refuse the real moment's create.
+        if self._moment_id_refused(event, moment_id, author_user_id):
             return
         if not await self._moment_authority_matches(
             event.from_instance,
@@ -3162,6 +3192,26 @@ class FederationInboundService:
                 author_user_id=author_user_id,
                 emoji=published_emoji,
             )
+        )
+
+    @staticmethod
+    def _moment_id_refused(
+        event: "FederationEvent", moment_id: str, author_user_id: str
+    ) -> bool:
+        """An owner-bound moment id (v_36) claimed for another author.
+
+        The stored row binds a moment id to whoever named it here first
+        (:meth:`_moment_row_binds`, and a delete's tombstone), so a bound id
+        is checked before either: a claim for anyone but the author it
+        commits to is neither stored, tombstoned nor relayed. A legacy id
+        keeps the first-come rule.
+        """
+        return owner_bound_id_refused(
+            MOMENT_KIND,
+            moment_id,
+            space_id="",
+            owner_user_id=author_user_id,
+            context=f"{event.event_type} from {event.from_instance}",
         )
 
     async def _moment_authority_matches(

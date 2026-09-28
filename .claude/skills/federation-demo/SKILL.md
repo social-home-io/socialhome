@@ -174,6 +174,11 @@ That single command runs the full sequence:
      for c, so it landed on the derived-key path — and that no household's
      log shows the legacy window ("unsigned moment from pre-v_35") or a
      relayed-moment refusal ("relayed by … — refusing (moment=").
+   - **v_36 creator-bound ids.** ``verify`` asserts every moment id
+     ``traffic`` minted, b's bazaar wrapper post and b's space calendar
+     event carry an owner-bound id that verifies for the creating user
+     (``federation/owner_bound_id.check_owner_bound_id``) — the ids the
+     arrival checks above found on the other households.
    - **Deletes stick.** c replies to its own moment (replies skip the
      15-min rate limit, so ``verify`` re-runs cleanly), waits for the reply
      to reach d relayed, deletes it, and asserts d drops it and keeps a
@@ -403,7 +408,8 @@ Phases added after the initial publish are documented inline in
   bytes alone while d refused the item for naming an album it never got.
   From v_34 it also asserts the album id c minted is owner-bound to c's
   user in that space (``federation/owner_bound_id.check_owner_bound_id``)
-  and that d holds it for that owner.
+  and that d holds it for that owner; from v_36 that the upload's id is
+  owner-bound to its uploader too.
 * ``space-sync-catchup-media`` — newcomer joining a long-running
   space gets the historical post + gallery bytes too, not just
   the metadata rows. Catch-up enqueues happen after the §25.6

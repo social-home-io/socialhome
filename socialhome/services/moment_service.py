@@ -18,10 +18,10 @@ realtime push pick them up.
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..domain.events import (
     MomentCreated,
     MomentDeleted,
@@ -163,7 +163,11 @@ class MomentService:
 
         now = datetime.now(timezone.utc)
         moment = Moment(
-            id=uuid.uuid4().hex,
+            # Owner-bound (v_36): no other household can announce this id
+            # first — as a moment or a delete — for its own user.
+            id=mint_owner_bound_id(
+                MOMENT_KIND, space_id="", owner_user_id=author_user_id
+            ),
             author_user_id=author_user_id,
             content=content,
             media_url=media_url,

@@ -6,7 +6,21 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 35
+    assert fc.OURS == 36
+
+
+def test_owner_bound_content_id_capability_threshold():
+    """v_36 — every federated row with an owner gets a creator-bound id.
+    Space-scoped: a behind member household's new rows keep today's
+    first-come rules for the whole space."""
+    assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID == 36
+    assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Creator-bound content ids" in fc.features_missing_below(35)
+    assert "Creator-bound content ids" not in fc.features_missing_below(36)
+    assert fc.space_features_missing_below(35) == ["Creator-bound content ids"]
 
 
 def test_moment_origin_signature_capability_threshold():
@@ -19,7 +33,7 @@ def test_moment_origin_signature_capability_threshold():
     )
     assert "Signed relayed moments" in fc.features_missing_below(34)
     assert "Signed relayed moments" not in fc.features_missing_below(35)
-    assert fc.space_features_missing_below(34) == []
+    assert fc.space_features_missing_below(34) == ["Creator-bound content ids"]
 
 
 def test_remote_subscriber_role_capability_threshold():

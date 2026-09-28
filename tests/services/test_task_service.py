@@ -10,10 +10,15 @@ import pytest
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.federation.owner_bound_id import (
+    SPACE_TASK_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from socialhome.domain.user import User
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.services.task_service import TaskService
+from socialhome.services.task_service import SpaceTaskService, TaskService
 
 
 @pytest.fixture
@@ -423,3 +428,39 @@ async def test_space_task_service_list(env):
     assert isinstance(lists, list)
     tasks = await svc.list_tasks(sid)
     assert isinstance(tasks, list)
+
+
+async def test_a_space_task_id_commits_to_its_creator(env):
+    """v_36: a space task federates, so its id is owner-bound to its
+    creator in its space — no other household can announce it first."""
+    svc = SpaceTaskService(env.space_task_repo)
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("sowner", "uid-so", "SO"),
+    )
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode)
+           VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        (
+            "sp-t",
+            "SpaceT",
+            env.iid,
+            "sowner",
+            generate_identity_keypair().public_key.hex(),
+        ),
+    )
+    lst = await svc.create_list(space_id="sp-t", name="L", created_by="uid-so")
+    task = await svc.create_task(
+        space_id="sp-t", list_id=lst.id, title="T", created_by="uid-so"
+    )
+    for owner, expected in (
+        ("uid-so", OwnerBinding.VALID),
+        ("uid-x", OwnerBinding.MISMATCH),
+    ):
+        assert (
+            check_owner_bound_id(
+                SPACE_TASK_KIND, task.id, space_id="sp-t", owner_user_id=owner
+            )
+            is expected
+        )

@@ -69,6 +69,17 @@ requests; authenticated cross-HFS requests are bearer-authorised via
 the space membership. This keeps large files off the federation
 envelopes but still lets every member see them.
 
+## Creator-bound ids (v_36)
+
+A new space task's id is owner-bound to its `created_by` and space
+(`federation/owner_bound_id.py`, kind `space-task`): the live create
+handler (for a task not held yet) and the §25.6 sync receiver refuse
+a bound id claimed for anybody else, so only the creator's household
+can announce it. Tasks are collaborative, so only the
+attribution was at stake; edits keep it. Legacy (uuid4) ids keep the
+first-come rule. See [`spaces.md`](./spaces.md) and the v_36 row in
+[`capabilities.md`](./capabilities.md).
+
 ## Implementation
 
 - `socialhome/services/task_service.py`,

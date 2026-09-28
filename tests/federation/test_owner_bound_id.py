@@ -8,13 +8,23 @@ import pytest
 
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    MOMENT_KIND,
     OWNER_BOUND_ID_SUITE_SHA256,
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_COMMENT_KIND,
+    SPACE_PAGE_KIND,
+    SPACE_POST_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
+    UNSCOPED_KINDS,
     SUPPORTED_OWNER_BOUND_ID_SUITES,
     OwnerBinding,
     UnsupportedOwnerBoundIdSuite,
     check_owner_bound_id,
     is_owner_bound,
     mint_owner_bound_id,
+    owner_bound_id_refused,
     suite_of,
 )
 
@@ -109,3 +119,73 @@ def test_minting_refuses_an_unknown_suite_or_missing_inputs():
         _mint(space_id="")
     with pytest.raises(ValueError):
         mint_owner_bound_id("", space_id=SP, owner_user_id=OWNER)
+
+
+_SCOPED_KINDS = [
+    GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    SPACE_POST_KIND,
+    SPACE_COMMENT_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_TASK_KIND,
+    SPACE_PAGE_KIND,
+    SPACE_STICKY_KIND,
+]
+
+
+def test_every_kind_is_distinct():
+    kinds = [*_SCOPED_KINDS, MOMENT_KIND]
+    assert len(set(kinds)) == len(kinds)
+    assert UNSCOPED_KINDS == {MOMENT_KIND}
+
+
+@pytest.mark.parametrize("kind", _SCOPED_KINDS)
+def test_a_space_kind_binds_owner_and_space_and_kind(kind):
+    row_id = mint_owner_bound_id(kind, space_id=SP, owner_user_id=OWNER)
+    assert _check(row_id, kind=kind) is OwnerBinding.VALID
+    assert _check(row_id, kind=kind, owner="u-x") is OwnerBinding.MISMATCH
+    assert _check(row_id, kind=kind, space="sp-x") is OwnerBinding.MISMATCH
+    other = GALLERY_ITEM_KIND if kind != GALLERY_ITEM_KIND else SPACE_POST_KIND
+    assert _check(row_id, kind=other) is OwnerBinding.MISMATCH
+    with pytest.raises(ValueError):
+        mint_owner_bound_id(kind, space_id="", owner_user_id=OWNER)
+
+
+def test_a_moment_id_binds_its_author_without_a_space():
+    row_id = mint_owner_bound_id(MOMENT_KIND, space_id="", owner_user_id=OWNER)
+    assert is_owner_bound(row_id)
+    assert _check(row_id, kind=MOMENT_KIND, space="") is OwnerBinding.VALID
+    assert _check(row_id, kind=MOMENT_KIND, space="", owner="u-x") is (
+        OwnerBinding.MISMATCH
+    )
+    # An unscoped kind never names a space — on either side.
+    assert _check(row_id, kind=MOMENT_KIND, space=SP) is OwnerBinding.MISMATCH
+    with pytest.raises(ValueError):
+        mint_owner_bound_id(MOMENT_KIND, space_id=SP, owner_user_id=OWNER)
+
+
+def test_refused_warns_only_on_a_mismatch(caplog):
+    row_id = _mint()
+    with caplog.at_level("WARNING"):
+        assert not owner_bound_id_refused(
+            GALLERY_ALBUM_KIND, row_id, space_id=SP, owner_user_id=OWNER, context="t"
+        )
+        assert not owner_bound_id_refused(
+            GALLERY_ALBUM_KIND,
+            uuid.uuid4().hex,
+            space_id=SP,
+            owner_user_id="u-x",
+            context="t",
+        )
+        assert not caplog.records
+        assert owner_bound_id_refused(
+            GALLERY_ALBUM_KIND, row_id, space_id=SP, owner_user_id="u-x", context="t"
+        )
+    assert "not bound to 'u-x' in space sp-1" in caplog.text
+    caplog.clear()
+    moment = mint_owner_bound_id(MOMENT_KIND, space_id="", owner_user_id=OWNER)
+    with caplog.at_level("WARNING"):
+        assert owner_bound_id_refused(
+            MOMENT_KIND, moment, space_id="", owner_user_id="u-x", context="t"
+        )
+    assert "in space" not in caplog.text

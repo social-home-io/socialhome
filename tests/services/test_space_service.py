@@ -18,6 +18,12 @@ from PIL import Image
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.post import PostType
+from socialhome.federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -1686,6 +1692,33 @@ async def test_space_comment_and_delete(stack):
     await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
     got = await stack.space_post_repo.get_comment(c.id)
     assert got.deleted
+
+
+async def test_a_space_post_and_comment_id_commit_to_their_author(stack):
+    """v_36: both federate, so their ids are owner-bound — they verify for
+    their author in their space and for nobody else."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=anna.user_id, content="nice"
+    )
+    for kind, row_id, owner, other in (
+        (SPACE_POST_KIND, p.id, bob.user_id, anna.user_id),
+        (SPACE_COMMENT_KIND, c.id, anna.user_id, bob.user_id),
+    ):
+        assert (
+            check_owner_bound_id(kind, row_id, space_id=s.id, owner_user_id=owner)
+            is OwnerBinding.VALID
+        )
+        assert (
+            check_owner_bound_id(kind, row_id, space_id=s.id, owner_user_id=other)
+            is OwnerBinding.MISMATCH
+        )
 
 
 async def test_space_comment_non_member_rejected(stack):
@@ -3556,6 +3589,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space roster snapshot",
         "Shared gallery albums",
         "Creator-bound album ids",
+        "Creator-bound content ids",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3577,6 +3611,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space roster snapshot",
         "Shared gallery albums",
         "Creator-bound album ids",
+        "Creator-bound content ids",
     )
 
 
@@ -3610,6 +3645,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space roster snapshot",
         "Shared gallery albums",
         "Creator-bound album ids",
+        "Creator-bound content ids",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3658,6 +3694,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space roster snapshot",
         "Shared gallery albums",
         "Creator-bound album ids",
+        "Creator-bound content ids",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features

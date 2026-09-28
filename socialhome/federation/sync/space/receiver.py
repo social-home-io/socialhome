@@ -46,7 +46,19 @@ from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
 from ....domain.task import RecurrenceRule, Task, TaskStatus
 from ....infrastructure.event_bus import EventBus
-from ...owner_bound_id import GALLERY_ALBUM_KIND, OwnerBinding, check_owner_bound_id
+from ...owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_COMMENT_KIND,
+    SPACE_PAGE_KIND,
+    SPACE_POST_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+    owner_bound_id_refused,
+)
 from ....services.inbound_media_store import local_media_ref, local_media_refs
 from .exporter import ALLOWED_RESOURCES, SENTINEL_RESOURCE, parse_chunk
 
@@ -368,6 +380,9 @@ class SpaceSyncReceiver:
         provider: str,
     ) -> None:
         records = await self._admit(resource, space_id, records, provider=provider)
+        # v_36: whoever streams it — the host included — a record may not
+        # claim an owner-bound id for anybody but the user it commits to.
+        records = [r for r in records if not _claims_bound_id(resource, space_id, r)]
         if not records:
             return
         if resource == "members":
@@ -873,6 +888,37 @@ class SpaceSyncReceiver:
                 item.album_id,
                 exc_info=True,
             )
+
+
+#: ``resource → (id kind, owner fields in precedence order)`` for the sync
+#: resources whose rows carry an owner-bound id (v_36). Gallery albums are
+#: checked in :meth:`SpaceSyncReceiver._persist_album` (v_34).
+_BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "posts": (SPACE_POST_KIND, ("author",)),
+    "comments": (SPACE_COMMENT_KIND, ("author",)),
+    "gallery": (GALLERY_ITEM_KIND, ("uploaded_by", "uploader")),
+    "calendar": (SPACE_CALENDAR_EVENT_KIND, ("created_by",)),
+    "tasks": (SPACE_TASK_KIND, ("created_by",)),
+    "tasks_archived": (SPACE_TASK_KIND, ("created_by",)),
+    "pages": (SPACE_PAGE_KIND, ("created_by",)),
+    "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
+}
+
+
+def _claims_bound_id(resource: str, space_id: str, r: dict[str, Any]) -> bool:
+    """Is ``r`` a claim on an owner-bound id for somebody else? (Logged.)"""
+    bound = _BOUND_RESOURCES.get(resource)
+    if bound is None or (resource == "gallery" and r.get("kind") != "item"):
+        return False
+    kind, owner_fields = bound
+    owner = next((str(r[f]) for f in owner_fields if r.get(f)), "")
+    return owner_bound_id_refused(
+        kind,
+        str(r.get("id") or ""),
+        space_id=space_id,
+        owner_user_id=owner,
+        context=f"space sync ({resource})",
+    )
 
 
 def _log_sync_refusal(what: str, row_id: str, space_id: str) -> None:

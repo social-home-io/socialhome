@@ -48,8 +48,14 @@ from ...domain.events import (
 from ...domain.federation import FederationEventType
 from ...federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_PAGE_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
     OwnerBinding,
     check_owner_bound_id,
+    owner_bound_id_refused,
 )
 from ...federation.space_scope import (
     log_cross_space_refusal,
@@ -349,6 +355,10 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="task", row_id=task_id
             )
             return
+        if existing is None and self._bound_id_refused(
+            event, SPACE_TASK_KIND, task_id, space_id, task.created_by
+        ):
+            return
         if not await self._collaborative_write_allowed(
             event,
             space_id,
@@ -426,6 +436,10 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="page", row_id=page_id
             )
             return
+        if existing is None and self._bound_id_refused(
+            event, SPACE_PAGE_KIND, page_id, space_id, page.created_by
+        ):
+            return
         if not await self._collaborative_write_allowed(
             event,
             space_id,
@@ -491,6 +505,10 @@ class SpaceContentInboundHandlers:
             author = existing.author
         elif not author:
             log.debug("SPACE_STICKY_CREATED missing author")
+            return
+        elif self._bound_id_refused(
+            event, SPACE_STICKY_KIND, sticky_id, space_id, author
+        ):
             return
         if not await self._collaborative_write_allowed(
             event,
@@ -605,6 +623,10 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
             )
+            return
+        if is_new and self._bound_id_refused(
+            event, SPACE_CALENDAR_EVENT_KIND, event_id, space_id, created_by
+        ):
             return
         # Collaborative (any member edits a space event locally); the
         # upsert keeps the row's own ``created_by``, so the claim is only
@@ -1278,6 +1300,10 @@ class SpaceContentInboundHandlers:
             sort_order=int(p.get("sort_order") or 0),
             created_at=p.get("created_at") or p.get("occurred_at"),
         )
+        if self._bound_id_refused(
+            event, GALLERY_ITEM_KIND, item_id, space_id, uploaded_by
+        ):
+            return
         if not await self._authorship.may_author(event, space_id, uploaded_by):
             await self._authorship.hold_or_refuse(
                 event,
@@ -1921,6 +1947,27 @@ class SpaceContentInboundHandlers:
         if post is None:
             return False
         return await self._acts_for(event, space_id, post.author, what, post_id)
+
+    @staticmethod
+    def _bound_id_refused(
+        event: "FederationEvent",
+        kind: str,
+        row_id: str,
+        space_id: str,
+        owner_user_id: str,
+    ) -> bool:
+        """A new row's owner-bound id (v_36) names somebody else — refuse.
+
+        Only a row we do not hold yet is checked: an edit of a collaborative
+        row keeps the stored attribution whatever the payload claims.
+        """
+        return owner_bound_id_refused(
+            kind,
+            row_id,
+            space_id=space_id,
+            owner_user_id=owner_user_id,
+            context=f"{event.event_type} from {event.from_instance}",
+        )
 
     async def _collaborative_write_allowed(
         self,
