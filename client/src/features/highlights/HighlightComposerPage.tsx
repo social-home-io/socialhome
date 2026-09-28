@@ -27,15 +27,64 @@ import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
 import type { HighlightAudienceKind, HighlightInboxItem } from '@/types'
 
+/** A household the audience picker offers — a confirmed social peer. */
 interface RemoteHousehold {
   instance_id: string
   display_name: string
 }
 
+/** A person the per-person picker offers. ``household_name`` is null
+ *  for members of our own household. */
 interface ConnectedPerson {
   user_id: string
   display_name: string
-  instance_id: string
+  household_name: string | null
+}
+
+/** The slice of ``GET /api/friends`` (``routes/friends.py``) the picker
+ *  reads. ``households`` is the *social* peer list
+ *  (``list_social_instances``) — the same set the highlight outbound
+ *  (``HighlightFederationOutbound._resolve_audience``) fans out to, so
+ *  a household invited only through a space link is never offered. */
+interface FriendsPayload {
+  instance: {
+    members: { user_id: string, display_name: string, personal_alias?: string | null }[]
+  }
+  households: {
+    instance_id: string
+    display_name: string
+    members: { user_id: string, display_name: string, personal_alias?: string | null }[]
+  }[]
+}
+
+/** Flatten ``/api/friends`` into picker rows. The author is left out of
+ *  the people list — they always see their own highlight. */
+export function audienceFromFriends(
+  payload: FriendsPayload,
+  selfUserId: string | null | undefined,
+): { households: RemoteHousehold[], people: ConnectedPerson[] } {
+  const households: RemoteHousehold[] = (payload.households ?? []).map(h => ({
+    instance_id: h.instance_id, display_name: h.display_name,
+  }))
+  const people: ConnectedPerson[] = []
+  for (const m of payload.instance?.members ?? []) {
+    if (m.user_id === selfUserId) continue
+    people.push({
+      user_id: m.user_id,
+      display_name: m.personal_alias || m.display_name,
+      household_name: null,
+    })
+  }
+  for (const h of payload.households ?? []) {
+    for (const m of h.members ?? []) {
+      people.push({
+        user_id: m.user_id,
+        display_name: m.personal_alias || m.display_name,
+        household_name: h.display_name,
+      })
+    }
+  }
+  return { households, people }
 }
 
 /** A media file the user has uploaded but not yet posted. Each entry
@@ -70,7 +119,37 @@ const submitting = signal<boolean>(false)
 const advanced = signal<boolean>(false)
 const households = signal<RemoteHousehold[]>([])
 const people = signal<ConnectedPerson[]>([])
+/** Why the household / people lists couldn't load — shown in the picker
+ *  with a Retry so an outage doesn't read as "no connections". */
+const audienceError = signal<string | null>(null)
 
+async function loadAudience(): Promise<void> {
+  try {
+    const payload = await api.get('/api/friends') as FriendsPayload
+    const out = audienceFromFriends(payload, currentUser.value?.user_id)
+    households.value = out.households
+    people.value = out.people
+    audienceError.value = null
+  } catch (err: unknown) {
+    households.value = []
+    people.value = []
+    audienceError.value = (err as Error)?.message ?? String(err)
+  }
+}
+
+
+function AudienceLoadError() {
+  return (
+    <div role="alert">
+      <p class="sh-muted">
+        Couldn't load your connections ({audienceError.value}).
+      </p>
+      <Button type="button" variant="secondary" onClick={() => void loadAudience()}>
+        Retry
+      </Button>
+    </div>
+  )
+}
 
 export default function HighlightComposerPage() {
   const loc = useLocation()
@@ -86,14 +165,10 @@ export default function HighlightComposerPage() {
     advanced.value = false
     mineToday.value = 0
 
-    // Lazy-load connected peers for the picker. Both endpoints exist
-    // already; if either fails we silently degrade to "all paired".
-    api.get('/api/instances?status=confirmed').then((rows: RemoteHousehold[]) => {
-      households.value = rows ?? []
-    }).catch(() => {})
-    api.get('/api/connections/people').then((rows: ConnectedPerson[]) => {
-      people.value = rows ?? []
-    }).catch(() => {})
+    // Connected households + people for the picker, from one
+    // ``/api/friends`` read. A failure is surfaced in the picker; the
+    // default "all connected households" audience still works.
+    void loadAudience()
 
     // Today's frame count for the cap. Authors can post up to
     // ``MAX_FRAMES_PER_HIGHLIGHT`` frames per day; the server returns
@@ -335,7 +410,8 @@ export default function HighlightComposerPage() {
         </label>
         {audienceKind.value === 'households' && (
           <div class="sh-highlight-composer-audience-list">
-            {households.value.length === 0 && (
+            {audienceError.value && <AudienceLoadError />}
+            {!audienceError.value && households.value.length === 0 && (
               <p class="sh-muted">No connected households yet.</p>
             )}
             {households.value.map(h => (
@@ -373,7 +449,8 @@ export default function HighlightComposerPage() {
             </label>
             {audienceKind.value === 'users' && (
               <div class="sh-highlight-composer-audience-list">
-                {people.value.length === 0 && (
+                {audienceError.value && <AudienceLoadError />}
+                {!audienceError.value && people.value.length === 0 && (
                   <p class="sh-muted">No connected people yet.</p>
                 )}
                 {people.value.map(p => (
@@ -384,7 +461,9 @@ export default function HighlightComposerPage() {
                       onChange={() => toggleId(p.user_id)}
                     />
                     {p.display_name}
-                    <span class="sh-muted"> @ {p.instance_id.slice(0, 8)}…</span>
+                    {p.household_name && (
+                      <span class="sh-muted"> · {p.household_name}</span>
+                    )}
                   </label>
                 ))}
               </div>

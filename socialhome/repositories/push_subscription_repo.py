@@ -40,7 +40,10 @@ class SqlitePushSubscriptionRepo:
 
     async def save(self, sub: PushSubscription) -> None:
         created = sub.created_at or datetime.now(timezone.utc).isoformat()
-        # Upsert on endpoint so a re-register doesn't multiply rows.
+        # Upsert on id so a re-register doesn't multiply rows. The id is
+        # client-chosen (the SPA derives it from the endpoint), so the
+        # update is scoped to the row's owner — a colliding id from
+        # another user must never repoint someone else's subscription.
         await self._db.enqueue(
             """
             INSERT INTO push_subscriptions(
@@ -51,6 +54,7 @@ class SqlitePushSubscriptionRepo:
                 p256dh=excluded.p256dh,
                 auth_secret=excluded.auth_secret,
                 device_label=excluded.device_label
+            WHERE push_subscriptions.user_id = excluded.user_id
             """,
             (
                 sub.id,

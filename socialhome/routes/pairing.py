@@ -42,6 +42,7 @@ from ..domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
+    RemoteInstance,
     is_relay_only,
 )
 from ..security import error_response
@@ -839,10 +840,11 @@ class PairingConnectionTransportDetailView(BaseView):
     """``GET /api/pairing/connections/{instance_id}/transport-detail``.
 
     Admin-only side panel data for the SPA's Manage detail view.
-    Returns ``{"last_relay": {"via": <iid>, "ts": <iso>} | null}`` —
-    the most recent DM that relayed via a third household within
-    the last 24 hours. Used to surface "Last DM took the relay path"
-    on the connection detail panel.
+    Returns ``{"last_relay": {"via": <iid>, "ts": <iso>} | null,
+    "inbox_url": <str> | null}``. ``last_relay`` is the most recent DM
+    that relayed via a third household within the last 24 hours (the
+    "Last DM took the relay path" hint). ``inbox_url`` is the address
+    this household delivers to — see :func:`_admin_visible_inbox_url`.
     """
 
     async def get(self) -> web.Response:
@@ -852,10 +854,40 @@ class PairingConnectionTransportDetailView(BaseView):
         instance_id = self.match("instance_id")
         svc = self.svc(dm_routing_service_key)
         entry = await svc.last_relay_for(instance_id)
+        inst = await self.svc(federation_repo_key).get_instance(instance_id)
+        fed = self.svc(federation_service_key)
         return web.json_response(
             {
                 "last_relay": (
                     {"via": entry.via, "ts": entry.ts} if entry is not None else None
                 ),
+                "inbox_url": _admin_visible_inbox_url(
+                    inst,
+                    last_relay_accepted_at=fed.last_relay_accepted_at(instance_id),
+                ),
             },
         )
+
+
+def _admin_visible_inbox_url(
+    inst: RemoteInstance | None,
+    *,
+    last_relay_accepted_at: str | None,
+) -> str | None:
+    """The peer inbox URL an admin may see on the Manage panel, else None.
+
+    Only for a *confirmed, directly paired* (``manual``) household the
+    admin exchanged addresses with at the QR handshake — useful when
+    diagnosing "not connected". Never for a ``space_session`` household
+    (met through an invite link: the connection server shields each
+    household's address from the other) nor for a peer currently reached
+    only through the relay. Kept off the member-readable connections
+    listing on purpose.
+    """
+    if inst is None or inst.status is not PairingStatus.CONFIRMED:
+        return None
+    if inst.source is not InstanceSource.MANUAL:
+        return None
+    if is_relay_only(last_relay_accepted_at, inst.last_reachable_at):
+        return None
+    return inst.remote_inbox_url or None

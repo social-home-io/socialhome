@@ -495,7 +495,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | GET | `/api/pairing/connections` | Paired peers. Readable by any signed-in member (the dashboard map renders it read-only); every write under `/api/pairing/*` is admin-only (`401` without credentials, `403` for a non-admin). Now also carries `home_lat` / `home_lon` per row (4dp-truncated, `null` when unset) so the SPA can render a household map without a follow-up fetch. Each row carries `instance_id`, `display_name`, `status`, `reachable`, **`transport`** (`"rtc"` when the WebRTC DataChannel is open, `"https"` when running on the HTTPS-inbox fallback, `null` when the peer is unreachable or pending), **`share_home`** (`true` / `false` — whether this household's home coordinates are shared with the peer; defaults to `true`), **`queued_envelopes`** (integer — federation envelopes still `pending` in the outbox for that peer, i.e. waiting to be sent and retried automatically once the peer is reachable; `0` when there is no backlog, which is what tells an admin a long-dark household apart from a momentary drop), and **`dropped_envelopes`** (integer — envelopes in the terminal `failed` state: a PERMANENT rejection or an exhausted retry budget. These are **not** retried and are purged 24 h after going terminal, so a non-zero value is delivery loss, not a queue). The two counts are deliberately separate: reporting only the pending one renders dropped messages as "queued for delivery". Also **`last_relay_accepted_at`** (naive UTC `"YYYY-MM-DD HH:MM:SS"` or `null` — when the connection-server relay last *accepted* an envelope for this peer; held in memory, so `null` again after a restart until the next relay send) and **`relay_only`** (bool — `true` when that acceptance is newer than `last_reachable_at`, or there has never been a proven delivery: the peer's recent traffic has only been handed to the relay, which answers a uniform 202 whether or not the household is online, so it is "accepted", not "delivered"). Local operator info only — nothing new is sent to the connection server. Whitelisted fields only. |
 | GET | `/api/connections` | Alias of the above. Returns the same shape including `share_home`, `queued_envelopes`, `dropped_envelopes`, `last_relay_accepted_at`, `relay_only` and `local_alias` per row. |
 | DELETE | `/api/pairing/connections/{instance_id}` | Admin-only. Unpair. |
-| GET | `/api/pairing/connections/{instance_id}/transport-detail` | Admin-only. Returns `{"last_relay": {"via": <iid>, "ts": <iso>} \| null}` — the most recent DM that relayed via a third household within the last 24h. Powers the SPA's Manage detail panel. |
+| GET | `/api/pairing/connections/{instance_id}/transport-detail` | Admin-only. Returns `{"last_relay": {"via": <iid>, "ts": <iso>} \| null, "inbox_url": <str> \| null}` — the most recent DM that relayed via a third household within the last 24h, and the peer's inbox address. `inbox_url` is set only for a confirmed, directly paired (`manual`) peer that isn't relay-only — never for a `space_session` household (the connection server shields addresses between link-introduced households). The member-readable connections listing never carries it. Powers the SPA's Manage detail panel. |
 | PATCH | `/api/pairing/connections/{instance_id}` | Admin-only. Accepts `{"share_home": bool}` — flip whether this household's home coordinates are shared with the peer. Setting `false` immediately fires a one-shot `LOCAL_HOME_LOCATION_CHANGED` with null coords to revoke the peer's pin; setting `true` fires the current coords to restore it. Idempotent. |
 | PATCH | `/api/pairing/connections/{instance_id}/alias` | Admin-only. Body `{alias: string\|null}` — set or clear the local-only rename of the peer (cap 80 chars; whitespace-only clears). Returns `{instance_id, display_name, local_alias, effective_display_name}`. Never federated. |
 | GET / POST | `/api/pairing/relay-requests[/{id}/{approve\|decline}]` | Admin-only. Relay-request queue. |
@@ -523,8 +523,9 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/push/vapid_public_key` | Public VAPID key (unauth). |
-| POST / PUT / DELETE | `/api/push/subscribe[/{sub_id}]` | Register / update / remove. |
+| GET | `/api/push/vapid_public_key` | Public VAPID key for `pushManager.subscribe()` (any signed-in user). |
+| POST | `/api/push/subscribe` | Register (or re-register) this browser's subscription. Body is `PushSubscription.toJSON()` plus an optional `id`; the SPA sends a stable id derived from the endpoint (SHA-256) so it can delete the row later without the server ever echoing the endpoint. An upsert never rewrites another user's row. Returns `{id}`. |
+| DELETE | `/api/push/subscribe/{sub_id}` | Remove one of your own subscriptions (204; 404 if unknown or not yours). |
 | GET | `/api/push/subscriptions` | List own subscriptions. |
 
 ## HFS — GFS connections & public spaces
@@ -577,9 +578,9 @@ Two distinct audit surfaces:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/reports` | Own reports. |
-| GET | `/api/admin/reports` | Admin queue. |
-| PATCH | `/api/admin/reports/{id}/resolve` | Resolve a report. |
+| POST | `/api/reports` | File a report (`{target_type, target_id, category, notes?, forward_gfs?}`). |
+| GET | `/api/admin/reports` | Admin queue — a plain list of pending reports (`id, target_type, target_id, reporter_user_id, reporter_instance_id, category, notes, status, created_at, resolved_by, resolved_at`). |
+| POST | `/api/admin/reports/{id}/resolve` | Resolve a report; body `{"dismissed": true}` dismisses it instead. |
 
 ## HFS — Bot-bridge (Home Assistant → Social Home)
 

@@ -77,6 +77,23 @@ async def test_save_upserts_existing_id(env):
     assert got.device_label == "Updated"
 
 
+async def test_save_never_rewrites_another_users_row(env):
+    """The row id is client-chosen (``POST /api/push/subscribe`` accepts
+    ``id``), so an upsert on a colliding id must not repoint someone
+    else's subscription at the caller's endpoint."""
+    db, repo, uid = env
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        ("mallory", "u-mallory", "Mallory"),
+    )
+    await repo.save(_sub(uid, "s1", "https://push.example.com/alice"))
+    await repo.save(_sub("u-mallory", "s1", "https://evil.example.com/m"))
+    got = await repo.get("s1")
+    assert got.user_id == uid
+    assert got.endpoint == "https://push.example.com/alice"
+    assert await repo.list_for_user("u-mallory") == []
+
+
 async def test_list_for_user_returns_all(env):
     _, repo, uid = env
     await repo.save(_sub(uid, "s1"))

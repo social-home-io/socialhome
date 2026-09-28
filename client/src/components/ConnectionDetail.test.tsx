@@ -56,7 +56,6 @@ const _conn = (over: Partial<Record<string, unknown>> = {}) => ({
   federated_display_name: 'z7k63zfi',
   local_alias: null,
   status: 'confirmed',
-  inbox_url: 'https://x/wh/abc',
   unreachable_since: null,
   paired_at: '2026-05-18T10:00:00+00:00',
   ...over,
@@ -424,6 +423,36 @@ describe('DM path row', () => {
     // The Transport row should still render — proves the panel didn't crash:
     expect(screen.getByText(/HTTPS inbox \(fallback\)/i)).toBeTruthy()
     expect(screen.queryByText(/Last DM took the relay path/i)).toBeNull()
+  })
+})
+
+describe('Inbox row — admin-only, confirmed direct peers only', () => {
+  it('shows the inbox_url /transport-detail returns', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/pairing/connections/z7k63zfi/transport-detail') {
+        return Promise.resolve({ last_relay: null, inbox_url: 'https://peer.example/federation/inbox/wh-1' })
+      }
+      return Promise.resolve({ users: [] })
+    })
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
+    expect(await screen.findByText('https://peer.example/federation/inbox/wh-1')).toBeTruthy()
+    expect(screen.getByText('Inbox')).toBeTruthy()
+  })
+
+  it('hides the row when the server withholds the address (space_session / relay-only / non-admin)', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/transport-detail')) {
+        return Promise.resolve({ last_relay: null, inbox_url: null })
+      }
+      return Promise.resolve({ users: [] })
+    })
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith(
+      '/api/pairing/connections/z7k63zfi/transport-detail',
+    ))
+    expect(screen.queryByText('Inbox')).toBeNull()
   })
 })
 

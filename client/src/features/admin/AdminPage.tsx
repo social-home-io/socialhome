@@ -34,14 +34,20 @@ type TabId =
   | 'sessions' | 'child-protection' | 'storage' | 'backup'
   | 'settings'
 
-interface ModerationItem {
-  id:          string
-  space_id:    string
-  ref_type:    string
-  ref_id:      string
-  reported_by: string
-  reason:      string
-  occurred_at: string
+/** One row of ``GET /api/admin/reports`` — mirrors ``_report_dict`` in
+ *  ``socialhome/routes/reports.py`` (the route returns pending rows only). */
+export interface ContentReport {
+  id:                   string
+  target_type:          string
+  target_id:            string
+  reporter_user_id:     string
+  reporter_instance_id: string | null
+  category:             string
+  notes:                string | null
+  status:               string
+  created_at:           string | null
+  resolved_by:          string | null
+  resolved_at:          string | null
 }
 
 interface ApiToken {
@@ -55,7 +61,8 @@ interface ApiToken {
 }
 
 const users         = signal<User[]>([])
-const reports       = signal<ModerationItem[]>([])
+const reports       = signal<ContentReport[]>([])
+const reportsError  = signal<string | null>(null)
 const tokens        = signal<ApiToken[]>([])
 const loading       = signal(true)
 const tab           = signal<TabId>('members')
@@ -553,14 +560,67 @@ async function resolveReport(id: string, dismissed: boolean) {
   }
 }
 
+// Wire enums from ``socialhome/domain/report.py`` (ReportTargetType /
+// ReportCategory), sentence-cased for the queue row.
+const _REPORT_TARGET_LABELS: Record<string, string> = {
+  post:      'Post',
+  comment:   'Comment',
+  user:      'Member',
+  space:     'Space',
+  highlight: 'Highlight',
+  moment:    'Moment',
+}
+
+const _REPORT_CATEGORY_LABELS: Record<string, string> = {
+  spam:           'spam',
+  harassment:     'harassment',
+  inappropriate:  'inappropriate',
+  misinformation: 'misinformation',
+  other:          'other',
+}
+
+/** In-app link to the reported content when the SPA has a page for it by
+ *  id alone. Posts / comments / members need a feed or space context the
+ *  report doesn't carry, so they stay unlinked. */
+function _reportTargetHref(r: ContentReport): string | null {
+  const id = encodeURIComponent(r.target_id)
+  switch (r.target_type) {
+    case 'highlight': return `/highlights/${id}`
+    case 'moment':    return `/momentum/${id}`
+    case 'space':     return `/spaces/${id}`
+    default:          return null
+  }
+}
+
+function _reporterLabel(r: ContentReport): string {
+  if (r.reporter_instance_id) return 'someone from another household'
+  const u = users.value.find((x) => x.user_id === r.reporter_user_id)
+  return u ? (u.display_name || u.username) : 'a household member'
+}
+
 function ModerationTab() {
+  if (reportsError.value) {
+    return (
+      <section class="sh-admin-section">
+        <h2>Moderation queue</h2>
+        <div role="alert">
+          <p class="sh-muted">
+            Couldn't load the moderation queue ({reportsError.value}).
+          </p>
+          <Button variant="secondary" onClick={() => void loadReports()}>
+            Retry
+          </Button>
+        </div>
+      </section>
+    )
+  }
   if (reports.value.length === 0) {
     return (
       <section class="sh-admin-section">
         <h2>Moderation queue</h2>
         <p class="sh-muted">
-          No pending reports. Items appear here when a member flags a
-          post, comment, or sticky for admin review.
+          No pending reports. Items appear here when someone reports a
+          post, comment, member, space, highlight, or moment.
         </p>
       </section>
     )
@@ -574,46 +634,43 @@ function ModerationTab() {
         <strong> Dismiss</strong> when the report is unfounded.
       </p>
       <ol class="sh-admin-queue">
-        {reports.value.map((m) => {
-          // ``ref_type`` is the wire enum (post / comment / sticky /
-          // page).  Sentence-case it so the row reads as a friendly
-          // line instead of "post in space {hash}".
-          const refLabel = ((t: string) => {
-            switch (t) {
-              case 'post':    return 'Post'
-              case 'comment': return 'Comment'
-              case 'sticky':  return 'Sticky note'
-              case 'page':    return 'Page'
-              default:        return t
-            }
-          })(m.ref_type)
+        {reports.value.map((r) => {
+          const target = _REPORT_TARGET_LABELS[r.target_type] ?? r.target_type
+          const category = _REPORT_CATEGORY_LABELS[r.category] ?? r.category
+          const href = _reportTargetHref(r)
           return (
-            <li key={m.id} class="sh-admin-row">
+            <li key={r.id} class="sh-admin-row">
               <div class="sh-admin-row__hd">
-                <strong>{refLabel}</strong>
-                <span class="sh-muted">flagged in a space</span>
-                <time
-                  class="sh-muted"
-                  dateTime={m.occurred_at}
-                  title={new Date(m.occurred_at).toLocaleString()}
-                >
-                  {new Date(m.occurred_at).toLocaleDateString(undefined, {
-                    month: 'short', day: 'numeric',
-                    hour: '2-digit', minute: '2-digit',
-                  })}
-                </time>
+                {href
+                  ? <a href={href}><strong>{target}</strong></a>
+                  : <strong>{target}</strong>}
+                <span class="sh-muted">
+                  reported as {category} by {_reporterLabel(r)}
+                </span>
+                {r.created_at && (
+                  <time
+                    class="sh-muted"
+                    dateTime={r.created_at}
+                    title={new Date(r.created_at).toLocaleString()}
+                  >
+                    {new Date(r.created_at).toLocaleDateString(undefined, {
+                      month: 'short', day: 'numeric',
+                      hour: '2-digit', minute: '2-digit',
+                    })}
+                  </time>
+                )}
               </div>
-              <p class="sh-admin-row__reason">{m.reason}</p>
+              {r.notes && <p class="sh-admin-row__reason">{r.notes}</p>}
               <div class="sh-admin-row__actions">
                 <Button
                   variant="secondary"
-                  onClick={() => void resolveReport(m.id, true)}
+                  onClick={() => void resolveReport(r.id, true)}
                 >
                   Dismiss
                 </Button>
                 <Button
                   variant="primary"
-                  onClick={() => void resolveReport(m.id, false)}
+                  onClick={() => void resolveReport(r.id, false)}
                 >
                   Resolve
                 </Button>
@@ -1026,6 +1083,20 @@ export function RecoveryKitPanel() {
 
 // ─── Loaders ───────────────────────────────────────────────────────────────
 
+/** Pending content reports. ``GET /api/admin/reports`` returns a plain
+ *  list; a failure surfaces in the tab (with Retry) instead of reading as
+ *  an empty queue. */
+async function loadReports() {
+  try {
+    const rows = await api.get('/api/admin/reports') as ContentReport[]
+    reports.value = Array.isArray(rows) ? rows : []
+    reportsError.value = null
+  } catch (e: unknown) {
+    reports.value = []
+    reportsError.value = (e as Error)?.message ?? String(e)
+  }
+}
+
 async function loadAll() {
   loading.value = true
   try {
@@ -1033,15 +1104,7 @@ async function loadAll() {
   } catch {
     users.value = []
   }
-  try {
-    const body = await api.get('/api/admin/moderation') as
-      { items: ModerationItem[] }
-    reports.value = body.items
-  } catch {
-    // Endpoint optional — moderation queue is a §23.95.2 enhancement
-    // that ships separately. Silent empty state.
-    reports.value = []
-  }
+  await loadReports()
   try {
     const body = await api.get('/api/admin/tokens') as { tokens: ApiToken[] }
     tokens.value = body.tokens
