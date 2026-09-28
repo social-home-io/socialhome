@@ -556,25 +556,31 @@ class FederationService:
             instance_id=event.instance_id,
             user_id=event.user_id,
         ):
-            payload = held.payload if isinstance(held.payload, dict) else {}
-            ctx = InboundContext(
-                envelope={
-                    "space_id": held.space_id or payload.get("space_id") or None,
-                    "from_instance": held.from_instance,
-                },
-                event=held,
-            )
-            if not await run_post_decrypt_gates(
-                ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
-            ):
-                continue
-            log.info(
-                "replaying held %s from %s now that the seat landed in %s",
-                held.event_type,
-                held.from_instance,
-                event.space_id,
-            )
-            await self._event_registry.dispatch(held)
+            await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
+
+    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
+        """Re-run a held inbound event through the post-decrypt gates, then
+        dispatch it — the decision is taken again with the awaited state in
+        place (a write that still doesn't qualify is refused then)."""
+        payload = held.payload if isinstance(held.payload, dict) else {}
+        ctx = InboundContext(
+            envelope={
+                "space_id": held.space_id or payload.get("space_id") or None,
+                "from_instance": held.from_instance,
+            },
+            event=held,
+        )
+        if not await run_post_decrypt_gates(
+            ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
+        ):
+            return
+        log.info(
+            "replaying held %s from %s now that %s",
+            held.event_type,
+            held.from_instance,
+            reason,
+        )
+        await self._event_registry.dispatch(held)
 
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""

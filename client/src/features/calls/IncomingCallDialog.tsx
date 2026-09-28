@@ -98,7 +98,8 @@ export default function IncomingCallDialog() {
     ]
     // Focus Accept on mount so Enter activates the primary action
     // without the user having to tab to it.
-    setTimeout(() => findActions()[0]?.focus(), 10)
+    // Cleared on cleanup: the dialog can close before the tick fires.
+    const focusTimer = setTimeout(() => findActions()[0]?.focus(), 10)
 
     const timer = setTimeout(() => {
       if (incoming.value) {
@@ -127,6 +128,7 @@ export default function IncomingCallDialog() {
     window.addEventListener('keydown', onKey)
 
     return () => {
+      clearTimeout(focusTimer)
       clearTimeout(timer)
       window.removeEventListener('keydown', onKey)
       if (_ringStop) { _ringStop(); _ringStop = null }

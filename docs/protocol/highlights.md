@@ -77,6 +77,23 @@ sequenceDiagram
     SB-->>Fed: HIGHLIGHT_FRAME_VIEWED back to A
 ```
 
+## Receiver rules
+
+Highlights are sent straight from the author's home, never relayed. The
+receiver drops the event with a WARNING when:
+
+- `HIGHLIGHT_CREATED` / `HIGHLIGHT_FRAME_APPENDED` name a highlight id
+  stored here with a different author, or a frame id stored here under
+  a different highlight (the upserts are by id — the stored row decides);
+- `HIGHLIGHT_FRAME_DELETED` names a frame not held here, or one whose
+  highlight's author is not homed on the sender;
+- `HIGHLIGHT_FRAME_VIEWED` / `_REACTED` / `_REACTION_REMOVED` come from a
+  user not homed on the sender (unknown users included), or name a frame
+  that is not part of that highlight here or not authored by one of our
+  users. The published author is the stored one, never the payload's.
+
+`tests/protocol/test_highlight_scope.py`.
+
 ## Implementation pointers
 
 - Schema: `socialhome/migrations/0001_initial.sql` — `highlights`,

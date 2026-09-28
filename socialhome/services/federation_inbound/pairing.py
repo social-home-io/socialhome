@@ -11,9 +11,9 @@ Events covered:
 * ``PAIRING_ACCEPT`` — initiator receives the accept envelope from
   the peer who scanned our QR. Upgrades local status → `PENDING_RECEIVED`
   and surfaces the SAS so the admin can confirm.
-* ``PAIRING_CONFIRM`` — either side — peer finished verifying the SAS.
-  Flip local status to `CONFIRMED`.
-* ``PAIRING_ABORT`` — peer cancelled an in-progress handshake.
+* ``PAIRING_CONFIRM`` — refused: a pairing is confirmed only by this
+  household's own verification step (never by the peer's say-so).
+* ``PAIRING_ABORT`` — peer cancelled its own in-progress handshake.
 * ``UNPAIR`` — peer tore down an existing (confirmed) pairing.
 """
 
@@ -26,19 +26,20 @@ from ...domain.events import (
     DmContactRequested,
     PairingAborted,
     PairingAcceptReceived,
-    PairingConfirmed,
     PairingIntroReceived,
     PeerProtoVersionRaised,
 )
-from ...domain.federation import FederationEventType, PairingStatus, RemoteInstance
+from ...crypto import derive_instance_id
+from ...domain.federation import FederationEventType, PairingStatus
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from ...infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
-    from ...domain.federation import FederationEvent
+    from ...domain.federation import FederationEvent, PairingSession
     from ...federation.federation_service import FederationService
     from ...repositories.dm_contact_repo import AbstractDmContactRepo
     from ...repositories.federation_repo import AbstractFederationRepo
+    from ...repositories.user_repo import AbstractUserRepo
     from ..peer_unpair_service import PeerUnpairService
 
 log = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class PairingInboundHandlers:
     handshake, which lives in the same family.)
     """
 
-    __slots__ = ("_bus", "_repo", "_dm_contact_repo", "_peer_unpair")
+    __slots__ = ("_bus", "_repo", "_dm_contact_repo", "_peer_unpair", "_user_repo")
 
     def __init__(
         self,
@@ -59,11 +60,15 @@ class PairingInboundHandlers:
         federation_repo: "AbstractFederationRepo",
         peer_unpair: "PeerUnpairService",
         dm_contact_repo: "AbstractDmContactRepo | None" = None,
+        user_repo: "AbstractUserRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._repo = federation_repo
         self._peer_unpair = peer_unpair
         self._dm_contact_repo = dm_contact_repo
+        #: Binds a contact request's requester to the sending household.
+        #: Without it no request is accepted (fail closed).
+        self._user_repo = user_repo
 
     def attach_to(self, federation_service: "FederationService") -> None:
         """Register every handler on the service's event registry."""
@@ -130,48 +135,52 @@ class PairingInboundHandlers:
         )
 
     async def _on_confirm(self, event: "FederationEvent") -> None:
-        """Peer confirmed the SAS — flip local status to CONFIRMED."""
+        """Refuse an inbox ``PAIRING_CONFIRM`` — it never confirms a pairing.
+
+        A pairing only becomes ``CONFIRMED`` through this household's own
+        verification step: the local admin entering the SAS
+        (:meth:`PairingCoordinator.confirm`), the signed peer-confirm the
+        admin's counterpart sends after doing so
+        (:meth:`PairingCoordinator.handle_peer_confirm`, bound to the
+        pairing token), or the vouched auto-pair finalisation. No honest
+        sender emits ``PAIRING_CONFIRM`` over the federation inbox, and
+        a still-pending peer already passes the §24.11 signature check
+        (its keys land on the row at peer-accept time, before the SAS is
+        compared) — so honouring this event would let the peer confirm
+        itself. Fail closed: never change the row, never publish.
+        """
         instance = await self._repo.get_instance(event.from_instance)
-        if instance is None:
-            log.debug(
-                "PAIRING_CONFIRM from unknown instance=%s",
-                event.from_instance,
-            )
+        if instance is None or instance.status is PairingStatus.CONFIRMED:
             return
-        if instance.status is PairingStatus.CONFIRMED:
-            return
-        confirmed = RemoteInstance(
-            id=instance.id,
-            display_name=instance.display_name,
-            remote_identity_pk=instance.remote_identity_pk,
-            key_self_to_remote=instance.key_self_to_remote,
-            key_remote_to_self=instance.key_remote_to_self,
-            remote_inbox_url=instance.remote_inbox_url,
-            local_inbox_id=instance.local_inbox_id,
-            status=PairingStatus.CONFIRMED,
-            source=instance.source,
-            intro_relay_enabled=instance.intro_relay_enabled,
-            proto_version=instance.proto_version,
-            remote_pq_algorithm=instance.remote_pq_algorithm,
-            remote_pq_identity_pk=instance.remote_pq_identity_pk,
-            sig_suite=instance.sig_suite,
-            relay_via=instance.relay_via,
-            home_lat=instance.home_lat,
-            home_lon=instance.home_lon,
-            paired_at=instance.paired_at,
-            created_at=instance.created_at,
-            last_reachable_at=instance.last_reachable_at,
-            unreachable_since=instance.unreachable_since,
+        log.warning(
+            "PAIRING_CONFIRM refused: from=%s status=%s — a pairing is "
+            "confirmed only by this household's own verification step",
+            event.from_instance,
+            instance.status.value,
         )
-        await self._repo.save_instance(confirmed)
-        await self._bus.publish(PairingConfirmed(instance_id=instance.id))
 
     async def _on_abort(self, event: "FederationEvent") -> None:
-        """Peer cancelled the handshake — delete pending_pairings + surface."""
+        """Peer cancelled the handshake — delete pending_pairings + surface.
+
+        The ``token`` in the payload is bound to the sender: a pending
+        session is only dropped when the peer identity stored on it
+        derives to ``from_instance``. A household can cancel its own
+        handshake with us, never somebody else's by quoting a token.
+        """
         token = str(event.payload.get("token") or "")
         reason = str(event.payload.get("reason") or "")[:200]
         if token:
-            await self._repo.delete_pairing(token)
+            session = await self._repo.get_pairing(token)
+            if session is not None:
+                if self._session_peer_id(session) == event.from_instance:
+                    await self._repo.delete_pairing(token)
+                else:
+                    log.warning(
+                        "PAIRING_ABORT refused for pending session: from=%s "
+                        "token=%s… — session belongs to another peer",
+                        event.from_instance,
+                        token[:8],
+                    )
         instance = await self._repo.get_instance(event.from_instance)
         if instance is not None and instance.status is not PairingStatus.CONFIRMED:
             await self._repo.delete_instance(instance.id)
@@ -181,6 +190,17 @@ class PairingInboundHandlers:
                 reason=reason,
             )
         )
+
+    @staticmethod
+    def _session_peer_id(session: "PairingSession") -> str | None:
+        """Instance id of the peer a pending session is with, or ``None``
+        when the peer's identity isn't known yet (or is malformed)."""
+        if not session.peer_identity_pk:
+            return None
+        try:
+            return derive_instance_id(bytes.fromhex(session.peer_identity_pk))
+        except ValueError:
+            return None
 
     async def _on_unpair(self, event: "FederationEvent") -> None:
         """Peer tore down the pairing — forget it exactly as a local unpair
@@ -267,7 +287,7 @@ class PairingInboundHandlers:
             # setup enforces locally, so a malicious peer can't store a
             # multi-KB / multi-line / control-char name for layout-DoS or
             # impersonation.
-            clean_name = "".join(c for c in raw_name.strip() if c.isprintable())[:80]
+            clean_name = _clean_display_name(raw_name)
         else:
             clean_name = ""
         if clean_name and clean_name != instance.display_name:
@@ -308,11 +328,25 @@ class PairingInboundHandlers:
         recipient_user_id = str(
             p.get("recipient_user_id") or p.get("to_user_id") or "",
         )
-        requester_display_name = str(
-            p.get("requester_display_name") or requester_user_id,
-        )
+        raw_name = p.get("requester_display_name")
+        requester_display_name = (
+            _clean_display_name(raw_name) if isinstance(raw_name, str) else ""
+        ) or requester_user_id
         if not requester_user_id or not recipient_user_id:
             log.debug("DM_CONTACT_REQUEST missing requester/recipient user id")
+            return
+        # The requester is the sending household's own user — never a local
+        # member, another household's user, or an id we can't place.
+        if (
+            self._user_repo is None
+            or await self._user_repo.get_instance_for_user(requester_user_id)
+            != event.from_instance
+        ):
+            log.warning(
+                "DM_CONTACT_REQUEST from %s refused: requester %s is not homed there",
+                event.from_instance,
+                requester_user_id,
+            )
             return
         try:
             await self._dm_contact_repo.save_request(
@@ -337,3 +371,12 @@ class PairingInboundHandlers:
                 recipient_user_id=recipient_user_id,
             )
         )
+
+
+def _clean_display_name(raw: str) -> str:
+    """Strip non-printable characters and cap a peer-supplied display name.
+
+    The same 80-character limit setup enforces locally, so a peer can't
+    store a multi-KB / multi-line / control-character name.
+    """
+    return "".join(c for c in raw.strip() if c.isprintable())[:80]

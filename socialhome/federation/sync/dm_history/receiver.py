@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING
 from ....domain.conversation import MESSAGE_TYPES, ConversationMessage
 from ....domain.events import DmHistorySyncComplete
 from ....domain.federation import FederationEventType
+from ...dm_scope import DmScope, refuse
 
 if TYPE_CHECKING:
     from ....domain.federation import FederationEvent
     from ....federation.federation_service import FederationService
     from ....infrastructure.event_bus import EventBus
     from ....repositories.conversation_repo import AbstractConversationRepo
+    from ....repositories.user_repo import AbstractUserRepo
 
 
 log = logging.getLogger(__name__)
@@ -23,22 +25,37 @@ log = logging.getLogger(__name__)
 class DmHistoryReceiver:
     """Persists inbound DM history chunks and emits the sync-complete event.
 
-    :meth:`save_message` is upsert-by-id (``ON CONFLICT(id) DO UPDATE``),
-    so replayed or overlapping chunks are harmless.
+    History only fills gaps: a chunk is taken from a household seated in
+    the conversation, each message must be its own seated user's, and it
+    is inserted when absent (:meth:`insert_message_if_absent`). A message
+    already here is updated from the chunk (its sender's later edit or
+    delete) only when the stored row has that same sender in that same
+    conversation — never anyone else's message.
     """
 
-    __slots__ = ("_conversation_repo", "_bus", "_counts", "_federation")
+    __slots__ = (
+        "_conversation_repo",
+        "_bus",
+        "_counts",
+        "_federation",
+        "_dm_scope",
+    )
 
     def __init__(
         self,
         *,
         conversation_repo: "AbstractConversationRepo",
+        user_repo: "AbstractUserRepo",
         bus: "EventBus",
         federation_service: "FederationService | None" = None,
     ) -> None:
         self._conversation_repo = conversation_repo
         self._bus = bus
         self._federation = federation_service
+        self._dm_scope = DmScope(
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+        )
         # (from_instance, conversation_id) → chunks seen so far
         self._counts: dict[tuple[str, str], int] = {}
 
@@ -55,14 +72,43 @@ class DmHistoryReceiver:
         if not conversation_id or not isinstance(raw_messages, list):
             log.debug("DM_HISTORY_CHUNK malformed: %s", payload)
             return 0
+        if not await self._dm_scope.seated(event, conversation_id):
+            refuse(
+                event,
+                "sender holds no seat in the conversation",
+                conversation=conversation_id,
+            )
+            return 0
 
         saved = 0
         for raw in raw_messages:
             msg = _dict_to_message(raw, conversation_id)
             if msg is None:
                 continue
-            await self._conversation_repo.save_message(msg)
-            saved += 1
+            if not await self._dm_scope.speaks_for(
+                event, conversation_id, msg.sender_user_id
+            ):
+                refuse(
+                    event,
+                    "message is not a seated user's of the sending household",
+                    conversation=conversation_id,
+                    message=msg.id,
+                )
+                continue
+            if await self._conversation_repo.insert_message_if_absent(msg):
+                saved += 1
+                continue
+            # Already here: the catch-up copy may carry the sender's own later
+            # edit or delete — applied only onto that same sender's row in
+            # that same conversation, never onto anyone else's message.
+            stored = await self._conversation_repo.get_message(msg.id)
+            if (
+                stored is not None
+                and stored.sender_user_id == msg.sender_user_id
+                and stored.conversation_id == conversation_id
+            ):
+                await self._conversation_repo.save_message(msg)
+                saved += 1
 
         key = (event.from_instance, conversation_id)
         self._counts[key] = self._counts.get(key, 0) + 1
@@ -88,10 +134,17 @@ class DmHistoryReceiver:
         return saved
 
     async def handle_complete(self, event: "FederationEvent") -> None:
-        """Publish :class:`DmHistorySyncComplete`."""
+        """Publish :class:`DmHistorySyncComplete` — for a seated sender only."""
         payload = event.payload or {}
         conversation_id = str(payload.get("conversation_id") or "")
         if not conversation_id:
+            return
+        if not await self._dm_scope.seated(event, conversation_id):
+            refuse(
+                event,
+                "sender holds no seat in the conversation",
+                conversation=conversation_id,
+            )
             return
         key = (event.from_instance, conversation_id)
         chunks = self._counts.pop(key, int(payload.get("chunks_sent") or 0))

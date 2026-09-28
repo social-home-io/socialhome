@@ -802,6 +802,39 @@ async def test_upsert_remote_rebinds_a_stale_natural_key_row(env):
     assert got is not None and got.user_id == "derivedadminid"
 
 
+async def test_upsert_remote_never_rehomes_a_cached_user(env):
+    """A row cached for one household is never moved onto another one."""
+    from socialhome.domain.user import RemoteUser
+
+    await _seed_peer_instance(env, "peer-b")
+    await env.db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-c', 'C', ?, 'k1', 'k2',"
+        " 'https://c/wh', 'wh-c', 'confirmed', 'manual')",
+        ("11" * 32,),
+    )
+    await env.user_repo.upsert_remote(
+        RemoteUser(
+            user_id="u-x",
+            instance_id="peer-b",
+            remote_username="x",
+            display_name="X",
+        ),
+    )
+    await env.user_repo.upsert_remote(
+        RemoteUser(
+            user_id="u-x",
+            instance_id="peer-c",
+            remote_username="x",
+            display_name="Forged",
+        ),
+    )
+    got = await env.user_repo.get_remote("u-x")
+    assert got is not None
+    assert (got.instance_id, got.display_name) == ("peer-b", "X")
+
+
 # ── API-token expiry (timestamp-shape regression) ──────────────────────────
 
 

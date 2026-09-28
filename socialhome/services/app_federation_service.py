@@ -135,7 +135,7 @@ class AppFederationService:
         #: HTTPS fallback / retransmit) seating two invites + two notifications
         #: for the same challenge. Scoped to inbound only; outbound
         #: ``open_session`` always mints a fresh uuid so it never dedupes.
-        self._seen_open_sessions: OrderedDict[str, None] = OrderedDict()
+        self._seen_open_sessions: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     async def _emit(self, event: "DomainEvent") -> None:
         """Publish ``event`` fail-soft; no-op without a bus.
@@ -442,7 +442,7 @@ class AppFederationService:
             # notifications for the same challenge.  Scoped to opens — a
             # future ``verb`` ("close") is not a session-creating event.
             if event.payload.get("verb") == "open" and self._seen_open_session(
-                str(session_id)
+                event.from_instance, str(session_id)
             ):
                 log.debug(
                     "app_federation: duplicate inbound open for session %r — skipping",
@@ -465,6 +465,19 @@ class AppFederationService:
         from_user = (
             raw_from_user if isinstance(raw_from_user, str) and raw_from_user else None
         )
+        # A household that addresses people (v_18+) always names the user on
+        # the JSON path; the whole-household fan-out is only for older peers.
+        if to_user is None and await self._federation.peer_supports(
+            event.from_instance,
+            min_version=FederationCapability.MIN_FOR_APP_USER_ROUTING,
+        ):
+            log.warning(
+                "app_federation: %s from %s refused — no addressee (session=%s)",
+                kind,
+                event.from_instance,
+                session_id,
+            )
+            return
 
         await self._deliver(
             app_id,
@@ -503,8 +516,12 @@ class AppFederationService:
 
     # ─── Internal helpers ─────────────────────────────────────────────────────
 
-    def _seen_open_session(self, session_id: str) -> bool:
-        """Return whether ``session_id`` was already handled inbound.
+    def _seen_open_session(self, from_instance: str, session_id: str) -> bool:
+        """Return whether ``session_id`` from ``from_instance`` was already
+        handled inbound.
+
+        Keyed per sending household, so one household can never pre-empt
+        another's open by sending the same session id first.
 
         First sight records it (LRU, capped at
         :data:`_SEEN_OPEN_SESSIONS_MAX`, oldest evicted) and returns ``False``;
@@ -512,9 +529,10 @@ class AppFederationService:
         challenge publish. Synchronous — the OrderedDict mutation is atomic
         under the single-threaded asyncio loop.
         """
-        if session_id in self._seen_open_sessions:
+        key = (from_instance, session_id)
+        if key in self._seen_open_sessions:
             return True
-        self._seen_open_sessions[session_id] = None
+        self._seen_open_sessions[key] = None
         if len(self._seen_open_sessions) > _SEEN_OPEN_SESSIONS_MAX:
             self._seen_open_sessions.popitem(last=False)
         return False
@@ -757,6 +775,16 @@ class AppFederationService:
         # caller (legacy household fan-out) and is never looked up.
         if to_user is not None:
             recipient = await self._user_repo.get(to_user)
+            if recipient is None:
+                log.warning(
+                    "app_federation: %s from %s refused — addressee %r is not "
+                    "a user here (session=%s)",
+                    kind,
+                    from_instance,
+                    to_user,
+                    session_id,
+                )
+                return
             if recipient is not None:
                 # Recipient block enforcement (symmetric with DMs,
                 # ``dm_service._guard_block_pair``): if the recipient has
@@ -767,7 +795,22 @@ class AppFederationService:
                 initiator = await self._resolve_remote_initiator(
                     from_instance, from_user
                 )
-                if initiator is not None and await self._user_repo.is_blocked(
+                # A per-user delivery names its initiator (v_18+ senders
+                # always ship ``to_user`` with ``from_user``): it must be a
+                # user of the sending household, so the recipient's block
+                # list can always be applied.
+                if initiator is None:
+                    log.warning(
+                        "app_federation: per-user %s from %s refused — "
+                        "initiator %r is not a user of that household "
+                        "(session=%s)",
+                        kind,
+                        from_instance,
+                        from_user,
+                        session_id,
+                    )
+                    return
+                if await self._user_repo.is_blocked(
                     recipient.user_id, initiator.user_id
                 ):
                     log.info(
@@ -830,6 +873,17 @@ class AppFederationService:
         user_ids = [u.user_id for u in users]
         if not user_ids:
             return
+
+        # Recipients who blocked the named initiator never get the frame
+        # (same rule as the per-user path). An unnamed initiator (binary
+        # frames carry no routing slot) can't be checked.
+        initiator = await self._resolve_remote_initiator(from_instance, from_user)
+        if initiator is not None:
+            user_ids = [
+                uid
+                for uid in user_ids
+                if not await self._user_repo.is_blocked(uid, initiator.user_id)
+            ]
 
         # Age-gate filter: skip recipients who are protected minors below
         # the app's minimum age.  Fast path when the app has no restriction.

@@ -652,8 +652,11 @@ class CallSignalingService:
                 )
             case FederationEventType.CALL_ICE_CANDIDATE | FederationEventType.CALL_ICE:
                 record = self._calls.get(call_id)
-                if record is None or not await self._hosts_participant(
-                    event.from_instance, record.participants
+                if record is None:
+                    return
+                sender = payload.get("from_user")
+                if not await self._is_sender_participant(
+                    event, call_id, sender, record.participants, field="from_user"
                 ):
                     return
                 record.last_activity = time.time()
@@ -679,10 +682,19 @@ class CallSignalingService:
                 await self._on_federated_end(event, call_id, payload)
             case FederationEventType.CALL_QUALITY:
                 # Phase CF — persist remote-reported WebRTC quality sample.
+                # Bound to the sender: the call must exist here and the
+                # reporter must be one of its participants, homed on the
+                # sending household.
+                reporter = str(payload.get("reporter_user") or "")
+                _record, _persisted, participants = await self._known_call(call_id)
+                if not await self._is_sender_participant(
+                    event, call_id, reporter, participants, field="reporter_user"
+                ):
+                    return
                 try:
                     sample = CallQualitySample(
                         call_id=call_id,
-                        reporter_user_id=str(payload.get("reporter_user") or ""),
+                        reporter_user_id=reporter,
                         sampled_at=int(payload.get("sampled_at") or time.time()),
                         rtt_ms=payload.get("rtt_ms"),
                         jitter_ms=payload.get("jitter_ms"),
@@ -948,16 +960,15 @@ class CallSignalingService:
         ``CALL_BUSY``: release the local user and close the persisted row
         (otherwise it stays ``active`` forever, or ``ringing`` until the
         sweep reports a declined call as missed)."""
-        record = self._calls.get(call_id)
-        persisted = await self._call_repo.get_call(call_id)
-        participants = (
-            record.participants
-            if record is not None
-            else set(persisted.participant_user_ids)
-            if persisted is not None
-            else set()
-        )
-        if not await self._hosts_participant(event.from_instance, participants):
+        record, persisted, participants = await self._known_call(call_id)
+        # The ender named in the payload is bound to the signing household:
+        # a household can only end a call on behalf of its own participant
+        # (the same "any participant hangs up → the call ends" rule as a
+        # local hangup), never name somebody else's user.
+        ender = payload.get("hanger_user") or payload.get("decliner_user")
+        if not await self._is_sender_participant(
+            event, call_id, ender, participants, field="hanger_user/decliner_user"
+        ):
             return
         if persisted is not None and persisted.status in ("ringing", "active"):
             declined = event.event_type in (
@@ -972,7 +983,6 @@ class CallSignalingService:
             )
         if record is None:
             return
-        ender = payload.get("hanger_user") or payload.get("decliner_user")
         target = (
             record.callee_user_id
             if ender == record.caller_user_id
@@ -986,6 +996,52 @@ class CallSignalingService:
             },
         )
         self._cleanup_call(call_id)
+
+    async def _known_call(
+        self,
+        call_id: str,
+    ) -> tuple[CallRecord | None, CallSession | None, set[str]]:
+        """The in-memory record, the persisted row and the participant set
+        (from whichever of the two exists) for *call_id*."""
+        record = self._calls.get(call_id)
+        persisted = await self._call_repo.get_call(call_id)
+        participants = (
+            set(record.participants)
+            if record is not None
+            else set(persisted.participant_user_ids)
+            if persisted is not None
+            else set()
+        )
+        return record, persisted, participants
+
+    async def _is_sender_participant(
+        self,
+        event,
+        call_id: str,
+        user_id: object,
+        participants: set[str],
+        *,
+        field: str,
+    ) -> bool:
+        """``True`` when the payload-named *user_id* is a participant of the
+        call AND homed on the signing household. Refusals log a WARNING."""
+        if not isinstance(user_id, str) or not user_id:
+            reason = f"missing {field}"
+        elif user_id not in participants:
+            reason = f"{field} is not a participant of the call"
+        elif await self._instance_of(user_id) != event.from_instance:
+            reason = f"{field} is not a user of the sending household"
+        else:
+            return True
+        log.warning(
+            "%s refused: from=%s call_id=%s user=%s — %s",
+            event.event_type.value,
+            event.from_instance,
+            call_id,
+            user_id if isinstance(user_id, str) else None,
+            reason,
+        )
+        return False
 
     async def _hosts_participant(
         self,

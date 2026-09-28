@@ -171,22 +171,61 @@ async def test_handle_call_busy_cleans_record():
 
 
 async def test_handle_call_quality_persists_without_record():
-    """CALL_QUALITY persists the sample even without a local record."""
-    env = make_call_service()
+    """CALL_QUALITY from a participant's household persists even after the
+    routing record is gone (only the persisted row is left)."""
+    env = _caller_env()
+    cid = await _start_outbound(env)
+    env.svc._calls.clear()
     await env.svc.handle_federated_signal(
         _Event(
             FederationEventType.CALL_QUALITY,
             "remote-inst",
             {
-                "call_id": "stale",
+                "call_id": cid,
                 "rtt_ms": 42,
-                "reporter_user": "uid-remote",
+                "reporter_user": "uid-bob",
                 "sampled_at": 1700000000,
             },
         )
     )
-    samples = await env.call_repo.list_quality_samples("stale")
+    samples = await env.call_repo.list_quality_samples(cid)
     assert samples and samples[0].rtt_ms == 42
+
+
+@pytest.mark.parametrize(
+    ("reporter", "sender"),
+    [
+        pytest.param("uid-alice", "remote-inst", id="a local participant"),
+        pytest.param("uid-bob", "stranger-inst", id="another household"),
+        pytest.param("uid-carol", "remote-inst", id="not a participant"),
+    ],
+)
+async def test_call_quality_names_only_the_senders_own_participant(reporter, sender):
+    env = _caller_env()
+    cid = await _start_outbound(env)
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_QUALITY,
+            sender,
+            {"call_id": cid, "rtt_ms": 1, "reporter_user": reporter},
+        )
+    )
+    assert await env.call_repo.list_quality_samples(cid) == []
+
+
+@pytest.mark.parametrize(
+    "ender", [None, "uid-alice", "uid-carol"], ids=["missing", "local", "outsider"]
+)
+async def test_remote_hangup_names_the_senders_own_participant(ender):
+    env = _caller_env()
+    cid = await _start_outbound(env)
+    payload = {"call_id": cid}
+    if ender is not None:
+        payload["hanger_user"] = ender
+    await env.svc.handle_federated_signal(
+        _Event(FederationEventType.CALL_HANGUP, "remote-inst", payload)
+    )
+    assert (await env.call_repo.get_call(cid)).status == "ringing"
 
 
 # ─── Signed SDP verification path ─────────────────────────────────────────
@@ -535,7 +574,11 @@ async def test_remote_hangup_after_answer_records_a_duration():
         _Event(FederationEventType.CALL_ANSWER, "remote-inst", {"call_id": cid})
     )
     await env.svc.handle_federated_signal(
-        _Event(FederationEventType.CALL_HANGUP, "remote-inst", {"call_id": cid})
+        _Event(
+            FederationEventType.CALL_HANGUP,
+            "remote-inst",
+            {"call_id": cid, "hanger_user": "uid-bob"},
+        )
     )
     row = await env.call_repo.get_call(cid)
     assert row.status == "ended"
@@ -558,7 +601,11 @@ async def test_remote_end_closes_the_row_even_without_a_routing_record():
     cid = await _start_outbound(env)
     env.svc._calls.clear()
     await env.svc.handle_federated_signal(
-        _Event(FederationEventType.CALL_HANGUP, "remote-inst", {"call_id": cid})
+        _Event(
+            FederationEventType.CALL_HANGUP,
+            "remote-inst",
+            {"call_id": cid, "hanger_user": "uid-bob"},
+        )
     )
     assert (await env.call_repo.get_call(cid)).status == "ended"
 

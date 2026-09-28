@@ -129,6 +129,25 @@ couple two trust models and leak block-list shape to peers.
   the ``origin_instance_id`` field as long as it matches the author's
   home instance lookup. Unknown authors (``USER_UPDATED`` envelope
   hasn't landed yet) are accepted on first sight.
+* **Never ours:** a moment whose claimed origin is this household, or
+  whose author is one of our own users, is refused on every path — those
+  only originate here.
+* **Stored row wins:** a `MOMENT_CREATED` / `MOMENT_DELETED` naming a
+  moment id this household holds is applied only when the stored author
+  and origin match the payload; a delete of an id not held here changes
+  nothing locally and travels on (each hop re-checks its own row).
+* **Reactions** (`MOMENT_REACTED` / `_REMOVED`) are honoured only for a
+  moment authored here, from a reactor homed on the sending household;
+  the published author is the stored one.
+* Refused events are logged at WARNING and never relayed
+  (`tests/protocol/test_moment_scope.py`).
+* **Known limitation — relayed moments are not yet authenticated.** On
+  the 2/3-hop path the receiver cannot tell a genuine relay from a paired
+  household that names a remote origin: the origin field is not signed by
+  the origin. The rules above bind direct deliveries and stop anything
+  claiming this household or its members, but a relayed create or delete
+  for another household's author is taken on the relayer's word. Closing
+  this needs an end-to-end origin signature on the moment (planned).
 
 ## Mermaid sequence — local author posts a moment
 

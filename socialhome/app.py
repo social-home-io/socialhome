@@ -995,6 +995,7 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         peer_unpair=peer_unpair_service,
         dm_contact_repo=dm_contact_repo,
+        user_repo=user_repo,
     ).attach_to(federation_service)
 
     # Transitive auto-pair coordinator (§11 "simple pairing") —
@@ -1321,6 +1322,7 @@ def _wire_federation_stack(
     )
     dm_history_receiver = DmHistoryReceiver(
         conversation_repo=conversation_repo,
+        user_repo=user_repo,
         bus=bus,
         federation_service=federation_service,
     )

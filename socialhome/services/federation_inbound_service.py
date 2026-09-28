@@ -73,9 +73,11 @@ from ..domain.highlight import (
 )
 from ..crypto import (
     UnsupportedUserSigSuite,
+    derive_user_id,
     verify_user_identity_assertion,
 )
 from ..domain.user import RemoteUser, UserIdentityAssertion, UserStatus
+from ..federation.dm_scope import DmScope, refuse
 from ..federation.space_authorship import SpaceAuthorship
 from ..federation.space_scope import (
     log_cross_space_refusal,
@@ -126,6 +128,10 @@ if TYPE_CHECKING:
     from .relay_policy import RelayPolicy
 
 log = logging.getLogger(__name__)
+
+#: Hold-buffer scope for DMs waiting on their sender's user sync. Not a
+#: space id (those are 32-char key fingerprints), so the keys never mix.
+_DM_HOLD_SCOPE = "dm"
 
 
 def _now_iso() -> str:
@@ -276,6 +282,8 @@ class FederationInboundService:
         "_gallery_repo",
         "_bazaar_repo",
         "_authorship",
+        "_dm_scope",
+        "_pending",
         "_federation_service",
         "_space_cover_repo",
         "_space_icon_repo",
@@ -348,6 +356,16 @@ class FederationInboundService:
             if space_remote_member_repo is not None
             else None
         )
+        #: §24.11 DM binding — ties the conversation, message and person a
+        #: DM payload names to the household that signed it.
+        self._dm_scope = DmScope(
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+        )
+        #: Holds a DM whose sender this household has no user row for yet
+        #: (the sender's profile sync trails their first message); released
+        #: when that user syncs. ``None`` refuses instead.
+        self._pending = pending_seat_buffer
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
         #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
@@ -459,6 +477,11 @@ class FederationInboundService:
             return
         if msg_type not in MESSAGE_TYPES:
             msg_type = "text"
+        recipients = tuple(p.get("recipient_user_ids") or ())
+        if not await self._dm_message_in_scope(
+            event, conv_id, message_id, sender_user_id, recipients
+        ):
+            return
 
         # Cross-household DMs arrive without the conversation ever
         # being created on this instance — the *sender's* household
@@ -470,7 +493,6 @@ class FederationInboundService:
         # doesn't trip a FOREIGN KEY constraint failure on the receiver
         # the very first time a sender ships a DM. Idempotent —
         # ``conversation_repo`` upserts.
-        recipients = tuple(p.get("recipient_user_ids") or ())
         await self._ensure_remote_dm_conversation(
             conv_id=conv_id,
             sender_instance_id=event.from_instance,
@@ -657,30 +679,32 @@ class FederationInboundService:
         ``GET /api/conversations/{id}/messages`` returns 403
         ("not a member").
 
-        Idempotent: ``conversation_repo.create`` upserts on the
-        primary key, ``add_member`` / ``add_remote_member`` upsert on
+        Runs only for a conversation that is not here yet: the seats of an
+        existing conversation are never rewritten by an inbound message
+        (:meth:`_dm_message_in_scope` already required the sender to hold
+        one). Idempotent: ``add_member`` / ``add_remote_member`` upsert on
         the natural keys.
         """
-        existing = await self._conversation_repo.get(conv_id)
-        if existing is None:
-            now_iso = (
-                occurred_at
-                if isinstance(occurred_at, str) and occurred_at
-                else datetime.now(timezone.utc).isoformat()
+        if await self._conversation_repo.get(conv_id) is not None:
+            return
+        now_iso = (
+            occurred_at
+            if isinstance(occurred_at, str) and occurred_at
+            else datetime.now(timezone.utc).isoformat()
+        )
+        try:
+            await self._conversation_repo.create(
+                Conversation(
+                    id=conv_id,
+                    type=ConversationType.DM,
+                    created_at=parse_iso8601_lenient(now_iso),
+                ),
             )
-            try:
-                await self._conversation_repo.create(
-                    Conversation(
-                        id=conv_id,
-                        type=ConversationType.DM,
-                        created_at=parse_iso8601_lenient(now_iso),
-                    ),
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                log.debug(
-                    "_ensure_remote_dm_conversation: create skipped (%s)",
-                    exc,
-                )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug(
+                "_ensure_remote_dm_conversation: create skipped (%s)",
+                exc,
+            )
 
         joined_at = datetime.now(timezone.utc).isoformat()
 
@@ -731,6 +755,113 @@ class FederationInboundService:
                         remote.remote_username,
                         exc,
                     )
+
+    async def _dm_message_in_scope(
+        self,
+        event: "FederationEvent",
+        conv_id: str,
+        message_id: str,
+        sender_user_id: str,
+        recipients: tuple,
+    ) -> bool:
+        """Whether ``from_instance`` may write this ``DM_MESSAGE``.
+
+        * the sender is a user of the sending household (never a local
+          member, never a third household's user);
+        * an existing message id is only ever re-sent (edit, transcript) by
+          its own sender, in its own conversation;
+        * an existing conversation takes messages only from a sender seated
+          in it;
+        * a conversation not here yet is opened only for a local recipient.
+        """
+        scope = self._dm_scope
+        reason: str | None = None
+        if await self._user_repo.get_instance_for_user(sender_user_id) is None:
+            # Not a refusal yet: the sender's user row can trail their first
+            # DM. Hold it until that user syncs (bounded; see
+            # :meth:`_release_held_dms`), refuse only when it can't be held.
+            if self._pending is not None and self._pending.hold(
+                event, space_id=_DM_HOLD_SCOPE, user_id=sender_user_id
+            ):
+                log.info(
+                    "DM_MESSAGE from %s: sender %s not synced yet — holding",
+                    event.from_instance,
+                    sender_user_id,
+                )
+                return False
+        existing = await self._conversation_repo.get_message(message_id)
+        if not await scope.sent_from(event, sender_user_id):
+            reason = "sender is not a user of the sending household"
+        elif existing is not None and (
+            existing.conversation_id != conv_id
+            or existing.sender_user_id != sender_user_id
+        ):
+            reason = "message id belongs to another message"
+        elif (conv := await self._conversation_repo.get(conv_id)) is not None:
+            if not await scope.speaks_for(
+                event, conv_id, sender_user_id
+            ) and not await self._heal_legacy_seat(event, conv, sender_user_id):
+                reason = "sender is not seated in the conversation"
+        elif not await self._has_local_recipient(recipients):
+            reason = "no local recipient for a new conversation"
+        if reason is None:
+            return True
+        refuse(
+            event,
+            reason,
+            conversation=conv_id,
+            message=message_id,
+            sender=sender_user_id,
+        )
+        return False
+
+    async def _heal_legacy_seat(
+        self,
+        event: "FederationEvent",
+        conv: Conversation,
+        sender_user_id: str,
+    ) -> bool:
+        """Seat the sender in an older 1:1 whose remote seat was never written.
+
+        Only for a 1:1 with exactly one local member, no remote seat at all,
+        and earlier messages from this very sender — proof they were the other
+        party. The sender is already bound to ``from_instance`` by the caller.
+        Anything else (a group, a thread with another remote party, a 1:1 the
+        sender never wrote in) stays refused.
+        """
+        if conv.type is not ConversationType.DM:
+            return False
+        if await self._conversation_repo.list_remote_members(conv.id):
+            return False
+        if len(await self._conversation_repo.list_members(conv.id)) != 1:
+            return False
+        if conv.id not in await self._conversation_repo.list_conversations_with_sender(
+            sender_user_id
+        ):
+            return False
+        remote = await self._user_repo.get_remote(sender_user_id)
+        if remote is None:
+            return False
+        await self._conversation_repo.add_remote_member(
+            RemoteConversationMember(
+                conversation_id=conv.id,
+                instance_id=event.from_instance,
+                remote_username=remote.remote_username,
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        log.info(
+            "DM: restored %s's seat in older conversation %s",
+            sender_user_id,
+            conv.id,
+        )
+        return True
+
+    async def _has_local_recipient(self, recipients: tuple) -> bool:
+        for rid in recipients:
+            if await self._user_repo.get_by_user_id(str(rid)) is not None:
+                return True
+        return False
 
     # ── DM media ─────────────────────────────────────────────────────
 
@@ -1126,8 +1257,21 @@ class FederationInboundService:
                     )
 
     async def _on_dm_deleted(self, event: "FederationEvent") -> None:
+        """Soft-delete a message — only its own sender's household may."""
         message_id = str(event.payload.get("message_id") or "")
+        conv_id = str(event.payload.get("conversation_id") or "")
         if not message_id:
+            return
+        msg = await self._conversation_repo.get_message(message_id)
+        if msg is None:
+            return
+        reason: str | None = None
+        if not await self._dm_scope.sent_from(event, msg.sender_user_id):
+            reason = "message was not sent from this household"
+        elif conv_id and conv_id != msg.conversation_id:
+            reason = "message is not in the named conversation"
+        if reason is not None:
+            refuse(event, reason, conversation=conv_id, message=message_id)
             return
         await self._conversation_repo.soft_delete_message(message_id)
 
@@ -1137,7 +1281,21 @@ class FederationInboundService:
         user_id = str(p.get("user_id") or "")
         emoji = str(p.get("emoji") or "")
         action = str(p.get("action") or "add")
+        conv_id = str(p.get("conversation_id") or "")
         if not message_id or not user_id or not emoji:
+            return
+        # A reaction is its reactor's own: only a user of the sending
+        # household, seated in the message's conversation.
+        msg = await self._conversation_repo.get_message(message_id)
+        if msg is None:
+            return
+        reason: str | None = None
+        if conv_id and conv_id != msg.conversation_id:
+            reason = "message is not in the named conversation"
+        elif not await self._dm_scope.speaks_for(event, msg.conversation_id, user_id):
+            reason = "reactor is not a seated user of the sending household"
+        if reason is not None:
+            refuse(event, reason, message=message_id, user=user_id)
             return
         if action == "remove":
             await self._conversation_repo.remove_reaction(message_id, user_id, emoji)
@@ -1145,9 +1303,6 @@ class FederationInboundService:
             await self._conversation_repo.add_reaction(message_id, user_id, emoji)
         # Fan to local WS sessions so every open thread tab on this
         # household updates the reaction strip without a refetch.
-        msg = await self._conversation_repo.get_message(message_id)
-        if msg is None:
-            return
         members = await self._conversation_repo.list_members(msg.conversation_id)
         recipient_ids: list[str] = []
         for m in members:
@@ -2319,6 +2474,11 @@ class FederationInboundService:
         user_id = str(event.payload.get("user_id") or "")
         if not user_id:
             return
+        # Only the user's home household may remove them — never a local
+        # member, another household's user, or an id we have never seen.
+        if not await self._dm_scope.sent_from(event, user_id):
+            refuse(event, "user is not homed on the sending household", user=user_id)
+            return
         log.info("USER_REMOVED: flagging remote user %s as deprovisioned", user_id)
         await self._user_repo.mark_remote_deprovisioned(user_id)
 
@@ -2386,6 +2546,9 @@ class FederationInboundService:
         user_id = str(p.get("user_id") or "")
         if not user_id:
             return
+        if not await self._dm_scope.sent_from(event, user_id):
+            refuse(event, "user is not homed on the sending household", user=user_id)
+            return
         status: UserStatus | None
         if p.get("status_cleared"):
             status = None
@@ -2415,7 +2578,9 @@ class FederationInboundService:
         Authority check: the envelope's signed sender (``from_instance``)
         must equal the home instance of the payload's
         ``author_user_id`` — peers can't impersonate highlights from
-        someone else's instance.
+        someone else's instance. The upsert is by id, so an id we already
+        store must belong to that same author, and the frame id must not
+        belong to another highlight (see :meth:`_highlight_write_binds`).
         """
         if self._highlight_repo is None:
             return
@@ -2434,11 +2599,54 @@ class FederationInboundService:
                 highlight.author_user_id,
             )
             return
-        await self._highlight_repo.save_highlight(highlight)
         frame = self._frame_from_payload(highlight.id, p)
+        if not await self._highlight_write_binds(event, highlight, frame):
+            return
+        await self._highlight_repo.save_highlight(highlight)
         if frame is not None:
             await self._highlight_repo.save_frame(frame)
             await self._publish_frame_added(highlight, frame, is_first=True, p=p)
+
+    async def _highlight_write_binds(
+        self,
+        event: "FederationEvent",
+        highlight: Highlight | None,
+        frame: HighlightFrame | None,
+    ) -> bool:
+        """The by-id upserts may only touch rows that are already the sender's.
+
+        ``save_highlight`` / ``save_frame`` upsert on the bare id the payload
+        names, so the id alone must not reach a row that belongs to someone
+        else: a stored highlight with that id must have the same author, and
+        a stored frame with that id must already hang off the same highlight.
+        Refusals are logged at WARNING and change nothing.
+        """
+        if self._highlight_repo is None:  # pragma: no cover — callers gate
+            return False
+        reason: str | None = None
+        if highlight is not None:
+            stored = await self._highlight_repo.get_highlight(highlight.id)
+            if stored is not None and stored.author_user_id != (
+                highlight.author_user_id
+            ):
+                reason = "highlight id belongs to another author"
+        if reason is None and frame is not None:
+            stored_frame = await self._highlight_repo.get_frame(frame.id)
+            if stored_frame is not None and stored_frame.highlight_id != (
+                frame.highlight_id
+            ):
+                reason = "frame id belongs to another highlight"
+        if reason is None:
+            return True
+        log.warning(
+            "%s from %s: %s (highlight=%s frame=%s) — refusing",
+            event.event_type,
+            event.from_instance,
+            reason,
+            highlight.id if highlight is not None else None,
+            frame.id if frame is not None else None,
+        )
+        return False
 
     async def _on_highlight_frame_appended(self, event: "FederationEvent") -> None:
         """Append a frame to an existing remote highlight.
@@ -2457,6 +2665,7 @@ class FederationInboundService:
             log.debug("HIGHLIGHT_FRAME_APPENDED missing highlight_id: %s", p)
             return
         highlight = await self._highlight_repo.get_highlight(highlight_id)
+        lazy_parent = highlight is None
         if highlight is None:
             highlight = self._highlight_from_payload(p)
             if highlight is None:
@@ -2476,7 +2685,6 @@ class FederationInboundService:
                     highlight.author_user_id,
                 )
                 return
-            await self._highlight_repo.save_highlight(highlight)
         else:
             if not await self._authority_matches(
                 event.from_instance, highlight.author_user_id
@@ -2492,6 +2700,12 @@ class FederationInboundService:
         if frame is None:
             log.debug("HIGHLIGHT_FRAME_APPENDED missing frame fields: %s", p)
             return
+        # Bind before any write: a lazily-created parent must not land when
+        # the frame id it carries belongs to another highlight.
+        if not await self._highlight_write_binds(event, None, frame):
+            return
+        if lazy_parent:
+            await self._highlight_repo.save_highlight(highlight)
         await self._highlight_repo.save_frame(frame)
         await self._publish_frame_added(highlight, frame, is_first=False, p=p)
 
@@ -2502,35 +2716,32 @@ class FederationInboundService:
         frame_id = str(p.get("frame_id") or "")
         if not frame_id:
             return
+        # Bind to the stored frame: its own parent highlight's author must
+        # live on the sender. A frame we don't hold is nothing to delete.
         frame = await self._highlight_repo.get_frame(frame_id)
-        highlight_id = (
-            frame.highlight_id
-            if frame is not None
-            else str(p.get("highlight_id") or "")
-        )
-        highlight = (
-            await self._highlight_repo.get_highlight(highlight_id)
-            if highlight_id
-            else None
-        )
-        if highlight is not None and not await self._authority_matches(
+        if frame is None:
+            return
+        highlight = await self._highlight_repo.get_highlight(frame.highlight_id)
+        if highlight is None or not await self._authority_matches(
             event.from_instance, highlight.author_user_id
         ):
             log.warning(
-                "HIGHLIGHT_FRAME_DELETED authority mismatch: dropped",
+                "HIGHLIGHT_FRAME_DELETED from %s: frame %s is not the "
+                "sender's — refusing",
+                event.from_instance,
+                frame_id,
             )
             return
         await self._highlight_repo.delete_frame(frame_id)
-        if highlight is not None:
-            await self._bus.publish(
-                HighlightFrameRemoved(
-                    highlight_id=highlight.id,
-                    frame_id=frame_id,
-                    author_user_id=highlight.author_user_id,
-                    audience_kind=highlight.audience_kind.value,
-                    audience=highlight.audience,
-                )
+        await self._bus.publish(
+            HighlightFrameRemoved(
+                highlight_id=highlight.id,
+                frame_id=frame_id,
+                author_user_id=highlight.author_user_id,
+                audience_kind=highlight.audience_kind.value,
+                audience=highlight.audience,
             )
+        )
 
     async def _on_highlight_deleted(self, event: "FederationEvent") -> None:
         if self._highlight_repo is None:
@@ -2572,26 +2783,75 @@ class FederationInboundService:
         highlight_id = str(p.get("highlight_id") or "")
         frame_id = str(p.get("frame_id") or "")
         viewer_user_id = str(p.get("viewer_user_id") or "")
-        author_user_id = str(p.get("author_user_id") or "")
-        if not (highlight_id and frame_id and viewer_user_id and author_user_id):
+        if not (highlight_id and frame_id and viewer_user_id):
             return
-        # Authority check: the envelope's signed sender must be the
-        # viewer's home instance — peers can't fabricate views from a
-        # user that doesn't live on their household.
-        if not await self._authority_matches(event.from_instance, viewer_user_id):
-            log.warning(
-                "HIGHLIGHT_FRAME_VIEWED authority mismatch — dropped",
-            )
+        highlight = await self._local_frame_reply_target(
+            event, highlight_id, frame_id, viewer_user_id
+        )
+        if highlight is None:
             return
         await self._highlight_repo.mark_viewed(frame_id, viewer_user_id)
         await self._bus.publish(
             HighlightFrameViewed(
-                highlight_id=highlight_id,
+                highlight_id=highlight.id,
                 frame_id=frame_id,
                 viewer_user_id=viewer_user_id,
-                author_user_id=author_user_id,
+                author_user_id=highlight.author_user_id,
             )
         )
+
+    async def _local_frame_reply_target(
+        self,
+        event: "FederationEvent",
+        highlight_id: str,
+        frame_id: str,
+        actor_user_id: str,
+    ) -> Highlight | None:
+        """Return our author's highlight iff the sender may reply on ``frame_id``.
+
+        Views and reactions are unicast to the author's home
+        (``HighlightFederationOutbound._on_frame_viewed`` /
+        ``_on_reaction_changed``), so a reply is honoured only when all of
+        these hold — otherwise it is dropped with a WARNING:
+
+        * ``actor_user_id``'s home household is the sending household. An
+          unknown user, a local member and another household's user are
+          all refused;
+        * the frame exists here and hangs off ``highlight_id``;
+        * that highlight is authored by one of *our* users.
+
+        The caller publishes the stored author, never the payload's.
+        """
+        if self._highlight_repo is None:  # pragma: no cover — callers gate
+            return None
+        reason: str | None = None
+        highlight: Highlight | None = None
+        home = await self._user_repo.get_instance_for_user(actor_user_id)
+        if home is None or home != event.from_instance:
+            reason = "user does not belong to the sending household"
+        else:
+            frame = await self._highlight_repo.get_frame(frame_id)
+            if frame is None or frame.highlight_id != highlight_id:
+                reason = "frame is not part of that highlight here"
+            else:
+                highlight = await self._highlight_repo.get_highlight(highlight_id)
+                if highlight is None or (
+                    await self._user_repo.get_by_user_id(highlight.author_user_id)
+                    is None
+                ):
+                    reason = "frame is not authored here"
+        if reason is None:
+            return highlight
+        log.warning(
+            "%s from %s: %s (highlight=%s frame=%s user=%s) — refusing",
+            event.event_type,
+            event.from_instance,
+            reason,
+            highlight_id,
+            frame_id,
+            actor_user_id,
+        )
+        return None
 
     async def _on_highlight_frame_reacted(self, event: "FederationEvent") -> None:
         await self._handle_reaction_envelope(event, removed=False)
@@ -2614,14 +2874,13 @@ class FederationInboundService:
         highlight_id = str(p.get("highlight_id") or "")
         frame_id = str(p.get("frame_id") or "")
         reactor_user_id = str(p.get("reactor_user_id") or "")
-        author_user_id = str(p.get("author_user_id") or "")
         emoji = None if removed else (p.get("emoji") or None)
-        if not (highlight_id and frame_id and reactor_user_id and author_user_id):
+        if not (highlight_id and frame_id and reactor_user_id):
             return
-        if not await self._authority_matches(event.from_instance, reactor_user_id):
-            log.warning(
-                "HIGHLIGHT_FRAME_REACT* authority mismatch — dropped",
-            )
+        highlight = await self._local_frame_reply_target(
+            event, highlight_id, frame_id, reactor_user_id
+        )
+        if highlight is None:
             return
         if removed or emoji is None:
             await self._highlight_repo.clear_reaction(frame_id, reactor_user_id)
@@ -2631,10 +2890,10 @@ class FederationInboundService:
             published_emoji = emoji
         await self._bus.publish(
             HighlightFrameReactionChanged(
-                highlight_id=highlight_id,
+                highlight_id=highlight.id,
                 frame_id=frame_id,
                 reactor_user_id=reactor_user_id,
-                author_user_id=author_user_id,
+                author_user_id=highlight.author_user_id,
                 emoji=published_emoji,
             )
         )
@@ -2668,6 +2927,10 @@ class FederationInboundService:
             author_user_id,
         ):
             log.warning("MOMENT_CREATED authority mismatch — dropped")
+            return
+        if not await self._moment_row_binds(
+            event, moment_id, author_user_id, origin_instance_id
+        ):
             return
         # §Momentum-relay-policy: drop banned-source / open-report
         # envelopes before either persist or relay.
@@ -2766,14 +3029,22 @@ class FederationInboundService:
         ):
             log.warning("MOMENT_DELETED authority mismatch — dropped")
             return
-        await self._moment_repo.delete(moment_id)
-        await self._bus.publish(
-            MomentDeleted(
-                moment_id=moment_id,
-                author_user_id=author_user_id,
-                origin_instance_id=origin_instance_id,
+        if not await self._moment_row_binds(
+            event, moment_id, author_user_id, origin_instance_id
+        ):
+            return
+        # A moment we never stored is nothing to delete here; the delete
+        # still travels on so a household that does hold it can apply it
+        # (and runs these same checks against its own row).
+        if await self._moment_repo.get(moment_id) is not None:
+            await self._moment_repo.delete(moment_id)
+            await self._bus.publish(
+                MomentDeleted(
+                    moment_id=moment_id,
+                    author_user_id=author_user_id,
+                    origin_instance_id=origin_instance_id,
+                )
             )
-        )
         await self._maybe_relay(
             event_type=event.event_type,
             payload=p,
@@ -2800,13 +3071,34 @@ class FederationInboundService:
         p = event.payload
         moment_id = str(p.get("moment_id") or "")
         reactor_user_id = str(p.get("reactor_user_id") or "")
-        author_user_id = str(p.get("author_user_id") or "")
-        if not (moment_id and reactor_user_id and author_user_id):
+        if not (moment_id and reactor_user_id):
             return
-        # Authority: envelope sender == reactor's home instance.
-        if not await self._authority_matches(event.from_instance, reactor_user_id):
-            log.warning("MOMENT_REACT* authority mismatch — dropped")
+        # Reactions are unicast to the author's home: the reactor must be a
+        # user of the sending household, and the moment one authored here.
+        # The published author is the stored one, never the payload's.
+        reason: str | None = None
+        moment = None
+        if await self._user_repo.get_instance_for_user(reactor_user_id) != (
+            event.from_instance
+        ):
+            reason = "reactor does not belong to the sending household"
+        else:
+            moment = await self._moment_repo.get(moment_id)
+            if moment is None or (
+                await self._user_repo.get_by_user_id(moment.author_user_id) is None
+            ):
+                reason = "moment is not authored here"
+        if reason is not None or moment is None:
+            log.warning(
+                "%s from %s: %s (moment=%s user=%s) — refusing",
+                event.event_type,
+                event.from_instance,
+                reason,
+                moment_id,
+                reactor_user_id,
+            )
             return
+        author_user_id = moment.author_user_id
         emoji = None if removed else (p.get("emoji") or None)
         if removed or emoji is None:
             await self._moment_repo.clear_reaction(moment_id, reactor_user_id)
@@ -2842,7 +3134,20 @@ class FederationInboundService:
         author's home instance lookup matches. Unknown authors (the
         ``USER_UPDATED`` envelope hasn't landed yet) fall through and
         accept the row.
+
+        Never accepted, whichever path: a moment whose claimed origin is
+        this household, or whose author is one of our own users — those
+        only ever originate here.
         """
+        own = (
+            self._federation_service.own_instance_id
+            if self._federation_service is not None
+            else ""
+        )
+        if (own and origin_instance_id == own) or (
+            await self._user_repo.get_by_user_id(author_user_id) is not None
+        ):
+            return False
         if from_instance == origin_instance_id:
             # Direct delivery — also check the author lives there.
             try:
@@ -2856,6 +3161,35 @@ class FederationInboundService:
         except Exception:  # pragma: no cover — defensive
             return True
         return home is None or home == origin_instance_id
+
+    async def _moment_row_binds(
+        self,
+        event: "FederationEvent",
+        moment_id: str,
+        author_user_id: str,
+        origin_instance_id: str,
+    ) -> bool:
+        """A moment id we already store must carry the same author + origin.
+
+        ``moment_repo.save`` upserts on the bare id, and a delete names only
+        the id: the stored row, not the payload, says whose moment it is.
+        Refused writes are neither applied nor relayed.
+        """
+        if self._moment_repo is None:  # pragma: no cover — callers gate
+            return False
+        stored = await self._moment_repo.get(moment_id)
+        if stored is None or (
+            stored.author_user_id == author_user_id
+            and stored.origin_instance_id == origin_instance_id
+        ):
+            return True
+        log.warning(
+            "%s from %s: moment %s belongs to another author — refusing",
+            event.event_type,
+            event.from_instance,
+            moment_id,
+        )
+        return False
 
     async def _maybe_relay(
         self,
@@ -2985,6 +3319,22 @@ class FederationInboundService:
         username = str(payload.get("username") or payload.get("remote_username") or "")
         if not user_id or not username:
             return
+        # Binding check BEFORE any write — the picture table is shared with
+        # local users, so a refused entry must not touch it either. A user
+        # already known here (local or remote) is only ever published by
+        # their own home household.
+        home = await self._user_repo.get_instance_for_user(user_id)
+        if home is not None and home != instance_id:
+            log.warning(
+                "user sync from %s refused: user %s is homed elsewhere",
+                instance_id,
+                user_id,
+            )
+            return
+        if home is None and not await self._derives_from_sender(
+            instance_id, user_id, username, payload
+        ):
+            return
         picture_hash = payload.get("picture_hash")
 
         # If the peer shipped fresh picture bytes, revalidate and store
@@ -3033,6 +3383,7 @@ class FederationInboundService:
             synced_at=_now_iso(),
         )
         await self._user_repo.upsert_remote(remote)
+        await self._release_held_dms(instance_id, user_id)
 
         # Per-user identity binding (independent user identity, proto v_25).
         # When the entry carries the self-verifying assertion fields, verify
@@ -3042,6 +3393,59 @@ class FederationInboundService:
         # re-verified outside the original §24.11 envelope (Phase 3/4), so we
         # check the instance signature here too — not just the user self-sig.
         await self._store_user_identity_binding(instance_id, user_id, payload)
+
+    async def _release_held_dms(self, instance_id: str, user_id: str) -> None:
+        """Replay DMs held for ``user_id`` now that their user row exists.
+
+        Each replay runs the full DM rules again, so a DM some other
+        household sent in that user's name is refused at this point.
+        """
+        if self._pending is None or self._federation_service is None:
+            return
+        for held in self._pending.release(
+            space_id=_DM_HOLD_SCOPE, instance_id=instance_id, user_id=user_id
+        ):
+            await self._federation_service.replay_held(
+                held, reason=f"user {user_id} synced"
+            )
+
+    async def _derives_from_sender(
+        self,
+        instance_id: str,
+        user_id: str,
+        username: str,
+        payload: dict,
+    ) -> bool:
+        """A first-seen ``user_id`` must derive from the sender's pinned key.
+
+        ``derive_user_id(sender_pk, identity_anchor or username)`` — the same
+        construction every household mints its users with — so a household
+        can only introduce its own users and never pre-claim somebody else's
+        id before that user's home syncs it. Refused (WARNING) when the key
+        can't be resolved or the id doesn't derive.
+        """
+        sender_pk = (
+            await self._federation_service.peer_identity_public_key(instance_id)
+            if self._federation_service is not None
+            else None
+        )
+        raw_anchor = payload.get("identity_anchor")
+        seed = raw_anchor if isinstance(raw_anchor, str) and raw_anchor else username
+        derived = ""
+        if sender_pk is not None:
+            try:
+                derived = derive_user_id(sender_pk, seed)
+            except ValueError:
+                derived = ""
+        if derived and derived == user_id:
+            return True
+        log.warning(
+            "user sync from %s refused: new user %s does not derive from the "
+            "sender's identity key",
+            instance_id,
+            user_id,
+        )
+        return False
 
     async def _store_user_identity_binding(
         self,

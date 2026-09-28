@@ -75,6 +75,7 @@ class AbstractConversationRepo(Protocol):
     async def save_message_returning_created(
         self, message: ConversationMessage
     ) -> tuple[ConversationMessage, bool]: ...
+    async def insert_message_if_absent(self, message: ConversationMessage) -> bool: ...
     async def get_message(self, message_id: str) -> ConversationMessage | None: ...
     async def list_messages(
         self,
@@ -422,6 +423,17 @@ class SqliteConversationRepo:
             edited_at=excluded.edited_at
         """
 
+    _MESSAGE_INSERT_IGNORE_SQL = """
+        INSERT OR IGNORE INTO conversation_messages(
+            id, conversation_id, sender_user_id, content, type,
+            media_url, file_name, mime_type, file_size_bytes,
+            media_blob_id, media_sync_status,
+            reply_to_id, reply_to_highlight_frame_id,
+            reply_to_highlight_frame_snapshot,
+            deleted, edited_at, created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+        """
+
     @staticmethod
     def _message_upsert_params(message: ConversationMessage) -> tuple:
         return (
@@ -489,19 +501,7 @@ class SqliteConversationRepo:
             # ``INSERT OR IGNORE`` returns rowcount=0 when the row
             # already exists; rowcount=1 means we inserted. Either
             # way the conversation timestamp gets bumped below.
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO conversation_messages(
-                    id, conversation_id, sender_user_id, content, type,
-                    media_url, file_name, mime_type, file_size_bytes,
-                    media_blob_id, media_sync_status,
-                    reply_to_id, reply_to_highlight_frame_id,
-                    reply_to_highlight_frame_snapshot,
-                    deleted, edited_at, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
-                """,
-                params,
-            )
+            cur = conn.execute(self._MESSAGE_INSERT_IGNORE_SQL, params)
             inserted = cur.rowcount == 1
             if not inserted:
                 # Existing row — apply the same UPDATE the upsert
@@ -550,6 +550,28 @@ class SqliteConversationRepo:
             at=_iso(message.created_at),
         )
         return message, inserted
+
+    async def insert_message_if_absent(self, message: ConversationMessage) -> bool:
+        """Insert ``message`` unless a row with its id exists; never update one.
+
+        Returns whether the row was inserted. For catch-up paths (DM history)
+        that may fill in a missing message but must never rewrite an
+        existing one — edits and deletes travel as their own events, bound
+        to the message's sender.
+        """
+        params = self._message_upsert_params(message)
+
+        def _do(conn) -> bool:
+            cur = conn.execute(self._MESSAGE_INSERT_IGNORE_SQL, params)
+            return cur.rowcount == 1
+
+        inserted = await self._db.transact(_do)
+        if inserted:
+            await self.touch_last_message(
+                message.conversation_id,
+                at=_iso(message.created_at),
+            )
+        return inserted
 
     async def get_message(
         self,

@@ -117,6 +117,35 @@ paired peer populate its directory without waiting for each user to
 tick over organically. Rate: once every 24 h, plus on demand when a
 new pairing is confirmed.
 
+## Receiver rules
+
+A household speaks only for the users homed on it (the user's home is
+the household their `user_id` is cached under, or this household for its
+own members). The receiver drops the event with a WARNING when:
+
+- `USER_UPDATED` / a `USERS_SYNC` entry names a user already known here
+  and homed elsewhere — a local member or another household's user.
+  Nothing is written, not even the profile picture. The repository
+  upsert also never moves a cached user onto another household.
+- `USER_REMOVED`, `USER_STATUS_UPDATED`, `USER_ONLINE` / `USER_IDLE` /
+  `USER_OFFLINE` and `DM_CONTACT_REQUEST` name a user whose home is not
+  the sending household, or a user this household does not know.
+- `PRESENCE_UPDATED` is keyed on `from_instance` by construction.
+
+A user seen for the first time is taken only when its `user_id`
+re-derives from the sender's pinned identity key —
+`derive_user_id(sender_pk, identity_anchor or username)`, the construction
+every household mints its users with — so a household can introduce only
+its own users and never pre-claim another household's id. Senders ship the
+bare `identity_anchor` on every user publication (inside the identity
+binding when the peer supports it, on its own otherwise). Legacy window: a
+peer still on an older build sends no anchor before capabilities are
+exchanged, so its anchor-derived users land on the first later publication
+that carries the anchor (a profile update or re-pair). User-visible
+effect in that window (and for a user the sender hides from this
+household): their DMs are held for a while and then dropped, and their
+calendar and app invites are not shown. `tests/protocol/test_user_sync_scope.py`.
+
 ## Implementation
 
 - `socialhome/services/presence_service.py` — local state +

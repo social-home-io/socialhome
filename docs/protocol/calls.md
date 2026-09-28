@@ -124,6 +124,17 @@ At hangup the offerer may emit `CALL_QUALITY` with RTT, jitter,
 packet-loss, and codec summaries. The event is opt-in per-instance
 (disabled by default) — quality metrics are otherwise private.
 
+## Receiver rules
+
+Every call signal names the participant it speaks for. The receiver
+honours `CALL_HANGUP` / `CALL_END` / `CALL_DECLINE` / `CALL_BUSY`
+(`hanger_user` / `decliner_user`), `CALL_ICE` / `CALL_ICE_CANDIDATE`
+(`from_user`) and `CALL_QUALITY` (`reporter_user`) only when that user is
+a participant of a call held here **and** homed on the sending household;
+anything else is logged at WARNING and changes nothing. `CALL_OFFER`
+binds the caller to the sender and the callee to the conversation.
+`tests/protocol/test_call_signal_scope.py`.
+
 ## Rate limiting
 
 - `POST /api/calls` — 10/min (creation)

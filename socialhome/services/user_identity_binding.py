@@ -75,11 +75,12 @@ async def user_identity_binding_fields(
 ) -> dict[str, str]:
     """Return the per-user identity-binding wire fields for one user/peer.
 
-    Empty dict (legacy shape) when:
+    No binding (legacy shape) when:
 
-    * ``user_repo`` is ``None`` (the service wasn't wired with one), or
-    * the peer doesn't support v_25, or
-    * the user has no minted identity keypair.
+    * ``user_repo`` is ``None`` (the service wasn't wired with one) — empty, or
+    * the peer doesn't support v_25, or the user has no minted identity
+      keypair — then only the bare ``identity_anchor`` (when the user has
+      one), so a first-seen ``user_id`` can still be re-derived.
 
     Otherwise the returned dict carries the full self-verifying credential —
     ``user_identity_public_key`` / ``user_sig_suite`` / ``user_signature``
@@ -96,7 +97,7 @@ async def user_identity_binding_fields(
         peer_instance_id,
         min_version=FederationCapability.MIN_FOR_USER_IDENTITY_KEY,
     ):
-        return {}
+        return await _plain_anchor(user_repo, username)
 
     try:
         keypair = await user_repo.get_user_identity_keypair(username)
@@ -108,7 +109,7 @@ async def user_identity_binding_fields(
         )
         return {}
     if keypair is None:
-        return {}
+        return await _plain_anchor(user_repo, username)
     user_public_key, user_seed = keypair
 
     # The immutable anchor (uuid) is the v_26 addition. We only put it on the
@@ -170,3 +171,19 @@ async def user_identity_binding_fields(
     if identity_anchor is not None:
         fields["identity_anchor"] = identity_anchor
     return fields
+
+
+async def _plain_anchor(user_repo: "AbstractUserRepo", username: str) -> dict[str, str]:
+    """The bare ``identity_anchor`` when no binding carries it.
+
+    A receiver only takes a user it has never seen when the ``user_id``
+    re-derives from the sender's pinned key and this anchor (or the
+    username for a legacy id). Nothing signs it here and nothing needs to:
+    the derivation itself is the proof. Omitted when the user has none.
+    """
+    try:
+        anchor = await user_repo.get_user_identity_anchor(username)
+    except Exception as exc:  # pragma: no cover — defensive, fail-soft
+        log.warning("identity-anchor lookup for %s failed: %s", username, exc)
+        return {}
+    return {"identity_anchor": anchor} if anchor else {}

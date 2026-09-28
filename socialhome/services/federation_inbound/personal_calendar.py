@@ -92,6 +92,52 @@ class PersonalCalendarInboundHandlers:
             return None
         return cals[0].id
 
+    @staticmethod
+    def _foreign_row_reason(
+        existing: CalendarEvent,
+        event: "FederationEvent",
+        remote_event_id: str,
+    ) -> str | None:
+        """Why ``existing`` is not ``from_instance``'s mirror of ``remote_event_id``.
+
+        The per-recipient row id is a truncated derivation (see
+        :func:`_mint_event_id`), so distinct inputs can land on one id.
+        The id alone never proves ownership — the stored row's provenance
+        does. ``None`` means the row is the sender's own mirror of that
+        same remote event.
+        """
+        if existing.origin != "remote_invite":
+            return "row is not an inbound invite"
+        if existing.remote_instance_id != event.from_instance:
+            return "row mirrors another household's invite"
+        if existing.remote_event_id != remote_event_id:
+            return "row mirrors a different remote event"
+        return None
+
+    @staticmethod
+    def _refuse(
+        event: "FederationEvent",
+        reason: str,
+        remote_event_id: str,
+        detail: str,
+    ) -> None:
+        log.warning(
+            "%s from %s: %s (remote_event=%s %s) — refusing",
+            event.event_type,
+            event.from_instance,
+            reason,
+            remote_event_id,
+            detail,
+        )
+
+    async def _recipient_calendar_ids(self, recipient_user_id: str) -> set[str]:
+        """Ids of the personal calendars a LOCAL recipient owns (empty otherwise)."""
+        user = await self._user_repo.get_by_user_id(recipient_user_id)
+        if user is None:
+            return set()
+        cals = await self._calendar_repo.list_calendars_for_user(user.username)
+        return {c.id for c in cals}
+
     # ─── Event lifecycle ─────────────────────────────────────────────────
 
     async def _on_event_saved(self, event: "FederationEvent") -> None:
@@ -111,6 +157,24 @@ class PersonalCalendarInboundHandlers:
             or not organizer_user_id
         ):
             log.debug("PERSONAL_CALENDAR_EVENT_* missing required field")
+            return
+        # The organiser is shown as the invite's author (``created_by``), so
+        # it must be a user of the sending household — never a local
+        # member, never a third household's user, never an id we can't
+        # place. Honest senders stamp their own local user here
+        # (``CalendarService._publish_federation_event`` publishes
+        # ``event.created_by`` of a locally-authored row, learnt here via
+        # USERS_SYNC / USER_UPDATED). A sender user hidden from this
+        # household by its per-peer visibility list is unknown here, so
+        # its invites are dropped too — fail closed.
+        organiser_home = await self._user_repo.get_instance_for_user(organizer_user_id)
+        if organiser_home != event.from_instance:
+            self._refuse(
+                event,
+                "organiser is not a user of the sending household",
+                remote_event_id,
+                f"organiser={organizer_user_id}",
+            )
             return
         # IANA wall-clock anchor — additive over the wire. The
         # organiser's tz is what locally-rendered times anchor to; the
@@ -138,6 +202,20 @@ class PersonalCalendarInboundHandlers:
                 recipient_user_id,
             )
             existing = await self._calendar_repo.get_event(row_id)
+            if existing is not None:
+                reason = self._foreign_row_reason(existing, event, remote_event_id)
+                if reason is None and existing.calendar_id not in (
+                    await self._recipient_calendar_ids(recipient_user_id)
+                ):
+                    reason = "row is not on the recipient's calendar"
+                if reason is not None:
+                    self._refuse(
+                        event,
+                        reason,
+                        remote_event_id,
+                        f"row={row_id} recipient={recipient_user_id}",
+                    )
+                    continue
             cal_id = (
                 existing.calendar_id
                 if existing is not None
@@ -230,8 +308,18 @@ class PersonalCalendarInboundHandlers:
                     recipient_user_id,
                 )
                 existing = await self._calendar_repo.get_event(row_id)
-                if existing is not None:
-                    await self._calendar_repo.delete_event(existing.id)
+                if existing is None:
+                    continue
+                reason = self._foreign_row_reason(existing, event, remote_event_id)
+                if reason is not None:
+                    self._refuse(
+                        event,
+                        reason,
+                        remote_event_id,
+                        f"row={row_id} recipient={recipient_user_id}",
+                    )
+                    continue
+                await self._calendar_repo.delete_event(existing.id)
             return
         # Fallback for older payloads that omit the attendee list:
         # find any mirror row pointing back to this remote event.

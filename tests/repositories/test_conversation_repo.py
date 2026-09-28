@@ -536,3 +536,17 @@ async def test_save_message_returning_created_is_race_safe(env):
         f"expected exactly one INSERT, got {sum(created_flags)} "
         f"out of {len(created_flags)} concurrent saves"
     )
+
+
+# ── Insert-only catch-up write ────────────────────────────────────────────
+
+
+async def test_insert_message_if_absent_never_rewrites_an_existing_row(env):
+    await env.repo.create(_conv("conv-io"))
+    first = _message("m-io-1", "conv-io", content="original")
+    assert await env.repo.insert_message_if_absent(first) is True
+    again = _message("m-io-1", "conv-io", content="rewritten")
+    assert await env.repo.insert_message_if_absent(again) is False
+    fetched = await env.repo.get_message("m-io-1")
+    assert fetched is not None
+    assert fetched.content == "original"

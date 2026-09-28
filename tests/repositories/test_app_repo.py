@@ -264,6 +264,29 @@ async def test_pending_pk_idempotent_latest_payload(db):
 
 
 @pytest.mark.asyncio
+async def test_pending_session_is_only_refreshed_by_its_own_household(db):
+    """Another household reusing a pending invite's id changes nothing."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid, payload={"v": 1}))
+    theirs = _pending(uid, payload={"v": 3})
+    await repo.add_pending_session(
+        AppPendingSession(
+            app_id=theirs.app_id,
+            user_id=theirs.user_id,
+            session_id=theirs.session_id,
+            from_instance="elsewhere.example",
+            from_user="eve",
+            payload=theirs.payload,
+            created_at=theirs.created_at,
+        )
+    )
+    (s,) = await repo.drain_pending_sessions("chess", uid)
+    assert (s.from_instance, s.payload) == ("remote.example", {"v": 1})
+
+
+@pytest.mark.asyncio
 async def test_pending_from_user_nullable(db):
     repo = SqliteAppRepo(db)
     uid = await _seed_user(db)

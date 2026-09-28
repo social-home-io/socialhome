@@ -746,6 +746,9 @@ async def test_visible_users_patch_unhide_sends_user_updated(client):
         async def send_event(self, *, to_instance_id, event_type, payload):
             captured.append({"type": event_type, "payload": payload})
 
+        async def peer_supports(self, instance_id, *, min_version):
+            return False
+
     client.app[federation_service_key] = _Recorder()
 
     r = await client.patch(

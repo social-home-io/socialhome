@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from socialhome.crypto import derive_instance_id
 from socialhome.domain.events import (
     PairingAborted,
     PairingAcceptReceived,
@@ -272,7 +273,9 @@ async def test_accept_unknown_token_is_noop(bus, handlers):
     assert captured == []
 
 
-async def test_confirm_flips_status_to_confirmed(bus, repo, handlers):
+async def test_confirm_never_flips_a_pending_pairing(bus, repo, handlers):
+    """A pairing is confirmed only by this household's own verification
+    step — an inbox PAIRING_CONFIRM from the pending peer changes nothing."""
     repo.instances["peer-a"] = _sample_instance(
         "peer-a", PairingStatus.PENDING_RECEIVED
     )
@@ -284,9 +287,16 @@ async def test_confirm_flips_status_to_confirmed(bus, repo, handlers):
             {},
         )
     )
-    assert repo.instances["peer-a"].status is PairingStatus.CONFIRMED
-    assert len(captured) == 1
-    assert captured[0].instance_id == "peer-a"
+    assert repo.instances["peer-a"].status is PairingStatus.PENDING_RECEIVED
+    assert captured == []
+
+
+async def test_confirm_from_unknown_instance_is_noop(bus, repo, handlers):
+    captured: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, captured.append)
+    await handlers._on_confirm(_event(FederationEventType.PAIRING_CONFIRM, {}))
+    assert repo.instances == {}
+    assert captured == []
 
 
 async def test_confirm_already_confirmed_is_noop(repo, handlers):
@@ -301,20 +311,29 @@ async def test_confirm_already_confirmed_is_noop(repo, handlers):
     assert repo.instances["peer-a"].status is PairingStatus.CONFIRMED
 
 
-async def test_abort_drops_pending_and_publishes(bus, repo, handlers):
-    repo.pairings["tok-1"] = PairingSession(
-        token="tok-1",
+def _pending_session(token: str, peer_identity_pk: str | None) -> PairingSession:
+    return PairingSession(
+        token=token,
         own_identity_pk="aa" * 32,
         own_dh_pk="bb" * 32,
         own_dh_sk="enc",
         inbox_url="https://peer/wh/own-id",
         own_local_inbox_id="own-id",
+        peer_identity_pk=peer_identity_pk,
         issued_at="2026-04-18T00:00:00+00:00",
         expires_at="2026-04-18T01:00:00+00:00",
-        status=PairingStatus.PENDING_SENT,
+        status=PairingStatus.PENDING_RECEIVED,
     )
-    repo.instances["peer-a"] = _sample_instance(
-        "peer-a",
+
+
+_PEER_PK = "cd" * 32
+_PEER_ID = derive_instance_id(bytes.fromhex(_PEER_PK))
+
+
+async def test_abort_drops_pending_and_publishes(bus, repo, handlers):
+    repo.pairings["tok-1"] = _pending_session("tok-1", _PEER_PK)
+    repo.instances[_PEER_ID] = _sample_instance(
+        _PEER_ID,
         PairingStatus.PENDING_RECEIVED,
     )
     captured: list[PairingAborted] = []
@@ -323,11 +342,32 @@ async def test_abort_drops_pending_and_publishes(bus, repo, handlers):
         _event(
             FederationEventType.PAIRING_ABORT,
             {"token": "tok-1", "reason": "timeout"},
+            from_instance=_PEER_ID,
         )
     )
     assert "tok-1" not in repo.pairings
-    assert "peer-a" not in repo.instances
+    assert _PEER_ID not in repo.instances
     assert captured[0].reason == "timeout"
+
+
+@pytest.mark.parametrize(
+    "peer_identity_pk",
+    [None, "ef" * 32, "not-hex"],
+    ids=["peer-unknown", "another-peer", "malformed-pk"],
+)
+async def test_abort_keeps_session_not_bound_to_sender(
+    repo, handlers, peer_identity_pk
+):
+    """The token only cancels the sender's own pending session."""
+    repo.pairings["tok-1"] = _pending_session("tok-1", peer_identity_pk)
+    await handlers._on_abort(
+        _event(
+            FederationEventType.PAIRING_ABORT,
+            {"token": "tok-1"},
+            from_instance=_PEER_ID,
+        )
+    )
+    assert "tok-1" in repo.pairings
 
 
 async def test_abort_keeps_confirmed_instance(repo, handlers):

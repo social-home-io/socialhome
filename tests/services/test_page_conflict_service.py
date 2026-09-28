@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -135,7 +137,6 @@ async def test_merge_remote_conflict_stores_both_sides(svc):
         author_user_id="u1",
     )
     # Diverge locally.
-    from dataclasses import replace
 
     await repo.save(replace(page, content="mine-version"), space_id="sp-1")
     # Remote also diverged from base — conflict.
@@ -146,7 +147,7 @@ async def test_merge_remote_conflict_stores_both_sides(svc):
         remote_author_user_id="u2",
     )
     assert result.has_conflict
-    assert await service.has_active_conflict(page.id)
+    assert await service.has_active_conflict(page.id, space_id="sp-1")
 
 
 async def test_merge_remote_page_missing_raises(svc):
@@ -162,7 +163,6 @@ async def test_merge_remote_page_missing_raises(svc):
 
 async def test_resolve_conflict_mine_keeps_local(svc):
     db, repo, service, page = svc
-    from dataclasses import replace
 
     await service.record_base(
         page_id=page.id,
@@ -184,12 +184,11 @@ async def test_resolve_conflict_mine_keeps_local(svc):
         resolution="mine",
     )
     assert out == "mine-version"
-    assert not await service.has_active_conflict(page.id)
+    assert not await service.has_active_conflict(page.id, space_id="sp-1")
 
 
 async def test_resolve_conflict_theirs_applies_remote(svc):
     db, repo, service, page = svc
-    from dataclasses import replace
 
     await service.record_base(
         page_id=page.id,
@@ -217,7 +216,6 @@ async def test_resolve_conflict_theirs_applies_remote(svc):
 
 async def test_resolve_conflict_merged_requires_content(svc):
     db, repo, service, page = svc
-    from dataclasses import replace
 
     await service.record_base(
         page_id=page.id,
@@ -244,7 +242,6 @@ async def test_resolve_conflict_merged_requires_content(svc):
 
 async def test_resolve_conflict_merged_applies_provided_body(svc):
     db, repo, service, page = svc
-    from dataclasses import replace
 
     await service.record_base(
         page_id=page.id,
@@ -267,7 +264,7 @@ async def test_resolve_conflict_merged_applies_provided_body(svc):
         merged_content="hand-merged",
     )
     assert out == "hand-merged"
-    assert not await service.has_active_conflict(page.id)
+    assert not await service.has_active_conflict(page.id, space_id="sp-1")
 
 
 async def test_resolve_unknown_resolution_raises(svc):
@@ -306,3 +303,66 @@ async def test_resolve_missing_page_raises(svc):
             user_id="u1",
             resolution="mine",
         )
+
+
+# ─── Scope: a merge / resolve only ever touches the named space's page ──
+
+
+async def _household_twin(repo, page):
+    """A household (non-space) page that shares the space page's id."""
+    twin = replace(page, content="household-body", space_id=None)
+    await repo.save(twin, space_id=None)
+    return twin
+
+
+async def test_merge_remote_targets_the_space_page_not_a_household_twin(svc):
+    db, repo, service, page = svc
+    await _household_twin(repo, page)
+    await service.record_base(
+        page_id=page.id, space_id="sp-1", body="original", author_user_id="u1"
+    )
+    result = await service.merge_remote_body(
+        page_id=page.id,
+        space_id="sp-1",
+        remote_body="original\n\nadded",
+        remote_author_user_id="u2",
+    )
+    assert not result.has_conflict
+    space_page = await repo.get_space_page(page.id, space_id="sp-1")
+    assert space_page.content == "original\n\nadded"
+    household = await repo.get(page.id)
+    assert household.space_id is None
+    assert household.content == "household-body"
+
+
+async def test_merge_remote_in_another_space_raises(svc):
+    _, _, service, page = svc
+    with pytest.raises(PageNotFoundError):
+        await service.merge_remote_body(
+            page_id=page.id,
+            space_id="sp-other",
+            remote_body="x",
+            remote_author_user_id="u2",
+        )
+
+
+async def test_resolve_conflict_in_another_space_raises(svc):
+    db, repo, service, page = svc
+    await service.record_base(
+        page_id=page.id, space_id="sp-1", body="original", author_user_id="u1"
+    )
+    await repo.save(replace(page, content="mine-version"), space_id="sp-1")
+    await service.merge_remote_body(
+        page_id=page.id,
+        space_id="sp-1",
+        remote_body="theirs-version",
+        remote_author_user_id="u2",
+    )
+    with pytest.raises(NoActiveConflictError):
+        await service.resolve_conflict(
+            space_id="sp-other",
+            page_id=page.id,
+            user_id="u1",
+            resolution="theirs",
+        )
+    assert await service.has_active_conflict(page.id, space_id="sp-1")

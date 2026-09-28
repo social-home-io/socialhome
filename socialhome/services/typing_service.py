@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEventType
+from ..federation.dm_scope import DmScope, refuse
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .peer_outbound import SingleTargetSender
@@ -52,6 +53,7 @@ class TypingService(VisibilityMixin, SingleTargetSender):
     __slots__ = (
         "_convo_repo",
         "_user_repo",
+        "_dm_scope",
         "_space_repo",
         "_ws",
         "_federation",
@@ -73,6 +75,10 @@ class TypingService(VisibilityMixin, SingleTargetSender):
     ) -> None:
         self._convo_repo = conversation_repo
         self._user_repo = user_repo
+        self._dm_scope = DmScope(
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+        )
         self._space_repo = space_repo
         self._ws = ws_manager
         self._federation = federation_service
@@ -263,14 +269,27 @@ class TypingService(VisibilityMixin, SingleTargetSender):
         """Inbound DM_USER_TYPING from a remote instance.
 
         Forward to local members of the conversation. Returns local
-        delivery count.
+        delivery count. Only a user of the sending household who is seated
+        in the conversation can be shown typing; the frame carries the
+        username this household holds for them, not the payload's.
         """
         payload = event.payload or {}
-        cid = payload.get("conversation_id") or ""
-        sender_uid = payload.get("sender_user_id") or ""
-        sender_username = payload.get("sender_username") or ""
+        cid = str(payload.get("conversation_id") or "")
+        sender_uid = str(payload.get("sender_user_id") or "")
         if not cid or not sender_uid:
             return 0
+        remote = await self._user_repo.get_remote(sender_uid)
+        if remote is None or not await self._dm_scope.speaks_for(
+            event, cid, sender_uid
+        ):
+            refuse(
+                event,
+                "typist is not a seated user of the sending household",
+                conversation=cid,
+                user=sender_uid,
+            )
+            return 0
+        sender_username = remote.remote_username
         members = await self._convo_repo.list_members(cid)
         local_targets: list[str] = []
         for m in members:

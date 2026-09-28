@@ -10,12 +10,18 @@ refused before any pairing state exists or any outbound request is made.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import MappingProxyType
 
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, federation_repo_key, federation_service_key
+from socialhome.app_keys import (
+    db_key,
+    event_bus_key,
+    federation_repo_key,
+    federation_service_key,
+)
 from socialhome.auth import (
     _DEFAULT_PUBLIC_PATH_PATTERNS,
     _DEFAULT_PUBLIC_PATHS,
@@ -27,11 +33,15 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import (
+    FederationEvent,
+    FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.federation.peer_pairing_client import sign_peer_body
 
 pytestmark = pytest.mark.security
 
@@ -225,3 +235,126 @@ async def test_every_trust_mutation_refuses_anonymous_and_non_admin(
     assert inst.status is PairingStatus.CONFIRMED
     assert inst.local_alias is None
     assert sent == []
+
+
+# ─── Only this household's own verification step confirms a pairing ────────
+#
+# After the scanner's signed peer-accept lands, the initiator stores the
+# scanner's row as PENDING_RECEIVED *with* keys — so the scanner already
+# passes the inbound signature check before the local admin has compared
+# the SAS. A federation-inbox ``PAIRING_CONFIRM`` from that pending peer
+# must never flip the row: the pairing is confirmed by the admin entering
+# the code, nothing else. ``PAIRING_ABORT`` likewise only cancels the
+# sender's own pending session.
+
+
+async def _dispatch(app, event_type, payload, *, from_instance: str) -> None:
+    handlers = app[federation_service_key]._event_registry.handlers_for(event_type)
+    assert handlers
+    for handler in handlers:
+        await handler(
+            FederationEvent(
+                msg_id=f"m-{event_type.value}",
+                event_type=event_type,
+                from_instance=from_instance,
+                to_instance="us",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                payload=payload,
+            )
+        )
+
+
+async def _peer_accepted(app) -> tuple[str, str, str]:
+    """Walk initiate + the scanner's signed peer-accept on the initiator.
+
+    Returns ``(token, verification_code, scanner_instance_id)``.
+    """
+    coord = app[federation_service_key]._pairing
+    qr = await coord.initiate("https://test.example/federation/inbox")
+    scanner = generate_identity_keypair()
+    scanner_id = derive_instance_id(scanner.public_key)
+    body = sign_peer_body(
+        {
+            "token": qr["token"],
+            "verification_code": "424242",
+            "identity_pk": scanner.public_key.hex(),
+            "instance_id": scanner_id,
+            "dh_pk": generate_x25519_keypair().public_key.hex(),
+            "inbox_url": "https://scanner.example/federation/inbox/s1",
+            "display_name": "Scanner",
+        },
+        own_identity_seed=scanner.private_key,
+    )
+    await coord.handle_peer_accept(body)
+    inst = await app[federation_repo_key].get_instance(scanner_id)
+    assert inst is not None and inst.status is PairingStatus.PENDING_RECEIVED
+    assert inst.remote_identity_pk  # keyed — would pass the §24.11 lookup
+    return qr["token"], "424242", scanner_id
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"token": "ignored"}, {"verification_code": "424242"}],
+    ids=["bare", "with-token", "with-code"],
+)
+async def test_pending_peer_cannot_confirm_itself_over_the_inbox(anon_client, payload):
+    app = anon_client.server.app
+    token, _code, scanner_id = await _peer_accepted(app)
+    confirmed: list[PairingConfirmed] = []
+    app[event_bus_key].subscribe(PairingConfirmed, confirmed.append)
+
+    await _dispatch(
+        app, FederationEventType.PAIRING_CONFIRM, payload, from_instance=scanner_id
+    )
+
+    repo = app[federation_repo_key]
+    inst = await repo.get_instance(scanner_id)
+    assert inst is not None
+    assert inst.status is PairingStatus.PENDING_RECEIVED
+    assert await repo.get_pairing(token) is not None
+    assert confirmed == []
+
+
+async def test_admin_entering_the_code_still_confirms(anon_client):
+    """Control: the local verification step is what confirms the pair."""
+    app = anon_client.server.app
+    token, code, scanner_id = await _peer_accepted(app)
+    await app[federation_service_key]._pairing.confirm(token, code)
+    inst = await app[federation_repo_key].get_instance(scanner_id)
+    assert inst is not None
+    assert inst.status is PairingStatus.CONFIRMED
+
+
+async def test_abort_cannot_cancel_another_peers_pending_session(anon_client):
+    app = anon_client.server.app
+    token, _code, scanner_id = await _peer_accepted(app)
+    repo = app[federation_repo_key]
+    await repo.save_instance(_seeded_peer())  # a different, confirmed peer
+
+    await _dispatch(
+        app,
+        FederationEventType.PAIRING_ABORT,
+        {"token": token, "reason": "x"},
+        from_instance=_SEEDED_PEER,
+    )
+
+    assert await repo.get_pairing(token) is not None
+    inst = await repo.get_instance(scanner_id)
+    assert inst is not None and inst.status is PairingStatus.PENDING_RECEIVED
+    other = await repo.get_instance(_SEEDED_PEER)
+    assert other is not None and other.status is PairingStatus.CONFIRMED
+
+
+async def test_abort_from_the_sessions_own_peer_still_cancels(anon_client):
+    """Control: the peer the session is with can still cancel it."""
+    app = anon_client.server.app
+    token, _code, scanner_id = await _peer_accepted(app)
+    await _dispatch(
+        app,
+        FederationEventType.PAIRING_ABORT,
+        {"token": token, "reason": "declined"},
+        from_instance=scanner_id,
+    )
+    repo = app[federation_repo_key]
+    assert await repo.get_pairing(token) is None
+    assert await repo.get_instance(scanner_id) is None

@@ -93,6 +93,23 @@ def test_audio_webm_mime_sniff_accepts_ebml_magic():
 async def inbound_svc(db, bus, tmp_path):
     media_dir = tmp_path / "media"
     media_dir.mkdir()
+    # A local recipient and the sender ``u-remote`` of ``peer-a``.
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("local", "u-local", "Local"),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-a', 'peer-a', ?, 'k1',"
+        " 'k2', 'https://peer-a/wh', 'wh-peer-a', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES('u-remote', 'peer-a', 'remote', 'Remote')",
+        (),
+    )
     return FederationInboundService(
         bus=bus,
         conversation_repo=SqliteConversationRepo(db),
@@ -121,7 +138,7 @@ async def test_inbound_audio_first_arrival_publishes_created(inbound_svc, db, bu
         "mime_type": "audio/ogg",
         "file_name": "voice.ogg",
         "occurred_at": datetime.now(timezone.utc).isoformat(),
-        "recipient_user_ids": [],
+        "recipient_user_ids": ["u-local"],
     }
     await inbound_svc._on_dm_message(_event(FederationEventType.DM_MESSAGE, payload))
 
@@ -153,7 +170,7 @@ async def test_inbound_audio_repeat_with_transcript_publishes_updated(
         "mime_type": "audio/ogg",
         "file_name": "voice2.ogg",
         "occurred_at": datetime.now(timezone.utc).isoformat(),
-        "recipient_user_ids": [],
+        "recipient_user_ids": ["u-local"],
     }
     # First leg — no transcript yet.
     await inbound_svc._on_dm_message(

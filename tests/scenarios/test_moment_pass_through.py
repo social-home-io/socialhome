@@ -58,6 +58,7 @@ async def env(db):
     )
     user_repo = MagicMock()
     user_repo.get_instance_for_user = AsyncMock(return_value="inst-remote")
+    user_repo.get_by_user_id = AsyncMock(return_value=None)  # author is remote
 
     out = MomentFederationOutbound(
         bus=bus,

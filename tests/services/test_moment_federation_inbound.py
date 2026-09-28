@@ -13,6 +13,7 @@ from socialhome.domain.events import (
     MomentReactionChanged,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.moment import Moment
 from socialhome.domain.user import RemoteUser
 from socialhome.repositories import (
     SqliteConversationRepo,
@@ -92,6 +93,25 @@ def _create_payload(**over):
     }
     base.update(over)
     return base
+
+
+async def _seed_local_moment(svc) -> None:
+    """``m-fed-1`` authored by our own ``uid-local`` (reactions go home)."""
+    now = datetime.now(timezone.utc)
+    await svc._moment_repo.save(
+        Moment(
+            id="m-fed-1",
+            author_user_id="uid-local",
+            content="hello",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            origin_instance_id="self",
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(days=7)).isoformat(),
+        )
+    )
 
 
 # ── MOMENT_CREATED ────────────────────────────────────────────────────────
@@ -178,9 +198,7 @@ async def test_moment_deleted_removes_and_relays(db, bus, inbound):
 
 async def test_moment_reacted_persists_and_publishes(db, bus, inbound):
     svc, relay = inbound
-    await svc._on_moment_created(
-        _event(FederationEventType.MOMENT_CREATED, _create_payload()),
-    )
+    await _seed_local_moment(svc)
     captured: list[MomentReactionChanged] = []
     bus.subscribe(MomentReactionChanged, captured.append)
     await svc._on_moment_reacted(
@@ -201,9 +219,7 @@ async def test_moment_reacted_persists_and_publishes(db, bus, inbound):
 
 async def test_moment_reaction_removed_clears(db, bus, inbound):
     svc, relay = inbound
-    await svc._on_moment_created(
-        _event(FederationEventType.MOMENT_CREATED, _create_payload()),
-    )
+    await _seed_local_moment(svc)
     # Seed a reaction first.
     await svc._on_moment_reacted(
         _event(

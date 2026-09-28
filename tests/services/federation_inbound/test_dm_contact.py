@@ -86,6 +86,18 @@ def repo():
     return _FakeDmContactRepo()
 
 
+class _FakeUserRepo:
+    """``u-local`` lives here; ``u-remote`` / ``u-1`` on ``peer-a``."""
+
+    async def get_instance_for_user(self, user_id):
+        return {
+            "u-remote": "peer-a",
+            "u-1": "peer-a",
+            "u-local": "self",
+            "u-other": "peer-b",
+        }.get(user_id)
+
+
 @pytest.fixture
 def handlers(bus, repo):
     h = PairingInboundHandlers(
@@ -93,6 +105,7 @@ def handlers(bus, repo):
         federation_repo=_FakeFederationRepo(),
         peer_unpair=_UNUSED_UNPAIR,
         dm_contact_repo=repo,
+        user_repo=_FakeUserRepo(),
     )
     fed = _FakeFederationService()
     h.attach_to(fed)
@@ -187,3 +200,51 @@ async def test_contact_request_fk_failure_drops_silently(bus, repo, handlers):
     # pointing at a row that doesn't exist).
     assert repo.saved == []
     assert captured == []
+
+
+@pytest.mark.parametrize("requester", ["u-local", "u-other", "u-ghost"])
+async def test_contact_request_names_only_the_senders_own_user(
+    bus, repo, handlers, requester
+):
+    """A request speaking for a local member, another household's user or an
+    unknown id is refused and notifies nobody."""
+    h, _ = handlers
+    captured: list[DmContactRequested] = []
+    bus.subscribe(DmContactRequested, captured.append)
+    await h._on_contact_request(
+        _event({"requester_user_id": requester, "recipient_user_id": "u-2"})
+    )
+    assert repo.saved == []
+    assert captured == []
+
+
+async def test_contact_request_display_name_is_cleaned(bus, repo, handlers):
+    h, _ = handlers
+    captured: list[DmContactRequested] = []
+    bus.subscribe(DmContactRequested, captured.append)
+    await h._on_contact_request(
+        _event(
+            {
+                "requester_user_id": "u-remote",
+                "requester_display_name": "  Al" + chr(27) + "ice" + "x" * 200,
+                "recipient_user_id": "u-local",
+            }
+        )
+    )
+    name = captured[0].requester_display_name
+    assert name.startswith("Alice")
+    assert len(name) == 80
+    assert name.isprintable()
+
+
+async def test_contact_request_without_a_user_repo_is_refused(bus, repo):
+    h = PairingInboundHandlers(
+        bus=bus,
+        federation_repo=_FakeFederationRepo(),
+        peer_unpair=_UNUSED_UNPAIR,
+        dm_contact_repo=repo,
+    )
+    await h._on_contact_request(
+        _event({"requester_user_id": "u-remote", "recipient_user_id": "u-local"})
+    )
+    assert repo.saved == []

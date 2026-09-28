@@ -310,6 +310,28 @@ async def test_v25_peer_no_minted_key_gets_no_binding(instance_kp):
     assert fields == {}
 
 
+@pytest.mark.parametrize("supports", [False, True], ids=["pre-v25", "no-key"])
+async def test_without_a_binding_the_plain_anchor_still_travels(instance_kp, supports):
+    """With no binding to carry it (a peer whose version isn't known yet, or a
+    user without a minted key), the anchor still rides along on its own so the
+    receiver can re-derive a first-seen ``user_id`` from the sender's key."""
+    fed = _FakeFederation(
+        instance_kp.private_key, instance_kp.public_key, supports=supports
+    )
+    uid = derive_user_id(instance_kp.public_key, "anchor-uuid")
+    repo = _FakeUserRepo({}, anchors={"alice": "anchor-uuid"})
+
+    fields = await user_identity_binding_fields(
+        federation_service=fed,
+        user_repo=repo,
+        peer_instance_id="peer-1",
+        user_id=uid,
+        username="alice",
+        display_name="Alice",
+    )
+    assert fields == {"identity_anchor": "anchor-uuid"}
+
+
 async def test_no_user_repo_gets_no_binding(instance_kp):
     fed = _FakeFederation(
         instance_kp.private_key, instance_kp.public_key, supports=True

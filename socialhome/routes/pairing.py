@@ -48,6 +48,7 @@ from ..domain.federation import (
 )
 from ..security import error_response
 from ..services.peer_home_sharing_service import UnknownInstanceError
+from ..services.user_identity_binding import user_identity_binding_fields
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -725,6 +726,17 @@ class PairingConnectionVisibleUsersView(BaseView):
                 # name / bio may have changed while the user was hidden.
                 u = local_by_id[uid]
                 try:
+                    # Same identity fields as every other user publication,
+                    # so the peer can bind the user to this household.
+                    binding = await user_identity_binding_fields(
+                        federation_service=federation,
+                        user_repo=users_repo,
+                        peer_instance_id=instance_id,
+                        user_id=u.user_id,
+                        username=u.username,
+                        display_name=u.display_name,
+                        picture_hash=getattr(u, "picture_hash", None),
+                    )
                     await federation.send_event(
                         to_instance_id=instance_id,
                         event_type=FederationEventType.USER_UPDATED,
@@ -734,6 +746,7 @@ class PairingConnectionVisibleUsersView(BaseView):
                             "display_name": u.display_name,
                             "bio": getattr(u, "bio", None),
                             "picture_hash": getattr(u, "picture_hash", None),
+                            **binding,
                         },
                     )
                 except Exception:  # pragma: no cover — defensive

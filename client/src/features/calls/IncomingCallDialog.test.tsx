@@ -74,4 +74,19 @@ describe('IncomingCallDialog', () => {
     expect(incoming.value).toEqual(RINGING)
     expect(getByText('Decline')).toBeTruthy()
   })
+
+  it('an unmount before the focus tick cancels it', () => {
+    vi.useFakeTimers()
+    try {
+      incoming.value = { ...RINGING, signed_sdp: null }
+      const { unmount } = render(<IncomingCallDialog />)
+      unmount()
+      const query = vi.spyOn(document, 'querySelector')
+      vi.advanceTimersByTime(50)
+      expect(query).not.toHaveBeenCalled()
+      query.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -239,10 +239,17 @@ class SqliteAppRepo:
 
     async def add_pending_session(self, s: AppPendingSession) -> None:
         await self._db.enqueue(
-            """INSERT OR REPLACE INTO app_pending_sessions
+            """INSERT INTO app_pending_sessions
                  (app_id, user_id, session_id, from_instance, from_user,
                   payload_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(app_id, user_id, session_id) DO UPDATE SET
+                 from_user=excluded.from_user,
+                 payload_json=excluded.payload_json,
+                 created_at=excluded.created_at
+               -- A pending invite is only ever refreshed by the household
+               -- that opened it; another one reusing the id changes nothing.
+               WHERE app_pending_sessions.from_instance = excluded.from_instance""",
             (
                 s.app_id,
                 s.user_id,
