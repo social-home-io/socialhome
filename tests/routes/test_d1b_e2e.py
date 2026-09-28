@@ -19,8 +19,10 @@ ultimately reads.
 from __future__ import annotations
 
 import base64
+import io
 
 import pytest
+from PIL import Image
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
@@ -36,15 +38,17 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-# A 1×1 white WebP (real bytes). Tiny enough to inline; round-trips
+# A 1×1 white WebP (real bytes, generated). Round-trips
 # through ``base64`` cleanly so the inbound-side write asserts on
 # something realistic.
-_WHITE_WEBP = bytes.fromhex(
-    "52494646260000005745425056503820"
-    "1A0000003001009D012A010001000200"
-    "3402259A002FF24800000FE0BF00FEFB"
-    "9400"
-)
+def _white_webp() -> bytes:
+    """A real 1x1 WebP — the member validates shipped cover bytes."""
+    buf = io.BytesIO()
+    Image.new("RGB", (1, 1), (255, 255, 255)).save(buf, format="WEBP")
+    return buf.getvalue()
+
+
+_WHITE_WEBP = _white_webp()
 
 
 @pytest.fixture

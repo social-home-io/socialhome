@@ -3050,6 +3050,43 @@ async def test_send_with_mesh_fallback_no_route_when_not_in_cooldown():
 
 
 @pytest.mark.asyncio
+async def test_broadcast_to_space_members_sends_the_relay_payload_to_relay_seats(
+    monkeypatch,
+):
+    """A household seated from an invite link rides the connection-server
+    relay, whose envelope cap is far tighter than a paired peer's. A caller
+    that ships bulky bytes hands a smaller ``relay_payload`` for exactly
+    those members; every other member gets the full ``payload``."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    paired, _ = _make_remote_instance(km)
+    relayed, _ = _make_remote_instance(km)
+    relayed = dataclasses.replace(relayed, source=InstanceSource.SPACE_SESSION)
+    await fed_repo.save_instance(paired)
+    await fed_repo.save_instance(relayed)
+    space_id = "space-relay-variant"
+    fed_repo.add_space_member(space_id, paired.id)
+    fed_repo.add_space_member(space_id, relayed.id)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: dict[str, dict] = {}
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent[to_instance_id] = payload
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members(
+        space_id,
+        FederationEventType.SPACE_CONFIG_CHANGED,
+        {"variant": "full"},
+        relay_payload={"variant": "relay"},
+    )
+    assert sent == {
+        paired.id: {"variant": "full"},
+        relayed.id: {"variant": "relay"},
+    }
+
+
 async def test_broadcast_to_space_members_warns_about_failed_targets(caplog):
     """The mesh fan-out has no outbox, so a failed target is a permanent,
     invisible loss. The minimum bar is a diagnosable WARNING naming the

@@ -10,10 +10,24 @@ mode and silently broke the space map (the API's strict
 
 from __future__ import annotations
 
+import base64
+import dataclasses
+import io
+import random
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
+from socialhome.crypto import generate_space_keypair
+from socialhome.domain.media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+)
+from socialhome.services.space_crypto_service import (
+    strip_authority_sig_fields,
+    verify_authority_event,
+)
 from socialhome.domain.events import SpaceConfigChanged
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import (
@@ -387,3 +401,199 @@ async def test_age_gate_change_on_non_host_is_not_broadcast(fed):
         CpSpaceAgeGateChanged(space_id="sp-1", min_age=13),
     )
     fed.broadcast_to_space_members.assert_not_awaited()
+
+
+# ─── A cover / icon change ships the image, not just its hash ─────────
+#
+# ``SPACE_CONFIG_CHANGED`` used to carry only ``cover_hash`` / ``icon_hash``
+# for a cover or icon change, so no member ever received the new bytes and
+# every joiner kept the image from its join time.
+
+
+def _webp(width: int, height: int, *, noisy: bool = False) -> bytes:
+    if noisy:
+        img = Image.frombytes(
+            "RGB",
+            (width, height),
+            random.Random(width * height).randbytes(width * height * 3),
+        )
+    else:
+        img = Image.new("RGB", (width, height), (40, 120, 200))
+    out = io.BytesIO()
+    img.save(out, format="WEBP", quality=90)
+    return out.getvalue()
+
+
+def _image_repo(data: bytes | None, hash_: str = "h-new"):
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=(data, hash_) if data is not None else None)
+    return repo
+
+
+def _space_with(**kw) -> Space:
+    return dataclasses.replace(_make_space(), **kw)
+
+
+async def _publish(outbound: SpaceConfigOutbound, bus, event_type: str) -> None:
+    outbound.wire()
+    await bus.publish(
+        SpaceConfigChanged(
+            space_id="sp-1",
+            event_type=event_type,
+            payload={},
+            sequence=6,
+        ),
+    )
+
+
+async def test_a_cover_change_ships_the_cover_bytes(fed, space_repo):
+    cover = _webp(64, 32)
+    space_repo.get = AsyncMock(return_value=_space_with(cover_hash="h-new"))
+    bus = EventBus()
+    await _publish(
+        SpaceConfigOutbound(
+            bus=bus,
+            federation_service=fed,
+            space_repo=space_repo,
+            cover_repo=_image_repo(cover),
+            icon_repo=_image_repo(_webp(16, 16)),
+        ),
+        bus,
+        "cover_updated",
+    )
+    call = fed.broadcast_to_space_members.await_args
+    meta = call.args[2]["space_meta"]
+    assert meta["cover_hash"] == "h-new"
+    assert base64.b64decode(meta["cover_webp_base64"]) == cover
+    # Only the image that changed rides the event.
+    assert "icon_webp_base64" not in meta
+    # A small cover fits the relay bound too, so both variants carry it.
+    relay_meta = call.kwargs["relay_payload"]["space_meta"]
+    assert base64.b64decode(relay_meta["cover_webp_base64"]) == cover
+
+
+async def test_a_link_joined_member_gets_a_rendition_that_fits_the_relay(
+    fed,
+    space_repo,
+):
+    """A paired peer's envelope takes a cover up to the snapshot bound; the
+    connection-server relay a link-joined member sits behind takes only the
+    bootstrap bound, so that member is sent a smaller rendition."""
+    cover = _webp(400, 300, noisy=True)
+    assert SPACE_COVER_BOOTSTRAP_MAX_BYTES < len(cover)
+    assert len(cover) <= SPACE_COVER_SNAPSHOT_MAX_BYTES
+    space_repo.get = AsyncMock(return_value=_space_with(cover_hash="h-new"))
+    bus = EventBus()
+    await _publish(
+        SpaceConfigOutbound(
+            bus=bus,
+            federation_service=fed,
+            space_repo=space_repo,
+            cover_repo=_image_repo(cover),
+        ),
+        bus,
+        "cover_updated",
+    )
+    call = fed.broadcast_to_space_members.await_args
+    full = base64.b64decode(call.args[2]["space_meta"]["cover_webp_base64"])
+    relay = base64.b64decode(
+        call.kwargs["relay_payload"]["space_meta"]["cover_webp_base64"],
+    )
+    assert full == cover
+    assert len(relay) <= SPACE_COVER_BOOTSTRAP_MAX_BYTES
+    assert Image.open(io.BytesIO(relay)).format == "WEBP"
+
+
+async def test_an_icon_change_ships_the_icon_bytes(fed, space_repo):
+    icon = _webp(32, 32)
+    space_repo.get = AsyncMock(
+        return_value=_space_with(cover_hash="h-cover", icon_hash="h-icon"),
+    )
+    bus = EventBus()
+    await _publish(
+        SpaceConfigOutbound(
+            bus=bus,
+            federation_service=fed,
+            space_repo=space_repo,
+            cover_repo=_image_repo(_webp(64, 32), "h-cover"),
+            icon_repo=_image_repo(icon, "h-icon"),
+        ),
+        bus,
+        "icon_updated",
+    )
+    meta = fed.broadcast_to_space_members.await_args.args[2]["space_meta"]
+    assert base64.b64decode(meta["icon_webp_base64"]) == icon
+    assert "cover_webp_base64" not in meta
+
+
+async def test_a_rename_ships_no_image_bytes(fed, space_repo):
+    """Image bytes ride only the change that altered them — a rename must
+    not re-send a few hundred KiB to every member household."""
+    space_repo.get = AsyncMock(return_value=_space_with(cover_hash="h-new"))
+    bus = EventBus()
+    await _publish(
+        SpaceConfigOutbound(
+            bus=bus,
+            federation_service=fed,
+            space_repo=space_repo,
+            cover_repo=_image_repo(_webp(64, 32)),
+        ),
+        bus,
+        "rename",
+    )
+    call = fed.broadcast_to_space_members.await_args
+    assert "cover_webp_base64" not in call.args[2]["space_meta"]
+    assert "relay_payload" not in call.kwargs
+
+
+async def test_a_cleared_cover_ships_no_bytes(fed, space_repo):
+    space_repo.get = AsyncMock(return_value=_space_with(cover_hash=None))
+    bus = EventBus()
+    await _publish(
+        SpaceConfigOutbound(
+            bus=bus,
+            federation_service=fed,
+            space_repo=space_repo,
+            cover_repo=_image_repo(None),
+        ),
+        bus,
+        "cover_updated",
+    )
+    call = fed.broadcast_to_space_members.await_args
+    meta = call.args[2]["space_meta"]
+    assert meta["cover_hash"] is None
+    assert "cover_webp_base64" not in meta
+    assert "relay_payload" not in call.kwargs
+
+
+async def test_the_authority_signature_covers_each_variant(fed):
+    """The bytes live inside the signed ``space_meta``, so a relay cannot
+    swap the picture — and each variant is signed over its own bytes."""
+    kp = generate_space_keypair()
+    space = _space_with(identity_public_key=kp.public_key.hex(), cover_hash="h")
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=space)
+    repo.get_space_seed = AsyncMock(return_value=kp.private_key)
+    bus = EventBus()
+    await _publish(
+        SpaceConfigOutbound(
+            bus=bus,
+            federation_service=fed,
+            space_repo=repo,
+            cover_repo=_image_repo(_webp(400, 300, noisy=True), "h"),
+        ),
+        bus,
+        "cover_updated",
+    )
+    call = fed.broadcast_to_space_members.await_args
+    variants = [call.args[2]["space_meta"], call.kwargs["relay_payload"]["space_meta"]]
+    assert variants[0]["cover_webp_base64"] != variants[1]["cover_webp_base64"]
+    for meta in variants:
+        assert verify_authority_event(
+            event_type="space_config_changed",
+            space_id="sp-1",
+            payload=strip_authority_sig_fields(meta),
+            authority_sig=meta["authority_sig"],
+            authority_sig_suite=meta["authority_sig_suite"],
+            space_public_key=kp.public_key,
+        )

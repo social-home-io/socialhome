@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import logging
 import unicodedata
 import uuid
@@ -127,6 +128,7 @@ from ..domain.media_constraints import (
     SPACE_COVER_MAX_DIMENSION,
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
+    SPACE_IMAGE_EMBED_MAX_BYTES,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
@@ -5360,6 +5362,56 @@ async def _bounded_space_image(
     return fitted
 
 
+async def embed_space_images(
+    meta: dict,
+    space: Space,
+    *,
+    cover_repo=None,
+    icon_repo=None,
+    cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    cover: bool = True,
+    icon: bool = True,
+) -> None:
+    """Add ``cover_webp_base64`` / ``icon_webp_base64`` to ``meta``.
+
+    The one place a household puts its space's image bytes on the wire:
+    the join snapshot (:func:`build_space_snapshot_for_federation`) and a
+    cover / icon change (``SpaceConfigOutbound``). A dimension-capped
+    (1200 px) WebP is NOT byte-capped — a detailed photo is several
+    hundred KiB — so each image is bounded to ``*_max_bytes`` (a smaller
+    rendition, or left out; :func:`_bounded_space_image`). The bytes ship
+    under the host's own ``cover_hash`` / ``icon_hash``, which is therefore
+    a version tag, not a digest of the bytes that travel. Base64 because
+    the envelope is JSON.
+    """
+    for wanted, repo, hash_, key, max_bytes, what in (
+        (
+            cover,
+            cover_repo,
+            space.cover_hash,
+            "cover_webp_base64",
+            cover_max_bytes,
+            "cover",
+        ),
+        (icon, icon_repo, space.icon_hash, "icon_webp_base64", icon_max_bytes, "icon"),
+    ):
+        if not wanted or repo is None or not hash_:
+            continue
+        stored = await repo.get(space.id)
+        if stored is None:
+            continue
+        webp, _stored_hash = stored
+        fitted = await _bounded_space_image(
+            webp,
+            max_bytes=max_bytes,
+            what=what,
+            space_id=space.id,
+        )
+        if fitted is not None:
+            meta[key] = base64.b64encode(fitted).decode("ascii")
+
+
 async def build_space_snapshot_for_federation(
     space: Space,
     *,
@@ -5444,40 +5496,17 @@ async def build_space_snapshot_for_federation(
     # (migration 0036); backfilled from it so it stays strictly above every
     # prior member_version.
     meta["roster_version"] = space.roster_sequence
-    # §D1b cover federation (#116) — ship the actual WebP bytes
-    # alongside ``cover_hash``. Without them, the joiner's stub
-    # renders the gradient fallback even when the host has a
-    # custom cover. A dimension-capped (1200 px) WebP is NOT
-    # byte-capped — a detailed photo is several hundred KiB — so it
-    # is bounded to ``cover_max_bytes`` here. Base64 because the
-    # envelope is JSON.
-    if cover_repo is not None and space.cover_hash:
-        cover = await cover_repo.get(space.id)
-        if cover is not None:
-            bytes_webp, _hash = cover
-            fitted = await _bounded_space_image(
-                bytes_webp,
-                max_bytes=cover_max_bytes,
-                what="cover",
-                space_id=space.id,
-            )
-            if fitted is not None:
-                meta["cover_webp_base64"] = base64.b64encode(fitted).decode("ascii")
-    # §D1b icon federation — ship the space icon (avatar) WebP bytes the
-    # same way as the cover, so a joiner's stub shows the real icon rather
-    # than falling back to the emoji. Small (≤256 px), bounded the same way.
-    if icon_repo is not None and space.icon_hash:
-        icon = await icon_repo.get(space.id)
-        if icon is not None:
-            icon_webp, _ih = icon
-            fitted = await _bounded_space_image(
-                icon_webp,
-                max_bytes=icon_max_bytes,
-                what="icon",
-                space_id=space.id,
-            )
-            if fitted is not None:
-                meta["icon_webp_base64"] = base64.b64encode(fitted).decode("ascii")
+    # §D1b cover / icon federation (#116) — ship the actual WebP bytes
+    # alongside ``cover_hash`` / ``icon_hash``, so a joiner's stub shows the
+    # real art rather than the gradient / emoji fallback.
+    await embed_space_images(
+        meta,
+        space,
+        cover_repo=cover_repo,
+        icon_repo=icon_repo,
+        cover_max_bytes=cover_max_bytes,
+        icon_max_bytes=icon_max_bytes,
+    )
     # §D1b content-key handoff (#117) — the space content key is the
     # symmetric AES-256 secret that decrypts every event in this
     # space. Ship it inside the (already-encrypted to the invitee
@@ -5665,47 +5694,94 @@ async def apply_space_content_key_from_metadata(
         )
 
 
+async def _apply_space_image_from_metadata(
+    space_id: str,
+    *,
+    meta: dict,
+    repo,
+    what: str,
+    b64_key: str,
+    hash_key: str,
+    max_dimension: int,
+) -> bool:
+    """Persist one space image a host shipped in ``meta``; ``True`` if stored.
+
+    Bytes from another household are checked before they are kept: at most
+    :data:`SPACE_IMAGE_EMBED_MAX_BYTES` (the largest any sender ships), and
+    a WebP that fully decodes within ``max_dimension`` (Pillow, off the
+    event loop). Anything else is dropped at WARNING and the stored image
+    is left alone. The bytes are stored under the announced hash — the
+    host's version tag for the image, which a shrunken rendition does not
+    digest to — so the SPA's ``?v=<hash>`` cache-buster follows the host.
+    Their integrity rides the §24.11-authenticated envelope (and, on a
+    config change, the space-authority signature over ``space_meta``).
+    """
+    if repo is None:
+        return False
+    b64 = meta.get(b64_key)
+    if not isinstance(b64, str) or not b64:
+        return False
+    image_hash = str(meta.get(hash_key) or "")
+    if not image_hash:
+        return False
+    # 4/3 base64 overhead: refuse an oversize blob before decoding it.
+    if len(b64) > 4 * -(-SPACE_IMAGE_EMBED_MAX_BYTES // 3):
+        log.warning(
+            "space %s: shipped %s is over %d bytes — ignoring it",
+            space_id,
+            what,
+            SPACE_IMAGE_EMBED_MAX_BYTES,
+        )
+        return False
+    try:
+        webp = base64.b64decode(b64, validate=True)
+    except binascii.Error, ValueError:
+        log.warning("space %s: shipped %s is not valid base64", space_id, what)
+        return False
+    if not await ImageProcessor().is_valid_webp(webp, max_dimension=max_dimension):
+        log.warning(
+            "space %s: shipped %s is not a WebP within %d px — ignoring it",
+            space_id,
+            what,
+            max_dimension,
+        )
+        return False
+    # ``width`` / ``height`` aren't shipped — the SPA renders the image at
+    # whatever native dimensions the WebP carries, so 0 is fine.
+    await repo.set(
+        space_id,
+        bytes_webp=webp,
+        hash=image_hash,
+        width=0,
+        height=0,
+    )
+    return True
+
+
 async def apply_space_cover_from_metadata(
     space_id: str,
     *,
     meta: dict,
     cover_repo,
-) -> None:
-    """When a §D1b stub-creation event carries the host's WebP cover
-    bytes (``meta['cover_webp_base64']``), decode + persist them via
-    the supplied cover repo so the joiner's ``/api/spaces/{id}/cover``
-    serves the real image instead of the gradient placeholder.
+) -> bool:
+    """When a §D1b stub-creation event (or a cover change) carries the
+    host's WebP cover bytes (``meta['cover_webp_base64']``), validate +
+    persist them via the supplied cover repo so the member's
+    ``/api/spaces/{id}/cover`` serves the real image instead of the
+    gradient placeholder.
 
     No-op when ``cover_repo`` isn't wired, when the host didn't ship
-    bytes (older sender), or when base64 decoding fails (the receiver
-    just keeps the gradient fallback rather than crashing).
+    bytes (older sender), or when the bytes are not a valid WebP cover
+    (the receiver keeps what it had rather than storing junk).
     """
-    if cover_repo is None:
-        return
-    b64 = meta.get("cover_webp_base64")
-    if not isinstance(b64, str) or not b64:
-        return
-    try:
-        bytes_webp = base64.b64decode(b64)
-    except Exception:  # pragma: no cover — defensive
-        log.warning(
-            "apply_space_cover_from_metadata: invalid base64 for space %s",
-            space_id,
-        )
-        return
-    cover_hash = str(meta.get("cover_hash") or "")
-    if not cover_hash:
-        return
-    # ``width`` / ``height`` aren't shipped today — the SPA renders
-    # the cover at whatever native dimensions the WebP carries, so
-    # passing 0 here is fine. The repo signature requires the
-    # kwargs; later we can ship dimensions in ``space_meta`` too.
-    await cover_repo.set(
+    return await _apply_space_image_from_metadata(
         space_id,
-        bytes_webp=bytes_webp,
-        hash=cover_hash,
-        width=0,
-        height=0,
+        meta=meta,
+        repo=cover_repo,
+        what="cover",
+        b64_key="cover_webp_base64",
+        hash_key="cover_hash",
+        max_dimension=SPACE_COVER_MAX_DIMENSION,
     )
 
 
@@ -5714,34 +5790,73 @@ async def apply_space_icon_from_metadata(
     *,
     meta: dict,
     icon_repo,
-) -> None:
+) -> bool:
     """Persist the host's icon WebP bytes (``meta['icon_webp_base64']``) on
-    a joiner so ``/api/spaces/{id}/icon`` serves the real avatar. Mirrors
-    :func:`apply_space_cover_from_metadata`; no-op when the repo isn't wired,
-    the host shipped no bytes, or decoding fails."""
-    if icon_repo is None:
-        return
-    b64 = meta.get("icon_webp_base64")
-    if not isinstance(b64, str) or not b64:
-        return
-    try:
-        icon_webp = base64.b64decode(b64)
-    except Exception:  # pragma: no cover — defensive
-        log.warning(
-            "apply_space_icon_from_metadata: invalid base64 for space %s",
-            space_id,
-        )
-        return
-    icon_hash = str(meta.get("icon_hash") or "")
-    if not icon_hash:
-        return
-    await icon_repo.set(
+    a member so ``/api/spaces/{id}/icon`` serves the real avatar. Mirrors
+    :func:`apply_space_cover_from_metadata`."""
+    return await _apply_space_image_from_metadata(
         space_id,
-        bytes_webp=icon_webp,
-        hash=icon_hash,
-        width=0,
-        height=0,
+        meta=meta,
+        repo=icon_repo,
+        what="icon",
+        b64_key="icon_webp_base64",
+        hash_key="icon_hash",
+        max_dimension=SPACE_ICON_MAX_DIMENSION,
     )
+
+
+async def apply_space_images_from_config_change(
+    space_id: str,
+    *,
+    meta: dict,
+    previous: Space,
+    cover_repo,
+    icon_repo,
+) -> None:
+    """Bring a member's stored cover / icon in line with an APPLIED
+    ``SPACE_CONFIG_CHANGED``.
+
+    Called only after the change passed the owner / authority and
+    last-writer-wins gates, so an out-of-order older change can never roll
+    the picture back. Per image: bytes shipped → validated and stored
+    (:func:`_apply_space_image_from_metadata`); hash cleared by the host →
+    the stored image is removed; neither → left alone (a rename, or a
+    sender too old to ship bytes, whose hash then updates without them).
+    Only a ``space_meta`` that carries the hash key at all is considered,
+    so an old flat-shaped payload never clears anything.
+    """
+    for repo, what, hash_key, b64_key, old_hash, max_dimension in (
+        (
+            cover_repo,
+            "cover",
+            "cover_hash",
+            "cover_webp_base64",
+            previous.cover_hash,
+            SPACE_COVER_MAX_DIMENSION,
+        ),
+        (
+            icon_repo,
+            "icon",
+            "icon_hash",
+            "icon_webp_base64",
+            previous.icon_hash,
+            SPACE_ICON_MAX_DIMENSION,
+        ),
+    ):
+        if repo is None or hash_key not in meta:
+            continue
+        if meta.get(b64_key):
+            await _apply_space_image_from_metadata(
+                space_id,
+                meta=meta,
+                repo=repo,
+                what=what,
+                b64_key=b64_key,
+                hash_key=hash_key,
+                max_dimension=max_dimension,
+            )
+        elif not meta.get(hash_key) and old_hash:
+            await repo.clear(space_id)
 
 
 def stub_space_from_metadata(

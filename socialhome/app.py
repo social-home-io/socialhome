@@ -962,6 +962,9 @@ def _wire_federation_stack(
         # profile / role-change handlers find a remote member's seat.
         space_remote_member_repo=space_remote_member_repo,
         pending_seat_buffer=pending_seat_buffer,
+        # A host's cover / icon change ships the image; members store it.
+        space_cover_repo=space_cover_repo,
+        space_icon_repo=space_icon_repo,
     )
     inbound_service.attach_to(federation_service)
 
@@ -2712,6 +2715,8 @@ def create_app(config: Config | None = None) -> web.Application:
             bus=bus,
             federation_service=federation_service,
             space_repo=space_repo,
+            cover_repo=space_cover_repo,
+            icon_repo=space_icon_repo,
         ).wire()
         # Wire RSVP propagation onto the calendar service. Done after
         # federation_service is built so the service can broadcast on

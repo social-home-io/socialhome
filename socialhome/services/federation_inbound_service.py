@@ -103,7 +103,10 @@ from .space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from .space_service import stub_space_from_metadata
+from .space_service import (
+    apply_space_images_from_config_change,
+    stub_space_from_metadata,
+)
 from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
@@ -114,6 +117,8 @@ if TYPE_CHECKING:
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.space_post_repo import AbstractSpacePostRepo
+    from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
+    from ..repositories.space_icon_repo import AbstractSpaceIconRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.highlight_repo import AbstractHighlightRepo
     from ..repositories.user_repo import AbstractUserRepo
@@ -272,6 +277,8 @@ class FederationInboundService:
         "_bazaar_repo",
         "_authorship",
         "_federation_service",
+        "_space_cover_repo",
+        "_space_icon_repo",
     )
 
     def __init__(
@@ -295,6 +302,8 @@ class FederationInboundService:
         gallery_repo: "AbstractGalleryRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
         pending_seat_buffer: "PendingSeatBuffer | None" = None,
+        space_cover_repo: "AbstractSpaceCoverRepo | None" = None,
+        space_icon_repo: "AbstractSpaceIconRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -340,6 +349,11 @@ class FederationInboundService:
             else None
         )
         self._federation_service = None
+        #: Where a member stores the cover / icon a host's
+        #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
+        #: omit them (the image is then simply not stored).
+        self._space_cover_repo = space_cover_repo
+        self._space_icon_repo = space_icon_repo
 
     def attach_realtime(self, realtime: "object") -> None:
         """Wire the realtime broadcaster after construction.
@@ -2162,6 +2176,16 @@ class FederationInboundService:
                 )
             refreshed = replace(refreshed, features=pinned)
         await self._space_repo.save(refreshed)
+        # A cover / icon change ships the new image in ``space_meta``; land
+        # it (validated) now that the change itself passed every gate above,
+        # so an out-of-order older change can never roll the picture back.
+        await apply_space_images_from_config_change(
+            space_id,
+            meta=meta,
+            previous=existing,
+            cover_repo=self._space_cover_repo,
+            icon_repo=self._space_icon_repo,
+        )
         # Record the author of the edit we just applied so a later
         # equal-sequence edit can deterministically tie-break (v_24 LWW).
         if incoming_author:

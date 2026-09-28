@@ -237,9 +237,12 @@ with `REDEEM_DENY_REASON_TOO_LARGE`, which the redeemer maps to its own
 text is still never rendered). A relay that refuses a reply is logged at
 WARNING on the issuer — the redeemer can only see its own timeout.
 
-A joiner keeps the rendition it was handed: a cover change later rides
-`SPACE_CONFIG_CHANGED` as a `cover_hash` only, and space media does not flow
-to a link-joined member (see "Media does NOT flow" below).
+A later cover or icon change reaches a link-joined member too: the
+`SPACE_CONFIG_CHANGED` for it carries the new image, bounded for this member
+to the same `SPACE_*_BOOTSTRAP_MAX_BYTES` so it fits the relay (see "A cover /
+icon change carries the image" in [spaces.md](./spaces.md)). Other space media
+(post attachments, gallery) still does not flow to a link-joined member (see
+"Media does NOT flow" below).
 
 The routing envelope is **identity-free** — the #677 lesson. The
 sender's identity, the token, the space, the users, the nonce and the

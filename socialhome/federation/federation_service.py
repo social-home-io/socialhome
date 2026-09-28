@@ -61,6 +61,7 @@ from ..domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
@@ -1801,8 +1802,16 @@ class FederationService:
         payload: dict,
         *,
         min_proto_version: int | None = None,
+        relay_payload: dict | None = None,
     ) -> BroadcastResult:
         """Fan out to every member household of ``space_id``.
+
+        ``relay_payload``, when given, is sent INSTEAD of ``payload`` to a
+        member seated from an invite link (``InstanceSource.SPACE_SESSION``):
+        that household is reached only through the connection-server relay,
+        whose envelope cap (``RELAY_MAX_ENVELOPE_BYTES``, ~232 KiB) is far
+        tighter than a paired peer's ~1 MiB. A caller shipping bulky bytes
+        (a space cover) hands a smaller variant for exactly those members.
 
         Each per-peer ship goes through :meth:`send_with_mesh_fallback`
         so a member whose household is *not* a direct CONFIRMED peer
@@ -1844,10 +1853,18 @@ class FederationService:
             ):
                 # Below threshold — silently skip. Best-effort path.
                 continue
+            peer_payload = payload
+            if relay_payload is not None:
+                instance = await self._federation_repo.get_instance(iid)
+                if (
+                    instance is not None
+                    and instance.source is InstanceSource.SPACE_SESSION
+                ):
+                    peer_payload = relay_payload
             result = await self.send_with_mesh_fallback(
                 to_instance_id=iid,
                 event_type=event_type,
-                payload=payload,
+                payload=peer_payload,
                 space_id=space_id,
             )
             results.append(result)

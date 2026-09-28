@@ -3049,7 +3049,9 @@ async def test_apply_space_icon_from_metadata_persists_bytes(stack):
             self.saved = (space_id, bytes_webp, hash)
 
     repo = _IconRepo()
-    raw = b"RIFFwebp-icon"
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (1, 2, 3)).save(buf, format="WEBP")
+    raw = buf.getvalue()
     await apply_space_icon_from_metadata(
         "sp-x",
         meta={
@@ -3065,6 +3067,18 @@ async def test_apply_space_icon_from_metadata_persists_bytes(stack):
         "sp-x", meta={"icon_hash": "h"}, icon_repo=repo2
     )
     assert repo2.saved is None
+    # Bytes that are not a WebP icon → no write (bytes from another
+    # household are validated before they are kept).
+    repo3 = _IconRepo()
+    await apply_space_icon_from_metadata(
+        "sp-x",
+        meta={
+            "icon_hash": "h",
+            "icon_webp_base64": base64.b64encode(b"RIFFwebp-icon").decode("ascii"),
+        },
+        icon_repo=repo3,
+    )
+    assert repo3.saved is None
 
 
 async def test_allowed_post_types_federate_via_space_meta(stack):

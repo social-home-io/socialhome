@@ -157,6 +157,29 @@ def _noise_webp(width: int, height: int) -> bytes:
     return buf.getvalue()
 
 
+async def test_is_valid_webp_accepts_a_webp_within_the_dimension():
+    assert await ImageProcessor().is_valid_webp(_noise_webp(40, 20), max_dimension=40)
+
+
+async def test_is_valid_webp_refuses_an_oversized_webp():
+    assert not await ImageProcessor().is_valid_webp(
+        _noise_webp(41, 20),
+        max_dimension=40,
+    )
+
+
+async def test_is_valid_webp_refuses_other_formats_and_garbage():
+    img = _Image.new("RGB", (8, 8))
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    processor = ImageProcessor()
+    assert not await processor.is_valid_webp(buf.getvalue(), max_dimension=64)
+    assert not await processor.is_valid_webp(b"RIFF....WEBPjunk", max_dimension=64)
+    # Truncated: the header parses, the pixel data does not.
+    good = _noise_webp(32, 32)
+    assert not await processor.is_valid_webp(good[: len(good) // 2], max_dimension=64)
+
+
 async def test_fit_within_returns_an_image_already_under_the_bound():
     data = _noise_webp(64, 64)
     assert await ImageProcessor().fit_within(data, len(data)) is data
