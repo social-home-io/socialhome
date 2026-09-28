@@ -130,8 +130,9 @@ class SpaceCalendarFeedView(BaseView):
 class SpaceCalendarFeedTokenView(BaseView):
     """``POST`` / ``DELETE /api/spaces/{id}/calendar/feed-token`` — token mgmt.
 
-    POST generates a new token (or returns the existing one for this
-    user/space pair), revokes any previous, and returns the full URL.
+    POST generates a new token for this user/space pair, replacing any
+    previous one, and returns ``{token, url, external_url}``. The raw
+    token exists only in this response (the table stores its hash).
     DELETE revokes the current token; future fetches return 401 until a
     fresh POST.
     """
@@ -151,7 +152,20 @@ class SpaceCalendarFeedTokenView(BaseView):
             token=token,
         )
         url = f"/api/spaces/{space_id}/calendar/export.ics?token={token}"
-        return web.json_response({"token": token, "url": url}, status=201)
+        # Calendar apps poll this from outside the SPA, so a relative
+        # ``url`` isn't enough — under ingress the SPA's own base is not
+        # reachable by them. ``external_url`` is the absolute link when
+        # the deployment has a direct public address, else ``None`` (the
+        # SPA explains why instead of showing a link that can't work).
+        public = await self.svc(K.platform_adapter_key).get_public_base_url()
+        return web.json_response(
+            {
+                "token": token,
+                "url": url,
+                "external_url": f"{public}{url}" if public else None,
+            },
+            status=201,
+        )
 
     async def delete(self) -> web.Response:
         ctx = self.user

@@ -149,6 +149,46 @@ async def test_revoke_token(client):
         headers=_auth(client._admin_token),
     )
     assert resp2.status in (200, 204)
+    listed = await client.get("/api/me/tokens", headers=_auth(client._admin_token))
+    ids = [t["token_id"] for t in (await listed.json())["tokens"]]
+    assert token_id not in ids
+
+
+async def test_revoke_token_cannot_touch_another_users_token(client):
+    """Regression: ``DELETE /api/me/tokens/{id}`` used to revoke ANY
+    user's token by id — bob could sign pascal out. The self-service
+    route is now scoped to the caller: a foreign id is a silent 204
+    no-op and the owner's token keeps working."""
+    resp = await client.delete(
+        "/api/me/tokens/tid-1",  # pascal's token
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 204
+    still = await client.get("/api/me", headers=_auth(client._admin_token))
+    assert still.status == 200
+    listed = await client.get("/api/me/tokens", headers=_auth(client._admin_token))
+    ids = [t["token_id"] for t in (await listed.json())["tokens"]]
+    assert "tid-1" in ids
+
+
+async def test_list_tokens_base_url_null_without_external_url(client):
+    """No ``external_url`` configured → ``base_url`` is ``null`` so the
+    SPA can say there is no outside address instead of guessing one."""
+    resp = await client.get("/api/me/tokens", headers=_auth(client._admin_token))
+    assert resp.status == 200
+    assert (await resp.json())["base_url"] is None
+
+
+async def test_list_tokens_base_url_from_admin_set_external_url(client):
+    """The admin-set base (``federation_base_url``) is Social Home's own
+    public origin, so it is what an API-token client should talk to."""
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO instance_config(key, value) VALUES(?, ?)",
+        ("federation_base_url", "https://home.example.com/"),
+    )
+    resp = await client.get("/api/me/tokens", headers=_auth(client._admin_token))
+    assert (await resp.json())["base_url"] == "https://home.example.com"
 
 
 # ─── PATCH /api/me — status (emoji + text + clear after) ─────────────────

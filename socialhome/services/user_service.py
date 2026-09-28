@@ -708,7 +708,20 @@ class UserService:
         return token_id, raw_token
 
     async def revoke_api_token(self, token_id: str) -> None:
+        """Revoke any user's token — the admin path (``/api/admin/tokens``)."""
         await self._repo.revoke_api_token(token_id)
+
+    async def revoke_own_api_token(self, username: str, token_id: str) -> None:
+        """Revoke ``token_id`` only if it belongs to ``username``.
+
+        The self-service path (``DELETE /api/me/tokens/{id}``). An id owned
+        by someone else is a no-op, so a member can't sign another member
+        out by guessing or harvesting a token id.
+        """
+        user = await self._repo.get(username)
+        if user is None:
+            raise KeyError(f"user {username!r} not found")
+        await self._repo.revoke_api_token_for_user(user.user_id, token_id)
 
     async def list_api_tokens(self, username: str) -> list[dict]:
         user = await self._repo.get(username)

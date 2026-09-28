@@ -76,9 +76,35 @@ async def manual_federation_base(db: "AsyncDatabase | None") -> str | None:
     return f"{base}{INBOX_PATH}"
 
 
+def public_base_from_federation_base(base: str | None) -> str | None:
+    """Derive the base at which *this Social Home* is directly reachable.
+
+    Out-of-app URLs — an iCal feed a calendar app polls, the address an
+    API-token script talks to — need Social Home's own public origin,
+    not the SPA's ``document.baseURI`` (under Home Assistant ingress that
+    is an ingress path only a signed-in HA browser can load).
+
+    Reuses the adapter's federation answer instead of a second setting:
+    a base ending in :data:`INBOX_PATH` is Social Home's own inbox
+    (``[standalone].external_url`` or the admin-set value), so stripping
+    the path yields a URL that serves every other Social Home route too.
+    Any other shape — the Home Assistant integration's
+    ``…/api/socialhome/inbox`` forwarder — reaches only the inbox, so
+    there is no public origin to hand out and the answer is ``None``.
+    """
+    if not base:
+        return None
+    trimmed = base.rstrip("/")
+    if not trimmed.endswith(INBOX_PATH):
+        return None
+    root = trimmed[: -len(INBOX_PATH)].rstrip("/")
+    return root or None
+
+
 __all__ = [
     "INBOX_PATH",
     "MANUAL_BASE_KEY",
     "manual_federation_base",
+    "public_base_from_federation_base",
     "read_manual_base",
 ]

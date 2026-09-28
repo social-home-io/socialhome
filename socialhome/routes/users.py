@@ -417,8 +417,13 @@ class TokenCollectionView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(user_service_key)
         rows = await svc.list_api_tokens(ctx.username)
+        # The origin an external client (script, integration) reaches us
+        # at — ``None`` when the deployment has no direct public address
+        # (e.g. an add-on reachable only through ingress).
+        base_url = await self.svc(platform_adapter_key).get_public_base_url()
         return web.json_response(
             {
+                "base_url": base_url,
                 "tokens": [
                     {
                         "token_id": r["token_id"],
@@ -430,7 +435,7 @@ class TokenCollectionView(BaseView):
                     }
                     for r in rows
                     if not r.get("revoked_at")
-                ]
+                ],
             }
         )
 
@@ -452,12 +457,18 @@ class TokenCollectionView(BaseView):
 
 
 class TokenDetailView(BaseView):
-    """DELETE /api/me/tokens/{id} — revoke an API token."""
+    """DELETE /api/me/tokens/{id} — revoke one of the caller's API tokens.
+
+    Scoped to the caller: an id that belongs to another user is a silent
+    no-op (still 204, so the response doesn't reveal whether the id
+    exists). Household-wide revocation is ``/api/admin/tokens/{id}``.
+    """
 
     async def delete(self) -> web.Response:
+        ctx = self.user
         svc = self.svc(user_service_key)
         token_id = self.match("id")
-        await svc.revoke_api_token(token_id)
+        await svc.revoke_own_api_token(ctx.username, token_id)
         return web.Response(status=204)
 
 

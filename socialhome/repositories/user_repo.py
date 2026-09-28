@@ -108,6 +108,7 @@ class AbstractUserRepo(Protocol):
         expires_at: str | None = None,
     ) -> str: ...
     async def revoke_api_token(self, token_id: str) -> None: ...
+    async def revoke_api_token_for_user(self, user_id: str, token_id: str) -> None: ...
     async def get_user_by_token_hash(self, token_hash: str) -> User | None: ...
 
     # Blocks --------------------------------------------------------------
@@ -858,6 +859,14 @@ class SqliteUserRepo:
             "UPDATE api_tokens SET revoked_at=COALESCE(revoked_at, datetime('now')) "
             "WHERE token_id=?",
             (token_id,),
+        )
+
+    async def revoke_api_token_for_user(self, user_id: str, token_id: str) -> None:
+        """Revoke ``token_id`` only when ``user_id`` owns it (else no-op)."""
+        await self._db.enqueue(
+            "UPDATE api_tokens SET revoked_at=COALESCE(revoked_at, datetime('now')) "
+            "WHERE token_id=? AND user_id=?",
+            (token_id, user_id),
         )
 
     async def get_user_by_token_hash(self, token_hash: str) -> User | None:

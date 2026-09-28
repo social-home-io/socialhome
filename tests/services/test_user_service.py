@@ -163,6 +163,24 @@ async def test_api_token_lifecycle(stack):
     await stack.user_svc.revoke_api_token(tid)
 
 
+async def test_revoke_own_api_token_is_scoped_to_owner(stack):
+    """``revoke_own_api_token`` only revokes the caller's own token."""
+    await stack.provision_user("pascal")
+    await stack.provision_user("bob")
+    tid, _ = await stack.user_svc.create_api_token("pascal", label="laptop")
+    await stack.user_svc.revoke_own_api_token("bob", tid)
+    rows = await stack.user_svc.list_api_tokens("pascal")
+    assert rows[0]["revoked_at"] is None
+    await stack.user_svc.revoke_own_api_token("pascal", tid)
+    rows = await stack.user_svc.list_api_tokens("pascal")
+    assert rows[0]["revoked_at"] is not None
+
+
+async def test_revoke_own_api_token_unknown_user_raises(stack):
+    with pytest.raises(KeyError):
+        await stack.user_svc.revoke_own_api_token("nobody", "tid")
+
+
 async def test_blocks(stack):
     """block / unblock toggles the block relationship between two users."""
     a = await stack.provision_user("anna")

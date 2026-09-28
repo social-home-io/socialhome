@@ -62,7 +62,7 @@ log aggregation.** Code must never log the full query string of
 | GET | `/api/me/notify-targets` | Selectable push notify targets for the notification-settings dropdown. HA mode lists the household's `notify.*` entities (`[{entity_id, name}]`); other platforms return `[]`. |
 | GET | `/api/me/export` | Initiate a data-export job. |
 | GET | `/api/me/corner` | "My Corner" aggregated feed. |
-| GET / POST / DELETE | `/api/me/tokens[/{id}]` | Manage personal API tokens. |
+| GET / POST / DELETE | `/api/me/tokens[/{id}]` | Manage the caller's own API tokens (browser sign-ins appear here too, labelled `web`). `GET` returns `{base_url, tokens: [{token_id, label, created_at, last_used_at, expires_at, revoked_at}]}` (revoked rows omitted); `base_url` is the origin an external client reaches this Social Home at — derived from `PlatformAdapter.get_public_base_url()` (the admin-set external URL or `[standalone].external_url`), `null` when the only public route is Home Assistant's inbox forwarder or nothing is configured. `POST {label, expires_at?}` returns `201 {token_id, token}` — the raw token appears only in this response (only its SHA-256 is stored). `DELETE` returns `204` and only revokes a token the caller owns; another user's id is a silent no-op (admins use `/api/admin/tokens/{id}`). |
 
 Admins also have:
 
@@ -305,9 +305,9 @@ unnecessary.
 | DELETE | `/api/calendars/events/{id}/reminders` | Remove a reminder. Required `?minutes_before=<int>` and optional `?occurrence_at=<iso>`. |
 | GET | `/api/calendars/events/{id}/export.ics` | iCal export of one event (Phase F). Member-only. Includes the caller's reminders as VALARM blocks. |
 | GET | `/api/spaces/{id}/calendar/export.ics` | Subscribable iCal feed for the next 90 days. Auth via `?token=<feed-token>` (no Bearer required — public path). Honours `If-None-Match` for conditional GET. |
-| POST | `/api/spaces/{id}/calendar/feed-token` | Mint / regenerate a per-(user, space) feed token. Returns `{token, url}`. |
+| POST | `/api/spaces/{id}/calendar/feed-token` | Mint / regenerate a per-(user, space) feed token, replacing any earlier one. Returns `201 {token, url, external_url}`: `url` is the relative feed path, `external_url` the absolute link on the deployment's public origin (`PlatformAdapter.get_public_base_url()`), or `null` when there is none (e.g. an add-on reachable only through ingress) — calendar apps poll from outside the SPA, so the ingress-prefixed `document.baseURI` is never a usable base. The raw token is shown only in this response (only its hash is stored). |
 | DELETE | `/api/spaces/{id}/calendar/feed-token` | Revoke the current feed token. Future fetches return 401. |
-| POST | `/api/calendars/{id}/import_ics` | Upload iCal. |
+| POST | `/api/calendars/{id}/import_ics` | Upload iCal. Body is raw `text/calendar` bytes or JSON `{ics}`; capped at 1 MiB by the request-size limit. All-or-nothing: `422 ICS_PARSE_ERROR` (with the parser's reason) when any VEVENT lacks `SUMMARY`/`DTSTART` or the file holds none, else `201 {events: [...]}`. No de-duplication — importing the same file twice adds the events twice. |
 | POST | `/api/calendars/{id}/{import_image\|import_prompt}` | AI-assisted import. |
 | GET | `/api/calendar/{id}/export.ics` | iCal export. |
 | …same under `/api/spaces/{id}/calendar/...` | | Space-scoped variants. Space event create/list also accepts/returns `announce_in_feed` (§23.15, default **false**): when true the event also mirrors to the space feed as a `PostType.EVENT` post; otherwise it lives only in the Calendar tab. |

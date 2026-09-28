@@ -928,3 +928,17 @@ async def test_list_with_expired_status(env):
     assert [
         u.username for u in await env.user_repo.list_with_expired_status(exact)
     ] == ["gone"]
+
+
+async def test_revoke_api_token_for_user_only_revokes_the_owners_token(env):
+    """The self-service revoke is scoped by ``user_id``: another user's id
+    leaves the token live; the owner's id revokes it."""
+    await env.user_svc.provision(username="alice", display_name="Alice")
+    await env.user_svc.provision(username="bob", display_name="Bob")
+    alice = await env.user_repo.get("alice")
+    bob = await env.user_repo.get("bob")
+    tid = await env.user_repo.create_api_token(alice.user_id, "hash-own", "laptop")
+    await env.user_repo.revoke_api_token_for_user(bob.user_id, tid)
+    assert await env.user_repo.get_user_by_token_hash("hash-own") is not None
+    await env.user_repo.revoke_api_token_for_user(alice.user_id, tid)
+    assert await env.user_repo.get_user_by_token_hash("hash-own") is None

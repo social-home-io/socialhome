@@ -15,6 +15,7 @@ from socialhome.platform.federation_base import (
     INBOX_PATH,
     MANUAL_BASE_KEY,
     manual_federation_base,
+    public_base_from_federation_base,
     read_manual_base,
 )
 
@@ -78,3 +79,22 @@ async def test_manual_key_is_not_the_integration_key():
     key would let the integration's next push clobber the admin's value
     and would append the wrong path to whichever one won."""
     assert MANUAL_BASE_KEY != "ha_federation_base"
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"),
+    [
+        (f"https://h.example{INBOX_PATH}", "https://h.example"),
+        (f"https://h.example{INBOX_PATH}/", "https://h.example"),
+        (f"https://h.example/prefix{INBOX_PATH}", "https://h.example/prefix"),
+        # HA's forwarder reaches only the inbox — not a public origin.
+        ("https://ha.example/api/socialhome/inbox", None),
+        (INBOX_PATH, None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_public_base_from_federation_base(base, expected):
+    """Only a base that is Social Home's *own* inbox yields an origin that
+    external clients (calendar apps, API-token scripts) can use."""
+    assert public_base_from_federation_base(base) == expected
