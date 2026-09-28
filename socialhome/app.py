@@ -569,16 +569,29 @@ async def _redeliver_envelope(
                     # resolve the inbox id we hold, and retrying the full
                     # ladder just burns ~8 hours and a PeerConnection per
                     # attempt to reach the same conclusion.
-                    if entry.attempts < PAIR_WINDOW_404_ATTEMPTS:
+                    # Exception: an UNPAIR to a tombstone. A 404 not from
+                    # the peer's Social Home says nothing about whether it
+                    # still holds us — it has simply not been told yet.
+                    # Dropping it would purge the tombstone and leave the
+                    # peer paired to us for good, so it keeps retrying
+                    # until the UNPAIR's own ``expires_at``.
+                    unpair_blocked = (
+                        entry.event_type is FederationEventType.UNPAIR
+                        and not peer_rejected
+                    )
+                    if unpair_blocked or entry.attempts < PAIR_WINDOW_404_ATTEMPTS:
                         log.info(
                             "outbox: %s returned 404 for %s (%s) — attempt"
-                            " %d, retrying (pair-window race)",
+                            " %d, retrying (%s)",
                             entry.instance_id,
                             entry.id,
                             "peer's Social Home rejected the inbox id"
                             if peer_rejected
                             else "not from the peer's Social Home",
                             entry.attempts + 1,
+                            "UNPAIR not delivered yet"
+                            if unpair_blocked
+                            else "pair-window race",
                         )
                         return DeliveryOutcome.TRANSIENT
                     if peer_rejected:

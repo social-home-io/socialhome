@@ -24,7 +24,12 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.transport import _TransportSendResult
-from socialhome.infrastructure import DeliveryOutcome, EventBus, KeyManager
+from socialhome.infrastructure import (
+    PAIR_WINDOW_404_ATTEMPTS,
+    DeliveryOutcome,
+    EventBus,
+    KeyManager,
+)
 from socialhome.repositories import (
     SqliteFederationRepo,
     SqliteOutboxRepo,
@@ -904,11 +909,12 @@ async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
 
 
 class _StatusResp:
-    def __init__(self, status):
+    def __init__(self, status, body='{"error": "unknown_inbox"}'):
         self.status = status
+        self.body = body
 
     async def text(self):
-        return '{"error": "unknown_inbox"}'
+        return self.body
 
     async def __aenter__(self):
         return self
@@ -918,13 +924,14 @@ class _StatusResp:
 
 
 class _CountingClient:
-    def __init__(self, status=204):
+    def __init__(self, status=204, body='{"error": "unknown_inbox"}'):
         self.status = status
+        self.body = body
         self.posts: list[str] = []
 
     def post(self, url, **kw):
         self.posts.append(url)
-        return _StatusResp(self.status)
+        return _StatusResp(self.status, self.body)
 
 
 async def _peer(fed_repo, kek, *, tombstone=True):
@@ -1049,3 +1056,39 @@ async def test_unpair_refused_by_a_peer_that_already_forgot_us_ends_it(unpair_en
     outcome = await _deliver_outbox_entry(svc, fed_repo, unpair, entry)
     assert outcome is DeliveryOutcome.PERMANENT
     assert await fed_repo.get_instance(peer.id, include_unpairing=True) is None
+
+
+def _unpair_entry(svc, peer, *, attempts):
+    return _OutboxEntry(
+        id="u-404",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+        event_type=FederationEventType.UNPAIR,
+        attempts=attempts,
+    )
+
+
+async def test_unpair_404_from_in_front_of_the_peer_stays_transient(env):
+    """A 404 without our ``unknown_inbox`` marker came from something in
+    front of the peer (its HA integration not loaded yet), not from the
+    peer's Social Home — the peer has not been told. Dropping it after the
+    pair window would purge the tombstone and strand the peer paired
+    forever, so the UNPAIR keeps retrying until its own expiry."""
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek)
+    svc._http_client = _CountingClient(404, body="404: Not Found")
+    for attempts in (0, PAIR_WINDOW_404_ATTEMPTS, PAIR_WINDOW_404_ATTEMPTS * 10):
+        entry = _unpair_entry(svc, peer, attempts=attempts)
+        outcome = await _redeliver_envelope(svc, fed_repo, entry)
+        assert outcome is DeliveryOutcome.TRANSIENT, attempts
+
+
+async def test_unpair_404_from_the_peers_social_home_still_ends_it(env):
+    """The peer's own inbox refusing our inbox id means it already forgot
+    us — that verdict stays PERMANENT after the pair window."""
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek)
+    svc._http_client = _CountingClient(404)
+    entry = _unpair_entry(svc, peer, attempts=PAIR_WINDOW_404_ATTEMPTS)
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+    assert outcome is DeliveryOutcome.PERMANENT
