@@ -716,8 +716,8 @@ async def test_zone_only_decrypted_envelope_has_no_gps(env, tmp_dir):
     )
 
     [call] = real_fed.calls
-    assert "lat" not in call["encrypted_payload"]
-    assert "lon" not in call["encrypted_payload"]
+    # Only the decrypted plaintext is meaningful: a substring check on the
+    # base64 ciphertext matches "lat"/"lon" by chance (flaky, proves nothing).
     plaintext = encoder.decrypt_payload(
         call["encrypted_payload"],
         session_key,
