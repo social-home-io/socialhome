@@ -22,8 +22,9 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 33
+    assert OURS == 34
     assert FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC == 33
+    assert FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID == 34
     assert FederationCapability.MIN_FOR_INSTANCE_RESYNC == 19
     assert FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED == 20
     assert FederationCapability.MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY == 21
@@ -136,6 +137,7 @@ def test_space_features_missing_below_v13():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
 
 
@@ -154,6 +156,7 @@ def test_space_features_missing_below_v16():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
 
 
@@ -169,6 +172,7 @@ def test_space_features_missing_below_v22():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
 
 
@@ -182,6 +186,7 @@ def test_space_features_missing_below_v23():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
 
 
@@ -196,6 +201,7 @@ def test_space_features_missing_below_v24():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
     assert space_features_missing_below(27) == [
         "Mesh route-stale nack",
@@ -204,6 +210,7 @@ def test_space_features_missing_below_v24():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
 
 
@@ -219,24 +226,32 @@ def test_space_features_missing_below_v32_is_empty():
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
     assert space_features_missing_below(29) == [
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
     assert space_features_missing_below(30) == [
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
     assert space_features_missing_below(31) == [
         "Space roster snapshot",
         "Shared gallery albums",
+        "Creator-bound album ids",
     ]
-    assert space_features_missing_below(32) == ["Shared gallery albums"]
-    assert space_features_missing_below(33) == []
+    assert space_features_missing_below(32) == [
+        "Shared gallery albums",
+        "Creator-bound album ids",
+    ]
+    assert space_features_missing_below(33) == ["Creator-bound album ids"]
+    assert space_features_missing_below(34) == []
 
 
 def test_space_scoped_min_versions_are_capability_constants():

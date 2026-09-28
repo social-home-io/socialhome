@@ -47,6 +47,7 @@ from ..domain.media_constraints import (
 )
 from ..domain.post import Post, PostType
 from ..domain.space import SpaceRole
+from ..federation.owner_bound_id import GALLERY_ALBUM_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
 from ..media.image_processor import ImageProcessor
@@ -224,7 +225,18 @@ class GalleryService:
 
         now = datetime.now(timezone.utc).isoformat()
         album = GalleryAlbum(
-            id=uuid.uuid4().hex,
+            # A space album federates, so its id commits to its creator —
+            # no other household can announce it first as theirs. A
+            # household album never leaves this household.
+            id=(
+                uuid.uuid4().hex
+                if space_id is None
+                else mint_owner_bound_id(
+                    GALLERY_ALBUM_KIND,
+                    space_id=space_id,
+                    owner_user_id=owner_user_id,
+                )
+            ),
             space_id=space_id,
             owner_user_id=owner_user_id,
             name=name.strip(),
@@ -304,6 +316,7 @@ class GalleryService:
             GalleryAlbumDeleted(
                 album_id=album_id,
                 space_id=album.space_id,
+                owner_id=album.owner_user_id,
             )
         )
 

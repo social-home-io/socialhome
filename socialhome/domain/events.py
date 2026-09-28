@@ -701,6 +701,9 @@ class GalleryAlbumDeleted(DomainEvent):
     album_id: str
     space_id: str | None
     occurred_at: datetime = field(default_factory=_now)
+    #: The deleted album's owner — lets a receiver that does not hold the
+    #: album yet check an owner-bound id's delete came from its owner.
+    owner_id: str | None = None
     #: ``None`` on local origination; the sending household's instance
     #: id when a federation inbound handler re-publishes a change it
     #: applied — the outbound bridge never federates those back.

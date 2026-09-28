@@ -50,6 +50,10 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    mint_owner_bound_id,
+)
 from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
@@ -1056,6 +1060,177 @@ async def test_a_synced_album_and_upload_of_a_remote_member_both_land(env):
         "SELECT uploaded_by FROM gallery_items WHERE id='gi-sync-g'", ()
     )
     assert item is not None and item["uploaded_by"] == "u-g"
+
+
+def _bound_album(owner: str = "u-g") -> str:
+    return mint_owner_bound_id(GALLERY_ALBUM_KIND, space_id=SP, owner_user_id=owner)
+
+
+async def _album_owner(db, album_id: str) -> str | None:
+    row = await db.fetchone(
+        "SELECT owner_user_id FROM gallery_albums WHERE id=?", (album_id,)
+    )
+    return None if row is None else row["owner_user_id"]
+
+
+async def test_a_new_album_can_only_be_announced_by_the_household_that_made_it(
+    env, caplog
+):
+    """A member household that has seen another household's new album id
+    races the real announcement to us and claims the id for its own user.
+    The id is bound to its creator, so the claim is refused on sight — and
+    the creator's genuine announcement still lands afterwards."""
+    app, db = env
+    album_id = _bound_album("u-g")
+    with caplog.at_level("WARNING"):
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ALBUM_CREATED,
+            {"id": album_id, "owner_user_id": "u-o", "name": "Mine now"},
+            sender=OTHER,
+        )
+    assert await _album_owner(db, album_id) is None
+    assert "not bound to" in caplog.text
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) == "u-g"
+
+
+async def test_the_host_relaying_a_bound_album_keeps_it_valid(env):
+    """The id binds the original owner, not the envelope's sender, so the
+    host's §25.6 replay of a member's album still verifies."""
+    app, db = env
+    album_id = _bound_album("u-g")
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=HOST,
+    )
+    assert await _album_owner(db, album_id) == "u-g"
+
+
+async def test_a_bound_album_id_is_bound_to_its_space(env):
+    """An id minted for another space does not verify here."""
+    app, db = env
+    album_id = mint_owner_bound_id(
+        GALLERY_ALBUM_KIND, space_id="sp-elsewhere", owner_user_id="u-g"
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) is None
+
+
+async def test_a_bound_album_id_with_an_unknown_suite_is_refused(env):
+    """Receivers reject a binding suite they do not know — no fallback."""
+    app, db = env
+    good = _bound_album("u-g")
+    unknown = good[:16] + "b" + good[17:]
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": unknown, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, unknown) is None
+
+
+async def test_a_legacy_album_id_keeps_the_first_come_rule(env):
+    """Albums minted before the binding keep today's behaviour: the first
+    valid claim holds the id, a later claim for another owner is refused."""
+    app, db = env
+    legacy = "0123456789ab4def8123456789abcdef"  # a uuid4 hex, pre-binding
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": legacy, "owner_user_id": "u-o", "name": "First"},
+        sender=OTHER,
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": legacy, "owner_user_id": "u-g", "name": "Second"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, legacy) == "u-o"
+
+
+@pytest.mark.parametrize(
+    "payload_owner", [None, "u-o", "u-g"], ids=["no-owner", "own", "claims-u-g"]
+)
+async def test_another_household_cannot_delete_a_new_album_before_it_lands(
+    env, payload_owner
+):
+    """A household that is neither the album's owner's nor a moderator
+    sends a delete for a bound album id we do not hold yet. It must not be
+    remembered as deleted, or the creator's announcement would be refused."""
+    app, db = env
+    album_id = _bound_album("u-g")
+    payload = {"id": album_id}
+    if payload_owner:
+        payload["owner_user_id"] = payload_owner
+    await _deliver(app, FET.SPACE_GALLERY_ALBUM_DELETED, payload, sender=OTHER)
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) == "u-g"
+
+
+@pytest.mark.parametrize(
+    ("sender", "payload"),
+    [
+        (AUTHOR, {"owner_user_id": "u-g"}),  # the owner's household
+        (HOST, {}),  # a moderator, even without the owner
+        (ADMIN, {}),
+    ],
+    ids=["owner", "host", "admin"],
+)
+async def test_a_rightful_delete_that_overtakes_a_bound_create_keeps_it_deleted(
+    env, sender, payload
+):
+    app, db = env
+    album_id = _bound_album("u-g")
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": album_id, **payload}, sender=sender
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) is None
+
+
+async def test_a_synced_album_whose_id_names_another_owner_is_skipped(env):
+    """The §25.6 chunked sync applies the same binding: a record claiming a
+    bound id for somebody other than its creator is not stored."""
+    app, db = env
+    receiver = app[space_sync_receiver_key]
+    squatted = _bound_album("u-g")
+    genuine = _bound_album("u-g")
+    await receiver._dispatch(
+        "gallery",
+        SP,
+        [
+            {"kind": "album", "id": squatted, "owner_user_id": "u-o", "name": "x"},
+            {"kind": "album", "id": genuine, "owner_user_id": "u-g", "name": "y"},
+        ],
+        provider=HOST,
+    )
+    assert await _album_owner(db, squatted) is None
+    assert await _album_owner(db, genuine) == "u-g"
 
 
 async def test_a_squatted_buffered_rsvp_cannot_drop_the_real_one(env):

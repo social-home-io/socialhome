@@ -7369,6 +7369,34 @@ def cmd_space_gallery_media_blob() -> None:
             f"space-gallery-media-blob: d's album is named {d_album.get('name')!r}"
         )
     print(f"  d holds album {album_id} ✓")
+    # v_34: a space album's id commits to its creator, so no other
+    # household can announce it first as theirs. The id c minted must
+    # verify for c's user in this space — and d accepted it on that basis.
+    from socialhome.federation.owner_bound_id import (
+        GALLERY_ALBUM_KIND,
+        OwnerBinding,
+        check_owner_bound_id,
+    )
+
+    s, c_me = _request(f"http://127.0.0.1:{c['port']}/api/me", token=c["token"])
+    _must("c /api/me", s, c_me, ok=(200,))
+    binding = check_owner_bound_id(
+        GALLERY_ALBUM_KIND,
+        album_id,
+        space_id=space_id,
+        owner_user_id=c_me["user_id"],
+    )
+    if binding is not OwnerBinding.VALID:
+        raise SystemExit(
+            f"space-gallery-media-blob: album id {album_id} is {binding.value}, "
+            f"not bound to its creator {c_me['user_id']!r} (v_34)"
+        )
+    if d_album.get("owner_user_id") not in (None, c_me["user_id"]):
+        raise SystemExit(
+            f"space-gallery-media-blob: d holds the album for "
+            f"{d_album.get('owner_user_id')!r}, expected {c_me['user_id']!r}"
+        )
+    print("  album id is bound to its creator (v_34) ✓")
     d_items = {i["id"]: i for i in _gallery_items_on("d", d)}
     if item_id not in d_items:
         raise SystemExit(

@@ -445,6 +445,19 @@ material is needed).  See [`protocol/apps.md`](protocol/apps.md).
 **WebRTC SDP signing** (`federation/sdp_signing.py`) — Ed25519
 signature over `<sdp_type>:<sdp>` so a MITM can't swap DTLS endpoints.
 
+**Owner-bound row ids** (`federation/owner_bound_id.py`, v_34) — a new
+space album's id commits to its creator, so no other household can claim
+it first. 32 hex characters in the UUIDv8 layout: `id[0:16]` is a random
+nonce (with the UUID version nibble `8`), `id[16]` the suite nibble in the
+variant position (`8` = `OWNER_BOUND_ID_SUITE_SHA256`; receivers check it
+against `SUPPORTED_OWNER_BOUND_ID_SUITES` and refuse anything else, no
+default) and `id[17:32]` the first 60 bits of
+SHA-256(`"socialhome/owner-bound-id/v1"` ‖ kind ‖ space_id ‖
+owner_user_id ‖ nonce, NUL-separated). Forging a claim for another owner
+means a 60-bit preimage per attempt, and the claimed owner must still be
+seated on the signing household. A commitment, not a signature — hash-based,
+so no PQ migration is needed beyond a suite bump if SHA-256 ever is.
+
 **Standalone auth** — `StandaloneAdapter` hashes passwords with scrypt
 and embeds parameters in the stored hash: `scrypt$16384$8$1$<salt
 hex>$<hash hex>`. Parameters can be bumped without a schema change.

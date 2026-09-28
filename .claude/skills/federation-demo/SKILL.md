@@ -389,6 +389,9 @@ Phases added after the initial publish are documented inline in
   attributed to dave plus its bytes (a remote uploader); c renames the
   album and d's copy follows (``_UPDATED``). Before v_33 the step passed on
   bytes alone while d refused the item for naming an album it never got.
+  From v_34 it also asserts the album id c minted is owner-bound to c's
+  user in that space (``federation/owner_bound_id.check_owner_bound_id``)
+  and that d holds it for that owner.
 * ``space-sync-catchup-media`` — newcomer joining a long-running
   space gets the historical post + gallery bytes too, not just
   the metadata rows. Catch-up enqueues happen after the §25.6
