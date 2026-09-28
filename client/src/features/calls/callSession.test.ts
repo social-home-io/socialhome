@@ -95,7 +95,9 @@ let lastStream: FakeStream | null = null
 function mediaOk(kinds: Array<'audio' | 'video'>) {
   return async (c: MediaStreamConstraints) => {
     log.push(`getUserMedia ${c.video ? 'audio+video' : 'audio'}`)
-    lastStream = new FakeStream(kinds.map(k => new FakeTrack(k)))
+    // Like the browser: only the requested kinds come back.
+    lastStream = new FakeStream(
+      kinds.filter(k => k === 'audio' || c.video).map(k => new FakeTrack(k)))
     return lastStream
   }
 }
@@ -106,6 +108,7 @@ type Session = typeof import('./callSession')
 type Store = typeof import('@/store/calls')
 let S: Session
 let store: Store
+let CallEmbedBlockedError: typeof import('./embedPolicy').CallEmbedBlockedError
 
 beforeEach(async () => {
   vi.resetModules()
@@ -129,6 +132,7 @@ beforeEach(async () => {
   store = await import('@/store/calls')
   store.wireCallsWs()
   S = await import('./callSession')
+  CallEmbedBlockedError = (await import('./embedPolicy')).CallEmbedBlockedError
 })
 
 afterEach(() => {
@@ -214,11 +218,64 @@ describe('startCall (caller)', () => {
     expect(log).toContain('setRemote answer EARLY-ANSWER')
   })
 
-  it('audio calls start with the camera track disabled but still sent', async () => {
+  it('audio calls ask for the microphone only — the camera is never opened', async () => {
     await S.startCall('conv-1', 'audio')
-    expect(log).toContain('addTrack video')
-    expect(lastStream!.getVideoTracks()[0].enabled).toBe(false)
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true, video: false })
+    expect(log).toContain('addTrack audio')
+    expect(log).not.toContain('addTrack video')
+    expect(S.hasCamera.value).toBe(false)
+  })
+
+  it('video calls ask for the microphone and the camera', async () => {
+    await S.startCall('conv-1', 'video')
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true, video: true })
     expect(S.hasCamera.value).toBe(true)
+  })
+
+  it('explains an embed that denies the microphone instead of prompting', async () => {
+    // A cross-origin iframe with allow="fullscreen" (HA Webpage dashboard):
+    // Chromium reports the policy, and getUserMedia is never tried.
+    vi.stubGlobal('top', {})
+    Object.defineProperty(document, 'permissionsPolicy', {
+      configurable: true,
+      value: { allowsFeature: (f: string) => f !== 'microphone' && f !== 'camera' },
+    })
+    try {
+      const err = await S.startCall('conv-1', 'audio').catch(e => e)
+      expect(err).toBeInstanceOf(CallEmbedBlockedError)
+      expect(err.certain).toBe(true)
+      expect(err.message).toMatch(/its own tab/)
+      expect(getUserMedia).not.toHaveBeenCalled()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(S.isCallLive()).toBe(false)
+    } finally {
+      delete (document as { permissionsPolicy?: unknown }).permissionsPolicy
+    }
+  })
+
+  it('a framed NotAllowedError without a policy API reads as a possible embed denial', async () => {
+    vi.stubGlobal('top', {})
+    getUserMedia.mockRejectedValue(Object.assign(new Error('denied'), { name: 'NotAllowedError' }))
+    const err = await S.startCall('conv-1', 'audio').catch(e => e)
+    expect(err).toBeInstanceOf(CallEmbedBlockedError)
+    expect(err.certain).toBe(false)
+  })
+
+  it('an unframed page never reports an embed denial', async () => {
+    Object.defineProperty(document, 'permissionsPolicy', {
+      configurable: true,
+      value: { allowsFeature: () => false },
+    })
+    try {
+      getUserMedia.mockRejectedValue(Object.assign(new Error('denied'), { name: 'NotAllowedError' }))
+      const err = await S.startCall('conv-1', 'audio').catch(e => e)
+      expect(err).not.toBeInstanceOf(CallEmbedBlockedError)
+      expect(err.message).toMatch(/Microphone access is blocked/)
+    } finally {
+      delete (document as { permissionsPolicy?: unknown }).permissionsPolicy
+    }
   })
 
   it('falls back to audio-only when there is no usable camera', async () => {

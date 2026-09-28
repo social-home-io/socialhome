@@ -34,6 +34,7 @@ import { effect, signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws, type WsEvent } from '@/ws'
 import { consumeIce, pendingIce, type IncomingCall } from '@/store/calls'
+import { CallEmbedBlockedError, embedBlocksMicrophone, isFramed } from './embedPolicy'
 
 export type CallType = 'audio' | 'video'
 export type CallPhase =
@@ -54,8 +55,9 @@ export const callConversation = signal<string | null>(null)
 export const callEndReason    = signal<string | null>(null)
 export const localStream      = signal<MediaStream | null>(null)
 export const remoteStream     = signal<MediaStream | null>(null)
-/** ``false`` when the device gave us no camera — the page disables the
- *  camera toggle instead of offering a control that can't do anything. */
+/** ``false`` for an audio call (the camera is never opened) or when the
+ *  device gave us no camera — the page disables the camera toggle instead
+ *  of offering a control that can't do anything. */
 export const hasCamera        = signal<boolean>(false)
 
 interface SignedSdp { sdp?: unknown, sdp_type?: unknown }
@@ -187,7 +189,7 @@ async function openPeerConnection(type: CallType): Promise<RTCPeerConnection> {
     (api.get('/api/calls/ice-servers') as Promise<IceServersResponse>)
       .then(r => r.ice_servers ?? [])
       .catch(() => [] as RTCIceServer[]),
-    acquireMedia(),
+    acquireMedia(type),
   ])
   if (role === null) {
     // Torn down while waiting on the permission prompt.
@@ -196,10 +198,10 @@ async function openPeerConnection(type: CallType): Promise<RTCPeerConnection> {
   }
   const conn = new RTCPeerConnection({ iceServers: servers })
   pc = conn
+  // Audio calls never open the camera, so there is no track to switch on
+  // mid-call (that would need a renegotiation the signalling doesn't
+  // carry) — the page disables the camera toggle instead.
   hasCamera.value = stream.getVideoTracks().length > 0
-  // Audio calls start with the camera off; the track is still sent so
-  // the in-call "camera on" toggle works without a renegotiation.
-  if (type === 'audio') stream.getVideoTracks().forEach(t => { t.enabled = false })
   stream.getTracks().forEach(t => conn.addTrack(t, stream))
   localStream.value = stream
 
@@ -235,30 +237,37 @@ async function openPeerConnection(type: CallType): Promise<RTCPeerConnection> {
   return conn
 }
 
-async function acquireMedia(): Promise<MediaStream> {
+async function acquireMedia(type: CallType): Promise<MediaStream> {
   const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
   if (!md?.getUserMedia) {
     throw new Error('Calls need a secure (HTTPS) connection to use the microphone.')
   }
-  // Always ask for the camera too so the in-call toggle can flip a live
-  // track; fall back to audio-only when there's no (usable) camera.
-  try {
-    return await md.getUserMedia({ audio: true, video: true })
-  } catch {
+  if (embedBlocksMicrophone()) throw new CallEmbedBlockedError()
+  // An audio call asks for the microphone only — no camera prompt, no
+  // camera light. A video call asks for both and falls back to
+  // audio-only when there is no (usable) camera.
+  if (type === 'video') {
     try {
-      return await md.getUserMedia({ audio: true })
-    } catch (err) {
-      const name = (err as DOMException)?.name
-      if (name === 'NotAllowedError' || name === 'SecurityError') {
-        throw new Error('Microphone access is blocked. Allow it in your browser\'s site '
-          + 'settings, then try again.', { cause: err })
-      }
-      if (name === 'NotFoundError') {
-        throw new Error('No microphone was found on this device.', { cause: err })
-      }
-      throw new Error(`Couldn't start the microphone: ${(err as Error)?.message ?? err}`,
-        { cause: err })
+      return await md.getUserMedia({ audio: true, video: true })
+    } catch { /* fall through to audio-only */ }
+  }
+  try {
+    return await md.getUserMedia({ audio: true, video: false })
+  } catch (err) {
+    const name = (err as DOMException)?.name
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      // Inside a frame a denial can come from the embedding page's
+      // ``allow`` attribute rather than from the user — Firefox and
+      // Safari have no API to tell the two apart.
+      if (isFramed()) throw new CallEmbedBlockedError({ cause: err, certain: false })
+      throw new Error('Microphone access is blocked. Allow it in your browser\'s site '
+        + 'settings, then try again.', { cause: err })
     }
+    if (name === 'NotFoundError') {
+      throw new Error('No microphone was found on this device.', { cause: err })
+    }
+    throw new Error(`Couldn't start the microphone: ${(err as Error)?.message ?? err}`,
+      { cause: err })
   }
 }
 

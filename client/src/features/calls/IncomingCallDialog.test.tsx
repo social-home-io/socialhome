@@ -18,6 +18,8 @@ const route = vi.fn()
 vi.mock('preact-iso', () => ({ useLocation: () => ({ route, url: '/' }) }))
 
 import IncomingCallDialog from './IncomingCallDialog'
+import { CallEmbedBlockedDialog } from './CallEmbedBlockedDialog'
+import { CallEmbedBlockedError } from './embedPolicy'
 import { incoming, type IncomingCall } from '@/store/calls'
 
 const RINGING: IncomingCall = {
@@ -88,5 +90,25 @@ describe('IncomingCallDialog', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('an embed that denies the mic stops the ring here and points to its own tab', async () => {
+    acceptCall.mockRejectedValueOnce(new CallEmbedBlockedError())
+    incoming.value = RINGING
+    const { getByText, queryByText } = render(
+      <><IncomingCallDialog /><CallEmbedBlockedDialog /></>,
+    )
+    fireEvent.click(getByText('Accept'))
+    await new Promise(r => setTimeout(r, 0))
+    // Not a decline: another device of this user may still answer.
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(incoming.value).toBeNull()
+    expect(showToast).not.toHaveBeenCalled()
+    expect(queryByText('Accept')).toBeNull()
+    const link = getByText('Open in a new tab') as HTMLAnchorElement
+    expect(link.target).toBe('_blank')
+    expect(link.href).toBe(window.location.href)
+    fireEvent.click(getByText('Not now'))
+    expect(queryByText('Open in a new tab')).toBeNull()
   })
 })

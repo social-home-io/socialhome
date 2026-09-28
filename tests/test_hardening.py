@@ -305,4 +305,22 @@ async def test_permissions_policy_allows_same_origin_camera_and_microphone(
     assert policy["camera"] == "(self)"
     assert policy["microphone"] == "(self)"
     assert policy["geolocation"] == "(self)"
-    assert r.headers["X-Frame-Options"] == "DENY"
+    # Same-origin framing only — see the next test.
+    assert r.headers["X-Frame-Options"] == "SAMEORIGIN"
+
+
+async def test_security_headers_let_the_ha_ingress_panel_frame_the_spa(aiohttp_client):
+    """Under ``haos`` HA's add-on ingress panel renders the SPA as a
+    same-origin ``<iframe src="/api/hassio_ingress/<token>/">``. ``DENY``
+    made the browser refuse to display that frame at all; ``SAMEORIGIN``
+    allows it while still refusing every other origin."""
+
+    async def echo(request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app = web.Application(middlewares=[build_security_headers_middleware()])
+    app.router.add_get("/", echo)
+    tc = await aiohttp_client(app)
+    r = await tc.get("/")
+    assert r.headers["X-Frame-Options"] != "DENY"
+    assert r.headers["X-Frame-Options"] == "SAMEORIGIN"

@@ -52,9 +52,7 @@ The SPA owns the only `RTCPeerConnection`
 (`client/src/features/calls/callSession.ts`); the backend relays
 whatever SDP / ICE the browsers produce and never touches media.
 
-- **Caller** — `getUserMedia` (audio + camera, audio-only fallback when
-  there is no camera; audio calls send the camera track disabled so it
-  can be switched on without renegotiation) → `createOffer` /
+- **Caller** — `getUserMedia` → `createOffer` /
   `setLocalDescription` → `POST /api/calls {sdp_offer}`. Local ICE
   candidates gathered before the `call_id` exists are held and flushed
   once the POST returns. `call.answered.signed_sdp.sdp` becomes the
@@ -68,13 +66,52 @@ whatever SDP / ICE the browsers produce and never touches media.
   ringing) and applied once a remote description exists.
 - **STUN / TURN** — `GET /api/calls/ice-servers` (time-limited TURN
   credentials when `webrtc_turn_secret` is set).
+- **Media** — an audio call asks for `{audio: true, video: false}`: no
+  camera prompt, no camera light, and no camera to switch on mid-call
+  (that would need a renegotiation the signalling doesn't carry, so the
+  toggle is disabled). A video call asks for `{audio: true, video: true}`
+  and falls back to audio-only when there is no usable camera.
 - **Ending** — hangup / decline / `call.ended` / `call.declined` close the
   peer connection and stop the local tracks; an ICE/DTLS `failed` state
   fails the call and posts a hangup so the other side is released.
+  "Back to chats" on the *Call not connected on this device* page (after
+  a reload or from a stale link) also posts a hangup, so the other side
+  stops ringing or waiting.
+
+### Headers and embedding (HAOS ingress)
 
 The security headers allow `camera=(self), microphone=(self)` in
 `Permissions-Policy`; with `()` the browser rejects `getUserMedia` before
-the user is even prompted.
+the user is even prompted. `X-Frame-Options` is `SAMEORIGIN`.
+
+Under `haos` the SPA runs inside Home Assistant's add-on ingress panel
+(home-assistant/frontend `src/panels/app/ha-panel-app.ts`, checked at
+`16183f9`): `<iframe src=${addon.ingress_url}>` with **no `allow`
+attribute**. `ingress_url` is `/api/hassio_ingress/<token>/` on HA's own
+origin, and the Supervisor and Core ingress proxies forward our response
+headers unchanged (`_response_header` only drops the transfer headers).
+So:
+
+- the frame is same-origin with its parent and inherits the default
+  `'self'` allowlist — camera and microphone are available, and our
+  `(self)` (here: HA's origin) agrees;
+- `X-Frame-Options: DENY` would make the browser refuse to show the
+  frame at all, which is why the header is `SAMEORIGIN`.
+
+HA's Webpage dashboard / `panel_iframe`
+(`src/panels/iframe/ha-panel-iframe.ts`) and the iframe card
+(`hui-iframe-card.ts`, default) set `allow="fullscreen"` only. Pointed at
+Social Home's direct URL they are cross-origin, and `SAMEORIGIN` keeps
+Social Home out of them entirely (it was already `DENY`). So the only
+frames that can render Social Home have all-same-origin ancestors, and
+the microphone is only denied there when a same-origin ancestor narrows
+the policy (e.g. `allow="microphone 'none'"`). For that case the SPA
+detects the denial (`client/src/features/calls/embedPolicy.ts`:
+`document.permissionsPolicy` on Chromium; a framed `NotAllowedError`
+elsewhere) and shows *Open Social Home in its own tab* with a link to the
+current page instead of a generic error. A ringing device that can't
+answer for this reason stops ringing without declining, so the user's
+other devices keep ringing.
 
 ## Callee-side state
 

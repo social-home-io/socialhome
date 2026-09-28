@@ -21,7 +21,7 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import {
   callConversation, callEndReason, callId as sessionCallId, callPhase,
-  getPeerConnection, hangupCall, hasCamera, isCallLive, localStream,
+  callType, getPeerConnection, hangupCall, hasCamera, isCallLive, localStream,
   remoteStream, resetCall, type CallPhase,
 } from './callSession'
 
@@ -66,6 +66,14 @@ export default function InCallPage() {
     const conv = convRef.current
     resetCall()
     loc.route(conv ? `/dms/${conv}` : '/dms')
+  }
+  // "Not connected on this device" (a reload, a stale link): the call may
+  // still be ringing or open on the backend, with the other side waiting
+  // on us. Leaving ends it there too. Best-effort — an already-ended
+  // call answers 404, which is fine.
+  const abandon = () => {
+    if (callId) void api.post(`/api/calls/${callId}/hangup`, {}).catch(() => {})
+    leave()
   }
 
   // Reset the per-call controls on every entry; hang up when the user
@@ -154,14 +162,14 @@ export default function InCallPage() {
   if (phase === 'idle' || phase === 'failed') {
     const message = phase === 'failed'
       ? (callEndReason.value ?? "The call couldn't be connected.")
-      : "This call isn't connected on this device. It may have ended, or it "
-        + 'was started in another tab or before the page reloaded.'
+      : "This call isn't connected on this device — it may have ended, or "
+        + 'the page reloaded. Going back ends it, so nobody is left waiting.'
     return (
       <div class="sh-incall sh-incall--closed" role="alert">
         <div class="sh-incall-closed-card">
           <strong>{phase === 'failed' ? 'Call failed' : 'Call not connected'}</strong>
           <p>{message}</p>
-          <Button onClick={leave}>Back to chats</Button>
+          <Button onClick={phase === 'failed' ? leave : abandon}>Back to chats</Button>
         </div>
       </div>
     )
@@ -197,7 +205,8 @@ export default function InCallPage() {
                 onClick={toggleCamera}
                 disabled={!hasCamera.value}
                 aria-pressed={cameraOff.value}
-                aria-label={!hasCamera.value ? 'No camera available'
+                aria-label={!hasCamera.value
+                  ? (callType.value === 'audio' ? 'Camera is off in audio calls' : 'No camera available')
                   : cameraOff.value ? 'Turn camera on' : 'Turn camera off'}>
           {cameraOff.value ? '🎥🚫' : '🎥'}
         </Button>

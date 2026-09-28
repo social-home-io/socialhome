@@ -164,7 +164,7 @@ async def test_bundle_entry_served_with_valid_sig(client):
     Asserts:
     - body == index.html bytes
     - Content-Security-Policy contains connect-src 'none'
-    - X-Frame-Options: SAMEORIGIN (overrides the global DENY)
+    - X-Frame-Options: SAMEORIGIN (set explicitly on the bundle)
     - Set-Cookie with sh_app_bundle_{id} is present
     """
     from socialhome.app_keys import config_key

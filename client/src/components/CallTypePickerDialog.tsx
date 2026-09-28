@@ -19,8 +19,9 @@
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { startCall } from '@/features/calls/callSession'
+import { showCallError } from '@/features/calls/CallEmbedBlockedDialog'
+import { CallEmbedBlockedError } from '@/features/calls/embedPolicy'
 import { Modal } from './Modal'
-import { showToast } from './Toast'
 
 const open = signal(false)
 const conversationId = signal<string | null>(null)
@@ -45,7 +46,10 @@ export function CallTypePickerDialog() {
       open.value = false
       loc.route(`/calls/${callId}`)
     } catch (err: unknown) {
-      showToast(`Couldn't start the call: ${(err as Error)?.message ?? err}`, 'error')
+      // An embed that denies the mic can't be retried from here — swap the
+      // picker for the "open in its own tab" dialog.
+      if (err instanceof CallEmbedBlockedError) open.value = false
+      showCallError("Couldn't start the call", err)
       submitting.value = false
     }
   }
@@ -67,7 +71,7 @@ export function CallTypePickerDialog() {
         >
           <span class="sh-call-picker-icon" aria-hidden="true">📞</span>
           <span class="sh-call-picker-label">Audio</span>
-          <span class="sh-call-picker-meta">Voice only — turn on the camera later if you want.</span>
+          <span class="sh-call-picker-meta">Voice only — the camera stays off.</span>
         </button>
         <button
           type="button"
