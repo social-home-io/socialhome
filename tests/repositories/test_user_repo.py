@@ -910,3 +910,21 @@ async def test_api_token_with_unparseable_expiry_fails_closed(env):
     """
     await _token_for(env, "whenever")
     assert await env.user_repo.get_user_by_token_hash("hash-exp") is None
+
+
+async def test_list_with_expired_status(env):
+    """Only rows whose ``status_expires_at`` is at/before ``now`` come back."""
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    for name in ("gone", "later", "forever", "blank"):
+        await env.user_svc.provision(username=name, display_name=name)
+    await env.user_svc.set_status("gone", text="a", clear_after="30m", now=now)
+    await env.user_svc.set_status("later", text="b", clear_after="4h", now=now)
+    await env.user_svc.set_status("forever", text="c", now=now)
+    probe = (now + timedelta(hours=1)).isoformat(timespec="seconds")
+    got = await env.user_repo.list_with_expired_status(probe)
+    assert [u.username for u in got] == ["gone"]
+    # Boundary: expiring exactly "now" counts as expired.
+    exact = (now + timedelta(minutes=30)).isoformat(timespec="seconds")
+    assert [
+        u.username for u in await env.user_repo.list_with_expired_status(exact)
+    ] == ["gone"]

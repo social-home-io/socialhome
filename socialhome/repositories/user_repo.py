@@ -37,6 +37,7 @@ class AbstractUserRepo(Protocol):
     async def list_active(self) -> list[User]: ...
     async def list_all(self) -> list[User]: ...
     async def list_by_ids(self, user_ids: set[str]) -> list[User]: ...
+    async def list_with_expired_status(self, now_iso: str) -> list[User]: ...
     async def set_admin(self, username: str, is_admin: bool) -> None: ...
     async def set_last_seen(self, user_id: str, at: str) -> None: ...
     async def set_tz(self, username: str, tz: str) -> None: ...
@@ -318,6 +319,16 @@ class SqliteUserRepo:
         rows = await self._db.fetchall(
             f"SELECT * FROM users WHERE user_id IN ({placeholders})",
             tuple(user_ids),
+        )
+        return [u for u in (_row_to_user(d) for d in rows_to_dicts(rows)) if u]
+
+    async def list_with_expired_status(self, now_iso: str) -> list[User]:
+        """Local users whose ``status_expires_at`` is at or before ``now_iso``
+        (UTC ISO-8601, the same shape :meth:`UserService.set_status` stores)."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM users WHERE status_expires_at IS NOT NULL "
+            "AND status_expires_at <= ?",
+            (now_iso,),
         )
         return [u for u in (_row_to_user(d) for d in rows_to_dicts(rows)) if u]
 

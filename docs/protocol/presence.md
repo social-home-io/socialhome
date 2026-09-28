@@ -77,6 +77,14 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
      remote member instance, encrypted payload `{user_id, lat, lon,
      accuracy_m, updated_at}`.
 
+   On the receiving household the inbound handler stores the pin
+   (coordinates truncated to 4 decimals, none at all for `zone_only`)
+   and emits the same local `space_location_updated` frame to that
+   space's local members, so remote pins move live. A pin whose mode
+   differs from the receiving space's `location_mode` is stored but
+   neither shown on the map nor sent as a frame. It is never
+   re-federated.
+
    **Both space-bound payloads strip `zone_name`.** HA zones do not
    reach a space. To label a member's pin on the space map, each
    space carries its own zone catalogue (see "Per-space zones" below);
@@ -108,6 +116,19 @@ Local admin CRUD also fires a `space_zone_changed` WS frame to space
 members on this instance so the admin UI redraws without polling.
 The frame shape is `{type: "space_zone_changed", data: {space_id,
 action: "upsert"|"delete", zone_id, zone: SpaceZone | null}}`.
+
+## User status (`USER_STATUS_UPDATED`)
+
+A member's status is an emoji plus one line of text with an optional
+deadline, set through `PATCH /api/me`. Every change (set, cleared, or
+cleared by the expiry sweep at its deadline) goes to each confirmed
+social peer the user is visible to, pairwise-encrypted, as
+`{user_id, emoji, text, expires_at}` or `{user_id, status_cleared: true}`.
+Only users homed on the sending household are sent; a status received
+from a peer is never echoed back into the mesh. The receiver applies
+the same caps as the local route (text ≤ 80 characters on one line, a
+single emoji) and refuses an envelope that breaks them, then fans a
+`user.status_changed` frame to its household.
 
 ## USERS_SYNC
 

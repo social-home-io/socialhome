@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pytest
 
 from socialhome.domain.user import (
     DisplayableUser,
     MemberRef,
     RESERVED_USERNAMES,
+    STATUS_TEXT_MAX_CHARS,
     RemoteUser,
     User,
     UserIdentityAssertion,
+    UserStatus,
+    clean_status_emoji,
+    clean_status_text,
 )
 
 
@@ -133,3 +140,44 @@ def test_user_identity_assertion_wire_roundtrip_legacy_omits_binding():
         signature="instance-sig",
     )
     assert UserIdentityAssertion.from_wire_dict(a.to_wire_dict()) == a
+
+
+# ─── UserStatus + status validation ──────────────────────────────────────
+
+
+def test_user_status_is_set_and_expired():
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    assert UserStatus().is_set is False
+    assert UserStatus(text="hi").is_set is True
+    assert UserStatus(text="hi").is_expired(now) is False
+    assert UserStatus(text="hi", expires_at="2026-09-28T12:00:00+00:00").is_expired(now)
+    assert not UserStatus(text="hi", expires_at="2026-09-28T12:00:01+00:00").is_expired(
+        now
+    )
+    # Naive reads as UTC; unparseable counts as expired.
+    assert UserStatus(text="hi", expires_at="2026-09-28 11:00:00").is_expired(now)
+    assert UserStatus(text="hi", expires_at="soon").is_expired(now)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, None), ("", None), ("   ", None), (" 👍🏽 ", "👍🏽"), ("1️⃣", "1️⃣")],
+)
+def test_clean_status_emoji_accepts(raw, expected):
+    assert clean_status_emoji(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["ok", ":)", "🎉 🎉", "🎉\n🎉", "🎉" * 17, 5])
+def test_clean_status_emoji_rejects(raw):
+    with pytest.raises(ValueError):
+        clean_status_emoji(raw)
+
+
+def test_clean_status_text_caps_and_single_line():
+    assert clean_status_text(None) is None
+    assert clean_status_text("  ") is None
+    assert clean_status_text(" Lunch ") == "Lunch"
+    assert clean_status_text("x" * STATUS_TEXT_MAX_CHARS) == "x" * STATUS_TEXT_MAX_CHARS
+    for bad in ("x" * (STATUS_TEXT_MAX_CHARS + 1), "a\nb", "a\x00b", 3):
+        with pytest.raises(ValueError):
+            clean_status_text(bad)

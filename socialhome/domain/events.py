@@ -254,6 +254,31 @@ class SpaceLocationModeChanged(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteSpaceLocationUpdated(DomainEvent):
+    """A remote member's space-map pin was stored (§23.8.6).
+
+    Published by the inbound ``SPACE_LOCATION_UPDATED`` handler after the
+    ``space_remote_member_locations`` upsert, with coordinates already
+    truncated to 4 decimals. :class:`SpaceLocationOutbound` turns it into
+    the same local ``space_location_updated`` frame a local member's move
+    produces, so remote pins move live instead of on the Map tab's poll.
+    Local-only: never re-federated.
+    """
+
+    space_id: str
+    instance_id: str
+    user_id: str
+    mode: str  # "gps" | "zone_only"
+    latitude: float | None = None
+    longitude: float | None = None
+    accuracy_m: float | None = None
+    zone_id: str | None = None
+    zone_name: str | None = None
+    updated_at: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceLocationFeatureEnabled(DomainEvent):
     """Admin flipped ``feature_location`` from OFF to ON (§23.8.6).
 

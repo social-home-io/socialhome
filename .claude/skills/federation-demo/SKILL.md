@@ -86,7 +86,7 @@ That single command runs the full sequence:
    other), launch all five backends, and walk the
    ``/api/setup/standalone`` wizard so each gets a bearer token.
 2. ``pair`` — four QR handshakes (a↔b, b↔c, a↔c, b↔d). After this
-   ``/api/pairing/connections`` returns the expected confirmed-peer
+   ``/api/connections`` (the un-throttled alias of ``/api/pairing/connections``; every harness read uses it) returns the expected confirmed-peer
    counts on each instance (a:2, b:3, c:2, d:1, **e:0** — e stays
    unpaired on purpose; see Topology).
 3. ``relay-pair`` — §11 simple-pairing dry run.

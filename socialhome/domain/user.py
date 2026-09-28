@@ -19,6 +19,8 @@ must never appear in any API response or federation payload.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import unicodedata
 
 
 # Usernames that a platform adapter must never provision, because the spec
@@ -55,6 +57,82 @@ class UserStatus:
     emoji: str | None = None
     text: str | None = None
     expires_at: str | None = None  # ISO-8601 UTC; ``None`` = no expiry
+
+    @property
+    def is_set(self) -> bool:
+        return bool(self.emoji or self.text)
+
+    def is_expired(self, now: datetime) -> bool:
+        """``True`` once ``expires_at`` has passed (``now`` is tz-aware).
+
+        An unparseable ``expires_at`` counts as expired — a status whose
+        deadline can't be read is not one we should keep showing.
+        """
+        if not self.expires_at:
+            return False
+        try:
+            deadline = datetime.fromisoformat(self.expires_at)
+        except ValueError:
+            return True
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return deadline <= now
+
+
+#: Longest status text (code points) — matches the SPA input's cap.
+STATUS_TEXT_MAX_CHARS: int = 80
+#: Longest status emoji (code points). A single emoji grapheme can span
+#: several code points (skin-tone modifier, ZWJ family / profession
+#: sequences, keycaps, tag-sequence flags); 16 covers all of them while
+#: keeping the field from becoming a second text line.
+STATUS_EMOJI_MAX_CODEPOINTS: int = 16
+
+
+def clean_status_text(value: object) -> str | None:
+    """Validate a status text; ``None`` / blank → ``None``.
+
+    Raises :class:`ValueError` when it isn't a string, is too long, or
+    carries control characters / line breaks (the status is one line).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("The status text must be text.")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > STATUS_TEXT_MAX_CHARS:
+        raise ValueError(
+            f"Keep the status to {STATUS_TEXT_MAX_CHARS} characters or fewer."
+        )
+    if any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in text):
+        raise ValueError("Keep the status to a single line.")
+    return text
+
+
+def clean_status_emoji(value: object) -> str | None:
+    """Validate a status emoji; ``None`` / blank → ``None``.
+
+    A sanity check, not a full emoji parser: at most
+    :data:`STATUS_EMOJI_MAX_CODEPOINTS` code points, no whitespace or
+    control characters, and at least one non-ASCII code point (so plain
+    words like ``"busy"`` belong in the text, while keycaps such as
+    ``1️⃣`` still pass).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Pick a single emoji for your status.")
+    emoji = value.strip()
+    if not emoji:
+        return None
+    if len(emoji) > STATUS_EMOJI_MAX_CODEPOINTS:
+        raise ValueError("Pick a single emoji for your status.")
+    if any(unicodedata.category(ch) in ("Cc", "Zs", "Zl", "Zp") for ch in emoji):
+        raise ValueError("Pick a single emoji for your status.")
+    if all(ord(ch) < 0x80 for ch in emoji):
+        raise ValueError("Pick a single emoji for your status.")
+    return emoji
 
 
 @dataclass(slots=True, frozen=True)

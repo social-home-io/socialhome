@@ -3642,7 +3642,7 @@ def cmd_relay_pair() -> None:
         for delay in (25.0, 20.0, 20.0):
             time.sleep(delay)
             s, conns = _request(
-                f"http://127.0.0.1:{info['port']}/api/pairing/connections",
+                f"http://127.0.0.1:{info['port']}/api/connections",
                 token=info["token"],
             )
             if s == 429:
@@ -4136,11 +4136,18 @@ def cmd_verify() -> None:
     # fast run. One fetch, reused by every reader that only needs the
     # snapshot; the polls that genuinely need fresh data (the transport
     # probe) still fetch their own.
+    #
+    # Every read in verify goes through the ``/api/connections`` alias
+    # (same view, same shape) rather than ``/api/pairing/connections``:
+    # the limiter keys on the ``/api/pairing`` prefix, and the steps
+    # before verify (pair, relay-pair, share_home PATCHes) can leave b's
+    # bucket empty — this fetch then 429'd, was skipped, and block 7
+    # failed "b: no pairing-connections snapshot" on the first run.
     _conns: dict[str, list] = {}
     for viewer in ("a", "b", "c"):
         v = state["instances"][viewer]
         s, conns = _request(
-            f"http://127.0.0.1:{v['port']}/api/pairing/connections",
+            f"http://127.0.0.1:{v['port']}/api/connections",
             token=v["token"],
         )
         if s != 200 or not isinstance(conns, list):
@@ -4484,7 +4491,7 @@ def cmd_verify() -> None:
                             # sender would have transparently fallen back to
                             # JSON (still correct, but not what v_14 ships).
                             _, conns_c = _request(
-                                f"http://127.0.0.1:{c['port']}/api/pairing/connections",
+                                f"http://127.0.0.1:{c['port']}/api/connections",
                                 token=c["token"],
                             )
                             a_iid = state["instances"]["a"]["instance_id"]
@@ -4633,7 +4640,7 @@ def cmd_verify() -> None:
         for viewer, peer in (("a", d_iid), ("d", a_iid)):
             info = state["instances"][viewer]
             s, conns = _request(
-                f"http://127.0.0.1:{info['port']}/api/pairing/connections",
+                f"http://127.0.0.1:{info['port']}/api/connections",
                 token=info["token"],
             )
             _must(f"connections({viewer})", s, conns)
@@ -4819,7 +4826,7 @@ def cmd_verify() -> None:
         for src in ("a", "b", "c"):
             info = state["instances"][src]
             s, conns = _request(
-                f"http://127.0.0.1:{info['port']}/api/pairing/connections",
+                f"http://127.0.0.1:{info['port']}/api/connections",
                 token=info["token"],
             )
             if s == 429:

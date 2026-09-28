@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -12,6 +13,7 @@ from socialhome.crypto import (
     derive_user_id,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import UserStatusChanged
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.user_repo import SqliteUserRepo
@@ -731,3 +733,114 @@ async def test_apply_ha_username_only_matches_ha_source(stack):
     # Untouched — source!='ha'.
     assert await stack.user_svc.get("manualguy") is not None
     assert await stack.user_svc.get("renamed") is None
+
+
+# ─── Status: validation, clear-after, expiry ─────────────────────────────
+
+_NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+
+
+async def test_set_status_publishes_status_changed(stack):
+    await stack.provision_user("pascal")
+    seen: list[UserStatusChanged] = []
+
+    async def _on(e):
+        seen.append(e)
+
+    stack.bus.subscribe(UserStatusChanged, _on)
+    u = await stack.user_svc.set_status("pascal", emoji=" 🎉 ", text=" party ")
+    assert (u.status.emoji, u.status.text) == ("🎉", "party")
+    assert seen[-1].status == u.status
+    await stack.user_svc.set_status("pascal", emoji=None, text="")
+    assert seen[-1].status is None
+    # Clearing an already-clear status is a no-op — no duplicate frame.
+    await stack.user_svc.set_status("pascal")
+    assert len(seen) == 2
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected"),
+    [
+        ("30m", "2026-09-28T12:30:00+00:00"),
+        ("1h", "2026-09-28T13:00:00+00:00"),
+        ("4h", "2026-09-28T16:00:00+00:00"),
+        (None, None),
+    ],
+)
+async def test_set_status_clear_after_choices(stack, choice, expected):
+    await stack.provision_user("pascal")
+    u = await stack.user_svc.set_status(
+        "pascal", emoji="🎉", clear_after=choice, now=_NOW
+    )
+    assert u.status.expires_at == expected
+    stored = await stack.user_repo.get("pascal")
+    assert stored.status.expires_at == expected
+
+
+async def test_set_status_today_ends_at_local_midnight(stack):
+    await stack.provision_user("pascal")
+    await stack.user_svc.set_tz("pascal", "Europe/Zurich")
+    u = await stack.user_svc.set_status(
+        "pascal", text="out", clear_after="today", now=_NOW
+    )
+    # 12:00Z is 14:00 in Zurich (CEST, +02:00); midnight there is 22:00Z.
+    assert u.status.expires_at == "2026-09-28T22:00:00+00:00"
+
+
+async def test_set_status_explicit_iso_clear_after(stack):
+    await stack.provision_user("pascal")
+    u = await stack.user_svc.set_status(
+        "pascal", text="out", clear_after="2026-09-29T08:00:00+02:00", now=_NOW
+    )
+    assert u.status.expires_at == "2026-09-29T06:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text": "x" * 81},
+        {"text": "two\nlines"},
+        {"text": 42},
+        {"emoji": "busy"},
+        {"emoji": "🎉 🎉"},
+        {"emoji": "🎉" * 17},
+        {"emoji": "🎉", "clear_after": "2h"},
+        {"emoji": "🎉", "clear_after": 30},
+        {"emoji": "🎉", "clear_after": "2026-09-28T11:00:00+00:00"},  # past
+        {"emoji": "🎉", "clear_after": "2026-10-06T12:00:00+00:00"},  # > 7 d
+        {"emoji": "🎉", "clear_after": "2026-09-28T13:00:00"},  # naive
+    ],
+)
+async def test_set_status_rejects_invalid_input(stack, kwargs):
+    await stack.provision_user("pascal")
+    with pytest.raises(ValueError):
+        await stack.user_svc.set_status("pascal", now=_NOW, **kwargs)
+    assert (await stack.user_repo.get("pascal")).status.is_set is False
+
+
+async def test_set_status_accepts_multi_codepoint_emoji(stack):
+    await stack.provision_user("pascal")
+    for emoji in ("👍🏽", "👨‍👩‍👧‍👦", "1️⃣", "🏳️‍🌈"):
+        u = await stack.user_svc.set_status("pascal", emoji=emoji)
+        assert u.status.emoji == emoji
+
+
+async def test_clear_expired_statuses_clears_and_publishes(stack):
+    await stack.provision_user("pascal")
+    await stack.provision_user("anna")
+    await stack.user_svc.set_status("pascal", emoji="🎉", clear_after="30m", now=_NOW)
+    await stack.user_svc.set_status("anna", emoji="🌴", clear_after="4h", now=_NOW)
+    seen: list[UserStatusChanged] = []
+
+    async def _on(e):
+        seen.append(e)
+
+    stack.bus.subscribe(UserStatusChanged, _on)
+    later = _NOW + timedelta(hours=1)
+    assert await stack.user_svc.clear_expired_statuses(now=later) == 1
+    pascal = await stack.user_repo.get("pascal")
+    assert pascal.status.is_set is False
+    assert (await stack.user_repo.get("anna")).status.emoji == "🌴"
+    assert [(e.user_id, e.status) for e in seen] == [(pascal.user_id, None)]
+    # A second sweep finds nothing left to clear.
+    assert await stack.user_svc.clear_expired_statuses(now=later) == 0

@@ -4,11 +4,12 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Avatar } from '@/components/Avatar'
-import { StatusEditor } from '@/components/StatusEditor'
+import { StatusEditor, formatClearsAt } from '@/components/StatusEditor'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
-import { showToast } from '@/components/Toast'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
+import { currentUser } from '@/store/auth'
+import type { UserStatus } from '@/types'
 
 interface PresenceEntry {
   username: string
@@ -23,6 +24,8 @@ interface PresenceEntry {
   is_online?: boolean
   is_idle?: boolean
   dnd?: boolean
+  /** Emoji + text status; null when unset or expired. */
+  status?: UserStatus | null
 }
 
 /** Compact "5 min ago" / "2 h ago" / "3 d ago" rendering for the
@@ -39,12 +42,16 @@ function humanizeAgo(iso: string | null | undefined): string | null {
   return `${Math.floor(sec / 86400)} d ago`
 }
 
-type ExpiryDuration = '30m' | '1h' | '4h' | 'today' | 'none'
-
 const presenceList = signal<PresenceEntry[]>([])
 const loading = signal(true)
-const statusExpiry = signal<ExpiryDuration>('none')
 const showStatusEditor = signal(false)
+
+/** "🌴 On leave" — null when there is nothing to show. */
+function statusLine(s: UserStatus | null | undefined): string | null {
+  if (!s || (!s.emoji && !s.text)) return null
+  if (s.expires_at && Date.parse(s.expires_at) <= Date.now()) return null
+  return [s.emoji, s.text].filter(Boolean).join(' ')
+}
 
 function presenceDot(state: string): string {
   switch (state) {
@@ -88,50 +95,53 @@ export default function PresencePage() {
     const offOnline = ws.on('user.online', refresh)
     const offIdle = ws.on('user.idle', refresh)
     const offOffline = ws.on('user.offline', refresh)
-    return () => { offUpdated(); offOnline(); offIdle(); offOffline() }
+    // A member's status (set, cleared, or expired by the server's sweep).
+    // Our own status also lands on ``currentUser`` so the "Your status"
+    // line follows a change made from another tab.
+    const offStatus = ws.on('user.status_changed', (e) => {
+      const me = currentUser.value
+      if (me && e.data.user_id === me.user_id) {
+        currentUser.value = {
+          ...me,
+          status: (e.data.status as UserStatus | null)
+            ?? { emoji: null, text: null, expires_at: null },
+        }
+      }
+      refresh()
+    })
+    return () => { offUpdated(); offOnline(); offIdle(); offOffline(); offStatus() }
   }, [])
 
-  const setExpiry = async (duration: ExpiryDuration) => {
-    statusExpiry.value = duration
-    let clear_after: string | null = null
-    if (duration === '30m') clear_after = '30m'
-    else if (duration === '1h') clear_after = '1h'
-    else if (duration === '4h') clear_after = '4h'
-    else if (duration === 'today') clear_after = 'today'
-    try {
-      await api.patch('/api/me', { status_clear_after: clear_after })
-      showToast(`Status will clear after ${duration === 'none' ? 'never' : duration}`, 'info')
-    } catch {
-      showToast('Failed to set expiry', 'error')
-    }
-  }
-
   if (loading.value) return <Spinner />
+
+  const myStatus = currentUser.value?.status
+  const myLine = statusLine(myStatus)
 
   return (
     <div class="sh-presence">
 
       <div class="sh-presence-controls">
-        <div class="sh-status-expiry">
-          <span>Clear status after:</span>
-          <div class="sh-expiry-options">
-            {(['none', '30m', '1h', '4h', 'today'] as ExpiryDuration[]).map(d => (
-              <button
-                key={d}
-                type="button"
-                class={statusExpiry.value === d ? 'sh-chip sh-chip--active' : 'sh-chip'}
-                onClick={() => setExpiry(d)}
-              >
-                {d === 'none' ? 'Never' : d}
-              </button>
-            ))}
+        {showStatusEditor.value ? (
+          <StatusEditor
+            onSave={() => { showStatusEditor.value = false; void loadPresenceList() }}
+            onCancel={() => { showStatusEditor.value = false }}
+          />
+        ) : (
+          <div class="sh-my-status">
+            <span class="sh-my-status__label">Your status</span>
+            <span class={myLine ? 'sh-my-status__value' : 'sh-my-status__value sh-muted'}>
+              {myLine ?? 'No status set'}
+              {myLine && myStatus?.expires_at && (
+                <span class="sh-muted">
+                  {` · clears ${formatClearsAt(myStatus.expires_at)}`}
+                </span>
+              )}
+            </span>
+            <Button variant="secondary" onClick={() => { showStatusEditor.value = true }}>
+              {myLine ? 'Edit status' : 'Set status'}
+            </Button>
           </div>
-        </div>
-
-        <Button variant="secondary" onClick={() => { showStatusEditor.value = !showStatusEditor.value }}>
-          {showStatusEditor.value ? 'Hide status editor' : 'Set status'}
-        </Button>
-        {showStatusEditor.value && <StatusEditor onSave={() => { showStatusEditor.value = false }} />}
+        )}
       </div>
 
       <div class="sh-presence-map">
@@ -201,6 +211,9 @@ export default function PresencePage() {
                 {!online && lastSeen && `· Last seen ${lastSeen}`}
                 {!online && !lastSeen && '· Offline'}
               </span>
+              {statusLine(p.status) && (
+                <span class="sh-presence-status">{statusLine(p.status)}</span>
+              )}
             </div>
           </div>
         )

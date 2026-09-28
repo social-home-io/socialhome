@@ -26,6 +26,16 @@ export interface User {
    *  user's actual wall clock. Editable from the settings page. */
   tz?: string
   is_new_member: boolean
+  /** Emoji + one-line status (``PATCH /api/me``). Every field is null
+   *  when no status is set; an expired one already reads as unset. */
+  status?: UserStatus | null
+}
+
+export interface UserStatus {
+  emoji: string | null
+  text: string | null
+  /** UTC ISO-8601 deadline ("clear after"), or null to keep it. */
+  expires_at: string | null
 }
 
 export interface SpaceMemberProfile {
