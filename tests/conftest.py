@@ -361,6 +361,7 @@ from socialhome.config import Config  # noqa: E402
 from socialhome.crypto import generate_identity_keypair, derive_instance_id  # noqa: E402
 from socialhome.db import database as _db_module  # noqa: E402
 from socialhome.db.database import AsyncDatabase  # noqa: E402
+from socialhome.global_server.config import GfsConfig  # noqa: E402
 from socialhome.infrastructure.event_bus import EventBus  # noqa: E402
 from socialhome.repositories.conversation_repo import SqliteConversationRepo  # noqa: E402
 from socialhome.repositories.notification_repo import SqliteNotificationRepo  # noqa: E402
@@ -385,8 +386,8 @@ TEST_WRITE_WINDOW_MS = 1
 #: sites) and are collapsed to :data:`TEST_WRITE_WINDOW_MS`.
 _FAST_WINDOW_CEILING_MS = 10
 
-#: The production default window (500 ms), as ``Config`` and
-#: ``AsyncDatabase`` each declare it. A test that never chose a window runs
+#: The production default window, as ``Config``, ``GfsConfig`` and
+#: ``AsyncDatabase`` each declare it (5 ms today; it was 500 ms). A test that never chose a window runs
 #: with this one, so it is collapsed too. Any OTHER explicit window is a test
 #: choosing one on purpose (the batching tests use 200 ms) and is kept.
 _PRODUCTION_WINDOWS_MS = frozenset(
@@ -399,6 +400,7 @@ _PRODUCTION_WINDOWS_MS = frozenset(
         inspect.signature(AsyncDatabase.__init__)
         .parameters["batch_timeout_ms"]
         .default,
+        GfsConfig().write_batch_window_ms,
     }
 )
 
@@ -418,13 +420,13 @@ def _fast_test_databases():
       full migration chain on every fresh file. Wrap the runner it calls so
       the first empty DB per process pays for the real chain and every later
       one is a page copy of that result — see ``tests/migration_template.py``.
-    * **Write-batch window.** The writer holds every batch open for the full
-      window waiting for companions, so each *sequential* ``enqueue`` costs
+    * **Write-batch window.** The writer waits the full window for
+      companions before it commits (no lock held while it waits), so each *sequential* ``enqueue`` costs
       at least one window. Tests pass 10 ms to mean "fast", yet 10 ms per
       write was the single largest cost of the suite (a fixture seeding 40
       rows spent 0.4 s just waiting), and every test that never chose a
-      window — ``GfsApp`` has no knob at all, nor does a bare ``Config(...)``
-      — paid the production 500 ms per write. Collapse those to
+      window paid the production default per write (500 ms until that
+      default came down to a few ms). Collapse those to
       :data:`TEST_WRITE_WINDOW_MS`. Writes queued in the same tick still
       coalesce (the drain takes whatever is already queued), and a window a
       test set on purpose is kept, so the database's own batching tests are

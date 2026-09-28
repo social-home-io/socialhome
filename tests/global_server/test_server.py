@@ -1009,3 +1009,15 @@ def test_bad_signing_seed_override_is_rejected(tmp_path, bad):
     with pytest.raises(ValueError) as exc:
         _boot(tmp_path, signing_seed_hex=bad)
     assert bad not in str(exc.value)
+
+
+async def test_gfs_database_runs_the_configured_write_window(tmp_path):
+    """``[server] write_batch_window_ms`` reaches the GFS's AsyncDatabase.
+
+    Before, ``GfsApp`` built its database with no window at all, so every
+    GFS node ran the 500 ms production default and every sequential write
+    a request made waited out half a second.
+    """
+    cfg = GfsConfig(data_dir=str(tmp_path), write_batch_window_ms=37)
+    gfs = server.GfsApp(cfg, db_path_override=tmp_path / "gfs.db")
+    assert gfs.db.batch_window_ms == 37

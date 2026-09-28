@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from socialhome.config import Config, _split_toml
+from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 
 
 def test_defaults():
@@ -205,3 +206,16 @@ def test_map_tile_url_env_overrides_toml(tmp_path, monkeypatch):
     monkeypatch.setenv("SH_MAP_TILE_URL", "https://other.example/{z}/{x}/{y}.png")
     cfg = Config.from_env()
     assert cfg.map_tile_url == "https://other.example/{z}/{x}/{y}.png"
+
+
+def test_write_batch_window_defaults_to_the_interactive_window(monkeypatch):
+    """A household no longer spends half a second per sequential write.
+
+    The writer waits the whole window for companion statements before it
+    commits, so the old 500 ms default made creating a post (four sequential
+    writes) take ~2 s and a reaction ~0.5 s.
+    """
+    monkeypatch.delenv("SH_DB_WRITE_BATCH_TIMEOUT_MS", raising=False)
+    assert Config().db_write_batch_timeout_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
+    assert Config.from_env().db_write_batch_timeout_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
+    assert DEFAULT_WRITE_BATCH_WINDOW_MS <= 20

@@ -573,7 +573,14 @@ WS pushes across allocs. The step:
    publish the link right now"; with ``busy_timeout=0`` this step reports
    ``12 of 24 … failed`` and the lock lines, so it is a real regression
    guard, not a smoke test.
-4. Confirms a client registered via one node is served by the other
+   Both bursts print their wall time.
+4. Publishes 8 more spaces **one at a time** (alternating nodes) and fails
+   if the median request exceeds 250 ms. The DB writer waits its
+   write-batch window for companion statements before committing, so every
+   sequential write pays it; at the old fixed 500 ms every publish took
+   ≥ 0.5 s (`GFS_WRITE_BATCH_WINDOW_MS=500` in the environment reproduces
+   that: median ~509 ms, the step fails). At the 5 ms default: ~7 ms.
+5. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 
 ```bash

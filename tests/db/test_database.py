@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import sqlite3
 
 import pytest
 
-from socialhome.db.database import AsyncDatabase
+from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS, AsyncDatabase
 from socialhome.db.migrations import MigrationError, discover_migrations
 
 
@@ -552,3 +554,59 @@ async def test_enqueue_rowcount_reports_rows_changed(tmp_dir):
     row = await db.fetchone("SELECT v FROM t WHERE id='r1'")
     assert row is not None and row["v"] == "y"
     await db.shutdown()
+
+
+def test_default_write_window_is_interactive():
+    """The writer waits the whole window for companions before committing,
+    so the default window is a floor on every write's latency. 500 ms made
+    each sequential ``enqueue`` cost half a second; a few ms still coalesces
+    a burst (the drain takes whatever is already queued, up to
+    ``batch_max``)."""
+    default = (
+        inspect.signature(AsyncDatabase.__init__).parameters["batch_timeout_ms"].default
+    )
+    assert default == DEFAULT_WRITE_BATCH_WINDOW_MS
+    assert DEFAULT_WRITE_BATCH_WINDOW_MS <= 20
+
+
+async def test_batch_window_ms_reports_the_configured_window(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "w.db", batch_timeout_ms=37)
+    assert db.batch_window_ms == 37
+
+
+async def test_writer_does_not_hold_the_write_lock_while_it_waits(tmp_dir):
+    """The coalescing window is spent COLLECTING statements, not inside a
+    transaction: ``BEGIN IMMEDIATE`` is only taken to flush. So another
+    process sharing the file (a GFS cluster node) can write while this
+    writer is still waiting out its window — its lock wait is the other
+    node's short flush, never the window.
+
+    ``timeout=0`` on the other connection makes any held lock an instant
+    ``database is locked`` instead of a silent wait.
+    """
+    path = tmp_dir / "nolock.db"
+    db = AsyncDatabase(path, batch_timeout_ms=300)
+    await db.startup()
+    try:
+        await db.enqueue("CREATE TABLE t(x INTEGER)")
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        pending = asyncio.create_task(db.enqueue("INSERT INTO t VALUES(1)"))
+        await asyncio.sleep(0.05)  # the writer is now inside its window
+        assert not pending.done()
+
+        def other_node_writes() -> None:
+            other = sqlite3.connect(str(path), isolation_level=None, timeout=0)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("INSERT INTO t VALUES(2)")
+                other.execute("COMMIT")
+            finally:
+                other.close()
+
+        await loop.run_in_executor(None, other_node_writes)
+        assert loop.time() - started < 0.3, "other write waited out the window"
+        await pending
+        assert await db.fetchval("SELECT COUNT(*) FROM t") == 2
+    finally:
+        await db.shutdown()
