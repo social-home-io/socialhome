@@ -276,4 +276,69 @@ describe('SpaceLocationCard', () => {
       mockWs.on.mock.calls.some((c: any[]) => c[0] === 'space_zone_changed'),
     ).toBe(true)
   })
+
+  describe('live space_location_updated pins', () => {
+    const pascal = (lat: number) => ({
+      user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
+      state: 'not_home', latitude: lat, longitude: 8.5417,
+      gps_accuracy_m: 10, picture_url: null,
+    })
+    let entries: unknown[]
+    const presenceGets = () => mockApi.get.mock.calls
+      .filter((c: unknown[]) => String(c[0]).endsWith('/presence')).length
+    const pinHandler = () => {
+      const call = mockWs.on.mock.calls.find((c: unknown[]) => c[0] === 'space_location_updated')
+      return (call as unknown as [string, (e: unknown) => void])[1]
+    }
+
+    beforeEach(() => {
+      entries = [pascal(47.3769)]
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.includes('/presence')) {
+          return Promise.resolve({
+            feature_enabled: true, location_mode: 'gps', entries,
+          })
+        }
+        return Promise.resolve({ zones: [] })
+      })
+    })
+
+    it('refetches presence once for a burst of pin frames for this space', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const { findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+        await findByText(/sharing GPS/i)
+        expect(presenceGets()).toBe(1)
+        entries = [pascal(47.4), { ...pascal(47.5), user_id: 'u_anna', username: 'anna', display_name: 'Anna' }]
+        const frame = (lat: number) => ({
+          type: 'space_location_updated',
+          data: { type: 'space_location_updated', data: { space_id: 'sp_test', user_id: 'u_pascal', mode: 'gps', lat, lon: 8.5 } },
+        })
+        pinHandler()(frame(47.4))
+        pinHandler()(frame(47.41))
+        pinHandler()(frame(47.42))
+        await vi.advanceTimersByTimeAsync(600)
+        expect(presenceGets()).toBe(2)
+        await findByText(/^2 of \d+ sharing GPS/)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('ignores a pin frame for another space', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const { findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+        await findByText(/sharing GPS/i)
+        pinHandler()({
+          type: 'space_location_updated',
+          data: { type: 'space_location_updated', data: { space_id: 'sp_other', user_id: 'u_x' } },
+        })
+        await vi.advanceTimersByTimeAsync(600)
+        expect(presenceGets()).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
 })

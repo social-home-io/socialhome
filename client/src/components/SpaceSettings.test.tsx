@@ -575,4 +575,56 @@ describe('SpaceSettings', () => {
       space_type: 'public',
     })
   })
+
+  describe('dissolve', () => {
+    async function proposeDissolve(result: Promise<unknown>) {
+      const { isLocalDissolve } = await import('@/store/spaces')
+      let markedDuringRequest = false
+      apiMock.post.mockImplementationOnce(() => {
+        // The server's ``dissolved`` frame lands while this request is
+        // still in flight — the tab must already have claimed it.
+        markedDuringRequest = isLocalDissolve('s-1')
+        return result
+      })
+      const { getByText, getByRole } = render(
+        <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+      )
+      fireEvent.click(getByText('Dissolve space'))
+      fireEvent.click(getByRole('button', { name: 'Propose dissolve' }))
+      await vi.waitFor(() => expect(apiMock.post).toHaveBeenCalled())
+      await new Promise(r => setTimeout(r, 0))
+      return { markedDuringRequest, isLocalDissolve }
+    }
+
+    it('claims an executed dissolve and hard-navigates inside the ingress base', async () => {
+      const spy = vi.spyOn(window, 'location', 'get')
+      const loc = { href: '' } as Location
+      spy.mockReturnValue(loc)
+      try {
+        const { markedDuringRequest } = await proposeDissolve(
+          Promise.resolve({ proposal: { status: 'executed' } }),
+        )
+        expect(markedDuringRequest).toBe(true)
+        expect(apiMock.post).toHaveBeenCalledWith(
+          '/api/spaces/s-1/proposals', { action: 'dissolve' },
+        )
+        expect(loc.href.endsWith('/spaces')).toBe(true)
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('releases the claim when the dissolve is only proposed', async () => {
+      const { markedDuringRequest, isLocalDissolve } = await proposeDissolve(
+        Promise.resolve({ proposal: { status: 'pending', needed: 2 } }),
+      )
+      expect(markedDuringRequest).toBe(true)
+      expect(isLocalDissolve('s-1')).toBe(false)
+    })
+
+    it('releases the claim when the request fails', async () => {
+      const { isLocalDissolve } = await proposeDissolve(Promise.reject(new Error('nope')))
+      expect(isLocalDissolve('s-1')).toBe(false)
+    })
+  })
 })

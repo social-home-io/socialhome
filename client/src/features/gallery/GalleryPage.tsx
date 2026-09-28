@@ -69,18 +69,34 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
 
   // Live cross-device updates: refetch on gallery WS frames, scoped to
   // this page (a space gallery vs the household gallery). Thin frames →
-  // refetch the canonical GET shape; reload the open album's items too.
+  // refetch the canonical GET shape quietly (no spinner, so an open album
+  // isn't swapped for a loader) and follow the open album: its items on
+  // an upload / delete, its header on a rename or cover change, and back
+  // to the list when another device or household deletes it.
   useEffect(() => {
-    const handle = (e: { data: { space_id?: string | null; album_id?: string } }) => {
-      if ((e.data.space_id ?? null) !== (spaceId ?? null)) return
-      void loadAlbums(spaceId)
+    type GalleryFrame = { data: { space_id?: string | null; album_id?: string } }
+    const inScope = (e: GalleryFrame) =>
+      (e.data.space_id ?? null) === (spaceId ?? null)
+    const handle = (e: GalleryFrame) => {
+      if (!inScope(e)) return
+      void loadAlbums(spaceId, { quiet: true })
       if (activeAlbum.value && e.data.album_id === activeAlbum.value.id) {
         void loadItems(activeAlbum.value.id)
       }
     }
+    const onAlbumDeleted = (e: GalleryFrame) => {
+      if (!inScope(e)) return
+      if (activeAlbum.value && e.data.album_id === activeAlbum.value.id) {
+        activeAlbum.value = null
+        items.value = []
+        showToast('This album was deleted.', 'info')
+      }
+      void loadAlbums(spaceId, { quiet: true })
+    }
     const offs = [
       ws.on('gallery.album_created', handle),
-      ws.on('gallery.album_deleted', handle),
+      ws.on('gallery.album_updated', handle),
+      ws.on('gallery.album_deleted', onAlbumDeleted),
       ws.on('gallery.item_uploaded', handle),
       ws.on('gallery.item_deleted', handle),
     ]
@@ -499,21 +515,29 @@ function CreateAlbumForm({
   )
 }
 
-async function loadAlbums(spaceId?: string) {
-  loading.value = true
+/** Fetch the album list. ``quiet`` is the live-refresh path: no spinner
+ *  and no error toast (a failed refresh keeps the list on screen). The
+ *  open album's header (name / cover) follows the fresh row either way. */
+async function loadAlbums(spaceId?: string, { quiet = false } = {}) {
+  if (!quiet) loading.value = true
   try {
     const url = spaceId
       ? `/api/spaces/${spaceId}/gallery/albums`
       : '/api/gallery/albums'
-    albums.value = await api.get(url) as Album[]
+    const rows = await api.get(url) as Album[]
+    albums.value = rows
+    const open = activeAlbum.value
+    const fresh = open ? rows.find(a => a.id === open.id) : undefined
+    if (fresh) activeAlbum.value = fresh
   } catch (err: unknown) {
+    if (quiet) return
     showToast(
       `Could not load albums: ${(err as Error)?.message ?? err}`,
       'error',
     )
     albums.value = []
   } finally {
-    loading.value = false
+    if (!quiet) loading.value = false
   }
 }
 

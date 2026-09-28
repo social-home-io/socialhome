@@ -2,12 +2,14 @@
  * ModerationQueue — admin review UI for moderated content (§23.96/§23.97).
  *
  * Fetches `/api/spaces/{spaceId}/moderation` on mount and on every
- * ``spaceId`` change, then lets the admin approve or reject each item.
+ * ``spaceId`` change (and again, quietly, on every ``space.moderation.*``
+ * frame for the space), then lets the admin approve or reject each item.
  * Rejection pops a ``RejectReasonDialog`` for the reason textarea.
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { ws, type WsEvent } from '@/ws'
 import { Button } from './Button'
 import { showToast } from './Toast'
 import { Spinner } from './Spinner'
@@ -109,8 +111,24 @@ export function ModerationQueue({ spaceId }: { spaceId: string }) {
       .finally(() => {
         if (!cancelled) loading.value = false
       })
+    // Live: a member submitted something, or another admin (or this
+    // admin on another device) decided an item. Refetch the canonical
+    // admin-only list quietly — no spinner, and a failed refresh keeps
+    // the current rows rather than flipping to the error state.
+    const onModerationFrame = (e: WsEvent) => {
+      if ((e.data as { space_id?: string }).space_id !== spaceId) return
+      api.get(`/api/spaces/${spaceId}/moderation`)
+        .then((data: QueueItem[]) => { if (!cancelled) items.value = data })
+        .catch(() => { /* keep the rows on screen */ })
+    }
+    const offs = [
+      'space.moderation.queued',
+      'space.moderation.approved',
+      'space.moderation.rejected',
+    ].map(type => ws.on(type, onModerationFrame))
     return () => {
       cancelled = true
+      offs.forEach(off => off())
     }
   }, [spaceId])
 

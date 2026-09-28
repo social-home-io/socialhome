@@ -33,6 +33,7 @@ import { SpaceTasksTab, resetSpaceTasks } from './SpaceTasksTab'
 import { SpaceBazaarTab } from './SpaceBazaarTab'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
+import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 import { CalendarEventDialog, openSpaceEventDialog } from '@/components/CalendarEventDialog'
 import { SpaceLinksStrip } from './SpaceLinksStrip'
 import { SpaceProposalsBanner } from '@/components/SpaceProposalsBanner'
@@ -138,6 +139,37 @@ const viewerRole = signal<
 const spaceDetail = signal<SpaceDetail | null>(null)
 const memberCount = signal<number | null>(null)
 
+/** The space header + the viewer's role: ``GET /api/spaces/{id}`` (name,
+ *  emoji, cover, features → tabs, archive state) and the member list
+ *  (role → admin-only UI, member count). Runs on open and again on every
+ *  ``space.config.changed`` frame — a rename, feature toggle or admin
+ *  grant elsewhere shows up without a reload. A failed refetch keeps
+ *  what's on screen. */
+async function loadSpaceHeader(spaceId: string) {
+  const me = currentUser.value?.user_id
+  await Promise.all([
+    api.get(`/api/spaces/${spaceId}`).then((d) => {
+      spaceDetail.value = d as SpaceDetail
+    }).catch(() => { /* non-fatal */ }),
+    // Derive viewer's role from the member list so admin-only UI renders.
+    me
+      ? api.get(`/api/spaces/${spaceId}/members`)
+        .then((members: { user_id: string; role: string }[]) => {
+          memberCount.value = members.length
+          const mine = members.find(m => m.user_id === me)
+          viewerRole.value = (
+            mine
+            && (mine.role === 'owner' || mine.role === 'admin'
+                || mine.role === 'member' || mine.role === 'subscriber')
+          )
+            ? mine.role
+            : undefined
+        })
+        .catch(() => { /* keep the last role */ })
+      : Promise.resolve(),
+  ])
+}
+
 async function loadSpaceFeed(spaceId: string) {
   const rows = await api.get(`/api/spaces/${spaceId}/feed`) as FeedPost[]
   posts.value = rows
@@ -190,6 +222,9 @@ export default function SpaceFeedPage() {
   // fetches /api/spaces/{id}/theme, sets CSS vars, and cleans up on
   // unmount so household colours return as the user leaves.
   useSpaceTheme(spaceId)
+  // Live header / tabs / role on a config change elsewhere; a dissolve
+  // leaves for the spaces list with a toast.
+  useSpaceConfigWs(spaceId, () => { void loadSpaceHeader(spaceId) })
   // Surface the space's name in the global TopBar (matches the
   // household feed pattern). Falls back to "Space" while the detail
   // request is in flight.
@@ -213,29 +248,10 @@ export default function SpaceFeedPage() {
     selectedSpaceEventId.value = null
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
-    api.get(`/api/spaces/${spaceId}`).then((d) => {
-      spaceDetail.value = d as SpaceDetail
-    }).catch(() => { /* non-fatal */ })
     loadSpaceFeed(spaceId)
       .catch(() => { posts.value = [] })
       .finally(() => { loading.value = false })
-    // Derive viewer's role from the member list so admin-only UI renders.
-    const me = currentUser.value?.user_id
-    if (me) {
-      api.get(`/api/spaces/${spaceId}/members`)
-        .then((members: { user_id: string; role: string }[]) => {
-          memberCount.value = members.length
-          const mine = members.find(m => m.user_id === me)
-          if (
-            mine
-            && (mine.role === 'owner' || mine.role === 'admin'
-                || mine.role === 'member' || mine.role === 'subscriber')
-          ) {
-            viewerRole.value = mine.role
-          }
-        })
-        .catch(() => { viewerRole.value = undefined })
-    }
+    void loadSpaceHeader(spaceId)
 
     const off4 = ws.on('space.post.created', (e) => {
       const d = e.data as { space_id?: string | null }

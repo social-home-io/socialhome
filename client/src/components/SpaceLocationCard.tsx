@@ -96,6 +96,9 @@ interface SpaceMember {
 }
 
 const POLL_INTERVAL_MS = 30_000
+/** Window that folds a burst of ``space_location_updated`` frames into
+ *  one presence refetch. */
+export const PIN_REFRESH_COALESCE_MS = 500
 
 function modalSeenKey(spaceId: string): string {
   return `sh.space.${spaceId}.locationModalSeen`
@@ -189,10 +192,33 @@ export function SpaceLocationCard({
       }
     })
 
+    // A local member's pin moved (``SpaceLocationOutbound`` fans
+    // ``{type, data: {space_id, user_id, mode, …}}`` to this space's
+    // local members). The frame is the federation payload, not the
+    // presence-entry shape the map renders, so refetch the presence
+    // view only — zones and the roster didn't change. Coalesced so a
+    // burst of GPS updates costs one request. Remote members' pins
+    // still arrive via the 30 s poll (no frame for inbound pins).
+    let pinTimer: ReturnType<typeof setTimeout> | null = null
+    const offPin = ws.on('space_location_updated', (e) => {
+      const d = (e.data as { data?: { space_id?: string } }).data
+      if (d?.space_id !== spaceId || pinTimer !== null) return
+      pinTimer = setTimeout(() => {
+        pinTimer = null
+        api.get(`/api/spaces/${spaceId}/presence`)
+          .then((presence) => {
+            if (!cancelled) setData(presence as SpacePresenceResponse)
+          })
+          .catch(() => { /* keep the last map; the poll retries */ })
+      }, PIN_REFRESH_COALESCE_MS)
+    })
+
     return () => {
       cancelled = true
       clearInterval(t)
+      if (pinTimer !== null) clearTimeout(pinTimer)
       offZone()
+      offPin()
     }
   }, [spaceId, currentUserId])
 
