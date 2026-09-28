@@ -182,6 +182,7 @@ class GfsSpaceMirrorService:
             try:
                 async with client.get(
                     url,
+                    allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=_MIRROR_FETCH_TIMEOUT_S),
                 ) as resp:
                     if resp.status == 404:

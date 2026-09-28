@@ -128,6 +128,7 @@ class HighlightPublicationService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/highlights/{highlight.id}/publish",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -178,6 +179,7 @@ class HighlightPublicationService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/highlight_tokens/{token}/revoke",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -207,6 +209,7 @@ class HighlightPublicationService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/highlights/{highlight.id}/unpublish",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:

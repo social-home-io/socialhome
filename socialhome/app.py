@@ -59,6 +59,7 @@ from .i18n import Catalog
 from .identity_bootstrap import ensure_instance_identity
 from .infrastructure.user_identity import ensure_user_identities
 from .media_signer import MediaUrlSigner, derive_signing_key
+from .peer_http import post_to_peer
 from . import __version__
 from .infrastructure import (
     PAIR_WINDOW_404_ATTEMPTS,
@@ -468,7 +469,8 @@ async def _redeliver_envelope(
 
     try:
         client = await federation_service._get_http_client()
-        async with client.post(
+        async with post_to_peer(
+            client,
             instance.remote_inbox_url,
             data=body,
             headers={"Content-Type": "application/json"},

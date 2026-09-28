@@ -55,6 +55,7 @@ from .gfs_relay_transport import (
 )
 from ..domain.events import PeerTransportChanged
 from ..exception_text import describe_exception
+from ..peer_http import post_to_peer
 from ..domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
@@ -136,7 +137,8 @@ class HttpsInboxTransport:
         """
         try:
             client = await self._client_once()
-            async with client.post(
+            async with post_to_peer(
+                client,
                 instance.remote_inbox_url,
                 json=envelope_dict,
                 timeout=ClientTimeout(total=self._timeout_s),

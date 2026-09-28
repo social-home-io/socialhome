@@ -346,6 +346,7 @@ class MomentPublicSignalingHandler:
         try:
             async with self._http_client.post(
                 url,
+                allow_redirects=False,
                 data=self._iter_moment_frames(user_id),
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=600, sock_connect=15),
@@ -471,6 +472,7 @@ class MomentPublicSignalingHandler:
         try:
             async with self._http_client.post(
                 url,
+                allow_redirects=False,
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:

@@ -107,6 +107,7 @@ class MomentPublicService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/moments/users/register",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -145,6 +146,7 @@ class MomentPublicService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/moments/users/{user_id}/deregister",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -194,6 +196,7 @@ class MomentPublicService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/moments/users/{followed_user_id}/follow",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -231,6 +234,7 @@ class MomentPublicService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/moments/users/{followed_user_id}/unfollow",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -264,6 +268,7 @@ class MomentPublicService:
         try:
             async with self._client().get(
                 url,
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status >= 300:
@@ -292,6 +297,7 @@ class MomentPublicService:
         try:
             async with self._client().get(
                 f"{conn.inbox_url}/gfs/moments/users/{user_id}/picture",
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 404:
@@ -326,6 +332,7 @@ class MomentPublicService:
         try:
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/moments/users/{user_id}/picture",
+                allow_redirects=False,
                 json=signed,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:

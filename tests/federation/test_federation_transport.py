@@ -11,9 +11,14 @@ fallback branches without the native binding.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 
+import aiohttp
 import aiolibdatachannel as rtc
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from socialhome.domain.events import PeerTransportChanged
 from socialhome.domain.federation import (
@@ -881,7 +886,7 @@ async def test_https_inbox_transport_2xx_is_ok():
             return False
 
     class _FakeClient:
-        def post(self, url, json, timeout):
+        def post(self, url, **kw):
             return _FakeResp(204)
 
     async def _factory():
@@ -907,7 +912,7 @@ async def test_https_inbox_transport_non_2xx_is_failure():
             return False
 
     class _FakeClient:
-        def post(self, url, json, timeout):
+        def post(self, url, **kw):
             return _FakeResp(503)
 
     async def _factory():
@@ -2805,3 +2810,64 @@ async def test_a_frame_too_big_for_the_relay_is_not_a_transient_failure():
     assert result.via == "gfs_relay"
     assert result.status_code == RELAY_STATUS_TOO_LARGE
     assert result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
+
+
+# ─── HttpsInboxTransport: redirects ───────────────────────────────────────
+
+
+@pytest.fixture
+async def redirect_server():
+    hits: list[str] = []
+
+    async def inbox(request: web.Request) -> web.Response:
+        hits.append("inbox")
+        return web.Response(status=202)
+
+    async def elsewhere(request: web.Request) -> web.Response:
+        hits.append("elsewhere")
+        raise web.HTTPPermanentRedirect(f"http://localhost:{request.url.port}/inbox")
+
+    async def slash(request: web.Request) -> web.Response:
+        hits.append("slash")
+        raise web.HTTPPermanentRedirect("/inbox")
+
+    app = web.Application()
+    app.router.add_post("/inbox", inbox)
+    app.router.add_post("/elsewhere", elsewhere)
+    app.router.add_post("/slash", slash)
+    srv = TestServer(app, host="127.0.0.1")
+    await srv.start_server()
+    async with aiohttp.ClientSession() as session:
+
+        async def _factory():
+            return session
+
+        yield srv, HttpsInboxTransport(client_factory=_factory), hits
+    await srv.close()
+
+
+def _at(srv, path: str) -> RemoteInstance:
+    return dataclasses.replace(
+        _fake_instance("peer"),
+        remote_inbox_url=f"http://127.0.0.1:{srv.port}{path}",
+    )
+
+
+async def test_https_inbox_transport_refuses_a_redirect_to_another_host(
+    redirect_server,
+):
+    """A 3xx from (or in front of) the peer must not carry the signed
+    envelope to a host its inbox URL never named."""
+    srv, wt, hits = redirect_server
+    ok, status = await wt.send(instance=_at(srv, "/elsewhere"), envelope_dict={})
+    assert ok is False and status == 308
+    assert hits == ["elsewhere"]
+
+
+async def test_https_inbox_transport_follows_one_same_host_redirect(
+    redirect_server,
+):
+    srv, wt, hits = redirect_server
+    ok, status = await wt.send(instance=_at(srv, "/slash"), envelope_dict={})
+    assert ok is True and status == 202
+    assert hits == ["slash", "inbox"]

@@ -31,6 +31,7 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..crypto import b64url_decode, verify_ed25519
+from ..peer_http import post_to_peer
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import (
     normalize_category,
@@ -1468,12 +1469,15 @@ class GfsFederationService:
 
         # HTTPS-inbox fallback.
         try:
-            async with session.post(
+            async with post_to_peer(
+                session,
                 sub.inbox_url,
                 json=event_body,
                 timeout=aiohttp.ClientTimeout(total=FAN_OUT_TIMEOUT_SECONDS),
             ) as resp:
-                if resp.status < 400:
+                # 2xx only: a redirect is not followed off the registered
+                # address (``socialhome.peer_http``), so a 3xx is not delivery.
+                if 200 <= resp.status < 300:
                     return sub.instance_id
                 # DEBUG, not WARNING, on purpose: a household's registered
                 # ``inbox_url`` is ``<base>/federation/inbox`` while its actual

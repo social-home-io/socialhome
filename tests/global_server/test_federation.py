@@ -8,7 +8,10 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -3053,3 +3056,39 @@ async def test_republishing_a_readable_space_keeps_subscribers(svc):
     )
     subs = await svc._repo.list_subscribers("sp-keep")
     assert sorted(s.instance_id for s in subs) == ["keep-a", "keep-b"]
+
+
+# ── HTTPS-inbox fallback: redirects ────────────────────────────────────────────
+
+
+async def test_fan_out_inbox_fallback_does_not_follow_a_redirect_elsewhere():
+    """A subscriber's registered inbox answering 3xx to another host is NOT
+    a delivery — and the relay frame never goes to that host."""
+    hits: list[str] = []
+
+    async def elsewhere(request: web.Request) -> web.Response:
+        hits.append("elsewhere")
+        return web.Response(status=202)
+
+    async def registered(request: web.Request) -> web.Response:
+        hits.append("registered")
+        raise web.HTTPTemporaryRedirect(f"http://localhost:{request.url.port}/x")
+
+    app = web.Application()
+    app.router.add_post("/x", elsewhere)
+    app.router.add_post("/wh", registered)
+    srv = TestServer(app, host="127.0.0.1")
+    await srv.start_server()
+    try:
+        svc = GfsFederationService(object(), ws_registry=None)
+        sub = GfsSubscriber(
+            instance_id="sub-r", inbox_url=f"http://127.0.0.1:{srv.port}/wh"
+        )
+        async with aiohttp.ClientSession() as session:
+            delivered = await svc._fan_out(
+                [sub], {"space_id": "sp", "payload": {}}, session
+            )
+    finally:
+        await srv.close()
+    assert delivered == []
+    assert hits == ["registered"]
