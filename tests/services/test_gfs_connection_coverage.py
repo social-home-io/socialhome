@@ -4,11 +4,18 @@ unpublish, appeal, and the _client() guard.
 
 from __future__ import annotations
 
+import base64
+from types import SimpleNamespace
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
+from socialhome.domain.media_constraints import (
+    SPACE_IMAGE_DATA_URI_MAX_CHARS,
+    SPACE_IMAGE_DATA_URI_PREFIX,
+)
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.services.gfs_connection_service import (
     GfsConnectionError,
@@ -565,3 +572,40 @@ async def test_report_fraud_network_error_returns_false(env):
         signing_key=b"\x00" * 32,
     )
     assert ok is False
+
+
+async def test_image_data_uri_omits_an_oversized_cover(env):
+    """A cover/icon whose bytes exceed the embed cap is left out of the
+    publish body (returns "") so it can't push the body past the GFS
+    request limit and fail the whole publish; a small one is embedded.
+    """
+    svc = GfsConnectionService(env)
+    cap = svc._MAX_EMBEDDED_IMAGE_BYTES
+
+    class _CoverRepo:
+        def __init__(self, blob: bytes) -> None:
+            self._blob = blob
+
+        async def get(self, space_id: str):
+            return (self._blob, "hash")
+
+    space = SimpleNamespace(id="sp-1", cover_hash="h", icon_hash="h")
+
+    # Oversized → omitted.
+    big = await svc._image_data_uri(_CoverRepo(b"x" * (cap + 1)), space)
+    assert big == ""
+    # Exactly at the cap → embedded, and fits the shared data-URI bound the
+    # GFS stores under.
+    at_cap = await svc._image_data_uri(_CoverRepo(b"x" * cap), space)
+    assert at_cap.startswith(SPACE_IMAGE_DATA_URI_PREFIX)
+    assert len(at_cap) == SPACE_IMAGE_DATA_URI_MAX_CHARS
+    # Small → embedded as a round-trippable data URI.
+    small = await svc._image_data_uri(_CoverRepo(b"x" * 32), space)
+    assert base64.b64decode(small[len(SPACE_IMAGE_DATA_URI_PREFIX) :]) == b"x" * 32
+    # The icon path is bounded the same way.
+    assert (
+        await svc._image_data_uri(_CoverRepo(b"x" * (cap + 1)), space, icon=True) == ""
+    )
+    # No cover set → empty regardless.
+    none_space = SimpleNamespace(id="sp-2", cover_hash=None, icon_hash=None)
+    assert await svc._image_data_uri(_CoverRepo(b"x"), none_space) == ""
