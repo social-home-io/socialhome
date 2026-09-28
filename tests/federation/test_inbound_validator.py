@@ -19,6 +19,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
     InstanceSource,
+    PairingStatus,
 )
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
@@ -33,6 +34,7 @@ from socialhome.federation.inbound_validator import (
     make_check_space_writer,
     make_check_replay,
     make_check_timestamp,
+    make_check_unpairing,
     make_idempotency_check,
     make_lookup_instance,
     make_parse_json,
@@ -641,6 +643,115 @@ async def test_peer_class_gate_is_a_step_in_both_shipped_pipelines():
     assert svc is not None
 
 
+async def test_unpairing_gate_sits_between_signature_and_replay():
+    """Mutation guard: after the signature (the nudge must be authentic),
+    before the replay-id is recorded (a refused envelope is not "seen")."""
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.index("verify_signature") < names.index("check_unpairing")
+    assert names.index("check_unpairing") < names.index("check_replay")
+
+
+# ─── Unpair tombstone gate ───────────────────────────────────────────────
+
+
+class _StatusInstance:
+    def __init__(self, status):
+        self.status = status
+        self.from_instance = "remote-iid"
+
+
+async def test_unpairing_gate_passes_every_type_for_a_live_peer():
+    step = make_check_unpairing()
+    for status in (PairingStatus.CONFIRMED, PairingStatus.PENDING_RECEIVED):
+        for event_type in FederationEventType:
+            await step(
+                InboundContext(
+                    envelope=_minimal_envelope(event_type=event_type.value),
+                    instance=_StatusInstance(status),
+                )
+            )
+
+
+async def test_unpairing_gate_lets_only_unpair_through_from_a_tombstone():
+    refused: list[str] = []
+
+    async def _nudge(iid: str) -> None:
+        refused.append(iid)
+
+    step = make_check_unpairing(on_refused=_nudge)
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(event_type=FederationEventType.UNPAIR.value),
+            instance=_StatusInstance(PairingStatus.UNPAIRING),
+        )
+    )
+    assert refused == []
+    for event_type in FederationEventType:
+        if event_type is FederationEventType.UNPAIR:
+            continue
+        with pytest.raises(ValueError, match="No instance found"):
+            await step(
+                InboundContext(
+                    inbox_id="wh-x",
+                    envelope=_minimal_envelope(event_type=event_type.value),
+                    instance=_StatusInstance(PairingStatus.UNPAIRING),
+                )
+            )
+    assert set(refused) == {"remote-iid"}
+
+
+async def test_unpairing_gate_refuses_even_when_the_nudge_fails():
+    async def _boom(iid: str) -> None:
+        raise RuntimeError("db down")
+
+    step = make_check_unpairing(on_refused=_boom)
+    with pytest.raises(ValueError, match="No instance found"):
+        await step(
+            InboundContext(
+                instance_id="remote-iid",
+                envelope=_minimal_envelope(
+                    event_type=FederationEventType.PRESENCE_UPDATED.value
+                ),
+                instance=_StatusInstance(PairingStatus.UNPAIRING),
+            )
+        )
+
+
+async def test_unpairing_gate_logs_info_only_when_it_pulled_the_unpair_forward(
+    caplog,
+):
+    """A hostile ex-peer can send envelopes as fast as it likes; only the
+    refusal that actually expedited the UNPAIR logs at INFO, every repeat
+    (the nudge found nothing parked) drops to DEBUG."""
+    results = iter([True, False, False])
+
+    async def _nudge(iid: str) -> bool:
+        return next(results)
+
+    step = make_check_unpairing(on_refused=_nudge)
+
+    def _refuse():
+        return step(
+            InboundContext(
+                envelope=_minimal_envelope(
+                    event_type=FederationEventType.PRESENCE_UPDATED.value
+                ),
+                instance=_StatusInstance(PairingStatus.UNPAIRING),
+            )
+        )
+
+    with caplog.at_level("DEBUG", logger="socialhome.federation.inbound_validator"):
+        for _ in range(3):
+            with pytest.raises(ValueError, match="No instance found"):
+                await _refuse()
+    levels = [r.levelname for r in caplog.records if "UNPAIR" in r.getMessage()]
+    assert levels == ["INFO", "DEBUG", "DEBUG"]
+
+
 async def test_the_space_writer_gate_is_a_step_in_the_shipped_pipeline():
     """Mutation guard: the Follower gate has to be IN the chain — and
     LAST, so the replay-id is persisted whether or not the write is kept
@@ -690,6 +801,7 @@ class _StubPipelineOwner:
     _space_repo = None
     _space_remote_member_repo = None
     _pending_seat_buffer = None
+    _on_tombstone_contact = None
     _own_instance_id = "own-1"
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):

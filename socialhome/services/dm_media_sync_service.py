@@ -50,9 +50,11 @@ from ..domain.federation import FederationEventType
 from ..media.image_processor import ImageProcessor
 from ..media.video_processor import VideoProcessor
 from .backoff import jittered_backoff_seconds
+from .peer_unpair_service import is_unpair_tombstone
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..federation.federation_service import FederationService
     from ..repositories.conversation_repo import AbstractConversationRepo
     from ..repositories.dm_media_outbox_repo import AbstractDmMediaOutboxRepo
@@ -119,6 +121,7 @@ class DmMediaSyncService(VisibilityMixin):
         "_convos",
         "_outbox",
         "_federation",
+        "_federation_repo",
         "_media_dir",
         "_image_proc",
         "_video_proc",
@@ -137,10 +140,13 @@ class DmMediaSyncService(VisibilityMixin):
         media_dir: pathlib.Path,
         interval_seconds: float = 5.0,
         visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        federation_repo: "AbstractFederationRepo | None" = None,
     ) -> None:
         self._convos = convos
         self._outbox = outbox
         self._federation = federation
+        #: Only to recognise an unpair tombstone (see :func:`is_unpair_tombstone`).
+        self._federation_repo = federation_repo
         self._media_dir = media_dir
         self._visibility_repo = visibility_repo
         # One processor instance is fine — ``ImageProcessor`` is
@@ -377,6 +383,16 @@ class DmMediaSyncService(VisibilityMixin):
         due = await self._outbox.list_due(limit=limit)
         shipped = 0
         for entry in due:
+            if await is_unpair_tombstone(
+                self._federation_repo, entry.target_instance_id
+            ):
+                # It gets our UNPAIR and nothing else; the row can never
+                # ship (unpairing already purged the rest).
+                await self._outbox.delete(
+                    blob_id=entry.blob_id,
+                    target_instance_id=entry.target_instance_id,
+                )
+                continue
             await self._outbox.mark_in_flight(
                 blob_id=entry.blob_id,
                 target_instance_id=entry.target_instance_id,

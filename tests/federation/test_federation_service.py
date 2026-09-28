@@ -6,6 +6,7 @@ All tests use in-memory stubs — no network, no real disk.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -121,15 +122,29 @@ class InMemoryFederationRepo:
         """Test helper — not part of AbstractFederationRepo."""
         self._space_members.add((space_id, instance_id))
 
-    async def get_instance(self, instance_id: str) -> RemoteInstance | None:
-        return self._instances.get(instance_id)
+    async def get_instance(
+        self,
+        instance_id: str,
+        *,
+        include_unpairing: bool = False,
+    ) -> RemoteInstance | None:
+        inst = self._instances.get(instance_id)
+        if inst is None:
+            return None
+        if inst.status is PairingStatus.UNPAIRING and not include_unpairing:
+            return None
+        return inst
 
     async def get_instance_by_local_inbox_id(
         self,
         local_inbox_id: str,
+        *,
+        include_unpairing: bool = False,
     ) -> RemoteInstance | None:
         for inst in self._instances.values():
             if inst.local_inbox_id == local_inbox_id:
+                if inst.status is PairingStatus.UNPAIRING and not include_unpairing:
+                    return None
                 return inst
         return None
 
@@ -302,6 +317,7 @@ class InMemoryOutboxRepo:
                 "instance_id": instance_id,
                 "event_type": event_type,
                 "payload_json": payload_json,
+                "expires_at": expires_at,
             }
         )
         return entry_id
@@ -534,6 +550,90 @@ async def test_send_event_failure_enqueues_outbox():
     assert outbox_repo.enqueued[0]["instance_id"] == inst.id
     # reachable → unreachable edge fired exactly once so the SPA flips red live
     assert unreachable == [inst.id]
+
+
+@pytest.mark.asyncio
+async def test_queue_event_seals_for_a_tombstone_and_only_queues():
+    """``queue_event`` is how an unpair reaches a peer that was offline: it
+    must work on an ``unpairing`` row (which ``send_event`` refuses), make
+    no delivery attempt, and carry the caller's retry deadline."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, session_key = _make_remote_instance(km)
+    await fed_repo.save_instance(
+        dataclasses.replace(inst, status=PairingStatus.UNPAIRING)
+    )
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(side_effect=AssertionError("no delivery attempt"))
+    svc, own_kp = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=mock_http,
+    )
+
+    sent = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.UNPAIR,
+        payload={},
+    )
+    assert sent.ok is False and sent.error == "unknown_instance"
+    assert outbox_repo.enqueued == []
+
+    msg_id = await svc.queue_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.UNPAIR,
+        payload={},
+        expires_at="2030-01-01T00:00:00+00:00",
+    )
+    (row,) = outbox_repo.enqueued
+    assert row["id"] == msg_id
+    assert row["event_type"] is FederationEventType.UNPAIR
+    assert row["expires_at"] == "2030-01-01T00:00:00+00:00"
+    envelope = json.loads(row["payload_json"])
+    assert envelope["event_type"] == "unpair"
+    assert envelope["to_instance"] == inst.id
+    assert (
+        json.loads(
+            svc._encoder.decrypt_payload(envelope["encrypted_payload"], session_key)
+        )
+        == {}
+    )
+
+
+async def test_queue_event_for_unknown_instance_queues_nothing():
+    outbox_repo = InMemoryOutboxRepo()
+    svc, _ = _make_service(outbox_repo=outbox_repo)
+    assert (
+        await svc.queue_event(
+            to_instance_id="nope",
+            event_type=FederationEventType.UNPAIR,
+            payload={},
+        )
+        is None
+    )
+    assert outbox_repo.enqueued == []
+
+
+async def test_queue_event_with_unreadable_session_key_queues_nothing():
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(dataclasses.replace(inst, key_self_to_remote="junk"))
+    svc, _ = _make_service(
+        federation_repo=fed_repo, outbox_repo=outbox_repo, key_manager=km
+    )
+    assert (
+        await svc.queue_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.UNPAIR,
+            payload={},
+        )
+        is None
+    )
+    assert outbox_repo.enqueued == []
 
 
 @pytest.mark.asyncio

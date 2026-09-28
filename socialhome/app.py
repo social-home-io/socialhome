@@ -45,6 +45,7 @@ from .domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     FederationEventType,
     InstanceSource,
+    PairingStatus,
 )
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
@@ -354,6 +355,27 @@ async def _download_bytes(url: str) -> bytes:
             return await resp.read()
 
 
+async def _deliver_outbox_entry(
+    federation_service: FederationService,
+    federation_repo,
+    peer_unpair: PeerUnpairService,
+    entry,
+) -> DeliveryOutcome:
+    """The :class:`OutboxProcessor` delivery callback.
+
+    :func:`_redeliver_envelope` does the work; an ``UNPAIR`` that reached a
+    verdict (delivered, or refused for good — the peer already forgot us)
+    also ends the peer's unpair tombstone.
+    """
+    outcome = await _redeliver_envelope(federation_service, federation_repo, entry)
+    if (
+        entry.event_type is FederationEventType.UNPAIR
+        and outcome is not DeliveryOutcome.TRANSIENT
+    ):
+        await peer_unpair.finish_unpair(entry.instance_id)
+    return outcome
+
+
 async def _redeliver_envelope(
     federation_service: FederationService,
     federation_repo,
@@ -397,7 +419,10 @@ async def _redeliver_envelope(
     * 5xx, timeout, network error → :attr:`DeliveryOutcome.TRANSIENT`
       (reschedule with backoff).
     """
-    instance = await federation_repo.get_instance(entry.instance_id)
+    instance = await federation_repo.get_instance(
+        entry.instance_id,
+        include_unpairing=True,
+    )
     if instance is None:
         # Peer was unpaired (the row in ``remote_instances`` is gone)
         # between the original ``send_event`` enqueue and this retry —
@@ -407,6 +432,24 @@ async def _redeliver_envelope(
         # mark reachable, no URL to POST to, and the operator already
         # decided to drop the peer.
         log.warning("outbox: unknown instance %s — dropping", entry.instance_id)
+        return DeliveryOutcome.PERMANENT
+
+    # Unpair tombstone (§11): a peer we unpaired while it was offline gets
+    # our queued UNPAIR and nothing else — and an UNPAIR goes to nobody
+    # BUT a tombstone. The second half matters after a re-pair: the old
+    # UNPAIR still queued for that household is superseded by the new
+    # pairing and must never reach it.
+    tombstoned = instance.status is PairingStatus.UNPAIRING
+    if (entry.event_type is FederationEventType.UNPAIR) is not tombstoned:
+        log.info(
+            "outbox: dropping %s %s for %s — %s",
+            entry.event_type.value,
+            entry.id,
+            entry.instance_id,
+            "the peer is being unpaired"
+            if tombstoned
+            else "superseded, the peer is paired again",
+        )
         return DeliveryOutcome.PERMANENT
 
     # Re-stamp + re-sign BEFORE the delivery try: a malformed / legacy /
@@ -526,16 +569,29 @@ async def _redeliver_envelope(
                     # resolve the inbox id we hold, and retrying the full
                     # ladder just burns ~8 hours and a PeerConnection per
                     # attempt to reach the same conclusion.
-                    if entry.attempts < PAIR_WINDOW_404_ATTEMPTS:
+                    # Exception: an UNPAIR to a tombstone. A 404 not from
+                    # the peer's Social Home says nothing about whether it
+                    # still holds us — it has simply not been told yet.
+                    # Dropping it would purge the tombstone and leave the
+                    # peer paired to us for good, so it keeps retrying
+                    # until the UNPAIR's own ``expires_at``.
+                    unpair_blocked = (
+                        entry.event_type is FederationEventType.UNPAIR
+                        and not peer_rejected
+                    )
+                    if unpair_blocked or entry.attempts < PAIR_WINDOW_404_ATTEMPTS:
                         log.info(
                             "outbox: %s returned 404 for %s (%s) — attempt"
-                            " %d, retrying (pair-window race)",
+                            " %d, retrying (%s)",
                             entry.instance_id,
                             entry.id,
                             "peer's Social Home rejected the inbox id"
                             if peer_rejected
                             else "not from the peer's Social Home",
                             entry.attempts + 1,
+                            "UNPAIR not delivered yet"
+                            if unpair_blocked
+                            else "pair-window race",
                         )
                         return DeliveryOutcome.TRANSIENT
                     if peer_rejected:
@@ -772,6 +828,8 @@ def _wire_federation_stack(
     space_media_sync_service,
     dm_routing_service,
     dm_routing_repo,
+    dm_media_outbox_repo,
+    space_media_outbox_repo,
     presence_service,
     online_status_service,
     report_service,
@@ -991,6 +1049,8 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         outbox_repo=outbox_repo,
         routing_repo=dm_routing_repo,
+        dm_media_outbox_repo=dm_media_outbox_repo,
+        space_media_outbox_repo=space_media_outbox_repo,
     )
     PairingInboundHandlers(
         bus=bus,
@@ -1625,6 +1685,7 @@ def create_app(config: Config | None = None) -> web.Application:
         federation=None,  # set by attach_federation below
         media_dir=pathlib.Path(config.media_path),
         visibility_repo=repos.peer_user_visibility,
+        federation_repo=federation_repo,
     )
     # Space media sync — same shape as DmMediaSyncService but tied
     # to space_media_outbox so the two streams backoff
@@ -1633,6 +1694,7 @@ def create_app(config: Config | None = None) -> web.Application:
         outbox=repos.space_media_outbox,
         federation=None,
         media_dir=pathlib.Path(config.media_path),
+        federation_repo=federation_repo,
     )
     # DmService starts without ``audio_transcription`` — the platform
     # adapter is built much later in ``create_app``, so the service is
@@ -2577,6 +2639,8 @@ def create_app(config: Config | None = None) -> web.Application:
             space_media_sync_service=space_media_sync_service,
             dm_routing_service=dm_routing_service,
             dm_routing_repo=repos.dm_routing,
+            dm_media_outbox_repo=repos.dm_media_outbox,
+            space_media_outbox_repo=repos.space_media_outbox,
             presence_service=presence_service,
             online_status_service=online_status_service,
             report_service=report_service,
@@ -2975,6 +3039,8 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
 
         # 6. OutboxProcessor — drains federation_outbox in the background.
+        peer_unpair_service = app[K.peer_unpair_service_key]
+
         async def _deliver(entry):
             """Re-deliver an outbox entry via FederationService.
 
@@ -2982,13 +3048,20 @@ def create_app(config: Config | None = None) -> web.Application:
             from the original send_event() call. On retry we POST the same
             bytes verbatim — no re-encryption.
             """
-            return await _redeliver_envelope(
+            return await _deliver_outbox_entry(
                 federation_service,
                 federation_repo,
+                peer_unpair_service,
                 entry,
             )
 
-        outbox_processor = OutboxProcessor(outbox_repo, _deliver)
+        # ``after_prune``: once the retention sweep has failed an UNPAIR
+        # past its max age, purge that peer's unpair tombstone.
+        outbox_processor = OutboxProcessor(
+            outbox_repo,
+            _deliver,
+            after_prune=peer_unpair_service.sweep_tombstones,
+        )
         await outbox_processor.start()
         app[K.outbox_processor_key] = outbox_processor
 

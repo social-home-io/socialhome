@@ -92,6 +92,8 @@ class AbstractDmMediaOutboxRepo(Protocol):
         target_instance_id: str,
     ) -> None: ...
 
+    async def delete_for_instance(self, target_instance_id: str) -> None: ...
+
     async def reschedule(
         self,
         *,
@@ -184,6 +186,18 @@ class SqliteDmMediaOutboxRepo:
         await self._db.enqueue(
             "DELETE FROM dm_media_outbox WHERE blob_id=? AND target_instance_id=?",
             (blob_id, target_instance_id),
+        )
+
+    async def delete_for_instance(self, target_instance_id: str) -> None:
+        """Delete every row (any status) addressed to one household.
+
+        Called when that household becomes an unpair tombstone: it gets
+        our ``UNPAIR`` and nothing else, so its media never ships.
+        Mirrors ``SqliteOutboxRepo.delete_for_instance``.
+        """
+        await self._db.enqueue(
+            "DELETE FROM dm_media_outbox WHERE target_instance_id=?",
+            (target_instance_id,),
         )
 
     async def reschedule(

@@ -51,7 +51,7 @@ class _FakeFederationRepo:
         self.instances[inst.id] = inst
         return inst
 
-    async def get_instance(self, iid):
+    async def get_instance(self, iid, *, include_unpairing=False):
         return self.instances.get(iid)
 
     async def delete_instance(self, iid):
@@ -181,6 +181,8 @@ def peer_unpair(bus, repo, outbox, routing):
         federation_repo=repo,
         outbox_repo=outbox,
         routing_repo=routing,
+        dm_media_outbox_repo=_FakeOutboxRepo(),
+        space_media_outbox_repo=_FakeOutboxRepo(),
     )
 
 

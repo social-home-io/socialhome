@@ -32,9 +32,17 @@ from .base import bool_col, row_to_dict, rows_to_dicts
 @runtime_checkable
 class AbstractFederationRepo(Protocol):
     # Remote instances ----------------------------------------------------
-    async def get_instance(self, instance_id: str) -> RemoteInstance | None: ...
+    async def get_instance(
+        self,
+        instance_id: str,
+        *,
+        include_unpairing: bool = False,
+    ) -> RemoteInstance | None: ...
     async def get_instance_by_local_inbox_id(
-        self, local_inbox_id: str
+        self,
+        local_inbox_id: str,
+        *,
+        include_unpairing: bool = False,
     ) -> RemoteInstance | None: ...
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance: ...
     async def set_proto_version(
@@ -53,6 +61,7 @@ class AbstractFederationRepo(Protocol):
     async def list_instances_in_space(self, space_id: str) -> list[RemoteInstance]: ...
     async def list_member_instance_ids(self, space_id: str) -> list[str]: ...
     async def delete_instance(self, instance_id: str) -> None: ...
+    async def mark_unpairing(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
     async def update_inbox(self, instance_id: str, new_url: str) -> None: ...
@@ -119,9 +128,26 @@ class SqliteFederationRepo:
 
     # ── Remote instances ───────────────────────────────────────────────
 
-    async def get_instance(self, instance_id: str) -> RemoteInstance | None:
+    async def get_instance(
+        self,
+        instance_id: str,
+        *,
+        include_unpairing: bool = False,
+    ) -> RemoteInstance | None:
+        """The row for ``instance_id`` — never an unpair tombstone unless
+        ``include_unpairing`` asks for it.
+
+        A :data:`~PairingStatus.UNPAIRING` row is kept only so the outbox
+        can still deliver our ``UNPAIR`` to a peer that was offline when
+        we unpaired it (see :mod:`socialhome.services.peer_unpair_service`).
+        It grants no trust, so every ordinary caller sees "no such peer".
+        Only the unpair delivery path and the inbound pipeline (which must
+        recognise the tombstone to refuse it — or to accept its ``UNPAIR``)
+        opt in.
+        """
         row = await self._db.fetchone(
-            "SELECT * FROM remote_instances WHERE id=?",
+            "SELECT * FROM remote_instances WHERE id=?"
+            + _live_clause(include_unpairing),
             (instance_id,),
         )
         return _row_to_instance(row_to_dict(row))
@@ -129,73 +155,38 @@ class SqliteFederationRepo:
     async def get_instance_by_local_inbox_id(
         self,
         local_inbox_id: str,
+        *,
+        include_unpairing: bool = False,
     ) -> RemoteInstance | None:
+        """Resolve an inbox id — tombstones hidden, as in :meth:`get_instance`."""
         row = await self._db.fetchone(
-            "SELECT * FROM remote_instances WHERE local_inbox_id=? LIMIT 1",
+            "SELECT * FROM remote_instances WHERE local_inbox_id=?"
+            + _live_clause(include_unpairing)
+            + " LIMIT 1",
             (local_inbox_id,),
         )
         return _row_to_instance(row_to_dict(row))
 
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance:
-        await self._db.enqueue(
-            """
-            INSERT INTO remote_instances(
-                id, display_name, remote_identity_pk,
-                key_self_to_remote, key_remote_to_self,
-                remote_inbox_url, local_inbox_id,
-                status, source, proto_version,
-                remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
-                intro_relay_enabled, relay_via, remote_keywrap_pk,
-                home_lat, home_lon, paired_at, created_at,
-                last_reachable_at, unreachable_since, share_home
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
-            ON CONFLICT(id) DO UPDATE SET
-                display_name=excluded.display_name,
-                remote_identity_pk=excluded.remote_identity_pk,
-                key_self_to_remote=excluded.key_self_to_remote,
-                key_remote_to_self=excluded.key_remote_to_self,
-                remote_inbox_url=excluded.remote_inbox_url,
-                status=excluded.status,
-                source=excluded.source,
-                proto_version=excluded.proto_version,
-                remote_pq_algorithm=excluded.remote_pq_algorithm,
-                remote_pq_identity_pk=excluded.remote_pq_identity_pk,
-                sig_suite=excluded.sig_suite,
-                intro_relay_enabled=excluded.intro_relay_enabled,
-                relay_via=excluded.relay_via,
-                remote_keywrap_pk=excluded.remote_keywrap_pk,
-                home_lat=excluded.home_lat,
-                home_lon=excluded.home_lon,
-                paired_at=excluded.paired_at,
-                last_reachable_at=excluded.last_reachable_at,
-                unreachable_since=excluded.unreachable_since
-            """,
-            (
-                inst.id,
-                inst.display_name,
-                inst.remote_identity_pk,
-                inst.key_self_to_remote,
-                inst.key_remote_to_self,
-                inst.remote_inbox_url,
-                inst.local_inbox_id,
-                inst.status.value,
-                inst.source.value,
-                inst.proto_version,
-                inst.remote_pq_algorithm,
-                inst.remote_pq_identity_pk,
-                inst.sig_suite,
-                int(inst.intro_relay_enabled),
-                inst.relay_via,
-                inst.remote_keywrap_pk,
-                inst.home_lat,
-                inst.home_lon,
-                inst.paired_at,
-                inst.created_at,
-                inst.last_reachable_at,
-                inst.unreachable_since,
-                int(inst.share_home),
-            ),
-        )
+        if inst.status is PairingStatus.UNPAIRING:
+            await self._db.enqueue(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+            return inst
+
+        def _run(conn) -> None:
+            # A new pairing with a household we unpaired while it was
+            # offline replaces the tombstone outright. The upsert below
+            # deliberately keeps ``local_inbox_id`` on conflict, which would
+            # pin the new pairing to the dead inbox id the peer no longer
+            # uses; and nothing the tombstone holds (old keys, old URL) may
+            # leak into the new row. One transaction: if the new row cannot
+            # be written, the tombstone (and our pending UNPAIR) survives.
+            conn.execute(
+                "DELETE FROM remote_instances WHERE id=? AND status=?",
+                (inst.id, PairingStatus.UNPAIRING.value),
+            )
+            conn.execute(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+
+        await self._db.transact(_run)
         return inst
 
     async def set_proto_version(
@@ -248,6 +239,11 @@ class SqliteFederationRepo:
         if status is not None:
             clauses.append("status=?")
             params.append(status)
+        else:
+            # Unfiltered = every *pairing*; an unpair tombstone is not one.
+            # Ask for ``status='unpairing'`` explicitly to see those.
+            clauses.append("status<>?")
+            params.append(PairingStatus.UNPAIRING.value)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = await self._db.fetchall(
             f"SELECT * FROM remote_instances{where} ORDER BY display_name",
@@ -333,6 +329,33 @@ class SqliteFederationRepo:
             "DELETE FROM remote_instances WHERE id=?",
             (instance_id,),
         )
+
+    async def mark_unpairing(self, instance_id: str) -> None:
+        """Turn a pairing into an unpair tombstone, atomically.
+
+        The row keeps only what delivering our ``UNPAIR`` needs (identity
+        key, session keys, inbox URL, source/relay); the status flip hides
+        it from every ordinary read (:meth:`get_instance`). The rows that
+        exist only *because* we are paired — the peer's people
+        (``remote_users``) and our per-peer visibility choices
+        (``peer_user_visibility``) — are dropped now, exactly as the
+        ``ON DELETE CASCADE`` of a real delete would, so the household
+        vanishes from rosters immediately rather than when the tombstone
+        is finally purged.
+        """
+
+        def _run(conn) -> None:
+            conn.execute(
+                "UPDATE remote_instances SET status=? WHERE id=?",
+                (PairingStatus.UNPAIRING.value, instance_id),
+            )
+            conn.execute("DELETE FROM remote_users WHERE instance_id=?", (instance_id,))
+            conn.execute(
+                "DELETE FROM peer_user_visibility WHERE instance_id=?",
+                (instance_id,),
+            )
+
+        await self._db.transact(_run)
 
     async def mark_reachable(self, instance_id: str) -> None:
         await self._db.enqueue(
@@ -681,6 +704,79 @@ class SqliteFederationRepo:
 
 
 # ─── Row → domain helper ──────────────────────────────────────────────────
+
+
+_UPSERT_INSTANCE_SQL = """
+INSERT INTO remote_instances(
+    id, display_name, remote_identity_pk,
+    key_self_to_remote, key_remote_to_self,
+    remote_inbox_url, local_inbox_id,
+    status, source, proto_version,
+    remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
+    intro_relay_enabled, relay_via, remote_keywrap_pk,
+    home_lat, home_lon, paired_at, created_at,
+    last_reachable_at, unreachable_since, share_home
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
+ON CONFLICT(id) DO UPDATE SET
+    display_name=excluded.display_name,
+    remote_identity_pk=excluded.remote_identity_pk,
+    key_self_to_remote=excluded.key_self_to_remote,
+    key_remote_to_self=excluded.key_remote_to_self,
+    remote_inbox_url=excluded.remote_inbox_url,
+    status=excluded.status,
+    source=excluded.source,
+    proto_version=excluded.proto_version,
+    remote_pq_algorithm=excluded.remote_pq_algorithm,
+    remote_pq_identity_pk=excluded.remote_pq_identity_pk,
+    sig_suite=excluded.sig_suite,
+    intro_relay_enabled=excluded.intro_relay_enabled,
+    relay_via=excluded.relay_via,
+    remote_keywrap_pk=excluded.remote_keywrap_pk,
+    home_lat=excluded.home_lat,
+    home_lon=excluded.home_lon,
+    paired_at=excluded.paired_at,
+    last_reachable_at=excluded.last_reachable_at,
+    unreachable_since=excluded.unreachable_since
+"""
+
+
+def _instance_params(inst: RemoteInstance) -> tuple:
+    return (
+        inst.id,
+        inst.display_name,
+        inst.remote_identity_pk,
+        inst.key_self_to_remote,
+        inst.key_remote_to_self,
+        inst.remote_inbox_url,
+        inst.local_inbox_id,
+        inst.status.value,
+        inst.source.value,
+        inst.proto_version,
+        inst.remote_pq_algorithm,
+        inst.remote_pq_identity_pk,
+        inst.sig_suite,
+        int(inst.intro_relay_enabled),
+        inst.relay_via,
+        inst.remote_keywrap_pk,
+        inst.home_lat,
+        inst.home_lon,
+        inst.paired_at,
+        inst.created_at,
+        inst.last_reachable_at,
+        inst.unreachable_since,
+        int(inst.share_home),
+    )
+
+
+def _live_clause(include_unpairing: bool) -> str:
+    """SQL suffix that hides unpair tombstones unless asked to include them.
+
+    A constant string (the status value is an enum literal, not input), so
+    it is safe to splice.
+    """
+    if include_unpairing:
+        return ""
+    return f" AND status<>'{PairingStatus.UNPAIRING.value}'"
 
 
 def _row_to_instance(row: dict | None) -> RemoteInstance | None:

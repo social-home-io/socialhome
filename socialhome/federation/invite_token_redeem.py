@@ -2066,6 +2066,8 @@ class SpaceInviteTokenRedeemCoordinator:
             peer_keywrap_pub=peer_keywrap_pub,
             is_redeemer=is_redeemer,
         )
+        # An unpair tombstone is hidden from this lookup (it is no
+        # relationship); ``save_instance`` below replaces it outright.
         existing = await self._federation_repo.get_instance(instance_id)
         if existing is not None and existing.status is PairingStatus.CONFIRMED:
             # Never downgrade or re-key an existing RELATIONSHIP (a real
@@ -2074,8 +2076,8 @@ class SpaceInviteTokenRedeemCoordinator:
             return
         if existing is not None:
             # …but a row is not a relationship. A ``pending_sent`` /
-            # ``pending_received`` / ``unpairing`` row is an abandoned or
-            # half-finished handshake, and bailing out on it left this
+            # ``pending_received`` row is an abandoned or half-finished
+            # handshake, and bailing out on it left this
             # seat with no session keys, no ``relay_via`` and no key-wrap
             # key — so the redeem ACKed, both households believed they
             # were seated, and then every envelope failed silently

@@ -93,6 +93,7 @@ from .inbound_validator import (
     make_check_replay,
     make_check_peer_class,
     make_check_timestamp,
+    make_check_unpairing,
     make_decrypt_and_parse,
     make_idempotency_check,
     make_lookup_instance,
@@ -359,6 +360,11 @@ class FederationService:
             make_check_peer_class(),
             make_check_timestamp(),
             make_verify_signature(encoder=self._encoder),
+            # Unpair tombstone gate: a peer we unpaired while it was offline
+            # still has a row (so the outbox can deliver our UNPAIR), but no
+            # trust. After the signature check so only the genuine peer can
+            # pull our queued UNPAIR forward.
+            make_check_unpairing(on_refused=self._on_tombstone_contact),
             make_check_replay(replay_cache=self._replay_cache),
             make_decrypt_and_parse(
                 key_manager=self._key_manager,
@@ -378,6 +384,15 @@ class FederationService:
         # redelivering.
         steps.extend(self.post_decrypt_gate_steps())
         return steps
+
+    async def _on_tombstone_contact(self, instance_id: str) -> bool:
+        """An unpair tombstone just proved it is online — send our queued
+        ``UNPAIR`` on the next outbox tick rather than after its backoff.
+        Returns whether it was parked (``False`` = already due)."""
+        return await self._outbox_repo.expedite(
+            instance_id,
+            FederationEventType.UNPAIR,
+        )
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         """The gates that judge a DECRYPTED event, in pipeline order.
@@ -1030,55 +1045,19 @@ class FederationService:
                 error="unknown_instance",
             )
 
-        # Decrypt the directional session key (stored KEK-encrypted).
-        try:
-            session_key = self._key_manager.decrypt(instance.key_self_to_remote)
-        except Exception as exc:
-            # §Audit #12: don't surface the underlying crypto exception
-            # text at error level — that leaks detail useful to a key-
-            # tampering attacker and the operator can see the full
-            # traceback at debug. Fixed-string warn is enough.
-            log.warning(
-                "send_event: failed to decrypt session key for %s",
-                to_instance_id,
-            )
-            log.debug(
-                "send_event: key decrypt error detail for %s: %s",
-                to_instance_id,
-                exc,
-            )
+        envelope_dict = self._seal_envelope(
+            instance,
+            event_type=event_type,
+            payload=payload,
+            space_id=space_id,
+        )
+        if envelope_dict is None:
             return DeliveryResult(
                 instance_id=to_instance_id,
                 ok=False,
                 error="key_decrypt_error",
             )
-
-        # Encrypt the payload.
-        payload_json = _dumps(payload)
-        encrypted_payload = self._encrypt_payload(payload_json, session_key)
-
-        # Build the envelope. The per-peer sig_suite (negotiated at
-        # pairing time) decides which algorithms sign this envelope.
-        msg_id = str(uuid.uuid4())
-        timestamp = datetime.now(timezone.utc).isoformat()
-        effective_suite = instance.sig_suite or self._encoder.sig_suite
-        envelope_dict: dict = {
-            "msg_id": msg_id,
-            "event_type": event_type.value,
-            "from_instance": self._own_instance_id,
-            "to_instance": to_instance_id,
-            "timestamp": timestamp,
-            "encrypted_payload": encrypted_payload,
-            "space_id": space_id,
-            "proto_version": 1,
-            "sig_suite": effective_suite,
-        }
-        # Signatures cover everything except the ``signatures`` field itself.
-        envelope_bytes = _dumps(envelope_dict).encode("utf-8")
-        envelope_dict["signatures"] = self._encoder.sign_envelope_all(
-            envelope_bytes,
-            suite=effective_suite,
-        )
+        msg_id = envelope_dict["msg_id"]
 
         # Dispatch the envelope. When a FederationTransport facade is
         # attached, it decides between WebRTC DataChannel (§24.12.5
@@ -1216,6 +1195,107 @@ class FederationService:
             ok=False,
             status_code=status_code if isinstance(status_code, int) else None,
             error=DELIVERY_ERROR_QUEUED,
+        )
+
+    def _seal_envelope(
+        self,
+        instance: RemoteInstance,
+        *,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None,
+    ) -> dict | None:
+        """Encrypt ``payload`` for *instance* and sign the envelope.
+
+        Returns the signed envelope dict, or ``None`` when the stored
+        session key cannot be unwrapped (logged; nothing can be sealed).
+        """
+        # Decrypt the directional session key (stored KEK-encrypted).
+        try:
+            session_key = self._key_manager.decrypt(instance.key_self_to_remote)
+        except Exception as exc:
+            # §Audit #12: don't surface the underlying crypto exception
+            # text at error level — that leaks detail useful to a key-
+            # tampering attacker and the operator can see the full
+            # traceback at debug. Fixed-string warn is enough.
+            log.warning(
+                "send_event: failed to decrypt session key for %s",
+                instance.id,
+            )
+            log.debug(
+                "send_event: key decrypt error detail for %s: %s",
+                instance.id,
+                exc,
+            )
+            return None
+
+        # Encrypt the payload.
+        payload_json = _dumps(payload)
+        encrypted_payload = self._encrypt_payload(payload_json, session_key)
+
+        # Build the envelope. The per-peer sig_suite (negotiated at
+        # pairing time) decides which algorithms sign this envelope.
+        effective_suite = instance.sig_suite or self._encoder.sig_suite
+        envelope_dict: dict = {
+            "msg_id": str(uuid.uuid4()),
+            "event_type": event_type.value,
+            "from_instance": self._own_instance_id,
+            "to_instance": instance.id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "encrypted_payload": encrypted_payload,
+            "space_id": space_id,
+            "proto_version": 1,
+            "sig_suite": effective_suite,
+        }
+        # Signatures cover everything except the ``signatures`` field itself.
+        envelope_bytes = _dumps(envelope_dict).encode("utf-8")
+        envelope_dict["signatures"] = self._encoder.sign_envelope_all(
+            envelope_bytes,
+            suite=effective_suite,
+        )
+        return envelope_dict
+
+    async def queue_event(
+        self,
+        *,
+        to_instance_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        expires_at: str | None = None,
+    ) -> str | None:
+        """Seal an event for *to_instance_id* and hand it to the outbox only.
+
+        No delivery attempt is made here — the outbox processor sends it on
+        its next tick and retries with backoff. Unlike :meth:`send_event`
+        this also reaches an unpair tombstone
+        (:data:`PairingStatus.UNPAIRING`): queueing our ``UNPAIR`` for a
+        peer we could not tell in time is the one thing a tombstone is
+        for. ``expires_at`` bounds how long the outbox keeps trying
+        (``None`` = the event type's retention default).
+
+        Returns the queued ``msg_id``, or ``None`` when there is no such
+        row or its session key cannot be unwrapped.
+        """
+        instance = await self._federation_repo.get_instance(
+            to_instance_id,
+            include_unpairing=True,
+        )
+        if instance is None:
+            return None
+        envelope_dict = self._seal_envelope(
+            instance,
+            event_type=event_type,
+            payload=payload,
+            space_id=None,
+        )
+        if envelope_dict is None:
+            return None
+        return await self._outbox_repo.enqueue(
+            instance_id=to_instance_id,
+            event_type=event_type,
+            payload_json=_dumps(envelope_dict),
+            msg_id=envelope_dict["msg_id"],
+            expires_at=expires_at,
         )
 
     def resign_for_redelivery(self, payload_json: str) -> str:
@@ -3118,8 +3198,15 @@ async def _lookup_by_inbox_id(
     repo: AbstractFederationRepo,
     inbox_id: str,
 ) -> "_InboxInstance | None":
-    """Find a ``RemoteInstance`` by its ``local_inbox_id``."""
-    inst = await repo.get_instance_by_local_inbox_id(inbox_id)
+    """Find a ``RemoteInstance`` by its ``local_inbox_id``.
+
+    Includes unpair tombstones: the pipeline's unpairing gate must see one
+    to refuse it (or to accept its ``UNPAIR``).
+    """
+    inst = await repo.get_instance_by_local_inbox_id(
+        inbox_id,
+        include_unpairing=True,
+    )
     return _InboxInstance(inst) if inst is not None else None
 
 

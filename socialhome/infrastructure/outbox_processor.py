@@ -111,6 +111,11 @@ class DeliveryOutcome(enum.Enum):
 #: values; raising is treated the same as :attr:`DeliveryOutcome.TRANSIENT`.
 Deliver = Callable[[OutboxEntry], Awaitable[DeliveryOutcome]]
 
+#: Optional follow-up to the retention sweep. Runs after expired rows have
+#: been flipped to ``failed``, so it sees the outbox as the sweep left it
+#: (the unpair-tombstone purge keys off "no UNPAIR still pending").
+AfterPrune = Callable[[], Awaitable[object]]
+
 
 class OutboxProcessor:
     """Long-running coroutine that drains the outbox on a timer.
@@ -131,6 +136,7 @@ class OutboxProcessor:
         "_task",
         "_stop",
         "_jitter",
+        "_after_prune",
     )
 
     def __init__(
@@ -141,8 +147,10 @@ class OutboxProcessor:
         poll_interval_seconds: float = 5.0,
         prune_interval_seconds: float = 3600.0,
         rng: Callable[[], float] | None = None,
+        after_prune: AfterPrune | None = None,
     ) -> None:
         self._repo = repo
+        self._after_prune = after_prune
         self._deliver = deliver
         self._poll_interval = poll_interval_seconds
         self._prune_interval = prune_interval_seconds
@@ -296,6 +304,7 @@ class OutboxProcessor:
         2. DELETE terminal (delivered/failed) rows older than TERMINAL_GRACE,
            in bounded batches, so the queue never accumulates tombstones
            (and a pre-change historical backlog is reclaimed over time).
+        Then the optional ``after_prune`` hook (best-effort).
         Returns expired + purged count.
         """
         now = datetime.now(timezone.utc)
@@ -312,6 +321,12 @@ class OutboxProcessor:
                 break
         if purged:
             log.info("OutboxProcessor: purged %d terminal outbox rows", purged)
+        if self._after_prune is not None:
+            try:
+                await self._after_prune()
+            except Exception:
+                # Best-effort like the sweep itself — never costs the prune.
+                log.exception("OutboxProcessor after-prune hook failed")
         return expired + purged
 
     # ── Backoff math (pure) ────────────────────────────────────────────

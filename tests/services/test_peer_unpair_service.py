@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -17,7 +19,10 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.services.peer_unpair_service import PeerUnpairService
+from socialhome.services.peer_unpair_service import (
+    UNPAIR_RETRY_MAX_AGE,
+    PeerUnpairService,
+)
 
 
 def _inst(iid: str) -> RemoteInstance:
@@ -43,8 +48,21 @@ class _FakeFederationRepo:
         self.instances: dict[str, RemoteInstance] = {}
         self._log = log
 
-    async def get_instance(self, iid):
-        return self.instances.get(iid)
+    async def get_instance(self, iid, *, include_unpairing=False):
+        inst = self.instances.get(iid)
+        if inst is None:
+            return None
+        if inst.status is PairingStatus.UNPAIRING and not include_unpairing:
+            return None
+        return inst
+
+    async def list_instances(self, *, source=None, status=None):
+        return [i for i in self.instances.values() if i.status.value == status]
+
+    async def mark_unpairing(self, iid):
+        self._log.append(("mark_unpairing", iid))
+        inst = self.instances[iid]
+        self.instances[iid] = replace(inst, status=PairingStatus.UNPAIRING)
 
     async def delete_instance(self, iid):
         self._log.append(("delete_instance", iid))
@@ -59,6 +77,20 @@ class _FakeOutboxRepo:
     async def delete_for_instance(self, iid):
         self._log.append(("outbox_purge", iid))
         self.rows.pop(iid, None)
+
+    async def count_pending_for(self, iid):
+        return len(self.rows.get(iid, []))
+
+
+class _FakeMediaOutboxRepo:
+    def __init__(self, log: _Log, name: str) -> None:
+        self.targets: set[str] = set()
+        self._log = log
+        self._name = name
+
+    async def delete_for_instance(self, iid):
+        self._log.append((self._name, iid))
+        self.targets.discard(iid)
 
 
 class _FakeRoutingRepo:
@@ -79,7 +111,33 @@ class _FakeFederation:
         self._repo = repo
         self._log = log
         self.sent: list[dict] = []
+        self.queued: list[dict] = []
         self.result = "ok"  # "ok" | "fail" | "hang" | "raise"
+        self.queue_ok = True
+        self._outbox: _FakeOutboxRepo | None = None
+        #: Awaited inside ``queue_event`` before the row lands — lets a test
+        #: interleave another coroutine at the worst possible point.
+        self.before_queue = None
+
+    async def queue_event(self, *, to_instance_id, event_type, payload, expires_at):
+        inst = await self._repo.get_instance(to_instance_id, include_unpairing=True)
+        self._log.append(("queue_event", to_instance_id))
+        if self.before_queue is not None:
+            await self.before_queue()
+        self.queued.append(
+            {
+                "to": to_instance_id,
+                "event_type": event_type,
+                "payload": payload,
+                "expires_at": expires_at,
+                "status": inst.status if inst else None,
+            }
+        )
+        if not self.queue_ok:
+            return None
+        assert self._outbox is not None
+        self._outbox.rows.setdefault(to_instance_id, []).append("queued-unpair")
+        return "msg-1"
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         self._log.append(("send_event", to_instance_id))
@@ -110,12 +168,17 @@ def env():
     outbox = _FakeOutboxRepo(log)
     routing = _FakeRoutingRepo(log)
     fed = _FakeFederation(repo, log)
+    fed._outbox = outbox
+    dm_media = _FakeMediaOutboxRepo(log, "dm_media_purge")
+    space_media = _FakeMediaOutboxRepo(log, "space_media_purge")
     svc = PeerUnpairService(
         bus=bus,
         federation=fed,  # type: ignore[arg-type]
         federation_repo=repo,  # type: ignore[arg-type]
         outbox_repo=outbox,  # type: ignore[arg-type]
         routing_repo=routing,  # type: ignore[arg-type]
+        dm_media_outbox_repo=dm_media,  # type: ignore[arg-type]
+        space_media_outbox_repo=space_media,  # type: ignore[arg-type]
         notify_timeout_s=0.05,
     )
     published: list[PeerUnpaired] = []
@@ -128,6 +191,8 @@ def env():
         "fed": fed,
         "log": log,
         "published": published,
+        "dm_media": dm_media,
+        "space_media": space_media,
     }
 
 
@@ -165,31 +230,146 @@ async def test_unpair_unknown_peer_returns_none_and_sends_nothing(env):
     assert env["published"] == []
 
 
-@pytest.mark.parametrize("outcome", ["fail", "raise"])
-async def test_undeliverable_unpair_still_removes_locally(env, outcome):
+@pytest.mark.parametrize("outcome", ["fail", "raise", "hang"])
+async def test_undeliverable_unpair_leaves_a_tombstone_that_retries(env, outcome):
+    """An offline peer must still learn it was unpaired: the row stays as an
+    ``unpairing`` tombstone (the outbox needs its keys + inbox URL) and one
+    fresh UNPAIR is queued with a bounded lifetime."""
     env["repo"].instances["peer-b"] = _inst("peer-b")
-    env["outbox"].rows["peer-b"] = ["queued-unpair"]
+    env["outbox"].rows["peer-b"] = ["queued-post", "queued-unpair-from-send"]
+    env["routing"].discovered_via["peer-b"] = ["peer-x"]
     env["fed"].result = outcome
+
+    started = time.monotonic()
+    assert await env["svc"].unpair("peer-b") is False
+    assert time.monotonic() - started < 1.0
+
+    # Order: close trust first, then drop the old queue, then queue the
+    # one envelope the tombstone exists for.
+    calls = [c for c, _ in env["log"]]
+    assert calls[:1] == ["send_event"]
+    assert calls.index("mark_unpairing") < calls.index("outbox_purge")
+    assert calls.index("outbox_purge") < calls.index("queue_event")
+    assert "delete_instance" not in calls
+
+    inst = env["repo"].instances["peer-b"]
+    assert inst.status is PairingStatus.UNPAIRING
+    assert env["outbox"].rows == {"peer-b": ["queued-unpair"]}
+    assert env["routing"].discovered_via == {}
+    (queued,) = env["fed"].queued
+    assert queued["event_type"] is FederationEventType.UNPAIR
+    assert queued["payload"] == {}
+    assert queued["status"] is PairingStatus.UNPAIRING
+    expires = datetime.fromisoformat(queued["expires_at"])
+    expected = datetime.now(timezone.utc) + UNPAIR_RETRY_MAX_AGE
+    assert abs((expires - expected).total_seconds()) < 60
+    # The UI drops the connection now — the tombstone is not a connection.
+    assert [e.instance_id for e in env["published"]] == ["peer-b"]
+
+
+async def test_unqueueable_unpair_forgets_immediately(env):
+    """No session key to seal with → nothing could ever be delivered, so a
+    tombstone would only linger: forget on the spot."""
+    env["repo"].instances["peer-b"] = _inst("peer-b")
+    env["fed"].result = "fail"
+    env["fed"].queue_ok = False
 
     assert await env["svc"].unpair("peer-b") is False
 
     assert "peer-b" not in env["repo"].instances
-    # The UNPAIR send_event just queued can never be redelivered once the
-    # row is gone — it is purged with the rest.
     assert env["outbox"].rows == {}
     assert [e.instance_id for e in env["published"]] == ["peer-b"]
 
 
-async def test_hanging_peer_does_not_block_unpair(env):
-    env["repo"].instances["peer-c"] = _inst("peer-c")
-    env["fed"].result = "hang"
+async def test_unpair_of_a_tombstone_is_unknown(env):
+    env["repo"].instances["peer-t"] = replace(
+        _inst("peer-t"), status=PairingStatus.UNPAIRING
+    )
+    assert await env["svc"].unpair("peer-t") is None
+    assert env["fed"].sent == []
 
-    started = time.monotonic()
-    assert await env["svc"].unpair("peer-c") is False
-    assert time.monotonic() - started < 1.0
 
-    assert "peer-c" not in env["repo"].instances
-    assert [e.instance_id for e in env["published"]] == ["peer-c"]
+async def test_finish_purges_a_tombstone_once_unpair_is_delivered(env):
+    env["repo"].instances["peer-t"] = replace(
+        _inst("peer-t"), status=PairingStatus.UNPAIRING
+    )
+    env["outbox"].rows["peer-t"] = ["queued-unpair"]
+
+    await env["svc"].finish_unpair("peer-t")
+
+    assert "peer-t" not in env["repo"].instances
+    assert env["outbox"].rows == {}
+    # Already announced when the tombstone was made — not twice.
+    assert env["published"] == []
+
+
+async def test_finish_never_touches_a_live_pairing(env):
+    """A stale UNPAIR outcome after a re-pair must not tear the new pair down."""
+    env["repo"].instances["peer-a"] = _inst("peer-a")
+    env["outbox"].rows["peer-a"] = ["new-post"]
+
+    await env["svc"].finish_unpair("peer-a")
+    await env["svc"].finish_unpair("gone")
+
+    assert "peer-a" in env["repo"].instances
+    assert env["outbox"].rows == {"peer-a": ["new-post"]}
+
+
+async def test_sweep_purges_tombstones_whose_unpair_is_gone(env):
+    """The UNPAIR expired (max age) or was dropped: the tombstone goes too.
+    One that still has its UNPAIR queued is kept."""
+    for iid in ("peer-done", "peer-waiting"):
+        env["repo"].instances[iid] = replace(_inst(iid), status=PairingStatus.UNPAIRING)
+    env["repo"].instances["peer-live"] = _inst("peer-live")
+    env["outbox"].rows["peer-waiting"] = ["queued-unpair"]
+
+    assert await env["svc"].sweep_tombstones() == 1
+
+    assert set(env["repo"].instances) == {"peer-waiting", "peer-live"}
+
+
+async def test_sweep_never_purges_a_tombstone_still_being_made(env):
+    """Race: the hourly sweep can run between the status flip and the
+    UNPAIR landing in the outbox. At that instant the tombstone has
+    nothing queued, and purging it would mean the peer is never told."""
+    env["repo"].instances["peer-a"] = _inst("peer-a")
+    env["fed"].result = "fail"
+    swept: list[int] = []
+
+    async def _sweep_now():
+        swept.append(await env["svc"].sweep_tombstones())
+
+    env["fed"].before_queue = _sweep_now
+
+    assert await env["svc"].unpair("peer-a") is False
+
+    assert swept == [0]
+    tomb = env["repo"].instances["peer-a"]
+    assert tomb.status is PairingStatus.UNPAIRING
+    assert env["outbox"].rows == {"peer-a": ["queued-unpair"]}
+    # Once it is made, the sweep treats it like any other tombstone.
+    assert await env["svc"].sweep_tombstones() == 0
+    env["outbox"].rows.clear()
+    assert await env["svc"].sweep_tombstones() == 1
+
+
+async def test_tombstoning_drops_queued_media_for_the_peer(env):
+    """Media bytes to a tombstone would never be accepted (the pipeline
+    refuses everything but UNPAIR): its DM and space media rows go when the
+    tombstone is made, like its ordinary outbox rows."""
+    env["repo"].instances["peer-a"] = _inst("peer-a")
+    env["fed"].result = "fail"
+    env["dm_media"].targets = {"peer-a", "peer-b"}
+    env["space_media"].targets = {"peer-a", "peer-b"}
+
+    assert await env["svc"].unpair("peer-a") is False
+
+    assert env["dm_media"].targets == {"peer-b"}
+    assert env["space_media"].targets == {"peer-b"}
+
+
+def test_retry_max_age_is_thirty_days():
+    assert UNPAIR_RETRY_MAX_AGE == timedelta(days=30)
 
 
 async def test_forget_cleans_up_without_notifying(env):

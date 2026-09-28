@@ -28,7 +28,11 @@ from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import FederationService
 from socialhome.infrastructure import EventBus, KeyManager
 from socialhome.repositories import SqliteFederationRepo, SqliteOutboxRepo
+from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.space_media_outbox_repo import (
+    SqliteSpaceMediaOutboxRepo,
+)
 from socialhome.services.federation_inbound import PairingInboundHandlers
 from socialhome.services.peer_unpair_service import PeerUnpairService
 
@@ -72,6 +76,8 @@ async def env(tmp_dir):
             federation_repo=fed_repo,
             outbox_repo=outbox,
             routing_repo=SqliteDmRoutingRepo(db),
+            dm_media_outbox_repo=SqliteDmMediaOutboxRepo(db),
+            space_media_outbox_repo=SqliteSpaceMediaOutboxRepo(db),
         ),
     ).attach_to(svc)
     unpaired: list[str] = []
