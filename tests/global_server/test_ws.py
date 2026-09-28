@@ -30,6 +30,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
+from socialhome.global_server.routes import ws as ws_routes
 from socialhome.global_server.server import create_gfs_app
 
 
@@ -259,8 +260,10 @@ async def test_ws_rejects_unknown_instance(ws_client):
         assert ws.close_code == 4401
 
 
-async def test_ws_hello_timeout_closes_4408(ws_client):
-    """Connecting and never sending a hello → server closes 4408 within ~5 s."""
+async def test_ws_hello_timeout_closes_4408(ws_client, monkeypatch):
+    """Connecting and never sending a hello → server closes 4408 once the
+    hello window (5 s in production, shrunk here) runs out."""
+    monkeypatch.setattr(ws_routes, "HELLO_TIMEOUT_SECONDS", 0.2)
     async with ws_client.ws_connect("/gfs/ws") as ws:
         msg = await asyncio.wait_for(ws.receive(), timeout=8.0)
         assert msg.type.name == "CLOSE"

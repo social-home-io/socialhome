@@ -64,7 +64,20 @@ async def _stop_node(server: TestServer) -> None:
     await server.close()
 
 
-async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory):
+@pytest.fixture
+def fast_sync_retry(monkeypatch):
+    """Shrink the production 5 s ``_broadcast`` retry back-off.
+
+    Both nodes advertise the same unreachable ``base_url`` in their HELLO,
+    so each also learns a peer row it can never reach, and every fan-out to
+    it fails, sleeps ``SYNC_RETRY_DELAY_S``, retries and drops — the
+    retry-then-drop path still runs, it just no longer costs 5 s a time
+    (the end-to-end test spent 20 of its 20.5 s asleep here).
+    """
+    monkeypatch.setattr(cluster_mod, "SYNC_RETRY_DELAY_S", 0.01)
+
+
+async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_retry):
     """Full NODE_* fan-out between two live GFS nodes.
 
     Covers ``add_peer`` → NODE_HELLO POST → ``_post_to_peer`` →
@@ -190,7 +203,9 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory):
         await _stop_node(b)
 
 
-async def test_post_to_peer_raises_on_non_2xx(tmp_dir, tmp_path_factory):
+async def test_post_to_peer_raises_on_non_2xx(
+    tmp_dir, tmp_path_factory, fast_sync_retry
+):
     """``_broadcast`` retries once on error then logs + drops (ignore_errors
     path via ``relay_to_peers`` + NODE_RELAY to an offline peer)."""
     dir_a = tmp_path_factory.mktemp("gfs-solo")

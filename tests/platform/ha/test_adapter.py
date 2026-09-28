@@ -774,9 +774,22 @@ async def test_adapter_raises_before_on_startup_when_client_not_injected():
         await adapter.list_external_users()
 
 
-async def test_on_startup_does_not_provision_users(tmp_path):
+async def test_on_startup_does_not_provision_users(tmp_path, monkeypatch):
     """HaAdapter (Core mode) never bootstraps users on startup —
     that's haos territory."""
+    # No injected client: ``on_startup`` builds its own via
+    # ``build_ha_client``. Swap the factory for a fake at the boundary so
+    # that branch still runs without resolving ``ha.local`` for real.
+    built: list[dict] = []
+
+    def _fake_build(session, **kwargs):  # noqa: ARG001
+        built.append(kwargs)
+        return _FakeHaClient()
+
+    monkeypatch.setattr(
+        "socialhome.platform.ha.adapter.build_ha_client",
+        _fake_build,
+    )
     db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
     await db.startup()
     kp = generate_identity_keypair()
@@ -798,6 +811,13 @@ async def test_on_startup_does_not_provision_users(tmp_path):
             data_dir=str(tmp_path),
         )
         await adapter.on_startup(app)
+        assert built == [
+            {
+                "supervisor_token": "",
+                "ha_url": "http://ha.local:8123",
+                "ha_token": "",
+            }
+        ]
         assert await db.fetchval("SELECT COUNT(*) FROM users") == 0
     await db.shutdown()
 
@@ -846,6 +866,9 @@ async def test_get_federation_base_appends_inbox_path(tmp_path):
             ha_url="http://ha.local:8123",
             ha_token="",
             data_dir=str(tmp_path),
+            # A fake client: a real one resolves ``ha.local`` over the
+            # network and the test waits out the DNS/connect timeout.
+            ha_client=_FakeHaClient(),
         )
         await adapter.on_startup(app)
         assert (
@@ -881,6 +904,9 @@ async def test_get_federation_base_strips_trailing_slash(tmp_path):
             ha_url="http://ha.local:8123",
             ha_token="",
             data_dir=str(tmp_path),
+            # A fake client: a real one resolves ``ha.local`` over the
+            # network and the test waits out the DNS/connect timeout.
+            ha_client=_FakeHaClient(),
         )
         await adapter.on_startup(app)
         assert (
@@ -917,6 +943,9 @@ async def test_get_federation_base_idempotent_if_already_appended(tmp_path):
             ha_url="http://ha.local:8123",
             ha_token="",
             data_dir=str(tmp_path),
+            # A fake client: a real one resolves ``ha.local`` over the
+            # network and the test waits out the DNS/connect timeout.
+            ha_client=_FakeHaClient(),
         )
         await adapter.on_startup(app)
         assert (
