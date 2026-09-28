@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -45,6 +45,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
+    _moment_expired,
 )
 
 
@@ -4109,3 +4110,22 @@ async def test_space_post_created_keeps_only_local_media_references(db, bus, inb
     assert got is not None
     assert got[1].media_url is None
     assert got[1].image_urls == ("api/media/fine.webp",)
+
+
+@pytest.mark.parametrize(
+    ("value", "expired"),
+    [
+        (timedelta(minutes=-1), True),
+        (timedelta(days=1), False),
+        ("2000-01-01 00:00:00", True),  # naive → UTC
+        ("2000-01-01T00:00:00Z", True),
+        ("not a date", False),  # unparseable → existing handling
+        ("", False),
+        (None, False),
+        (123, False),
+    ],
+)
+def test_moment_expired(value, expired):
+    if isinstance(value, timedelta):
+        value = (datetime.now(timezone.utc) + value).isoformat()
+    assert _moment_expired(value) is expired

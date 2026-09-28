@@ -393,3 +393,119 @@ async def test_prune_expired_collects_same_day_expiry(db, repo):
     assert await repo.prune_expired() == 1
     rows = await db.fetchall("SELECT id FROM moments")
     assert {r["id"] for r in rows} == {"m-keep"}
+
+
+# ── Delete tombstones ─────────────────────────────────────────────────────
+
+
+async def _raw(db, moment_id: str):
+    return await db.fetchone("SELECT * FROM moments WHERE id=?", (moment_id,))
+
+
+async def test_delete_leaves_a_content_free_tombstone(db, repo):
+    await repo.save(replace(_moment(id="m-t", content="#tag hi"), is_public=True))
+    await repo.set_reaction("m-t", "u-fan", "x")
+    await repo.delete("m-t")
+    assert await repo.get("m-t") is None
+    tomb = await repo.get("m-t", include_deleted=True)
+    assert tomb is not None and tomb.deleted_at is not None
+    assert tomb.author_user_id == "u-author"
+    assert (tomb.content, tomb.media_url, tomb.is_public) == ("", None, False)
+    assert await repo.list_hashtags_for("m-t") == []
+    assert await repo.list_reactions("m-t") == []
+
+
+async def test_tombstones_are_hidden_from_every_read(db, repo):
+    await repo.save(replace(_moment(id="m-root", content="#x"), is_public=True))
+    await repo.save(_moment(id="m-reply", author="u-o", parent_moment_id="m-root"))
+    await repo.save(_moment(id="m-gone", author="u-o", parent_moment_id="m-root"))
+    await repo.delete("m-gone")
+    assert {m.id for m in await repo.list_visible_to("u-me")} == {"m-root", "m-reply"}
+    assert [m.id for m in await repo.list_replies("m-root")] == ["m-reply"]
+    engagement = await repo.count_engagement_for(["m-root"])
+    assert engagement["m-root"]["reply_count"] == 1
+    await repo.delete("m-root")
+    assert {m.id for m in await repo.list_visible_to("u-me")} == {"m-reply"}
+    assert await repo.list_public_for("u-author") == []
+    assert await repo.list_top_hashtags("u-me") == []
+    assert await repo.count_recent_for_author("u-author", since_iso=_now_iso(-5)) == 0
+    # Replies detach from a deleted parent, as the old hard delete did.
+    reply = await repo.get("m-reply")
+    assert reply is not None and reply.parent_moment_id is None
+
+
+async def test_save_never_overwrites_a_tombstone(db, repo):
+    await repo.save(_moment(id="m-t", content="#tag original"))
+    await repo.delete("m-t")
+    await repo.save(_moment(id="m-t", content="#tag resurrected"))
+    assert await repo.get("m-t") is None
+    assert (await _raw(db, "m-t"))["content"] == ""
+    assert await repo.list_hashtags_for("m-t") == []
+
+
+async def test_tombstone_an_unknown_id_holds_the_delete(db, repo):
+    expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    removed = await repo.tombstone(
+        "m-later",
+        author_user_id="u-remote",
+        origin_instance_id="peer",
+        expires_at=expires,
+    )
+    assert removed is False
+    tomb = await repo.get("m-later", include_deleted=True)
+    assert tomb is not None and tomb.deleted_at is not None
+    assert (tomb.author_user_id, tomb.origin_instance_id) == ("u-remote", "peer")
+    assert tomb.expires_at == expires
+    await repo.save(_moment(id="m-later", author="u-remote"))
+    assert await repo.get("m-later") is None
+
+
+async def test_tombstone_a_stored_moment_keeps_its_expiry(db, repo):
+    m = _moment(id="m-t", expires_days=3)
+    await repo.save(m)
+    removed = await repo.tombstone(
+        "m-t",
+        author_user_id="u-author",
+        origin_instance_id="self",
+        expires_at=_now_iso(7 * 24 * 60),
+    )
+    assert removed is True
+    tomb = await repo.get("m-t", include_deleted=True)
+    assert tomb is not None and tomb.expires_at == m.expires_at
+    # A second delete is a no-op and reports nothing removed.
+    again = await repo.tombstone(
+        "m-t",
+        author_user_id="u-author",
+        origin_instance_id="self",
+        expires_at=_now_iso(),
+    )
+    assert again is False
+
+
+async def test_delete_by_author_tombstones_live_moments(db, repo):
+    await repo.save(_moment(id="m-1", author="u-gone"))
+    await repo.save(_moment(id="m-2", author="u-gone"))
+    await repo.save(_moment(id="m-3", author="u-stays"))
+    await repo.delete("m-2")
+    assert await repo.delete_by_author("u-gone") == 1
+    assert await repo.get("m-1") is None
+    assert await repo.get("m-1", include_deleted=True) is not None
+    assert await repo.get("m-3") is not None
+
+
+async def test_prune_expired_sweeps_tombstones(db, repo):
+    await repo.tombstone(
+        "m-old",
+        author_user_id="u-remote",
+        origin_instance_id="peer",
+        expires_at=_now_iso(-60),
+    )
+    await repo.tombstone(
+        "m-fresh",
+        author_user_id="u-remote",
+        origin_instance_id="peer",
+        expires_at=_now_iso(60),
+    )
+    assert await repo.prune_expired() == 1
+    assert await _raw(db, "m-old") is None
+    assert await _raw(db, "m-fresh") is not None

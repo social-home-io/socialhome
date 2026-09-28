@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..crypto import b64url_decode, verify_ed25519
 from ..domain.events import MomentCreated, MomentDeleted
-from ..domain.moment import Moment
+from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
@@ -68,6 +69,15 @@ class MomentPublicInbound:
                 "moment_public.inbound: signature failed moment=%s author=%s",
                 env.get("moment_id"),
                 env.get("author_user_id"),
+            )
+            return
+        stored = await self._moments.get(str(env["moment_id"]), include_deleted=True)
+        if stored is not None and stored.deleted_at is not None:
+            # Deletes stick: a replayed create for a deleted moment is
+            # refused for as long as its tombstone lives.
+            log.info(
+                "moment_public.inbound: refusing create for deleted moment=%s",
+                env.get("moment_id"),
             )
             return
         moment = Moment(
@@ -117,14 +127,32 @@ class MomentPublicInbound:
         moment_id = str(env.get("moment_id") or "")
         if not moment_id:
             return
-        existing = await self._moments.get(moment_id)
+        author_user_id = str(env.get("author_user_id") or "")
+        stored = await self._moments.get(moment_id, include_deleted=True)
+        if stored is not None and stored.author_user_id != author_user_id:
+            log.warning(
+                "moment_public.inbound: delete for %s names another author",
+                moment_id,
+            )
+            return
+        existing = stored if stored is not None and stored.deleted_at is None else None
+        # Tombstoned whether or not we hold it, so a create that arrives
+        # later (or is replayed) is refused — held for the longest a moment
+        # can live when we never saw it.
+        await self._moments.tombstone(
+            moment_id,
+            author_user_id=author_user_id,
+            origin_instance_id=str(env.get("origin_instance_id") or ""),
+            expires_at=(
+                datetime.now(timezone.utc) + timedelta(days=MOMENT_RETENTION_DAYS)
+            ).isoformat(),
+        )
         if existing is None:
             return
-        await self._moments.delete(moment_id)
         await self._bus.publish(
             MomentDeleted(
                 moment_id=moment_id,
-                author_user_id=str(env.get("author_user_id") or ""),
+                author_user_id=author_user_id,
                 origin_instance_id=existing.origin_instance_id,
             )
         )

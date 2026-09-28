@@ -116,8 +116,8 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
 
 async def _state(db) -> dict[str, list[tuple]]:
     queries = {
-        "moments": "SELECT id, author_user_id, content, origin_instance_id"
-        " FROM moments ORDER BY id",
+        "moments": "SELECT id, author_user_id, content, origin_instance_id,"
+        " deleted_at FROM moments ORDER BY id",
         "reactions": "SELECT moment_id, reactor_user_id, emoji"
         " FROM moment_reactions ORDER BY 1, 2",
     }
@@ -242,7 +242,8 @@ async def test_moment_reaction_outside_its_scope_changes_nothing(
 async def test_the_author_household_deletes_its_own_moment(env):
     app, db, _, _ = env
     await _send(app, FET.MOMENT_DELETED, _moment("m-bob", "u-bob", PEER))
-    assert "m-bob" not in {r[0] for r in (await _state(db))["moments"]}
+    live = {r[0] for r in (await _state(db))["moments"] if r[4] is None}
+    assert "m-bob" not in live
 
 
 async def test_a_user_of_the_sender_reacts_on_our_moment(env):

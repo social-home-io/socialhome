@@ -132,10 +132,18 @@ legacy_env = _env_factory(NEW - 1)
 
 
 async def _moments(db) -> dict[str, tuple]:
+    """Every row, tombstones included — a refused event changes none."""
     rows = await db.fetchall(
-        "SELECT id, author_user_id, content, origin_instance_id FROM moments", ()
+        "SELECT id, author_user_id, content, origin_instance_id, deleted_at"
+        " FROM moments",
+        (),
     )
     return {r[0]: tuple(r) for r in rows}
+
+
+async def _live(db) -> set[str]:
+    """Ids of moments that exist (a delete leaves a tombstone row)."""
+    return {k for k, row in (await _moments(db)).items() if row[4] is None}
 
 
 async def _send(app, event_type, payload, *, from_instance=RELAY) -> None:
@@ -277,6 +285,7 @@ async def test_genuine_relayed_moment_is_stored_and_relayed_verbatim(env):
         "u-olga",
         "hello from the origin",
         ORIGIN,
+        None,
     )
     onward = _relayed(sent)
     assert [s[1] for s in onward] == [FET.MOMENT_CREATED]
@@ -297,7 +306,7 @@ async def test_relayed_moment_from_unpaired_origin_verifies_by_derivation(env):
 async def test_genuine_relayed_origin_delete_removes_the_moment(env):
     app, db, sent = env
     await _send(app, FET.MOMENT_DELETED, _signed(FET.MOMENT_DELETED, _delete()))
-    assert "m-olga" not in await _moments(db)
+    assert "m-olga" not in await _live(db)
     assert [s[1] for s in _relayed(sent)] == [FET.MOMENT_DELETED]
 
 
@@ -305,7 +314,7 @@ async def test_direct_delivery_from_the_origin_needs_no_origin_signature(env):
     app, db, _ = env
     await _send(app, FET.MOMENT_CREATED, _create(), from_instance=ORIGIN)
     await _send(app, FET.MOMENT_DELETED, _delete(), from_instance=ORIGIN)
-    moments = await _moments(db)
+    moments = await _live(db)
     assert "m-new" in moments
     assert "m-olga" not in moments
 
@@ -317,7 +326,7 @@ async def test_unsigned_relay_from_a_legacy_origin_is_accepted(legacy_env):
     app, db, sent = legacy_env
     await _send(app, FET.MOMENT_CREATED, _create(hop_count=2))
     await _send(app, FET.MOMENT_DELETED, _delete())
-    moments = await _moments(db)
+    moments = await _live(db)
     assert "m-new" in moments
     assert "m-olga" not in moments
     assert [s[1] for s in _relayed(sent)] == [FET.MOMENT_CREATED, FET.MOMENT_DELETED]

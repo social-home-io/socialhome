@@ -30,6 +30,7 @@ from ..domain.events import (
 from ..domain.moment import (
     MOMENT_MAX_CONTENT_LEN,
     MOMENT_MAX_VIDEO_MS,
+    MOMENT_RETENTION_DAYS,
     Moment,
 )
 from ..media.cleanup import unlink_unreferenced
@@ -49,10 +50,6 @@ log = logging.getLogger(__name__)
 #: Minimum interval between two top-level moments by the same author.
 #: Replies and reactions are exempt — see ``create_moment``.
 MOMENT_RATE_WINDOW = timedelta(minutes=15)
-
-#: Absolute on-disk retention. The list query collapses this to 24 h
-#: for non-followers; the scheduler drops anything past this point.
-MOMENT_RETENTION_DAYS: int = 7
 
 
 class MomentNotFoundError(KeyError):

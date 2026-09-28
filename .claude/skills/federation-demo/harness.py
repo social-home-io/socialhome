@@ -4638,6 +4638,64 @@ def cmd_verify() -> None:
     else:
         print("  (v_35 relayed-moment check skipped — c's moment rate-limited or no d)")
 
+    # 3c-ter. Deletes stick. c replies to its own moment (replies are exempt
+    #     from the 15-min rate limit, so verify can re-run), the reply relays
+    #     to d, c deletes it, and d must drop it and keep a tombstone row
+    #     (``deleted_at`` set, content wiped) so a replayed create for the
+    #     id is refused rather than resurrecting it.
+    if carol_moment and "d" in state.get("instances", {}):
+        c = state["instances"]["c"]
+        d = state["instances"]["d"]
+        reply_text = f"[c] reply that will be deleted {secrets.token_hex(3)}"
+        s, r_resp = _request(
+            f"http://127.0.0.1:{c['port']}/api/moments",
+            token=c["token"],
+            method="POST",
+            body={"content": reply_text, "parent_moment_id": carol_moment["id"]},
+        )
+        _must("moment reply(c)", s, r_resp, ok=(201,))
+        rp = r_resp.get("data") if isinstance(r_resp.get("data"), dict) else r_resp
+        reply_id = rp.get("id")
+
+        def _d_has(text: str) -> bool:
+            s2, p2 = _request(
+                f"http://127.0.0.1:{d['port']}/api/moments", token=d["token"]
+            )
+            items = p2.get("data") if isinstance(p2, dict) else p2
+            return any(
+                text in (m.get("content") or "")
+                for m in (items if isinstance(items, list) else [])
+            )
+
+        deadline = time.time() + 30
+        while time.time() < deadline and not _d_has(reply_text):
+            time.sleep(1)
+        if not _d_has(reply_text):
+            failures.append(f"d: c's relayed reply {reply_id!r} never arrived")
+        else:
+            s, _ = _request(
+                f"http://127.0.0.1:{c['port']}/api/moments/{reply_id}",
+                token=c["token"],
+                method="DELETE",
+            )
+            _must("moment delete(c)", s, _)
+            deadline = time.time() + 30
+            while time.time() < deadline and _d_has(reply_text):
+                time.sleep(1)
+            tomb = _rows(
+                "d",
+                "SELECT content, deleted_at FROM moments WHERE id=?",
+                (reply_id,),
+            )
+            if _d_has(reply_text):
+                failures.append(f"d: c's deleted reply {reply_id!r} still visible")
+            elif not tomb or tomb[0][1] is None or tomb[0][0] != "":
+                failures.append(
+                    f"d: no delete tombstone for c's reply {reply_id!r} (row={tomb!r})"
+                )
+            else:
+                print("  d drops c's deleted reply and keeps its tombstone ✓")
+
     # 4. Space — Beta's space, both Alice and Carol invited.
     if "space_id" in state:
         b = state["instances"]["b"]

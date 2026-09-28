@@ -1,0 +1,19 @@
+-- §Momentum: a deleted moment stays deleted.
+--
+-- A relayed ``MOMENT_CREATED`` is origin-signed (v_35), which proves who
+-- made the moment but not that it still exists: a relay can re-send an
+-- old, genuinely signed create after the origin deleted the moment, and
+-- relays deliver out of order, so a delete can land before its create.
+-- Hard-deleting the row forgets the delete ever happened.
+--
+-- A delete now keeps the row as a tombstone — content, media and tags
+-- wiped, ``deleted_at`` set — until the row's own ``expires_at``, when
+-- the existing retention prune removes it like any other expired moment.
+-- A delete for a moment not stored yet inserts the tombstone directly
+-- (``expires_at`` capped at the 7-day maximum lifetime). The row already
+-- carries everything a tombstone needs (id, author, origin, expiry), and
+-- replays can arrive after a restart, so the ``moments`` table itself is
+-- the tombstone store: no new table.
+--
+-- Additive and NULL-defaulted: every existing row is a live moment.
+ALTER TABLE moments ADD COLUMN deleted_at TEXT;

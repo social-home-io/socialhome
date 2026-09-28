@@ -174,6 +174,11 @@ That single command runs the full sequence:
      for c, so it landed on the derived-key path — and that no household's
      log shows the legacy window ("unsigned moment from pre-v_35") or a
      relayed-moment refusal ("relayed by … — refusing (moment=").
+   - **Deletes stick.** c replies to its own moment (replies skip the
+     15-min rate limit, so ``verify`` re-runs cleanly), waits for the reply
+     to reach d relayed, deletes it, and asserts d drops it and keeps a
+     delete tombstone (``moments.deleted_at`` set, content wiped) — the row
+     that refuses a replayed create for that id.
      (The capability-bump tripwire — v_24, which makes
      ``SPACE_CONFIG_CHANGED`` space-authority-signed so a seed-holding delegated
      admin can change a space's config with the owner offline and every member

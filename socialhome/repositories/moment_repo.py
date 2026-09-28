@@ -10,6 +10,13 @@ Manages two tables:
 * ``moment_reactions`` — one row per (moment_id, reactor_user_id),
   holding the current emoji.
 
+A delete never drops the ``moments`` row: it becomes a **tombstone**
+(content, media, tags and reactions wiped, ``deleted_at`` set) that lives
+until the row's ``expires_at``, when :meth:`SqliteMomentRepo.prune_expired`
+removes it like any other expired moment. Every read below skips
+tombstones, and :meth:`SqliteMomentRepo.save` never writes over one — so a
+replayed or late-arriving create for a deleted id cannot bring it back.
+
 The visibility query in :meth:`list_visible_to` does *all* the
 filtering in one statement: drop blocked authors, collapse the
 absolute 7-day retention to 24 h for non-followers, and apply the
@@ -28,8 +35,21 @@ from .base import row_to_dict, rows_to_dicts
 @runtime_checkable
 class AbstractMomentRepo(Protocol):
     async def save(self, moment: Moment) -> Moment: ...
-    async def get(self, moment_id: str) -> Moment | None: ...
+    async def get(
+        self,
+        moment_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> Moment | None: ...
     async def delete(self, moment_id: str) -> None: ...
+    async def tombstone(
+        self,
+        moment_id: str,
+        *,
+        author_user_id: str,
+        origin_instance_id: str,
+        expires_at: str,
+    ) -> bool: ...
     async def delete_by_author(self, author_user_id: str) -> int: ...
     async def list_visible_to(
         self,
@@ -128,6 +148,7 @@ class SqliteMomentRepo:
                 is_public=excluded.is_public,
                 received_via=excluded.received_via,
                 received_via_gfs_id=excluded.received_via_gfs_id
+            WHERE moments.deleted_at IS NULL
             """,
             (
                 moment.id,
@@ -156,26 +177,66 @@ class SqliteMomentRepo:
         )
         for tag in extract_hashtags(moment.content):
             await self._db.enqueue(
-                "INSERT OR IGNORE INTO moment_hashtags(moment_id, tag) VALUES(?, ?)",
-                (moment.id, tag),
+                "INSERT OR IGNORE INTO moment_hashtags(moment_id, tag)"
+                " SELECT ?, ? WHERE EXISTS("
+                "SELECT 1 FROM moments WHERE id=? AND deleted_at IS NULL)",
+                (moment.id, tag, moment.id),
             )
         return moment
 
-    async def get(self, moment_id: str) -> Moment | None:
+    async def get(
+        self,
+        moment_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> Moment | None:
+        """The live moment, or ``None``. ``include_deleted`` also returns a
+        tombstone (``deleted_at`` set) — for the id→author binding check."""
         row = await self._db.fetchone(
-            "SELECT * FROM moments WHERE id=?",
+            "SELECT * FROM moments WHERE id=?"
+            + ("" if include_deleted else " AND deleted_at IS NULL"),
             (moment_id,),
         )
         return _row_to_moment(row_to_dict(row))
 
     async def delete(self, moment_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM moments WHERE id=?",
-            (moment_id,),
+        """Turn a stored moment into a tombstone; no-op for an unknown id."""
+        await self._db.transact(
+            lambda conn: _tombstone_rows(conn, "id=?", (moment_id,)),
         )
 
+    async def tombstone(
+        self,
+        moment_id: str,
+        *,
+        author_user_id: str,
+        origin_instance_id: str,
+        expires_at: str,
+    ) -> bool:
+        """Record that ``moment_id`` was deleted, stored or not.
+
+        A stored row is wiped in place and keeps its own ``expires_at`` (a
+        replay of its create carries the same expiry, so it is refused for
+        as long as it could be shown). An unknown id gets a content-free
+        row expiring at ``expires_at`` — the caller passes the maximum
+        moment lifetime, so the delete is held until any create for it
+        could arrive. Returns ``True`` iff a *live* moment was removed.
+        """
+
+        def _run(conn) -> bool:
+            removed = _tombstone_rows(conn, "id=?", (moment_id,)) > 0
+            conn.execute(
+                "INSERT OR IGNORE INTO moments(id, author_user_id, content,"
+                " origin_instance_id, expires_at, received_via, deleted_at)"
+                " VALUES(?, ?, '', ?, ?, 'household', datetime('now'))",
+                (moment_id, author_user_id, origin_instance_id, expires_at),
+            )
+            return removed
+
+        return await self._db.transact(_run)
+
     async def delete_by_author(self, author_user_id: str) -> int:
-        """Hard-delete every moment authored by ``author_user_id``.
+        """Tombstone every moment authored by ``author_user_id``.
 
         Drives the §Connection-Detail visibility cascade: when an inbound
         ``USER_REMOVED`` lands for this user, every moment they ever
@@ -184,17 +245,9 @@ class SqliteMomentRepo:
         the receiver-side rule treats hide as full removal, matching
         the "hide = remove" UX the SPA copy promises.
         """
-        row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM moments WHERE author_user_id=?",
-            (author_user_id,),
+        return await self._db.transact(
+            lambda conn: _tombstone_rows(conn, "author_user_id=?", (author_user_id,)),
         )
-        n = int(row["n"]) if row else 0
-        if n:
-            await self._db.enqueue(
-                "DELETE FROM moments WHERE author_user_id=?",
-                (author_user_id,),
-            )
-        return n
 
     async def list_visible_to(
         self,
@@ -241,6 +294,7 @@ class SqliteMomentRepo:
                  )
                )
                AND datetime(m.expires_at) > datetime('now')
+               AND m.deleted_at IS NULL
                AND m.hop_count <= ?
                AND (? IS NULL OR m.created_at < ?)
                AND (
@@ -324,6 +378,7 @@ class SqliteMomentRepo:
             """
             SELECT * FROM moments
              WHERE author_user_id = ? AND is_public = 1
+               AND deleted_at IS NULL
                AND datetime(expires_at) > datetime('now')
              ORDER BY created_at DESC
              LIMIT ?
@@ -335,7 +390,8 @@ class SqliteMomentRepo:
     async def list_replies(self, parent_moment_id: str) -> list[Moment]:
         """Replies in chronological order so the thread reads top-down."""
         rows = await self._db.fetchall(
-            "SELECT * FROM moments WHERE parent_moment_id=? ORDER BY created_at ASC",
+            "SELECT * FROM moments WHERE parent_moment_id=?"
+            " AND deleted_at IS NULL ORDER BY created_at ASC",
             (parent_moment_id,),
         )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
@@ -350,7 +406,7 @@ class SqliteMomentRepo:
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM moments "
             "WHERE author_user_id=? AND created_at>=? "
-            "AND parent_moment_id IS NULL",
+            "AND parent_moment_id IS NULL AND deleted_at IS NULL",
             (author_user_id, since_iso),
         )
         return int(row["n"]) if row else 0
@@ -438,6 +494,7 @@ class SqliteMomentRepo:
             SELECT parent_moment_id AS moment_id, COUNT(*) AS n
               FROM moments
              WHERE parent_moment_id IN ({placeholders})
+               AND deleted_at IS NULL
              GROUP BY parent_moment_id
             """,
             tuple(moment_ids),
@@ -489,6 +546,7 @@ class SqliteMomentRepo:
                  )
                )
                AND datetime(m.expires_at) > datetime('now')
+               AND m.deleted_at IS NULL
              GROUP BY mh.tag
              ORDER BY n DESC, mh.tag ASC
              LIMIT ?
@@ -516,7 +574,8 @@ class SqliteMomentRepo:
         return [r["media_url"] for r in rows_to_dicts(rows) if r.get("media_url")]
 
     async def prune_expired(self) -> int:
-        """Drop rows past their absolute 7-day cap. Reactions cascade."""
+        """Drop rows past their absolute 7-day cap — live moments and
+        delete tombstones alike. Reactions cascade."""
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM moments "
             "WHERE datetime(expires_at) < datetime('now')",
@@ -528,6 +587,39 @@ class SqliteMomentRepo:
             "DELETE FROM moments WHERE datetime(expires_at) < datetime('now')",
         )
         return n
+
+
+def _tombstone_rows(conn, where: str, params: tuple) -> int:
+    """Wipe the live moments matching ``where`` down to tombstones.
+
+    Runs inside :meth:`AsyncDatabase.transact`. Keeps the id, author, origin
+    and ``expires_at`` (what a tombstone must remember); drops content,
+    media, tags and reactions; detaches replies (``parent_moment_id`` →
+    NULL, as the old hard delete's ``ON DELETE SET NULL`` did). Returns the
+    number of live moments tombstoned. ``where`` is a fixed column
+    predicate from this module, never caller input.
+    """
+    ids = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT id FROM moments WHERE {where} AND deleted_at IS NULL",
+            params,
+        ).fetchall()
+    ]
+    for mid in ids:
+        conn.execute("DELETE FROM moment_hashtags WHERE moment_id=?", (mid,))
+        conn.execute("DELETE FROM moment_reactions WHERE moment_id=?", (mid,))
+        conn.execute(
+            "UPDATE moments SET parent_moment_id=NULL WHERE parent_moment_id=?",
+            (mid,),
+        )
+        conn.execute(
+            "UPDATE moments SET content='', media_url=NULL, media_type=NULL,"
+            " duration_ms=NULL, parent_moment_id=NULL, is_public=0,"
+            " deleted_at=datetime('now') WHERE id=?",
+            (mid,),
+        )
+    return len(ids)
 
 
 def _row_to_moment(row: dict | None) -> Moment | None:
@@ -548,4 +640,5 @@ def _row_to_moment(row: dict | None) -> Moment | None:
         is_public=bool(row.get("is_public") or 0),
         received_via=row.get("received_via") or "self",
         received_via_gfs_id=row.get("received_via_gfs_id"),
+        deleted_at=row.get("deleted_at"),
     )
