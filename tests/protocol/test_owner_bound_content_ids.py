@@ -40,7 +40,10 @@ from socialhome.federation.owner_bound_id import (
     GALLERY_ITEM_KIND,
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
+    SPACE_PAGE_KIND,
     SPACE_POST_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
     mint_owner_bound_id,
 )
 
@@ -151,6 +154,46 @@ KINDS: list[Kind] = [
         "calendar",
         lambda rid, who: {"id": rid, "summary": "x", "created_by": who, **_CAL},
     ),
+    Kind(
+        "task",
+        SPACE_TASK_KIND,
+        FET.SPACE_TASK_CREATED,
+        lambda rid, who: {
+            "id": rid,
+            "list_id": "list-a",
+            "title": "x",
+            "created_by": who,
+        },
+        "space_tasks",
+        "created_by",
+        "tasks",
+        lambda rid, who: {
+            "id": rid,
+            "list_id": "list-a",
+            "title": "x",
+            "created_by": who,
+        },
+    ),
+    Kind(
+        "page",
+        SPACE_PAGE_KIND,
+        FET.SPACE_PAGE_CREATED,
+        lambda rid, who: {"id": rid, "title": "x", "created_by": who},
+        "space_pages",
+        "created_by",
+        "pages",
+        lambda rid, who: {"id": rid, "title": "x", "created_by": who},
+    ),
+    Kind(
+        "sticky",
+        SPACE_STICKY_KIND,
+        FET.SPACE_STICKY_CREATED,
+        lambda rid, who: {"id": rid, "author": who, "content": "x"},
+        "stickies",
+        "author",
+        "stickies",
+        lambda rid, who: {"id": rid, "author": who, "content": "x"},
+    ),
 ]
 
 _IDS = [k.label for k in KINDS]
@@ -242,5 +285,8 @@ async def test_every_kind_is_covered():
         SPACE_COMMENT_KIND,
         GALLERY_ITEM_KIND,
         SPACE_CALENDAR_EVENT_KIND,
+        SPACE_TASK_KIND,
+        SPACE_PAGE_KIND,
+        SPACE_STICKY_KIND,
     }
     assert covered == expected, sorted(expected - covered)

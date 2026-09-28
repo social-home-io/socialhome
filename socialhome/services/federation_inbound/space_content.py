@@ -50,6 +50,9 @@ from ...federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
     SPACE_CALENDAR_EVENT_KIND,
+    SPACE_PAGE_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
     OwnerBinding,
     check_owner_bound_id,
     owner_bound_id_refused,
@@ -352,6 +355,10 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="task", row_id=task_id
             )
             return
+        if existing is None and self._bound_id_refused(
+            event, SPACE_TASK_KIND, task_id, space_id, task.created_by
+        ):
+            return
         if not await self._collaborative_write_allowed(
             event,
             space_id,
@@ -429,6 +436,10 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="page", row_id=page_id
             )
             return
+        if existing is None and self._bound_id_refused(
+            event, SPACE_PAGE_KIND, page_id, space_id, page.created_by
+        ):
+            return
         if not await self._collaborative_write_allowed(
             event,
             space_id,
@@ -494,6 +505,10 @@ class SpaceContentInboundHandlers:
             author = existing.author
         elif not author:
             log.debug("SPACE_STICKY_CREATED missing author")
+            return
+        elif self._bound_id_refused(
+            event, SPACE_STICKY_KIND, sticky_id, space_id, author
+        ):
             return
         if not await self._collaborative_write_allowed(
             event,

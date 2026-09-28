@@ -51,7 +51,10 @@ from ...owner_bound_id import (
     GALLERY_ITEM_KIND,
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
+    SPACE_PAGE_KIND,
     SPACE_POST_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
     OwnerBinding,
     check_owner_bound_id,
     owner_bound_id_refused,
@@ -895,6 +898,10 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "comments": (SPACE_COMMENT_KIND, ("author",)),
     "gallery": (GALLERY_ITEM_KIND, ("uploaded_by", "uploader")),
     "calendar": (SPACE_CALENDAR_EVENT_KIND, ("created_by",)),
+    "tasks": (SPACE_TASK_KIND, ("created_by",)),
+    "tasks_archived": (SPACE_TASK_KIND, ("created_by",)),
+    "pages": (SPACE_PAGE_KIND, ("created_by",)),
+    "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
 }
 
 
