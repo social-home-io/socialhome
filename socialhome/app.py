@@ -1510,6 +1510,10 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             "/api/spaces/*/ban": (5, 60),  # moderation
             "/api/calls/*/decline": (10, 60),
             "/api/calls/*/hangup": (30, 60),
+            # Trickle ICE: every leg of a group-call mesh posts its own
+            # candidates within seconds (5 legs × several candidates), and
+            # the broad ``/api/calls`` limit below would 429 them.
+            "/api/calls/*/ice": (300, 60),
             # Map tiles — *looser* than the default, and listed ahead of
             # any broader prefix because ``_pick`` returns the first
             # match in insertion order. Leaflet's ``<img>`` loads all

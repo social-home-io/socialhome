@@ -30,6 +30,7 @@ from ..services.call_service import (
     CallAlreadyAnsweredError,
     CallConversationError,
     CallNotFoundError,
+    CallTooLargeError,
 )
 from ..webrtc_ice import make_turn_credential as _make_turn_credential
 from .base import BaseView
@@ -78,7 +79,17 @@ class CallCollectionView(BaseView):
         conversation_id = body.get("conversation_id")
         sdp_offer = body.get("sdp_offer")
         call_type = body.get("call_type", "audio")
-        if not conversation_id or not sdp_offer:
+        # Group calls: one offer per callee, ``{user_id: sdp}``.
+        raw_offers = body.get("sdp_offers")
+        if raw_offers is not None and not isinstance(raw_offers, dict):
+            return web.json_response(
+                {"error": "sdp_offers must be an object"},
+                status=422,
+            )
+        sdp_offers = {
+            str(k): v for k, v in (raw_offers or {}).items() if isinstance(v, str) and v
+        }
+        if not conversation_id or not (sdp_offer or sdp_offers):
             return web.json_response(
                 {
                     "error": "missing_fields",
@@ -92,7 +103,8 @@ class CallCollectionView(BaseView):
                 caller_user_id=ctx.user_id,
                 conversation_id=conversation_id,
                 call_type=call_type,
-                sdp_offer=sdp_offer,
+                sdp_offer=sdp_offer or None,
+                sdp_offers=sdp_offers or None,
             )
         except PermissionError as exc:
             return web.json_response(
@@ -101,6 +113,10 @@ class CallCollectionView(BaseView):
         except CallConversationError as exc:
             return web.json_response(
                 {"error": "invalid_conversation", "detail": str(exc)}, status=422
+            )
+        except CallTooLargeError as exc:
+            return web.json_response(
+                {"error": "too_many_participants", "detail": str(exc)}, status=422
             )
         except ValueError as exc:
             return web.json_response(
@@ -127,6 +143,9 @@ class CallAnswerView(BaseView):
                 call_id=call_id,
                 answerer_user_id=self.user.user_id,
                 sdp_answer=sdp_answer,
+                # A mesh-leg answer names the participant whose offer it
+                # answers; the ring's answer goes to the caller (default).
+                to_user_id=_opt_str(body.get("to_user")),
             )
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
@@ -157,9 +176,14 @@ class CallIceView(BaseView):
                 call_id=call_id,
                 from_user_id=self.user.user_id,
                 candidate=candidate,
+                to_user_id=_opt_str(body.get("to_user")),
             )
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
+        except PermissionError as exc:
+            return web.json_response(
+                {"error": "forbidden", "detail": str(exc)}, status=403
+            )
         return web.Response(status=204)
 
 
@@ -229,6 +253,10 @@ class CallJoinView(BaseView):
             )
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
+        except CallTooLargeError as exc:
+            return web.json_response(
+                {"error": "too_many_participants", "detail": str(exc)}, status=422
+            )
         except PermissionError as exc:
             return web.json_response(
                 {"error": "forbidden", "detail": str(exc)}, status=403
@@ -399,6 +427,10 @@ class IceServersView(BaseView):
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────
+
+
+def _opt_str(value) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _coerce_int(value) -> int | None:

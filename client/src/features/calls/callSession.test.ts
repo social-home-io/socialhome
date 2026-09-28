@@ -27,6 +27,11 @@ vi.mock('@/ws', () => ({
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()
+// Our own user id decides who offers on a callee ↔ callee mesh leg.
+const auth = vi.hoisted(() => ({ me: 'uid-me' }))
+vi.mock('@/store/auth', () => ({
+  currentUser: { get value() { return { user_id: auth.me } } },
+}))
 vi.mock('@/api', () => ({
   api: {
     get: (...a: unknown[]) => apiGet(...a),
@@ -52,7 +57,10 @@ class FakeStream {
   getVideoTracks() { return this.tracks.filter(t => t.kind === 'video') }
 }
 
+let pcSeq = 0
 class FakePC {
+  /** Numbered so each leg's offer / answer is told apart in the log. */
+  n = ++pcSeq
   signalingState: RTCSignalingState = 'stable'
   connectionState: RTCPeerConnectionState = 'new'
   localDescription: RTCSessionDescriptionInit | null = null
@@ -67,8 +75,14 @@ class FakePC {
     pcs.push(this)
   }
   addTrack(t: FakeTrack) { log.push(`addTrack ${t.kind}`) }
-  async createOffer() { log.push('createOffer'); return { type: 'offer', sdp: 'OFFER-SDP' } }
-  async createAnswer() { log.push('createAnswer'); return { type: 'answer', sdp: 'ANSWER-SDP' } }
+  async createOffer() {
+    log.push('createOffer')
+    return { type: 'offer', sdp: this.n === 1 ? 'OFFER-SDP' : `OFFER-SDP-${this.n}` }
+  }
+  async createAnswer() {
+    log.push('createAnswer')
+    return { type: 'answer', sdp: this.n === 1 ? 'ANSWER-SDP' : `ANSWER-SDP-${this.n}` }
+  }
   async setLocalDescription(d: RTCSessionDescriptionInit) {
     log.push(`setLocal ${d.type}`)
     this.localDescription = d
@@ -104,6 +118,10 @@ function mediaOk(kinds: Array<'audio' | 'video'>) {
 
 const flush = () => new Promise(r => setTimeout(r, 0))
 
+interface Member { user_id: string, display_name?: string, is_self?: boolean }
+const SELF: Member = { user_id: 'uid-me', display_name: 'Me', is_self: true }
+let members: Member[] = []
+
 type Session = typeof import('./callSession')
 type Store = typeof import('@/store/calls')
 let S: Session
@@ -115,10 +133,14 @@ beforeEach(async () => {
   wsHandlers.clear()
   log = []
   pcs.length = 0
+  pcSeq = 0
+  auth.me = 'uid-me'
+  members = [SELF, { user_id: 'uid-bob', display_name: 'Bob' }]
   lastStream = null
   FakePC.gather = { candidate: 'local-1', sdpMid: '0' }
   apiGet.mockReset().mockImplementation(async (path: string) => {
     log.push(`GET ${path}`)
+    if (path.endsWith('/members')) return members
     return { ice_servers: [{ urls: ['turn:turn.example'], username: 'u', credential: 'c' }] }
   })
   apiPost.mockReset().mockImplementation(async (path: string, body: Frame) => {
@@ -150,14 +172,16 @@ describe('startCall (caller)', () => {
     expect(log).toEqual([
       'GET /api/calls/ice-servers',
       'getUserMedia audio+video',
+      'GET /api/conversations/conv-1/members',
       `new PC ${TURN}`,
       'addTrack audio',
       'addTrack video',
       'createOffer',
       'setLocal offer',
+      // 1:1 keeps the single-offer body.
       'POST /api/calls {"conversation_id":"conv-1","call_type":"video","sdp_offer":"OFFER-SDP"}',
-      // Gathered before call_id existed → held, then flushed.
-      'POST /api/calls/call-1/ice {"candidate":{"candidate":"local-1","sdpMid":"0"}}',
+      // Gathered before call_id existed → held, then flushed to the leg.
+      'POST /api/calls/call-1/ice {"candidate":{"candidate":"local-1","sdpMid":"0"},"to_user":"uid-bob"}',
     ])
     expect(S.callPhase.value).toBe('ringing')
     expect(S.callId.value).toBe('call-1')
@@ -284,9 +308,10 @@ describe('startCall (caller)', () => {
       throw Object.assign(new Error('no cam'), { name: 'NotFoundError' })
     }).mockImplementationOnce(mediaOk(['audio']))
     await S.startCall('conv-1', 'video')
-    expect(log.slice(0, 4)).toEqual([
+    expect(log.slice(0, 5)).toEqual([
       'GET /api/calls/ice-servers',
       'getUserMedia audio+video',
+      'GET /api/conversations/conv-1/members',
       'getUserMedia audio',
       `new PC ${TURN}`,
     ])
@@ -344,6 +369,8 @@ describe('acceptCall (callee)', () => {
 
     await S.acceptCall(store.incoming.value!)
     expect(log).toEqual([
+      // Names for the call page — fetched alongside, never waited on.
+      'GET /api/conversations/conv-1/members',
       'GET /api/calls/ice-servers',
       'getUserMedia audio+video',
       `new PC ${TURN}`,
@@ -355,7 +382,7 @@ describe('acceptCall (callee)', () => {
       'setLocal answer',
       'POST /api/calls/call-9/answer {"sdp_answer":"ANSWER-SDP"}',
       // Our own candidates only go out once the answer is posted.
-      'POST /api/calls/call-9/ice {"candidate":{"candidate":"local-1","sdpMid":"0"}}',
+      'POST /api/calls/call-9/ice {"candidate":{"candidate":"local-1","sdpMid":"0"},"to_user":"uid-alice"}',
     ])
     expect(store.pendingIce.value).toEqual([])
     expect(S.callPhase.value).toBe('connecting')
@@ -457,5 +484,176 @@ describe('store/calls', () => {
     const before = store.pendingIce.value
     expect(store.consumeIce('call-y')).toEqual([])
     expect(store.pendingIce.value).toBe(before)
+  })
+})
+
+// ─── group calls: full mesh ─────────────────────────────────────────────
+
+describe('group calls (mesh)', () => {
+  const BOB = { user_id: 'uid-bob', display_name: 'Bob' }
+  const CAROL = { user_id: 'uid-carol', display_name: 'Carol' }
+  const answered = (from: string, sdp: string, call = 'call-1') =>
+    emit('call.answered', { call_id: call, from_user: from, signed_sdp: { sdp } })
+
+  it('the caller opens one leg per callee and posts one offer each', async () => {
+    members = [SELF, BOB, CAROL]
+    await S.startCall('conv-g', 'video')
+    // One camera/mic for the whole call, sent on every leg.
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+    expect(pcs).toHaveLength(2)
+    expect(log.filter(l => l.startsWith('addTrack'))).toHaveLength(4)
+    expect(log).toContain('POST /api/calls {"conversation_id":"conv-g","call_type":"video",'
+      + '"sdp_offers":{"uid-bob":"OFFER-SDP","uid-carol":"OFFER-SDP-2"}}')
+    // Each leg's held candidates go to its own participant.
+    expect(log).toContain('POST /api/calls/call-1/ice {"candidate":{"candidate":"local-1","sdpMid":"0"},"to_user":"uid-bob"}')
+    expect(log).toContain('POST /api/calls/call-1/ice {"candidate":{"candidate":"local-1","sdpMid":"0"},"to_user":"uid-carol"}')
+    expect(S.callPeers.value.map(p => [p.name, p.state])).toEqual([
+      ['Bob', 'ringing'], ['Carol', 'ringing'],
+    ])
+    expect(S.callPhase.value).toBe('ringing')
+  })
+
+  it('routes each answer and each remote candidate to its own leg', async () => {
+    members = [SELF, BOB, CAROL]
+    await S.startCall('conv-g', 'video')
+    const [bob, carol] = pcs
+    log = []
+    // Carol's candidate arrives first but waits for Carol's answer.
+    emit('call.ice_candidate', { call_id: 'call-1', from_user: 'uid-carol', candidate: { candidate: 'c-1' } })
+    answered('uid-bob', 'ANS-BOB')
+    await flush()
+    expect(bob.remoteDescription?.sdp).toBe('ANS-BOB')
+    expect(carol.remoteDescription).toBeNull()
+    expect(log).toEqual(['setRemote answer ANS-BOB'])
+    answered('uid-carol', 'ANS-CAROL')
+    await flush()
+    expect(log.slice(1)).toEqual(['setRemote answer ANS-CAROL', 'addIce c-1'])
+    expect(S.callPhase.value).toBe('connecting')
+    bob.setConnection('connected')
+    expect(S.callPhase.value).toBe('connected')
+    expect(S.callPeers.value.map(p => p.state)).toEqual(['connected', 'connecting'])
+  })
+
+  it('refuses a group bigger than the mesh cap before touching the network', async () => {
+    members = [SELF, ...Array.from({ length: S.MAX_CALL_PARTICIPANTS }, (_, i) => ({ user_id: `uid-${i}` }))]
+    await expect(S.startCall('conv-big', 'audio')).rejects.toThrow(/limited to 6 people/)
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(S.isCallLive()).toBe(false)
+  })
+
+  it('one callee leaving closes their leg only; "over" ends the call', async () => {
+    members = [SELF, BOB, CAROL]
+    await S.startCall('conv-g', 'video')
+    emit('call.declined', { call_id: 'call-1', by: 'uid-bob', over: false })
+    expect(pcs[0].connectionState).toBe('closed')
+    expect(pcs[1].connectionState).toBe('new')
+    expect(S.isCallLive()).toBe(true)
+    expect(S.callPeers.value.map(p => p.name)).toEqual(['Carol'])
+    emit('call.declined', { call_id: 'call-1', by: 'uid-carol', over: true })
+    expect(S.callPhase.value).toBe('ended')
+    expect(S.callEndReason.value).toBe('The call was declined.')
+  })
+
+  it('a callee opens its legs to the higher-id callees after answering the caller', async () => {
+    auth.me = 'uid-b'
+    emit('call.ringing', {
+      call_id: 'call-9', from_user: 'uid-a', call_type: 'audio', conversation_id: 'conv-g',
+      participants: ['uid-a', 'uid-b', 'uid-c'],
+      signed_sdp: { sdp: 'OFFER-FROM-A', sdp_type: 'offer', signature: 's' },
+    })
+    await S.acceptCall(store.incoming.value!)
+    await flush()
+    const posts = log.filter(l => l.startsWith('POST'))
+    expect(posts).toEqual([
+      'POST /api/calls/call-9/answer {"sdp_answer":"ANSWER-SDP"}',
+      'POST /api/calls/call-9/ice {"candidate":{"candidate":"local-1","sdpMid":"0"},"to_user":"uid-a"}',
+      'POST /api/calls/call-9/join {"sdp_offers":{"uid-c":"OFFER-SDP-2"}}',
+      'POST /api/calls/call-9/ice {"candidate":{"candidate":"local-1","sdpMid":"0"},"to_user":"uid-c"}',
+    ])
+    // Carol's answer to that leg lands on it — not on the caller's.
+    answered('uid-c', 'ANS-C', 'call-9')
+    await flush()
+    expect(pcs[1].remoteDescription?.sdp).toBe('ANS-C')
+    expect(pcs[0].remoteDescription?.sdp).toBe('OFFER-FROM-A')
+  })
+
+  it('a higher-id callee answers the leg offer that arrived while it was ringing', async () => {
+    auth.me = 'uid-c'
+    emit('call.ringing', {
+      call_id: 'call-9', from_user: 'uid-a', call_type: 'audio', conversation_id: 'conv-g',
+      participants: ['uid-a', 'uid-b', 'uid-c'],
+      signed_sdp: { sdp: 'OFFER-FROM-A', sdp_type: 'offer', signature: 's' },
+    })
+    // uid-b accepted first and offered us a leg — we are still ringing.
+    emit('call.peer_join', {
+      call_id: 'call-9', joiner_user_id: 'uid-b',
+      signed_sdp: { sdp: 'OFFER-FROM-B', sdp_type: 'offer', signature: 's' },
+    })
+    emit('call.ice_candidate', { call_id: 'call-9', from_user: 'uid-b', candidate: { candidate: 'b-1' } })
+    await flush()
+    expect(pcs).toHaveLength(0)
+    await S.acceptCall(store.incoming.value!)
+    await flush(); await flush()
+    expect(pcs).toHaveLength(2)
+    expect(pcs[1].remoteDescription?.sdp).toBe('OFFER-FROM-B')
+    expect(log).toContain('addIce b-1')
+    expect(log).toContain('POST /api/calls/call-9/answer {"sdp_answer":"ANSWER-SDP-2","to_user":"uid-b"}')
+    // We never offer to a lower id.
+    expect(log.some(l => l.includes('/join'))).toBe(false)
+    expect(store.pendingPeerOffers.value).toEqual([])
+  })
+
+  it('an unanswered leg is dropped after the ringing TTL and a lone call ends', async () => {
+    vi.useFakeTimers()
+    try {
+      await S.startCall('conv-1', 'audio')
+      log = []
+      vi.advanceTimersByTime(S.RING_TIMEOUT_MS)
+      expect(S.callPhase.value).toBe('ended')
+      expect(S.callEndReason.value).toBe('Nobody answered.')
+      expect(log).toContain('POST /api/calls/call-1/hangup {}')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('one failed leg in a group keeps the call; the last one fails it', async () => {
+    members = [SELF, BOB, CAROL]
+    await S.startCall('conv-g', 'video')
+    pcs[0].setConnection('failed')
+    expect(S.isCallLive()).toBe(true)
+    log = []
+    pcs[1].setConnection('failed')
+    await flush()
+    expect(S.callPhase.value).toBe('failed')
+    expect(log).toContain('POST /api/calls/call-1/hangup {}')
+  })
+})
+
+describe('store/calls — group ringing', () => {
+  const ring = {
+    call_id: 'call-9', from_user: 'uid-a', call_type: 'audio',
+    participants: ['uid-a', 'uid-b', 'uid-c'],
+    signed_sdp: { sdp: 'O', sdp_type: 'offer', signature: 's' },
+  }
+
+  it('another callee declining does not stop our ring', () => {
+    emit('call.ringing', ring)
+    emit('call.declined', { call_id: 'call-9', by: 'uid-b', over: false })
+    expect(store.incoming.value?.call_id).toBe('call-9')
+    expect(store.incoming.value?.participants).toEqual(['uid-a', 'uid-b', 'uid-c'])
+  })
+
+  it('the caller leaving withdraws the invite', () => {
+    emit('call.ringing', ring)
+    emit('call.ended', { call_id: 'call-9', by: 'uid-a', over: false })
+    expect(store.incoming.value).toBeNull()
+  })
+
+  it('a leaver\'s queued leg offer is forgotten', () => {
+    emit('call.peer_join', { call_id: 'call-9', joiner_user_id: 'uid-b', signed_sdp: { sdp: 'X' } })
+    expect(store.pendingPeerOffers.value).toHaveLength(1)
+    emit('call.ended', { call_id: 'call-9', by: 'uid-b', over: false })
+    expect(store.pendingPeerOffers.value).toEqual([])
   })
 })

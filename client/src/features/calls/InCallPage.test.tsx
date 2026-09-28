@@ -32,7 +32,7 @@ vi.mock('./callSession', async () => {
     callConversation: signal<string | null>('conv-1'),
     callEndReason: signal<string | null>(null),
     localStream: signal<MediaStream | null>(null),
-    remoteStream: signal<MediaStream | null>(null),
+    callPeers: signal<Array<{ userId: string, name: string, state: string, stream: null }>>([]),
     hasCamera: signal<boolean>(true),
     callType: signal<'audio' | 'video'>('video'),
     getPeerConnection: () => null,
@@ -44,7 +44,7 @@ vi.mock('./callSession', async () => {
 
 import InCallPage from './InCallPage'
 import {
-  callConversation, callEndReason, callId, callPhase, callType, hasCamera,
+  callConversation, callEndReason, callId, callPeers, callPhase, callType, hasCamera,
   type CallPhase,
 } from './callSession'
 
@@ -65,6 +65,7 @@ describe('InCallPage', () => {
     callEndReason.value = null
     callPhase.value = 'idle'
     callId.value = null
+    callPeers.value = [{ userId: 'uid-bob', name: 'Bob', state: 'connecting', stream: null }]
     s.live = false
   })
 
@@ -160,5 +161,31 @@ describe('InCallPage', () => {
     const { unmount } = render(<InCallPage />)
     unmount()
     expect(s.hangupCall).toHaveBeenCalledTimes(1)
+  })
+
+  it('a group call shows one tile per participant with its own state', () => {
+    session('connected')
+    callPeers.value = [
+      { userId: 'uid-bob', name: 'Bob', state: 'connected', stream: null },
+      { userId: 'uid-carol', name: 'Carol', state: 'ringing', stream: null },
+    ]
+    const { getByRole, getAllByRole, queryByRole } = render(<InCallPage />)
+    expect(getByRole('list', { name: 'Call participants' })).toBeTruthy()
+    const tiles = getAllByRole('listitem').map(t => t.textContent)
+    expect(tiles).toEqual(['BBob', 'CCarol · Ringing…'])
+    // Per-tile states replace the call-wide status line.
+    expect(queryByRole('status')).toBeNull()
+  })
+
+  it('a ringing group call says "Ringing…" on each tile, not across them', () => {
+    session('ringing')
+    callPeers.value = [
+      { userId: 'uid-bob', name: 'Bob', state: 'ringing', stream: null },
+      { userId: 'uid-carol', name: 'Carol', state: 'ringing', stream: null },
+    ]
+    const { getAllByRole, queryByRole } = render(<InCallPage />)
+    expect(getAllByRole('listitem').map(t => t.textContent))
+      .toEqual(['BBob · Ringing…', 'CCarol · Ringing…'])
+    expect(queryByRole('status')).toBeNull()
   })
 })
