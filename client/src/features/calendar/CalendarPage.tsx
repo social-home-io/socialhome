@@ -11,6 +11,7 @@ import {
   openEditEventDialog,
 } from '@/components/CalendarEventDialog'
 import { CalendarFilterStrip } from '@/components/CalendarFilterStrip'
+import { CalendarImport, openCalendarImport } from '@/components/CalendarImport'
 import { CapacityStrip } from '@/components/CapacityStrip'
 import { EventOverflowMenu } from '@/components/EventOverflowMenu'
 import { EventRowMeta } from '@/components/EventRowMeta'
@@ -327,7 +328,48 @@ export default function CalendarPage() {
     )
   }
 
-  if (loading.value) return <CalendarSkeleton />
+  // After an import, make sure the target calendar is showing so the
+  // new events are visible (it may be another member's calendar that
+  // was toggled off in the strip), then refetch the range.
+  const handleImported = (calendarId: string) => {
+    if (!visibleCalendarIds.value.has(calendarId)) {
+      const next = new Set(visibleCalendarIds.value)
+      next.add(calendarId)
+      setVisible(next)
+      return
+    }
+    void loadEvents()
+  }
+
+  // "Show in calendar" after an import: move the view to the earliest
+  // imported event — an .ics export usually covers other months.
+  const showImported = (imported: { start: string }[]) => {
+    const times = imported.map(e => Date.parse(e.start)).filter(t => !Number.isNaN(t))
+    if (times.length > 0) currentDate.value = new Date(Math.min(...times))
+  }
+
+  const setVisible = (next: Set<string>) => {
+    visibleCalendarIds.value = next
+    activeCalendarScope.value = next
+    const uid = currentUser.value?.user_id
+    if (uid) saveVisibilityPrefs(uid, next)
+    void loadEvents()
+  }
+
+  // The import dialog sits first in a fragment that BOTH render paths
+  // return, so it survives the loading skeleton an import's refetch
+  // flips on (a remount would drop the result summary mid-read).
+  const importHost = (
+    <CalendarImport
+      calendars={calendars.value}
+      defaultCalendarId={writeCalendarId.value || null}
+      ensureCalendar={ensureHouseholdCalendar}
+      onImported={handleImported}
+      onShow={showImported}
+    />
+  )
+
+  if (loading.value) return <>{importHost}<CalendarSkeleton /></>
 
   // Pass the visible range so the overlap-based server query (which
   // legitimately returns an event that started before the period) can't
@@ -341,15 +383,8 @@ export default function CalendarPage() {
   // ``new Date(key)`` round-trip required.
   const dayKeys = Object.keys(grouped).sort()
 
-  const setVisible = (next: Set<string>) => {
-    visibleCalendarIds.value = next
-    activeCalendarScope.value = next
-    const uid = currentUser.value?.user_id
-    if (uid) saveVisibilityPrefs(uid, next)
-    void loadEvents()
-  }
-
   return (
+    <>{importHost}
     <div class="sh-calendar">
       <CalendarFilterStrip
         calendars={calendars.value}
@@ -358,7 +393,12 @@ export default function CalendarPage() {
         onShowAll={showAllCalendars}
         onShowOnlyMine={showOnlyMine}
         primaryAction={
-          <Button onClick={handleNewEvent}>+ New event</Button>
+          <div class="sh-cal-strip-actions__buttons">
+            <Button variant="secondary" onClick={openCalendarImport}>
+              Import
+            </Button>
+            <Button onClick={handleNewEvent}>+ New event</Button>
+          </div>
         }
       />
 
@@ -397,9 +437,14 @@ export default function CalendarPage() {
             Birthdays, school runs, vet visits, the trip you're planning —
             anything the household needs to keep track of.
           </p>
-          <Button onClick={handleNewEvent}>
-            + Create your first event
-          </Button>
+          <div class="sh-empty-state__cta-row">
+            <Button onClick={handleNewEvent}>
+              + Create your first event
+            </Button>
+            <Button variant="secondary" onClick={openCalendarImport}>
+              Import a calendar file
+            </Button>
+          </div>
         </div>
       )}
 
@@ -691,5 +736,6 @@ export default function CalendarPage() {
         void loadEvents()
       }} />
     </div>
+    </>
   )
 }

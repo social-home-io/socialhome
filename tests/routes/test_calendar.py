@@ -745,6 +745,11 @@ async def test_feed_token_lifecycle(client):
     body = await r.json()
     token = body["token"]
     assert token
+    # Calendar apps poll from outside the SPA: the response carries the
+    # absolute link on the deployment's public origin (the fixture's
+    # ``[standalone].external_url``), next to the relative ``url``.
+    assert body["url"] == f"/api/spaces/sp-cal/calendar/export.ics?token={token}"
+    assert body["external_url"] == f"https://test.example{body['url']}"
     # Create an event so the feed has content.
     now = datetime.now(timezone.utc)
     await client.post(

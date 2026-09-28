@@ -52,6 +52,8 @@ from typing import (
     runtime_checkable,
 )
 
+from .federation_base import public_base_from_federation_base
+
 if TYPE_CHECKING:
     from aiohttp import web
 
@@ -327,6 +329,18 @@ class PlatformAdapter(abc.ABC):
         the pairing route (surfaced as 422 ``NOT_CONFIGURED``).
         """
         ...
+
+    async def get_public_base_url(self) -> str | None:
+        """Return the origin external clients reach this Social Home at.
+
+        Used for URLs that leave the SPA (iCal feed links, the API-token
+        base) — never ``document.baseURI``, which under ingress is a
+        path only a signed-in Home Assistant browser can load. Derived
+        from :meth:`get_federation_base`, so it is set exactly when the
+        deployment has a direct public address; ``None`` when the only
+        public route is the Home Assistant inbox forwarder (or nothing).
+        """
+        return public_base_from_federation_base(await self.get_federation_base())
 
     @abc.abstractmethod
     async def update_location(

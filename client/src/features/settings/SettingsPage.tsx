@@ -33,6 +33,7 @@ import {
 } from '@/utils/webPush'
 import { UsernameEditor } from './UsernameEditor'
 import { HandleEditor } from './HandleEditor'
+import { SecuritySettings } from '@/components/SecuritySettings'
 
 interface SpaceLocationRow {
   space_id: string
@@ -44,7 +45,11 @@ interface SpaceLocationRow {
 export const spaceLocationRows = signal<SpaceLocationRow[]>([])
 export const spaceLocationLoading = signal(false)
 
-type SettingsTab = 'profile' | 'privacy' | 'notifications' | 'appearance'
+type SettingsTab = 'profile' | 'privacy' | 'notifications' | 'appearance' | 'security'
+
+const SETTINGS_TABS: SettingsTab[] = [
+  'profile', 'privacy', 'notifications', 'appearance', 'security',
+]
 
 const activeTab = signal<SettingsTab>('profile')
 const displayName = signal('')
@@ -94,10 +99,28 @@ export default function SettingsPage() {
   const panelId = (t: SettingsTab) => `sh-settings-panel-${t}`
   const tabId   = (t: SettingsTab) => `sh-settings-tab-${t}`
 
+  // Roving tabindex: only the active tab is in the Tab order, so the
+  // others must be reachable with the arrow keys (WAI-ARIA tabs pattern)
+  // — without this a keyboard user could never leave the first tab.
+  const onTabKeyDown = (e: KeyboardEvent) => {
+    const i = SETTINGS_TABS.indexOf(activeTab.value)
+    let next: number
+    switch (e.key) {
+      case 'ArrowRight': next = (i + 1) % SETTINGS_TABS.length; break
+      case 'ArrowLeft': next = (i - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length; break
+      case 'Home': next = 0; break
+      case 'End': next = SETTINGS_TABS.length - 1; break
+      default: return
+    }
+    e.preventDefault()
+    activeTab.value = SETTINGS_TABS[next]
+    document.getElementById(tabId(SETTINGS_TABS[next]))?.focus()
+  }
+
   return (
     <div class="sh-settings">
-      <nav class="sh-settings-tabs" role="tablist">
-        {(['profile', 'privacy', 'notifications', 'appearance'] as SettingsTab[]).map(t => (
+      <nav class="sh-settings-tabs" role="tablist" onKeyDown={onTabKeyDown}>
+        {SETTINGS_TABS.map(t => (
           <button
             key={t}
             type="button"
@@ -125,6 +148,9 @@ export default function SettingsPage() {
       </div>
       <div role="tabpanel" id={panelId('appearance')} aria-labelledby={tabId('appearance')} hidden={activeTab.value !== 'appearance'}>
         {activeTab.value === 'appearance' && <AppearanceTab />}
+      </div>
+      <div role="tabpanel" id={panelId('security')} aria-labelledby={tabId('security')} hidden={activeTab.value !== 'security'}>
+        {activeTab.value === 'security' && <SecurityTab />}
       </div>
     </div>
   )
@@ -1035,6 +1061,15 @@ function HaNotifyServiceRow() {
         <Button onClick={save} loading={haNotifySaving.value}>Save</Button>
       </div>
     </div>
+  )
+}
+
+function SecurityTab() {
+  return (
+    <section class="sh-settings-section">
+      <h2>Security</h2>
+      <SecuritySettings />
+    </section>
   )
 }
 

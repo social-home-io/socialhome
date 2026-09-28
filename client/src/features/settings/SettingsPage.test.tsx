@@ -85,6 +85,34 @@ describe('SettingsPage', () => {
     expect(mod.default).toBeTruthy()
     expect(typeof mod.default).toBe('function')
   })
+
+  it('has a Security tab that mounts the API-token manager', async () => {
+    mockGet.mockImplementation(async (path: string) =>
+      path === '/api/me/tokens' ? { base_url: null, tokens: [] } : { spaces: [] })
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole, findByText } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Security' }))
+    await findByText('API tokens')
+    expect(mockGet).toHaveBeenCalledWith('/api/me/tokens')
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+  })
+
+  it('arrow keys move between tabs (roving tabindex is keyboard-reachable)', async () => {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole } = render(<SettingsPage />)
+    const profile = getByRole('tab', { name: 'Profile' })
+    fireEvent.click(profile)
+    profile.focus()
+    fireEvent.keyDown(profile, { key: 'End' })
+    const security = getByRole('tab', { name: 'Security' })
+    expect(security.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(security)
+    fireEvent.keyDown(security, { key: 'ArrowRight' })
+    expect(getByRole('tab', { name: 'Profile' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(getByRole('tab', { name: 'Profile' }), { key: 'ArrowLeft' })
+    expect(getByRole('tab', { name: 'Security' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+  })
 })
 
 async function renderPrivacyTab() {

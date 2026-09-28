@@ -223,3 +223,36 @@ def test_provides_ice_servers_is_not_a_spa_capability():
     ``adapter.capabilities``, so leaking it there would publish an internal
     startup detail on a public API surface."""
     assert not any("ice" in str(c).lower() for c in Capability)
+
+
+# ── get_public_base_url (ABC default) ────────────────────────────────────────
+
+
+class _BaseAdapter(_MinimalAdapter):
+    """Reports a fixed federation base so the derivation can be pinned."""
+
+    def __init__(self, base: str | None) -> None:
+        self._base = base
+
+    async def get_federation_base(self) -> str | None:
+        return self._base
+
+
+@pytest.mark.parametrize(
+    ("federation_base", "expected"),
+    [
+        # Social Home's own inbox → its origin serves every other route too.
+        ("https://home.example.com/federation/inbox", "https://home.example.com"),
+        (
+            "https://proxy.example.com/sh/federation/inbox",
+            "https://proxy.example.com/sh",
+        ),
+        # Home Assistant's forwarder only reaches the inbox → no public origin.
+        ("https://ha.example.com/api/socialhome/inbox", None),
+        (None, None),
+    ],
+)
+async def test_get_public_base_url_derives_from_federation_base(
+    federation_base, expected
+):
+    assert await _BaseAdapter(federation_base).get_public_base_url() == expected

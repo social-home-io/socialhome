@@ -204,6 +204,25 @@ class ApiClient {
     )
   }
 
+  /** POST a raw (non-JSON) body with an explicit ``Content-Type`` — an
+   *  ``.ics`` file as ``text/calendar``, an image as ``image/jpeg``.
+   *  Same base-relative URL + 401 handling as every other verb, so a
+   *  file upload never needs a hand-rolled ``fetch``. */
+  async postRaw<T = any>(path: string, body: BodyInit, contentType: string): Promise<T> {
+    const res = await this._handle(
+      await fetch(_rel(path), {
+        method: 'POST',
+        headers: {
+          'Content-Type': contentType,
+          ...(token.value ? { Authorization: `Bearer ${token.value}` } : {}),
+        },
+        body,
+      }),
+      path,
+    )
+    return _parseJsonOrNull<T>(res)
+  }
+
   async upload<T = any>(path: string, body: FormData): Promise<T> {
     const headers: HeadersInit = token.value
       ? { Authorization: `Bearer ${token.value}` }

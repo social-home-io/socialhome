@@ -8350,6 +8350,12 @@ a.sh-btn { text-decoration: none; }
   margin-bottom: var(--sh-space-lg);
   overflow-x: auto;
 }
+/* Five tabs don't fit a phone: wrap instead of scrolling the last ones
+ * (Security) out of sight with no hint they exist. */
+@media (max-width: 640px) {
+  .sh-settings-tabs { flex-wrap: wrap; overflow-x: visible; row-gap: 0; }
+  .sh-settings-tabs .sh-tab { min-height: 40px; }
+}
 
 /* Presence — outer page container is a vertical stack (controls + map +
  * "Members" heading + the cards grid). The grid layout that wraps
@@ -14283,12 +14289,56 @@ a.sh-welcome-card:hover {
   font-size: 0.875rem;
 }
 .sh-token-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sh-space-sm);
   padding: var(--sh-space-md);
   background: var(--sh-bg-secondary);
   border-radius: var(--sh-radius-md);
   margin-bottom: var(--sh-space-md);
 }
+.sh-token-create__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.sh-token-create__field--expiry { flex: 0 1 9rem; }
+.sh-token-create .sh-form-error { flex-basis: 100%; margin: 0; }
 .sh-token-label { font-weight: 600; }
+.sh-token-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+  overflow: hidden;
+}
+.sh-token-row__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+.sh-token-row__meta { font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-token-row__badge {
+  margin-left: var(--sh-space-xs);
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--sh-danger, #b3261e) 14%, transparent);
+  color: var(--sh-danger, #b3261e);
+}
+.sh-security { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-security > h3, .sh-security > p { margin: 0; }
+.sh-security__list-heading { margin: var(--sh-space-md) 0 0; }
+.sh-security__error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sh-space-sm); }
+.sh-security__empty { margin: 0; }
 
 /* Edit history + version row */
 .sh-edit-history, .sh-versions {
@@ -16646,88 +16696,178 @@ a.sh-welcome-card:hover {
   border-radius: var(--sh-radius-sm);
 }
 
-/* SubscribeFeed — URL row + accordion. */
+/* SubscribeFeed — private iCal link, rendered inside a Modal on the
+ * space Calendar tab (so no card chrome of its own). */
 .sh-subscribe-feed {
-  margin-top: var(--sh-space-lg);
-  padding: var(--sh-space-md);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg-subtle, #f7f8fa);
-}
-.sh-subscribe-feed-heading {
-  margin: 0 0 var(--sh-space-xs);
-  font-size: 1em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  min-width: 0;
 }
 .sh-subscribe-feed-help {
-  margin: 0 0 var(--sh-space-sm);
-  font-size: 0.9em;
+  margin: 0;
   color: var(--sh-text-muted);
 }
 .sh-subscribe-empty {
-  text-align: center;
-  padding: var(--sh-space-md) 0;
-}
-.sh-subscribe-empty p {
-  margin-bottom: var(--sh-space-sm);
-  color: var(--sh-text-muted);
-}
-.sh-subscribe-url-row {
   display: flex;
-  align-items: stretch;
-  gap: var(--sh-space-xs);
-  margin-bottom: var(--sh-space-sm);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
 }
-.sh-subscribe-url {
-  flex: 1;
-  min-width: 0;
-  padding: 0.4em 0.6em;
+.sh-subscribe-feed-note {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-subscribe-open { margin: 0; }
+.sh-subscribe-open .sh-btn { display: inline-flex; text-decoration: none; }
+.sh-subscribe-unreachable {
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-sm);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85em;
-  background: var(--sh-bg, #fff);
+  background: var(--sh-bg-secondary);
+}
+.sh-subscribe-unreachable p { margin: 0 0 var(--sh-space-xs); }
+.sh-subscribe-path {
+  display: block;
+  margin-top: var(--sh-space-xs);
+  font-family: var(--sh-font-mono, ui-monospace, monospace);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
 }
 .sh-subscribe-actions {
   display: flex;
-  gap: var(--sh-space-xs);
-  margin-bottom: var(--sh-space-sm);
-}
-.sh-subscribe-instructions {
-  margin-top: var(--sh-space-md);
-}
-.sh-subscribe-instructions summary {
-  cursor: pointer;
-  font-size: 0.95em;
-  color: var(--sh-text);
-}
-.sh-subscribe-apps {
-  display: flex;
   flex-wrap: wrap;
   gap: var(--sh-space-xs);
-  margin-top: var(--sh-space-sm);
 }
-.sh-subscribe-app-tab {
-  border: 1px solid var(--sh-border);
-  background: transparent;
-  border-radius: var(--sh-radius-sm);
-  padding: 0.3em 0.7em;
+.sh-subscribe-instructions summary,
+.sh-subscribe-app summary,
+.sh-subscribe-unreachable summary {
   cursor: pointer;
-  font-size: 0.9em;
+  /* Padding, not display:flex — flex would drop the disclosure marker. */
+  padding: 8px 0;
 }
-.sh-subscribe-app-tab--active {
-  background: var(--sh-primary-soft, rgba(33, 150, 243, 0.12));
-  border-color: var(--sh-primary, #D2542A);
-  color: var(--sh-primary, #D2542A);
+.sh-subscribe-feed-note .sh-link-button {
+  min-height: 36px;
+}
+.sh-subscribe-app {
+  margin-left: var(--sh-space-md);
 }
 .sh-subscribe-steps {
-  margin-top: var(--sh-space-sm);
+  margin: 0 0 var(--sh-space-xs);
   padding-left: var(--sh-space-lg);
-  font-size: 0.92em;
+  font-size: var(--sh-font-size-sm);
   color: var(--sh-text);
 }
 .sh-subscribe-steps li {
   margin-bottom: 0.3em;
 }
+/* Space Calendar tab header: "Subscribe" + "+ New event" trail right,
+ * primary last — same placement as the household Calendar page. The
+ * doubled class out-ranks the mobile ``.sh-page-header`` column rule so
+ * the pair stays on one row on a phone. */
+.sh-page-header.sh-space-cal-header {
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+
+/* SecretReveal — a just-minted token / feed link, shown once. */
+.sh-secret-reveal {
+  padding: var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-secret-reveal__title { font-weight: 700; }
+.sh-secret-reveal__warning { margin: 0; }
+.sh-secret-reveal__value {
+  display: flex;
+  gap: var(--sh-space-sm);
+  align-items: center;
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-sm);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  min-width: 0;
+}
+.sh-secret-reveal__value code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sh-font-mono, ui-monospace, monospace);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.sh-secret-reveal__value code:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-secret-reveal__hint { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-secret-reveal__snippet {
+  margin: 0;
+  background: color-mix(in srgb, var(--sh-text) 6%, transparent);
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-sm);
+  font-size: var(--sh-font-size-xs);
+  /* One command — wrap it rather than hide half of it behind a
+   * scrollbar-less horizontal scroll on a phone. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sh-secret-reveal__actions { display: flex; justify-content: flex-end; }
+
+/* Calendar import dialog. */
+.sh-cal-strip-actions__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+  justify-content: flex-end;
+}
+.sh-cal-import-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+}
+.sh-cal-import-source {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  min-height: 36px;
+  padding: 0 var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-sm);
+  cursor: pointer;
+}
+.sh-cal-import-source--on {
+  border-color: var(--sh-primary);
+  background: color-mix(in srgb, var(--sh-primary) 10%, transparent);
+}
+.sh-cal-import-source:focus-within {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-cal-import-file input[type="file"] {
+  max-width: 100%;
+}
+.sh-cal-import-file__picked { font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-cal-import-busy {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  color: var(--sh-text-muted);
+}
+.sh-cal-import-result__headline { font-weight: 700; margin: 0 0 var(--sh-space-sm); }
+.sh-cal-import-result__list {
+  margin: 0 0 var(--sh-space-sm);
+  padding-left: var(--sh-space-lg);
+}
+.sh-cal-import-result__list li { margin-bottom: 0.25em; overflow-wrap: anywhere; }
+.sh-cal-import-result__note { font-size: var(--sh-font-size-sm); }
 
 /* Capacity-input helper text on the event dialog. */
 .sh-form-help {

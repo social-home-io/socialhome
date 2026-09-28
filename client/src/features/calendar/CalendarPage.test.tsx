@@ -8,6 +8,7 @@ vi.mock('@/api', () => ({
     post: vi.fn().mockResolvedValue({}),
     patch: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue(undefined),
+    postRaw: vi.fn().mockResolvedValue({ events: [] }),
   },
 }))
 
@@ -597,5 +598,44 @@ describe('CalendarPage', () => {
     expect(localStorage.getItem(VIS_KEY)).toBeNull()
     const urls = vi.mocked(api.get).mock.calls.map(c => c[0] as string)
     expect(urls.some(u => u.startsWith('/api/calendars/cal-2/events'))).toBe(false)
+  })
+
+  it('imports a calendar file into a hidden calendar and switches it on so the events show', async () => {
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url === '/api/calendars') {
+        return [
+          { id: 'cal-1', name: 'Admin', owner_username: 'admin', color: null },
+          { id: 'cal-2', name: 'Emely', owner_username: 'emely', color: null },
+        ]
+      }
+      return []
+    })
+    vi.mocked(api.postRaw).mockResolvedValueOnce({
+      events: [{ id: 'e1', summary: 'Swim', start: '2026-10-01T10:00:00+00:00' }],
+    })
+    const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+    const mod = await import('./CalendarPage')
+    const utils = render(<mod.default />)
+    const trigger = await utils.findByRole('button', { name: 'Import' })
+    fireEvent.click(trigger)
+    fireEvent.change(utils.getByLabelText('Add to'), { target: { value: 'cal-2' } })
+    const input = document.querySelector('form.sh-cal-import input[type="file"]') as HTMLInputElement
+    const file = new File(['BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n'], 'swim.ics', { type: 'text/calendar' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    fireEvent.change(input)
+    await utils.findByText(/swim\.ics/)
+    vi.mocked(api.get).mockClear()
+    fireEvent.submit(document.querySelector('form.sh-cal-import')!)
+    await utils.findByText('Added 1 event to emely\'s calendar.')
+    expect(api.postRaw).toHaveBeenCalledWith('/api/calendars/cal-2/import_ics', file, 'text/calendar')
+    await waitFor(() => {
+      const urls = vi.mocked(api.get).mock.calls.map(c => c[0] as string)
+      expect(urls.some(u => u.startsWith('/api/calendars/cal-2/events'))).toBe(true)
+    })
+    expect(JSON.parse(localStorage.getItem(VIS_KEY) ?? '[]')).toContain('cal-2')
+    // "Show in calendar" jumps the view to the imported event's month.
+    fireEvent.click(utils.getByRole('button', { name: 'Show in calendar' }))
+    await utils.findByText('October 2026')
   })
 })
