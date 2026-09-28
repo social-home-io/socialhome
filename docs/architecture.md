@@ -278,7 +278,7 @@ host**: space content fans out peer-to-peer from the *originating*
 household (`broadcast_to_space_members`), so a member household
 receives a follower's writes directly. It covers the whole write
 vocabulary (`SPACE_WRITE_EVENT_TYPES` — posts, comments, pages, tasks,
-polls, stickies, calendar events, RSVPs, schedules, gallery items,
+polls, stickies, calendar events, RSVPs, schedules, gallery albums and items,
 bazaar listings / bids / offers, zones, location pins, media blobs,
 and every `*_UPDATED` / `*_DELETED` sibling), with one opt-in:
 `SPACE_COMMENT_CREATED` when the space has `allow_subscriber_comment`
@@ -712,7 +712,7 @@ architectural rules.
 a space-content table (`space_posts`, `space_post_comments`, `space_tasks`,
 `space_task_lists`, `space_pages`, `stickies`, `space_calendar_events`,
 `space_calendar_rsvps`, the `space_poll_*` / `space_schedule_*` family,
-`gallery_items`, `space_zones`, `bazaar_listings`, `bazaar_bids`) takes a
+`gallery_albums`, `gallery_items`, `space_zones`, `bazaar_listings`, `bazaar_bids`) takes a
 `space_id` and scopes its statement with it — `AND space_id = ?`, an
 `ON CONFLICT` clause that never rewrites `space_id` and refuses a row of
 another space, or, for a child row, a parent check inside the same

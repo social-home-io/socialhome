@@ -88,10 +88,17 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 - `SPACE_CALENDAR_EVENT_CREATED` — calendar events
   (`space_calendar_repo.list_events_since`, RRULEs included)
 - `SPACE_GALLERY_ITEM_CREATED` — gallery items, joined via
-  `gallery_items.album_id` → `gallery_albums.space_id`. Albums
-  themselves still ride the chunked initial sync (§4.2.3); only items
-  push per-event. Wire payload is the §S-9 thumbnail-only projection
-  — full files are fetched on demand. Both rows record the owning /
+  `gallery_items.album_id` → `gallery_albums.space_id`. Each replayed
+  item's album goes out first as `SPACE_GALLERY_ALBUM_CREATED` (v_33;
+  once per album, never the system "Posts" album) — the receiver files an
+  item only into an album it already holds, and an album created while it
+  was offline is exactly the one it lacks. Live, albums push their own
+  `SPACE_GALLERY_ALBUM_*` lifecycle events (see
+  [`spaces.md`](./spaces.md)). Wire payload is the §S-9 thumbnail projection **plus
+  the full `url`** (`GalleryItem.to_federation_dict`): the on-demand
+  full-file fetch S-9 describes was never built, the sender pushes both
+  files over the media outbox, and the receiver's row must name the full
+  file or the `SPACE_MEDIA_BLOB` scope check refuses it. Both rows record the owning /
   uploading `user_id` with **no** foreign key, because that user lives
   on the originating household — the same reason `space_posts.author`
   carries none. Before migration 0046 those columns referenced the local

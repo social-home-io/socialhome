@@ -13,6 +13,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import GalleryAlbumUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -184,6 +185,22 @@ async def test_update_album_owner_succeeds(env):
     )
     refreshed = await env.get_album(a.id, actor_user_id="b-id")
     assert refreshed.name == "Renamed"
+
+
+async def test_update_album_publishes_gallery_album_updated(env):
+    """The edit is what the federation outbound fans out to the space's
+    other member households (v_33) — a no-op patch publishes nothing."""
+    seen: list[GalleryAlbumUpdated] = []
+
+    async def _on(event: GalleryAlbumUpdated) -> None:
+        seen.append(event)
+
+    env._bus.subscribe(GalleryAlbumUpdated, _on)
+    a = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="Old")
+    await env.update_album(a.id, actor_user_id="b-id")
+    assert seen == []
+    await env.update_album(a.id, actor_user_id="b-id", name="New")
+    assert [(e.album_id, e.space_id) for e in seen] == [(a.id, "sp-1")]
 
 
 async def test_update_album_space_admin_succeeds(env):

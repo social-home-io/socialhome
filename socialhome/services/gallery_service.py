@@ -13,9 +13,10 @@ EXIF: only the date (``YYYY-MM-DD``) is retained as ``taken_at`` —
 no time, no GPS — so the album answers "when was this taken?" without
 leaking precise timestamps or location.
 
-Per §25.6.2 S-9 the federation/sync layer must emit only the
-``thumbnail_filename`` for ``gallery_items``; the full file is fetched
-on demand via ``gallery_item_full``.
+§25.6.2 S-9 describes a thumbnail-only federation projection with an
+on-demand ``gallery_item_full`` fetch; that fetch was never built, so the
+federated item carries its full ``url`` and both files are pushed over
+the media outbox (see ``GalleryItem.to_federation_dict``).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from ..config import Config
 from ..domain.events import (
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
 )
@@ -280,6 +282,9 @@ class GalleryService:
             patch["cover_item_id"] = cover_item_id
         if patch:
             await self._repo.update_album(album_id, patch)
+            await self._bus.publish(
+                GalleryAlbumUpdated(album_id=album_id, space_id=album.space_id)
+            )
 
     async def delete_album(self, album_id: str, *, actor_user_id: str) -> None:
         album = await self._repo.get_album(album_id)

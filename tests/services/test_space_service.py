@@ -3530,6 +3530,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
+        "Shared gallery albums",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3549,6 +3550,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
+        "Shared gallery albums",
     )
 
 
@@ -3580,6 +3582,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
+        "Shared gallery albums",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3626,6 +3629,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Cross-household Follower seats",
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
+        "Shared gallery albums",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features

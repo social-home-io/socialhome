@@ -243,9 +243,14 @@ class FederationEventType(str, enum.Enum):
     SPACE_ZONE_UPSERTED = "space_zone_upserted"
     SPACE_ZONE_DELETED = "space_zone_deleted"
     # ── Gallery (§23.119) — per-event push complementing the chunked
-    # initial sync. Carries the thumbnail-only projection per S-9; the
-    # full file is fetched lazily via ``gallery_item_full``. Albums
-    # ride on the chunked sync only — they're rare and structural.
+    # initial sync. Items carry the thumbnail and the full ``url``; both
+    # files follow over the media outbox (``SPACE_MEDIA_BLOB``). Albums
+    # federate their own lifecycle (v_33): an item names its album by id,
+    # so an album a member creates after the others joined has to reach
+    # them before the items uploaded into it can land anywhere.
+    SPACE_GALLERY_ALBUM_CREATED = "space_gallery_album_created"
+    SPACE_GALLERY_ALBUM_UPDATED = "space_gallery_album_updated"
+    SPACE_GALLERY_ALBUM_DELETED = "space_gallery_album_deleted"
     SPACE_GALLERY_ITEM_CREATED = "space_gallery_item_created"
     SPACE_GALLERY_ITEM_DELETED = "space_gallery_item_deleted"
     # ── Bazaar (§5.6) — per-space marketplace listings. The wrapper
@@ -567,6 +572,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SCHEDULE_CREATED,
         FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
         FederationEventType.SPACE_SCHEDULE_FINALIZED,
+        FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
         FederationEventType.SPACE_GALLERY_ITEM_CREATED,
         FederationEventType.SPACE_GALLERY_ITEM_DELETED,
         FederationEventType.BAZAAR_LISTING_CREATED,
@@ -643,7 +651,7 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 
 #: Space-content **writes** — every event type that mutates content inside
 #: a space (create, update or delete of a post, comment, page, task, poll,
-#: sticky, calendar event, RSVP, schedule, gallery item, bazaar listing /
+#: sticky, calendar event, RSVP, schedule, gallery album or item, bazaar listing /
 #: bid / offer, zone, location pin, or the media bytes a post references).
 #:
 #: This is the vocabulary the §24.11 ``check_space_writer`` step refuses
@@ -704,6 +712,9 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SCHEDULE_RESPONSE_UPDATED,
         FederationEventType.SPACE_SCHEDULE_FINALIZED,
         # ── Gallery ──
+        FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
         FederationEventType.SPACE_GALLERY_ITEM_CREATED,
         FederationEventType.SPACE_GALLERY_ITEM_DELETED,
         # ── Bazaar (listings live in a space like any other content) ──

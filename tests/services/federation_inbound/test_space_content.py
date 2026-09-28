@@ -12,6 +12,7 @@ from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
+from socialhome.services.gallery_service import DESCRIPTION_MAX, NAME_MAX
 
 
 class _FakeRegistry:
@@ -893,6 +894,9 @@ class _FakeGalleryRepo:
         self.items_by_id: dict[str, object] = {}
         self.album_space: dict[str, str | None] = {}
         self.fail_create = False
+        self.albums: dict[str, SimpleNamespace] = {}
+        self.albums_deleted: list[str] = []
+        self.album_patches: list[tuple[str, dict]] = []
 
     def _album_in(self, album_id, space_id) -> bool:
         return self.album_space.get(album_id, "sp-1") == space_id
@@ -901,9 +905,44 @@ class _FakeGalleryRepo:
         return self.items_by_id.get(item_id)
 
     async def get_album(self, album_id):
+        if album_id in self.albums:
+            return self.albums[album_id]
+        if album_id in self.albums_deleted:
+            return None
         return SimpleNamespace(
-            id=album_id, space_id=self.album_space.get(album_id, "sp-1")
+            id=album_id,
+            space_id=self.album_space.get(album_id, "sp-1"),
+            owner_user_id="u-owner",
+            is_system=False,
         )
+
+    async def create_album_in_space(self, album, *, space_id):
+        if album.id in self.album_space and self.album_space[album.id] != space_id:
+            return False
+        self.albums[album.id] = SimpleNamespace(
+            id=album.id,
+            space_id=space_id,
+            owner_user_id=album.owner_user_id,
+            name=album.name,
+            description=album.description,
+            is_system=False,
+        )
+        return True
+
+    async def update_album_in_space(self, album_id, patch, *, space_id):
+        album = await self.get_album(album_id)
+        if album is None or album.space_id != space_id or album.is_system:
+            return False
+        self.album_patches.append((album_id, dict(patch)))
+        return True
+
+    async def delete_album_in_space(self, album_id, *, space_id):
+        album = await self.get_album(album_id)
+        if album is None or album.space_id != space_id or album.is_system:
+            return False
+        self.albums.pop(album_id, None)
+        self.albums_deleted.append(album_id)
+        return True
 
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
         if self.fail_create:
@@ -1034,6 +1073,297 @@ async def test_gallery_item_deleted_unknown_is_noop(gallery_handlers):
     assert gallery.counts == {}
 
 
+# ─── Gallery albums (v_33) ────────────────────────────────────────────
+
+
+def _album_payload(**over):
+    return {
+        "id": "alb-new",
+        "owner_user_id": "u-remote",
+        "name": "Holiday",
+        "description": "from next door",
+        "cover_item_id": None,
+        "created_at": "2026-09-28T10:00:00+00:00",
+        **over,
+    }
+
+
+def _denying_gallery_handlers(bus, repos):
+    gallery = _FakeGalleryRepo()
+    deny = _AllowAuthorship(answer=False)
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=deny,
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        gallery_repo=gallery,
+    )
+    return h, gallery, deny
+
+
+async def test_gallery_album_created_files_it_under_the_gated_space(
+    gallery_handlers,
+):
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_album_created(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+            _album_payload(space_id="sp-1"),
+            space_id="sp-1",
+        )
+    )
+    got = gallery.albums["alb-new"]
+    assert (got.space_id, got.owner_user_id, got.name, got.description) == (
+        "sp-1",
+        "u-remote",
+        "Holiday",
+        "from next door",
+    )
+    assert ("may_author", "sp-1", "u-remote") in handlers._authorship.calls
+
+
+async def test_an_album_then_an_item_by_a_remote_member_both_land(
+    gallery_handlers,
+):
+    """The bug: an album made after the others joined never reached them,
+    so the item uploaded into it had no album to land in."""
+    handlers, gallery = gallery_handlers
+    gallery.album_space["alb-new"] = None  # not held here yet
+    item = {"id": "gi-1", "album_id": "alb-new", "uploaded_by": "u-remote"}
+    await handlers._on_gallery_item_saved(
+        _event(FederationEventType.SPACE_GALLERY_ITEM_CREATED, item, space_id="sp-1")
+    )
+    assert gallery.created == []  # no album yet → refused (the old failure)
+    gallery.album_space.pop("alb-new")
+    await handlers._on_gallery_album_created(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+            _album_payload(),
+            space_id="sp-1",
+        )
+    )
+    gallery.album_space["alb-new"] = "sp-1"
+    await handlers._on_gallery_item_saved(
+        _event(FederationEventType.SPACE_GALLERY_ITEM_CREATED, item, space_id="sp-1")
+    )
+    assert [i.uploaded_by for i in gallery.created] == ["u-remote"]
+
+
+async def test_gallery_album_created_needs_an_owner_and_a_name(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    for bad in (
+        _album_payload(id=""),
+        _album_payload(owner_user_id=""),
+        _album_payload(name="  "),
+    ):
+        await handlers._on_gallery_album_created(
+            _event(
+                FederationEventType.SPACE_GALLERY_ALBUM_CREATED, bad, space_id="sp-1"
+            )
+        )
+    assert gallery.albums == {}
+
+
+async def test_gallery_album_over_the_local_limits_is_dropped(gallery_handlers):
+    """The wire gets the limits ``GalleryService`` puts on a local album."""
+    handlers, gallery = gallery_handlers
+    for bad in (
+        _album_payload(name="x" * (NAME_MAX + 1)),
+        _album_payload(description="x" * (DESCRIPTION_MAX + 1)),
+        _album_payload(description={"not": "text"}),
+    ):
+        await handlers._on_gallery_album_created(
+            _event(
+                FederationEventType.SPACE_GALLERY_ALBUM_CREATED, bad, space_id="sp-1"
+            )
+        )
+        await handlers._on_gallery_album_updated(
+            _event(
+                FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+                dict(bad, id="alb-1"),
+                space_id="sp-1",
+            )
+        )
+    assert gallery.albums == {}
+    assert gallery.album_patches == []
+
+
+async def test_gallery_album_created_without_a_space_is_dropped(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_album_created(
+        _event(FederationEventType.SPACE_GALLERY_ALBUM_CREATED, _album_payload())
+    )
+    assert gallery.albums == {}
+
+
+async def test_gallery_album_created_refused_authorship_holds_or_refuses(bus, repos):
+    h, gallery, deny = _denying_gallery_handlers(bus, repos)
+    await h._on_gallery_album_created(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+            _album_payload(),
+            space_id="sp-1",
+        )
+    )
+    assert gallery.albums == {}
+    assert deny.refusals == ["alb-new"]
+
+
+async def test_gallery_album_created_cross_space_is_refused(gallery_handlers, caplog):
+    handlers, gallery = gallery_handlers
+    gallery.album_space["alb-new"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_gallery_album_created(
+            _event(
+                FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+                _album_payload(),
+                space_id="sp-a",
+            )
+        )
+    assert gallery.albums == {}
+    assert "is not in space sp-a" in caplog.text
+
+
+async def test_gallery_album_updated_binds_the_stored_owner(gallery_handlers):
+    """The payload's ``owner_user_id`` is ignored — the album keeps its
+    owner, and the mutate rule is judged against the stored one."""
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_album_updated(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            _album_payload(id="alb-1", owner_user_id="u-evil", cover_item_id="gi-1"),
+            space_id="sp-1",
+        )
+    )
+    assert ("may_mutate", "sp-1", "u-owner") in handlers._authorship.calls
+    assert gallery.album_patches == [
+        (
+            "alb-1",
+            {
+                "name": "Holiday",
+                "description": "from next door",
+                "cover_item_id": "gi-1",
+            },
+        )
+    ]
+
+
+async def test_gallery_album_updated_only_patches_what_it_carries(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    await handlers._on_gallery_album_updated(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            {"id": "alb-1", "name": "Renamed"},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.album_patches == [("alb-1", {"name": "Renamed"})]
+
+
+async def test_gallery_album_updated_refuses_the_system_album_and_strangers(
+    gallery_handlers, caplog
+):
+    handlers, gallery = gallery_handlers
+    gallery.albums["alb-sys"] = SimpleNamespace(
+        id="alb-sys", space_id="sp-1", owner_user_id=None, is_system=True
+    )
+    gallery.album_space["alb-b"] = "sp-b"
+    gallery.albums_deleted.append("alb-gone")
+    with caplog.at_level("WARNING"):
+        for album_id in ("alb-sys", "alb-b", "alb-gone", ""):
+            await handlers._on_gallery_album_updated(
+                _event(
+                    FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+                    {"id": album_id, "name": "Evil"},
+                    space_id="sp-1",
+                )
+            )
+    assert gallery.album_patches == []
+    assert "is not in space sp-1" in caplog.text
+
+
+async def test_gallery_album_edit_and_delete_refused_authorship(bus, repos):
+    h, gallery, deny = _denying_gallery_handlers(bus, repos)
+    await h._on_gallery_album_updated(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            {"id": "alb-1", "name": "Evil"},
+            space_id="sp-1",
+        )
+    )
+    await h._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": "alb-1"},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.album_patches == [] and gallery.albums_deleted == []
+    assert deny.refusals == ["alb-1", "alb-1"]
+
+
+async def test_gallery_album_deleted_is_scoped(gallery_handlers, caplog):
+    handlers, gallery = gallery_handlers
+    gallery.album_space["alb-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_gallery_album_deleted(
+            _event(
+                FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+                {"id": "alb-b"},
+                space_id="sp-a",
+            )
+        )
+    assert gallery.albums_deleted == []
+    assert "is not in space sp-a" in caplog.text
+    await handlers._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": "alb-1"},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.albums_deleted == ["alb-1"]
+    assert ("may_mutate", "sp-1", "u-owner") in handlers._authorship.calls
+
+
+async def test_gallery_album_deleted_unknown_is_a_noop(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    gallery.albums_deleted.append("ghost")
+    for payload in ({"id": "ghost"}, {}):
+        await handlers._on_gallery_album_deleted(
+            _event(
+                FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+                payload,
+                space_id="sp-1",
+            )
+        )
+    assert gallery.albums_deleted == ["ghost"]
+
+
+async def test_gallery_album_handlers_are_registered(bus, repos):
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        gallery_repo=_FakeGalleryRepo(),
+    )
+    fed = _FakeFederationService()
+    h.attach_to(fed)
+    types = {t for t, _ in fed._event_registry.registered}
+    assert {
+        FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+        FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+    } <= types
+
+
 async def test_gallery_handlers_not_registered_without_repo(bus, repos):
     """No gallery_repo → events not registered."""
     h = SpaceContentInboundHandlers(
@@ -1050,6 +1380,7 @@ async def test_gallery_handlers_not_registered_without_repo(bus, repos):
     types = {t for t, _ in fed._event_registry.registered}
     assert FederationEventType.SPACE_GALLERY_ITEM_CREATED not in types
     assert FederationEventType.SPACE_GALLERY_ITEM_DELETED not in types
+    assert FederationEventType.SPACE_GALLERY_ALBUM_CREATED not in types
 
 
 # ─── Bazaar listings (#PR445) ─────────────────────────────────────────

@@ -9,7 +9,7 @@ import pytest
 
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.federation import FederationEventType
-from socialhome.domain.gallery import GalleryItem
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
@@ -97,6 +97,17 @@ class _FakeListSinceRepo:
 
             return _impl
         raise AttributeError(name)
+
+
+class _FakeGalleryRepo(_FakeListSinceRepo):
+    """``list_items_since`` plus ``get_album`` for the album-before-item replay."""
+
+    def __init__(self, rows: list, albums: dict[str, GalleryAlbum]) -> None:
+        super().__init__(rows)
+        self._albums = albums
+
+    async def get_album(self, album_id: str) -> GalleryAlbum | None:
+        return self._albums.get(album_id)
 
 
 def _ts_attr(row) -> str:
@@ -216,6 +227,7 @@ def provider_factory():
         stickies=None,
         cal_events=None,
         gallery_items=None,
+        gallery_albums=None,
         members,
     ):
         fed = _FakeFederation()
@@ -233,7 +245,9 @@ def provider_factory():
                 _FakeListSinceRepo(cal_events) if cal_events is not None else None
             ),
             gallery_repo=(
-                _FakeListSinceRepo(gallery_items) if gallery_items is not None else None
+                _FakeGalleryRepo(gallery_items, gallery_albums or {})
+                if gallery_items is not None
+                else None
             ),
         )
         return provider, fed, post_repo
@@ -471,9 +485,72 @@ async def test_handle_request_replays_gallery_items(provider_factory):
         s["type"] == FederationEventType.SPACE_GALLERY_ITEM_CREATED for s in fed.sent
     )
     payload = fed.sent[0]["payload"]
-    # §S-9 thumbnail-only projection — no full ``url`` field.
-    assert "url" not in payload
+    # Same shape as the live push — the full ``url`` included.
+    assert payload["url"] == "/api/media/orig-0.jpg"
     assert {"id", "album_id", "uploaded_by", "thumbnail_url"} <= set(payload)
+
+
+async def test_replayed_items_are_preceded_by_their_album(provider_factory):
+    """An item lands only in an album the receiver already holds, and an
+    album created after it went offline is exactly what it lacks — so each
+    replayed item's album goes out first, once. The system album never
+    does: every household rebuilds its own from the posts."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    iso = (base + timedelta(minutes=1)).isoformat()
+    items = [
+        _gallery_item(0, iso),
+        _gallery_item(1, iso),
+        GalleryItem(
+            id="gi-sys",
+            album_id="alb-sys",
+            uploaded_by="alice",
+            item_type="photo",
+            url="/api/media/s.jpg",
+            thumbnail_url="/api/media/s-t.jpg",
+            width=1,
+            height=1,
+            created_at=iso,
+        ),
+        GalleryItem(
+            id="gi-gone",
+            album_id="alb-gone",
+            uploaded_by="alice",
+            item_type="photo",
+            url="/api/media/g.jpg",
+            thumbnail_url="/api/media/g-t.jpg",
+            width=1,
+            height=1,
+            created_at=iso,
+        ),
+    ]
+    albums = {
+        "alb-1": GalleryAlbum(
+            id="alb-1", space_id="sp-1", owner_user_id="u-remote", name="Trip"
+        ),
+        "alb-sys": GalleryAlbum(
+            id="alb-sys",
+            space_id="sp-1",
+            owner_user_id=None,
+            name="Posts",
+            is_system=True,
+        ),
+    }
+    provider, fed, _ = provider_factory(
+        gallery_items=items, gallery_albums=albums, members=["peer-a"]
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    types = [s["type"] for s in fed.sent]
+    assert types[0] == FederationEventType.SPACE_GALLERY_ALBUM_CREATED
+    assert types.count(FederationEventType.SPACE_GALLERY_ALBUM_CREATED) == 1
+    assert types[1:] == [FederationEventType.SPACE_GALLERY_ITEM_CREATED] * 4
+    album_payload = fed.sent[0]["payload"]
+    assert (album_payload["id"], album_payload["owner_user_id"]) == (
+        "alb-1",
+        "u-remote",
+    )
+    assert sent == 5
 
 
 async def test_handle_request_aggregates_across_resources(provider_factory):

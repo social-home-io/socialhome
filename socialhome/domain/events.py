@@ -680,6 +680,15 @@ class GalleryAlbumCreated(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class GalleryAlbumUpdated(DomainEvent):
+    """An album's name / description / cover changed."""
+
+    album_id: str
+    space_id: str | None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class GalleryAlbumDeleted(DomainEvent):
     album_id: str
     space_id: str | None

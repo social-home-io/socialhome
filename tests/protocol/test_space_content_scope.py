@@ -60,8 +60,9 @@ VICTIM_HOUSE = "peer-seated-in-b"  # B's own member household (the control)
 #: The users the attack payloads name. SENDER holds a live seat for each of
 #: them in GATED — admin included — so the §24.11 *authorship* rule
 #: (``test_space_content_authorship.py``) passes for every case here and
-#: the only thing left to refuse the write is the space boundary. u-g has
-#: a ``users`` row as well, for the gallery FK.
+#: the only thing left to refuse the write is the space boundary. u-g is
+#: the gallery uploader — like every remote member, without a ``users`` row
+#: here (the gallery columns carry no FK to it, migration 0046).
 SEATED_IN_GATED = ("u-evil", "u-b", "u-b2", "u-g")
 
 #: Every table holding space content, plus the household tables a
@@ -284,6 +285,28 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         ),
     ],
     # ── Gallery ──
+    FET.SPACE_GALLERY_ALBUM_CREATED: [
+        (
+            "take over B's album",
+            {"id": "album-b", "owner_user_id": "u-g", "name": "Evil"},
+        ),
+        (
+            "take over the household album",
+            {"id": "album-home", "owner_user_id": "u-g", "name": "Evil"},
+        ),
+    ],
+    FET.SPACE_GALLERY_ALBUM_UPDATED: [
+        ("rename B's album", {"id": "album-b", "name": "Evil"}),
+        ("rename the household album", {"id": "album-home", "name": "Evil"}),
+        (
+            "set A's album cover to B's item",
+            {"id": "album-a", "cover_item_id": "gi-b"},
+        ),
+    ],
+    FET.SPACE_GALLERY_ALBUM_DELETED: [
+        ("delete B's album", {"id": "album-b"}),
+        ("delete the household album", {"id": "album-home"}),
+    ],
     FET.SPACE_GALLERY_ITEM_CREATED: [
         (
             "upload into B's album",
@@ -409,7 +432,7 @@ _SEED = [
             "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
             (name, uid, name),
         )
-        for name, uid in (("local", LOCAL_USER), ("ug", "u-g"))
+        for name, uid in (("local", LOCAL_USER),)
     ],
     *[
         (
@@ -542,7 +565,11 @@ _SEED = [
             " item_count) VALUES(?, ?, ?, 'Album', 1)",
             (aid, sid, LOCAL_USER),
         )
-        for aid, sid in (("album-b", VICTIM), ("album-home", None))
+        for aid, sid in (
+            ("album-a", GATED),
+            ("album-b", VICTIM),
+            ("album-home", None),
+        )
     ],
     *[
         (
@@ -807,6 +834,12 @@ _SYNC_ATTACKS = [
     (
         "gallery",
         [
+            {
+                "kind": "album",
+                "id": "album-b",
+                "owner_user_id": "u-g",
+                "name": "Evil",
+            },
             {
                 "kind": "item",
                 "id": "gi-new",

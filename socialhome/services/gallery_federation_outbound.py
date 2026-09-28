@@ -12,10 +12,18 @@ receive the full album + items snapshot on their next sync tick, but
 between ticks they see new uploads in near real-time, and
 ``SPACE_SYNC_RESUME`` (§4.4) replays them on long-offline catch-up.
 
+Albums federate their own lifecycle too (``SPACE_GALLERY_ALBUM_*``,
+v_33): an item names its album by id, and the receiver files it only
+into an album it already holds for that space. Before v_33 an album
+reached the other households only in the initial sync, so anything
+uploaded into an album created after they joined was refused
+everywhere but on the creator's household.
+
 Household-scoped items (album with ``space_id IS NULL``) stay local —
 no peer has a right to know about them. The album lookup is the
 gate: we never emit when the resolved album has a NULL
-``space_id``.
+``space_id``. The system "Posts" album never federates either: every
+household rebuilds its own from the posts.
 """
 
 from __future__ import annotations
@@ -23,7 +31,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ..domain.events import GalleryItemDeleted, GalleryItemUploaded
+from ..domain.events import (
+    GalleryAlbumCreated,
+    GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
+    GalleryItemDeleted,
+    GalleryItemUploaded,
+)
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
 
@@ -70,8 +84,41 @@ class GalleryFederationOutbound:
 
     def wire(self) -> None:
         """Subscribe handlers on the bus. Idempotent."""
+        self._bus.subscribe(GalleryAlbumCreated, self._on_album_created)
+        self._bus.subscribe(GalleryAlbumUpdated, self._on_album_updated)
+        self._bus.subscribe(GalleryAlbumDeleted, self._on_album_deleted)
         self._bus.subscribe(GalleryItemUploaded, self._on_uploaded)
         self._bus.subscribe(GalleryItemDeleted, self._on_deleted)
+
+    async def _on_album_created(self, event: GalleryAlbumCreated) -> None:
+        await self._fan_out_album(
+            event.album_id, FederationEventType.SPACE_GALLERY_ALBUM_CREATED
+        )
+
+    async def _on_album_updated(self, event: GalleryAlbumUpdated) -> None:
+        await self._fan_out_album(
+            event.album_id, FederationEventType.SPACE_GALLERY_ALBUM_UPDATED
+        )
+
+    async def _on_album_deleted(self, event: GalleryAlbumDeleted) -> None:
+        # The row is gone by now — the space rides the domain event. The
+        # service refuses to delete the system album, so any space album
+        # deleted here is a user album.
+        if event.space_id is None:
+            return
+        await self._fan_out(
+            event.space_id,
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": event.album_id},
+        )
+
+    async def _fan_out_album(
+        self, album_id: str, event_type: FederationEventType
+    ) -> None:
+        album = await self._gallery_repo.get_album(album_id)
+        if album is None or album.space_id is None or album.is_system:
+            return  # raced with a delete / household album / system album
+        await self._fan_out(album.space_id, event_type, album.to_federation_dict())
 
     async def _on_uploaded(self, event: GalleryItemUploaded) -> None:
         space_id = await self._space_id_for_album(event.album_id)
@@ -86,9 +133,10 @@ class GalleryFederationOutbound:
         # double-add on the peer.
         if item.source_post_id is not None:
             return
-        # §S-9: thumbnail-only projection for the wire — the full file
-        # is fetched on demand by the receiver, never preloaded.
-        payload = item.to_thumbnail_dict()
+        # The thumbnail projection plus the full ``url``: both files are
+        # pushed below, and the receiver's row must name the full one (its
+        # SPACE_MEDIA_BLOB scope check and the zoom view both read it).
+        payload = item.to_federation_dict()
         await self._fan_out(
             space_id,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,
