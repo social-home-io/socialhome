@@ -27,6 +27,21 @@ from .migrations import MIGRATIONS_DIR, run_migrations
 
 log = logging.getLogger(__name__)
 
+#: Default write-coalescing window, in milliseconds, for every
+#: :class:`AsyncDatabase` (household ``db_write_batch_timeout_ms`` and GFS
+#: ``[server] write_batch_window_ms`` default to it).
+#:
+#: The writer waits up to this long after the first queued statement for
+#: companions before it commits, so the window is a floor on the latency of
+#: every write that arrives alone — and every *sequential* ``enqueue`` in a
+#: request pays it again. It was 500 ms, which made creating a post (four
+#: sequential writes) take ~2 s and each GFS write half a second. A few
+#: milliseconds still coalesces a burst: the drain takes whatever is already
+#: queued, up to ``batch_max``, and a 500-statement burst commits as fast at
+#: 5 ms as it did at 500 ms. ``0`` disables the wait entirely (every
+#: statement commits in its own transaction — slower under a burst).
+DEFAULT_WRITE_BATCH_WINDOW_MS = 5
+
 
 @dataclass
 class _PendingWrite:
@@ -62,13 +77,14 @@ class AsyncDatabase:
         path: str | Path,
         *,
         batch_max: int = 50,
-        batch_timeout_ms: int = 500,
+        batch_timeout_ms: int = DEFAULT_WRITE_BATCH_WINDOW_MS,
         busy_timeout_ms: int = 5000,
         migrations_dir: Path | None = None,
     ) -> None:
         self._path = str(path)
         self._batch_max = batch_max
-        self._batch_timeout = batch_timeout_ms / 1000.0
+        self._batch_window_ms = max(0, int(batch_timeout_ms))
+        self._batch_timeout = self._batch_window_ms / 1000.0
         # How long a write waits for SQLite's file lock before giving up.
         # The default is 0 — fail instantly — which is fine for a
         # single-process household but wrong for a MULTI-PROCESS deployment
@@ -100,6 +116,11 @@ class AsyncDatabase:
         # ``transact``, ``checkpoint``).
         self._conn_thread_lock = threading.RLock()
         self._closed = False
+
+    @property
+    def batch_window_ms(self) -> int:
+        """The write-coalescing window this database runs with, in ms."""
+        return self._batch_window_ms
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -361,6 +382,18 @@ class AsyncDatabase:
         return await loop.run_in_executor(None, _locked, self._conn)
 
     async def _writer_loop(self) -> None:
+        # Sentinel-driven queue worker (the documented exception to the
+        # ``_stop: asyncio.Event`` scheduler pattern): ``shutdown()`` puts a
+        # ``None`` that ends the loop after the queue ahead of it drains.
+        #
+        # The coalescing window below is spent COLLECTING statements from the
+        # in-process queue — no transaction is open and no SQLite lock is
+        # held while it runs. ``BEGIN IMMEDIATE`` (the file's write lock) is
+        # only taken inside ``_apply_batch``, for the flush itself, so another
+        # process sharing the file (a GFS cluster node) never waits out this
+        # writer's window. What the window DOES cost is latency: a statement
+        # that arrives alone waits the whole window for companions, hence the
+        # small :data:`DEFAULT_WRITE_BATCH_WINDOW_MS`.
         assert self._conn is not None
         assert self._write_queue is not None
         conn = self._conn

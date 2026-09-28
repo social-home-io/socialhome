@@ -867,8 +867,10 @@ def cmd_gfs_cluster() -> None:
         )
         return i, code
 
+    t_reg = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
         results = list(ex.map(_register, range(n)))
+    reg_ms = (time.monotonic() - t_reg) * 1000
     failed = [(i, c) for i, c in results if c not in (200, 201)]
     locked = _gfs_cluster_log_matches("database is locked")
     if failed or locked:
@@ -881,7 +883,7 @@ def cmd_gfs_cluster() -> None:
         )
     print(
         f"  {n} concurrent registrations across all nodes — all accepted, "
-        "0 'database is locked' ✓"
+        f"0 'database is locked', burst took {reg_ms:.0f} ms ✓"
     )
 
     # 3b. The operation the user actually hit: concurrent SPACE PUBLISHES.
@@ -930,8 +932,10 @@ def cmd_gfs_cluster() -> None:
         )
         return i, code
 
+    t_pub = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
         pub_results = list(ex.map(_publish, range(n)))
+    pub_ms = (time.monotonic() - t_pub) * 1000
     pub_failed = [(i, c) for i, c in pub_results if c not in (200, 201)]
     pub_locked = _gfs_cluster_log_matches("database is locked")
     if pub_failed or pub_locked:
@@ -945,7 +949,36 @@ def cmd_gfs_cluster() -> None:
         )
     print(
         f"  {n} concurrent space publishes across all nodes — all accepted, "
-        "0 'database is locked' ✓"
+        f"0 'database is locked', burst took {pub_ms:.0f} ms ✓"
+    )
+
+    # 3b'. Per-request write latency. The DB writer waits its write-batch
+    # window for companions before committing, so every sequential write a
+    # request makes pays that window: at the old fixed 500 ms a single
+    # publish took >= 0.5 s even on an idle node. Publish a few more spaces
+    # ONE AT A TIME (alternating nodes) and assert the median stays
+    # interactive.
+    seq_ms: list[float] = []
+    for i in range(2, 10):
+        t_one = time.monotonic()
+        _i, code = _publish(i)
+        seq_ms.append((time.monotonic() - t_one) * 1000)
+        if code not in (200, 201):
+            _gfs_cluster_down(preserve_logs=True)
+            raise SystemExit(f"gfs-cluster: sequential publish {i} → HTTP {code}")
+    seq_ms.sort()
+    median_ms = seq_ms[len(seq_ms) // 2]
+    if median_ms > 250:
+        _gfs_cluster_down(preserve_logs=True)
+        raise SystemExit(
+            f"gfs-cluster: a lone space publish takes {median_ms:.0f} ms "
+            f"(median of {len(seq_ms)}; all {[round(x) for x in seq_ms]}) — "
+            "each write is waiting out the DB write-batch window "
+            "([server] write_batch_window_ms).",
+        )
+    print(
+        f"  {len(seq_ms)} sequential space publishes: median {median_ms:.0f} ms, "
+        f"max {seq_ms[-1]:.0f} ms ✓"
     )
 
     # 3c. The large-cover publishes were stored intact, and a DIFFERENT node

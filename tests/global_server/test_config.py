@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 from socialhome.global_server.config import (
     GfsConfig,
     set_password_in_toml,
@@ -300,3 +301,62 @@ def test_gfs_signing_seed_env_overrides_the_file(tmp_dir, monkeypatch):
     )
     monkeypatch.setenv("GFS_SIGNING_SEED", "cd" * 32)
     assert GfsConfig.load(p).signing_seed_hex == "cd" * 32
+
+
+def test_write_batch_window_defaults_to_the_interactive_window():
+    """The GFS no longer runs the old 500 ms coalescing window.
+
+    The writer waits the whole window for companion statements before it
+    commits, so every sequential write a request makes (publish, register,
+    relay bookkeeping, invite mint) cost up to one window — half a second
+    each, with no knob to turn it down.
+    """
+    assert GfsConfig().write_batch_window_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
+    assert DEFAULT_WRITE_BATCH_WINDOW_MS <= 20
+
+
+def test_write_batch_window_loads_from_toml(tmp_dir):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\nwrite_batch_window_ms = 37\n'
+    )
+    assert GfsConfig.from_toml(p).write_batch_window_ms == 37
+
+
+def test_write_batch_window_missing_from_toml_uses_default(tmp_dir):
+    p = tmp_dir / "global_server.toml"
+    p.write_text('[server]\nbase_url = "https://g.example"\n')
+    assert GfsConfig.from_toml(p).write_batch_window_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
+
+
+def test_write_batch_window_zero_in_toml_is_kept(tmp_dir):
+    """``0`` is a real value (commit each statement alone), not "unset"."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\nwrite_batch_window_ms = 0\n'
+    )
+    assert GfsConfig.from_toml(p).write_batch_window_ms == 0
+
+
+def test_write_batch_window_env_overrides_the_file(tmp_dir, monkeypatch):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\nwrite_batch_window_ms = 37\n'
+    )
+    monkeypatch.setenv("GFS_WRITE_BATCH_WINDOW_MS", "3")
+    assert GfsConfig.load(p).write_batch_window_ms == 3
+
+
+def test_negative_write_batch_window_is_rejected(tmp_dir):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\nwrite_batch_window_ms = -1\n'
+    )
+    with pytest.raises(ValueError, match="write_batch_window_ms"):
+        GfsConfig.from_toml(p)
+
+
+def test_example_toml_documents_write_batch_window():
+    from socialhome.global_server.config import EXAMPLE_TOML
+
+    assert f"write_batch_window_ms = {DEFAULT_WRITE_BATCH_WINDOW_MS}\n" in EXAMPLE_TOML

@@ -516,6 +516,31 @@ prune best-effort and independently guarded. Before this loop the GFS had
 no recurring cleanup — only a boot-time session purge and the cluster
 heartbeat — so those tables grew unbounded on a long-running process.
 
+### Database writer (write coalescing)
+
+Every process (household or GFS node) owns one `AsyncDatabase`
+(`socialhome/db/database.py`): WAL-mode SQLite, reads straight on the
+connection, writes through `enqueue()` into a queue drained by a single
+sentinel-driven writer task (`_writer_loop`, the documented exception to the
+`_stop` scheduler pattern). The writer takes the first queued statement,
+then waits up to the **write-batch window** for companions (or until
+`batch_max`, 50, are queued), and only then opens `BEGIN IMMEDIATE`, runs
+each statement under its own `SAVEPOINT` (one bad statement fails only its
+own caller) and commits. No transaction or file lock is held while the
+window runs, so on a GFS cluster (several nodes sharing one `gfs.db`, with
+`busy_timeout` = 5 s) the window never blocks another node — a node only
+waits for another node's short flush.
+
+The window *is* a floor on every write that arrives alone, and each
+sequential `enqueue` a request makes pays it again. It defaults to 5 ms
+(`DEFAULT_WRITE_BATCH_WINDOW_MS`); it was 500 ms, which made creating a post
+take ~2 s and every GFS write half a second. A burst still coalesces at 5 ms
+(the drain takes whatever is queued, up to `batch_max`). Knobs: household
+`db_write_batch_timeout_ms` / `SH_DB_WRITE_BATCH_TIMEOUT_MS`; GFS
+`[server] write_batch_window_ms` / `GFS_WRITE_BATCH_WINDOW_MS`. `0` commits
+each statement alone (slower under a burst). Multi-statement atomic steps
+use `transact()` / `UnitOfWork`, which bypass the window.
+
 ### Async media transcoding
 
 Video uploads transcode in the background instead of blocking the

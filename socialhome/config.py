@@ -26,6 +26,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from .db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
+
 
 log = logging.getLogger(__name__)
 
@@ -121,9 +123,11 @@ class Config:
     listen_port: int = 8099
     log_level: str = "INFO"
 
-    # Write coalescing for the SQLite executor
+    # Write coalescing for the SQLite executor. The window is a floor on the
+    # latency of every write that arrives alone (see
+    # ``DEFAULT_WRITE_BATCH_WINDOW_MS``), so keep it to a few ms.
     db_write_batch_max: int = 50
-    db_write_batch_timeout_ms: int = 500
+    db_write_batch_timeout_ms: int = DEFAULT_WRITE_BATCH_WINDOW_MS
 
     # Storage quota — household-wide cap on file_meta byte total.
     # 0 disables the cap. Default matches spec §5.2
@@ -411,7 +415,7 @@ class Config:
             db_write_batch_timeout_ms=_int_opt(
                 "db_write_batch_timeout_ms",
                 "SH_DB_WRITE_BATCH_TIMEOUT_MS",
-                500,
+                DEFAULT_WRITE_BATCH_WINDOW_MS,
             ),
             secure_cookies=_bool_opt(
                 "secure_cookies",

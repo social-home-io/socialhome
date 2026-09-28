@@ -163,11 +163,11 @@ test boundary — production code is untouched:
   database is identical to a freshly migrated one. Tests of the runner
   itself call `socialhome.db.migrations.run_migrations` directly and never
   see the cache.
-- **1 ms write-batch window.** `AsyncDatabase` holds each write batch open
-  for the whole window, so every *sequential* `enqueue` costs one window.
-  Test databases that ask for the suite's "fast" 10 ms — or never choose a
-  window and get the production 500 ms (`GfsApp`, a bare `Config(...)`) —
-  run with 1 ms instead. A window a test sets on purpose (the batching
+- **1 ms write-batch window.** `AsyncDatabase` waits the whole window for
+  companion statements before it commits, so every *sequential* `enqueue`
+  costs one window. Test databases that ask for the suite's "fast" 10 ms — or
+  never choose a window and get the production default (`GfsApp`, a bare
+  `Config(...)`; 5 ms, formerly 500 ms) — run with 1 ms instead. A window a test sets on purpose (the batching
   tests' 200 ms) is kept.
 
 Rules for new tests, from the root causes fixed so far:

@@ -264,7 +264,11 @@ class GfsApp:
                 Path(self.config.media_dir).mkdir(parents=True, exist_ok=True)
             except PermissionError:
                 pass
-        return AsyncDatabase(resolved_db, migrations_dir=_MIGRATIONS_DIR)
+        return AsyncDatabase(
+            resolved_db,
+            batch_timeout_ms=self.config.write_batch_window_ms,
+            migrations_dir=_MIGRATIONS_DIR,
+        )
 
     def _build_repos(self, db: AsyncDatabase) -> SimpleNamespace:
         """Instantiate the GFS repositories."""

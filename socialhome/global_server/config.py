@@ -9,7 +9,8 @@ Loaded with layered precedence:
 2. **Environment variables** (``GFS_HOST``, ``GFS_PORT``, ``GFS_BASE_URL``,
    ``GFS_DATA_DIR``, ``GFS_DB_PATH``, ``GFS_INSTANCE_ID``,
    ``GFS_SIGNING_SEED`` — 64 hex chars, the Ed25519 identity seed;
-   ``GFS_TRUSTED_PROXIES`` — comma-separated IPs/CIDRs, empty to clear)
+   ``GFS_TRUSTED_PROXIES`` — comma-separated IPs/CIDRs, empty to clear;
+   ``GFS_WRITE_BATCH_WINDOW_MS`` — the DB write-coalescing window)
    — override the matching ``[server]`` key when set, so an orchestrator can retarget a
    single value (e.g. a per-instance port) without rewriting the file.
    This mirrors :class:`socialhome.config.Config` (env > file > defaults).
@@ -36,6 +37,8 @@ import os
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
+
+from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 
 
 DEFAULT_DATA_DIR = "/var/lib/sh-gfs"
@@ -89,6 +92,14 @@ class GfsConfig:
     signing_seed_hex: str = ""
     # IPs / CIDRs of reverse proxies whose ``X-Forwarded-For`` is believed.
     trusted_proxies: tuple[str, ...] = DEFAULT_TRUSTED_PROXIES
+    #: How long the SQLite writer waits for companion statements before it
+    #: commits a batch, in ms. It is a floor on every write that arrives
+    #: alone, so each sequential write a request makes (publish, register,
+    #: relay bookkeeping, invite mint) pays it; the GFS used to run the old
+    #: 500 ms default with no knob. The wait happens before ``BEGIN
+    #: IMMEDIATE``, so it does not hold the file lock the other cluster nodes
+    #: share — it only adds latency. ``0`` commits each statement alone.
+    write_batch_window_ms: int = DEFAULT_WRITE_BATCH_WINDOW_MS
 
     # [branding] — start values; admin portal overrides via DB.
     server_name: str = "My Global Server"
@@ -172,6 +183,9 @@ class GfsConfig:
             cluster_enabled=bool(cluster.get("enabled", False)),
             cluster_node_id=str(cluster.get("node_id") or ""),
             cluster_peers=tuple(cluster.get("peers") or ()),
+            write_batch_window_ms=_window_ms(
+                server.get("write_batch_window_ms", DEFAULT_WRITE_BATCH_WINDOW_MS)
+            ),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -214,6 +228,11 @@ class GfsConfig:
             instance_id=env.get("GFS_INSTANCE_ID", self.instance_id),
             signing_seed_hex=env.get("GFS_SIGNING_SEED", self.signing_seed_hex),
             trusted_proxies=trusted_proxies,
+            write_batch_window_ms=(
+                _window_ms(env["GFS_WRITE_BATCH_WINDOW_MS"])
+                if "GFS_WRITE_BATCH_WINDOW_MS" in env
+                else self.write_batch_window_ms
+            ),
         )
 
     @classmethod
@@ -260,13 +279,22 @@ class GfsConfig:
         return cls.from_env_fallback()
 
 
+def _window_ms(raw: int | str) -> int:
+    """Parse ``write_batch_window_ms``; a negative window is a config error."""
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"write_batch_window_ms must be >= 0, got {value}")
+    return value
+
+
 # ─── TOML example (written by --init) ───────────────────────────────────
 
 EXAMPLE_TOML: str = """\
 [server]
 # These apply as written. To retarget a single instance without editing
 # the file, set the matching env var (env > file): GFS_HOST, GFS_PORT,
-# GFS_BASE_URL, GFS_DATA_DIR, GFS_INSTANCE_ID, GFS_SIGNING_SEED.
+# GFS_BASE_URL, GFS_DATA_DIR, GFS_INSTANCE_ID, GFS_SIGNING_SEED,
+# GFS_WRITE_BATCH_WINDOW_MS.
 host     = "0.0.0.0"
 port     = 8765
 base_url = "https://gfs.example.com"
@@ -289,6 +317,11 @@ trusted_proxies = [
   "127.0.0.0/8", "::1/128", "10.0.0.0/8",
   "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
 ]
+# How long (ms) the database writer waits for more writes before committing a
+# batch. Every write that arrives alone waits this long, so keep it small; the
+# wait holds no lock, so it is safe on a cluster sharing one database file.
+# 0 commits every write on its own. Env override: GFS_WRITE_BATCH_WINDOW_MS.
+write_batch_window_ms = 5
 
 [branding]
 server_name       = "My Global Server"
