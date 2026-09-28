@@ -14,9 +14,12 @@
  *     pick (the backend route accepts either; remote routing rides
  *     the federation envelope path automatically).
  *   • Two or more selected → POST /api/conversations/group with
- *     ``{members: [usernames]}``. The group endpoint is **local-only**
- *     today, so the picker disables remote rows once a 2nd person is
- *     selected and the Start button explains the limit.
+ *     ``{members: [local usernames], member_user_ids: [remote user_ids]}``.
+ *     Groups can span households (v_37): this household becomes the
+ *     group's home. A household whose Social Home is too old for group
+ *     chats (``supports_group_dm: false`` on ``/api/friends``) can only
+ *     be messaged 1:1 — its rows grey out once a group is forming, and
+ *     the row says why.
  *
  * On successful create the dialog navigates straight into the new
  * thread — "create" and "open" feel like one action, not two.
@@ -35,7 +38,7 @@ import { showToast } from './Toast'
  *  ``user_id`` + ``instance_id`` and the backend's
  *  ``POST /api/conversations/dm`` 1:1 path uses ``user_id`` to route
  *  the federation envelope. */
-interface Pickable {
+export interface Pickable {
   user_id: string
   username: string  // remote: ``ru.remote_username`` from /api/friends
   display_name: string
@@ -48,6 +51,9 @@ interface Pickable {
    *  Brother's house" without picking the wrong one. ``null`` for
    *  local rows (own household label is implicit). */
   household_name: string | null
+  /** Whether this person can be put in a group chat — always for local
+   *  rows; for remote rows the household must be v_37+. */
+  supports_group: boolean
 }
 
 const open       = signal(false)
@@ -85,11 +91,10 @@ const pickedUsers = computed<Pickable[]>(() => {
 
 const isGroup = computed(() => picked.value.size >= 2)
 
-/** True when the user has picked anything cross-household. The group
- *  endpoint is local-only today, so this gates the Start button when
- *  the picker holds a remote member + at least one other person. */
-const hasRemotePicked = computed(() =>
-  pickedUsers.value.some(u => u.instance_id !== null),
+/** True when a picked person can only be messaged 1:1 (their household
+ *  can't take part in group chats yet). Blocks Start for a group. */
+const hasGroupBlockerPicked = computed(() =>
+  pickedUsers.value.some(u => !u.supports_group),
 )
 
 function reset() {
@@ -119,15 +124,17 @@ interface FriendsResponseMember {
 interface FriendsResponseHousehold {
   instance_id: string | null
   display_name: string
+  /** v_37+ households only; absent from older backends (read as false). */
+  supports_group_dm?: boolean
   members: FriendsResponseMember[]
 }
 
-interface FriendsResponse {
+export interface FriendsResponse {
   instance: FriendsResponseHousehold
   households: FriendsResponseHousehold[]
 }
 
-function flattenFriends(payload: FriendsResponse): Pickable[] {
+export function flattenFriends(payload: FriendsResponse): Pickable[] {
   const out: Pickable[] = []
   for (const m of payload.instance.members) {
     out.push({
@@ -137,6 +144,7 @@ function flattenFriends(payload: FriendsResponse): Pickable[] {
       picture_url: m.picture_url,
       instance_id: null,
       household_name: null,
+      supports_group: true,
     })
   }
   for (const h of payload.households) {
@@ -148,10 +156,20 @@ function flattenFriends(payload: FriendsResponse): Pickable[] {
         picture_url: m.picture_url,
         instance_id: h.instance_id,
         household_name: h.display_name,
+        supports_group: h.supports_group_dm === true,
       })
     }
   }
   return out
+}
+
+/** Why a greyed-out row can't be picked — shown on the row itself (touch
+ *  devices have no hover tooltip). */
+function disabledReason(row: Pickable): string {
+  if (!row.supports_group) {
+    return `${row.household_name ?? 'Their household'} needs a Social Home update for group chats — 1:1 only`
+  }
+  return 'Can’t share a group with the person picked above — their household needs an update'
 }
 
 export function openNewDm() {
@@ -183,12 +201,14 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
         conv = await api.post('/api/conversations/dm', body)
         showToast('Conversation started', 'success')
       } else {
-        // Group endpoint is local-only today — the picker disables
-        // remote rows once a second person is selected, but defend
-        // server-side by sending usernames only.
-        const body: { members: string[]; name?: string } = {
-          members: picks.map(p => p.username).filter(Boolean),
+        // Local people by username, people from other households by
+        // ``user_id`` — the backend seats them and ships the member list
+        // to their households.
+        const body: { members: string[]; member_user_ids?: string[]; name?: string } = {
+          members: picks.filter(p => p.instance_id === null).map(p => p.username),
         }
+        const remoteIds = picks.filter(p => p.instance_id !== null).map(p => p.user_id)
+        if (remoteIds.length > 0) body.member_user_ids = remoteIds
         const trimmedName = groupName.value.trim()
         if (trimmedName) body.name = trimmedName
         conv = await api.post('/api/conversations/group', body)
@@ -211,30 +231,22 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
     }
   }
 
-  /** A row is disabled when picking it would put us into "group with a
-   *  remote member" territory the backend can't honour. Concretely:
-   *  the row is remote AND another local person is already picked
-   *  (so adding this remote would force a group with a remote);
-   *  OR the row is local AND a remote is already picked (same shape).
-   *  Already-picked rows are always enabled (so the user can un-pick). */
+  /** A row is disabled when picking it would form a group with somebody
+   *  whose household can't take part in group chats yet: the row is such
+   *  a person and someone is already picked, or such a person is already
+   *  picked. Already-picked rows are always enabled (so the user can
+   *  un-pick). */
   function isRowDisabled(row: Pickable): boolean {
     if (picked.value.has(row.user_id)) return false
     const picks = pickedUsers.value
     if (picks.length === 0) return false
-    const someoneRemote = picks.some(p => p.instance_id !== null)
-    if (row.instance_id !== null) {
-      // Trying to add a remote person — only OK if nobody else is picked.
-      return picks.length >= 1
-    }
-    // Trying to add a local person — OK unless we already have a remote.
-    return someoneRemote
+    return !row.supports_group || hasGroupBlockerPicked.value
   }
 
   const startDisabled = loading.value || picked.value.size === 0
-  /** Group-with-remote can't be served by the backend; pickers can't
-   *  reach this state because of ``isRowDisabled`` but we keep a safety
-   *  copy so a future bug doesn't silently 500 the request. */
-  const groupAndRemoteMixed = isGroup.value && hasRemotePicked.value
+  /** A group holding someone who can't join groups — unreachable through
+   *  ``isRowDisabled``, kept so a future bug can't send a doomed request. */
+  const groupBlocked = isGroup.value && hasGroupBlockerPicked.value
 
   return (
     <Modal
@@ -320,13 +332,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
                 aria-selected={checked}
                 aria-disabled={disabled}
                 disabled={disabled}
-                title={
-                  disabled && u.instance_id !== null
-                    ? 'Cross-household groups aren’t supported yet — pick this person for a 1:1.'
-                    : disabled
-                      ? 'Pick everyone from the same household — cross-household groups aren’t supported yet.'
-                      : undefined
-                }
+                title={disabled ? disabledReason(u) : undefined}
                 class={
                   checked
                     ? 'sh-newdm-row sh-newdm-row--checked'
@@ -348,6 +354,9 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
                       ? `at ${u.household_name}`
                       : `@${u.username}`}
                   </span>
+                  {disabled && (
+                    <span class="sh-newdm-row-note">{disabledReason(u)}</span>
+                  )}
                 </div>
                 <span class="sh-newdm-check" aria-hidden="true">
                   {checked ? '✓' : ''}
@@ -367,7 +376,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
           <Button
             onClick={handleCreate}
             loading={loading.value}
-            disabled={startDisabled || groupAndRemoteMixed}
+            disabled={startDisabled || groupBlocked}
           >
             {isGroup.value
               ? `Start group (${picked.value.size})`

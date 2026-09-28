@@ -349,6 +349,21 @@ That single command runs the full sequence:
    Complements the accept-only path that
    ``cmd_traffic`` + ``cmd_calendar`` exercise today.
 
+9b. ``group-dm`` (v_37 cross-household group conversations) — **a**
+   creates a group with **b**'s and **c**'s admins; both see it as a group
+   kept elsewhere (``managed_here: false``) and every household's message
+   reaches the other two. **d** (paired with **a** and **b**, never a
+   member) holds neither the group row nor any of its text. **a** adds
+   **d**'s admin (when **a**↔**d** is paired, i.e. after ``relay-pair``):
+   **d** is seated and catches up on the whole history from **a**. **a**
+   removes **c**: **c** drops the group and a later message never reaches
+   it. **b** leaves: its ``DM_GROUP_LEAVE`` reaches **a**, whose roster
+   drops **b**. Finally a group on **b** with **c** and **d** — never paired
+   with each other — proves the mesh leg: **c**'s message reaches **d**
+   E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
+   ``verify`` already asserts every confirmed peer advertises the build's
+   ``OURS`` (37).
+
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is
    offline, restarts **c**, waits across the second outbox-backoff
@@ -379,7 +394,8 @@ calendar → verify → relay-pair → visibility → invite-redeem →
 invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
-app-session → remote-invite-decline → replay → unpair → unpair-offline`` in that order.
+app-session → remote-invite-decline → group-dm → replay → unpair →
+unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-space-no-subscribers`` / ``gfs-down``)
