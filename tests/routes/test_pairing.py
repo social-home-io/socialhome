@@ -9,6 +9,7 @@ from socialhome.app_keys import (
     auto_pair_coordinator_key,
     db_key as _db_key,
     dm_routing_service_key,
+    event_bus_key,
     federation_repo_key,
     federation_service_key,
     federation_transport_key,
@@ -22,6 +23,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain.events import PeerUnpaired
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -485,6 +487,32 @@ async def test_unpair_removes_instance(client):
         headers=_auth(client._tok),
     )
     assert (await r.json()) == []
+
+
+async def test_unpair_publishes_peer_unpaired(client):
+    """A local unpair publishes ``PeerUnpaired`` so the realtime bridge
+    pushes ``connection.removed`` to every open connections list."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-5"))
+    seen: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, seen.append)
+    r = await client.delete(
+        "/api/pairing/connections/peer-5",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert [e.instance_id for e in seen] == ["peer-5"]
+
+
+async def test_unpair_404_publishes_nothing(client):
+    seen: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, seen.append)
+    r = await client.delete(
+        "/api/pairing/connections/nope",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 404
+    assert seen == []
 
 
 async def test_connections_endpoint_does_not_leak_session_keys(client):

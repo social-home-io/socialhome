@@ -44,6 +44,7 @@ from ..domain.events import (
     PairingConfirmed,
     PairingIntroReceived,
     PeerTransportChanged,
+    PeerUnpaired,
     SpaceMemberProfileUpdated,
     UserCameOnline,
     UserProfileUpdated,
@@ -302,6 +303,7 @@ class RealtimeService:
         self._bus.subscribe(CalendarEventDeleted, self._on_calendar_deleted)
         self._bus.subscribe(ConnectionReachable, self._on_connection_reachable)
         self._bus.subscribe(ConnectionUnreachable, self._on_connection_unreachable)
+        self._bus.subscribe(PeerUnpaired, self._on_peer_unpaired)
         self._bus.subscribe(GalleryAlbumCreated, self._on_gallery_album_created)
         self._bus.subscribe(GalleryAlbumDeleted, self._on_gallery_album_deleted)
         self._bus.subscribe(GalleryItemUploaded, self._on_gallery_item_uploaded)
@@ -1227,6 +1229,14 @@ class RealtimeService:
     async def _on_connection_unreachable(self, event: ConnectionUnreachable) -> None:
         await self._broadcast_household(
             {"type": "connection.unreachable", "instance_id": event.instance_id},
+        )
+
+    async def _on_peer_unpaired(self, event: PeerUnpaired) -> None:
+        # Household-wide like the other ``connection.*`` frames: every
+        # signed-in member can read the connections list. A new pairing
+        # needs no sibling frame — ``pairing.confirmed`` is that signal.
+        await self._broadcast_household(
+            {"type": "connection.removed", "instance_id": event.instance_id},
         )
 
     # ─── Gallery ──────────────────────────────────────────────────────────

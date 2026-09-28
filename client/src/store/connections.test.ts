@@ -19,6 +19,11 @@ vi.mock('@/ws', () => ({
   },
 }))
 
+const apiGet = vi.fn()
+vi.mock('@/api', () => ({
+  api: { get: (...args: unknown[]) => apiGet(...args) },
+}))
+
 import { connections, selfLat, selfLon, wireConnectionsWs } from './connections'
 
 describe('wireConnectionsWs', () => {
@@ -27,7 +32,56 @@ describe('wireConnectionsWs', () => {
     selfLat.value = null
     selfLon.value = null
     Object.keys(handlers).forEach(k => delete handlers[k])
+    apiGet.mockReset()
     wireConnectionsWs()
+  })
+
+  it('does not listen for the never-emitted connection.added frame', () => {
+    // A new pairing is signalled by ``pairing.confirmed`` — the server has
+    // no ``connection.added`` frame, so a handler for it is dead code.
+    expect(handlers['connection.added']).toBeUndefined()
+  })
+
+  it('pairing.confirmed refetches the list so a new peer shows without a reload', async () => {
+    connections.value = [
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true, status: 'confirmed' },
+    ]
+    apiGet.mockResolvedValueOnce([
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true, status: 'confirmed' },
+      { instance_id: 'peer-2', display_name: 'Carol', reachable: true, status: 'confirmed' },
+    ])
+    handlers['pairing.confirmed']({ data: { type: 'pairing.confirmed', instance_id: 'peer-2' } })
+    await vi.waitFor(() => expect(connections.value).toHaveLength(2))
+    expect(apiGet).toHaveBeenCalledWith('/api/connections')
+    expect(connections.value[1].display_name).toBe('Carol')
+  })
+
+  it('pairing.confirmed keeps the current list when the refetch fails', async () => {
+    connections.value = [
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true },
+    ]
+    apiGet.mockRejectedValueOnce(new Error('offline'))
+    handlers['pairing.confirmed']({ data: { instance_id: 'peer-2' } })
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await Promise.resolve()
+    expect(connections.value).toHaveLength(1)
+  })
+
+  it('connection.removed drops the unpaired peer from the list', () => {
+    connections.value = [
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true },
+      { instance_id: 'peer-2', display_name: 'Carol', reachable: true },
+    ]
+    handlers['connection.removed']({ data: { type: 'connection.removed', instance_id: 'peer-1' } })
+    expect(connections.value.map(c => c.instance_id)).toEqual(['peer-2'])
+  })
+
+  it('connection.removed without an instance_id is a no-op', () => {
+    connections.value = [
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true },
+    ]
+    handlers['connection.removed']({ data: {} })
+    expect(connections.value).toHaveLength(1)
   })
 
   it('local.home_changed updates selfLat and selfLon signals', () => {

@@ -7,7 +7,8 @@
  *
  * The media stack is intentionally single-peer for v1 — group calls fan
  * out at the signalling layer; each pair of participants has its own
- * :class:`RtcTransport`.
+ * ``RTCPeerConnection``, signalled over the ``/api/calls/*`` REST routes
+ * and the ``call.*`` WS frames.
  */
 import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'

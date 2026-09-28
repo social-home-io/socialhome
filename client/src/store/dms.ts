@@ -1,6 +1,6 @@
 /**
- * DMs store — driven by `dm.message`, `dm.message_deleted`,
- * `dm.message_reaction` and `conversation.user_typing` WS frames.
+ * DMs store — driven by `dm.message`, `dm.message_reaction` and
+ * `conversation.user_typing` WS frames.
  *
  * DmInboxPage reads :data:`inbox` (latest message per conversation).
  * DmThreadPage reads :data:`messagesByConversation[conversationId]`
@@ -64,14 +64,6 @@ function append(convo: string, msg: DmMessageLite): void {
   inbox.value = { ...inbox.value, [convo]: msg }
 }
 
-function removeMessage(convo: string, messageId: string): void {
-  const existing = messagesByConversation.value[convo]
-  if (!existing) return
-  messagesByConversation.value = {
-    ...messagesByConversation.value,
-    [convo]: existing.filter((m) => m.message_id !== messageId),
-  }
-}
 
 /** Apply a reaction add / remove to the cached copy of a message,
  *  deduping so a duplicate ``add`` frame (reconnect / multi-session)
@@ -157,12 +149,6 @@ export function wireDmWs(): void {
       occurred_at:     msg.created_at,
       edited_at:       msg.edited_at ?? null,
     })
-    void loadDmUnread()
-  })
-  ws.on('dm.message_deleted', (e) => {
-    const d = e.data as unknown as { conversation_id: string, message_id: string }
-    if (!d?.conversation_id || !d?.message_id) return
-    removeMessage(d.conversation_id, d.message_id)
     void loadDmUnread()
   })
   ws.on('dm.message_reaction', (e) => {

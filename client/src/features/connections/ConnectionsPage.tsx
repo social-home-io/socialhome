@@ -687,9 +687,9 @@ export default function ConnectionsPage() {
     void loadFederationCompat()
     if (currentUser.value?.is_admin) void loadAutoPairRequests()
 
-    const off1 = ws.on('pairing.confirmed', () => {
-      void loadConnections()
-    })
+    // ``pairing.confirmed`` / ``connection.removed`` are handled by the
+    // connections store (``wireConnectionsWs``) so every view of the
+    // list — this page and the dashboard map — updates live.
     const off2 = ws.on('pairing.aborted', () => {
       void loadConnections()
     })
@@ -704,7 +704,7 @@ export default function ConnectionsPage() {
           : c,
       )
     })
-    return () => { off1(); off2(); off3(); off4() }
+    return () => { off2(); off3(); off4() }
   }, [])
 
   const confirmed = connections.value.filter(
