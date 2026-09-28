@@ -1321,6 +1321,15 @@ class DmService(VisibilityMixin):
                         inst,
                     )
                     continue
+                if await self._mesh_refused(inst):
+                    log.info(
+                        "group %s: %s not sent to member household %s — we are "
+                        "unpairing from it, or only share a space with it",
+                        conversation_id,
+                        event_type.value,
+                        inst,
+                    )
+                    continue
                 via_mesh = True
             # Per-pair user-visibility filter (peer_user_visibility).
             # When the sender is hidden from this peer, drop the envelope
@@ -1457,6 +1466,26 @@ class DmService(VisibilityMixin):
                     "households. This conversation includes participants "
                     "reachable only via a relay.",
                 )
+
+    async def _mesh_refused(self, instance_id: str) -> bool:
+        """A group member household we must not reach over the mesh either.
+
+        One we are unpairing from (the admin asked to stop talking to it),
+        or one we share only a space with (an invite-link row: no social
+        relationship, and its "direct" channel is the connection-server
+        relay).
+        """
+        if self._federation_repo is None:
+            return False
+        instance = await self._federation_repo.get_instance(instance_id)
+        if instance is None:
+            return False
+        status = getattr(instance, "status", None)
+        source = getattr(instance, "source", None)
+        return (
+            getattr(status, "value", status) == "unpairing"
+            or getattr(source, "value", source) == "space_session"
+        )
 
     async def _peer_is_confirmed(self, instance_id: str) -> bool:
         """Is ``instance_id`` a directly-paired CONFIRMED peer?

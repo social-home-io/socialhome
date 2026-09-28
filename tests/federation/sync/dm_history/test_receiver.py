@@ -37,7 +37,9 @@ class _FakeConvRepo:
     async def list_remote_members(self, conversation_id):
         if conversation_id != "c-1":
             return []
-        return [SimpleNamespace(instance_id="peer-a", remote_username="x")]
+        return [
+            SimpleNamespace(instance_id="peer-a", remote_username="x", user_id=None)
+        ]
 
 
 class _FakeUserRepo:

@@ -32,6 +32,7 @@ import pytest
 from socialhome.app import create_app
 from socialhome.app_keys import db_key, dm_service_key, federation_service_key
 from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
@@ -494,8 +495,10 @@ async def test_a_removed_household_gets_the_final_roster_then_nothing(env, own_g
     await svc.remove_group_member(own_group, actor_username="ula", user_id="u-bob")
     rosters = {i: p for i, et, p in sent if et is FET.DM_GROUP_ROSTER}
     assert set(rosters) == {BOB, AUTH}
-    assert "u-bob" not in {m["user_id"] for m in rosters[BOB]["members"]}
+    # The removed household learns only that it is out — not who stays.
+    assert rosters[BOB]["members"] == []
     assert rosters[BOB]["version"] == 2
+    assert "u-bob" not in {m["user_id"] for m in rosters[AUTH]["members"]}
     sent.clear()
     await svc.send_message(own_group, sender_username="ula", content="after")
     assert _targets(sent, FET.DM_MESSAGE) == {AUTH}
@@ -547,3 +550,139 @@ async def test_a_leave_sent_to_a_non_authority_changes_nothing(env, group):
         from_instance=BOB,
     )
     assert await _state(db) == before
+
+
+# ─── Review hardening ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("sql", "stranger"),
+    [
+        pytest.param(None, "peer-stranger", id="a mesh stranger we never paired"),
+        pytest.param(
+            "UPDATE remote_instances SET source='space_session' WHERE id=?",
+            DORA,
+            id="an invite-link household we only share a space with",
+        ),
+        pytest.param(
+            "UPDATE remote_instances SET status='unpairing' WHERE id=?",
+            DORA,
+            id="a household we are unpairing from",
+        ),
+    ],
+)
+async def test_only_a_paired_household_can_be_a_groups_authority(env, sql, stranger):
+    """An id bound to yourself is easy to mint; seating our people in it
+    still needs a household we chose to pair with."""
+    app, db, own, _, _ = env
+    if sql:
+        await db.enqueue(sql, (stranger,))
+    before = await _state(db)
+    payload = _roster(_group_id(stranger), 1, own)
+    await _send(app, FET.DM_GROUP_ROSTER, payload, from_instance=stranger)
+    assert await _state(db) == before
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        pytest.param(True, id="a bool"),
+        pytest.param(0, id="zero"),
+        pytest.param(2**63, id="beyond SQLite"),
+        pytest.param("7", id="a string"),
+    ],
+)
+async def test_a_malformed_roster_version_is_refused(env, version):
+    app, db, own, _, _ = env
+    before = await _state(db)
+    payload = _roster(_group_id(AUTH), 1, own)
+    payload["version"] = version
+    await _send(app, FET.DM_GROUP_ROSTER, payload, from_instance=AUTH)
+    assert await _state(db) == before
+
+
+async def test_an_authority_user_not_synced_yet_is_held_then_seated(env):
+    """The authority can't seat a user_id on itself we haven't seen — the
+    roster waits for that user's own sync (then the same rules apply)."""
+    app, db, own, _, _ = env
+    conv = _group_id(AUTH)
+    user_id = derive_user_id(bytes(32), "nell")
+    payload = _roster(conv, 1, own, _member(user_id, AUTH, "nell"))
+    before = await _state(db)
+    await _send(app, FET.DM_GROUP_ROSTER, payload, from_instance=AUTH)
+    assert await _state(db) == before
+    await _send(
+        app,
+        FET.USER_UPDATED,
+        {"user_id": user_id, "username": "nell", "display_name": "Nell"},
+        from_instance=AUTH,
+    )
+    seats = (await _state(db))["seats"]
+    assert (conv, AUTH, "nell", user_id) in seats
+
+
+async def test_an_authority_history_row_never_overwrites_a_members_own(env, group):
+    """A relayed row fills a gap only — never rewrites, un-deletes or
+    rolls back what the member's own household delivered."""
+    app, db, _, _, _ = env
+    await _send(
+        app, FET.DM_MESSAGE, _dm(group, "m-c", "u-carl", "v2"), from_instance=CARL
+    )
+    await _send(
+        app,
+        FET.DM_MESSAGE_DELETED,
+        {"conversation_id": group, "message_id": "m-c"},
+        from_instance=CARL,
+    )
+    before = await _state(db)
+    await _send(
+        app,
+        FET.DM_HISTORY_CHUNK,
+        _chunk(group, ("m-c", "u-carl")),
+        from_instance=AUTH,
+    )
+    assert await _state(db) == before
+
+
+async def test_a_departed_member_leaves_the_group_standing(env, own_group):
+    """``USER_REMOVED`` from a member's household clears their messages and
+    (here, on the authority) their seat — never the whole group."""
+    app, db, _, sent, _ = env
+    svc = app[dm_service_key]
+    await svc.send_message(own_group, sender_username="ula", content="stays")
+    await _send(
+        app, FET.DM_MESSAGE, _dm(own_group, "m-b", "u-bob", "bye"), from_instance=BOB
+    )
+    sent.clear()
+    await _send(app, FET.USER_REMOVED, {"user_id": "u-bob"}, from_instance=BOB)
+    state = await _state(db)
+    assert any(c[0] == own_group for c in state["conversations"])
+    assert all(s[3] != "u-bob" for s in state["seats"] if s[0] == own_group)
+    texts = {m[3] for m in state["messages"] if m[1] == own_group}
+    assert "stays" in texts and "bye" not in texts
+    assert _targets(sent, FET.DM_GROUP_ROSTER) == {AUTH, BOB}
+
+
+async def test_a_member_household_we_share_only_a_space_with_is_not_reached(env, group):
+    """Its "direct" channel is the connection-server relay, and there is no
+    social pairing — the group message is not sent to it at all."""
+    app, db, _, sent, meshed = env
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            CARL,
+            CARL,
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://c/wh",
+            "wh-c",
+            "confirmed",
+            "space_session",
+        ),
+    )
+    sent.clear()
+    await app[dm_service_key].send_message(group, sender_username="ula", content="x")
+    assert CARL not in {inst for inst, _, _ in sent + meshed}

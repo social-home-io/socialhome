@@ -107,7 +107,7 @@ def _seat_dm_sender(svc) -> None:
         instance_id="peer-1", remote_username="u"
     )
     svc.convo.list_remote_members.return_value = [
-        SimpleNamespace(instance_id="peer-1", remote_username="u")
+        SimpleNamespace(instance_id="peer-1", remote_username="u", user_id=None)
     ]
     svc.convo.get_message.return_value = SimpleNamespace(
         conversation_id="c", sender_user_id="u"

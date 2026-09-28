@@ -85,7 +85,7 @@ from ..domain.user import (
     clean_status_text,
 )
 from ..domain.federation_capabilities import FederationCapability
-from ..federation.dm_scope import DmScope, refuse
+from ..federation.dm_scope import DM_HOLD_SCOPE, DmScope, refuse
 from ..federation.moment_origin import check_relayed_moment_origin
 from ..federation.owner_bound_id import (
     MOMENT_KIND,
@@ -128,6 +128,7 @@ from .space_service import (
 from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
+    from .dm_group_service import DmGroupService
     from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..domain.federation import FederationEvent
     from ..repositories.bazaar_repo import AbstractBazaarRepo
@@ -145,9 +146,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: Hold-buffer scope for DMs waiting on their sender's user sync. Not a
-#: space id (those are 32-char key fingerprints), so the keys never mix.
-_DM_HOLD_SCOPE = "dm"
+#: Hold-buffer scope for DMs waiting on their sender's user sync.
+_DM_HOLD_SCOPE = DM_HOLD_SCOPE
 
 
 def _moment_expired(expires_at: object) -> bool:
@@ -320,6 +320,7 @@ class FederationInboundService:
         "_federation_service",
         "_space_cover_repo",
         "_space_icon_repo",
+        "_groups",
     )
 
     def __init__(
@@ -405,6 +406,13 @@ class FederationInboundService:
         #: omit them (the image is then simply not stored).
         self._space_cover_repo = space_cover_repo
         self._space_icon_repo = space_icon_repo
+        #: Group-conversation authority (v_37) — a deprovisioned member of a
+        #: cross-household group leaves it instead of taking it down.
+        self._groups: "DmGroupService | None" = None
+
+    def attach_groups(self, groups: "DmGroupService") -> None:
+        """Wire the group-membership authority (built with the DM stack)."""
+        self._groups = groups
 
     def attach_realtime(self, realtime: "object") -> None:
         """Wire the realtime broadcaster after construction.
@@ -648,9 +656,10 @@ class FederationInboundService:
         # wrote — and the user got two bell rows + two pushes for one
         # message.
         _, created = await self._conversation_repo.save_message_returning_created(msg)
-        # Who hears about it here: the conversation's own seated local
-        # members — never whoever the sender listed in
-        # ``recipient_user_ids`` (a sender could name any local user).
+        # Who hears about it here: the conversation's own local members —
+        # never whoever the sender listed in ``recipient_user_ids`` (a
+        # sender could name any local user). A 1:1 the local member hid
+        # still reaches them (as before); a group member who left doesn't.
         local_recipients = await self._local_member_ids(conv_id)
 
         if not created:
@@ -913,10 +922,15 @@ class FederationInboundService:
         return True
 
     async def _local_member_ids(self, conv_id: str) -> tuple[str, ...]:
-        """``user_id`` of every local member still seated in ``conv_id``."""
+        """``user_id`` of the local members of ``conv_id``.
+
+        A group's members who left are not; a 1:1's hidden member still is.
+        """
+        conv = await self._conversation_repo.get(conv_id)
+        group = conv is not None and conv.type is ConversationType.GROUP_DM
         ids: list[str] = []
         for m in await self._conversation_repo.list_members(conv_id):
-            if m.deleted_at is not None:
+            if group and m.deleted_at is not None:
                 continue
             user = await self._user_repo.get(m.username)
             if user is not None:
@@ -2612,6 +2626,16 @@ class FederationInboundService:
             )
             conv_ids = []
         for conv_id in conv_ids:
+            conv = await self._conversation_repo.get(conv_id)
+            if (
+                conv is not None
+                and conv.type is ConversationType.GROUP_DM
+                and self._groups is not None
+            ):
+                # A group is everyone's, not the departed user's: clear
+                # their messages, and (on its authority) their seat.
+                await self._groups.remove_departed_user(conv_id, user_id)
+                continue
             try:
                 await self._conversation_repo.hard_delete(conv_id)
             except Exception as exc:  # pragma: no cover — defensive

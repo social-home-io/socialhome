@@ -85,13 +85,25 @@ household and the conversation's remote seats
   per message, the sender is not a seated user of `from_instance` — except
   that a group's authority may hand over rows of members seated on other
   households (a newly added household catches up from it), never a row
-  claimed for one of our own users.
+  claimed for one of our own users. Such a relayed row only fills a gap:
+  it never updates a row already here (no rewrite, un-delete or rollback
+  of what the member's own household delivered).
+- **`USER_REMOVED`** — for a group the departed user was in, the group
+  stays: their messages in it are cleared, and on the group's authority
+  their seat is taken out with the next roster. (A 1:1 with them is
+  purged, as before.)
 - **`DM_GROUP_ROSTER`** — `from_instance` is not the household the
-  group id commits to; the version is not newer than the one held; the
-  conversation exists here as a 1:1; or it is new and seats no local
-  user. Per entry: a local entry naming a `user_id` we don't have, or a
-  remote entry naming a person this household knows as homed on another
-  household (or here), is dropped.
+  group id commits to, or is not a directly paired, social household
+  (a mesh stranger can mint an id bound to itself; an invite-link or
+  unpairing row doesn't count either); the version is not a whole number
+  in `1 … 2^53` or not newer than the one held; the conversation exists
+  here as a 1:1; or it is new and seats no local user. Per entry: a local
+  entry naming a `user_id` we don't have, or a remote entry naming a
+  person this household knows as homed on another household (or here),
+  is dropped. An entry seating a user on the authority itself that the
+  authority never synced to us holds the whole roster (bounded, expiring)
+  until that user's profile lands, then it is applied by these same
+  rules — the authority's own seats are the ones it could speak for.
 - **`DM_GROUP_LEAVE`** — this household is not the group's authority,
   or the leaver is not a user seated on `from_instance`.
   A message is inserted when absent; one already here is updated from the
@@ -144,7 +156,8 @@ member leaving — is applied on the authority as a new snapshot with the
 next `membership_version` and shipped as `DM_GROUP_ROSTER`
 `{conversation_id, version, name, members: [{user_id, instance_id,
 username, display_name}]}` to every member household, plus once more to a
-household the change took out (so it drops the group too). It travels
+household the change took out — to that one with an empty member list,
+so it drops every seat and learns nothing about who stays. It travels
 direct (the authority is paired with every member household — it seated
 them), encrypted per peer like every envelope. A receiver applies it only
 from the household the id commits to and only when the version is newer
@@ -164,15 +177,17 @@ member's `user_id` and display name (`conversation_remote_members`); a
 message, reaction, typing frame or delete from that member binds to the
 seat — and so to the household that must sign the envelope.
 
-**Delivery — members only.** Messages, edits, deletes, reactions and
-typing fan out from the sending household to every member household
-itself: direct when the two are paired, otherwise over the mesh as
-`SPACE_ROUTED`, E2E-sealed to the member household and origin-signed, so
-the relays in between (never members) see only ciphertext. A household
-that is not a member never gets group content, and a removed one stops
-getting it with the roster that removed it. Media stays on the
-direct-pairing rule: a group with a member household the sender isn't
-paired with refuses attachments (`MEDIA_REQUIRES_DIRECT_PAIRING`).
+**Delivery — members only.** Messages, edits, deletes and reactions fan
+out from the sending household to every member household itself: direct
+when the two are paired, otherwise over the mesh as `SPACE_ROUTED`,
+E2E-sealed to the member household and origin-signed, so the relays in
+between (never members) see only ciphertext. A household that is not a
+member never gets group content, and a removed one stops getting it with
+the roster that removed it. A member household we are unpairing from, or
+share only a space with (an invite-link row), is not reached at all.
+Typing indicators and calls go direct only (ephemeral), and media stays
+on the direct-pairing rule: a group with a member household the sender
+isn't paired with refuses attachments (`MEDIA_REQUIRES_DIRECT_PAIRING`).
 
 **History.** A household newly seated by a roster pulls the backlog from
 the authority (`DM_HISTORY_REQUEST`, below) — the same full history a
@@ -184,7 +199,18 @@ never a row claimed for one of its own users.
 catch-up copy of other members' messages, the way a space host is for its
 roster; it can't speak live for a member on another household (their live
 messages must be signed by their own household) or for a receiver's own
-users.
+users, and its catch-up rows never overwrite what a member's own household
+delivered.
+
+**Known limits.** Only people on the authority household change the
+member list; if they all leave, the list is frozen (the others keep
+chatting). A leave is sent through the outbox like any event; a roster
+the authority built before it saw the leave can seat the leaver again
+until the next roster. Mesh-routed deliveries have no outbox — a message to a
+member household reached only over the mesh that finds no route is not
+retried (logged at WARNING).
+The per-pair hide list filters what a household sends to a peer, not who
+the authority lists in a roster.
 
 ```mermaid
 sequenceDiagram

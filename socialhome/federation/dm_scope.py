@@ -44,6 +44,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Hold-buffer scope (``PendingSeatBuffer``) for DM events waiting on a
+#: user's sync — a message from a sender not synced yet, or a group roster
+#: naming an authority user not synced yet. Not a space id (those are
+#: 32-char key fingerprints), so the keys never mix.
+DM_HOLD_SCOPE = "dm"
+
 
 class DmScope:
     """Bind the conversation and the people a DM payload names to its sender."""
@@ -107,7 +113,7 @@ class DmScope:
             return None
         members = await self._conversations.list_remote_members(conversation_id)
         for m in members:
-            if m.instance_id == sender and getattr(m, "user_id", None) == user_id:
+            if m.instance_id == sender and m.user_id == user_id:
                 return m
         if home is None:
             return None
@@ -118,7 +124,7 @@ class DmScope:
             if (
                 m.instance_id == sender
                 and m.remote_username == remote.remote_username
-                and getattr(m, "user_id", None) in (None, user_id)
+                and m.user_id in (None, user_id)
             ):
                 return m
         return None
@@ -180,8 +186,7 @@ class DmScope:
         home = await self._users.get_instance_for_user(user_id)
         remote = await self._users.get_remote(user_id) if home is not None else None
         for m in await self._conversations.list_remote_members(conversation_id):
-            seat_uid = getattr(m, "user_id", None)
-            if seat_uid == user_id and (home is None or home == m.instance_id):
+            if m.user_id == user_id and (home is None or home == m.instance_id):
                 return True
             if (
                 remote is not None

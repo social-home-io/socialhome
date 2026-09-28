@@ -1208,7 +1208,7 @@ class CallSignalingService:
             if u is not None:
                 ids.add(u.user_id)
         for r in await self._conv_repo.list_remote_members(conversation_id):
-            seat_uid = getattr(r, "user_id", None)
+            seat_uid = r.user_id
             if seat_uid:
                 ids.add(seat_uid)
                 continue
@@ -1448,7 +1448,7 @@ class CallSignalingService:
         if not any(
             r.instance_id == from_instance
             and r.remote_username == caller.remote_username
-            and getattr(r, "user_id", None) in (None, caller_user_id)
+            and r.user_id in (None, caller_user_id)
             for r in remotes
         ):
             return "caller is not in the conversation"

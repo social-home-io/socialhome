@@ -50,7 +50,7 @@ from ..domain.conversation import (
 from ..domain.events import DmConversationCreated, DmGroupRosterChanged
 from ..domain.federation import FederationEventType, InstanceSource, PairingStatus
 from ..domain.federation_capabilities import FederationCapability
-from ..federation.dm_scope import DmScope, refuse
+from ..federation.dm_scope import DM_HOLD_SCOPE, DmScope, refuse
 from ..federation.owner_bound_id import (
     GROUP_CONVERSATION_KIND,
     OwnerBinding,
@@ -65,6 +65,7 @@ from ..repositories.user_repo import AbstractUserRepo
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
     from ..federation.federation_service import FederationService
+    from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..federation.sync.dm_history import DmHistoryScheduler
     from ..repositories.federation_repo import AbstractFederationRepo
 
@@ -76,6 +77,14 @@ MAX_GROUP_MEMBERS: int = 32
 
 #: Longest group name kept (the SPA caps its input at 80 too).
 MAX_GROUP_NAME: int = 80
+
+#: A roster version above this is refused — far beyond any real history,
+#: and inside SQLite's signed 64-bit INTEGER.
+MAX_MEMBERSHIP_VERSION: int = 2**53
+
+#: How often the authority retries a member's leave that raced another
+#: membership change (each retry re-reads the new version).
+_LEAVE_RETRIES: int = 3
 
 
 class GroupMemberUnsupportedError(ValueError):
@@ -107,6 +116,7 @@ class DmGroupService:
         "_own_instance_id",
         "_history",
         "_scope",
+        "_pending",
     )
 
     def __init__(
@@ -125,6 +135,7 @@ class DmGroupService:
         self._own_instance_id = own_instance_id
         self._history: "DmHistoryScheduler | None" = None
         self._scope = DmScope(conversation_repo=conversation_repo, user_repo=user_repo)
+        self._pending: "PendingSeatBuffer | None" = None
 
     def attach_federation(
         self,
@@ -140,6 +151,15 @@ class DmGroupService:
     def attach_history(self, scheduler: "DmHistoryScheduler") -> None:
         """Wire the DM history scheduler so a newly seated household catches up."""
         self._history = scheduler
+
+    def attach_pending(self, buffer: "PendingSeatBuffer") -> None:
+        """Hold a roster naming an authority user this household hasn't synced.
+
+        Released (and re-applied through the same rules) when that user's
+        profile lands — the same buffer a DM from a not-yet-synced sender
+        waits in.
+        """
+        self._pending = buffer
 
     def attach_to(self, federation_service: "FederationService") -> None:
         """Register the inbound roster / leave handlers."""
@@ -331,7 +351,12 @@ class DmGroupService:
             "name": conv.name,
             "members": [m.to_wire() for m in members],
         }
-        targets = {m.instance_id for m in members} | set(also_to)
+        # A household the change took out learns only that: an empty list at
+        # the new version — it drops every seat, and learns nothing about who
+        # stays.
+        member_households = {m.instance_id for m in members}
+        removed_payload = {**payload, "members": []}
+        targets = member_households | set(also_to)
         targets.discard(self._own_instance_id)
         for instance_id in sorted(targets):
             if not await self._federation.peer_supports(
@@ -350,7 +375,9 @@ class DmGroupService:
             result = await self._federation.send_event(
                 to_instance_id=instance_id,
                 event_type=FederationEventType.DM_GROUP_ROSTER,
-                payload=payload,
+                payload=payload
+                if instance_id in member_households
+                else removed_payload,
             )
             if not getattr(result, "ok", True):
                 log.warning(
@@ -402,12 +429,21 @@ class DmGroupService:
         version = p.get("version")
         raw_members = p.get("members")
         reason: str | None = None
-        if not conv_id or not isinstance(version, int) or version < 1:
+        if (
+            not conv_id
+            or type(version) is not int
+            or not 1 <= version < MAX_MEMBERSHIP_VERSION
+        ):
             reason = "malformed roster"
         elif not isinstance(raw_members, list) or len(raw_members) > MAX_GROUP_MEMBERS:
             reason = "malformed member list"
         elif sender == self._own_instance_id or not _bound_to(conv_id, sender):
             reason = "sender is not the group's authority household"
+        elif not await self._is_social_peer(sender):
+            # A group seats our people only on the word of a household we
+            # chose to pair with — never a mesh stranger that minted an id
+            # bound to itself.
+            reason = "the group's authority is not a paired household"
         if reason is not None:
             refuse(event, reason, conversation=conv_id)
             return
@@ -416,9 +452,10 @@ class DmGroupService:
         if existing is not None and existing.type is not ConversationType.GROUP_DM:
             refuse(event, "conversation is not a group", conversation=conv_id)
             return
-        local_usernames, remote_members = await self._seats_from(
-            event, conv_id, raw_members
-        )
+        seats = await self._seats_from(event, conv_id, raw_members)
+        if seats is None:
+            return
+        local_usernames, remote_members = seats
         if existing is None and not local_usernames:
             refuse(event, "no local member in a new group", conversation=conv_id)
             return
@@ -464,12 +501,16 @@ class DmGroupService:
         event: "FederationEvent",
         conv_id: str,
         raw_members: list,
-    ) -> tuple[list[str], list[RemoteConversationMember]]:
+    ) -> tuple[list[str], list[RemoteConversationMember]] | None:
         """Local usernames + remote seats a roster names, bound per entry.
 
         An entry on this household must name one of our users by
         ``user_id``. An entry elsewhere must not name a person this
-        household knows as homed on another household (or here). Bad
+        household knows as homed on another household (or here). An entry
+        on the authority itself must name a user it has synced to us — the
+        authority's own seats are the ones it could speak for live, so a
+        ``user_id`` it merely claims is not enough; while one is missing
+        the whole roster is held for that user's sync (``None``). Other bad
         entries are dropped with a WARNING; the rest of the roster stands.
         """
         local_usernames: list[str] = []
@@ -497,6 +538,24 @@ class DmGroupService:
                 refuse(
                     event,
                     "roster seats a user on a household they are not homed on",
+                    conversation=conv_id,
+                    user=entry.user_id,
+                )
+                continue
+            if home is None and entry.instance_id == event.from_instance:
+                if self._pending is not None and self._pending.hold(
+                    event, space_id=DM_HOLD_SCOPE, user_id=entry.user_id
+                ):
+                    log.info(
+                        "DM_GROUP_ROSTER from %s: authority user %s not synced "
+                        "yet — holding",
+                        event.from_instance,
+                        entry.user_id,
+                    )
+                    return None
+                refuse(
+                    event,
+                    "roster names an authority user not synced here",
                     conversation=conv_id,
                     user=entry.user_id,
                 )
@@ -530,27 +589,90 @@ class DmGroupService:
         if reason is not None or conv is None or seat is None:
             refuse(event, reason or "refused", conversation=conv_id, user=user_id)
             return
-        remaining = [
-            m
-            for m in await self._convos.list_remote_members(conv_id)
-            if (m.instance_id, m.remote_username)
-            != (seat.instance_id, seat.remote_username)
-        ]
-        local = [
-            m.username
-            for m in await self._convos.list_members(conv_id)
-            if m.deleted_at is None
-        ]
-        await self.commit(
-            Conversation(
-                id=conv.id,
-                type=conv.type,
-                name=conv.name,
-                created_at=conv.created_at,
-                membership_version=conv.membership_version + 1,
-            ),
-            local_usernames=local,
-            remote_members=remaining,
+        await self.remove_remote_seat(conv_id, seat.instance_id, seat.remote_username)
+
+    async def remove_remote_seat(
+        self,
+        conversation_id: str,
+        instance_id: str,
+        remote_username: str,
+    ) -> None:
+        """Authority side: take one remote seat out, as the next snapshot.
+
+        Retried when another membership change took the version first, so a
+        member's leave (or a departed user) is never lost to a race.
+        """
+        for attempt in range(_LEAVE_RETRIES):
+            conv = await self._convos.get(conversation_id)
+            if conv is None:
+                return
+            seats = await self._convos.list_remote_members(conversation_id)
+            remaining = [
+                m
+                for m in seats
+                if (m.instance_id, m.remote_username) != (instance_id, remote_username)
+            ]
+            if len(remaining) == len(seats):
+                return
+            local = [
+                m.username
+                for m in await self._convos.list_members(conversation_id)
+                if m.deleted_at is None
+            ]
+            try:
+                await self.commit(
+                    Conversation(
+                        id=conv.id,
+                        type=conv.type,
+                        name=conv.name,
+                        created_at=conv.created_at,
+                        membership_version=conv.membership_version + 1,
+                    ),
+                    local_usernames=local,
+                    remote_members=remaining,
+                )
+                return
+            except ValueError:
+                if attempt == _LEAVE_RETRIES - 1:
+                    raise
+
+    async def remove_departed_user(self, conversation_id: str, user_id: str) -> None:
+        """A remote member's household deprovisioned them (``USER_REMOVED``).
+
+        Their messages in the group are cleared here. On the authority their
+        seat is also taken out, as the next roster; a member household keeps
+        the seat until that roster arrives (seats are the authority's).
+        """
+        await self._convos.soft_delete_messages_by_sender(conversation_id, user_id)
+        if not is_owner_bound(conversation_id) or not self.is_authority_here(
+            conversation_id
+        ):
+            return
+        for seat in await self._convos.list_remote_members(conversation_id):
+            if seat.user_id == user_id or (
+                seat.user_id is None
+                and (
+                    ru := await self._users.get_remote_by_member(
+                        seat.instance_id, seat.remote_username
+                    )
+                )
+                is not None
+                and ru.user_id == user_id
+            ):
+                await self.remove_remote_seat(
+                    conversation_id, seat.instance_id, seat.remote_username
+                )
+                return
+
+    async def _is_social_peer(self, instance_id: str) -> bool:
+        """A directly paired (CONFIRMED), social — not invite-link — household."""
+        if self._federation_repo is None:
+            return False
+        instance = await self._federation_repo.get_instance(instance_id)
+        return (
+            instance is not None
+            and instance.status is PairingStatus.CONFIRMED
+            and instance.source is not InstanceSource.SPACE_SESSION
         )
 
     # ── Helpers ─────────────────────────────────────────────────────────

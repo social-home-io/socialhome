@@ -337,6 +337,35 @@ def test_clean_group_name():
     assert len(clean_group_name("x" * 200)) == 80
 
 
+async def test_a_leave_that_races_another_change_is_retried(stack, monkeypatch):
+    conv = await stack.dm.create_group_dm(
+        creator_username="ann", member_usernames=["ben"], member_user_ids=["u-pat"]
+    )
+    real = stack.convos.apply_group_roster
+    calls = {"n": 0}
+
+    async def _racy(conversation, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # another change took this version first
+        return await real(conversation, **kw)
+
+    monkeypatch.setattr(stack.convos, "apply_group_roster", _racy)
+    await stack.groups.remove_remote_seat(conv.id, PEER, "pat")
+    assert calls["n"] == 2
+    assert await stack.convos.list_remote_members(conv.id) == []
+
+
+async def test_removing_a_seat_that_is_gone_is_a_no_op(stack):
+    conv = await stack.dm.create_group_dm(
+        creator_username="ann", member_usernames=["ben", "cid"]
+    )
+    stack.fed.sent.clear()
+    await stack.groups.remove_remote_seat(conv.id, PEER, "pat")
+    await stack.groups.remove_remote_seat("no-such-group", PEER, "pat")
+    assert stack.fed.sent == []
+
+
 def test_a_household_without_an_identity_cannot_mint_group_ids():
     svc = DmGroupService(conversation_repo=None, user_repo=None, bus=EventBus())
     with pytest.raises(RuntimeError):

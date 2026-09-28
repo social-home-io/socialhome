@@ -87,9 +87,10 @@ class DmHistoryReceiver:
             msg = _dict_to_message(raw, conversation_id)
             if msg is None:
                 continue
-            if not await self._dm_scope.speaks_for(
+            own = await self._dm_scope.speaks_for(
                 event, conversation_id, msg.sender_user_id
-            ) and not await self._dm_scope.relayed_by_authority(
+            )
+            if not own and not await self._dm_scope.relayed_by_authority(
                 event, conversation_id, msg.sender_user_id
             ):
                 refuse(
@@ -101,6 +102,11 @@ class DmHistoryReceiver:
                 continue
             if await self._conversation_repo.insert_message_if_absent(msg):
                 saved += 1
+                continue
+            if not own:
+                # A row the authority relays for another household's member
+                # only fills a gap: it never overwrites, un-deletes or rolls
+                # back what that member's own household delivered.
                 continue
             # Already here: the catch-up copy may carry the sender's own later
             # edit or delete — applied only onto that same sender's row in

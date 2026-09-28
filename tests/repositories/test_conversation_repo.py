@@ -672,3 +672,21 @@ async def test_add_remote_member_keeps_roster_identity_on_a_plain_upsert(env):
     )
     (seat,) = await env.repo.list_remote_members("c9")
     assert (seat.user_id, seat.display_name) == ("u-carol", "Carol")
+
+
+async def test_soft_delete_messages_by_sender_clears_only_theirs(env):
+    await env.repo.create(_conv("c5", ConversationType.GROUP_DM))
+    await env.repo.create(_conv("c6"))
+    for msg in (
+        _message("m1", "c5", sender="u-gone"),
+        _message("m2", "c5", sender="u-gone"),
+        _message("m3", "c5", sender="uid-alice"),
+        _message("m4", "c6", sender="u-gone"),
+    ):
+        await env.repo.save_message(msg)
+    assert await env.repo.soft_delete_messages_by_sender("c5", "u-gone") == 2
+    assert await env.repo.soft_delete_messages_by_sender("c5", "u-gone") == 0
+    by_id = {m.id: m for m in await env.repo.list_messages("c5")}
+    assert by_id["m1"].deleted and by_id["m1"].content == ""
+    assert not by_id["m3"].deleted
+    assert not (await env.repo.get_message("m4")).deleted

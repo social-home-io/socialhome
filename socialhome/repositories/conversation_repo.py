@@ -15,8 +15,8 @@ names, and driving delivery. This module is thin data access.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -110,6 +110,11 @@ class AbstractConversationRepo(Protocol):
         sender_user_id: str,
     ) -> list[str]: ...
     async def soft_delete_message(self, message_id: str) -> None: ...
+    async def soft_delete_messages_by_sender(
+        self,
+        conversation_id: str,
+        sender_user_id: str,
+    ) -> int: ...
     async def edit_message(self, message_id: str, new_content: str) -> None: ...
     async def find_pending_audio_transcripts(
         self,
@@ -838,6 +843,26 @@ class SqliteConversationRepo:
             "    media_blob_id=NULL, media_sync_status=NULL "
             "WHERE id=?",
             (message_id,),
+        )
+
+    async def soft_delete_messages_by_sender(
+        self,
+        conversation_id: str,
+        sender_user_id: str,
+    ) -> int:
+        """Clear every message ``sender_user_id`` wrote in ``conversation_id``.
+
+        Same shape as :meth:`soft_delete_message`; returns how many rows it
+        cleared. Used when a group member is deprovisioned by their home
+        household — the group itself stays for everyone else.
+        """
+        return await self._db.enqueue_rowcount(
+            "UPDATE conversation_messages "
+            "SET deleted=1, content='', media_url=NULL, "
+            "    file_name=NULL, mime_type=NULL, file_size_bytes=NULL, "
+            "    media_blob_id=NULL, media_sync_status=NULL "
+            "WHERE conversation_id=? AND sender_user_id=? AND deleted=0",
+            (conversation_id, sender_user_id),
         )
 
     async def edit_message(
