@@ -931,7 +931,11 @@ async def test_inbound_routes_to_resolved_user_when_to_user_present():
     """A non-empty to_user resolves to a local user → single broadcast_to_user."""
     app = _make_installed_app("chess")
     users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
-    svc, _, ws = _make_svc(apps={"chess": app}, users=users)
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=users,
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
 
     event = _make_event(
         FederationEventType.APP_SESSION,
@@ -1898,3 +1902,50 @@ async def test_list_peers_excludes_space_session_households():
     svc, _fed, _ws = _make_svc(instances=[paired, space_only])
     peers = await svc.list_peers()
     assert [p["instance_id"] for p in peers] == ["peer-social"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_user", [None, "stranger"], ids=["unnamed", "unknown"])
+async def test_per_user_open_needs_an_initiator_of_the_sending_household(from_user):
+    """A per-user open always names a user of the sending household, so the
+    recipient's block list can be applied; otherwise nothing is delivered."""
+    app = _make_installed_app("chess")
+    svc, _, ws = _make_svc(apps={"chess": app}, users=[_make_user("u2", "bob")])
+    payload = {"app_id": "chess", "session_id": "s", "verb": "open", "to_user": "bob"}
+    if from_user is not None:
+        payload["from_user"] = from_user
+    await svc.on_inbound_event(_make_event(FederationEventType.APP_SESSION, payload))
+    assert ws.user_calls == []
+    assert svc._app_repo.pending == []
+
+
+@pytest.mark.asyncio
+async def test_open_dedup_is_per_sending_household():
+    """Another household reusing a session id never suppresses the real open."""
+    app = _make_installed_app("chess")
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=[_make_user("u2", "bob")],
+        remote_users=[
+            _make_remote_user(remote_username="eve", instance_id="other-inst"),
+            _make_remote_user(user_id="r2", remote_username="alice"),
+        ],
+    )
+    for sender, who in (("other-inst", "eve"), ("peer-inst-id", "alice")):
+        await svc.on_inbound_event(
+            _make_event(
+                FederationEventType.APP_SESSION,
+                {
+                    "app_id": "chess",
+                    "session_id": "s",
+                    "verb": "open",
+                    "to_user": "bob",
+                    "from_user": who,
+                },
+                from_instance=sender,
+            )
+        )
+    assert [p.from_instance for p in svc._app_repo.pending] == [
+        "other-inst",
+        "peer-inst-id",
+    ]

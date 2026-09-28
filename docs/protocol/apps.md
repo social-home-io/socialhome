@@ -213,6 +213,21 @@ If the app is not installed or not enabled on the receiving household, the
 event is silently dropped with a debug log — the peer does not receive an
 error.
 
+## Receiver rules
+
+- A per-user delivery (`to_user` resolves to a local user) must name its
+  initiator: `from_user` has to be a user of the sending household
+  (v_18+ senders always ship both fields), so the recipient's block list
+  always applies. Otherwise nothing is delivered, stored or notified
+  (WARNING).
+- A pending invite (`app_pending_sessions`) is only refreshed by the
+  household that opened it; another household reusing the session id
+  changes nothing.
+- Re-delivered opens are de-duplicated per `(from_instance, session_id)`,
+  so one household can never suppress another's invite.
+
+`tests/protocol/test_app_session_scope.py`.
+
 ## Implementation
 
 - `socialhome/services/app_federation_service.py` — `AppFederationService`:
