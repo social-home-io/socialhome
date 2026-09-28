@@ -677,6 +677,10 @@ class GalleryAlbumCreated(DomainEvent):
     space_id: str | None
     owner_id: str
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` on local origination; the sending household's instance
+    #: id when a federation inbound handler re-publishes a change it
+    #: applied — the outbound bridge never federates those back.
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -686,6 +690,10 @@ class GalleryAlbumUpdated(DomainEvent):
     album_id: str
     space_id: str | None
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` on local origination; the sending household's instance
+    #: id when a federation inbound handler re-publishes a change it
+    #: applied — the outbound bridge never federates those back.
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -693,6 +701,10 @@ class GalleryAlbumDeleted(DomainEvent):
     album_id: str
     space_id: str | None
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` on local origination; the sending household's instance
+    #: id when a federation inbound handler re-publishes a change it
+    #: applied — the outbound bridge never federates those back.
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -706,6 +718,10 @@ class GalleryItemUploaded(DomainEvent):
     #: only, never the whole household.
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` on local origination; the sending household's instance
+    #: id when a federation inbound handler re-publishes a change it
+    #: applied — the outbound bridge never federates those back.
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -714,6 +730,10 @@ class GalleryItemDeleted(DomainEvent):
     album_id: str
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` on local origination; the sending household's instance
+    #: id when a federation inbound handler re-publishes a change it
+    #: applied — the outbound bridge never federates those back.
+    origin_instance_id: str | None = None
 
 
 # ─── Bazaar events (§9, §23.15) ──────────────────────────────────────────

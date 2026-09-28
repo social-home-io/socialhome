@@ -917,6 +917,108 @@ async def test_a_remote_members_new_album_and_its_upload_both_land(env):
     assert (row["album_id"], row["uploaded_by"]) == ("album-late", "u-g")
 
 
+async def test_an_album_id_held_for_one_owner_is_never_claimed_for_another(env, caplog):
+    """An album create naming an id this household already holds is only
+    ever a redelivery of that album. Claimed for a different owner it is
+    refused — loudly — and the stored owner stands, so the claimant gains
+    no owner rights (rename, cover, delete-with-items) over it."""
+    app, db = env
+    with caplog.at_level("WARNING"):
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ALBUM_CREATED,
+            {"id": "album-g", "owner_user_id": "u-o", "name": "Mine now"},
+            sender=OTHER,
+        )
+    row = await db.fetchone(
+        "SELECT owner_user_id, name FROM gallery_albums WHERE id='album-g'", ()
+    )
+    assert (row["owner_user_id"], row["name"]) == ("u-g", "Theirs")
+    assert "already held for another owner" in caplog.text
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_UPDATED,
+        {"id": "album-g", "name": "Renamed by the claimant"},
+        sender=OTHER,
+    )
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-g"}, sender=OTHER
+    )
+    row = await db.fetchone("SELECT name FROM gallery_albums WHERE id='album-g'", ())
+    assert row is not None and row["name"] == "Theirs"
+
+
+async def test_a_redelivered_album_from_its_owners_household_is_quiet(env, caplog):
+    app, db = env
+    with caplog.at_level("WARNING"):
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ALBUM_CREATED,
+            {"id": "album-g", "owner_user_id": "u-g", "name": "Theirs"},
+            sender=AUTHOR,
+        )
+    assert "album-g" not in caplog.text
+
+
+async def test_an_album_delete_that_overtakes_its_create_keeps_it_deleted(env):
+    app, db = env
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-racy"}, sender=AUTHOR
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": "album-racy", "owner_user_id": "u-g", "name": "Late"},
+        sender=AUTHOR,
+    )
+    assert (
+        await db.fetchone("SELECT 1 FROM gallery_albums WHERE id='album-racy'", ())
+        is None
+    )
+
+
+async def test_federated_gallery_deletes_remove_the_files(env, tmp_dir):
+    """An item delete takes its files; an album delete takes every item's
+    files — each unless another row still names it."""
+    app, db = env
+    media = tmp_dir / "media"
+    media.mkdir(exist_ok=True)
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": "album-files", "owner_user_id": "u-g", "name": "Files"},
+        sender=AUTHOR,
+    )
+    for n in (1, 2):
+        for kind in ("full", "thumb"):
+            (media / f"{kind}{n}.webp").write_bytes(b"x")
+        await _deliver(
+            app,
+            FET.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": f"gi-files-{n}",
+                "album_id": "album-files",
+                "uploaded_by": "u-g",
+                "url": f"api/media/full{n}.webp",
+                "thumbnail_url": f"api/media/thumb{n}.webp",
+            },
+            sender=AUTHOR,
+        )
+    (media / "f.webp").write_bytes(b"x")  # gi-a's file, still referenced
+    await _deliver(
+        app, FET.SPACE_GALLERY_ITEM_DELETED, {"id": "gi-files-1"}, sender=AUTHOR
+    )
+    assert not (media / "full1.webp").exists()
+    assert not (media / "thumb1.webp").exists()
+    assert (media / "full2.webp").exists()
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-files"}, sender=AUTHOR
+    )
+    assert not (media / "full2.webp").exists()
+    assert not (media / "thumb2.webp").exists()
+    assert (media / "f.webp").exists()
+
+
 async def test_a_synced_album_and_upload_of_a_remote_member_both_land(env):
     """§25.6 sync receiver, real SQLite: the host streams an album owned by
     a member of another household and that member's upload into it. Neither

@@ -91,11 +91,15 @@ class GalleryFederationOutbound:
         self._bus.subscribe(GalleryItemDeleted, self._on_deleted)
 
     async def _on_album_created(self, event: GalleryAlbumCreated) -> None:
+        if event.origin_instance_id is not None:
+            return  # applied from another household — never echo it back
         await self._fan_out_album(
             event.album_id, FederationEventType.SPACE_GALLERY_ALBUM_CREATED
         )
 
     async def _on_album_updated(self, event: GalleryAlbumUpdated) -> None:
+        if event.origin_instance_id is not None:
+            return
         await self._fan_out_album(
             event.album_id, FederationEventType.SPACE_GALLERY_ALBUM_UPDATED
         )
@@ -104,7 +108,7 @@ class GalleryFederationOutbound:
         # The row is gone by now — the space rides the domain event. The
         # service refuses to delete the system album, so any space album
         # deleted here is a user album.
-        if event.space_id is None:
+        if event.space_id is None or event.origin_instance_id is not None:
             return
         await self._fan_out(
             event.space_id,
@@ -121,6 +125,8 @@ class GalleryFederationOutbound:
         await self._fan_out(album.space_id, event_type, album.to_federation_dict())
 
     async def _on_uploaded(self, event: GalleryItemUploaded) -> None:
+        if event.origin_instance_id is not None:
+            return
         space_id = await self._space_id_for_album(event.album_id)
         if space_id is None:
             return  # household-level — no federation
@@ -184,6 +190,8 @@ class GalleryFederationOutbound:
                         )
 
     async def _on_deleted(self, event: GalleryItemDeleted) -> None:
+        if event.origin_instance_id is not None:
+            return
         space_id = await self._space_id_for_album(event.album_id)
         if space_id is None:
             return
@@ -216,30 +224,16 @@ class GalleryFederationOutbound:
         # receiver's §24.11 space-writer gate can read there. Additive;
         # older peers ignore it.
         payload = {**payload, "space_id": space_id}
+        # Member households only, each via ``send_with_mesh_fallback`` so a
+        # mesh-only member gets the event over ``SPACE_ROUTED``.
         try:
-            peers = await self._space_repo.list_member_instances(space_id)
+            await self._federation.broadcast_to_space_members(
+                space_id, event_type, payload
+            )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("gallery-outbound: list peers failed: %s", exc)
-            return
-        own = getattr(self._federation, "_own_instance_id", "")
-        for instance_id in peers:
-            if instance_id == own or not instance_id:
-                continue
-            # ``send_with_mesh_fallback`` lets mesh-only members
-            # (joined via §D1b through a relay) receive the event
-            # over ``SPACE_ROUTED`` instead of failing
-            # ``not_confirmed``. Matches the post-content fanout
-            # behaviour.
-            try:
-                await self._federation.send_with_mesh_fallback(
-                    to_instance_id=instance_id,
-                    event_type=event_type,
-                    payload=payload,
-                    space_id=space_id,
-                )
-            except Exception as exc:  # pragma: no cover — defensive
-                log.debug(
-                    "gallery-outbound: send to %s failed: %s",
-                    instance_id,
-                    exc,
-                )
+            log.debug(
+                "gallery-outbound: broadcast %s for %s failed: %s",
+                event_type,
+                space_id,
+                exc,
+            )

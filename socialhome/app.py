@@ -280,6 +280,7 @@ from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
+from .services.gallery_tombstones import GalleryAlbumTombstones
 from .services.media_transcode_service import MediaTranscodeService
 from .media.video_processor import VideoProcessor
 from .services.system_album_bridge import SystemAlbumBridge
@@ -777,6 +778,7 @@ def _wire_federation_stack(
     presence_repo,
     ws_manager,
     peer_user_visibility_repo,
+    media_reference_repo,
 ):
     """Build :class:`FederationService` + attach the whole federation stack.
 
@@ -1027,6 +1029,10 @@ def _wire_federation_stack(
     )
     private_invite_handler.attach_to(federation_service)
     app[K.private_invite_handler_key] = private_invite_handler
+    # Space albums deleted during this process's life — an overtaken or
+    # replayed create must not bring one back (see gallery_tombstones).
+    gallery_tombstones = GalleryAlbumTombstones()
+    gallery_tombstones.wire(bus)
     SpaceContentInboundHandlers(
         bus=bus,
         # §24.11 authorship — the users a content payload names must be
@@ -1041,6 +1047,10 @@ def _wire_federation_stack(
         gallery_repo=gallery_repo,
         zone_repo=space_zone_repo,
         bazaar_repo=bazaar_repo,
+        # A federated gallery delete removes the files it leaves unused.
+        media_dir=pathlib.Path(config.media_path),
+        media_refs=media_reference_repo,
+        gallery_tombstones=gallery_tombstones,
     ).attach_to(federation_service)
     PersonalCalendarInboundHandlers(
         bus=bus,
@@ -1104,6 +1114,7 @@ def _wire_federation_stack(
         poll_repo=space_poll_repo,
         pending_decrypts=app[K.pending_decrypts_cache_key],
         authorship=space_authorship,
+        gallery_tombstones=gallery_tombstones,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,
@@ -1260,10 +1271,9 @@ def _wire_federation_stack(
     )
     space_member_profile_federation_outbound.wire()
 
-    # §23.119 — gallery items federate per-event so SPACE_SYNC_RESUME
-    # has something to replay after long offlines, and so peers see
-    # uploads in near real-time between chunked sync ticks. Albums
-    # still ride the chunked sync only.
+    # §23.119 — gallery albums and items federate per-event (v_33) so
+    # peers see them in near real-time between chunked sync ticks, and
+    # SPACE_SYNC_RESUME has something to replay after long offlines.
     gallery_federation_outbound = GalleryFederationOutbound(
         bus=bus,
         federation_service=federation_service,
@@ -1328,8 +1338,8 @@ def _wire_federation_stack(
 
     # Spec §4.4 / §11452 — long-offline catch-up. Reconnecting peer asks
     # for events newer than ``since``; we replay individual ``SPACE_*_CREATED``
-    # events for posts, comments, tasks, pages, stickies, and calendar
-    # events. Gallery items will join when ``SPACE_GALLERY_*`` lands.
+    # events for posts, comments, tasks, pages, stickies, calendar events
+    # and the gallery (albums, album deletes, items).
     space_sync_resume_provider = SpaceSyncResumeProvider(
         federation_service=federation_service,
         space_repo=space_repo,
@@ -1339,6 +1349,7 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
+        gallery_tombstones=gallery_tombstones,
     )
 
     async def _space_sync_resume(event) -> None:
@@ -2555,6 +2566,7 @@ def create_app(config: Config | None = None) -> web.Application:
             presence_repo=repos.presence,
             ws_manager=ws_manager,
             peer_user_visibility_repo=repos.peer_user_visibility,
+            media_reference_repo=repos.media_reference,
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager

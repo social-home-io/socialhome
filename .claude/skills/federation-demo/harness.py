@@ -7111,6 +7111,7 @@ def cmd_space_gallery_media_blob() -> None:
             "space-gallery-media-blob: run 'remote-invite-routed' first",
         )
     c = state["instances"]["c"]
+    d = state["instances"]["d"]
 
     b_log_path = _instance_dir("b") / "log.txt"
     b_log_before_size = b_log_path.stat().st_size if b_log_path.exists() else 0

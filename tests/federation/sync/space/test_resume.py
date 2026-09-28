@@ -14,6 +14,7 @@ from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import Task, TaskStatus
+from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
@@ -108,6 +109,9 @@ class _FakeGalleryRepo(_FakeListSinceRepo):
 
     async def get_album(self, album_id: str) -> GalleryAlbum | None:
         return self._albums.get(album_id)
+
+    async def list_albums(self, space_id, *, limit=30, before=None):
+        return [a for a in self._albums.values() if a.space_id == space_id][:limit]
 
 
 def _ts_attr(row) -> str:
@@ -228,6 +232,7 @@ def provider_factory():
         cal_events=None,
         gallery_items=None,
         gallery_albums=None,
+        gallery_tombstones=None,
         members,
     ):
         fed = _FakeFederation()
@@ -249,6 +254,7 @@ def provider_factory():
                 if gallery_items is not None
                 else None
             ),
+            gallery_tombstones=gallery_tombstones,
         )
         return provider, fed, post_repo
 
@@ -721,3 +727,68 @@ def test_post_to_payload_omits_label_when_none():
     )
     payload = _post_to_payload(post)
     assert payload["location"] == {"lat": 10.0, "lon": 20.0}
+
+
+async def test_resume_replays_every_album_state_the_peer_may_have_missed(
+    provider_factory,
+):
+    """Albums are replayed whether or not anything was uploaded to them since
+    — an empty album made while the peer was away is just as missing. One
+    edited since ``since`` also goes out as an update (a create for an
+    album the peer holds is a no-op), and a delete recorded since then is
+    replayed first."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    since = base.isoformat()
+    later = (base + timedelta(minutes=5)).isoformat()
+    earlier = (base - timedelta(days=1)).isoformat()
+    albums = {
+        "alb-empty": GalleryAlbum(
+            id="alb-empty",
+            space_id="sp-1",
+            owner_user_id="u-a",
+            name="Empty",
+            created_at=later,
+            updated_at=later,
+        ),
+        "alb-old": GalleryAlbum(
+            id="alb-old",
+            space_id="sp-1",
+            owner_user_id="u-a",
+            name="Old",
+            created_at=earlier,
+            updated_at=earlier,
+        ),
+        "alb-renamed": GalleryAlbum(
+            id="alb-renamed",
+            space_id="sp-1",
+            owner_user_id="u-a",
+            name="Renamed",
+            created_at=earlier,
+            updated_at=later,
+        ),
+        "alb-elsewhere": GalleryAlbum(
+            id="alb-elsewhere", space_id="sp-2", owner_user_id="u-a", name="X"
+        ),
+    }
+    tombstones = GalleryAlbumTombstones()
+    tombstones.record("sp-1", "alb-gone", at=base + timedelta(minutes=1))
+    tombstones.record("sp-1", "alb-gone-long-ago", at=base - timedelta(days=2))
+    provider, fed, _ = provider_factory(
+        gallery_items=[],
+        gallery_albums=albums,
+        gallery_tombstones=tombstones,
+        members=["peer-a"],
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": since}),
+    )
+    got = [(s["type"], s["payload"]["id"]) for s in fed.sent]
+    assert got == [
+        (FederationEventType.SPACE_GALLERY_ALBUM_DELETED, "alb-gone"),
+        (FederationEventType.SPACE_GALLERY_ALBUM_CREATED, "alb-empty"),
+        (FederationEventType.SPACE_GALLERY_ALBUM_CREATED, "alb-old"),
+        (FederationEventType.SPACE_GALLERY_ALBUM_CREATED, "alb-renamed"),
+        (FederationEventType.SPACE_GALLERY_ALBUM_UPDATED, "alb-empty"),
+        (FederationEventType.SPACE_GALLERY_ALBUM_UPDATED, "alb-renamed"),
+    ]
+    assert sent == 6

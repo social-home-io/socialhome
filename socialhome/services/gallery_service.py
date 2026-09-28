@@ -295,7 +295,11 @@ class GalleryService:
                 "system album cannot be deleted",
             )
         await self._require_album_owner_or_admin(album, actor_user_id)
+        media = await self._repo.list_album_media(album_id)
         await self._repo.delete_album(album_id)
+        # The cascade took the item rows; drop their files unless another
+        # row still names them (same rule as ``delete_item``).
+        await unlink_unreferenced(self._media_dir, self._media_refs, media)
         await self._bus.publish(
             GalleryAlbumDeleted(
                 album_id=album_id,
@@ -585,7 +589,9 @@ class GalleryService:
     async def _resolve_cover(self, album: GalleryAlbum) -> str | None:
         if album.cover_item_id:
             item = await self._repo.get_item(album.cover_item_id)
-            if item is not None:
+            # Only an item of this album: a cover id can name one that has
+            # not arrived yet, or (from the wire) one filed elsewhere.
+            if item is not None and item.album_id == album.id:
                 return item.thumbnail_url
         return await self._repo.get_first_item_thumbnail(album.id)
 

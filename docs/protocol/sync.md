@@ -88,11 +88,14 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 - `SPACE_CALENDAR_EVENT_CREATED` — calendar events
   (`space_calendar_repo.list_events_since`, RRULEs included)
 - `SPACE_GALLERY_ITEM_CREATED` — gallery items, joined via
-  `gallery_items.album_id` → `gallery_albums.space_id`. Each replayed
-  item's album goes out first as `SPACE_GALLERY_ALBUM_CREATED` (v_33;
-  once per album, never the system "Posts" album) — the receiver files an
-  item only into an album it already holds, and an album created while it
-  was offline is exactly the one it lacks. Live, albums push their own
+  `gallery_items.album_id` → `gallery_albums.space_id`. The albums go
+  out first (v_33; never the system "Posts" album): the album deletes
+  recorded since `since` as `SPACE_GALLERY_ALBUM_DELETED`, every album of
+  the space as `SPACE_GALLERY_ALBUM_CREATED` (a no-op for one the receiver
+  holds) and those edited since `since` as `SPACE_GALLERY_ALBUM_UPDATED`
+  — the receiver files an item only into an album it already holds, and an
+  album made, edited or deleted while it was offline is state it lacks
+  whether or not anything was uploaded since. Live, albums push their own
   `SPACE_GALLERY_ALBUM_*` lifecycle events (see
   [`spaces.md`](./spaces.md)). Wire payload is the §S-9 thumbnail projection **plus
   the full `url`** (`GalleryItem.to_federation_dict`): the on-demand

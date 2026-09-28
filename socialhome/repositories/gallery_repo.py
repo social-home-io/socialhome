@@ -31,6 +31,7 @@ class AbstractGalleryRepo(Protocol):
         self, album_id: str, patch: dict, *, space_id: str
     ) -> bool: ...
     async def delete_album_in_space(self, album_id: str, *, space_id: str) -> bool: ...
+    async def list_album_media(self, album_id: str) -> list[str]: ...
     async def list_items(
         self,
         album_id: str,
@@ -209,18 +210,20 @@ class SqliteGalleryRepo:
         payload's own — as an empty, non-system album: its item count
         grows with the items that follow, and the system "Posts" album is
         rebuilt locally from posts, never taken off the wire. A redelivered
-        id in this space is an idempotent no-op (``True``, row untouched);
-        an id already used by an album of another space or the household
-        gallery is never taken over (``False``).
+        id in this space for the same owner is an idempotent no-op
+        (``True``, row untouched); an id already used by an album of another
+        space, of the household gallery, or of another owner is never taken
+        over (``False``).
         """
         now = album.created_at or datetime.now(timezone.utc).isoformat()
 
         def _run(conn) -> bool:
             row = conn.execute(
-                "SELECT space_id FROM gallery_albums WHERE id=?", (album.id,)
+                "SELECT space_id, owner_user_id FROM gallery_albums WHERE id=?",
+                (album.id,),
             ).fetchone()
             if row is not None:
-                return row[0] == space_id
+                return row[0] == space_id and row[1] == album.owner_user_id
             conn.execute(
                 """
                 INSERT INTO gallery_albums(
@@ -250,10 +253,12 @@ class SqliteGalleryRepo:
         """Apply a member's album edit — only to a user album of ``space_id``.
 
         ``False`` for an album of another space, the household gallery, or
-        the system album (which nobody renames). A ``cover_item_id`` is
-        applied only when it names an item of *this* album — otherwise the
-        cover would render some other album's picture — and is dropped
-        from the patch rather than failing the rest of the edit.
+        the system album (which nobody renames). A ``cover_item_id`` naming
+        an item of *another* album is dropped from the patch (the cover
+        would render some other album's picture) rather than failing the
+        rest of the edit; one naming an item not held here yet is kept —
+        the edit can overtake the upload, and the cover is rendered only
+        once that item is in this album. ``None`` clears the cover.
         """
         safe = {k: v for k, v in patch.items() if k in self._ALBUM_PATCH_ALLOWED}
 
@@ -268,14 +273,12 @@ class SqliteGalleryRepo:
             ):
                 return False
             cover = safe.get("cover_item_id")
-            if cover is not None and (
-                conn.execute(
-                    "SELECT 1 FROM gallery_items WHERE id=? AND album_id=?",
-                    (cover, album_id),
+            if cover is not None:
+                held = conn.execute(
+                    "SELECT album_id FROM gallery_items WHERE id=?", (cover,)
                 ).fetchone()
-                is None
-            ):
-                safe.pop("cover_item_id")
+                if held is not None and held[0] != album_id:
+                    safe.pop("cover_item_id")
             if safe:
                 set_clause = ", ".join(f"{k}=?" for k in safe)
                 conn.execute(
@@ -291,6 +294,20 @@ class SqliteGalleryRepo:
             return True
 
         return bool(await self._db.transact(_run))
+
+    async def list_album_media(self, album_id: str) -> list[str]:
+        """The ``api/media/`` references of every item file in the album —
+        what an album delete leaves behind for the media cleanup."""
+        rows = await self._db.fetchall(
+            "SELECT filename, thumbnail_filename FROM gallery_items WHERE album_id=?",
+            (album_id,),
+        )
+        out: list[str] = []
+        for r in rows:
+            for name in (r[0], r[1]):
+                if name:
+                    out.append(f"api/media/{name}")
+        return out
 
     async def delete_album_in_space(self, album_id: str, *, space_id: str) -> bool:
         """Delete a user album of ``space_id`` and (by cascade) its items.
@@ -444,8 +461,8 @@ class SqliteGalleryRepo:
             item.album_id,
             item.uploaded_by,
             item.item_type,
-            item.url.rsplit("/", 1)[-1],
-            item.thumbnail_url.rsplit("/", 1)[-1],
+            _basename(item.url),
+            _basename(item.thumbnail_url),
             item.width,
             item.height,
             item.duration_s,
@@ -623,3 +640,8 @@ class SqliteGalleryRepo:
             if r["thumbnail_filename"]:
                 out.append(r["thumbnail_filename"])
         return out
+
+
+def _basename(url: str) -> str:
+    """The stored file name of an ``api/media/<name>`` URL — no path, no query."""
+    return url.rsplit("/", 1)[-1].split("?", 1)[0]

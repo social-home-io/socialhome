@@ -352,6 +352,76 @@ async def test_delete_item_removes_files_from_disk(env):
     assert not thumb.exists()
 
 
+async def test_delete_album_removes_its_items_files_from_disk(env):
+    """The cascade takes the item rows; the files go with them unless
+    another row still names them."""
+    import dataclasses
+    import io
+
+    from PIL import Image
+
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="T")
+    other = await env.create_album(space_id=None, owner_user_id="a-id", name="O")
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
+    item = await env.upload_item(
+        album.id,
+        data=buf.getvalue(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    buf2 = io.BytesIO()
+    Image.new("RGB", (32, 32), (200, 20, 20)).save(buf2, format="JPEG")
+    kept = await env.upload_item(
+        album.id,
+        data=buf2.getvalue(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    await env._repo.create_item(  # type: ignore[attr-defined]
+        dataclasses.replace(kept, id="elsewhere", album_id=other.id)
+    )
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    gone = [media_dir / u.rsplit("/", 1)[-1] for u in (item.url, item.thumbnail_url)]
+    stay = [media_dir / u.rsplit("/", 1)[-1] for u in (kept.url, kept.thumbnail_url)]
+    assert all(p.exists() for p in gone + stay)
+
+    await env.delete_album(album.id, actor_user_id="a-id")
+    assert not any(p.exists() for p in gone)
+    assert all(p.exists() for p in stay)
+
+
+async def test_a_cover_renders_only_when_the_item_is_in_that_album(env):
+    """A cover id may name an item that has not arrived yet (a federated
+    edit can overtake the upload) — or, once it lands, one filed in some
+    other album. Only an item of this album is rendered as its cover."""
+    import dataclasses
+    import io
+
+    from PIL import Image
+
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="T")
+    other = await env.create_album(space_id=None, owner_user_id="a-id", name="O")
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
+    own = await env.upload_item(
+        album.id,
+        data=buf.getvalue(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    foreign = dataclasses.replace(
+        own, id="foreign", album_id=other.id, thumbnail_url="api/media/foreign.webp"
+    )
+    await env._repo.create_item(foreign)  # type: ignore[attr-defined]
+    await env._repo.update_album(album.id, {"cover_item_id": "foreign"})  # type: ignore[attr-defined]
+    got = await env.get_album(album.id, actor_user_id="a-id")
+    assert got.cover_url == own.thumbnail_url
+
+
 async def test_delete_item_keeps_files_another_item_uses(env):
     """An item naming another item's files (e.g. one synced from another
     household) is deleted without taking those files with it."""

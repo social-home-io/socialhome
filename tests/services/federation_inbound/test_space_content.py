@@ -7,12 +7,26 @@ from types import SimpleNamespace
 
 import pytest
 
-from socialhome.domain.events import CalendarEventCreated, CalendarEventDeleted
+from socialhome.domain.events import (
+    CalendarEventCreated,
+    CalendarEventDeleted,
+    GalleryAlbumCreated,
+    GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
+    GalleryItemDeleted,
+    GalleryItemUploaded,
+)
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
-from socialhome.services.gallery_service import DESCRIPTION_MAX, NAME_MAX
+from socialhome.domain.user import SYSTEM_AUTHOR
+from socialhome.services.gallery_service import (
+    ALBUMS_PER_SPACE,
+    DESCRIPTION_MAX,
+    NAME_MAX,
+)
+from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 
 
 class _FakeRegistry:
@@ -897,6 +911,10 @@ class _FakeGalleryRepo:
         self.albums: dict[str, SimpleNamespace] = {}
         self.albums_deleted: list[str] = []
         self.album_patches: list[tuple[str, dict]] = []
+        #: Ids no album is held for here (until created).
+        self.missing: set[str] = {"alb-new", "alb-late"}
+        self.space_album_count = 0
+        self.album_media: dict[str, list[str]] = {}
 
     def _album_in(self, album_id, space_id) -> bool:
         return self.album_space.get(album_id, "sp-1") == space_id
@@ -907,7 +925,7 @@ class _FakeGalleryRepo:
     async def get_album(self, album_id):
         if album_id in self.albums:
             return self.albums[album_id]
-        if album_id in self.albums_deleted:
+        if album_id in self.albums_deleted or album_id in self.missing:
             return None
         return SimpleNamespace(
             id=album_id,
@@ -916,8 +934,17 @@ class _FakeGalleryRepo:
             is_system=False,
         )
 
+    async def list_albums(self, space_id, *, limit=30, before=None):
+        return [SimpleNamespace(id=f"a{n}") for n in range(self.space_album_count)]
+
+    async def list_album_media(self, album_id):
+        return list(self.album_media.get(album_id, []))
+
     async def create_album_in_space(self, album, *, space_id):
         if album.id in self.album_space and self.album_space[album.id] != space_id:
+            return False
+        held = self.albums.get(album.id)
+        if held is not None and held.owner_user_id != album.owner_user_id:
             return False
         self.albums[album.id] = SimpleNamespace(
             id=album.id,
@@ -1132,6 +1159,7 @@ async def test_an_album_then_an_item_by_a_remote_member_both_land(
     so the item uploaded into it had no album to land in."""
     handlers, gallery = gallery_handlers
     gallery.album_space["alb-new"] = None  # not held here yet
+    gallery.missing.discard("alb-new")
     item = {"id": "gi-1", "album_id": "alb-new", "uploaded_by": "u-remote"}
     await handlers._on_gallery_item_saved(
         _event(FederationEventType.SPACE_GALLERY_ITEM_CREATED, item, space_id="sp-1")
@@ -2888,7 +2916,7 @@ def _seed(repos, seed):
         return
     if seed == "gallery":
         repos["gallery"].items_by_id["gi-1"] = SimpleNamespace(
-            id="gi-1", album_id="alb", uploaded_by="u-up"
+            id="gi-1", album_id="alb", uploaded_by="u-up", url="", thumbnail_url=""
         )
         return
     if seed == "rsvp":
@@ -3205,3 +3233,280 @@ async def test_an_expiry_from_a_non_seller_household_is_debug_noise(full, caplog
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
     assert "expiry is announced by the seller's household" in caplog.text
     assert repos["auth"].refusals == []
+
+
+# ─── Gallery review follow-ups ───────────────────────────────────────
+
+
+@pytest.fixture
+def gallery_env(bus, repos, tmp_path):
+    """Handlers with media cleanup + tombstones wired, and the bus events
+    they publish captured."""
+    gallery = _FakeGalleryRepo()
+    tombstones = GalleryAlbumTombstones()
+    tombstones.wire(bus)
+    media = tmp_path / "media"
+    media.mkdir()
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        gallery_repo=gallery,
+        media_dir=media,
+        media_refs=_NoRefs(),
+        gallery_tombstones=tombstones,
+    )
+    seen: list[object] = []
+
+    async def _capture(event) -> None:
+        seen.append(event)
+
+    for cls in (
+        GalleryAlbumCreated,
+        GalleryAlbumUpdated,
+        GalleryAlbumDeleted,
+        GalleryItemUploaded,
+        GalleryItemDeleted,
+    ):
+        bus.subscribe(cls, _capture)
+    return h, gallery, media, seen
+
+
+class _NoRefs:
+    """Media reference repo stub: nothing else references any file."""
+
+    async def is_referenced(self, basename):
+        return False
+
+    async def referenced_basenames(self):
+        return set()
+
+
+def _created(**over):
+    return _event(
+        FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
+        _album_payload(**over),
+        space_id="sp-1",
+    )
+
+
+async def test_the_system_identity_cannot_own_an_album(gallery_env):
+    handlers, gallery, _media, _seen = gallery_env
+    await handlers._on_gallery_album_created(_created(owner_user_id=SYSTEM_AUTHOR))
+    assert gallery.albums == {}
+
+
+async def test_the_per_space_album_limit_holds_for_federated_albums(gallery_env):
+    handlers, gallery, _media, _seen = gallery_env
+    gallery.space_album_count = ALBUMS_PER_SPACE
+    await handlers._on_gallery_album_created(_created())
+    assert gallery.albums == {}
+    gallery.space_album_count = ALBUMS_PER_SPACE - 1
+    await handlers._on_gallery_album_created(_created())
+    assert "alb-new" in gallery.albums
+
+
+async def test_a_held_album_redelivered_for_its_owner_is_a_quiet_no_op(
+    gallery_env, caplog
+):
+    handlers, gallery, _media, seen = gallery_env
+    await handlers._on_gallery_album_created(_created())
+    calls = len(handlers._authorship.calls)
+    with caplog.at_level("WARNING"):
+        await handlers._on_gallery_album_created(_created(name="Again"))
+    assert gallery.albums["alb-new"].name == "Holiday"
+    assert len(handlers._authorship.calls) == calls  # nothing to authorise
+    assert not caplog.records
+    assert [type(e) for e in seen] == [GalleryAlbumCreated]
+
+
+async def test_a_held_album_claimed_for_another_owner_is_refused(gallery_env, caplog):
+    handlers, gallery, _media, seen = gallery_env
+    await handlers._on_gallery_album_created(_created())
+    seen.clear()
+    with caplog.at_level("WARNING"):
+        await handlers._on_gallery_album_created(_created(owner_user_id="u-other"))
+    assert gallery.albums["alb-new"].owner_user_id == "u-remote"
+    assert "already held for another owner" in caplog.text
+    assert seen == []
+
+
+async def test_a_delete_that_overtakes_its_create_keeps_the_album_away(gallery_env):
+    handlers, gallery, _media, _seen = gallery_env
+    await handlers._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": "alb-new"},
+            space_id="sp-1",
+        )
+    )
+    await handlers._on_gallery_album_created(_created())
+    assert gallery.albums == {}
+
+
+async def test_an_album_deleted_here_is_not_brought_back_by_a_replay(bus, gallery_env):
+    handlers, gallery, _media, _seen = gallery_env
+    await bus.publish(GalleryAlbumDeleted(album_id="alb-new", space_id="sp-1"))
+    await handlers._on_gallery_album_created(_created())
+    assert gallery.albums == {}
+
+
+async def test_an_album_edit_can_clear_the_cover(gallery_env):
+    handlers, gallery, _media, _seen = gallery_env
+    await handlers._on_gallery_album_updated(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            {"id": "alb-1", "name": "Same", "cover_item_id": None},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.album_patches == [("alb-1", {"name": "Same", "cover_item_id": None})]
+
+
+async def test_applied_album_changes_are_published_with_their_origin(gallery_env):
+    """This household's own screens refresh; the origin keeps the outbound
+    bridge from sending them back."""
+    handlers, gallery, _media, seen = gallery_env
+    await handlers._on_gallery_album_created(_created())
+    await handlers._on_gallery_album_updated(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            {"id": "alb-new", "name": "Renamed"},
+            space_id="sp-1",
+        )
+    )
+    await handlers._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": "alb-new"},
+            space_id="sp-1",
+        )
+    )
+    assert [type(e) for e in seen] == [
+        GalleryAlbumCreated,
+        GalleryAlbumUpdated,
+        GalleryAlbumDeleted,
+    ]
+    assert {e.origin_instance_id for e in seen} == {"peer-a"}
+    assert {e.space_id for e in seen} == {"sp-1"}
+    assert seen[0].owner_id == "u-remote"
+
+
+async def test_applied_item_changes_are_published_with_their_origin(gallery_env):
+    handlers, gallery, _media, seen = gallery_env
+    payload = {
+        "id": "gi-1",
+        "album_id": "alb-1",
+        "uploaded_by": "u-remote",
+        "item_type": "photo",
+        "thumbnail_url": "api/media/t.webp",
+    }
+    for _ in range(2):  # a redelivery publishes nothing new
+        await handlers._on_gallery_item_saved(
+            _event(
+                FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+                payload,
+                space_id="sp-1",
+            )
+        )
+    await handlers._on_gallery_item_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+            {"id": "gi-1"},
+            space_id="sp-1",
+        )
+    )
+    assert [type(e) for e in seen] == [GalleryItemUploaded, GalleryItemDeleted]
+    up, gone = seen
+    assert (up.item_id, up.album_id, up.uploader, up.space_id) == (
+        "gi-1",
+        "alb-1",
+        "u-remote",
+        "sp-1",
+    )
+    assert up.origin_instance_id == gone.origin_instance_id == "peer-a"
+
+
+async def test_item_media_references_are_normalised(gallery_env):
+    """Only the canonical local ``api/media/<name>`` shape is stored — a
+    query string is dropped, anything else (a full URL, another path)
+    stores nothing."""
+    handlers, gallery, _media, _seen = gallery_env
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": "gi-n",
+                "album_id": "alb-1",
+                "uploaded_by": "u-remote",
+                "url": "https://elsewhere.example/api/media/full.webp",
+                "thumbnail_url": "/api/media/t.webp?sig=abc",
+            },
+            space_id="sp-1",
+        )
+    )
+    item = gallery.created[-1]
+    assert (item.url, item.thumbnail_url) == ("", "api/media/t.webp")
+
+
+async def test_a_federated_item_delete_removes_its_files(gallery_env):
+    handlers, gallery, media, _seen = gallery_env
+    for name in ("full.webp", "thumb.webp"):
+        (media / name).write_bytes(b"x")
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": "gi-f",
+                "album_id": "alb-1",
+                "uploaded_by": "u-remote",
+                "url": "api/media/full.webp",
+                "thumbnail_url": "api/media/thumb.webp",
+            },
+            space_id="sp-1",
+        )
+    )
+    await handlers._on_gallery_item_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+            {"id": "gi-f"},
+            space_id="sp-1",
+        )
+    )
+    assert not (media / "full.webp").exists()
+    assert not (media / "thumb.webp").exists()
+
+
+async def test_a_federated_album_delete_removes_its_items_files(gallery_env):
+    handlers, gallery, media, _seen = gallery_env
+    (media / "a.webp").write_bytes(b"x")
+    (media / "keep.webp").write_bytes(b"x")
+    gallery.album_media["alb-1"] = ["api/media/a.webp"]
+    await handlers._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": "alb-1"},
+            space_id="sp-1",
+        )
+    )
+    assert not (media / "a.webp").exists()
+    assert (media / "keep.webp").exists()
+
+
+async def test_a_refused_album_delete_keeps_the_files(gallery_env):
+    handlers, gallery, media, _seen = gallery_env
+    (media / "a.webp").write_bytes(b"x")
+    gallery.album_media["alb-b"] = ["api/media/a.webp"]
+    gallery.album_space["alb-b"] = "sp-b"
+    await handlers._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": "alb-b"},
+            space_id="sp-1",
+        )
+    )
+    assert (media / "a.webp").exists()

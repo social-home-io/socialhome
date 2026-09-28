@@ -25,25 +25,20 @@ class _FakeFederationService:
     def __init__(self, own_instance_id: str = "own-inst") -> None:
         self._own_instance_id = own_instance_id
         self.sent: list[tuple] = []
+        self.broadcasts: list[tuple] = []
+        self.members: dict[str, list[str]] = {}
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         # Kept for back-compat — older tests still call this path.
         self.sent.append((to_instance_id, event_type, payload, space_id))
 
-    async def send_with_mesh_fallback(
-        self,
-        *,
-        to_instance_id,
-        event_type,
-        payload,
-        space_id=None,
-    ):
-        # Gallery outbound now uses mesh-fallback so members joined
-        # via §D1b mesh path receive the event too.
-        from socialhome.domain.federation import DeliveryResult
-
-        self.sent.append((to_instance_id, event_type, payload, space_id))
-        return DeliveryResult(instance_id=to_instance_id, ok=True)
+    async def broadcast_to_space_members(self, space_id, event_type, payload):
+        """The real one fans out per member household (self excluded) via
+        ``send_with_mesh_fallback``; recorded here per target."""
+        self.broadcasts.append((space_id, event_type))
+        for iid in self.members.get(space_id, []):
+            if iid != self._own_instance_id:
+                self.sent.append((iid, event_type, payload, space_id))
 
 
 class _FakeSpaceRepo:
@@ -97,9 +92,9 @@ def _item(item_id: str, album_id: str) -> GalleryItem:
 def env():
     bus = EventBus()
     fed = _FakeFederationService()
-    space_repo = _FakeSpaceRepo(
-        {"sp-A": ["own-inst", "peer-1", "peer-2"], "sp-B": ["peer-3"]},
-    )
+    members = {"sp-A": ["own-inst", "peer-1", "peer-2"], "sp-B": ["peer-3"]}
+    fed.members = members
+    space_repo = _FakeSpaceRepo(members)
     gallery = _FakeGalleryRepo(
         albums={
             "alb-space-A": _album("alb-space-A", space_id="sp-A"),
@@ -347,3 +342,61 @@ async def test_a_space_album_deleted_fans_out_by_id(env):
     assert {e[0] for e in fed.sent} == {"peer-1", "peer-2"}
     assert {e[1] for e in fed.sent} == {FederationEventType.SPACE_GALLERY_ALBUM_DELETED}
     assert fed.sent[0][2] == {"id": "alb-space-A", "space_id": "sp-A"}
+
+
+async def test_fan_out_goes_through_broadcast_to_space_members(env):
+    """One call per event — the member-only fan-out with mesh fallback —
+    rather than a hand-rolled loop over the member list."""
+    bus, fed, _ = env
+    await bus.publish(
+        GalleryAlbumCreated(album_id="alb-space-A", space_id="sp-A", owner_id="alice")
+    )
+    await bus.publish(GalleryItemDeleted(item_id="it-1", album_id="alb-space-A"))
+    assert fed.broadcasts == [
+        ("sp-A", FederationEventType.SPACE_GALLERY_ALBUM_CREATED),
+        ("sp-A", FederationEventType.SPACE_GALLERY_ITEM_DELETED),
+    ]
+
+
+async def test_changes_applied_from_another_household_are_not_sent_back(env):
+    """The inbound handlers re-publish what they applied (so this
+    household's screens refresh); those carry the origin and never echo."""
+    bus, fed, _ = env
+    origin = "peer-1"
+    await bus.publish(
+        GalleryAlbumCreated(
+            album_id="alb-space-A",
+            space_id="sp-A",
+            owner_id="alice",
+            origin_instance_id=origin,
+        )
+    )
+    await bus.publish(
+        GalleryAlbumUpdated(
+            album_id="alb-space-A", space_id="sp-A", origin_instance_id=origin
+        )
+    )
+    await bus.publish(
+        GalleryAlbumDeleted(
+            album_id="alb-space-A", space_id="sp-A", origin_instance_id=origin
+        )
+    )
+    await bus.publish(
+        GalleryItemUploaded(
+            item_id="it-1",
+            album_id="alb-space-A",
+            item_type="photo",
+            uploader="alice",
+            space_id="sp-A",
+            origin_instance_id=origin,
+        )
+    )
+    await bus.publish(
+        GalleryItemDeleted(
+            item_id="it-1",
+            album_id="alb-space-A",
+            space_id="sp-A",
+            origin_instance_id=origin,
+        )
+    )
+    assert fed.sent == []

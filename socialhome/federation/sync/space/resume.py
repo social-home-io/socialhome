@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from ....domain.task import Task
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
+    from ....services.gallery_tombstones import GalleryAlbumTombstones
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
@@ -57,6 +58,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+#: A space holds at most ``gallery_service.ALBUMS_PER_SPACE`` albums; the
+#: repo caps a listing at the same 200.
+MAX_ALBUMS_REPLAYED: int = 200
 
 #: Hard cap on rows replayed per resource type per single
 #: ``SPACE_SYNC_RESUME``. Receivers that need older events re-issue the
@@ -85,6 +90,7 @@ class SpaceSyncResumeProvider:
         "_sticky_repo",
         "_space_calendar_repo",
         "_gallery_repo",
+        "_gallery_tombstones",
     )
 
     def __init__(
@@ -98,6 +104,7 @@ class SpaceSyncResumeProvider:
         sticky_repo: "AbstractStickyRepo | None" = None,
         space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
+        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
     ) -> None:
         self._federation = federation_service
         self._space_repo = space_repo
@@ -107,6 +114,7 @@ class SpaceSyncResumeProvider:
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
         self._gallery_repo = gallery_repo
+        self._gallery_tombstones = gallery_tombstones
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -366,33 +374,65 @@ class SpaceSyncResumeProvider:
         *,
         to: str,
     ) -> int:
-        """Replay missed ``SPACE_GALLERY_ITEM_CREATED`` events.
+        """Replay the space's gallery: albums first, then missed items.
 
         The receiver files an item only into an album it already holds for
-        the space, so every distinct album the replayed items name is sent
-        first as ``SPACE_GALLERY_ALBUM_CREATED`` — an idempotent no-op for
-        an album the receiver has, the missing parent for one created while
-        it was offline. The system "Posts" album is skipped: every household
-        rebuilds its own from the posts.
+        the space, and an album made, edited or deleted while it was away is
+        state it simply lacks — whether or not anything was uploaded since.
+        So, in order:
+
+        * every album delete recorded since ``since`` as
+          ``SPACE_GALLERY_ALBUM_DELETED`` (:class:`GalleryAlbumTombstones`);
+        * every non-system album of the space as
+          ``SPACE_GALLERY_ALBUM_CREATED`` — an idempotent no-op for one the
+          receiver holds;
+        * those edited since ``since`` as ``SPACE_GALLERY_ALBUM_UPDATED``;
+        * the items newer than ``since`` as ``SPACE_GALLERY_ITEM_CREATED``.
+
+        The system "Posts" album is skipped: every household rebuilds its
+        own from the posts.
         """
         if self._gallery_repo is None:
             return 0
-        items = await self._gallery_repo.list_items_since(
-            space_id,
-            since,
-            limit=MAX_PER_RESOURCE,
-        )
-        albums: list[GalleryAlbum] = []
-        for album_id in dict.fromkeys(i.album_id for i in items):
-            album = await self._gallery_repo.get_album(album_id)
-            if album is not None and album.space_id == space_id and not album.is_system:
-                albums.append(album)
-        sent = await self._send_each(
+        sent = 0
+        if self._gallery_tombstones is not None:
+            sent += await self._send_each(
+                [
+                    {"id": album_id}
+                    for album_id in self._gallery_tombstones.deleted_since(
+                        space_id, since
+                    )
+                ],
+                FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+                dict,
+                space_id=space_id,
+                to=to,
+            )
+        albums = [
+            a
+            for a in await self._gallery_repo.list_albums(
+                space_id, limit=MAX_ALBUMS_REPLAYED
+            )
+            if a.space_id == space_id and not a.is_system
+        ]
+        sent += await self._send_each(
             albums,
             FederationEventType.SPACE_GALLERY_ALBUM_CREATED,
             _gallery_album_to_payload,
             space_id=space_id,
             to=to,
+        )
+        sent += await self._send_each(
+            [a for a in albums if _changed_since(a.updated_at, since)],
+            FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
+            _gallery_album_to_payload,
+            space_id=space_id,
+            to=to,
+        )
+        items = await self._gallery_repo.list_items_since(
+            space_id,
+            since,
+            limit=MAX_PER_RESOURCE,
         )
         return sent + await self._send_each(
             items,
@@ -542,3 +582,20 @@ def _iso(value) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _changed_since(value: str | None, since: str) -> bool:
+    """``value`` is later than ``since`` — or either is unreadable, where
+    re-sending an unchanged album is harmless and skipping a change is not."""
+    if not value:
+        return False
+    try:
+        a = datetime.fromisoformat(value)
+        b = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=timezone.utc)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=timezone.utc)
+    return a > b

@@ -73,12 +73,31 @@ on its creator's household alone, and every item uploaded into it was
 refused everywhere else (the picture bytes arrived over the media outbox,
 the gallery rows never did). The album events carry
 `{id, owner_user_id, name, description, cover_item_id, created_at,
-updated_at}` inside the encrypted payload; the receiver files the album
-under the gated space as an empty, non-system album, never takes over an
-id it already uses elsewhere, applies an edit's `cover_item_id` only when
-it names an item of that album, and never lets the wire touch the system
-"Posts" album (every household rebuilds its own from the posts). A
-`SPACE_SYNC_RESUME` replay sends each replayed item's album ahead of it.
+updated_at}` inside the encrypted payload. The receiver:
+
+- files the album under the gated space as an empty, non-system album,
+  owned by a member seated on the sender (never the shared bot identity),
+  within the local per-space album limit;
+- treats an id it already holds as a redelivery of that album only for the
+  same owner (a quiet no-op) — naming another owner or space is refused at
+  WARNING, so an id can never be re-claimed for somebody else;
+- remembers album deletes (a bounded in-memory record,
+  `services/gallery_tombstones.py` — no table), so a delete that overtakes
+  its create, or a replay / sync from a household that missed the delete,
+  does not bring the album back;
+- ignores an edit's `cover_item_id` when it names an item of another album,
+  keeps one naming an item not held yet (rendered once it lands in this
+  album), and clears the cover on an explicit `null`;
+- removes the files an album or item delete leaves unreferenced
+  (`media/cleanup.unlink_unreferenced`), stores item media only in the
+  canonical `api/media/<name>` shape (`local_media_ref`), and re-publishes
+  what it applied on the local bus with its origin, so this household's
+  screens refresh while the outbound bridge never sends it back;
+- never lets the wire touch the system "Posts" album (every household
+  rebuilds its own from the posts).
+
+A `SPACE_SYNC_RESUME` replay sends the space's recent album deletes, every
+album (plus an update for each edited since `since`), then the items.
 An item carries its full `url` as well as the thumbnail
 (`GalleryItem.to_federation_dict`): both files follow over the media
 outbox, and the `SPACE_MEDIA_BLOB` scope check accepts only files the
