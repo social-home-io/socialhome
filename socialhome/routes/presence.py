@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from aiohttp import web
 
 from ..app_keys import (
@@ -53,9 +55,22 @@ class PresenceCollectionView(BaseView):
         # service, which is more recent than the persisted column).
         user_repo = self.request.app.get(user_repo_key)
         persisted: dict[str, str | None] = {}
+        statuses: dict[str, dict] = {}
         if user_repo is not None and entries:
             users = await user_repo.list_by_ids({p.user_id for p in entries})
             persisted = {u.user_id: u.last_seen_at for u in users}
+            # Emoji + text status (``PATCH /api/me``); an expired one reads
+            # as unset even before the expiry sweep clears it.
+            now = datetime.now(timezone.utc)
+            statuses = {
+                u.user_id: {
+                    "emoji": u.status.emoji,
+                    "text": u.status.text,
+                    "expires_at": u.status.expires_at,
+                }
+                for u in users
+                if u.status.is_set and not u.status.is_expired(now)
+            }
         # §Privacy — drop blocked household members from the viewer's
         # presence list. The block is local to this viewer; other
         # members still see the full roster.
@@ -86,6 +101,7 @@ class PresenceCollectionView(BaseView):
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
+                    "status": statuses.get(p.user_id),
                 }
             )
         return self._json(rows)

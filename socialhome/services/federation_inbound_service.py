@@ -76,7 +76,13 @@ from ..crypto import (
     derive_user_id,
     verify_user_identity_assertion,
 )
-from ..domain.user import RemoteUser, UserIdentityAssertion, UserStatus
+from ..domain.user import (
+    RemoteUser,
+    UserIdentityAssertion,
+    UserStatus,
+    clean_status_emoji,
+    clean_status_text,
+)
 from ..federation.dm_scope import DmScope, refuse
 from ..federation.space_authorship import SpaceAuthorship
 from ..federation.space_scope import (
@@ -2553,14 +2559,20 @@ class FederationInboundService:
         if p.get("status_cleared"):
             status = None
         else:
-            emoji = p.get("emoji")
-            text = p.get("text")
+            # Same caps the local ``PATCH /api/me`` applies — a peer
+            # can't push a multi-line essay into our status surfaces.
+            try:
+                emoji = clean_status_emoji(p.get("emoji"))
+                text = clean_status_text(p.get("text"))
+            except ValueError as exc:
+                refuse(event, f"invalid status: {exc}", user=user_id)
+                return
             if emoji is None and text is None:
                 status = None
             else:
                 status = UserStatus(
-                    emoji=str(emoji) if emoji else None,
-                    text=str(text) if text else None,
+                    emoji=emoji,
+                    text=text,
                     expires_at=str(p["expires_at"]) if p.get("expires_at") else None,
                 )
         await self._bus.publish(UserStatusChanged(user_id=user_id, status=status))

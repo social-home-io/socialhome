@@ -94,6 +94,7 @@ from .infrastructure.notification_cleanup_scheduler import (
 from .infrastructure.password_reset_cleanup_scheduler import (
     PasswordResetCleanupScheduler,
 )
+from .infrastructure.user_status_expiry_scheduler import UserStatusExpiryScheduler
 from .infrastructure.audio_transcript_scheduler import AudioTranscriptScheduler
 from .infrastructure.app_pending_session_scheduler import (
     AppPendingSessionPruneScheduler,
@@ -227,6 +228,7 @@ from .federation.routed_envelope import SpaceRoutedHandler
 from .federation.private_invite_handler import PrivateSpaceInviteHandler
 from .services.peer_directory_service import PeerDirectoryService
 from .services.profile_federation_outbound import ProfileFederationOutbound
+from .services.user_status_outbound import UserStatusOutbound
 from .services.users_sync_outbound import UsersSyncOutbound
 from .services.capabilities_outbound import CapabilitiesOutbound
 from .services.url_update_outbound import UrlUpdateOutbound
@@ -1285,6 +1287,16 @@ def _wire_federation_stack(
     )
     profile_federation_outbound.wire()
 
+    # USER_STATUS_UPDATED — a local user's status (set, changed, cleared or
+    # expired) reaches paired households; the inbound half already exists.
+    UserStatusOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        federation_repo=federation_repo,
+        user_repo=user_repo,
+        visibility_repo=peer_user_visibility_repo,
+    ).wire()
+
     # Roster catch-up — on PairingConfirmed, send the new peer a single
     # USERS_SYNC envelope carrying every (visible) local user so their
     # remote_users mirror is populated immediately. Without this the
@@ -2211,6 +2223,7 @@ def create_app(config: Config | None = None) -> web.Application:
     password_reset_cleanup_scheduler: PasswordResetCleanupScheduler | None = None
     auth_audit_cleanup_scheduler: AuthAuditCleanupScheduler | None = None
     notification_cleanup_scheduler: NotificationCleanupScheduler | None = None
+    user_status_expiry_scheduler: UserStatusExpiryScheduler | None = None
     pairing_relay_scheduler: PairingRelayRetentionScheduler | None = None
     pairing_session_prune_scheduler: PairingSessionPruneScheduler | None = None
     dm_gc_scheduler: DmGcScheduler | None = None
@@ -3152,6 +3165,15 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await notification_cleanup_scheduler.start()
 
+        # User-status expiry — clears a status once its "clear after"
+        # deadline passes, so tabs + paired households drop it (runs
+        # every minute). Uses the UserService carrying the real key.
+        nonlocal user_status_expiry_scheduler
+        user_status_expiry_scheduler = UserStatusExpiryScheduler(
+            app[K.user_service_key],
+        )
+        await user_status_expiry_scheduler.start()
+
         # Online-status idle scanner — promotes online → idle after 5
         # minutes of WS-frame silence and back to online on activity.
         await online_status_service.start()
@@ -3362,6 +3384,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await auth_audit_cleanup_scheduler.stop()
         if notification_cleanup_scheduler is not None:
             await notification_cleanup_scheduler.stop()
+        if user_status_expiry_scheduler is not None:
+            await user_status_expiry_scheduler.stop()
         await online_status_service.stop()
         if pairing_relay_scheduler is not None:
             await pairing_relay_scheduler.stop()

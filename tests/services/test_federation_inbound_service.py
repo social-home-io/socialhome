@@ -782,6 +782,28 @@ async def test_user_status_cleared_publishes_none(db, bus, inbound):
     assert captured[0].status is None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "x" * 500},
+        {"text": "multi\nline"},
+        {"emoji": "not an emoji"},
+    ],
+)
+async def test_user_status_invalid_is_refused(db, bus, inbound, payload):
+    """A peer's status gets the same caps as a local ``PATCH /api/me``."""
+    await _seed_dm_people(db, "u-1")
+    captured: list[UserStatusChanged] = []
+    bus.subscribe(UserStatusChanged, captured.append)
+    await inbound._on_user_status_updated(
+        _event(
+            FederationEventType.USER_STATUS_UPDATED,
+            {"user_id": "u-1", **payload},
+        )
+    )
+    assert captured == []
+
+
 # ─── Remote users ────────────────────────────────────────────────────────
 
 

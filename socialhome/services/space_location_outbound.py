@@ -19,6 +19,10 @@ Two privacy tiers, picked per-space via ``features.location_mode``:
 Either way HA-defined zone names never reach a space-bound payload —
 ``PresenceUpdated.zone_name`` is household-only data (§23.8.5).
 
+A remote member's pin (inbound ``SPACE_LOCATION_UPDATED``, surfaced as
+:class:`RemoteSpaceLocationUpdated`) gets the same local frame — never
+the federation fan-out, since it came from the mesh.
+
 This is the space twin of the household ``presence.updated`` frame
 emitted by :class:`RealtimeService`. Two different ``type`` strings,
 two different consumers, one PresenceUpdated event.
@@ -33,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.events import (
     PresenceUpdated,
+    RemoteSpaceLocationUpdated,
     SpaceLocationModeChanged,
     SpaceMemberLocationOptedIn,
 )
@@ -99,6 +104,51 @@ class SpaceLocationOutbound:
             SpaceMemberLocationOptedIn,
             self._on_member_opted_in,
         )
+        self._bus.subscribe(
+            RemoteSpaceLocationUpdated,
+            self._on_remote_location,
+        )
+
+    async def _on_remote_location(self, event: RemoteSpaceLocationUpdated) -> None:
+        """A remote member's pin was stored — emit the same local
+        ``space_location_updated`` frame a local move produces, so the
+        Map tab moves it live instead of on its 30 s poll.
+
+        Same audience as a local pin (this space's local members) and the
+        same tier rule as ``GET /api/spaces/{id}/presence``: *this*
+        household's ``location_mode`` is the authority, so a pin whose
+        mode disagrees (a peer still on GPS after a switch to zone_only)
+        is not shown and never leaks coordinates. Local only — the pin
+        came from the mesh, so it is not re-federated.
+        """
+        space = await self._spaces.get(event.space_id)
+        if space is None or not space.features.location:
+            return
+        if event.mode != space.features.location_mode:
+            return
+        payload: dict
+        if event.mode == "zone_only":
+            payload = {
+                "mode": "zone_only",
+                "space_id": event.space_id,
+                "user_id": event.user_id,
+                "zone_id": event.zone_id,
+                "zone_name": event.zone_name,
+                "updated_at": event.updated_at,
+            }
+        else:
+            if event.latitude is None or event.longitude is None:
+                return
+            payload = {
+                "mode": "gps",
+                "space_id": event.space_id,
+                "user_id": event.user_id,
+                "lat": round(float(event.latitude), 4),
+                "lon": round(float(event.longitude), 4),
+                "accuracy_m": event.accuracy_m,
+                "updated_at": event.updated_at,
+            }
+        await self._broadcast_local(event.space_id, payload)
 
     async def _on_presence_updated(self, event: PresenceUpdated) -> None:
         # Skip when the accuracy gate dropped coordinates — there is

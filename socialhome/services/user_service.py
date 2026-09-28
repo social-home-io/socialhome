@@ -17,7 +17,7 @@ import logging
 import secrets
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import orjson
@@ -33,7 +33,13 @@ from ..domain.events import (
     UserUnblocked,
     UserUnfollowed,
 )
-from ..domain.user import RESERVED_USERNAMES, User, UserStatus
+from ..domain.user import (
+    RESERVED_USERNAMES,
+    User,
+    UserStatus,
+    clean_status_emoji,
+    clean_status_text,
+)
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..media.image_processor import ImageProcessor
@@ -69,6 +75,53 @@ class _Unset:
 
 
 _UNSET = _Unset()
+
+#: Relative "clear after" choices the status editor offers.
+STATUS_CLEAR_AFTER_CHOICES: dict[str, timedelta] = {
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "4h": timedelta(hours=4),
+}
+#: Furthest an explicit ``clear_after`` instant may lie in the future.
+STATUS_MAX_LIFETIME = timedelta(days=7)
+
+
+def _resolve_clear_after(value: object, *, now: datetime, tz: str) -> str | None:
+    """Turn a ``clear_after`` choice into a UTC ISO-8601 ``expires_at``."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Pick when the status should clear.")
+    value = value.strip()
+    if value in STATUS_CLEAR_AFTER_CHOICES:
+        deadline = now + STATUS_CLEAR_AFTER_CHOICES[value]
+    elif value == "today":
+        try:
+            zone = ZoneInfo(tz or "UTC")
+        except ZoneInfoNotFoundError:
+            zone = ZoneInfo("UTC")
+        local = now.astimezone(zone)
+        # Midnight at the start of the user's next local day. Built from
+        # the date (not ``+ timedelta(days=1)`` on the wall clock) so a
+        # DST switch today doesn't shift it by an hour.
+        next_day = local.date() + timedelta(days=1)
+        deadline = datetime(
+            next_day.year, next_day.month, next_day.day, tzinfo=zone
+        ).astimezone(timezone.utc)
+    else:
+        try:
+            deadline = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(
+                "Clear after must be 30m, 1h, 4h, today or an ISO-8601 time."
+            ) from exc
+        if deadline.tzinfo is None:
+            raise ValueError("The clear-after time needs a timezone offset.")
+        if deadline <= now:
+            raise ValueError("The clear-after time must be in the future.")
+        if deadline - now > STATUS_MAX_LIFETIME:
+            raise ValueError("A status can be set to clear at most 7 days ahead.")
+    return deadline.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 class UserService:
@@ -560,27 +613,63 @@ class UserService:
         self,
         username: str,
         *,
-        emoji: str | None = None,
-        text: str | None = None,
-        expires_at: str | None = None,
+        emoji: object = None,
+        text: object = None,
+        clear_after: object = None,
+        now: datetime | None = None,
     ) -> User:
-        """Set or clear a user's presence status."""
+        """Set or clear a user's status (emoji + one line of text).
+
+        ``emoji`` / ``text`` are validated by :func:`clean_status_emoji` /
+        :func:`clean_status_text`; both blank clears the status.
+        ``clear_after`` is ``None`` (keep until changed), one of
+        :data:`STATUS_CLEAR_AFTER_CHOICES` (``"today"`` = the end of the
+        user's local day in ``users.tz``), or an ISO-8601 instant in the
+        future and at most :data:`STATUS_MAX_LIFETIME` away. Invalid
+        input raises :class:`ValueError`.
+        """
         user = await self._repo.get(username)
         if user is None:
             raise KeyError(f"user {username!r} not found")
-        if emoji is None and text is None:
+        now = now or datetime.now(timezone.utc)
+        clean_emoji = clean_status_emoji(emoji)
+        clean_text = clean_status_text(text)
+        if clean_emoji is None and clean_text is None:
             status = UserStatus()
         else:
-            status = UserStatus(emoji=emoji, text=text, expires_at=expires_at)
+            status = UserStatus(
+                emoji=clean_emoji,
+                text=clean_text,
+                expires_at=_resolve_clear_after(clear_after, now=now, tz=user.tz),
+            )
+        if status == user.status:
+            return user
         new_user = replace(user, status=status)
         await self._repo.save(new_user)
         await self._bus.publish(
             UserStatusChanged(
                 user_id=user.user_id,
-                status=status if (emoji or text) else None,
+                status=status if status.is_set else None,
             ),
         )
         return new_user
+
+    async def clear_expired_statuses(self, *, now: datetime | None = None) -> int:
+        """Clear every local status whose ``expires_at`` has passed.
+
+        Driven by :class:`UserStatusExpiryScheduler`; going through
+        :meth:`set_status` publishes ``UserStatusChanged`` so open tabs
+        and paired households drop the status too. Returns the count.
+        """
+        now = now or datetime.now(timezone.utc)
+        cleared = 0
+        for user in await self._repo.list_with_expired_status(
+            now.isoformat(timespec="seconds")
+        ):
+            if user.status.is_expired(now):
+                await self.set_status(user.username, now=now)
+                cleared += 1
+        return cleared
 
     async def clear_onboarding(self, username: str) -> None:
         user = await self._repo.get(username)

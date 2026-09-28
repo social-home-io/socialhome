@@ -21,6 +21,7 @@ from socialhome.domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
+    RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
 from socialhome.domain.space import RemoteAdminOutcome, SpaceRole
@@ -1707,3 +1708,89 @@ async def test_space_location_updated_accepts_a_matching_pair():
     )
     await h._on_space_location_updated(ev)
     locations.upsert.assert_awaited_once()
+
+
+async def test_space_location_updated_truncates_gps_and_publishes_for_live_pins():
+    """A remote pin is stored at 4 decimals (the GPS rule applies to what
+    a peer sends too) and published so open Map tabs move it live."""
+    h, locations, _ = await _location_handler()
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {
+            "space_id": "sp-a",
+            "user_id": "u1",
+            "mode": "gps",
+            "lat": 48.13512345,
+            "lon": 11.58204567,
+            "accuracy_m": 9.0,
+            "updated_at": "2026-09-28T12:00:00+00:00",
+        },
+        from_instance="peer-1",
+    )
+    await h._on_space_location_updated(ev)
+    loc = locations.upsert.call_args.args[0]
+    assert (loc.latitude, loc.longitude) == (48.1351, 11.582)
+    [published] = [
+        e for e in h._bus.events if isinstance(e, RemoteSpaceLocationUpdated)
+    ]
+    assert published == RemoteSpaceLocationUpdated(
+        space_id="sp-a",
+        instance_id="peer-1",
+        user_id="u1",
+        mode="gps",
+        latitude=48.1351,
+        longitude=11.582,
+        accuracy_m=9.0,
+        updated_at="2026-09-28T12:00:00+00:00",
+        occurred_at=published.occurred_at,
+    )
+
+
+async def test_space_location_updated_zone_only_drops_any_coordinates():
+    """A zone_only pin never carries coordinates, even if the sender
+    put some in the payload."""
+    h, locations, _ = await _location_handler()
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {
+            "space_id": "sp-a",
+            "user_id": "u1",
+            "mode": "zone_only",
+            "zone_id": "z1",
+            "zone_name": "School",
+            "lat": 48.1351,
+            "lon": 11.582,
+        },
+        from_instance="peer-1",
+    )
+    await h._on_space_location_updated(ev)
+    loc = locations.upsert.call_args.args[0]
+    assert (loc.latitude, loc.longitude, loc.accuracy_m) == (None, None, None)
+    [published] = [
+        e for e in h._bus.events if isinstance(e, RemoteSpaceLocationUpdated)
+    ]
+    assert (published.latitude, published.longitude) == (None, None)
+    assert (published.zone_id, published.zone_name) == ("z1", "School")
+
+
+async def test_space_location_updated_bad_coordinates_are_dropped():
+    h, locations, _ = await _location_handler()
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": "north"},
+        from_instance="peer-1",
+    )
+    await h._on_space_location_updated(ev)
+    locations.upsert.assert_not_awaited()
+    assert not [e for e in h._bus.events if isinstance(e, RemoteSpaceLocationUpdated)]
+
+
+async def test_space_location_updated_refused_seat_publishes_nothing():
+    h, _, _ = await _location_handler(seat=False)
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+        from_instance="peer-1",
+    )
+    await h._on_space_location_updated(ev)
+    assert h._bus.events == []

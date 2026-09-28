@@ -309,3 +309,50 @@ async def test_update_location_unknown_username_404(client):
     assert r.status == 404
     body = await r.json()
     assert body["error"]["code"] == "NOT_FOUND"
+
+
+async def test_list_presence_carries_status(client):
+    """Each row carries the member's emoji + text status (null when unset),
+    so the Presence page can show it and refetch on ``user.status_changed``."""
+    await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "zone_name": "home",
+        },
+        headers=_auth(client._tok),
+    )
+    rows = await (await client.get("/api/presence", headers=_auth(client._tok))).json()
+    assert [r["status"] for r in rows if r["username"] == "admin"] == [None]
+
+    r = await client.patch(
+        "/api/me",
+        json={"status_emoji": "🎧", "status_text": "Focus", "status_clear_after": "1h"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    rows = await (await client.get("/api/presence", headers=_auth(client._tok))).json()
+    (status,) = [r["status"] for r in rows if r["username"] == "admin"]
+    assert status["emoji"] == "🎧" and status["text"] == "Focus"
+    assert status["expires_at"] is not None
+
+
+async def test_list_presence_hides_expired_status(client):
+    await client.post(
+        "/api/presence/location",
+        json={
+            "username": "admin",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "zone_name": "home",
+        },
+        headers=_auth(client._tok),
+    )
+    await client._db.enqueue(
+        "UPDATE users SET status_text='old', "
+        "status_expires_at='2000-01-01T00:00:00+00:00' WHERE username='admin'"
+    )
+    rows = await (await client.get("/api/presence", headers=_auth(client._tok))).json()
+    assert [r["status"] for r in rows if r["username"] == "admin"] == [None]

@@ -29,6 +29,7 @@ from ..domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
+    RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
 from ..crypto import derive_instance_id
@@ -894,6 +895,32 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
+        # GPS rule (§25): 4 decimals before storage, whatever precision
+        # the peer sent. A zone_only pin carries no coordinates at all,
+        # even if the sender put some in.
+        lat: float | None
+        lon: float | None
+        accuracy_m: float | None
+        zone_id: str | None
+        zone_name: str | None
+        if mode == "gps":
+            try:
+                lat = round(float(p["lat"]), 4)
+                lon = round(float(p["lon"]), 4)
+                acc_raw = p.get("accuracy_m")
+                accuracy_m = float(acc_raw) if acc_raw is not None else None
+            except KeyError, TypeError, ValueError:
+                log.debug(
+                    "SPACE_LOCATION_UPDATED from %s: unusable coordinates",
+                    event.from_instance,
+                )
+                return
+            zone_id = zone_name = None
+        else:
+            lat = lon = accuracy_m = None
+            zone_id = str(p["zone_id"]) if p.get("zone_id") else None
+            zone_name = str(p["zone_name"]) if p.get("zone_name") else None
+        updated_at = str(p["updated_at"]) if p.get("updated_at") else None
         try:
             await self._remote_locations.upsert(
                 SpaceRemoteLocation(
@@ -901,12 +928,12 @@ class PrivateSpaceInviteHandler:
                     instance_id=event.from_instance,
                     user_id=user_id,
                     mode=mode,
-                    latitude=p.get("lat"),
-                    longitude=p.get("lon"),
-                    accuracy_m=p.get("accuracy_m"),
-                    zone_id=p.get("zone_id"),
-                    zone_name=p.get("zone_name"),
-                    updated_at=p.get("updated_at"),
+                    latitude=lat,
+                    longitude=lon,
+                    accuracy_m=accuracy_m,
+                    zone_id=zone_id,
+                    zone_name=zone_name,
+                    updated_at=updated_at,
                 )
             )
         except Exception:
@@ -916,6 +943,23 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
                 space_id,
             )
+            return
+        # Live pin: SpaceLocationOutbound turns this into the local
+        # ``space_location_updated`` frame (never re-federated).
+        await self._bus.publish(
+            RemoteSpaceLocationUpdated(
+                space_id=space_id,
+                instance_id=event.from_instance,
+                user_id=user_id,
+                mode=mode,
+                latitude=lat,
+                longitude=lon,
+                accuracy_m=accuracy_m,
+                zone_id=zone_id,
+                zone_name=zone_name,
+                updated_at=updated_at,
+            )
+        )
 
     async def _on_remote_admin_kick(self, event: "FederationEvent") -> None:
         """Cross-household admin kick command (#114 phase 2).

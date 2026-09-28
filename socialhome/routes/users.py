@@ -1,7 +1,7 @@
 """User routes — account info, preferences, API tokens.
 
 GET  /api/me                  — current user profile
-PATCH /api/me                 — update display_name / bio / preferences
+PATCH /api/me                 — update display_name / bio / preferences / status
 GET  /api/users               — list all active users (admin view)
 POST /api/me/picture          — upload a new profile picture (multipart)
 DELETE /api/me/picture        — clear the picture (revert to initials)
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from datetime import datetime, timezone
 
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
@@ -37,7 +38,7 @@ from ..app_keys import (
     user_service_key,
 )
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
-from ..domain.user import _picture_url
+from ..domain.user import User, UserStatus, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..platform.adapter import Capability
 from ..security import error_response, sanitise_for_api
@@ -51,6 +52,9 @@ log = logging.getLogger(__name__)
 #: failed attempts lets attackers tell valid usernames apart.
 AUTH_TOKEN_RATE_LIMIT = 5
 AUTH_TOKEN_RATE_WINDOW_S = 15 * 60
+
+#: ``PATCH /api/me`` keys that go to :meth:`UserService.set_status`.
+_STATUS_KEYS = ("status_emoji", "status_text", "status_clear_after")
 
 
 def _user_to_dict(user) -> dict:
@@ -68,6 +72,10 @@ def _user_to_dict(user) -> dict:
         raw = dataclasses.asdict(user)
     else:
         raw = dict(user)
+    # A status past its "clear after" deadline reads as unset even before
+    # the expiry sweep clears the row.
+    if isinstance(user, User) and user.status.is_expired(datetime.now(timezone.utc)):
+        raw["status"] = dataclasses.asdict(UserStatus())
     raw["picture_url"] = _picture_url(
         str(raw.get("user_id") or ""),
         raw.get("picture_hash"),
@@ -143,6 +151,28 @@ class MeView(BaseView):
                 return error_response(422, "UNPROCESSABLE", str(exc))
             except KeyError:
                 return error_response(404, "NOT_FOUND", "User not found.")
+            return web.json_response(_user_to_dict_signed(self.request, user))
+
+        # Status (emoji + one line + optional "clear after"). A key that
+        # is absent keeps its current value, so the expiry chips can send
+        # ``status_clear_after`` alone; setting emoji/text without a
+        # ``status_clear_after`` means "keep until changed".
+        if any(k in body for k in _STATUS_KEYS):
+            current = await svc.get(ctx.username)
+            if current is None:
+                return error_response(404, "NOT_FOUND", "User not found.")
+            cur = current.status
+            if cur.is_expired(datetime.now(timezone.utc)):
+                cur = UserStatus()
+            try:
+                user = await svc.set_status(
+                    ctx.username,
+                    emoji=body.get("status_emoji", cur.emoji),
+                    text=body.get("status_text", cur.text),
+                    clear_after=body.get("status_clear_after"),
+                )
+            except ValueError as exc:
+                return error_response(422, "UNPROCESSABLE", str(exc))
             return web.json_response(_user_to_dict_signed(self.request, user))
 
         # Display-name + bio go through patch_profile so a

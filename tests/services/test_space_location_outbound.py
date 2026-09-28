@@ -31,7 +31,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import PresenceUpdated
+from socialhome.domain.events import PresenceUpdated, RemoteSpaceLocationUpdated
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import (
     JoinMode,
@@ -916,3 +916,114 @@ async def test_opt_in_skipped_when_feature_location_off(env):
     )
     assert env.ws.calls == []
     assert env.federation.calls == []
+
+
+# ─── Remote members' pins move live (inbound → local frame) ─────────────
+
+
+def _remote_pin(space_id: str, **over) -> RemoteSpaceLocationUpdated:
+    base = dict(
+        space_id=space_id,
+        instance_id="peer-1",
+        user_id="u-remote",
+        mode="gps",
+        latitude=48.1351,
+        longitude=11.582,
+        accuracy_m=9.0,
+        updated_at="2026-09-28T12:00:00+00:00",
+    )
+    base.update(over)
+    return RemoteSpaceLocationUpdated(**base)
+
+
+async def _with_local_members(env, sp):
+    for uid in (env.alice_uid, env.bob_uid):
+        await env.space_repo.save_member(
+            SpaceMember(
+                space_id=sp.id,
+                user_id=uid,
+                role="member",
+                joined_at="2026-04-27T00:00:00+00:00",
+            ),
+        )
+
+
+async def test_remote_gps_pin_emits_local_frame_without_refederating(env):
+    sp = await env.make_space("sp_map")
+    await _with_local_members(env, sp)
+    await env.bus.publish(_remote_pin(sp.id))
+    [(user_ids, frame)] = env.ws.calls
+    assert sorted(user_ids) == sorted([env.alice_uid, env.bob_uid])
+    assert frame == {
+        "type": "space_location_updated",
+        "data": {
+            "mode": "gps",
+            "space_id": sp.id,
+            "user_id": "u-remote",
+            "lat": 48.1351,
+            "lon": 11.582,
+            "accuracy_m": 9.0,
+            "updated_at": "2026-09-28T12:00:00+00:00",
+        },
+    }
+    # The pin came from the mesh; echoing it back would loop.
+    assert env.federation.calls == []
+
+
+async def test_remote_pin_frame_truncates_to_four_decimals(env):
+    sp = await env.make_space("sp_map")
+    await _with_local_members(env, sp)
+    await env.bus.publish(_remote_pin(sp.id, latitude=48.13519999, longitude=11.5))
+    [(_, frame)] = env.ws.calls
+    assert (frame["data"]["lat"], frame["data"]["lon"]) == (48.1352, 11.5)
+
+
+async def test_remote_zone_pin_in_zone_only_space_carries_no_coordinates(env):
+    sp = await env.make_space("sp_school", location_mode="zone_only")
+    await _with_local_members(env, sp)
+    await env.bus.publish(
+        _remote_pin(
+            sp.id,
+            mode="zone_only",
+            latitude=None,
+            longitude=None,
+            accuracy_m=None,
+            zone_id="z1",
+            zone_name="School",
+        )
+    )
+    [(_, frame)] = env.ws.calls
+    assert frame["data"] == {
+        "mode": "zone_only",
+        "space_id": sp.id,
+        "user_id": "u-remote",
+        "zone_id": "z1",
+        "zone_name": "School",
+        "updated_at": "2026-09-28T12:00:00+00:00",
+    }
+
+
+async def test_remote_gps_pin_in_zone_only_space_is_not_shown(env):
+    """The space's tier here is the authority (the REST map drops the
+    same row): a peer still sending GPS must not leak coordinates."""
+    sp = await env.make_space("sp_school", location_mode="zone_only")
+    await _with_local_members(env, sp)
+    await env.bus.publish(_remote_pin(sp.id))
+    assert env.ws.calls == []
+
+
+async def test_remote_zone_pin_in_gps_space_is_not_shown(env):
+    sp = await env.make_space("sp_map")
+    await _with_local_members(env, sp)
+    await env.bus.publish(
+        _remote_pin(sp.id, mode="zone_only", latitude=None, longitude=None)
+    )
+    assert env.ws.calls == []
+
+
+async def test_remote_pin_skipped_when_map_feature_off_or_space_unknown(env):
+    sp = await env.make_space("sp_nomap", feature_location=False)
+    await _with_local_members(env, sp)
+    await env.bus.publish(_remote_pin(sp.id))
+    await env.bus.publish(_remote_pin("sp_unknown"))
+    assert env.ws.calls == []

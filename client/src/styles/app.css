@@ -12339,11 +12339,43 @@ a.sh-welcome-card:hover {
   cursor: pointer;
 }
 .sh-status-text { flex: 1; }
+/* The global ``input:not(...)`` rule (width: 100%) outranks a single
+ * class, so size the pair through ``flex`` — which it doesn't set. */
+.sh-status-row .sh-status-emoji { flex: 0 0 64px; text-align: center; }
+.sh-status-row .sh-status-text { flex: 1 1 auto; min-width: 0; }
 .sh-status-expiry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
   font-size: var(--sh-font-size-xs);
   color: var(--sh-text-muted);
 }
-.sh-status-actions { display: flex; gap: var(--sh-space-sm); justify-content: flex-end; }
+.sh-expiry-options { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-expiry-options .sh-chip { min-height: 36px; }
+.sh-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+  justify-content: flex-end;
+}
+.sh-presence-controls .sh-status-editor { flex: 1 1 100%; max-width: 560px; }
+/* "Your status" line on the Presence page (read state of the editor). */
+.sh-my-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+.sh-my-status__label { font-weight: 600; }
+.sh-my-status__value { overflow-wrap: anywhere; }
+/* Name and state sit on one line; keep them apart. */
+.sh-presence-card .sh-presence-state { margin-left: var(--sh-space-xs); }
+/* A member's emoji + text status on their presence card. */
+.sh-presence-status {
+  display: block;
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
 
 /* ───── Bazaar (§9 / §23.15) ─────────────────────────────────────── */
 .sh-bazaar {
