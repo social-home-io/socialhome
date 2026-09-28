@@ -40,6 +40,7 @@ from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_service import BazaarServiceError, ListingNotFoundError
 from ..peer_url import InvalidPeerUrlError
+from ..services.dm_group_service import GroupMemberUnsupportedError
 from ..services.dm_service import MediaRequiresDirectPairingError
 from ..services.child_protection_service import (
     ChildProtectionError,
@@ -307,6 +308,10 @@ class BaseView(web.View):
                 "MEDIA_REQUIRES_DIRECT_PAIRING",
                 str(exc),
             )
+        except GroupMemberUnsupportedError as exc:
+            # The message says which person and why (not paired / their
+            # household needs an update) — the picker shows it verbatim.
+            return error_response(422, "GROUP_MEMBER_UNSUPPORTED", str(exc))
         except InvalidPeerUrlError as exc:
             # Subclasses ValueError — must precede it. The message names
             # the field + the failed rule (never the URL), so the admin who

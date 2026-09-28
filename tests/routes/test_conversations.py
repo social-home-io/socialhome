@@ -753,3 +753,201 @@ async def test_dm_text_message_has_no_poster(client):
     text_id = (await r.json())["id"]
     m = next(x for x in await _dm_messages(client, conv_id) if x["id"] == text_id)
     assert "media_thumbnail_url" not in m
+
+
+# ── Cross-household groups (v_37) ─────────────────────────────────────────
+
+
+async def _seed_household(db, instance_id: str, user_id: str, username: str, *, v=37):
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source, proto_version)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            instance_id,
+            f"{username.title()}'s house",
+            "00" * 32,
+            "k1",
+            "k2",
+            f"https://{instance_id}/wh",
+            f"wh-{instance_id}",
+            "confirmed",
+            "manual",
+            v,
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        (user_id, instance_id, username, username.title()),
+    )
+
+
+@pytest.fixture
+async def households(client, monkeypatch):
+    from socialhome.domain.federation import DeliveryResult
+    from socialhome.federation.federation_service import FederationService
+
+    sent: list[tuple[str, str, dict]] = []
+
+    async def _send(_self, *, to_instance_id, event_type, payload, **_kw):
+        sent.append((to_instance_id, event_type.value, payload))
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(FederationService, "send_event", _send)
+    db = client.app[_db_key]
+    await _seed_household(db, "inst-rita", "u-rita", "rita")
+    await _seed_household(db, "inst-olaf", "u-olaf", "olaf", v=36)
+    return sent
+
+
+async def test_a_group_can_include_people_from_other_households(client, households):
+    h = _auth(client._admin_token)
+    r = await client.post(
+        "/api/conversations/group",
+        json={"members": ["bob"], "member_user_ids": ["u-rita"], "name": "Mix"},
+        headers=h,
+    )
+    assert r.status == 201
+    conv_id = (await r.json())["id"]
+    assert [(i, e) for i, e, _ in households] == [("inst-rita", "dm_group_roster")]
+    resp = await client.get(f"/api/conversations/{conv_id}/members", headers=h)
+    rita = next(m for m in await resp.json() if m["user_id"] == "u-rita")
+    assert rita["household_name"] == "Rita's house"
+    assert rita["instance_id"] == "inst-rita"
+    listing = await (await client.get("/api/conversations", headers=h)).json()
+    row = next(c for c in listing if c["id"] == conv_id)
+    assert row["managed_here"] is True and row["member_count"] == 3
+
+
+async def test_a_person_on_an_older_household_is_refused_with_a_reason(
+    client, households
+):
+    r = await client.post(
+        "/api/conversations/group",
+        json={"members": ["bob"], "member_user_ids": ["u-olaf"]},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert "GROUP_MEMBER_UNSUPPORTED" in await r.text()
+    assert "needs a Social Home update" in await r.text()
+    assert households == []
+
+
+async def _mixed_group(client) -> str:
+    r = await client.post(
+        "/api/conversations/group",
+        json={"members": ["bob"], "member_user_ids": ["u-rita"]},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def test_group_add_rename_remove_and_leave(client, households):
+    h = _auth(client._admin_token)
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("carol", "u-carol", "Carol"),
+    )
+    conv_id = await _mixed_group(client)
+    r = await client.post(
+        f"/api/conversations/{conv_id}/members",
+        json={"usernames": ["carol"]},
+        headers=h,
+    )
+    assert r.status == 201
+    r = await client.patch(
+        f"/api/conversations/{conv_id}", json={"name": "Crew"}, headers=h
+    )
+    assert r.status == 200
+    r = await client.delete(f"/api/conversations/{conv_id}/members/u-rita", headers=h)
+    assert r.status == 200
+    versions = [p["version"] for _i, e, p in households if e == "dm_group_roster"]
+    assert versions == [1, 2, 3, 4]
+    r = await client.post(
+        f"/api/conversations/{conv_id}/leave", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200
+    r = await client.get(
+        f"/api/conversations/{conv_id}/members", headers=_auth(client._bob_token)
+    )
+    assert r.status == 403
+    resp = await client.get(f"/api/conversations/{conv_id}/members", headers=h)
+    assert {m["username"] for m in await resp.json()} == {"pascal", "carol"}
+    listing = await (await client.get("/api/conversations", headers=h)).json()
+    assert next(c for c in listing if c["id"] == conv_id)["name"] == "Crew"
+
+
+async def test_members_of_a_conversation_are_for_its_members_only(client, households):
+    conv_id = await _mixed_group(client)
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("eve", "u-eve", "Eve"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("tid-eve", "u-eve", "t", sha256_token_hash("eve-token")),
+    )
+    eve = _auth("eve-token")
+    r = await client.get(f"/api/conversations/{conv_id}/members", headers=eve)
+    assert r.status == 403
+    r = await client.post(
+        f"/api/conversations/{conv_id}/members",
+        json={"usernames": ["eve"]},
+        headers=eve,
+    )
+    assert r.status == 403
+
+
+async def test_a_group_kept_elsewhere_is_read_only_here(client, households):
+    from socialhome.app_keys import federation_service_key
+    from socialhome.domain.federation import FederationEvent, FederationEventType
+    from socialhome.federation.owner_bound_id import (
+        GROUP_CONVERSATION_KIND,
+        mint_owner_bound_id,
+    )
+
+    fed = client.app[federation_service_key]
+    own = fed.own_instance_id
+    conv_id = mint_owner_bound_id(
+        GROUP_CONVERSATION_KIND, space_id="", owner_user_id="inst-rita"
+    )
+    (handler,) = fed._event_registry.handlers_for(FederationEventType.DM_GROUP_ROSTER)
+    await handler(
+        FederationEvent(
+            msg_id="m",
+            event_type=FederationEventType.DM_GROUP_ROSTER,
+            from_instance="inst-rita",
+            to_instance=own,
+            timestamp="2026-09-28T00:00:00+00:00",
+            payload={
+                "conversation_id": conv_id,
+                "version": 1,
+                "name": "Rita's",
+                "members": [
+                    {
+                        "user_id": "u-rita",
+                        "instance_id": "inst-rita",
+                        "username": "rita",
+                    },
+                    {"user_id": client._admin_uid, "instance_id": own, "username": "p"},
+                    {"user_id": client._bob_uid, "instance_id": own, "username": "b"},
+                ],
+            },
+        )
+    )
+    h = _auth(client._admin_token)
+    listing = await (await client.get("/api/conversations", headers=h)).json()
+    row = next(c for c in listing if c["id"] == conv_id)
+    assert row["managed_here"] is False and row["type"] == "group_dm"
+    r = await client.patch(
+        f"/api/conversations/{conv_id}", json={"name": "x"}, headers=h
+    )
+    assert r.status == 403
+    households.clear()
+    r = await client.post(f"/api/conversations/{conv_id}/leave", headers=h)
+    assert r.status == 200
+    assert [(i, e) for i, e, _ in households] == [("inst-rita", "dm_group_leave")]
