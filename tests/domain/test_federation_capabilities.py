@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 33
+    assert fc.OURS == 34
 
 
 def test_remote_subscriber_role_capability_threshold():
@@ -234,3 +234,16 @@ def test_gallery_album_sync_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert "Shared gallery albums" in dict(fc.CAPABILITY_FEATURES).values()
+
+
+def test_owner_bound_album_id_capability_threshold():
+    """v_34 — owner-bound album ids. Space-scoped: a behind member
+    household's new albums keep the first-come rule for the whole space."""
+    assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID == 34
+    assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Creator-bound album ids" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Creator-bound album ids" in fc.features_missing_below(33)
+    assert "Creator-bound album ids" not in fc.features_missing_below(34)

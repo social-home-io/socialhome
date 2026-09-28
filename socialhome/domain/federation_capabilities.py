@@ -502,7 +502,29 @@ from __future__ import annotations
 #:   leaves it exactly where it was: the album and its items arrive only
 #:   with the next full sync. Space-scoped, so it appears in the per-space
 #:   compatibility banner.
-OURS: int = 33
+#: * **v_34** (2026-09-28) — a shared album can only be announced by the
+#:   household that created it. A new space album's id is **owner-bound**
+#:   (``federation/owner_bound_id.py``): a UUIDv8-shaped 32-hex id carrying
+#:   a random nonce, a suite nibble and a SHA-256 commitment over
+#:   ``(kind, space_id, owner_user_id, nonce)``. Every receiver path that
+#:   files an album — the ``SPACE_GALLERY_ALBUM_CREATED`` handler and the
+#:   §25.6 sync receiver — recomputes the commitment and refuses a claim of
+#:   that id for any other owner or space, and an unknown suite nibble (no
+#:   fallback). The owner's household needs no extra field: a ``user_id``
+#:   is derived from its home instance's key and the §24.11 authorship rule
+#:   already binds it to the signing household (or the host relaying it),
+#:   so a host relay or a resume replay keeps the id valid. No new field,
+#:   key or column — the id is self-verifying. **Ungated, wire-compatible.**
+#:   Senders always mint bound ids; a sub-v_34 receiver stores one as the
+#:   opaque string ids always were (it just doesn't check the binding).
+#:   **Legacy window:** an id of any other shape (the uuid4 hex every
+#:   earlier album carries, and every album a sub-v_34 household still
+#:   creates) keeps the v_33 first-come rule, logged at INFO when it lands.
+#:   It is not gated on the sender's advertised version — that is
+#:   self-reported, so it could not close the window against a claimant,
+#:   and the id's shape is set by its creator, which is what matters. It
+#:   closes for new albums as their creators upgrade. Space-scoped.
+OURS: int = 34
 
 
 class FederationCapability:
@@ -809,6 +831,14 @@ class FederationCapability:
     #: gap in the per-space compatibility banner.
     MIN_FOR_GALLERY_ALBUM_SYNC = 33
 
+    #: Minimum proto_version that mints owner-bound space album ids and
+    #: refuses a claim of one for anybody but its creator (v_34).
+    #: Informational — senders never gate on it (older receivers store the
+    #: id as an opaque string); it labels the gap in the per-space
+    #: compatibility banner: a behind household's new albums keep the
+    #: first-come rule.
+    MIN_FOR_OWNER_BOUND_ALBUM_ID = 34
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -897,6 +927,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
         "Shared gallery albums",
     ),
+    (
+        FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
+        "Creator-bound album ids",
+    ),
 ]
 
 
@@ -952,6 +986,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
         FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
         FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
+        FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
     }
 )
 

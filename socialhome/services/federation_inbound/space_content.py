@@ -46,6 +46,11 @@ from ...domain.events import (
     GalleryItemUploaded,
 )
 from ...domain.federation import FederationEventType
+from ...federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from ...federation.space_scope import (
     log_cross_space_refusal,
     log_not_applied,
@@ -960,7 +965,11 @@ class SpaceContentInboundHandlers:
         The album is filed under the space the envelope was gated for and
         starts empty and non-system (``create_album_in_space``); its owner
         must be a member seated on the sending household, the same rule as
-        any other create — never the shared bot identity. An album id held
+        any other create — never the shared bot identity. From v_34 the id
+        itself commits to its creator (``federation/owner_bound_id.py``):
+        an owner-bound id claimed for anyone else, or for another space, is
+        refused on sight, so nobody can announce another household's new
+        album first. A legacy (uuid4) id keeps the first-come rule below. An album id held
         here already is only ever a redelivery of that same album: for its
         owner a quiet no-op, for anybody else a refusal. An album deleted
         here (or whose delete overtook this create) is not brought back,
@@ -980,6 +989,20 @@ class SpaceContentInboundHandlers:
             return
         if not _album_text_ok(name, p.get("description")):
             log.debug("SPACE_GALLERY_ALBUM_CREATED %s over the size limits", album_id)
+            return
+        binding = check_owner_bound_id(
+            GALLERY_ALBUM_KIND, album_id, space_id=space_id, owner_user_id=owner
+        )
+        if binding is OwnerBinding.MISMATCH:
+            log.warning(
+                "%s from %s: gallery album id %s is not bound to %r in space "
+                "%s — refusing the write",
+                event.event_type,
+                event.from_instance,
+                album_id,
+                owner,
+                space_id,
+            )
             return
         held = await self._gallery_repo.get_album(album_id)
         if held is not None:
@@ -1039,6 +1062,17 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="gallery album", row_id=album_id
             )
             return
+        if binding is OwnerBinding.LEGACY:
+            # The legacy window (v_34): an id minted before the binding,
+            # or by a household that does not bind yet, carries no proof
+            # of its creator — accepted first-come, as before.
+            log.info(
+                "%s from %s: gallery album %s has a legacy (unbound) id — "
+                "accepted under the first-come rule",
+                event.event_type,
+                event.from_instance,
+                album_id,
+            )
         await self._bus.publish(
             GalleryAlbumCreated(
                 album_id=album_id,
@@ -1128,6 +1162,40 @@ class SpaceContentInboundHandlers:
             )
         )
 
+    async def _may_tombstone(
+        self, event: "FederationEvent", space_id: str, album_id: str
+    ) -> bool:
+        """May this delete of an album not held here yet be remembered?
+
+        Remembering it refuses the album's create later, so for an
+        owner-bound id (v_34) only a household that could delete the album
+        once it lands may do it: a moderator, or the owner's own household
+        — the payload's ``owner_user_id`` must be the one the id commits to
+        and be seated on the sender. A legacy id carries no owner to check
+        and keeps the v_33 behaviour.
+        """
+        owner = str(event.payload.get("owner_user_id") or "")
+        binding = check_owner_bound_id(
+            GALLERY_ALBUM_KIND, album_id, space_id=space_id, owner_user_id=owner
+        )
+        if binding is OwnerBinding.LEGACY:
+            return True
+        if await self._authorship.is_moderator(event, space_id):
+            return True
+        if binding is OwnerBinding.VALID and await self._authorship.acts_for(
+            event, space_id, owner, any_role=True
+        ):
+            return True
+        log.warning(
+            "%s from %s: delete of gallery album %s, not held here, comes "
+            "from neither its owner's household nor a moderator — not "
+            "remembered",
+            event.event_type,
+            event.from_instance,
+            album_id,
+        )
+        return False
+
     async def _on_gallery_album_deleted(self, event: "FederationEvent") -> None:
         """Remove a member's album — and, by cascade, the items in it, with
         their files unless another row still names them.
@@ -1142,7 +1210,9 @@ class SpaceContentInboundHandlers:
         if not space_id or not album_id:
             return
         if await self._gallery_repo.get_album(album_id) is None:
-            if self._album_tombstones is not None:
+            if self._album_tombstones is not None and await self._may_tombstone(
+                event, space_id, album_id
+            ):
                 self._album_tombstones.record(space_id, album_id)
         if not await self._gallery_album_mutable(event, space_id, album_id):
             return

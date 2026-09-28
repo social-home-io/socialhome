@@ -344,6 +344,21 @@ async def test_a_space_album_deleted_fans_out_by_id(env):
     assert fed.sent[0][2] == {"id": "alb-space-A", "space_id": "sp-A"}
 
 
+async def test_a_space_album_delete_names_its_owner(env):
+    """v_34: the owner rides the delete, so a receiver not holding the
+    album yet can check an owner-bound id's delete came from its owner."""
+    bus, fed, gallery = env
+    gallery.albums.pop("alb-space-A")
+    await bus.publish(
+        GalleryAlbumDeleted(album_id="alb-space-A", space_id="sp-A", owner_id="alice")
+    )
+    assert fed.sent[0][2] == {
+        "id": "alb-space-A",
+        "owner_user_id": "alice",
+        "space_id": "sp-A",
+    }
+
+
 async def test_fan_out_goes_through_broadcast_to_space_members(env):
     """One call per event — the member-only fan-out with mesh fallback —
     rather than a hand-rolled loop over the member list."""

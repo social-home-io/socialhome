@@ -106,6 +106,25 @@ updated_at}` inside the encrypted payload. The receiver:
 - treats an id it already holds as a redelivery of that album only for the
   same owner (a quiet no-op) — naming another owner or space is refused at
   WARNING, so an id can never be re-claimed for somebody else;
+- from v_34, checks that a new album's id belongs to its creator. A space
+  album id is **owner-bound** (`federation/owner_bound_id.py`): 32 hex
+  characters shaped as a UUIDv8, carrying a random nonce, a suite nibble
+  (`8` = SHA-256; an unknown one is refused, no fallback) and a commitment
+  over `(kind, space_id, owner_user_id, nonce)`. The receiver recomputes it
+  from the payload and refuses (WARNING) an id claimed for anyone else or
+  for another space, so a shared album can only be announced by the
+  household that created it — the first announcement no longer decides.
+  The owner's household is implied: a `user_id` derives from its home
+  instance's key and the authorship rule below binds it to the signer (or
+  the host relaying it), so a host relay or resume replay stays valid. The
+  §25.6 sync receiver applies the same check. The id is self-verifying, so
+  no field, key or column was added. An id of any other shape (the uuid4
+  of every earlier album, or one a sub-v_34 household creates) keeps the
+  first-come rule, logged at INFO — the legacy window. A delete that
+  arrives before an owner-bound album is remembered only when it comes
+  from a moderator or from the owner's household (the delete now carries
+  `owner_user_id`, which must be the owner the id commits to and be seated
+  on the sender), so nobody else can pre-empt the album with a delete;
 - remembers album deletes (a bounded in-memory record,
   `services/gallery_tombstones.py` — no table), so a delete that overtakes
   its create, or a replay / sync from a household that missed the delete,
@@ -128,14 +147,14 @@ An item carries its full `url` as well as the thumbnail
 outbox, and the `SPACE_MEDIA_BLOB` scope check accepts only files the
 receiver's row names — without the `url` it refused the full-size picture
 of every federated item.
-Sent ungated — see the v_33 row in [`capabilities.md`](./capabilities.md).
+Sent ungated — see the v_33 and v_34 rows in [`capabilities.md`](./capabilities.md).
 
 ```mermaid
 sequenceDiagram
     participant D as Member household (uploader)
     participant C as Other member household
     D->>C: SPACE_GALLERY_ALBUM_CREATED {id, owner_user_id, name, …}
-    Note over C: owner seated on D? file album under the gated space
+    Note over C: id bound to owner + space (v_34)? owner seated on D? file album under the gated space
     D->>C: SPACE_GALLERY_ITEM_CREATED {id, album_id, uploaded_by, url, thumbnail_url, …}
     Note over C: album held for this space + uploader seated on D → row lands
     D->>C: SPACE_MEDIA_BLOB (thumbnail + full bytes, media outbox)
@@ -300,7 +319,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Family | Create | Edit / state change | Delete |
 |---|---|---|---|
 | Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay) | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
-| Gallery albums (v_33) | owner seated on the sender (or the host's relay) | the stored owner's household or a moderator (the payload's owner is ignored) | same as edit |
+| Gallery albums (v_33) | owner seated on the sender (or the host's relay); from v_34 an owner-bound id must commit to that owner and space | the stored owner's household or a moderator (the payload's owner is ignored) | same as edit |
 | Gallery items | uploader seated on the sender (or the host's relay) | — | uploader's household or a moderator |
 | Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |

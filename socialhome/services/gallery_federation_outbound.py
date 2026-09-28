@@ -110,10 +110,16 @@ class GalleryFederationOutbound:
         # deleted here is a user album.
         if event.space_id is None or event.origin_instance_id is not None:
             return
+        payload: dict = {"id": event.album_id}
+        if event.owner_id:
+            # Additive (v_34): a receiver that does not hold the album yet
+            # remembers the delete only from the owner's household or a
+            # moderator; older receivers ignore the field.
+            payload["owner_user_id"] = event.owner_id
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
-            {"id": event.album_id},
+            payload,
         )
 
     async def _fan_out_album(

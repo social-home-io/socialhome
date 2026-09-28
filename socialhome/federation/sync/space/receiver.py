@@ -46,6 +46,7 @@ from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
 from ....domain.task import RecurrenceRule, Task, TaskStatus
 from ....infrastructure.event_bus import EventBus
+from ...owner_bound_id import GALLERY_ALBUM_KIND, OwnerBinding, check_owner_bound_id
 from ....services.inbound_media_store import local_media_ref, local_media_refs
 from .exporter import ALLOWED_RESOURCES, SENTINEL_RESOURCE, parse_chunk
 
@@ -788,26 +789,25 @@ class SpaceSyncReceiver:
         # The album lands in the space this sync stream was gated for —
         # never the record's own ``space_id`` (another space, or NULL =
         # the household gallery), which is just untrusted payload.
-        album = GalleryAlbum(
-            id=str(record["id"]),
-            space_id=space_id,
-            owner_user_id=(
-                # System albums have no human owner; carry NULL.
-                None
-                if record.get("is_system")
-                else (
-                    str(record.get("owner_user_id") or record.get("owner_id") or "")
-                    or None
-                )
-            ),
-            name=str(record.get("name") or ""),
-            description=record.get("description"),
-            cover_item_id=record.get("cover_item_id"),
-            item_count=int(record.get("item_count") or 0),
-            retention_exempt=bool(record.get("retention_exempt", False)),
-            is_system=bool(record.get("is_system", False)),
-            created_at=record.get("created_at"),
-        )
+        album = _album_from_record(record, space_id)
+        if (
+            check_owner_bound_id(
+                GALLERY_ALBUM_KIND,
+                album.id,
+                space_id=space_id,
+                owner_user_id=album.owner_user_id,
+            )
+            is OwnerBinding.MISMATCH
+        ):
+            # An owner-bound id commits to its creator; a record naming
+            # anyone else is a claim on another household's album.
+            log.warning(
+                "sync: gallery album id %s is not bound to %r in space %s — skipped",
+                album.id,
+                album.owner_user_id,
+                space_id,
+            )
+            return
         try:
             await self._gallery_repo.create_album(album)
         except Exception:
@@ -887,6 +887,29 @@ def _log_sync_refusal(what: str, row_id: str, space_id: str) -> None:
 
 
 # ─── Record → domain helpers ────────────────────────────────────────
+
+
+def _album_from_record(record: dict[str, Any], space_id: str) -> GalleryAlbum:
+    """The album a sync record describes, filed under ``space_id``."""
+    return GalleryAlbum(
+        id=str(record["id"]),
+        space_id=space_id,
+        owner_user_id=(
+            # System albums have no human owner; carry NULL.
+            None
+            if record.get("is_system")
+            else (
+                str(record.get("owner_user_id") or record.get("owner_id") or "") or None
+            )
+        ),
+        name=str(record.get("name") or ""),
+        description=record.get("description"),
+        cover_item_id=record.get("cover_item_id"),
+        item_count=int(record.get("item_count") or 0),
+        retention_exempt=bool(record.get("retention_exempt", False)),
+        is_system=bool(record.get("is_system", False)),
+        created_at=record.get("created_at"),
+    )
 
 
 def _post_from_record(r: dict[str, Any]) -> Post | None:

@@ -6,6 +6,12 @@ import pathlib
 
 import pytest
 
+from socialhome.federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+    is_owner_bound,
+)
 from socialhome.config import Config
 from socialhome.media.video_processor import VideoProcessor
 from socialhome.crypto import (
@@ -13,7 +19,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import GalleryAlbumUpdated
+from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -101,6 +107,30 @@ async def test_create_album_member_succeeds(env):
     )
     assert a.name == "Trip 2026"
     assert a.owner_user_id == "b-id"
+
+
+async def test_a_space_album_id_commits_to_its_creator(env):
+    """A space album federates, so its id is owner-bound: it verifies for
+    its creator in its space and for nobody else."""
+    a = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="Trip")
+    assert (
+        check_owner_bound_id(
+            GALLERY_ALBUM_KIND, a.id, space_id="sp-1", owner_user_id="b-id"
+        )
+        is OwnerBinding.VALID
+    )
+    assert (
+        check_owner_bound_id(
+            GALLERY_ALBUM_KIND, a.id, space_id="sp-1", owner_user_id="a-id"
+        )
+        is OwnerBinding.MISMATCH
+    )
+
+
+async def test_a_household_album_keeps_a_plain_id(env):
+    """A household album never leaves the household — nothing to bind."""
+    a = await env.create_album(space_id=None, owner_user_id="b-id", name="Home")
+    assert not is_owner_bound(a.id)
 
 
 async def test_create_album_non_member_403(env):
@@ -240,6 +270,20 @@ async def test_delete_album_owner_succeeds(env):
     await env.delete_album(a.id, actor_user_id="b-id")
     with pytest.raises(GalleryNotFoundError):
         await env.get_album(a.id, actor_user_id="a-id")
+
+
+async def test_delete_album_publishes_its_owner(env):
+    """The owner rides the delete event (v_34) so the federated delete can
+    name it for a receiver that does not hold the album yet."""
+    seen: list[GalleryAlbumDeleted] = []
+
+    async def _on(event: GalleryAlbumDeleted) -> None:
+        seen.append(event)
+
+    env._bus.subscribe(GalleryAlbumDeleted, _on)
+    a = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="X")
+    await env.delete_album(a.id, actor_user_id="a-id")  # the space owner
+    assert [(e.album_id, e.owner_id) for e in seen] == [(a.id, "b-id")]
 
 
 async def test_delete_unknown_album_silent(env):
