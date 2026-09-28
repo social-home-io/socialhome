@@ -54,9 +54,14 @@ class FakeFederation:
         self.own_instance_id = own_instance_id
         self.sent: list[tuple] = []
         self._federation_repo = FakeFedRepo(peer_pk_hex)
+        #: instance_id → advertised proto_version (unknown peers read as 1).
+        self.peer_versions: dict[str, int] = {}
 
     async def send_event(self, *, to_instance_id, event_type, payload, **kw):
         self.sent.append((to_instance_id, event_type, payload))
+
+    async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
+        return self.peer_versions.get(instance_id, 1) >= min_version
 
 
 class FakeWS:

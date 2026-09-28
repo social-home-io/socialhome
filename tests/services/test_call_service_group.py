@@ -20,6 +20,7 @@ from socialhome.services.call_service import (
 
 from ._call_fakes import make_call_service
 
+FET = FederationEventType
 A, B, C = "uid-a", "uid-b", "uid-c"
 
 
@@ -283,9 +284,7 @@ async def test_a_left_participant_gets_no_mesh_offers():
 # ─── cross-household limits ───────────────────────────────────────────────
 
 
-async def test_a_mesh_answer_to_a_remote_callee_is_not_federated():
-    """Group conversations are single-household; an older peer would hand a
-    callee-to-callee answer to the caller, so it never goes on the wire."""
+def _mixed_env():
     env = _env()
     env.users.add_remote(
         user_id="uid-r", instance_id="remote-inst", remote_username="r"
@@ -293,6 +292,13 @@ async def test_a_mesh_answer_to_a_remote_callee_is_not_federated():
     env.convos.add_conversation(
         "mixed", ["alice", "bob"], remotes=[("remote-inst", "r", "uid-r")]
     )
+    return env
+
+
+async def test_a_mesh_answer_to_a_callee_on_an_older_household_is_not_sent():
+    """A sub-v_37 household would hand a callee-to-callee answer to the
+    caller, so it never goes on the wire."""
+    env = _mixed_env()
     r = await env.svc.initiate_call(
         caller_user_id=A,
         conversation_id="mixed",
@@ -305,6 +311,34 @@ async def test_a_mesh_answer_to_a_remote_callee_is_not_federated():
     )
     assert env.fed.sent == []
     assert r["participants"] == sorted([A, B, "uid-r"])
+
+
+async def test_a_mesh_answer_reaches_a_callee_on_another_household():
+    """v_37: the answer names its target, so the remote household hands it
+    to that callee — not to the caller."""
+    env = _mixed_env()
+    env.fed.peer_versions["remote-inst"] = 37
+    r = await env.svc.initiate_call(
+        caller_user_id=A,
+        conversation_id="mixed",
+        call_type="audio",
+        sdp_offers={B: "OB", "uid-r": "OR"},
+    )
+    (ring,) = [p for _i, et, p in env.fed.sent if et is FET.CALL_OFFER]
+    assert ring["participants"] == sorted([A, B, "uid-r"])
+    env.fed.sent.clear()
+    await env.svc.answer_call(
+        call_id=r["call_id"], answerer_user_id=B, sdp_answer="x", to_user_id="uid-r"
+    )
+    ((inst, et, payload),) = env.fed.sent
+    assert (inst, et) == ("remote-inst", FET.CALL_ANSWER)
+    assert payload["from_user"] == B and payload["to_user"] == "uid-r"
+    env.fed.sent.clear()
+    await env.svc.add_ice_candidate(
+        call_id=r["call_id"], from_user_id=B, candidate={"c": 1}, to_user_id="uid-r"
+    )
+    ((inst, et, payload),) = env.fed.sent
+    assert et is FET.CALL_ICE_CANDIDATE and payload["to_user"] == "uid-r"
 
 
 async def test_an_inbound_answer_is_attributed_to_the_named_callee():
