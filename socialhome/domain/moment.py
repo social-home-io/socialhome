@@ -29,6 +29,11 @@ MOMENT_MAX_VIDEO_MS: int = 15_000
 #: receiver bumps and re-fans up to ``MAX_HOPS - 1``.
 MOMENT_MAX_HOPS: int = 3
 
+#: Absolute on-disk lifetime of a moment (``expires_at = created_at + 7 d``).
+#: Also the lifetime of a delete tombstone for a moment this household never
+#: stored — no genuine create can outlive it.
+MOMENT_RETENTION_DAYS: int = 7
+
 
 @dataclass(slots=True, frozen=True)
 class Moment:
@@ -66,6 +71,10 @@ class Moment:
     #: When ``received_via='gfs'``, points at the GFS connection that
     #: relayed the moment. NULL otherwise.
     received_via_gfs_id: str | None = None
+    #: Set when the moment was deleted: the row stays as a content-free
+    #: tombstone until ``expires_at`` so a replayed or late-arriving create
+    #: for the same id is refused. Ordinary reads never return tombstones.
+    deleted_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

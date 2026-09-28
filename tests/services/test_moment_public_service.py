@@ -372,3 +372,105 @@ async def test_inbound_ignores_unknown_frame_type(db):
     )
     # Should be a no-op (no exception).
     await inbound.handle({"type": "irrelevant", "payload": {}}, gfs_id="g1")
+
+
+# ── Deletes stick ────────────────────────────────────────────────────────
+
+
+async def _public_inbound_env(db):
+    from socialhome.repositories.moment_repo import SqliteMomentRepo
+
+    bus = EventBus()
+    created: list[MomentCreated] = []
+    bus.subscribe(MomentCreated, lambda e: created.append(e))
+    follow_repo = SqliteMomentPublicFollowRepo(db)
+    moment_repo = SqliteMomentRepo(db)
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state) "
+        "VALUES('u1','alice','Alice','active')"
+    )
+    await db.enqueue(
+        "INSERT INTO gfs_connections("
+        "id, gfs_instance_id, display_name, public_key, inbox_url, "
+        "status, paired_at) "
+        "VALUES('g1','gfs-1','GFS One','aa'*32,'https://gfs1.example','active', datetime('now'))"
+    )
+    await follow_repo.upsert(
+        follower_user_id="u1",
+        followed_user_id="u-remote",
+        gfs_id="g1",
+        followed_instance_pk=_author_pk_hex(),
+        followed_username="bob",
+        followed_display_name="Bob",
+    )
+    inbound = MomentPublicInbound(
+        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+    )
+    return inbound, moment_repo, created
+
+
+def _public_create(moment_id: str, author: str = "u-remote") -> dict:
+    return _signed_envelope(
+        {
+            "moment_id": moment_id,
+            "author_user_id": author,
+            "content": "hello",
+            "media_url": None,
+            "media_type": None,
+            "duration_ms": None,
+            "parent_moment_id": None,
+            "origin_instance_id": "inst-remote",
+            "created_at": "2026-05-06T12:00:00Z",
+            "expires_at": "2099-05-07T12:00:00Z",
+        }
+    )
+
+
+async def test_inbound_public_delete_before_create_keeps_it_deleted(db):
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    delete = _signed_envelope(
+        {
+            "moment_id": "m-late",
+            "author_user_id": "u-remote",
+            "origin_instance_id": "inst-remote",
+        }
+    )
+    await inbound.handle(
+        {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
+    )
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-late")},
+        gfs_id="g1",
+    )
+    assert await moment_repo.get("m-late") is None
+    assert created == []
+
+
+async def test_inbound_public_replay_after_delete_is_refused(db):
+    inbound, moment_repo, created = await _public_inbound_env(db)
+    create = {"type": "incoming_public_moment", "payload": _public_create("m-r")}
+    await inbound.handle(create, gfs_id="g1")
+    assert await moment_repo.get("m-r") is not None
+    delete = _signed_envelope({"moment_id": "m-r", "author_user_id": "u-remote"})
+    await inbound.handle(
+        {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
+    )
+    created.clear()
+    await inbound.handle(create, gfs_id="g1")
+    assert await moment_repo.get("m-r") is None
+    assert created == []
+
+
+async def test_inbound_public_delete_naming_another_author_is_refused(db):
+    inbound, moment_repo, _ = await _public_inbound_env(db)
+    await inbound.handle(
+        {"type": "incoming_public_moment", "payload": _public_create("m-bob")},
+        gfs_id="g1",
+    )
+    # Signed by the right key, but claiming a different author for the id.
+    await db.enqueue("UPDATE moments SET author_user_id='u-other' WHERE id='m-bob'")
+    delete = _signed_envelope({"moment_id": "m-bob", "author_user_id": "u-remote"})
+    await inbound.handle(
+        {"type": "incoming_public_moment_delete", "payload": delete}, gfs_id="g1"
+    )
+    assert await moment_repo.get("m-bob") is not None

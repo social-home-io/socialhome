@@ -34,7 +34,8 @@ encrypted payload (§25.8.21).
   the absolute cap to 24 h via a ``user_follows`` lookup against the
   viewer's row.
 * The retention scheduler runs hourly and deletes anything past the
-  absolute cap; reactions cascade.
+  absolute cap — live moments and delete tombstones alike; reactions
+  cascade.
 
 ## Hashtags
 
@@ -136,8 +137,8 @@ couple two trust models and leak block-list shape to peers.
   only originate here.
 * **Stored row wins:** a `MOMENT_CREATED` / `MOMENT_DELETED` naming a
   moment id this household holds is applied only when the stored author
-  and origin match the payload; a delete of an id not held here changes
-  nothing locally and travels on (each hop re-checks its own row).
+  and origin match the payload. A delete tombstone (below) still binds
+  its id to its author and origin.
 * **Reactions** (`MOMENT_REACTED` / `_REMOVED`) are honoured only for a
   moment authored here, from a reactor homed on the sending household;
   the published author is the stored one.
@@ -172,6 +173,33 @@ verbatim.
 * **Legacy window** — an unsigned relay whose origin this household holds a
   row for at `proto_version` < 35 is accepted and logged at INFO; it closes
   as origins upgrade. See [`capabilities.md`](./capabilities.md) (v_35).
+
+### Deletes stick
+
+The origin signature proves who made a moment, not that it still exists:
+a relay can hold a genuinely signed `MOMENT_CREATED` and re-send it after
+the origin deleted the moment, and relays deliver out of order, so a
+delete can arrive before its create. A verified delete is therefore never
+forgotten until the moment could no longer be shown anyway:
+
+* **Tombstone.** Every accepted `MOMENT_DELETED` — and a local delete by
+  the author or an admin, and a GFS-relayed public delete — keeps the
+  `moments` row with content, media, tags and reactions wiped and
+  `deleted_at` set. The tombstone keeps the row's own `expires_at`.
+* **Held delete.** A delete for a moment this household has not stored
+  yet inserts the tombstone directly, expiring after the maximum moment
+  lifetime (7 days from receipt; no create for it can outlive that). The
+  delete still travels on, so households that do hold the moment apply it
+  (pure pass-through households tombstone too, so they stop relaying a
+  replay).
+* **Refused create.** A `MOMENT_CREATED` for a tombstoned id is refused
+  (INFO log): not stored, not relayed. The repo's upsert also never
+  writes over a tombstone, so no path can bring one back.
+* **Sweep.** The retention scheduler removes expired tombstones with the
+  expired moments. A create that is itself past its `expires_at` is
+  refused (INFO) and not relayed, so the sweep never re-opens the window.
+* Tombstones live in SQLite and survive a restart
+  (`tests/protocol/test_moment_delete_tombstone.py`).
 
 ## Mermaid sequence — local author posts a moment
 
@@ -233,7 +261,8 @@ instance.
 - Schema: `socialhome/migrations/0001_initial.sql` — `moments`,
   `moment_reactions`, `user_follows`. ``moments.author_user_id`` is
   plain text (no FK) so federated remote-author rows live alongside
-  local rows.
+  local rows. `0057_moment_tombstone.sql` adds `moments.deleted_at`
+  (delete tombstones).
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.
 - Repo: `socialhome/repositories/moment_repo.py`.

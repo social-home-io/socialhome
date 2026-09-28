@@ -19,7 +19,7 @@ import binascii
 import logging
 import pathlib
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import aiofiles
@@ -63,6 +63,7 @@ from ..domain.post import (
     Post,
     PostType,
 )
+from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceConfigEventType, SpaceRole
 from ..domain.highlight import (
@@ -140,6 +141,23 @@ log = logging.getLogger(__name__)
 #: Hold-buffer scope for DMs waiting on their sender's user sync. Not a
 #: space id (those are 32-char key fingerprints), so the keys never mix.
 _DM_HOLD_SCOPE = "dm"
+
+
+def _moment_expired(expires_at: object) -> bool:
+    """True iff ``expires_at`` parses and is already in the past.
+
+    Naive timestamps are UTC. An absent or unparseable value is left to
+    the existing handling (the row is stored and never shown).
+    """
+    if not isinstance(expires_at, str) or not expires_at:
+        return False
+    try:
+        when = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when <= datetime.now(timezone.utc)
 
 
 def _now_iso() -> str:
@@ -2926,8 +2944,6 @@ class FederationInboundService:
         """
         if self._moment_repo is None:
             return
-        from ..domain.moment import Moment
-
         p = event.payload
         moment_id = str(p.get("moment_id") or "")
         author_user_id = str(p.get("author_user_id") or "")
@@ -2947,6 +2963,8 @@ class FederationInboundService:
         if not await self._moment_row_binds(
             event, moment_id, author_user_id, origin_instance_id
         ):
+            return
+        if await self._moment_create_is_stale(event, moment_id):
             return
         # §Momentum-relay-policy: drop banned-source / open-report
         # envelopes before either persist or relay.
@@ -3051,11 +3069,20 @@ class FederationInboundService:
             event, moment_id, author_user_id, origin_instance_id
         ):
             return
-        # A moment we never stored is nothing to delete here; the delete
-        # still travels on so a household that does hold it can apply it
-        # (and runs these same checks against its own row).
-        if await self._moment_repo.get(moment_id) is not None:
-            await self._moment_repo.delete(moment_id)
+        # Deletes stick: the row stays as a tombstone until the moment
+        # expires, so a replayed create is refused. A moment we never
+        # stored (the delete outran its create on another relay path) is
+        # held the same way, for the longest a moment can live. Either way
+        # the delete travels on so households that hold it apply it too.
+        removed = await self._moment_repo.tombstone(
+            moment_id,
+            author_user_id=author_user_id,
+            origin_instance_id=origin_instance_id,
+            expires_at=(
+                datetime.now(timezone.utc) + timedelta(days=MOMENT_RETENTION_DAYS)
+            ).isoformat(),
+        )
+        if removed:
             await self._bus.publish(
                 MomentDeleted(
                     moment_id=moment_id,
@@ -3234,6 +3261,36 @@ class FederationInboundService:
             )
         return True
 
+    async def _moment_create_is_stale(
+        self,
+        event: "FederationEvent",
+        moment_id: str,
+    ) -> bool:
+        """A create for a deleted or expired moment is never applied.
+
+        The origin signature proves who made a moment, not that it still
+        exists, so a relay can re-send an old signed create. Refused while
+        the delete's tombstone exists (until the moment's ``expires_at``);
+        once the tombstone is swept the replay is past its own
+        ``expires_at`` and refused on that. Neither is applied or relayed.
+        """
+        assert self._moment_repo is not None  # callers gate
+        stored = await self._moment_repo.get(moment_id, include_deleted=True)
+        reason: str | None = None
+        if stored is not None and stored.deleted_at is not None:
+            reason = "the moment was deleted"
+        elif _moment_expired(event.payload.get("expires_at")):
+            reason = "the moment has expired"
+        if reason is None:
+            return False
+        log.info(
+            "MOMENT_CREATED from %s: %s — refusing (moment=%s)",
+            event.from_instance,
+            reason,
+            moment_id,
+        )
+        return True
+
     async def _moment_row_binds(
         self,
         event: "FederationEvent",
@@ -3249,7 +3306,7 @@ class FederationInboundService:
         """
         if self._moment_repo is None:  # pragma: no cover — callers gate
             return False
-        stored = await self._moment_repo.get(moment_id)
+        stored = await self._moment_repo.get(moment_id, include_deleted=True)
         if stored is None or (
             stored.author_user_id == author_user_id
             and stored.origin_instance_id == origin_instance_id
