@@ -721,6 +721,37 @@ async def test_unpairing_gate_refuses_even_when_the_nudge_fails():
         )
 
 
+async def test_unpairing_gate_logs_info_only_when_it_pulled_the_unpair_forward(
+    caplog,
+):
+    """A hostile ex-peer can send envelopes as fast as it likes; only the
+    refusal that actually expedited the UNPAIR logs at INFO, every repeat
+    (the nudge found nothing parked) drops to DEBUG."""
+    results = iter([True, False, False])
+
+    async def _nudge(iid: str) -> bool:
+        return next(results)
+
+    step = make_check_unpairing(on_refused=_nudge)
+
+    def _refuse():
+        return step(
+            InboundContext(
+                envelope=_minimal_envelope(
+                    event_type=FederationEventType.PRESENCE_UPDATED.value
+                ),
+                instance=_StatusInstance(PairingStatus.UNPAIRING),
+            )
+        )
+
+    with caplog.at_level("DEBUG", logger="socialhome.federation.inbound_validator"):
+        for _ in range(3):
+            with pytest.raises(ValueError, match="No instance found"):
+                await _refuse()
+    levels = [r.levelname for r in caplog.records if "UNPAIR" in r.getMessage()]
+    assert levels == ["INFO", "DEBUG", "DEBUG"]
+
+
 async def test_the_space_writer_gate_is_a_step_in_the_shipped_pipeline():
     """Mutation guard: the Follower gate has to be IN the chain — and
     LAST, so the replay-id is persisted whether or not the write is kept

@@ -385,10 +385,14 @@ class FederationService:
         steps.extend(self.post_decrypt_gate_steps())
         return steps
 
-    async def _on_tombstone_contact(self, instance_id: str) -> None:
+    async def _on_tombstone_contact(self, instance_id: str) -> bool:
         """An unpair tombstone just proved it is online — send our queued
-        ``UNPAIR`` on the next outbox tick rather than after its backoff."""
-        await self._outbox_repo.expedite(instance_id, FederationEventType.UNPAIR)
+        ``UNPAIR`` on the next outbox tick rather than after its backoff.
+        Returns whether it was parked (``False`` = already due)."""
+        return await self._outbox_repo.expedite(
+            instance_id,
+            FederationEventType.UNPAIR,
+        )
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         """The gates that judge a DECRYPTED event, in pipeline order.

@@ -671,7 +671,36 @@ async def test_expedite_pulls_only_pending_rows_of_that_type_forward(env):
     for eid in (unpair, other, elsewhere):
         await repo.reschedule(eid, far, attempts=9)
 
-    await repo.expedite("peer", FederationEventType.UNPAIR)
+    assert await repo.expedite("peer", FederationEventType.UNPAIR) is True
 
     due = {e.id for e in await repo.list_due(10)}
     assert due == {unpair}
+
+
+async def test_expedite_is_a_no_op_once_the_row_is_already_due(env):
+    """Debounce: a hostile ex-peer hammering our inbox must not turn every
+    refused envelope into a DB write. Once the UNPAIR is due, a repeat
+    nudge reads, finds nothing parked in the future, and writes nothing."""
+    repo = env.outbox_repo
+    eid = await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.UNPAIR,
+        payload_json="{}",
+    )
+    # Freshly queued = due now: nothing to pull forward.
+    assert await repo.expedite("peer", FederationEventType.UNPAIR) is False
+    await repo.reschedule(eid, "2999-01-01T00:00:00+00:00", attempts=3)
+    assert await repo.expedite("peer", FederationEventType.UNPAIR) is True
+    writes: list[str] = []
+    real_enqueue = env.db.enqueue
+
+    async def _spy(sql, *a, **kw):
+        writes.append(sql)
+        return await real_enqueue(sql, *a, **kw)
+
+    env.db.enqueue = _spy
+    try:
+        assert await repo.expedite("peer", FederationEventType.UNPAIR) is False
+    finally:
+        env.db.enqueue = real_enqueue
+    assert writes == []

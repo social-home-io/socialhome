@@ -81,7 +81,7 @@ class AbstractOutboxRepo(Protocol):
         self,
         instance_id: str,
         event_type: FederationEventType,
-    ) -> None: ...
+    ) -> bool: ...
 
 
 class SqliteOutboxRepo:
@@ -342,19 +342,34 @@ class SqliteOutboxRepo:
         self,
         instance_id: str,
         event_type: FederationEventType,
-    ) -> None:
+    ) -> bool:
         """Make ``instance_id``'s pending ``event_type`` rows due now.
 
         Used when the peer has just proven it is back (it sent us an
         envelope) so a row parked on a long backoff goes out on the next
         drain tick instead of hours later. Attempt counts are untouched —
         a failure still backs off from where it was.
+
+        Debounced: only rows parked in the *future* are touched, and the
+        write is skipped entirely when there are none. The caller is the
+        inbound pipeline, so a sender repeating envelopes must cost one
+        read each, not a queued write. Returns whether a row moved.
         """
+        parked = await self._db.fetchone(
+            "SELECT 1 FROM federation_outbox "
+            "WHERE instance_id=? AND event_type=? AND status='pending' "
+            "AND datetime(next_attempt_at) > datetime('now') LIMIT 1",
+            (instance_id, event_type.value),
+        )
+        if parked is None:
+            return False
         await self._db.enqueue(
             "UPDATE federation_outbox SET next_attempt_at=? "
-            "WHERE instance_id=? AND event_type=? AND status='pending'",
+            "WHERE instance_id=? AND event_type=? AND status='pending' "
+            "AND datetime(next_attempt_at) > datetime('now')",
             (datetime.now(timezone.utc).isoformat(), instance_id, event_type.value),
         )
+        return True
 
 
 def _row_to_entry(row: dict) -> OutboxEntry:

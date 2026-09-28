@@ -374,7 +374,7 @@ def make_check_peer_class() -> InboundStep:
 
 def make_check_unpairing(
     *,
-    on_refused: Callable[[str], Awaitable[None]] | None = None,
+    on_refused: Callable[[str], Awaitable[bool]] | None = None,
 ) -> InboundStep:
     """Step 4b: an unpair tombstone may send us ``UNPAIR`` and nothing else.
 
@@ -389,6 +389,12 @@ def make_check_unpairing(
     Runs after :func:`make_verify_signature`, so ``on_refused`` (pull our
     queued ``UNPAIR`` forward: the peer has just proven it is online) fires
     only for the genuine peer, never for a stranger replaying the inbox id.
+    It returns whether the ``UNPAIR`` was actually pulled forward; only that
+    refusal logs at INFO. Every repeat until our next failed attempt parks
+    the row again logs at DEBUG, so an ex-peer that keeps sending cannot
+    turn each envelope into an INFO line (nor, see
+    :meth:`~socialhome.repositories.outbox_repo.SqliteOutboxRepo.expedite`,
+    into a DB write).
     """
 
     async def check_unpairing(ctx: InboundContext) -> None:
@@ -397,20 +403,23 @@ def make_check_unpairing(
         if ctx.envelope["event_type"] == FederationEventType.UNPAIR.value:
             return
         sender = getattr(ctx.instance, "from_instance", "")
-        log.info(
-            "inbound: refusing %r from %s — unpaired, UNPAIR still pending",
-            ctx.envelope["event_type"],
-            sender,
-        )
+        expedited = False
         if on_refused is not None and sender:
             try:
-                await on_refused(sender)
+                expedited = await on_refused(sender)
             except Exception:  # noqa: BLE001 — a nudge must never change the verdict
                 log.warning(
                     "inbound: could not expedite the UNPAIR to %s",
                     sender,
                     exc_info=True,
                 )
+        log.log(
+            logging.INFO if expedited else logging.DEBUG,
+            "inbound: refusing %r from %s — unpaired, UNPAIR still pending%s",
+            ctx.envelope["event_type"],
+            sender,
+            " (sending it now)" if expedited else "",
+        )
         ref = ctx.inbox_id or ctx.instance_id
         raise ValueError(f"No instance found for {ref!r}")
 
