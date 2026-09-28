@@ -130,6 +130,36 @@ async def test_resolve_conflict_bad_json_400(client):
     assert r.status == 400
 
 
+async def test_a_subscriber_cannot_write_space_pages(client):
+    """Subscribers read a space; they never create, edit, delete pages or
+    settle a page conflict."""
+    page = await _seed_conflict(client)
+    await client._db.enqueue(
+        "UPDATE space_members SET role='subscriber' WHERE space_id='sp-1'"
+        " AND user_id=?",
+        (client._uid,),
+    )
+    base = "/api/spaces/sp-1/pages"
+    headers = _auth(client._tok)
+    attempts = [
+        client.post(base, json={"title": "t", "content": "c"}, headers=headers),
+        client.patch(f"{base}/{page.id}", json={"content": "x"}, headers=headers),
+        client.delete(f"{base}/{page.id}", headers=headers),
+        client.post(
+            f"{base}/{page.id}/resolve-conflict",
+            json={"resolution": "theirs"},
+            headers=headers,
+        ),
+    ]
+    for attempt in attempts:
+        assert (await attempt).status == 403
+    current = await client.app[page_repo_key].get_space_page(page.id, space_id="sp-1")
+    assert current.content == "mine-version"
+    # Reading stays open.
+    r = await client.get(f"{base}/{page.id}", headers=headers)
+    assert r.status == 200
+
+
 async def test_resolve_conflict_requires_space_membership(client):
     """A signed-in user who is not in the space cannot settle its conflict."""
     page = await _seed_conflict(client, member=False)

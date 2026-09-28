@@ -259,7 +259,7 @@ inside the encrypted payload and render the same map card.
 | POST | `/api/pages/{id}/revert` | Revert to earlier version. |
 | POST | `/api/pages/{id}/{delete-request\|delete-approve\|delete-cancel}` | Two-admin delete. |
 | GET / POST / PATCH / DELETE | `/api/spaces/{id}/pages[/{pid}]` | Space-scoped pages. |
-| POST | `/api/spaces/{id}/pages/{pid}/resolve-conflict` | Force-pick in a conflict. Space members only; acts on that space's page. |
+| POST | `/api/spaces/{id}/pages/{pid}/resolve-conflict` | Force-pick in a conflict. Writing members only (not subscribers); acts on that space's page. |
 
 **Embedded media URLs.** Page `content` is a markdown body. Any
 `/api/media/{filename}` reference inside it (typically pasted from the

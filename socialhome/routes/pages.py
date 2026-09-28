@@ -36,6 +36,7 @@ from ..repositories.page_repo import (
     new_page,
 )
 from ..security import error_response
+from ..services.space_service import SpaceService
 from .base import BaseView
 
 
@@ -466,12 +467,17 @@ class PageDeleteCancelView(BaseView):
 class SpacePageCollectionView(BaseView):
     """GET/POST /api/spaces/{id}/pages — list or create space pages."""
 
-    async def _require_space_member(self, space_id: str, user_id: str) -> bool:
+    async def _require_space_member(
+        self, space_id: str, user_id: str, *, write: bool = False
+    ) -> bool:
         space_repo = self.svc(space_repo_key)
         member = await space_repo.get_member(space_id, user_id)
         if member is None:
             return False
         await self.require_space_feature(space_id, "pages")
+        if write:
+            # Subscribers read pages; they never write them.
+            SpaceService._assert_writable_member(member, action="edit pages")
         return True
 
     async def get(self) -> web.Response:
@@ -486,7 +492,7 @@ class SpacePageCollectionView(BaseView):
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_space_member(space_id, ctx.user_id):
+        if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         await self.require_household_feature("pages")
         repo = self.svc(page_repo_key)
@@ -517,20 +523,21 @@ class SpacePageCollectionView(BaseView):
 class SpacePageDetailView(BaseView):
     """GET/PATCH/DELETE /api/spaces/{id}/pages/{pid}."""
 
-    async def _require_space_member(self, space_id: str, user_id: str) -> bool:
+    async def _require_space_member(
+        self, space_id: str, user_id: str, *, write: bool = False
+    ) -> bool:
         space_repo = self.svc(space_repo_key)
         member = await space_repo.get_member(space_id, user_id)
         if member is None:
             return False
         await self.require_space_feature(space_id, "pages")
+        if write:
+            # Subscribers read pages; they never write them.
+            SpaceService._assert_writable_member(member, action="edit pages")
         return True
 
     async def _load(self, space_id: str, page_id: str):
-        repo = self.svc(page_repo_key)
-        p = await repo.get(page_id)
-        if p is None or p.space_id != space_id:
-            return None
-        return p
+        return await self.svc(page_repo_key).get_space_page(page_id, space_id=space_id)
 
     async def get(self) -> web.Response:
         ctx = self.user
@@ -545,7 +552,7 @@ class SpacePageDetailView(BaseView):
     async def patch(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_space_member(space_id, ctx.user_id):
+        if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
@@ -602,7 +609,7 @@ class SpacePageDetailView(BaseView):
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_space_member(space_id, ctx.user_id):
+        if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
@@ -622,9 +629,11 @@ class PageConflictView(BaseView):
         conflict_svc = self.svc(page_conflict_service_key)
         space_id = self.match("id")
         page_id = self.match("pid")
-        if await self.svc(space_repo_key).get_member(space_id, ctx.user_id) is None:
+        member = await self.svc(space_repo_key).get_member(space_id, ctx.user_id)
+        if member is None:
             return error_response(403, "FORBIDDEN", "Not a space member.")
         await self.require_space_feature(space_id, "pages")
+        SpaceService._assert_writable_member(member, action="edit pages")
         body = await self.body()
         resolution = str(body.get("resolution") or "")
         merged = body.get("content")
