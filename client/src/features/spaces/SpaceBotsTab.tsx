@@ -13,8 +13,9 @@
  * reveal panel is deliberately loud (toast + copy button + warning) so a
  * user can't miss it.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
+import { ws, type WsEvent } from '@/ws'
 import { Button } from '@/components/Button'
 import { BotAvatar } from '@/components/BotAvatar'
 import { showToast } from '@/components/Toast'
@@ -46,19 +47,40 @@ export function SpaceBotsTab({
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<SpaceBotWithToken | null>(null)
 
-  const reload = async () => {
-    setLoading(true)
+  /** ``quiet`` is the live-refresh path: no spinner, and a failed
+   *  refresh keeps the list on screen instead of blanking it. */
+  const reload = async ({ quiet = false } = {}) => {
+    if (!quiet) setLoading(true)
     try {
       setBots(await api.get(`/api/spaces/${spaceId}/bots`) as SpaceBot[])
     } catch (err: unknown) {
+      if (quiet) return
       showToast(`Failed to load bots: ${(err as Error).message}`, 'error')
       setBots([])
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }
 
   useEffect(() => { void reload() }, [spaceId])
+
+  // Live: another member / device created, renamed, deleted or rotated
+  // a bot in this space. The frames are thin nudges (``bot`` is the
+  // token-free public shape), so refetch the canonical list. A token
+  // reveal on screen stays put — it lives in its own state.
+  const reloadRef = useRef(reload)
+  reloadRef.current = reload
+  useEffect(() => {
+    const onBotFrame = (e: WsEvent) => {
+      if ((e.data as { space_id?: string }).space_id !== spaceId) return
+      void reloadRef.current({ quiet: true })
+    }
+    const offs = [
+      'space.bot.created', 'space.bot.updated',
+      'space.bot.deleted', 'space.bot.token_rotated',
+    ].map(type => ws.on(type, onBotFrame))
+    return () => { offs.forEach(off => off()) }
+  }, [spaceId])
 
   const spaceBots = bots.filter(b => b.scope === 'space')
   const memberBots = bots.filter(b => b.scope === 'member')

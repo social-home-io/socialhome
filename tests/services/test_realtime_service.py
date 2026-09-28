@@ -16,6 +16,7 @@ from socialhome.domain.events import (
     ConnectionUnreachable,
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
     PeerTransportChanged,
@@ -701,6 +702,38 @@ async def test_gallery_space_album_fans_to_members_only(env):
     )
     assert any("gallery.item_uploaded" in m for m in member.sent)
     assert nonmember.sent == []
+
+
+async def test_gallery_album_updated_fans_to_space_members_only(env):
+    """A rename / cover change of a space album pushes a thin
+    ``gallery.album_updated`` frame to that space's members only — the
+    same audience as the other gallery frames. Covers both a local edit
+    and an inbound-federated one (``origin_instance_id`` set)."""
+    svc, bus, ws = env
+    member, nonmember = _FakeWS(), _FakeWS()
+    await ws.register("u1", member)  # member of sp-1
+    await ws.register("u9", nonmember)
+    await bus.publish(GalleryAlbumUpdated(album_id="al-3", space_id="sp-1"))
+    await bus.publish(
+        GalleryAlbumUpdated(
+            album_id="al-3", space_id="sp-1", origin_instance_id="peer-1"
+        )
+    )
+    expected = {"type": "gallery.album_updated", "album_id": "al-3", "space_id": "sp-1"}
+    assert [json.loads(m) for m in member.sent] == [expected, expected]
+    assert nonmember.sent == []
+
+
+async def test_gallery_household_album_updated_fans_to_household(env):
+    svc, bus, ws = env
+    s1, stranger = _FakeWS(), _FakeWS()
+    await ws.register("u1", s1)
+    await ws.register("u9", stranger)  # not an active local user
+    await bus.publish(GalleryAlbumUpdated(album_id="al-4", space_id=None))
+    assert [json.loads(m) for m in s1.sent] == [
+        {"type": "gallery.album_updated", "album_id": "al-4", "space_id": None}
+    ]
+    assert stranger.sent == []
 
 
 async def test_user_status_changed_fans_to_household(env):

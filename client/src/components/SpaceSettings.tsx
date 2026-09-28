@@ -5,6 +5,8 @@
 import { useEffect, useState } from 'preact/hooks'
 import { signal, useSignal } from '@preact/signals'
 import { api } from '@/api'
+import { addBase } from '@/baseUrl'
+import { clearLocalDissolve, markLocalDissolve } from '@/store/spaces'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { EmojiField } from './EmojiField'
@@ -310,6 +312,10 @@ export function SpaceSettings({
   }
 
   const dissolve = async () => {
+    // A sole admin's dissolve executes inside this request, so the
+    // server's ``dissolved`` frame arrives before the response: mark it
+    // as ours so the live handlers leave the toast + redirect to us.
+    markLocalDissolve(space.id)
     try {
       // Dissolving is gated behind multi-admin approval (v_16): this opens
       // a proposal. It executes immediately only when the caller is the
@@ -320,14 +326,19 @@ export function SpaceSettings({
       }>(`/api/spaces/${space.id}/proposals`, { action: 'dissolve' })
       if (res?.proposal?.status === 'executed') {
         showToast('Space dissolved', 'info')
-        location.href = '/spaces'
+        // ``addBase`` keeps the hard navigate inside the ingress prefix.
+        window.location.href = addBase('/spaces')
       } else {
+        // Only proposed: when the other admins approve later, the
+        // dissolve frame must still move this tab off the space.
+        clearLocalDissolve(space.id)
         showToast(
           'Dissolve proposed — it needs a majority of admins to approve.',
           'info',
         )
       }
     } catch (e: any) {
+      clearLocalDissolve(space.id)
       showToast(e.message || 'Failed to dissolve', 'error')
     }
   }

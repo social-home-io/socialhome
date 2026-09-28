@@ -29,6 +29,7 @@ import { SpaceBotsTab } from './SpaceBotsTab'
 import { SpaceLinksTab } from './SpaceLinksTab'
 import { SpaceAgeGating } from '@/features/child-protection/SpaceAgeGating'
 import { confirmDialog } from '@/components/confirm'
+import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 
 type SettingsTab = 'general' | 'about' | 'theme' | 'links' | 'age' | 'bots'
 
@@ -76,7 +77,9 @@ export default function SpaceSettingsPage() {
   const [canAdmin, setCanAdmin] = useState(false)
   const [isMember, setIsMember] = useState(false)
 
-  const reload = async () => {
+  /** ``quiet`` is the live-refresh path: a failed refetch keeps the
+   *  page as it is instead of flipping to "Space not found". */
+  const reload = async ({ quiet = false } = {}) => {
     try {
       const [detail, members] = await Promise.all([
         api.get(`/api/spaces/${spaceId}`) as Promise<SpaceDetail>,
@@ -91,6 +94,7 @@ export default function SpaceSettingsPage() {
       setCanAdmin(mine?.role === 'owner' || mine?.role === 'admin')
       setIsMember(Boolean(mine))
     } catch {
+      if (quiet) return
       setSpace(null)
       setCanAdmin(false)
       setIsMember(false)
@@ -100,6 +104,9 @@ export default function SpaceSettingsPage() {
   }
 
   useEffect(() => { void reload() }, [spaceId])
+  // Another admin renamed / reconfigured the space, or changed roles →
+  // refresh the detail + tab gating; a dissolve leaves for the list.
+  useSpaceConfigWs(spaceId, () => { void reload({ quiet: true }) })
 
   if (loading) return <Spinner />
 

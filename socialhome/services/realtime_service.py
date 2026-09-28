@@ -31,6 +31,7 @@ from ..domain.events import (
     ConnectionUnreachable,
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
     CalendarEventDeleted,
@@ -305,6 +306,7 @@ class RealtimeService:
         self._bus.subscribe(ConnectionUnreachable, self._on_connection_unreachable)
         self._bus.subscribe(PeerUnpaired, self._on_peer_unpaired)
         self._bus.subscribe(GalleryAlbumCreated, self._on_gallery_album_created)
+        self._bus.subscribe(GalleryAlbumUpdated, self._on_gallery_album_updated)
         self._bus.subscribe(GalleryAlbumDeleted, self._on_gallery_album_deleted)
         self._bus.subscribe(GalleryItemUploaded, self._on_gallery_item_uploaded)
         self._bus.subscribe(GalleryItemDeleted, self._on_gallery_item_deleted)
@@ -1250,6 +1252,19 @@ class RealtimeService:
         await self._broadcast_gallery(
             {
                 "type": "gallery.album_created",
+                "album_id": event.album_id,
+                "space_id": event.space_id,
+            },
+            event.space_id,
+        )
+
+    async def _on_gallery_album_updated(self, event: GalleryAlbumUpdated) -> None:
+        # Rename / description / cover change — local edits and the ones
+        # a federation inbound handler applied (``origin_instance_id``)
+        # alike, so an open album header follows a remote rename too.
+        await self._broadcast_gallery(
+            {
+                "type": "gallery.album_updated",
                 "album_id": event.album_id,
                 "space_id": event.space_id,
             },
