@@ -177,6 +177,8 @@ class AbstractSpaceRepo(Protocol):
         *,
         redeemer_user_id: str | None = None,
     ) -> dict | None: ...
+    async def release_invite_token_use(self, token: str) -> None: ...
+    async def get_invite_token_space_id(self, token: str) -> str | None: ...
     async def list_live_invite_tokens(self, space_id: str) -> list[dict]: ...
     async def delete_invite_token(self, space_id: str, token: str) -> dict | None: ...
 
@@ -1385,6 +1387,45 @@ class SqliteSpaceRepo:
             }
 
         return await self._db.transact(_run)
+
+    async def release_invite_token_use(self, token: str) -> None:
+        """Give back one use :meth:`consume_invite_token` took.
+
+        The compensating half of a cross-household redeem whose ACK never
+        reached the joiner (the connection server refused the reply, or
+        the space did not fit it): the joiner holds nothing, so the use it
+        was charged is handed back and the link keeps working. Capped at
+        ``uses_total`` in the same statement, so a stray release can never
+        mint a use the admin did not grant; a revoked (deleted) token is
+        simply not there to release. Only ever called for a use the SAME
+        redeem just consumed — the counter stays single-use under
+        concurrency because the consume itself is the atomic guard.
+        """
+        await self._db.enqueue(
+            """
+            UPDATE space_invite_tokens
+               SET uses_remaining = uses_remaining + 1
+             WHERE token=?
+               AND (uses_total IS NULL OR uses_remaining < uses_total)
+            """,
+            (token,),
+        )
+
+    async def get_invite_token_space_id(self, token: str) -> str | None:
+        """The space a token was minted for, whatever state it is in.
+
+        Unlike :meth:`get_live_invite_token` this also answers for a spent
+        or expired token. Its caller is the retry of a redeem whose ACK
+        was lost after the issuer committed it: the redeemer is already
+        seated, the single use is gone, and the issuer answers with the
+        ACK again rather than a DENY. A revoked (deleted) token reads
+        ``None``. A read — never an authorization on its own.
+        """
+        row = await self._db.fetchone(
+            "SELECT space_id FROM space_invite_tokens WHERE token=?",
+            (token,),
+        )
+        return str(row[0]) if row is not None else None
 
     async def list_live_invite_tokens(self, space_id: str) -> list[dict]:
         """Every still-redeemable invite token of ``space_id``, newest first.

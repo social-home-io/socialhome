@@ -42,6 +42,8 @@ import asyncio
 import logging
 import secrets
 import uuid
+import weakref
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -195,6 +197,32 @@ BOOTSTRAP_BODY_INBOUND_LIMIT: int = 60
 RELAY_ENVELOPE_INBOUND_LIMIT: int = 600
 
 
+@dataclass(slots=True, frozen=True)
+class _SeatReservation:
+    """What one not-yet-committed redeem has written on the issuer.
+
+    Module-local DTO (never escapes this coordinator). A redeem spends the
+    token use and writes the remote seat up front — the use is the atomic
+    single-use guard and the seat has to be in the roster the ACK's
+    snapshot carries — but everything anyone ELSE can observe (the
+    ``SpaceRemoteSeatLive`` event, the v_23 roster gossip, the
+    ``space_instances`` fan-out target, a pending admin elevation) waits
+    until the ACK has been handed to its transport:
+    :meth:`SpaceInviteTokenRedeemCoordinator._commit_redeem` runs those,
+    :meth:`SpaceInviteTokenRedeemCoordinator._rollback_redeem` undoes the
+    up-front writes when the ACK cannot be delivered.
+    """
+
+    token: str
+    space_id: str
+    instance_id: str
+    user_id: str
+    user_pk: str | None
+    display_name: str | None
+    seat: str
+    pending_admin: bool
+
+
 class SpaceInviteTokenRedeemCoordinator:
     """Coordinator for the cross-instance ``SPACE_INVITE_TOKEN_REDEEM``
     round-trip.
@@ -229,6 +257,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_bootstrap_hints",
         "_rate_limiter",
         "_space_service",
+        "_redeem_locks",
     )
 
     def __init__(
@@ -303,6 +332,21 @@ class SpaceInviteTokenRedeemCoordinator:
         #: signs roster gossip. Optional so legacy fixtures still build a
         #: coordinator; unset simply means today's host-only seating.
         self._space_service: Any = None
+        #: One lock per redeeming household, held from the "already
+        #: seated?" check to the commit / rollback, so two redeems from the
+        #: SAME household cannot interleave (a rollback of one undoing the
+        #: seat the other committed). Weak values: a lock lives only while
+        #: a redeem holds or awaits it.
+        self._redeem_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+
+    def _redeem_lock(self, instance_id: str) -> asyncio.Lock:
+        lock = self._redeem_locks.get(instance_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._redeem_locks[instance_id] = lock
+        return lock
 
     def attach_space_service(self, space_service: Any) -> None:
         """Wire the roster-gossip seam (v_23).
@@ -791,34 +835,59 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return
 
-        ack_payload, deny_reason = await self._consume_seat_and_build_ack(
-            token=token,
-            redeemer_instance_id=event.from_instance,
-            redeemer_user_id=redeemer_user_id,
-            redeemer_pk=redeemer_pk,
-            redeemer_display=redeemer_display,
-        )
-        if ack_payload is None:
-            await self._send_deny(
-                event.from_instance,
-                nonce,
-                deny_reason or REDEEM_DENY_REASON,
-                routed_route_id=routed_route_id,
+        async with self._redeem_lock(event.from_instance):
+            (
+                ack_payload,
+                deny_reason,
+                reservation,
+            ) = await self._consume_seat_and_build_ack(
+                token=token,
+                redeemer_instance_id=event.from_instance,
+                redeemer_user_id=redeemer_user_id,
+                redeemer_pk=redeemer_pk,
+                redeemer_display=redeemer_display,
             )
-            return
-        ack_payload = {"redeem_nonce": nonce, **ack_payload}
-        if routed_route_id is not None and self._routed_handler is not None:
-            await self._routed_handler.send_routed_reply(
-                route_id=routed_route_id,
-                inner_event_type=(FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK),
-                inner_payload=ack_payload,
-            )
-        else:
-            await self._federation.send_event(
-                to_instance_id=event.from_instance,
-                event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
-                payload=ack_payload,
-            )
+            if ack_payload is None:
+                await self._send_deny(
+                    event.from_instance,
+                    nonce,
+                    deny_reason or REDEEM_DENY_REASON,
+                    routed_route_id=routed_route_id,
+                )
+                return
+            ack_payload = {"redeem_nonce": nonce, **ack_payload}
+            try:
+                if routed_route_id is not None and self._routed_handler is not None:
+                    await self._routed_handler.send_routed_reply(
+                        route_id=routed_route_id,
+                        inner_event_type=(
+                            FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK
+                        ),
+                        inner_payload=ack_payload,
+                    )
+                else:
+                    # A direct send that misses the peer lands in the
+                    # durable outbox and is retried, so it is committed
+                    # like a delivered one: the ACK is on its way. If it
+                    # arrives after the redeemer gave up, the redeemer's
+                    # retry is answered again (see
+                    # :meth:`_reack_seated_redeemer`).
+                    await self._federation.send_event(
+                        to_instance_id=event.from_instance,
+                        event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+                        payload=ack_payload,
+                    )
+            except Exception:
+                log.exception(
+                    "invite redeem: ACK to %s could not be sent — rolling the "
+                    "redeem back",
+                    event.from_instance,
+                )
+                if reservation is not None:
+                    await self._rollback_redeem(reservation)
+                return
+            if reservation is not None:
+                await self._commit_redeem(reservation)
 
     async def _consume_seat_and_build_ack(
         self,
@@ -829,7 +898,7 @@ class SpaceInviteTokenRedeemCoordinator:
         redeemer_pk: str | None,
         redeemer_display: str | None,
         bootstrap: bool = False,
-    ) -> tuple[dict | None, str | None]:
+    ) -> tuple[dict | None, str | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
 
         ``bootstrap`` marks the §D2b invite-link leg, whose ACK rides the
@@ -837,8 +906,16 @@ class SpaceInviteTokenRedeemCoordinator:
         icon are bounded to ``SPACE_*_BOOTSTRAP_MAX_BYTES`` instead of the
         peer-envelope defaults.
 
-        Returns ``(ack_body, None)`` on success or ``(None, reason)`` on
-        every denial. Shared verbatim by the §D2 event path
+        Returns ``(ack_body, None, reservation)`` on success or
+        ``(None, reason, None)`` on every denial. The redeem is NOT
+        committed yet: the caller hands the ACK to its transport first and
+        then calls :meth:`_commit_redeem` — or :meth:`_rollback_redeem`
+        when the ACK cannot be delivered, so a reply the relay refused
+        never leaves a phantom member behind or burns the link. A
+        household that is already seated (its earlier ACK was lost after
+        the issuer committed) gets the ACK again with ``reservation=None``
+        — nothing is spent, written or gossiped twice, and there is
+        nothing to commit or roll back. Shared verbatim by the §D2 event path
         (:meth:`_on_redeem`) and the §D2b bootstrap path so the atomic
         token consume, the §13.7 ban check and the remote-member seating
         can never diverge between them.
@@ -855,6 +932,15 @@ class SpaceInviteTokenRedeemCoordinator:
         a surface anybody holding a link can reach. The detail lives in
         ``log.exception`` on the issuer, where it belongs.
         """
+        reack = await self._reack_seated_redeemer(
+            token,
+            redeemer_instance_id=redeemer_instance_id,
+            redeemer_user_id=redeemer_user_id,
+            bootstrap=bootstrap,
+        )
+        if reack is not None:
+            ack, reason = reack
+            return ack, reason, None
         try:
             row = await self._spaces.consume_invite_token(
                 token,
@@ -869,15 +955,15 @@ class SpaceInviteTokenRedeemCoordinator:
                 "invite redeem: consume_invite_token raised for token from %s",
                 redeemer_instance_id,
             )
-            return None, REDEEM_DENY_REASON
+            return None, REDEEM_DENY_REASON, None
 
         if row is None:
-            return None, REDEEM_DENY_REASON
+            return None, REDEEM_DENY_REASON, None
 
         space_id = str(row.get("space_id") or "")
         if not space_id:
             log.warning("invite redeem: consumed token row carried no space_id")
-            return None, REDEEM_DENY_REASON
+            return None, REDEEM_DENY_REASON, None
 
         # The seat the ISSUER decided at mint time (migration 0053). The
         # redeemer never gets to ask for a role, so this is read here and
@@ -897,7 +983,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 "— refusing (a use was spent)",
                 seat,
             )
-            return None, REDEEM_DENY_REASON
+            return None, REDEEM_DENY_REASON, None
 
         # An admin/mod link does NOT grant admin straight through (owner
         # decision, 2026-09-19). The redeeming household is seated as a
@@ -926,6 +1012,10 @@ class SpaceInviteTokenRedeemCoordinator:
             # what the §24.11 space-writer gate reads to refuse its
             # writes. Both directions ride the one INSERT: up to admin, or
             # down to a read-only follower.
+            #
+            # It is written BEFORE the ACK leaves because the ACK's roster
+            # snapshot has to carry it; everything anyone else observes
+            # waits for :meth:`_commit_redeem`.
             await self._remote_members.add(
                 space_id=space_id,
                 instance_id=redeemer_instance_id,
@@ -934,73 +1024,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 display_name=redeemer_display,
                 role=seat,
             )
-            await self._bus.publish(
-                SpaceRemoteSeatLive(
-                    space_id=space_id,
-                    instance_id=redeemer_instance_id,
-                    user_id=redeemer_user_id,
-                )
-            )
-            # v_23 roster gossip, deliberately BEFORE the redeemer's own
-            # ``space_instances`` row exists.
-            #
-            # ``broadcast_to_space_members`` targets ``space_instances``,
-            # so running it here reaches exactly the households that were
-            # already in the space — which is the whole point: they need a
-            # row for the new household, or their §24.11 space-writer gate
-            # has nothing to refuse a Follower on (it is deliberately
-            # lenient about a household it holds no row for). The redeemer
-            # must NOT be among them: it has no local space row yet — it
-            # builds one from the ACK's ``space_meta``, whose roster
-            # snapshot carries its own seat — so a gossip sent now would
-            # arrive there for an unknown space and be dropped.
-            #
-            # Fail-soft: the seat is already durable, so a gossip that
-            # raises must never turn a completed redeem into a DENY. The
-            # next snapshot / §25.6 sync reconciles.
-            if self._space_service is not None:
-                try:
-                    await self._space_service.broadcast_remote_member_joined(
-                        space_id,
-                        instance_id=redeemer_instance_id,
-                        user_id=redeemer_user_id,
-                        user_pk=redeemer_pk,
-                        display_name=redeemer_display,
-                        role=seat,
-                        # The ACK's roster is taken now, at seat time; the
-                        # redeemer has no space row yet to apply one to.
-                        send_snapshot=False,
-                    )
-                except Exception:
-                    log.exception(
-                        "invite redeem: roster gossip failed for "
-                        "space_id=%s instance=%s",
-                        space_id,
-                        redeemer_instance_id,
-                    )
-            await self._spaces.add_space_instance(
-                space_id,
-                redeemer_instance_id,
-            )
-            if pending_admin and self._space_service is not None:
-                # Host-side pending elevation for the owner to approve.
-                # Fail-soft like the gossip: the member seat is durable, so
-                # a filing that raises must not turn a completed redeem into
-                # a DENY — the owner can still promote from the members list.
-                try:
-                    await self._space_service.file_admin_elevation_request(
-                        space_id,
-                        redeemer_user_id,
-                        remote_instance_id=redeemer_instance_id,
-                        remote_pk=redeemer_pk,
-                    )
-                except Exception:
-                    log.exception(
-                        "invite redeem: filing admin elevation failed for "
-                        "space_id=%s instance=%s",
-                        space_id,
-                        redeemer_instance_id,
-                    )
         except Exception:
             log.exception(
                 "invite redeem: seating remote member failed for"
@@ -1009,7 +1032,19 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_instance_id,
                 redeemer_user_id,
             )
-            return None, REDEEM_DENY_REASON
+            await self._release_token_use(token, space_id)
+            return None, REDEEM_DENY_REASON, None
+
+        reservation = _SeatReservation(
+            token=token,
+            space_id=space_id,
+            instance_id=redeemer_instance_id,
+            user_id=redeemer_user_id,
+            user_pk=redeemer_pk,
+            display_name=redeemer_display,
+            seat=seat,
+            pending_admin=pending_admin,
+        )
 
         # An ADMIN seat gets the ROLE and nothing else. NO signing-seed
         # share happens here, on either leg, and none should be added:
@@ -1025,11 +1060,37 @@ class SpaceInviteTokenRedeemCoordinator:
         # (``set_remote_member_role``), which is a deliberate act about a
         # household the owner already knows. See "An admin met through a
         # link never holds the signing seed" in docs/protocol/invites.md.
+        try:
+            ack_body = await self._build_ack_body(
+                space_id,
+                seat=seat,
+                pending_admin=pending_admin,
+                bootstrap=bootstrap,
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: building the ACK failed for space_id=%s",
+                space_id,
+            )
+            await self._rollback_redeem(reservation)
+            return None, REDEEM_DENY_REASON, None
+        return ack_body, None, reservation
 
-        # Pull the full space row so we can ship metadata + the member
-        # roster back to the receiver. Without the meta the receiver's
-        # stub card is blank; without the roster the receiver's Members
-        # tab shows only herself (#115).
+    async def _build_ack_body(
+        self,
+        space_id: str,
+        *,
+        seat: str,
+        pending_admin: bool,
+        bootstrap: bool,
+    ) -> dict:
+        """``{space_id, role[, pending_role], space_meta}`` for an ACK.
+
+        Pull the full space row so we can ship metadata + the member
+        roster back to the receiver. Without the meta the receiver's stub
+        card is blank; without the roster the receiver's Members tab shows
+        only herself (#115).
+        """
         space = await self._spaces.get(space_id)
         ack_body: dict = {
             "space_id": space_id,
@@ -1056,7 +1117,206 @@ class SpaceInviteTokenRedeemCoordinator:
                     else {}
                 ),
             )
+        return ack_body
+
+    async def _reack_seated_redeemer(
+        self,
+        token: str,
+        *,
+        redeemer_instance_id: str,
+        redeemer_user_id: str,
+        bootstrap: bool,
+    ) -> tuple[dict | None, str | None] | None:
+        """Answer the retry of a redeem the issuer already committed.
+
+        The ACK can be lost AFTER the issuer committed (the relay accepted
+        it, then the joiner's socket dropped; a direct send sat in the
+        outbox past the joiner's timeout). The joiner saw a timeout and
+        retries — and a single-use link is spent by then, so without this
+        the retry was a DENY for a household the host already counts as a
+        member. When the token (in any state — spent and expired included,
+        but not revoked) names a space in which this exact
+        ``(instance, user)`` already holds a live seat, the ACK is rebuilt
+        from that seat and nothing is consumed, written or gossiped.
+
+        Returns ``None`` when the redeemer is not seated there (the normal
+        path runs), else ``(ack_body, None)`` or ``(None, reason)`` for a
+        seated redeemer that is banned. The seat is keyed on the
+        §24.11-authenticated instance id, so another household holding the
+        same token string gets nothing from this; and an already-seated
+        member learns nothing it does not already receive as a member.
+        """
+        try:
+            space_id = await self._spaces.get_invite_token_space_id(token)
+            if not space_id:
+                return None
+            seat = await self._remote_members.get(
+                space_id,
+                redeemer_instance_id,
+                redeemer_user_id,
+            )
+            if seat is None:
+                return None
+            if await self._spaces.is_banned(space_id, redeemer_user_id):
+                return None, REDEEM_DENY_REASON
+            role = str(seat.role or SpaceRole.MEMBER.value)
+            if role not in SEATABLE_REMOTE_ROLES:
+                return None, REDEEM_DENY_REASON
+            ack_body = await self._build_ack_body(
+                space_id,
+                seat=role,
+                pending_admin=False,
+                bootstrap=bootstrap,
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: re-ACK lookup failed for a redeem from %s",
+                redeemer_instance_id,
+            )
+            return None, REDEEM_DENY_REASON
+        log.info(
+            "invite redeem: %s is already seated in space %s — answering its "
+            "retry with the ACK again",
+            redeemer_instance_id,
+            space_id,
+        )
         return ack_body, None
+
+    async def _commit_redeem(self, res: _SeatReservation) -> None:
+        """Publish a redeem whose ACK has been handed to its transport.
+
+        Runs everything another household (or the local UI) can observe,
+        in the order it always ran: the seat-live event, the v_23 roster
+        gossip, the ``space_instances`` fan-out target, and — for an admin
+        link — the pending elevation. Every step is fail-soft: the joiner
+        may already hold the ACK, so nothing here can turn the redeem
+        into a DENY any more; the next snapshot / §25.6 sync reconciles a
+        step that raised.
+        """
+        try:
+            await self._bus.publish(
+                SpaceRemoteSeatLive(
+                    space_id=res.space_id,
+                    instance_id=res.instance_id,
+                    user_id=res.user_id,
+                )
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: seat-live publish failed for space_id=%s",
+                res.space_id,
+            )
+        # v_23 roster gossip, deliberately BEFORE the redeemer's own
+        # ``space_instances`` row exists.
+        #
+        # ``broadcast_to_space_members`` targets ``space_instances``, so
+        # running it here reaches exactly the households that were already
+        # in the space — which is the whole point: they need a row for the
+        # new household, or their §24.11 space-writer gate has nothing to
+        # refuse a Follower on (it is deliberately lenient about a
+        # household it holds no row for). The redeemer must NOT be among
+        # them: its roster came in the ACK's snapshot.
+        if self._space_service is not None:
+            try:
+                await self._space_service.broadcast_remote_member_joined(
+                    res.space_id,
+                    instance_id=res.instance_id,
+                    user_id=res.user_id,
+                    user_pk=res.user_pk,
+                    display_name=res.display_name,
+                    role=res.seat,
+                    # The ACK's roster was taken at seat time.
+                    send_snapshot=False,
+                )
+            except Exception:
+                log.exception(
+                    "invite redeem: roster gossip failed for space_id=%s instance=%s",
+                    res.space_id,
+                    res.instance_id,
+                )
+        try:
+            await self._spaces.add_space_instance(res.space_id, res.instance_id)
+        except Exception:
+            log.exception(
+                "invite redeem: registering space instance failed for "
+                "space_id=%s instance=%s",
+                res.space_id,
+                res.instance_id,
+            )
+        if res.pending_admin and self._space_service is not None:
+            # Host-side pending elevation for the owner to approve. The
+            # owner can still promote from the members list if it raises.
+            try:
+                await self._space_service.file_admin_elevation_request(
+                    res.space_id,
+                    res.user_id,
+                    remote_instance_id=res.instance_id,
+                    remote_pk=res.user_pk,
+                )
+            except Exception:
+                log.exception(
+                    "invite redeem: filing admin elevation failed for "
+                    "space_id=%s instance=%s",
+                    res.space_id,
+                    res.instance_id,
+                )
+
+    async def _rollback_redeem(
+        self,
+        res: _SeatReservation,
+        *,
+        space_session: bool = False,
+    ) -> None:
+        """Undo a redeem whose ACK never left: un-seat, hand the use back.
+
+        Nothing observable ran yet (no seat-live event, no gossip, no
+        fan-out target — :meth:`_commit_redeem` never did), so un-seating
+        the one roster row and restoring the one token use is the whole
+        undo. The seat is tombstoned rather than deleted, which is also
+        exactly right for a household that had been kicked before and was
+        re-seated by this redeem. ``space_session`` also drops the §D2b
+        space-scoped instance row seated for the reply, once nothing else
+        justifies it — silently, since that household never joined.
+        """
+        log.warning(
+            "invite redeem: rolling back the seat of %s in space %s — the ACK "
+            "could not be delivered, so the link keeps its use",
+            res.instance_id,
+            res.space_id,
+        )
+        try:
+            await self._remote_members.remove(
+                res.space_id,
+                res.instance_id,
+                res.user_id,
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: un-seating %s in space %s failed",
+                res.instance_id,
+                res.space_id,
+            )
+        await self._release_token_use(res.token, res.space_id)
+        if space_session and self._space_service is not None:
+            try:
+                await self._space_service.revoke_space_session_if_orphaned(
+                    res.instance_id,
+                    notify=False,
+                )
+            except Exception:
+                log.exception(
+                    "invite redeem: dropping the space-session seat of %s failed",
+                    res.instance_id,
+                )
+
+    async def _release_token_use(self, token: str, space_id: str) -> None:
+        try:
+            await self._spaces.release_invite_token_use(token)
+        except Exception:
+            log.exception(
+                "invite redeem: handing a token use back failed for space_id=%s",
+                space_id,
+            )
 
     async def _on_redeem_ack(self, event: "FederationEvent") -> None:
         """Receiver-side: resolve the in-flight Future with the issuer's
@@ -1449,7 +1709,35 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return {"ok": True, "denied": True}
 
-        ack_body, deny_reason = await self._consume_seat_and_build_ack(
+        # Held from the "already seated?" check to the commit / rollback:
+        # two redeems from the same household must not interleave.
+        async with self._redeem_lock(redeemer_instance_id):
+            return await self._bootstrap_redeem_locked(
+                body,
+                nonce=nonce,
+                redeemer_instance_id=redeemer_instance_id,
+                redeemer_user_id=redeemer_user_id,
+                gfs_url=gfs_url,
+            )
+
+    async def _bootstrap_redeem_locked(
+        self,
+        body: dict,
+        *,
+        nonce: str,
+        redeemer_instance_id: str,
+        redeemer_user_id: str,
+        gfs_url: str,
+    ) -> dict:
+        """The §D2b redeem proper, under the per-household redeem lock.
+
+        Reserve (spend the use, write the seat), seal + relay the ACK, and
+        only then commit. The relay answering "no" — a 413, a network
+        failure — or an ACK that cannot fit it at all rolls the
+        reservation back: no phantom member on the host, and the link
+        keeps its use so the joiner's retry works.
+        """
+        ack_body, deny_reason, reservation = await self._consume_seat_and_build_ack(
             token=str(body.get("invite_token") or ""),
             redeemer_instance_id=redeemer_instance_id,
             redeemer_user_id=redeemer_user_id,
@@ -1473,27 +1761,41 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return {"ok": True, "denied": True}
 
-        # Space-scoped instance row — NOT a social peer. Seated only
-        # once the token has actually been consumed.
-        await self._seat_space_session_instance(
-            instance_id=redeemer_instance_id,
-            display_name=str(body.get("display_name") or redeemer_instance_id[:8]),
-            identity_pk=str(body["identity_pk"]),
-            keywrap_pk=str(body["keywrap_pk"]),
-            keywrap_sig=str(body["keywrap_sig"]),
-            proto_version=int(body.get("proto_version") or 1),
-            is_redeemer=False,
-            # The server the request arrived on: the one relay we know
-            # reaches this redeemer, and the one they are listening on.
-            gfs_url=gfs_url,
-        )
+        # Space-scoped instance row — NOT a social peer. Seated once the
+        # token has been consumed and BEFORE the ACK leaves, so the
+        # joiner's first envelopes after it applies the ACK find a row;
+        # a rollback drops it again.
+        try:
+            await self._seat_space_session_instance(
+                instance_id=redeemer_instance_id,
+                display_name=str(body.get("display_name") or redeemer_instance_id[:8]),
+                identity_pk=str(body["identity_pk"]),
+                keywrap_pk=str(body["keywrap_pk"]),
+                keywrap_sig=str(body["keywrap_sig"]),
+                proto_version=int(body.get("proto_version") or 1),
+                is_redeemer=False,
+                # The server the request arrived on: the one relay we know
+                # reaches this redeemer, and the one they are listening on.
+                gfs_url=gfs_url,
+            )
+        except Exception:
+            if reservation is not None:
+                await self._rollback_redeem(reservation, space_session=True)
+            raise
         if not await self._send_bootstrap_ack(
             body,
             nonce,
             ack_body,
             gfs_url=gfs_url,
         ):
+            # A re-ACK to an already-seated household (no reservation)
+            # has nothing to undo: that seat was committed earlier.
+            if reservation is not None:
+                await self._rollback_redeem(reservation, space_session=True)
             return {"ok": True, "denied": True}
+        if reservation is None:
+            return {"ok": True, "space_id": ack_body["space_id"]}
+        await self._commit_redeem(reservation)
         # The ONE operator-visible record that a stranger joined through a
         # public link. Every other outcome on this path is already
         # observable (a DENY, a rejected relay envelope, a failed seal),
@@ -1525,13 +1827,21 @@ class SpaceInviteTokenRedeemCoordinator:
         blob on its own), the ACK goes out again without the cover and icon
         — the join matters more than the art. Only when even that does not
         fit is the redeem answered with :data:`REDEEM_DENY_REASON_TOO_LARGE`
-        so the joiner is told why instead of timing out. Returns ``True``
-        when an ACK was handed to the relay.
+        so the joiner is told why instead of timing out.
+
+        Returns ``True`` only when the relay ACCEPTED an ACK. ``False`` —
+        the relay refused it (413, network) or nothing fit — tells the
+        caller to roll the redeem back. A refused ACK gets no DENY chaser:
+        the relay that just refused one is not going to carry the next,
+        and the joiner's own timeout says "try again", which is now true.
         """
         reply = {"kind": KIND_REDEEM_ACK, "redeem_nonce": nonce, **ack_body}
         try:
-            await self._send_bootstrap_reply(request_body, reply, gfs_url=gfs_url)
-            return True
+            return await self._send_bootstrap_reply(
+                request_body,
+                reply,
+                gfs_url=gfs_url,
+            )
         except BootstrapEnvelopeTooLarge as exc:
             log.warning(
                 "invite bootstrap: ACK for space %s does not fit the relay "
@@ -1547,16 +1857,18 @@ class SpaceInviteTokenRedeemCoordinator:
                 if k not in ("cover_webp_base64", "icon_webp_base64")
             }
         try:
-            await self._send_bootstrap_reply(request_body, reply, gfs_url=gfs_url)
-            return True
+            return await self._send_bootstrap_reply(
+                request_body,
+                reply,
+                gfs_url=gfs_url,
+            )
         except BootstrapEnvelopeTooLarge as exc:
-            # The seat is already durable on this side; the member list shows
-            # it and an admin can remove it. Logged at ERROR because this is
-            # a space the invite-link path cannot serve at all.
+            # The caller rolls the seat back. Logged at ERROR because this
+            # is a space the invite-link path cannot serve at all.
             log.error(
                 "invite bootstrap: ACK for space %s does not fit the relay even "
                 "without images (%s) — the joiner is told the space is too "
-                "large; their seat here stays until removed",
+                "large",
                 ack_body.get("space_id"),
                 exc,
             )
@@ -1667,8 +1979,11 @@ class SpaceInviteTokenRedeemCoordinator:
         reply: dict,
         *,
         gfs_url: str = "",
-    ) -> None:
-        """Seal ``reply`` to the requester's key-wrap key and relay it."""
+    ) -> bool:
+        """Seal ``reply`` to the requester's key-wrap key and relay it.
+
+        Returns whether the relay accepted it. Raises
+        :class:`BootstrapEnvelopeTooLarge` when it would not fit."""
         assert self._relay_sender is not None
         local = await self._federation_repo.get_local_identity()
         envelope = seal_bootstrap_envelope(
@@ -1701,6 +2016,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 reply.get("kind"),
                 request_body["instance_id"],
             )
+        return bool(delivered)
 
     async def _seat_space_session_instance(
         self,

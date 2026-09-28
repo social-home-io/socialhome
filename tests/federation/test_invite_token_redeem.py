@@ -48,14 +48,18 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.domain.events import SpaceRemoteSeatLive
+from socialhome.federation import invite_token_redeem as itr
 from socialhome.federation.invite_bootstrap import (
     KIND_REDEEM,
     KIND_REDEEM_ACK,
+    BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
     sign_bootstrap_body,
 )
 from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_DENY_CLIENT_MESSAGE,
+    BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
     REDEEM_DENY_REASON,
     BOOTSTRAP_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_WINDOW_S,
@@ -124,6 +128,8 @@ class _FakeSpaceRepo:
         # Pre-seed ``get`` returns; tests that drive the issuer-side
         # _on_redeem should populate this so the ACK can carry meta.
         self.space_rows_for_get: dict = {}
+        #: Tokens a rolled-back redeem handed a use back to.
+        self.released: list[str] = []
 
     async def get_live_invite_token(self, token):
         """Read-only peek — mirrors the repo's "live" predicate exactly and
@@ -171,6 +177,17 @@ class _FakeSpaceRepo:
             "role": row.get("role", SpaceRole.MEMBER.value),
         }
 
+    async def release_invite_token_use(self, token):
+        row = self.tokens.get(token)
+        if row is None:
+            return
+        self.released.append(token)
+        row["uses_remaining"] += 1
+
+    async def get_invite_token_space_id(self, token):
+        row = self.tokens.get(token)
+        return row["space_id"] if row is not None else None
+
     async def add_space_instance(self, space_id, instance_id):
         self.space_instances.append((space_id, instance_id))
 
@@ -197,14 +214,31 @@ class _FakeRemoteMemberRepo:
         self.removed: list[tuple[str, str, str]] = []
         self.roles: list[tuple[str, str, str, str]] = []
 
+        #: ``(space, instance, user) -> seat kwargs`` — the live roster.
+        self.live: dict[tuple[str, str, str], dict] = {}
+
     async def add(self, **kwargs):
         self.added.append(kwargs)
+        key = (kwargs["space_id"], kwargs["instance_id"], kwargs["user_id"])
+        self.live[key] = kwargs
 
     async def set_role(self, space_id, instance_id, user_id, role):
         self.roles.append((space_id, instance_id, user_id, role))
 
     async def remove(self, space_id, instance_id, user_id):
         self.removed.append((space_id, instance_id, user_id))
+        self.live.pop((space_id, instance_id, user_id), None)
+
+    async def get(self, space_id, instance_id, user_id):
+        row = self.live.get((space_id, instance_id, user_id))
+        if row is None:
+            return None
+        return SimpleNamespace(
+            space_id=space_id,
+            instance_id=instance_id,
+            user_id=user_id,
+            role=row.get("role", SpaceRole.MEMBER.value),
+        )
 
     async def list_for_space(self, space_id):
         return []
@@ -1343,6 +1377,12 @@ class _RelayBus:
         #: invite blob, the issuer answers on the one it arrived on.
         self.gfs_urls: list[str] = []
         self.deliver = True
+        #: Envelopes to these instances are refused (a 413 / network
+        #: failure on the relay — ``send_sealed_envelope`` returns False).
+        self.refuse_to: set[str] = set()
+        #: Envelopes to these instances are ACCEPTED by the relay but never
+        #: arrive (lost after acceptance — the joiner's socket dropped).
+        self.lose_to: set[str] = set()
 
     def sender_for(self, _from_instance: str):
         bus = self
@@ -1357,8 +1397,10 @@ class _RelayBus:
             ):
                 bus.envelopes.append((to_instance_id, envelope))
                 bus.gfs_urls.append(gfs_url)
-                if not bus.deliver:
+                if not bus.deliver or to_instance_id in bus.refuse_to:
                     return False
+                if to_instance_id in bus.lose_to:
+                    return True
                 target = bus.coordinators.get(to_instance_id)
                 if target is None:
                     return False
@@ -2236,12 +2278,17 @@ class _RecordingSpaceService:
     def __init__(self) -> None:
         self.joined: list[dict] = []
         self.elevations: list[dict] = []
+        self.revoked: list[tuple[str, bool]] = []
 
     async def broadcast_remote_member_joined(self, space_id, **kwargs):
         self.joined.append({"space_id": space_id, **kwargs})
 
     async def file_admin_elevation_request(self, space_id, user_id, **kwargs):
         self.elevations.append({"space_id": space_id, "user_id": user_id, **kwargs})
+
+    async def revoke_space_session_if_orphaned(self, instance_id, *, notify=True):
+        self.revoked.append((instance_id, notify))
+        return True
 
 
 async def test_a_redeem_tells_existing_member_households_about_the_seat():
@@ -2436,3 +2483,206 @@ async def test_the_gossip_runs_before_the_redeemer_joins_space_instances():
     # a fan-out target.
     assert order == ["gossip:0", "space_instance"]
     assert repo.space_instances == [("sp-sub", "sender-1")]
+
+
+# ─── The issuer commits a redeem only once the ACK is on its way ──────
+#
+# The issuer used to spend the token, seat the joiner and gossip the seat
+# BEFORE it knew the ACK could reach the joiner. A reply the connection
+# server refused (413, network) or one the issuer had to answer with
+# ``REDEEM_DENY_REASON_TOO_LARGE`` left a phantom member on the host, a
+# burnt link and a retry that failed.
+
+
+def _seat_live_publishes(coord) -> list:
+    return [
+        c.args[0]
+        for c in coord._bus.publish.await_args_list  # type: ignore[attr-defined]
+        if isinstance(c.args[0], SpaceRemoteSeatLive)
+    ]
+
+
+def _atomic_pair(**kwargs):
+    env = _bootstrap_pair(**kwargs)
+    env.redeemer._timeout = 0.2
+    env.spaces = _RecordingSpaceService()
+    env.issuer.attach_space_service(env.spaces)
+    return env
+
+
+async def _redeem(env):
+    return await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+
+
+async def test_a_refused_ack_leaves_no_seat_and_keeps_the_link_usable():
+    env = _atomic_pair()
+    env.relay.refuse_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    # Nothing survives on the host: no seat, no fan-out target, no gossip,
+    # no seat-live event — and the use came back.
+    assert env.issuer_members.live == {}
+    assert env.issuer_spaces.space_instances == []
+    assert env.spaces.joined == []
+    assert _seat_live_publishes(env.issuer) == []
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+    # The space-scoped instance row seated for the reply is dropped once
+    # nothing justifies it (and without telling a household that never
+    # joined).
+    assert env.spaces.revoked == [(env.redeemer_party.instance_id, False)]
+
+    # The link still works once the relay does.
+    env.relay.refuse_to.clear()
+    result = await _redeem(env)
+    assert result["space_id"] == "space-1"
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
+    assert list(env.issuer_members.live) == [
+        ("space-1", env.redeemer_party.instance_id, "u-local"),
+    ]
+    assert len(env.spaces.joined) == 1
+
+
+async def test_a_too_large_deny_leaves_no_seat(monkeypatch):
+    """The issuer cannot fit the space into the relay at all: the joiner is
+    told so, and the host keeps neither the seat nor the spent use."""
+    real_seal = itr.seal_bootstrap_envelope
+
+    def _seal(*, body, **kw):
+        if body.get("kind") == KIND_REDEEM_ACK:
+            raise BootstrapEnvelopeTooLarge("roster too big")
+        return real_seal(body=body, **kw)
+
+    monkeypatch.setattr(itr, "seal_bootstrap_envelope", _seal)
+    env = _atomic_pair()
+    with pytest.raises(SpacePermissionError) as exc:
+        await _redeem(env)
+    assert str(exc.value) == BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
+    assert env.issuer_members.live == {}
+    assert env.issuer_spaces.space_instances == []
+    assert env.spaces.joined == []
+    assert _seat_live_publishes(env.issuer) == []
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+
+
+async def test_a_lost_ack_is_answered_again_on_retry():
+    """The relay accepted the ACK but it never reached the joiner. The
+    issuer has committed, so the retry must not be a DENY for a spent
+    link: the already-seated household gets the ACK again, and nothing is
+    spent or gossiped twice."""
+    env = _atomic_pair()
+    env.relay.lose_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
+    assert len(env.spaces.joined) == 1
+
+    env.relay.lose_to.clear()
+    result = await _redeem(env)
+    assert result["space_id"] == "space-1"
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
+    assert env.issuer_spaces.released == []
+    assert len(env.spaces.joined) == 1
+    assert len(env.issuer_members.added) == 1
+    # The joiner seated the space from the re-sent snapshot.
+    assert "space-1" in env.redeemer_spaces.spaces
+
+
+async def test_a_re_ack_that_is_refused_rolls_nothing_back():
+    """A retry by an already-seated household whose re-ACK the relay
+    refuses must not un-seat the household it seated the first time."""
+    env = _atomic_pair()
+    env.relay.lose_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    env.relay.lose_to.clear()
+    env.relay.refuse_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    assert list(env.issuer_members.live) == [
+        ("space-1", env.redeemer_party.instance_id, "u-local"),
+    ]
+    assert env.issuer_spaces.released == []
+    assert env.spaces.revoked == []
+
+
+async def test_a_seated_but_banned_household_gets_no_re_ack():
+    env = _atomic_pair()
+    env.relay.lose_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    env.relay.lose_to.clear()
+    env.issuer_spaces.bans.add(("space-1", "u-local"))
+    with pytest.raises(SpacePermissionError) as exc:
+        await _redeem(env)
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
+
+
+async def test_concurrent_redeems_of_a_single_use_link_seat_one_household():
+    """Two strangers race for the last use: exactly one is seated and the
+    other is denied — the atomic consume holds even though the commit now
+    waits for the ACK to leave."""
+    env = _atomic_pair()
+    other_party = _Party("Second redeemer")
+    other = _make_coordinator(
+        federation=_BootstrapFederationService(other_party),
+        federation_repo=_BootstrapFederationRepo(other_party),
+        space_repo=_FakeSpaceRepo(),
+        timeout=0.2,
+    )
+    other.attach_bootstrap(
+        relay_sender=env.relay.sender_for(other_party.instance_id),
+        keywrap_private_key=other_party.keywrap_priv,
+        keywrap_public_key=other_party.keywrap_pub,
+        keywrap_sig=other_party.keywrap_sig,
+        key_manager=_FakeKeyManager(),
+    )
+    env.relay.coordinators[other_party.instance_id] = other
+
+    async def _redeem_as(coord):
+        return await coord.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+
+    results = await asyncio.gather(
+        _redeem_as(env.redeemer),
+        _redeem_as(other),
+        return_exceptions=True,
+    )
+    oks = [r for r in results if isinstance(r, dict)]
+    denies = [r for r in results if isinstance(r, SpacePermissionError)]
+    assert len(oks) == 1
+    assert len(denies) == 1
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
+    assert len(env.issuer_members.live) == 1
+    assert len(env.spaces.joined) == 1
+
+
+async def test_a_retry_over_the_event_path_is_acked_again():
+    """The §D2 path shares the retry rule: a paired household whose first
+    ACK went missing is answered again rather than refused for a spent
+    link."""
+    sender, _issuer, _sf, _if, repo, members = _wire_pair(
+        {"space_id": "sp-retry", "created_by": "owner", "uses_remaining": 1},
+    )
+    first = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    again = await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert first == again == {"space_id": "sp-retry", "role": "member"}
+    assert repo.tokens["good-token"]["uses_remaining"] == 0
+    assert len(members.added) == 1

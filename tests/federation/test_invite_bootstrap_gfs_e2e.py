@@ -607,6 +607,19 @@ async def test_a_space_too_big_for_the_relay_is_refused_clearly(
     assert str(exc_info.value) == BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
     assert await a.space_repo.get(space.id) is None
     assert "does not fit the relay even without images" in caplog.text
+    # …and the host kept nothing: no seat, no fan-out target, no
+    # space-scoped instance row, and the link still has its use.
+    await gfs.drain()
+    await _assert_redeem_rolled_back(a, b, space.id)
+
+
+async def _assert_redeem_rolled_back(a, b, space_id: str) -> None:
+    assert await b.remote_members.list_for_space(space_id) == []
+    assert a.instance_id not in await b.space_repo.list_member_instances(space_id)
+    assert await b.federation_repo.get_instance(a.instance_id) is None
+    live = await b.space_repo.get_live_invite_token(TOKEN_MARKER)
+    assert live is not None
+    assert live["uses_remaining"] == 1
 
 
 async def test_a_reply_the_relay_refuses_is_logged_on_the_issuer(
@@ -643,6 +656,58 @@ async def test_a_reply_the_relay_refuses_is_logged_on_the_issuer(
         await gfs.drain()
 
     assert "the connection server refused our" in caplog.text
+    # The refused ACK rolled the redeem back on the host …
+    await _assert_redeem_rolled_back(a, b, _space.id)
+
+    # … so once the relay carries replies again, the same link works.
+    b.coordinator._relay_sender = SimpleNamespace(send_sealed_envelope=real_send)
+    result = await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=hint,
+    )
+    assert result["space_id"] == _space.id
+    roster = await b.remote_members.list_for_space(_space.id)
+    assert [m.user_id for m in roster] == [a.user_id]
+    assert a.instance_id in await b.space_repo.list_member_instances(_space.id)
+
+
+async def test_a_lost_ack_is_answered_again_when_the_joiner_retries(
+    households,
+    gfs,
+):
+    """The relay accepted the ACK but the joiner never got it (its socket
+    dropped). The host has committed and the single-use link is spent — the
+    retry is answered with the ACK again, not a DENY."""
+    a, b = households
+    space, hint = await _mint_invite(b, gfs.url)
+    a.coordinator._timeout = 0.5
+    socket = gfs.sockets.pop(a.instance_id)
+
+    with pytest.raises(TimeoutError):
+        await a.space_service.redeem_invite_token(
+            TOKEN_MARKER,
+            user_id=a.user_id,
+            issuer_instance_id=b.instance_id,
+            bootstrap=hint,
+        )
+    await gfs.drain()
+    assert [m.user_id for m in await b.remote_members.list_for_space(space.id)] == [
+        a.user_id,
+    ]
+    assert await b.space_repo.get_live_invite_token(TOKEN_MARKER) is None
+
+    gfs.sockets[a.instance_id] = socket
+    result = await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=hint,
+    )
+    assert result["space_id"] == space.id
+    assert await a.space_repo.get_member(space.id, a.user_id) is not None
+    assert len(await b.remote_members.list_for_space(space.id)) == 1
 
 
 async def test_the_connection_server_sees_only_a_recipient_and_ciphertext(
