@@ -4589,6 +4589,55 @@ def cmd_verify() -> None:
     else:
         print("  moment-follow step was skipped during traffic")
 
+    # 3c-bis. v_35 — relayed moments carry their origin's signature. d is
+    #     never QR-paired with c, so c's moment can only reach d relayed
+    #     (via b, or a when the trust-relay pairing put a↔d in place), and
+    #     d holds no remote_instances row for c: the relay lands only if
+    #     d verified c's origin signature against the key that derives to
+    #     c's instance id. Two log tripwires on every household: no
+    #     "unsigned moment from pre-v_35" (the legacy window — a same-build
+    #     demo must never need it) and no relayed-moment refusal (the
+    #     signing bytes disagree across the two ends).
+    for _label in ("a", "b", "c", "d"):
+        _legacy = _log_lines_matching(_label, "unsigned moment from pre-v_35")
+        if _legacy:
+            failures.append(
+                f"{_label}: took the v_35 legacy window on a relayed moment "
+                f"({_legacy[-1].strip()[:160]}) — every household in this demo "
+                "runs the same build, so the origin stopped signing",
+            )
+        _bad = [
+            line
+            for line in _log_lines_matching(_label, " relayed by ")
+            if "— refusing (moment=" in line
+        ]
+        if _bad:
+            failures.append(
+                f"{_label}: refused a relayed moment on the v_35 origin check "
+                f"({_bad[-1].strip()[:160]}) — origin signing bytes disagree",
+            )
+    carol_moment = state.get("moments", {}).get("c")
+    if carol_moment and "d" in state.get("instances", {}):
+        d = state["instances"]["d"]
+        s, payload = _request(
+            f"http://127.0.0.1:{d['port']}/api/moments",
+            token=d["token"],
+        )
+        _must("moments(d)", s, payload)
+        inbox = payload.get("data") if isinstance(payload, dict) else payload
+        contents = [
+            m.get("content") for m in (inbox if isinstance(inbox, list) else [])
+        ]
+        if any(carol_moment["content"] in (mc or "") for mc in contents):
+            print("  d sees c's relayed moment (v_35 origin signature verified) ✓")
+        else:
+            failures.append(
+                f"d: c's relayed moment {carol_moment['id']!r} not in inbox "
+                f"(got contents={contents!r}) — the v_35 origin check refused it",
+            )
+    else:
+        print("  (v_35 relayed-moment check skipped — c's moment rate-limited or no d)")
+
     # 4. Space — Beta's space, both Alice and Carol invited.
     if "space_id" in state:
         b = state["instances"]["b"]

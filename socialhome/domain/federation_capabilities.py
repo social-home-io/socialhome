@@ -524,7 +524,27 @@ from __future__ import annotations
 #:   self-reported, so it could not close the window against a claimant,
 #:   and the id's shape is set by its creator, which is what matters. It
 #:   closes for new albums as their creators upgrade. Space-scoped.
-OURS: int = 34
+#: * **v_35** (2026-09-28) — relayed moments are checked against the
+#:   household that posted them. ``MOMENT_CREATED`` / ``MOMENT_DELETED``
+#:   gain ``origin_identity_pk`` / ``origin_sig`` / ``origin_sig_suite``
+#:   inside the encrypted payload: the origin household signs
+#:   ``moment-origin:v1:`` + canonical JSON of every stored field (plus the
+#:   event type and suite, never ``hop_count``) with its Ed25519 identity
+#:   key (``federation/moment_origin.py``). Relays forward the fields
+#:   verbatim. A receiver handed a moment by a household other than its
+#:   claimed origin verifies against the key it pins for that origin, or a
+#:   shipped key bound by ``derive_instance_id(pk) == origin_instance_id``
+#:   (a friend-of-friend origin has no ``remote_instances`` row). Until
+#:   v_35 a relayed ``origin_instance_id`` could not be checked against
+#:   the origin itself. Direct deliveries are unchanged (the envelope
+#:   signature binds them). **Senders always sign** (the fields are additive; older
+#:   receivers ignore them). **Fail-closed at the receiver, with a named
+#:   legacy window:** an unsigned relay is accepted only when the receiver
+#:   holds a row for the claimed origin whose ``proto_version`` is below
+#:   :data:`FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE`, logged
+#:   at INFO. A present signature must verify, under a known suite, at any
+#:   version. Not space-scoped (moments are household-broadcast).
+OURS: int = 35
 
 
 class FederationCapability:
@@ -839,6 +859,16 @@ class FederationCapability:
     #: first-come rule.
     MIN_FOR_OWNER_BOUND_ALBUM_ID = 34
 
+    #: Minimum proto_version where a household signs the ``MOMENT_CREATED``
+    #: / ``MOMENT_DELETED`` events it originates (``origin_sig`` et al.
+    #: inside the payload, v_35). Used **only** at the receiver, and only
+    #: to decide what an *unsigned relayed* moment means: a claimed origin
+    #: at v_35+ that ships no signature is a forgery and is dropped, while
+    #: an origin the receiver knows to be older is the legacy window.
+    #: Senders never gate on it — the fields are wire-additive, and a relay
+    #: target is routinely a household the origin holds no row for.
+    MIN_FOR_MOMENT_ORIGIN_SIGNATURE = 35
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -931,6 +961,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
         "Creator-bound album ids",
     ),
+    (
+        FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE,
+        "Signed relayed moments",
+    ),
 ]
 
 
@@ -963,6 +997,8 @@ def features_missing_below(version: int) -> list[str]:
 #: * ``MIN_FOR_USER_IDENTITY_KEY`` — per-user identity binding on the user
 #:   roster (USERS_SYNC / USER_UPDATED); its lag affects only the two
 #:   households exchanging the roster, not a shared space.
+#: * ``MIN_FOR_MOMENT_ORIGIN_SIGNATURE`` — moments are household-broadcast
+#:   posts, not space content.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,

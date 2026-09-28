@@ -37,6 +37,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.moment import MOMENT_MAX_HOPS
+from ..federation.moment_origin import sign_moment_origin
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .visibility import VisibilityMixin
@@ -109,19 +110,22 @@ class MomentFederationOutbound(
             return
         await self._fan_to_peers(
             event_type=FederationEventType.MOMENT_CREATED,
-            payload={
-                "moment_id": event.moment_id,
-                "author_user_id": event.author_user_id,
-                "content": event.content,
-                "media_url": event.media_url,
-                "media_type": event.media_type,
-                "duration_ms": event.duration_ms,
-                "parent_moment_id": event.parent_moment_id,
-                "origin_instance_id": event.origin_instance_id,
-                "expires_at": event.expires_at,
-                "occurred_at": event.occurred_at.isoformat(),
-                "hop_count": 1,
-            },
+            payload=self._origin_signed(
+                FederationEventType.MOMENT_CREATED,
+                {
+                    "moment_id": event.moment_id,
+                    "author_user_id": event.author_user_id,
+                    "content": event.content,
+                    "media_url": event.media_url,
+                    "media_type": event.media_type,
+                    "duration_ms": event.duration_ms,
+                    "parent_moment_id": event.parent_moment_id,
+                    "origin_instance_id": event.origin_instance_id,
+                    "expires_at": event.expires_at,
+                    "occurred_at": event.occurred_at.isoformat(),
+                    "hop_count": 1,
+                },
+            ),
             origin_instance_id=event.origin_instance_id,
             exclude_instances=set(),
             author_user_id=event.author_user_id,
@@ -138,13 +142,16 @@ class MomentFederationOutbound(
             return
         await self._fan_to_peers(
             event_type=FederationEventType.MOMENT_DELETED,
-            payload={
-                "moment_id": event.moment_id,
-                "author_user_id": event.author_user_id,
-                "origin_instance_id": event.origin_instance_id,
-                "occurred_at": event.occurred_at.isoformat(),
-                "hop_count": 1,
-            },
+            payload=self._origin_signed(
+                FederationEventType.MOMENT_DELETED,
+                {
+                    "moment_id": event.moment_id,
+                    "author_user_id": event.author_user_id,
+                    "origin_instance_id": event.origin_instance_id,
+                    "occurred_at": event.occurred_at.isoformat(),
+                    "hop_count": 1,
+                },
+            ),
             origin_instance_id=event.origin_instance_id,
             exclude_instances=set(),
             author_user_id=event.author_user_id,
@@ -230,6 +237,28 @@ class MomentFederationOutbound(
         )
 
     # ── Helpers ────────────────────────────────────────────────────────
+
+    def _origin_signed(
+        self,
+        event_type: FederationEventType,
+        payload: dict,
+    ) -> dict:
+        """Attach this household's origin signature (v_35).
+
+        Relays forward the payload verbatim, so every household down the
+        3-hop mesh can check the moment against its origin rather than
+        taking the relay's ``origin_instance_id`` on trust. Always signed,
+        never gated on the peer's version: the fields are additive (older
+        receivers ignore them) and the relay targets are households we
+        often hold no row for. One Ed25519 signature per moment — cheap
+        enough to run inline.
+        """
+        return sign_moment_origin(
+            seed=self._federation.own_identity_seed,
+            identity_pk=self._federation.own_identity_pk,
+            event_type=event_type,
+            payload=payload,
+        )
 
     async def _fan_to_peers(
         self,

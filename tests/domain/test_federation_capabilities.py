@@ -6,7 +6,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 34
+    assert fc.OURS == 35
+
+
+def test_moment_origin_signature_capability_threshold():
+    """v_35 — relayed moments carry their origin household's signature.
+    Not space-scoped: moments are household-broadcast, not space content."""
+    assert fc.FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE == 35
+    assert fc.FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Signed relayed moments" in fc.features_missing_below(34)
+    assert "Signed relayed moments" not in fc.features_missing_below(35)
+    assert fc.space_features_missing_below(34) == []
 
 
 def test_remote_subscriber_role_capability_threshold():

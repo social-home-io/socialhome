@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.events import (
     MomentCreated,
     MomentDeleted,
@@ -22,9 +23,12 @@ from socialhome.repositories import (
     SqliteUserRepo,
 )
 from socialhome.repositories.moment_repo import SqliteMomentRepo
+from socialhome.federation.moment_origin import sign_moment_origin
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
+
+ORIGIN_KEY = generate_identity_keypair()
 
 
 @pytest.fixture
@@ -150,20 +154,65 @@ async def test_moment_created_impersonation_dropped(db, bus, inbound):
     relay.relay_inbound.assert_not_called()
 
 
-async def test_moment_created_relay_path_trusts_origin(db, bus, inbound):
-    """A 2-hop relay envelope arrives from a different peer than origin
-    — the receiver must accept it as long as the origin field matches
-    the author's home instance."""
+def _attach_federation(svc, *, pinned: bytes | None, signs: bool) -> None:
+    fed = MagicMock()
+    fed.own_instance_id = "self"
+    fed.peer_identity_public_key = AsyncMock(return_value=pinned)
+    fed.peer_supports = AsyncMock(return_value=signs)
+    svc._federation_service = fed
+
+
+async def test_moment_created_relay_path_accepts_origin_signed(db, bus, inbound):
+    """A 2-hop relay (sender != origin) lands when the origin's identity
+    signature over the moment verifies against the key pinned for it."""
     svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    payload = sign_moment_origin(
+        seed=ORIGIN_KEY.private_key,
+        identity_pk=ORIGIN_KEY.public_key,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_create_payload(),
+    )
     await svc._on_moment_created(
         _event(
             FederationEventType.MOMENT_CREATED,
-            _create_payload(hop_count=2),
+            {**payload, "hop_count": 2},
             from_instance="peer-relayer",  # not the origin
         ),
     )
     assert await svc._moment_repo.get("m-fed-1") is not None
     relay.relay_inbound.assert_awaited_once()
+
+
+async def test_moment_created_relay_path_legacy_origin_unsigned(db, bus, inbound):
+    """Unsigned relay from an origin known to predate signing: legacy window."""
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=False)
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _create_payload(hop_count=2),
+            from_instance="peer-relayer",
+        ),
+    )
+    assert await svc._moment_repo.get("m-fed-1") is not None
+    relay.relay_inbound.assert_awaited_once()
+
+
+@pytest.mark.parametrize("wired", [True, False], ids=["origin signs", "no fed"])
+async def test_moment_created_relay_path_unsigned_refused(db, bus, inbound, wired):
+    svc, relay = inbound
+    if wired:
+        _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _create_payload(hop_count=2),
+            from_instance="peer-relayer",
+        ),
+    )
+    assert await svc._moment_repo.get("m-fed-1") is None
+    relay.relay_inbound.assert_not_called()
 
 
 # ── MOMENT_DELETED ────────────────────────────────────────────────────────

@@ -167,6 +167,13 @@ That single command runs the full sequence:
      household in the demo runs the same build, so taking the legacy
      window would mean the origin stopped signing — which reopens the
      hole for any peer a receiver reads as older.
+   - **v_35 relayed-moment origin signature.** ``MOMENT_CREATED`` /
+     ``MOMENT_DELETED`` carry ``origin_sig`` from the posting household,
+     forwarded verbatim by relays. ``verify`` asserts d (never paired with
+     c) sees c's moment — it can only arrive relayed, and d holds no row
+     for c, so it landed on the derived-key path — and that no household's
+     log shows the legacy window ("unsigned moment from pre-v_35") or a
+     relayed-moment refusal ("relayed by … — refusing (moment=").
      (The capability-bump tripwire — v_24, which makes
      ``SPACE_CONFIG_CHANGED`` space-authority-signed so a seed-holding delegated
      admin can change a space's config with the owner offline and every member
