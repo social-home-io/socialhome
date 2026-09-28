@@ -153,3 +153,47 @@ describe('ApiClient — empty / 204 responses', () => {
     expect(await api.put('/api/x', {})).toBeNull()
   })
 })
+
+describe('ApiClient.postRaw — raw bodies with an explicit content type', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs the raw body base-relative (keeps the ingress prefix) with the given Content-Type', async () => {
+    const res = {
+      ok: true,
+      status: 201,
+      headers: { get: () => null },
+      json: vi.fn().mockResolvedValue({ events: [] }),
+    } as unknown as Response
+    const fetchMock = vi.fn().mockResolvedValue(res)
+    vi.stubGlobal('fetch', fetchMock)
+    const out = await api.postRaw(
+      '/api/calendars/c1/import_ics', 'BEGIN:VCALENDAR', 'text/calendar',
+    )
+    expect(out).toEqual({ events: [] })
+    // Relative so it resolves against <base href> — under HA ingress
+    // that is the /api/hassio_ingress/<token>/ prefix.
+    expect(fetchMock.mock.calls[0][0]).toBe('api/calendars/c1/import_ics')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(init.body).toBe('BEGIN:VCALENDAR')
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('text/calendar')
+  })
+
+  it('throws ApiError with the backend detail on a 422', async () => {
+    const res = {
+      ok: false,
+      status: 422,
+      json: vi.fn().mockResolvedValue({
+        error: { code: 'ICS_PARSE_ERROR', detail: 'VEVENT missing SUMMARY' },
+      }),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+    await expect(
+      api.postRaw('/api/calendars/c1/import_ics', 'x', 'text/calendar'),
+    ).rejects.toMatchObject({
+      status: 422, code: 'ICS_PARSE_ERROR', message: 'VEVENT missing SUMMARY',
+    })
+  })
+})
