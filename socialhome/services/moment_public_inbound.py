@@ -75,6 +75,14 @@ class MomentPublicInbound:
         if _moment_id_refused(env, "create"):
             return
         stored = await self._moments.get(str(env["moment_id"]), include_deleted=True)
+        if not _row_binds(
+            stored,
+            author_user_id=str(env["author_user_id"]),
+            origin_instance_id=str(env.get("origin_instance_id") or ""),
+            what="create",
+            moment_id=str(env["moment_id"]),
+        ):
+            return
         if stored is not None and stored.deleted_at is not None:
             # Deletes stick: a replayed create for a deleted moment is
             # refused for as long as its tombstone lives.
@@ -131,14 +139,20 @@ class MomentPublicInbound:
         if not moment_id:
             return
         author_user_id = str(env.get("author_user_id") or "")
+        # The outbound names its household as ``instance_id`` on a delete.
+        origin_instance_id = str(
+            env.get("origin_instance_id") or env.get("instance_id") or ""
+        )
         if _moment_id_refused(env, "delete"):
             return  # never tombstoned: it would refuse the real moment
         stored = await self._moments.get(moment_id, include_deleted=True)
-        if stored is not None and stored.author_user_id != author_user_id:
-            log.warning(
-                "moment_public.inbound: delete for %s names another author",
-                moment_id,
-            )
+        if not _row_binds(
+            stored,
+            author_user_id=author_user_id,
+            origin_instance_id=origin_instance_id,
+            what="delete",
+            moment_id=moment_id,
+        ):
             return
         existing = stored if stored is not None and stored.deleted_at is None else None
         # Tombstoned whether or not we hold it, so a create that arrives
@@ -147,7 +161,7 @@ class MomentPublicInbound:
         await self._moments.tombstone(
             moment_id,
             author_user_id=author_user_id,
-            origin_instance_id=str(env.get("origin_instance_id") or ""),
+            origin_instance_id=origin_instance_id,
             expires_at=(
                 datetime.now(timezone.utc) + timedelta(days=MOMENT_RETENTION_DAYS)
             ).isoformat(),
@@ -172,6 +186,35 @@ class MomentPublicInbound:
             if row.gfs_id == gfs_id:
                 return row.followed_instance_pk
         return None
+
+
+def _row_binds(
+    stored: Moment | None,
+    *,
+    author_user_id: str,
+    origin_instance_id: str,
+    what: str,
+    moment_id: str,
+) -> bool:
+    """A moment id already held here — live or a delete's tombstone — keeps
+    its author and origin: a create or delete naming anyone else is refused.
+
+    The same rule as the household path
+    (``FederationInboundService._moment_row_binds``): ``save`` upserts on the
+    bare id, so without it the first holder of a legacy id could be
+    overwritten by whoever signs a moment of their own under it.
+    """
+    if stored is None or (
+        stored.author_user_id == author_user_id
+        and stored.origin_instance_id == origin_instance_id
+    ):
+        return True
+    log.warning(
+        "moment_public.inbound: %s for moment %s belongs to another author — refusing",
+        what,
+        moment_id,
+    )
+    return False
 
 
 def _moment_id_refused(envelope: dict, what: str) -> bool:
