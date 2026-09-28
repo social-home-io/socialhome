@@ -986,7 +986,6 @@ export default function ConnectionsPage() {
             local_alias: detail.local_alias ?? null,
             status: detail.status ?? 'confirmed',
             inbox_url: detail.inbox_url ?? '',
-            intro_relay_enabled: detail.intro_relay_enabled ?? true,
             unreachable_since: detail.unreachable_since ?? null,
             last_reachable_at: detail.last_reachable_at ?? null,
             last_relay_accepted_at: detail.last_relay_accepted_at ?? null,

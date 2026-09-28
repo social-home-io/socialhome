@@ -20,7 +20,7 @@ import {
 
 interface Connection {
   instance_id: string; display_name: string; status: string
-  inbox_url: string; intro_relay_enabled: boolean
+  inbox_url: string
   unreachable_since: string | null; paired_at: string | null
   /** Last moment an outbound envelope to this peer was accepted
    *  (``remote_instances.last_reachable_at``). ``null`` when it has never
@@ -163,15 +163,6 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
         return n
       })
     }
-  }
-
-  const toggleRelay = async () => {
-    try {
-      await api.patch(`/api/pairing/connections/${conn.instance_id}/settings`, {
-        intro_relay_enabled: !conn.intro_relay_enabled,
-      })
-      showToast('Setting updated', 'success')
-    } catch (e: any) { showToast(e.message || 'Failed', 'error') }
   }
 
   const saveAlias = async () => {
@@ -394,10 +385,6 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             </Button>
           </div>
         )}
-        <label class="sh-toggle-row">
-          <input type="checkbox" checked={conn.intro_relay_enabled} onChange={toggleRelay} />
-          Allow introduced pairing (friend-of-a-friend)
-        </label>
         <section class="sh-connection-share-home">
           <h4 style={{ margin: '12px 0 4px' }}>Home location</h4>
           <ShareHomeToggle
