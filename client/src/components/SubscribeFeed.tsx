@@ -1,232 +1,194 @@
 /**
- * SubscribeFeed — per-(user, space) iCal feed token UI (Phase F).
+ * SubscribeFeed — a private iCal link to one space's calendar, for the
+ * caller only (``/api/spaces/{id}/calendar/feed-token``).
  *
- * Reveals a stable URL the user can paste into Apple Calendar / Google
- * Calendar / Outlook / Thunderbird to subscribe to the space's events.
- * Tokens are URL-embedded since most desktop calendar clients refresh
- * without OAuth — the auth middleware lets the feed path through via
- * a public-path-pattern.
+ * Calendar apps (Apple Calendar, Google Calendar, Outlook, Thunderbird)
+ * poll the link on their own, without signing in, so the token rides
+ * in the URL. The server stores only its hash: the link exists in the
+ * one POST response that minted it and is shown once. There is no GET
+ * — creating a new link replaces any earlier one, which is also the
+ * recovery path for a lost or leaked link.
  *
- * UX:
- *
- * * "Reveal" gating — the token isn't shown by default; the user has
- *   to click to copy. Reduces accidental shoulder-surfing.
- * * Copy-to-clipboard with toast confirmation.
- * * Regenerate (with confirmation): "this invalidates the existing URL".
- * * Revoke: "future fetches return 401".
- * * Per-app instructions accordion: Apple Calendar, Google Calendar,
- *   Outlook, Thunderbird.
+ * The link must be reachable from OUTSIDE the SPA, so it is the
+ * server's ``external_url`` (built on the deployment's public origin),
+ * never a ``document.baseURI``-anchored URL — under HA ingress that
+ * base is an ingress path a calendar app can't load. When the server
+ * has no public origin (``external_url: null``), we say so instead of
+ * handing out a link that can't work.
  */
-import { useEffect } from 'preact/hooks'
-import { signal } from '@preact/signals'
-import { api } from '@/api'
+import { useSignal } from '@preact/signals'
+import { api, ApiError } from '@/api'
 import { Button } from '@/components/Button'
+import { FormError } from '@/components/FormError'
+import { SecretReveal } from '@/components/SecretReveal'
 import { showToast } from '@/components/Toast'
-import { t } from '@/i18n/i18n'
 import { confirmDialog } from '@/components/confirm'
+import { t } from '@/i18n/i18n'
+import { isSupervisorAddon } from '@/platform'
 
 export interface SubscribeFeedProps {
   spaceId: string
 }
 
-interface FeedToken {
+export interface FeedTokenResponse {
   token: string
   url: string
+  external_url: string | null
 }
 
-const tokenByspace = signal<Record<string, FeedToken | null>>({})
-const loading = signal<Record<string, boolean>>({})
-const revealed = signal<Record<string, boolean>>({})
-const showInstructions = signal<Record<string, string | null>>({})
+const APPS = ['apple', 'google', 'outlook', 'thunderbird'] as const
 
-async function fetchExisting(spaceId: string) {
-  // Server has no GET endpoint for the existing token (intentional —
-  // forces the user to mint or regenerate explicitly). We treat
-  // "absent" as the default state and only populate on POST. So this
-  // helper is a no-op; included for the contract the component expects.
-  if (!(spaceId in tokenByspace.value)) {
-    tokenByspace.value = { ...tokenByspace.value, [spaceId]: null }
-  }
+/** ``webcal://`` hands the link straight to the OS calendar app on
+ *  macOS / iOS / Windows. Only offered for an ``https`` link — a plain
+ *  ``http`` origin maps to ``webcal`` too, but calendar apps then reject
+ *  it on most platforms, so the copy button is the honest path there. */
+export function webcalUrl(url: string): string | null {
+  return url.startsWith('https://') ? `webcal://${url.slice('https://'.length)}` : null
 }
 
 export function SubscribeFeed({ spaceId }: SubscribeFeedProps) {
-  useEffect(() => {
-    fetchExisting(spaceId)
-  }, [spaceId])
+  const feed = useSignal<FeedTokenResponse | null>(null)
+  const busy = useSignal(false)
+  const error = useSignal<string | null>(null)
 
-  const tok = tokenByspace.value[spaceId] ?? null
-  const isLoading = loading.value[spaceId] ?? false
-  const isRevealed = revealed.value[spaceId] ?? false
-
-  const mintOrRegen = async (regen: boolean) => {
-    if (regen && tok) {
-      const ok = await confirmDialog(t('event.subscribe.confirm_regenerate'), { destructive: true })
+  const mint = async (replace: boolean) => {
+    if (replace) {
+      const ok = await confirmDialog(t('event.subscribe.confirm_regenerate'), {
+        title: t('event.subscribe.regenerate'),
+        confirmLabel: t('event.subscribe.regenerate'),
+        destructive: true,
+      })
       if (!ok) return
     }
-    loading.value = { ...loading.value, [spaceId]: true }
+    busy.value = true
+    error.value = null
     try {
-      const res = await api.post<FeedToken>(
+      feed.value = await api.post<FeedTokenResponse>(
         `/api/spaces/${spaceId}/calendar/feed-token`,
         {},
       )
-      tokenByspace.value = { ...tokenByspace.value, [spaceId]: res }
-      revealed.value = { ...revealed.value, [spaceId]: true }
-      showToast(
-        regen ? t('event.subscribe.regenerated') : t('event.subscribe.minted'),
-        'success',
-      )
     } catch (e) {
-      const msg = (e as Error)?.message ?? t('event.subscribe.failed')
-      showToast(msg, 'error')
+      error.value = e instanceof ApiError && e.detail
+        ? e.detail
+        : t('event.subscribe.failed')
     } finally {
-      const next = { ...loading.value }
-      delete next[spaceId]
-      loading.value = next
+      busy.value = false
     }
   }
 
   const revoke = async () => {
-    const ok = await confirmDialog(t('event.subscribe.confirm_revoke'), { destructive: true })
+    const ok = await confirmDialog(t('event.subscribe.confirm_revoke'), {
+      title: t('event.subscribe.revoke'),
+      confirmLabel: t('event.subscribe.revoke'),
+      destructive: true,
+    })
     if (!ok) return
-    loading.value = { ...loading.value, [spaceId]: true }
+    busy.value = true
+    error.value = null
     try {
       await api.delete(`/api/spaces/${spaceId}/calendar/feed-token`)
-      tokenByspace.value = { ...tokenByspace.value, [spaceId]: null }
-      revealed.value = { ...revealed.value, [spaceId]: false }
+      feed.value = null
       showToast(t('event.subscribe.revoked'), 'success')
     } catch (e) {
-      const msg = (e as Error)?.message ?? t('event.subscribe.failed')
-      showToast(msg, 'error')
+      error.value = e instanceof ApiError && e.detail
+        ? e.detail
+        : t('event.subscribe.failed')
     } finally {
-      const next = { ...loading.value }
-      delete next[spaceId]
-      loading.value = next
+      busy.value = false
     }
   }
 
-  const copy = async () => {
-    if (!tok) return
-    const url = absoluteUrl(tok.url)
-    try {
-      await navigator.clipboard.writeText(url)
-      showToast(t('event.subscribe.copied'), 'success')
-    } catch {
-      showToast(t('event.subscribe.copy_failed'), 'error')
-    }
-  }
-
-  const showApp = showInstructions.value[spaceId] ?? null
-  const setShowApp = (app: string | null) => {
-    showInstructions.value = { ...showInstructions.value, [spaceId]: app }
-  }
+  const current = feed.value
+  const external = current?.external_url ?? null
+  const webcal = external ? webcalUrl(external) : null
 
   return (
     <section class="sh-subscribe-feed" aria-label={t('event.subscribe.aria')}>
-      <h3 class="sh-subscribe-feed-heading">
-        <span aria-hidden="true">📅</span> {t('event.subscribe.heading')}
-      </h3>
       <p class="sh-subscribe-feed-help">{t('event.subscribe.help')}</p>
 
-      {tok ? (
-        <>
-          <div class="sh-subscribe-url-row">
-            <input
-              type="text"
-              readonly
-              value={isRevealed ? absoluteUrl(tok.url) : maskUrl(absoluteUrl(tok.url))}
-              class="sh-subscribe-url"
-              aria-label={t('event.subscribe.url_aria')}
-              onFocus={(e) => (e.target as HTMLInputElement).select()}
-            />
-            <Button
-              variant="secondary"
-              onClick={() =>
-                (revealed.value = { ...revealed.value, [spaceId]: !isRevealed })
-              }
-            >
-              {isRevealed ? t('event.subscribe.hide') : t('event.subscribe.reveal')}
-            </Button>
-            <Button variant="primary" onClick={copy} disabled={!isRevealed}>
-              {t('event.subscribe.copy')}
-            </Button>
-          </div>
-          <div class="sh-subscribe-actions">
-            <Button
-              variant="secondary"
-              loading={isLoading}
-              onClick={() => mintOrRegen(true)}
-            >
-              {t('event.subscribe.regenerate')}
-            </Button>
-            <Button variant="secondary" onClick={revoke}>
-              {t('event.subscribe.revoke')}
-            </Button>
-          </div>
-        </>
-      ) : (
+      {!current && (
         <div class="sh-subscribe-empty">
-          <p>{t('event.subscribe.empty')}</p>
-          <Button
-            variant="primary"
-            loading={isLoading}
-            onClick={() => mintOrRegen(false)}
-          >
+          <Button loading={busy.value} onClick={() => void mint(false)}>
             {t('event.subscribe.create')}
+          </Button>
+          <p class="sh-muted sh-subscribe-feed-note">
+            {t('event.subscribe.replaces_note')}{' '}
+            <button type="button" class="sh-link-button" onClick={() => void revoke()}
+                    disabled={busy.value}>
+              {t('event.subscribe.revoke_existing')}
+            </button>
+          </p>
+        </div>
+      )}
+
+      {current && external && (
+        <SecretReveal
+          title={t('event.subscribe.ready')}
+          secret={external}
+          secretLabel={t('event.subscribe.url_aria')}
+        >
+          {webcal && (
+            <p class="sh-subscribe-open">
+              <a class="sh-btn sh-btn--secondary" href={webcal}>
+                {t('event.subscribe.open_app')}
+              </a>
+            </p>
+          )}
+        </SecretReveal>
+      )}
+
+      {current && !external && (
+        <div class="sh-subscribe-unreachable" role="status">
+          <p><strong>{t('event.subscribe.no_public_title')}</strong></p>
+          <p class="sh-muted">
+            {isSupervisorAddon()
+              ? t('event.subscribe.no_public_addon')
+              : t('event.subscribe.no_public_body')}
+          </p>
+          <details>
+            <summary>{t('event.subscribe.show_path')}</summary>
+            <code class="sh-subscribe-path">{current.url}</code>
+          </details>
+        </div>
+      )}
+
+      {current && (
+        <div class="sh-subscribe-actions">
+          <Button variant="secondary" loading={busy.value} onClick={() => void mint(true)}>
+            {t('event.subscribe.regenerate')}
+          </Button>
+          <Button variant="danger" disabled={busy.value} onClick={() => void revoke()}>
+            {t('event.subscribe.revoke')}
           </Button>
         </div>
       )}
 
+      <FormError id={`sh-subscribe-error-${spaceId}`} message={error.value} />
+
       <details class="sh-subscribe-instructions">
         <summary>{t('event.subscribe.how_to')}</summary>
-        <div class="sh-subscribe-apps" role="tablist">
-          {(['apple', 'google', 'outlook', 'thunderbird'] as const).map((app) => (
-            <button
-              key={app}
-              type="button"
-              role="tab"
-              aria-selected={showApp === app}
-              class={`sh-subscribe-app-tab${
-                showApp === app ? ' sh-subscribe-app-tab--active' : ''
-              }`}
-              onClick={() => setShowApp(showApp === app ? null : app)}
-            >
-              {t(`event.subscribe.app.${app}`)}
-            </button>
-          ))}
-        </div>
-        {showApp && (
-          <ol class="sh-subscribe-steps">
-            {appSteps(showApp).map((step, i) => (
-              <li key={i}>{step}</li>
-            ))}
-          </ol>
-        )}
+        {APPS.map(app => (
+          <details key={app} class="sh-subscribe-app">
+            <summary>{t(`event.subscribe.app.${app}`)}</summary>
+            <ol class="sh-subscribe-steps">
+              {appSteps(app).map((step, i) => <li key={i}>{step}</li>)}
+            </ol>
+          </details>
+        ))}
       </details>
     </section>
   )
 }
 
 function appSteps(app: string): string[] {
-  // i18n keys for each step; falls back gracefully if some locales
-  // skip the deeper instructions.
+  // Numbered keys; stop at the first one the catalogue doesn't have
+  // (``t`` returns the raw key for a miss).
   const out: string[] = []
-  for (let i = 1; i <= 4; i++) {
+  for (let i = 1; i <= 6; i++) {
     const k = `event.subscribe.steps.${app}.${i}`
     const text = t(k)
-    if (text === k) break // no more steps in this locale
+    if (text === k) break
     out.push(text)
   }
   return out
-}
-
-function absoluteUrl(path: string): string {
-  if (typeof window === 'undefined') return path
-  if (path.startsWith('http')) return path
-  return `${window.location.origin}${path}`
-}
-
-function maskUrl(url: string): string {
-  // Show host + ".../calendar/export.ics?token=••••" — gives the user
-  // enough context to know which space without revealing the secret.
-  return url.replace(/(token=)[^&]+/, '$1••••••••')
 }

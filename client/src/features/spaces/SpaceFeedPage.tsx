@@ -25,6 +25,8 @@ import { SpaceLocationCard } from '@/components/SpaceLocationCard'
 import { SpaceMemberList } from '@/components/SpaceMemberList'
 import GalleryPage from '@/features/gallery/GalleryPage'
 import { Button } from '@/components/Button'
+import { Modal } from '@/components/Modal'
+import { SubscribeFeed } from '@/components/SubscribeFeed'
 import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
 import { openCommentOverlay } from '@/components/CommentOverlay'
@@ -124,6 +126,8 @@ export function archivedCopy(
 const posts = signal<FeedPost[]>([])
 const loading = signal(true)
 const activeTab = signal<SpaceTab>('feed')
+/** Calendar tab → "Subscribe" dialog (private iCal link). */
+const subscribeFeedOpen = signal(false)
 const spacePages = signal<SpacePage[]>([])
 const spaceCalEvents = signal<CalendarEvent[]>([])
 const spaceCalCursor = signal(new Date())
@@ -617,11 +621,22 @@ export default function SpaceFeedPage() {
         const dayKeys = Object.keys(grouped).sort()
         return (
           <div class="sh-calendar">
-            <div class="sh-page-header">
+            <div class="sh-page-header sh-space-cal-header">
+              <Button variant="secondary"
+                      onClick={() => { subscribeFeedOpen.value = true }}>
+                {t('event.subscribe.button')}
+              </Button>
               <Button onClick={() => openSpaceEventDialog(spaceId)}>
                 + New event
               </Button>
             </div>
+            <Modal
+              open={subscribeFeedOpen.value}
+              onClose={() => { subscribeFeedOpen.value = false }}
+              title={t('event.subscribe.heading')}
+            >
+              <SubscribeFeed spaceId={spaceId} />
+            </Modal>
 
             <div class="sh-calendar-controls">
               <div class="sh-calendar-nav">

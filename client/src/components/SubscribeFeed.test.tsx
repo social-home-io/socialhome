@@ -1,63 +1,129 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent } from '@testing-library/preact'
+import { render, fireEvent, waitFor } from '@testing-library/preact'
 
-const { apiMock } = vi.hoisted(() => ({
+const { apiMock, confirmMock, platformMock } = vi.hoisted(() => ({
   apiMock: { post: vi.fn(), delete: vi.fn() },
+  confirmMock: vi.fn(),
+  platformMock: { addon: false },
 }))
 
-vi.mock('@/api', () => ({ api: apiMock }))
+vi.mock('@/api', async () => {
+  const real = await vi.importActual<typeof import('@/api')>('@/api')
+  return { api: apiMock, ApiError: real.ApiError }
+})
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
+vi.mock('@/components/confirm', () => ({ confirmDialog: confirmMock }))
+vi.mock('@/platform', () => ({ isSupervisorAddon: () => platformMock.addon }))
 
-import { SubscribeFeed } from './SubscribeFeed'
+import { ApiError } from '@/api'
+import { SubscribeFeed, webcalUrl } from './SubscribeFeed'
+
+const FEED_URL = '/api/spaces/sp1/calendar/export.ics?token=tok123'
 
 beforeEach(() => {
   apiMock.post.mockReset()
   apiMock.delete.mockReset()
+  confirmMock.mockReset()
+  platformMock.addon = false
 })
 
-// Module-level signal cache in SubscribeFeed leaks between tests; use
-// distinct space IDs per test so each starts from a clean state.
 describe('SubscribeFeed', () => {
-  it('renders the empty state with a "Create" button initially', () => {
-    const { container } = render(<SubscribeFeed spaceId="sp-empty" />)
-    expect(container.textContent).toContain('No feed URL yet')
-    expect(container.textContent).toContain('Create feed URL')
+  it('starts with a Create button and a way to turn off an earlier link', () => {
+    const { getByRole } = render(<SubscribeFeed spaceId="sp1" />)
+    expect(getByRole('button', { name: 'Create my link' })).toBeTruthy()
+    expect(getByRole('button', { name: 'Turn off my existing link' })).toBeTruthy()
   })
 
-  it('mints a token on Create click', async () => {
+  it('POSTs the feed-token route and shows the server external_url once, with copy + webcal', async () => {
     apiMock.post.mockResolvedValueOnce({
-      token: 'abc',
-      url: '/api/spaces/sp-mint/calendar/export.ics?token=abc',
+      token: 'tok123',
+      url: FEED_URL,
+      external_url: `https://home.example.com${FEED_URL}`,
     })
-    const { container, findByText } = render(<SubscribeFeed spaceId="sp-mint" />)
-    const create = container.querySelector('button')!
-    fireEvent.click(create)
-    await Promise.resolve()
-    expect(apiMock.post).toHaveBeenCalledWith(
-      '/api/spaces/sp-mint/calendar/feed-token',
-      {},
-    )
-    await findByText('Copy')
+    const { getByRole, findByLabelText, getByText } = render(<SubscribeFeed spaceId="sp1" />)
+    fireEvent.click(getByRole('button', { name: 'Create my link' }))
+    const code = await findByLabelText('Calendar feed link')
+    expect(apiMock.post).toHaveBeenCalledWith('/api/spaces/sp1/calendar/feed-token', {})
+    // The copy-out value is the server's absolute public URL — never
+    // anchored on document.baseURI (an ingress path under HA).
+    expect(code.textContent).toBe(`https://home.example.com${FEED_URL}`)
+    expect(getByText(/you won't see it again/)).toBeTruthy()
+    expect(getByRole('button', { name: 'Copy' })).toBeTruthy()
+    const open = getByRole('link', { name: 'Open in my calendar app' })
+    expect(open.getAttribute('href')).toBe(`webcal://home.example.com${FEED_URL}`)
   })
 
-  it('reveals the masked URL on initial render after mint', async () => {
-    apiMock.post.mockResolvedValueOnce({
-      token: 'spaceXYZ',
-      url: '/api/spaces/sp-reveal/calendar/export.ics?token=spaceXYZ',
-    })
-    const { container, findByLabelText } = render(
-      <SubscribeFeed spaceId="sp-reveal" />,
+  it('explains there is no public address when external_url is null (no broken link)', async () => {
+    apiMock.post.mockResolvedValueOnce({ token: 'tok123', url: FEED_URL, external_url: null })
+    const { getByRole, findByText, queryByLabelText, container } = render(
+      <SubscribeFeed spaceId="sp1" />,
     )
-    fireEvent.click(container.querySelector('button')!)
-    const input = (await findByLabelText('Calendar feed URL')) as HTMLInputElement
-    expect(input.value).toContain('token=spaceXYZ')
+    fireEvent.click(getByRole('button', { name: 'Create my link' }))
+    await findByText("Calendar apps can't reach this Social Home")
+    expect(queryByLabelText('Calendar feed link')).toBeNull()
+    expect(container.textContent).toContain('Connections page')
+    expect(container.querySelector('.sh-subscribe-path')?.textContent).toBe(FEED_URL)
+    expect(container.querySelector('a[href^="webcal:"]')).toBeNull()
   })
 
-  it('shows per-app instruction tabs in the accordion', () => {
-    const { container } = render(<SubscribeFeed spaceId="sp-tabs" />)
-    expect(container.textContent).toContain('Apple Calendar')
-    expect(container.textContent).toContain('Google Calendar')
-    expect(container.textContent).toContain('Outlook')
-    expect(container.textContent).toContain('Thunderbird')
+  it('under the HA add-on, says the add-on is only reachable through HA (no admin hint)', async () => {
+    platformMock.addon = true
+    apiMock.post.mockResolvedValueOnce({ token: 't', url: FEED_URL, external_url: null })
+    const { getByRole, findByText, container } = render(<SubscribeFeed spaceId="sp1" />)
+    fireEvent.click(getByRole('button', { name: 'Create my link' }))
+    await findByText(/runs as a Home Assistant add-on/)
+    expect(container.textContent).not.toContain('Connections page')
+  })
+
+  it('creating a new link asks first and does nothing on cancel', async () => {
+    apiMock.post.mockResolvedValue({ token: 't', url: FEED_URL, external_url: `https://h.example${FEED_URL}` })
+    const { getByRole, findByRole } = render(<SubscribeFeed spaceId="sp1" />)
+    fireEvent.click(getByRole('button', { name: 'Create my link' }))
+    const regen = await findByRole('button', { name: 'Create a new link' })
+    confirmMock.mockResolvedValueOnce(false)
+    fireEvent.click(regen)
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1))
+    expect(apiMock.post).toHaveBeenCalledTimes(1)
+    confirmMock.mockResolvedValueOnce(true)
+    fireEvent.click(regen)
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(2))
+  })
+
+  it('turning the link off confirms, DELETEs, and returns to the empty state', async () => {
+    apiMock.post.mockResolvedValueOnce({ token: 't', url: FEED_URL, external_url: `https://h.example${FEED_URL}` })
+    apiMock.delete.mockResolvedValueOnce(undefined)
+    confirmMock.mockResolvedValueOnce(true)
+    const { getByRole, findByRole } = render(<SubscribeFeed spaceId="sp1" />)
+    fireEvent.click(getByRole('button', { name: 'Create my link' }))
+    fireEvent.click(await findByRole('button', { name: 'Turn off link' }))
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith('/api/spaces/sp1/calendar/feed-token'),
+    )
+    await findByRole('button', { name: 'Create my link' })
+  })
+
+  it('shows the server error detail inline when minting fails', async () => {
+    apiMock.post.mockRejectedValueOnce(
+      new ApiError(403, '/api/spaces/sp1/calendar/feed-token', {
+        code: 'FORBIDDEN', detail: 'Not a space member.',
+      }),
+    )
+    const { getByRole, findByRole } = render(<SubscribeFeed spaceId="sp1" />)
+    fireEvent.click(getByRole('button', { name: 'Create my link' }))
+    expect((await findByRole('alert')).textContent).toBe('Not a space member.')
+  })
+
+  it('lists setup steps per calendar app', () => {
+    const { container } = render(<SubscribeFeed spaceId="sp1" />)
+    for (const app of ['Apple Calendar', 'Google Calendar', 'Outlook', 'Thunderbird']) {
+      expect(container.textContent).toContain(app)
+    }
+  })
+})
+
+describe('webcalUrl', () => {
+  it('maps https to webcal and refuses plain http', () => {
+    expect(webcalUrl('https://h.example/x.ics?token=a')).toBe('webcal://h.example/x.ics?token=a')
+    expect(webcalUrl('http://h.example/x.ics')).toBeNull()
   })
 })
