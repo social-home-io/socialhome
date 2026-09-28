@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -821,3 +822,19 @@ async def test_save_instance_keeps_local_inbox_id_of_a_live_row(env):
 
 def replace_status(inst: RemoteInstance, status: PairingStatus) -> RemoteInstance:
     return replace(inst, status=status)
+
+
+async def test_save_instance_keeps_the_tombstone_when_the_new_row_fails(env):
+    """The tombstone swap is one transaction: if the new pairing cannot be
+    written (here: its inbox id collides with another peer's), the
+    tombstone — and with it our pending UNPAIR's keys and URL — survives."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-old"))
+    await env.fed_repo.mark_unpairing("peer-t")
+    await env.fed_repo.save_instance(_tomb_inst("peer-o", "wh-taken"))
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-taken"))
+
+    tomb = await env.fed_repo.get_instance("peer-t", include_unpairing=True)
+    assert tomb is not None and tomb.status is PairingStatus.UNPAIRING
+    assert tomb.local_inbox_id == "wh-old"

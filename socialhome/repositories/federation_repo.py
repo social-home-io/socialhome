@@ -168,76 +168,25 @@ class SqliteFederationRepo:
         return _row_to_instance(row_to_dict(row))
 
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance:
-        if inst.status is not PairingStatus.UNPAIRING:
+        if inst.status is PairingStatus.UNPAIRING:
+            await self._db.enqueue(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+            return inst
+
+        def _run(conn) -> None:
             # A new pairing with a household we unpaired while it was
             # offline replaces the tombstone outright. The upsert below
             # deliberately keeps ``local_inbox_id`` on conflict, which would
             # pin the new pairing to the dead inbox id the peer no longer
             # uses; and nothing the tombstone holds (old keys, old URL) may
-            # leak into the new row.
-            await self._db.enqueue(
+            # leak into the new row. One transaction: if the new row cannot
+            # be written, the tombstone (and our pending UNPAIR) survives.
+            conn.execute(
                 "DELETE FROM remote_instances WHERE id=? AND status=?",
                 (inst.id, PairingStatus.UNPAIRING.value),
             )
-        await self._db.enqueue(
-            """
-            INSERT INTO remote_instances(
-                id, display_name, remote_identity_pk,
-                key_self_to_remote, key_remote_to_self,
-                remote_inbox_url, local_inbox_id,
-                status, source, proto_version,
-                remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
-                intro_relay_enabled, relay_via, remote_keywrap_pk,
-                home_lat, home_lon, paired_at, created_at,
-                last_reachable_at, unreachable_since, share_home
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
-            ON CONFLICT(id) DO UPDATE SET
-                display_name=excluded.display_name,
-                remote_identity_pk=excluded.remote_identity_pk,
-                key_self_to_remote=excluded.key_self_to_remote,
-                key_remote_to_self=excluded.key_remote_to_self,
-                remote_inbox_url=excluded.remote_inbox_url,
-                status=excluded.status,
-                source=excluded.source,
-                proto_version=excluded.proto_version,
-                remote_pq_algorithm=excluded.remote_pq_algorithm,
-                remote_pq_identity_pk=excluded.remote_pq_identity_pk,
-                sig_suite=excluded.sig_suite,
-                intro_relay_enabled=excluded.intro_relay_enabled,
-                relay_via=excluded.relay_via,
-                remote_keywrap_pk=excluded.remote_keywrap_pk,
-                home_lat=excluded.home_lat,
-                home_lon=excluded.home_lon,
-                paired_at=excluded.paired_at,
-                last_reachable_at=excluded.last_reachable_at,
-                unreachable_since=excluded.unreachable_since
-            """,
-            (
-                inst.id,
-                inst.display_name,
-                inst.remote_identity_pk,
-                inst.key_self_to_remote,
-                inst.key_remote_to_self,
-                inst.remote_inbox_url,
-                inst.local_inbox_id,
-                inst.status.value,
-                inst.source.value,
-                inst.proto_version,
-                inst.remote_pq_algorithm,
-                inst.remote_pq_identity_pk,
-                inst.sig_suite,
-                int(inst.intro_relay_enabled),
-                inst.relay_via,
-                inst.remote_keywrap_pk,
-                inst.home_lat,
-                inst.home_lon,
-                inst.paired_at,
-                inst.created_at,
-                inst.last_reachable_at,
-                inst.unreachable_since,
-                int(inst.share_home),
-            ),
-        )
+            conn.execute(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+
+        await self._db.transact(_run)
         return inst
 
     async def set_proto_version(
@@ -755,6 +704,68 @@ class SqliteFederationRepo:
 
 
 # ─── Row → domain helper ──────────────────────────────────────────────────
+
+
+_UPSERT_INSTANCE_SQL = """
+INSERT INTO remote_instances(
+    id, display_name, remote_identity_pk,
+    key_self_to_remote, key_remote_to_self,
+    remote_inbox_url, local_inbox_id,
+    status, source, proto_version,
+    remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
+    intro_relay_enabled, relay_via, remote_keywrap_pk,
+    home_lat, home_lon, paired_at, created_at,
+    last_reachable_at, unreachable_since, share_home
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
+ON CONFLICT(id) DO UPDATE SET
+    display_name=excluded.display_name,
+    remote_identity_pk=excluded.remote_identity_pk,
+    key_self_to_remote=excluded.key_self_to_remote,
+    key_remote_to_self=excluded.key_remote_to_self,
+    remote_inbox_url=excluded.remote_inbox_url,
+    status=excluded.status,
+    source=excluded.source,
+    proto_version=excluded.proto_version,
+    remote_pq_algorithm=excluded.remote_pq_algorithm,
+    remote_pq_identity_pk=excluded.remote_pq_identity_pk,
+    sig_suite=excluded.sig_suite,
+    intro_relay_enabled=excluded.intro_relay_enabled,
+    relay_via=excluded.relay_via,
+    remote_keywrap_pk=excluded.remote_keywrap_pk,
+    home_lat=excluded.home_lat,
+    home_lon=excluded.home_lon,
+    paired_at=excluded.paired_at,
+    last_reachable_at=excluded.last_reachable_at,
+    unreachable_since=excluded.unreachable_since
+"""
+
+
+def _instance_params(inst: RemoteInstance) -> tuple:
+    return (
+        inst.id,
+        inst.display_name,
+        inst.remote_identity_pk,
+        inst.key_self_to_remote,
+        inst.key_remote_to_self,
+        inst.remote_inbox_url,
+        inst.local_inbox_id,
+        inst.status.value,
+        inst.source.value,
+        inst.proto_version,
+        inst.remote_pq_algorithm,
+        inst.remote_pq_identity_pk,
+        inst.sig_suite,
+        int(inst.intro_relay_enabled),
+        inst.relay_via,
+        inst.remote_keywrap_pk,
+        inst.home_lat,
+        inst.home_lon,
+        inst.paired_at,
+        inst.created_at,
+        inst.last_reachable_at,
+        inst.unreachable_since,
+        int(inst.share_home),
+    )
 
 
 def _live_clause(include_unpairing: bool) -> str:
