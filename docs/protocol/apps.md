@@ -225,6 +225,17 @@ error.
   changes nothing.
 - Re-delivered opens are de-duplicated per `(from_instance, session_id)`,
   so one household can never suppress another's invite.
+- A `to_user` that resolves to no local user reaches nobody — it is
+  never widened to the whole household.
+- A JSON `APP_SESSION` / `APP_MESSAGE` without `to_user` from a v_18+
+  household is refused: those senders always address a person. The
+  whole-household fan-out remains only for older households and for the
+  binary `fed-app-v1` frames (which carry no routing slot); it skips every
+  local user who blocked the named initiator. A binary frame names no
+  initiator, so blocks can't be applied to it (known limitation of the v1
+  frame format).
+- User-visible effect: an invite from a household user this household
+  hasn't synced (or one hidden from it) is not shown.
 
 `tests/protocol/test_app_session_scope.py`.
 

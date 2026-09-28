@@ -465,6 +465,19 @@ class AppFederationService:
         from_user = (
             raw_from_user if isinstance(raw_from_user, str) and raw_from_user else None
         )
+        # A household that addresses people (v_18+) always names the user on
+        # the JSON path; the whole-household fan-out is only for older peers.
+        if to_user is None and await self._federation.peer_supports(
+            event.from_instance,
+            min_version=FederationCapability.MIN_FOR_APP_USER_ROUTING,
+        ):
+            log.warning(
+                "app_federation: %s from %s refused — no addressee (session=%s)",
+                kind,
+                event.from_instance,
+                session_id,
+            )
+            return
 
         await self._deliver(
             app_id,
@@ -762,6 +775,16 @@ class AppFederationService:
         # caller (legacy household fan-out) and is never looked up.
         if to_user is not None:
             recipient = await self._user_repo.get(to_user)
+            if recipient is None:
+                log.warning(
+                    "app_federation: %s from %s refused — addressee %r is not "
+                    "a user here (session=%s)",
+                    kind,
+                    from_instance,
+                    to_user,
+                    session_id,
+                )
+                return
             if recipient is not None:
                 # Recipient block enforcement (symmetric with DMs,
                 # ``dm_service._guard_block_pair``): if the recipient has
@@ -850,6 +873,17 @@ class AppFederationService:
         user_ids = [u.user_id for u in users]
         if not user_ids:
             return
+
+        # Recipients who blocked the named initiator never get the frame
+        # (same rule as the per-user path). An unnamed initiator (binary
+        # frames carry no routing slot) can't be checked.
+        initiator = await self._resolve_remote_initiator(from_instance, from_user)
+        if initiator is not None:
+            user_ids = [
+                uid
+                for uid in user_ids
+                if not await self._user_repo.is_blocked(uid, initiator.user_id)
+            ]
 
         # Age-gate filter: skip recipients who are protected minors below
         # the app's minimum age.  Fast path when the app has no restriction.
