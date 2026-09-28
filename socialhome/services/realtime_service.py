@@ -130,6 +130,7 @@ from ..domain.events import (
     UserPreferencesChanged,
     UserStatusChanged,
 )
+from ..domain.space import SpaceRole
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
 from ..media_signer import MediaUrlSigner, sign_media_urls_in
@@ -144,6 +145,9 @@ if TYPE_CHECKING:
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 
 log = logging.getLogger(__name__)
+
+#: Space roles that may read the moderation queue / act on join requests.
+_SPACE_ADMIN_ROLES = frozenset({SpaceRole.OWNER, SpaceRole.ADMIN})
 
 
 class RealtimeService:
@@ -704,7 +708,7 @@ class RealtimeService:
         self,
         event: PairingIntroReceived,
     ) -> None:
-        await self._broadcast_household(
+        await self._broadcast_household_admins(
             {
                 "type": "pairing.intro_received",
                 "from_instance": event.from_instance,
@@ -717,7 +721,7 @@ class RealtimeService:
         self,
         event: AutoPairRequestIncoming,
     ) -> None:
-        await self._broadcast_household(
+        await self._broadcast_household_admins(
             {
                 "type": "pairing.auto_pair_requested",
                 "request_id": event.request_id,
@@ -753,9 +757,14 @@ class RealtimeService:
             },
         )
 
+    # ``space.moderation.*`` frames carry the full queued item (the
+    # pending body, the rejection reason). Only the people who can read
+    # the queue (``GET …/moderation`` is owner/admin-only) receive them;
+    # the submitter additionally learns the outcome of their own item.
+
     async def _on_space_mod_queued(self, event: SpaceModerationQueued) -> None:
         item = event.item
-        await self._broadcast_space(
+        await self._broadcast_space_admins(
             item.space_id,
             {
                 "type": "space.moderation.queued",
@@ -766,24 +775,26 @@ class RealtimeService:
 
     async def _on_space_mod_approved(self, event: SpaceModerationApproved) -> None:
         item = event.item
-        await self._broadcast_space(
+        await self._broadcast_space_admins(
             item.space_id,
             {
                 "type": "space.moderation.approved",
                 "space_id": item.space_id,
                 "item": _safe(item),
             },
+            also=item.submitted_by,
         )
 
     async def _on_space_mod_rejected(self, event: SpaceModerationRejected) -> None:
         item = event.item
-        await self._broadcast_space(
+        await self._broadcast_space_admins(
             item.space_id,
             {
                 "type": "space.moderation.rejected",
                 "space_id": item.space_id,
                 "item": _safe(item),
             },
+            also=item.submitted_by,
         )
 
     async def _on_space_config_changed(self, event: SpaceConfigChanged) -> None:
@@ -945,10 +956,8 @@ class RealtimeService:
     ) -> None:
         # Only notify admins + owner so the notification isn't a leak
         # about a space the requester isn't in yet.
-        members = await self._space_repo.list_members(event.space_id)
-        admin_ids = [m.user_id for m in members if m.role in ("owner", "admin")]
         await self._ws.broadcast_to_users(
-            admin_ids,
+            await self._space_admin_ids(event.space_id),
             {
                 "type": "space.join.requested",
                 "space_id": event.space_id,
@@ -973,10 +982,8 @@ class RealtimeService:
 
     async def _on_space_join_denied(self, event: SpaceJoinDenied) -> None:
         # Only tell the requester + the admins.
-        members = await self._space_repo.list_members(event.space_id)
-        admin_ids = [m.user_id for m in members if m.role in ("owner", "admin")]
         await self._ws.broadcast_to_users(
-            admin_ids + [event.user_id],
+            await self._space_admin_ids(event.space_id) + [event.user_id],
             {
                 "type": "space.join.denied",
                 "space_id": event.space_id,
@@ -1600,6 +1607,35 @@ class RealtimeService:
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
         ids = await self._space_repo.list_local_member_user_ids(space_id)
+        return await self._ws.broadcast_to_users(ids, payload)
+
+    async def _broadcast_household_admins(self, payload: dict) -> int:
+        """Household fan-out narrowed to admins — for frames about
+        actions only an admin can take (pairing management)."""
+        users = await self._user_repo.list_active()
+        return await self._ws.broadcast_to_users(
+            [u.user_id for u in users if u.is_admin],
+            payload,
+        )
+
+    async def _space_admin_ids(self, space_id: str) -> list[str]:
+        members = await self._space_repo.list_members(space_id)
+        return [m.user_id for m in members if m.role in _SPACE_ADMIN_ROLES]
+
+    async def _broadcast_space_admins(
+        self,
+        space_id: str,
+        payload: dict,
+        *,
+        also: str | None = None,
+    ) -> int:
+        """Space fan-out narrowed to the owner + admins, plus ``also``
+        (e.g. a submitter) while that user is still a member."""
+        members = await self._space_repo.list_members(space_id)
+        ids = [m.user_id for m in members if m.role in _SPACE_ADMIN_ROLES]
+        if also is not None and also not in ids:
+            if any(m.user_id == also for m in members):
+                ids.append(also)
         return await self._ws.broadcast_to_users(ids, payload)
 
     # ─── Shopping list (§23.120 — local household only) ─────────────────

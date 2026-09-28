@@ -1,17 +1,26 @@
-"""Coverage for SpaceModerationApproved/Rejected paths in RealtimeService."""
+"""Audience of the ``space.moderation.*`` frames in RealtimeService.
+
+The frame carries the full pending item (post body, rejection reason),
+so it goes only to the people who can read the moderation queue — the
+space's owner and admins — plus the submitter for the outcome of their
+own item.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 import pytest
 
 from socialhome.domain.events import (
+    SpaceJoinDenied,
+    SpaceJoinRequested,
     SpaceModerationApproved,
     SpaceModerationQueued,
     SpaceModerationRejected,
 )
-from socialhome.domain.space import SpaceModerationItem
+from socialhome.domain.space import SpaceMember, SpaceModerationItem, SpaceRole
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.services.realtime_service import RealtimeService
@@ -22,12 +31,19 @@ class _FakeUserRepo:
         return []
 
 
+def _member(uid: str, role: SpaceRole) -> SpaceMember:
+    return SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="2026")
+
+
 class _FakeSpaceRepo:
     def __init__(self, members):
         self._members = members
 
-    async def list_local_member_user_ids(self, space_id):
+    async def list_members(self, space_id):
         return self._members.get(space_id, [])
+
+    async def list_local_member_user_ids(self, space_id):
+        return [m.user_id for m in self._members.get(space_id, [])]
 
 
 class _FakeWS:
@@ -42,19 +58,23 @@ class _FakeWS:
         return False
 
 
-def _item():
+def _item(submitted_by: str = "sub") -> SpaceModerationItem:
     now = datetime(2026, 4, 15, tzinfo=timezone.utc)
     return SpaceModerationItem(
         id="mod-1",
         space_id="sp-1",
         feature="post",
         action="create",
-        submitted_by="a-id",
-        payload={"id": "p1", "content": "x"},
+        submitted_by=submitted_by,
+        payload={"id": "p1", "content": "secret body"},
         current_snapshot=None,
         submitted_at=now,
         expires_at=now,
+        rejection_reason="off topic",
     )
+
+
+_UIDS = ("own", "adm", "sub", "mem", "fol")
 
 
 @pytest.fixture
@@ -65,31 +85,91 @@ async def env():
         bus,
         ws,
         user_repo=_FakeUserRepo(),
-        space_repo=_FakeSpaceRepo({"sp-1": ["alice", "bob"]}),
+        space_repo=_FakeSpaceRepo(
+            {
+                "sp-1": [
+                    _member("own", SpaceRole.OWNER),
+                    _member("adm", SpaceRole.ADMIN),
+                    _member("sub", SpaceRole.MEMBER),
+                    _member("mem", SpaceRole.MEMBER),
+                    _member("fol", SpaceRole.SUBSCRIBER),
+                ]
+            }
+        ),
     )
     svc.wire()
-    return bus, ws
+    socks = {}
+    for uid in _UIDS:
+        socks[uid] = _FakeWS()
+        await ws.register(uid, socks[uid])
+    return bus, socks
 
 
-async def test_moderation_queued_fans_to_space(env):
-    bus, ws = env
-    sock = _FakeWS()
-    await ws.register("alice", sock)
+def _got(sock, frame_type):
+    return any(frame_type in m for m in sock.sent)
+
+
+async def test_moderation_queued_reaches_owner_and_admins_only(env):
+    bus, socks = env
     await bus.publish(SpaceModerationQueued(item=_item()))
-    assert any("space.moderation.queued" in m for m in sock.sent)
+    assert _got(socks["own"], "space.moderation.queued")
+    assert _got(socks["adm"], "space.moderation.queued")
+    # Plain members, subscribers — and the submitter, who already knows
+    # what they submitted — never get the pending item over WS.
+    for uid in ("sub", "mem", "fol"):
+        assert socks[uid].sent == [], uid
 
 
-async def test_moderation_approved_fans_to_space(env):
-    bus, ws = env
-    sock = _FakeWS()
-    await ws.register("alice", sock)
-    await bus.publish(SpaceModerationApproved(item=_item()))
-    assert any("space.moderation.approved" in m for m in sock.sent)
+@pytest.mark.parametrize(
+    ("event_cls", "frame_type"),
+    [
+        (SpaceModerationApproved, "space.moderation.approved"),
+        (SpaceModerationRejected, "space.moderation.rejected"),
+    ],
+)
+async def test_moderation_outcome_reaches_admins_and_submitter(
+    env, event_cls, frame_type
+):
+    bus, socks = env
+    await bus.publish(event_cls(item=_item()))
+    for uid in ("own", "adm", "sub"):
+        assert _got(socks[uid], frame_type), uid
+    for uid in ("mem", "fol"):
+        assert socks[uid].sent == [], uid
 
 
-async def test_moderation_rejected_fans_to_space(env):
-    bus, ws = env
-    sock = _FakeWS()
-    await ws.register("alice", sock)
-    await bus.publish(SpaceModerationRejected(item=_item()))
-    assert any("space.moderation.rejected" in m for m in sock.sent)
+async def test_moderation_outcome_not_duplicated_for_admin_submitter(env):
+    bus, socks = env
+    await bus.publish(SpaceModerationApproved(item=_item(submitted_by="adm")))
+    assert len(socks["adm"].sent) == 1
+
+
+async def test_moderation_outcome_skips_submitter_not_in_space(env):
+    """A submitter who has since left the space gets nothing either —
+    the outcome is theirs, but only while they still belong to it."""
+    bus, socks = env
+    item = dataclasses.replace(_item(), submitted_by="gone")
+    await bus.publish(SpaceModerationRejected(item=item))
+    assert _got(socks["own"], "space.moderation.rejected")
+    for uid in ("sub", "mem", "fol"):
+        assert socks[uid].sent == [], uid
+
+
+async def test_join_requested_reaches_owner_and_admins_only(env):
+    bus, socks = env
+    await bus.publish(SpaceJoinRequested(space_id="sp-1", user_id="x", request_id="r"))
+    assert _got(socks["own"], "space.join.requested")
+    assert _got(socks["adm"], "space.join.requested")
+    for uid in ("sub", "mem", "fol"):
+        assert socks[uid].sent == [], uid
+
+
+async def test_join_denied_reaches_admins_and_requester(env):
+    bus, socks = env
+    await bus.publish(
+        SpaceJoinDenied(space_id="sp-1", user_id="mem", request_id="r", denied_by="own")
+    )
+    for uid in ("own", "adm", "mem"):
+        assert _got(socks[uid], "space.join.denied"), uid
+    for uid in ("sub", "fol"):
+        assert socks[uid].sent == [], uid
