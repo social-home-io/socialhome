@@ -6,8 +6,9 @@ vi.mock('@/api', () => {
   return { api: m, _mock: m }
 })
 
+const wsTypes: string[] = []
 vi.mock('@/ws', () => ({
-  ws: { on: () => () => {} },
+  ws: { on: (type: string) => { wsTypes.push(type); return () => {} } },
 }))
 
 vi.mock('@/components/SkeletonScreen', () => ({
@@ -51,6 +52,23 @@ function bundle(over: BundleOver = {}) {
 describe('WelcomePage', () => {
   beforeEach(() => {
     apiMock.get.mockReset()
+  })
+
+  it('refreshes on the frame names the server actually emits', async () => {
+    wsTypes.length = 0
+    apiMock.get.mockResolvedValueOnce(bundle())
+    render(<WelcomePage />)
+    await waitFor(() => expect(wsTypes.length).toBeGreaterThan(0))
+    // RealtimeService emits ``notification.new`` / ``notification.unread_count``
+    // and ``calendar.created|updated|deleted`` — the old
+    // ``notification.created`` / ``calendar.event.*`` names never fire.
+    expect(wsTypes).toEqual(expect.arrayContaining([
+      'notification.new', 'notification.unread_count',
+      'calendar.created', 'calendar.updated', 'calendar.deleted',
+    ]))
+    expect(wsTypes).not.toContain('notification.created')
+    expect(wsTypes).not.toContain('notification.read_changed')
+    expect(wsTypes.filter(t => t.startsWith('calendar.event.'))).toEqual([])
   })
 
   it('greets the user by first name', async () => {

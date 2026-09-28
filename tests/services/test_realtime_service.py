@@ -19,6 +19,7 @@ from socialhome.domain.events import (
     GalleryItemDeleted,
     GalleryItemUploaded,
     PeerTransportChanged,
+    PeerUnpaired,
     PostCreated,
     PostDeleted,
     PostEdited,
@@ -641,6 +642,23 @@ async def test_connection_reachable_unreachable_fan_to_household(env):
     assert any("connection.reachable" in m for m in sock.sent)
     assert any("connection.unreachable" in m for m in sock.sent)
     assert all("inst-7" in m for m in sock.sent)
+
+
+async def test_peer_unpaired_emits_connection_removed_to_household(env):
+    """Unpairing (either side) pushes ``connection.removed`` so every open
+    connections list drops the row without a reload. The list is readable
+    by every member, so the frame fans to the whole household — never
+    an admin-only subset, never beyond the local users."""
+    svc, bus, ws = env
+    s1, s2, stranger = _FakeWS(), _FakeWS(), _FakeWS()
+    await ws.register("u1", s1)
+    await ws.register("u2", s2)
+    await ws.register("u9", stranger)  # not an active local user
+    await bus.publish(PeerUnpaired(instance_id="inst-8"))
+    expected = {"type": "connection.removed", "instance_id": "inst-8"}
+    assert [json.loads(m) for m in s1.sent] == [expected]
+    assert [json.loads(m) for m in s2.sent] == [expected]
+    assert stranger.sent == []
 
 
 async def test_gallery_household_events_fan_to_household(env):

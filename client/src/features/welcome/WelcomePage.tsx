@@ -72,10 +72,10 @@ export default function WelcomePage() {
       timer = setTimeout(() => { void refresh() }, 200)
     }
     const events = [
-      'notification.created', 'notification.read_changed',
+      'notification.new', 'notification.unread_count',
       'dm.message',
-      'calendar.event.created', 'calendar.event.updated',
-      'calendar.event.deleted',
+      'calendar.created', 'calendar.updated',
+      'calendar.deleted',
       'task.created', 'task.updated', 'task.deleted', 'task.completed',
     ]
     const offs = events.map(e => ws.on(e, debounced))

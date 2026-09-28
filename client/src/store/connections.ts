@@ -3,6 +3,12 @@
  * reachability, driven by `connection.reachable` and
  * `connection.unreachable` WS frames (§23.71).
  *
+ * Membership of the list is live too: `pairing.confirmed` (a new peer
+ * finished the handshake — ours or theirs) refetches the list, since
+ * the frame carries only the instance id and the row needs the full
+ * REST shape; `connection.removed` (a pairing was torn down, by our
+ * admin or by the peer) drops the row in place.
+ *
  * Also holds the local household's home coords (updated via
  * `local.home_changed` WS frames) and patches peer coords on
  * `peer.home_changed` WS frames so the federation map stays live.
@@ -10,6 +16,7 @@
  * NetworkMap + ConnectionsPage both read :data:`connections`.
  */
 import { signal } from '@preact/signals'
+import { api } from '@/api'
 import { ws } from '@/ws'
 
 /** Active federation transport for a peer.
@@ -94,6 +101,16 @@ function upsert(patch: Partial<Connection> & { instance_id: string }): void {
   }
 }
 
+/** Refetch the canonical list. On failure the current list is kept — a
+ *  transient network error must not blank the connections page. */
+async function refreshConnections(): Promise<void> {
+  try {
+    connections.value = await api.get('/api/connections') as Connection[]
+  } catch {
+    /* keep the last known list */
+  }
+}
+
 export function wireConnectionsWs(): void {
   ws.on('connection.reachable', (e) => {
     const d = e.data as unknown as { instance_id: string, last_seen_at?: string }
@@ -109,10 +126,8 @@ export function wireConnectionsWs(): void {
     if (!d?.instance_id) return
     upsert({ instance_id: d.instance_id, reachable: false })
   })
-  ws.on('connection.added', (e) => {
-    const d = e.data as unknown as Connection
-    if (!d?.instance_id) return
-    upsert(d)
+  ws.on('pairing.confirmed', () => {
+    void refreshConnections()
   })
   ws.on('connection.removed', (e) => {
     const d = e.data as unknown as { instance_id: string }

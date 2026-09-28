@@ -105,10 +105,10 @@ export default function DashboardPage() {
       timer = setTimeout(() => { void refresh() }, 200)
     }
     const relevant = [
-      'notification.created', 'notification.read_changed',
+      'notification.new', 'notification.unread_count',
       'dm.message',
-      'calendar.event.created', 'calendar.event.updated',
-      'calendar.event.deleted',
+      'calendar.created', 'calendar.updated',
+      'calendar.deleted',
       'presence.updated',
       'task.created', 'task.updated', 'task.deleted',
       'task.completed', 'task.assigned',

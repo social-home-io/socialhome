@@ -1152,7 +1152,8 @@ class AutoPairRequestIncoming(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PeerUnpaired(DomainEvent):
-    """A confirmed peer tore down the pairing."""
+    """A pairing was torn down — by the peer (inbound ``UNPAIR``) or by
+    our own admin (``DELETE /api/pairing/connections/{id}``)."""
 
     instance_id: str
     occurred_at: datetime = field(default_factory=_now)
