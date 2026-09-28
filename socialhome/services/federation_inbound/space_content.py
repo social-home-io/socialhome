@@ -49,6 +49,7 @@ from ...domain.federation import FederationEventType
 from ...federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
     OwnerBinding,
     check_owner_bound_id,
     owner_bound_id_refused,
@@ -607,6 +608,10 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
             )
+            return
+        if is_new and self._bound_id_refused(
+            event, SPACE_CALENDAR_EVENT_KIND, event_id, space_id, created_by
+        ):
             return
         # Collaborative (any member edits a space event locally); the
         # upsert keeps the row's own ``created_by``, so the claim is only
@@ -1280,12 +1285,8 @@ class SpaceContentInboundHandlers:
             sort_order=int(p.get("sort_order") or 0),
             created_at=p.get("created_at") or p.get("occurred_at"),
         )
-        if owner_bound_id_refused(
-            GALLERY_ITEM_KIND,
-            item_id,
-            space_id=space_id,
-            owner_user_id=uploaded_by,
-            context=f"{event.event_type} from {event.from_instance}",
+        if self._bound_id_refused(
+            event, GALLERY_ITEM_KIND, item_id, space_id, uploaded_by
         ):
             return
         if not await self._authorship.may_author(event, space_id, uploaded_by):
@@ -1931,6 +1932,27 @@ class SpaceContentInboundHandlers:
         if post is None:
             return False
         return await self._acts_for(event, space_id, post.author, what, post_id)
+
+    @staticmethod
+    def _bound_id_refused(
+        event: "FederationEvent",
+        kind: str,
+        row_id: str,
+        space_id: str,
+        owner_user_id: str,
+    ) -> bool:
+        """A new row's owner-bound id (v_36) names somebody else — refuse.
+
+        Only a row we do not hold yet is checked: an edit of a collaborative
+        row keeps the stored attribution whatever the payload claims.
+        """
+        return owner_bound_id_refused(
+            kind,
+            row_id,
+            space_id=space_id,
+            owner_user_id=owner_user_id,
+            context=f"{event.event_type} from {event.from_instance}",
+        )
 
     async def _collaborative_write_allowed(
         self,

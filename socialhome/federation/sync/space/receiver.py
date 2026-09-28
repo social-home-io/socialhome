@@ -49,6 +49,7 @@ from ....infrastructure.event_bus import EventBus
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     OwnerBinding,
@@ -893,6 +894,7 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "posts": (SPACE_POST_KIND, ("author",)),
     "comments": (SPACE_COMMENT_KIND, ("author",)),
     "gallery": (GALLERY_ITEM_KIND, ("uploaded_by", "uploader")),
+    "calendar": (SPACE_CALENDAR_EVENT_KIND, ("created_by",)),
 }
 
 

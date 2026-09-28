@@ -38,12 +38,14 @@ from socialhome.app_keys import db_key, space_sync_receiver_key
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.owner_bound_id import (
     GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     mint_owner_bound_id,
 )
 
 from .test_space_content_authorship import (
+    _CAL,
     _SEED,
     AUTHOR,
     HOST,
@@ -139,6 +141,16 @@ KINDS: list[Kind] = [
             "uploaded_by": who,
         },
     ),
+    Kind(
+        "calendar event",
+        SPACE_CALENDAR_EVENT_KIND,
+        FET.SPACE_CALENDAR_EVENT_CREATED,
+        lambda rid, who: {"id": rid, "summary": "x", "created_by": who, **_CAL},
+        "space_calendar_events",
+        "created_by",
+        "calendar",
+        lambda rid, who: {"id": rid, "summary": "x", "created_by": who, **_CAL},
+    ),
 ]
 
 _IDS = [k.label for k in KINDS]
@@ -229,5 +241,6 @@ async def test_every_kind_is_covered():
         SPACE_POST_KIND,
         SPACE_COMMENT_KIND,
         GALLERY_ITEM_KIND,
+        SPACE_CALENDAR_EVENT_KIND,
     }
     assert covered == expected, sorted(expected - covered)

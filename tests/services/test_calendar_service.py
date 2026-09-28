@@ -11,6 +11,11 @@ import pytest
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from socialhome.federation.owner_bound_id import (
+    SPACE_CALENDAR_EVENT_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from socialhome.domain.events import (
     CalendarEventCreated,
     CalendarEventUpdated,
@@ -903,6 +908,33 @@ async def test_rsvp_non_recurring_defaults_occurrence_to_event_start(space_cal_e
     assert len(rsvps) == 1
     # occurrence_at should equal the event's start
     assert rsvps[0].occurrence_at == now.isoformat()
+
+
+async def test_a_space_event_id_commits_to_its_creator(space_cal_env):
+    """v_36: a space event federates, so its id is owner-bound to its
+    creator in its space — no other household can announce it first."""
+    env = space_cal_env
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Party",
+        start=start.isoformat(),
+        end=(start + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+    )
+    for owner, expected in (
+        ("uid-alice", OwnerBinding.VALID),
+        ("uid-bob", OwnerBinding.MISMATCH),
+    ):
+        assert (
+            check_owner_bound_id(
+                SPACE_CALENDAR_EVENT_KIND,
+                event.id,
+                space_id="sp-cal",
+                owner_user_id=owner,
+            )
+            is expected
+        )
 
 
 async def test_rsvp_recurring_requires_occurrence_at(space_cal_env):
