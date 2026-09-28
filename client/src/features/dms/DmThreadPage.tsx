@@ -13,6 +13,7 @@ import { VideoMedia } from '@/components/VideoMedia'
 import { openLightbox } from '@/components/ImageLightbox'
 import { showToast } from '@/components/Toast'
 import { startCall } from '@/features/calls/callSession'
+import { showCallError } from '@/features/calls/CallEmbedBlockedDialog'
 import { ReadReceipt, readReceiptsEnabled } from '@/components/ReadReceipts'
 import { TypingIndicator, sendTyping } from '@/components/TypingIndicator'
 import { UnreadDivider } from '@/components/UnreadDivider'
@@ -1637,7 +1638,7 @@ export default function DmThreadPage() {
       const callId = await startCall(convId, callType)
       location.route(`/calls/${callId}`)
     } catch (err) {
-      showToast(`Couldn't start the call: ${(err as Error)?.message ?? err}`, 'error')
+      showCallError("Couldn't start the call", err)
     }
   }
 

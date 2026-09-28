@@ -31,6 +31,7 @@ import { ImageLightbox } from '@/components/ImageLightbox'
 import { StickyDialog } from '@/components/StickyDialog'
 import { HighlightPickerDialog } from '@/components/HighlightPickerDialog'
 import { CallTypePickerDialog } from '@/components/CallTypePickerDialog'
+import { CallEmbedBlockedDialog } from '@/features/calls/CallEmbedBlockedDialog'
 import { ConfirmDialogHost } from '@/components/confirm'
 import { UserActionsMenu } from '@/components/UserActionsMenu'
 import { HighlightPublishMenu } from '@/features/highlights/HighlightPublishMenu'
@@ -390,6 +391,7 @@ export function App() {
           <IncomingCallDialog />
           <HighlightPickerDialog />
           <CallTypePickerDialog />
+          <CallEmbedBlockedDialog />
           <ConfirmDialogHost />
           <UserActionsMenu />
           <HighlightPublishMenu />

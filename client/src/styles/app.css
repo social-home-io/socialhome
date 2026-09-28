@@ -6511,6 +6511,9 @@ body.sh-dm-thread-open .sh-messages {
 @media (max-width: 480px) {
   .sh-call-picker { grid-template-columns: 1fr; }
 }
+/* "Open Social Home in its own tab" — the embed denied the microphone. */
+.sh-call-embed-copy { margin: 0 0 var(--sh-space-md); line-height: 1.5; }
+a.sh-btn { text-decoration: none; }
 
 /* Gallery */
 .sh-gallery { display: flex; flex-direction: column; gap: var(--sh-space-md); }

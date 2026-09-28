@@ -19,6 +19,8 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { incoming } from '@/store/calls'
 import { acceptCall } from './callSession'
+import { showCallError } from './CallEmbedBlockedDialog'
+import { CallEmbedBlockedError } from './embedPolicy'
 import {
   householdDisplayName,
   loadHouseholdUsers,
@@ -150,7 +152,11 @@ export default function IncomingCallDialog() {
       incoming.value = null
       loc.route(`/calls/${call.call_id}`)
     } catch (err) {
-      showToast(`Couldn't answer the call: ${(err as Error).message ?? err}`, 'error')
+      // Answering can't work in this frame: stop ringing here (another
+      // device of this user may still pick up — so no decline) and say
+      // where calls do work.
+      if (err instanceof CallEmbedBlockedError) incoming.value = null
+      showCallError("Couldn't answer the call", err)
       setAccepting(false)
     }
   }

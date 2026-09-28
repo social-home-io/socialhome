@@ -163,11 +163,22 @@ def build_cors_deny_middleware(
 #: Headers injected on every response. Browsers ignore the ones they
 #: don't understand (e.g. API-only clients), so there's no downside.
 _SECURITY_HEADERS: dict[str, str] = {
-    "X-Frame-Options": "DENY",
+    # ``SAMEORIGIN``, not ``DENY``: under ``haos`` the SPA is rendered by
+    # HA's add-on ingress panel (home-assistant/frontend
+    # ``src/panels/app/ha-panel-app.ts``) as ``<iframe src=
+    # "/api/hassio_ingress/<token>/">`` — a same-origin frame of the HA
+    # frontend, which ``DENY`` refuses to display at all. Supervisor and
+    # Core's ingress proxies forward response headers unchanged. Other
+    # origins still can't frame us (click-jacking).
+    "X-Frame-Options": "SAMEORIGIN",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     # Each feature is allowed for our own origin only, so cross-origin
-    # embeds can never request it:
+    # embeds can never request it. In the HA ingress frame "our origin" is
+    # HA's (the frame is same-origin with its parent), and a frame with no
+    # ``allow`` attribute inherits the default ``'self'`` allowlist, so
+    # calls work there. If a parent does narrow the policy for our frame,
+    # the SPA detects it (``client/src/features/calls/embedPolicy.ts``).
     #
     # * ``geolocation`` — ``navigator.geolocation.getCurrentPosition()``
     #   for the location-share post composer + DM ShareLocationButton.

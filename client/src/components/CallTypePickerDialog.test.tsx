@@ -16,6 +16,8 @@ vi.mock('preact-iso', () => ({
 }))
 
 import { CallTypePickerDialog, openCallTypePicker } from './CallTypePickerDialog'
+import { CallEmbedBlockedDialog } from '@/features/calls/CallEmbedBlockedDialog'
+import { CallEmbedBlockedError } from '@/features/calls/embedPolicy'
 
 describe('CallTypePickerDialog', () => {
   beforeEach(() => {
@@ -69,5 +71,20 @@ describe('CallTypePickerDialog', () => {
       "Couldn't start the call: Microphone access is blocked.", 'error',
     )
     expect(tile.disabled).toBe(false)
+  })
+
+  it('swaps itself for the "open in its own tab" dialog when an embed blocks the mic', async () => {
+    startCall.mockRejectedValueOnce(new CallEmbedBlockedError())
+    openCallTypePicker('conv-1')
+    const { findByLabelText, getByText, queryByLabelText } = render(
+      <><CallTypePickerDialog /><CallEmbedBlockedDialog /></>,
+    )
+    fireEvent.click(await findByLabelText('Start audio call'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(showToast).not.toHaveBeenCalled()
+    expect(queryByLabelText('Start audio call')).toBeNull()
+    expect(getByText(/inside this embedded view/)).toBeTruthy()
+    expect(getByText('Open in a new tab')).toBeTruthy()
+    fireEvent.click(getByText('Not now'))
   })
 })
