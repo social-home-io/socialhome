@@ -152,6 +152,10 @@ class _FakeGfsServer:
             await ws.close(code=self.close_code, message=self.close_message)
             return ws
         self.last_ws = ws
+        # Read the client's side too, like the real GFS route does: that is
+        # what answers the client's CLOSE frame. Without a reader the client's
+        # ``close()`` waits out aiohttp's 10 s close-handshake timeout.
+        reader = asyncio.create_task(self._read_until_closed(ws))
         # Drain queued outbound frames for the duration of the connection.
         try:
             while not ws.closed:
@@ -167,7 +171,16 @@ class _FakeGfsServer:
                 await ws.send_json(frame)
         except Exception:
             pass
+        finally:
+            reader.cancel()
         return ws
+
+    @staticmethod
+    async def _read_until_closed(ws: web.WebSocketResponse) -> None:
+        # ``async for`` ends on the client's CLOSE, which aiohttp answers
+        # (``autoclose``) before the iterator stops.
+        async for _msg in ws:
+            pass
 
 
 @pytest.fixture
@@ -1236,3 +1249,41 @@ async def test_on_text_swallows_envelope_handler_exception(caplog):
     )
     assert "Replay detected" in caplog.text
     assert "secret-blob" not in caplog.text
+
+
+async def test_stop_on_a_connected_client_returns_promptly_without_cancel(
+    fake_gfs,
+    http_session,
+):
+    """Regression: ``stop()`` used to set ``_stop`` and then wait while the
+    loop sat in ``ws.receive()`` — which never looks at ``_stop`` — so every
+    stop of a live link burned the full 5 s timeout and then cancelled the
+    task mid-receive. It must close the socket so the loop exits cleanly."""
+    seed, _pub = _gen_keypair()
+
+    async def on_relay(_frame: dict) -> None:
+        return None
+
+    client = GfsWebSocketClient(
+        gfs_url=fake_gfs.url,
+        instance_id="sh-1",
+        signing_key=seed,
+        session_factory=lambda: http_session,
+        on_relay=on_relay,
+    )
+    await client.start()
+    for _ in range(100):
+        if client.connected:
+            break
+        await asyncio.sleep(0.02)
+    assert client.connected
+    task = client._task
+    assert task is not None
+
+    started = time.monotonic()
+    await client.stop()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"stop() took {elapsed:.2f}s on a live link"
+    assert task.done() and not task.cancelled(), "loop was cancelled, not stopped"
+    assert not client.connected

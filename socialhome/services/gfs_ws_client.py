@@ -96,6 +96,7 @@ class GfsWebSocketClient:
         "_stop",
         "_task",
         "_connected_event",
+        "_ws",
         "last_auth_error",
     )
 
@@ -132,6 +133,11 @@ class GfsWebSocketClient:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._connected_event = asyncio.Event()
+        # The WebSocket of the live session, if any. ``stop()`` closes it so
+        # the receive loop wakes up at once — without this, a connected
+        # client sat in ``ws.receive()`` (which never looks at ``_stop``)
+        # until ``stop()``'s 5 s wait ran out and it cancelled the task.
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
         # Last GFS-supplied reason for an auth-related close (e.g.
         # "unknown-instance", "bad-signature"). ``None`` while the link is
         # healthy; set on a 4401/4408/4400 close so the supervisor/UI can
@@ -236,6 +242,12 @@ class GfsWebSocketClient:
     async def stop(self) -> None:
         """Stop the loop and wait for it to exit."""
         self._stop.set()
+        ws = self._ws
+        if ws is not None and not ws.closed:
+            # Wake the receive loop: a close yields a CLOSED message, the
+            # loop sees ``_stop`` and returns cleanly instead of being
+            # cancelled mid-frame after the timeout below.
+            await ws.close()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
@@ -308,6 +320,7 @@ class GfsWebSocketClient:
             heartbeat=30.0,
             max_msg_size=4 * 1024 * 1024,
         ) as ws:
+            self._ws = ws
             await ws.send_json(self._build_hello())
             self._connected_event.set()
             if self._on_connected is not None:
@@ -372,6 +385,7 @@ class GfsWebSocketClient:
                         )
                         break
             finally:
+                self._ws = None
                 self._connected_event.clear()
 
     async def _on_text(self, raw: str) -> None:
