@@ -56,6 +56,32 @@ roster). Any failure (token unknown, expired,
 exhausted, banned, persistence error) → ``SPACE_INVITE_TOKEN_REDEEM_DENY``
 with a string ``reason``.
 
+**A redeem is committed only once its ACK is on its way.** The issuer spends
+the use (the atomic ``consume_invite_token`` UPDATE — still the one
+single-use guard, however many redeems race) and writes the remote seat
+first, because the ACK's roster snapshot has to carry it. Everything anyone
+else observes — the ``SpaceRemoteSeatLive`` event, the v_23
+``SPACE_MEMBER_JOINED`` gossip, the ``space_instances`` fan-out row, a pending
+admin elevation — runs only after the ACK has been handed to its transport
+(a direct send that misses lands in the durable outbox and counts as sent).
+When the ACK cannot leave at all, the redeem is rolled back: the seat is
+tombstoned, the use is handed back (``release_invite_token_use``, capped at
+the minted total) and, on the §D2b leg, the space-scoped instance row seated
+for the reply is dropped again — so there is no phantom member on the host,
+nothing was gossiped, and the link still works. Redeems from one household
+are serialised, so a rollback can never undo a seat a concurrent redeem of
+the same household committed.
+
+**A retry after a lost ACK is answered again.** If the ACK was accepted but
+never reached the joiner (the relay took it, then the joiner's socket
+dropped; an outboxed ACK arrived after the joiner's 10 s timeout), the
+issuer has committed and a single-use link is spent. The joiner's retry is
+not a DENY: when the token — in any state but revoked — names a space in
+which that exact ``(instance, user)`` already holds a live, unbanned seat, the
+issuer rebuilds the ACK from that seat and sends it again, spending, writing
+and gossiping nothing. The seat is keyed on the authenticated instance id,
+so another household holding the same token string gets nothing from it.
+
 The receiver awaits the ACK on a nonce-keyed Future inside the
 ``POST /api/spaces/join`` handler (10 s timeout). On success it seats the
 join **locally** from the ACK's ``space_meta``: a stub ``spaces`` row
@@ -235,7 +261,10 @@ resends it without the images, and only when even that fails answers DENY
 with `REDEEM_DENY_REASON_TOO_LARGE`, which the redeemer maps to its own
 "this space is too big to join through an invite link" wording (the issuer's
 text is still never rendered). A relay that refuses a reply is logged at
-WARNING on the issuer — the redeemer can only see its own timeout.
+WARNING on the issuer — the redeemer can only see its own timeout. Either
+way — a refused ACK or a `REDEEM_DENY_REASON_TOO_LARGE` answer — the issuer
+rolls the redeem back (see "A redeem is committed only once its ACK is on
+its way" above): no seat, no gossip, and the link keeps its use.
 
 A joiner keeps the rendition it was handed: a cover change later rides
 `SPACE_CONFIG_CHANGED` as a `cover_hash` only, and space media does not flow

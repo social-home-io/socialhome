@@ -673,6 +673,57 @@ async def test_consume_missing_token_returns_none(env):
     assert result is None
 
 
+async def test_release_invite_token_use_hands_the_use_back(env):
+    """A redeem whose ACK never reached the joiner gives its use back."""
+    await env.repo.save(_space("sp-release"))
+    token = await env.repo.create_invite_token("sp-release", "uid-alice", uses=1)
+    assert await env.repo.consume_invite_token(token) is not None
+    assert await env.repo.consume_invite_token(token) is None
+    await env.repo.release_invite_token_use(token)
+    row = await env.repo.consume_invite_token(token)
+    assert row is not None
+    assert row["uses_remaining"] == 0
+
+
+async def test_concurrent_consumes_of_a_single_use_token_spend_it_once(env):
+    await env.repo.save(_space("sp-race"))
+    token = await env.repo.create_invite_token("sp-race", "uid-alice", uses=1)
+    results = await asyncio.gather(
+        *(env.repo.consume_invite_token(token) for _ in range(5)),
+    )
+    assert sum(r is not None for r in results) == 1
+
+
+async def test_release_invite_token_use_never_exceeds_the_minted_total(env):
+    """A stray release can never mint a use the admin never granted."""
+    await env.repo.save(_space("sp-release-cap"))
+    token = await env.repo.create_invite_token("sp-release-cap", "uid-alice", uses=2)
+    await env.repo.release_invite_token_use(token)
+    live = await env.repo.get_live_invite_token(token)
+    assert live is not None
+    assert live["uses_remaining"] == 2
+
+
+async def test_release_invite_token_use_of_a_revoked_token_is_a_noop(env):
+    await env.repo.save(_space("sp-release-gone"))
+    token = await env.repo.create_invite_token("sp-release-gone", "uid-alice")
+    await env.repo.consume_invite_token(token)
+    await env.repo.delete_invite_token("sp-release-gone", token)
+    await env.repo.release_invite_token_use(token)
+    assert await env.repo.get_invite_token_space_id(token) is None
+
+
+async def test_get_invite_token_space_id_reads_a_spent_token(env):
+    """The retry-after-lost-ACK lookup: an exhausted token still names its
+    space (the live predicate would not)."""
+    await env.repo.save(_space("sp-spent"))
+    token = await env.repo.create_invite_token("sp-spent", "uid-alice", uses=1)
+    await env.repo.consume_invite_token(token)
+    assert await env.repo.get_live_invite_token(token) is None
+    assert await env.repo.get_invite_token_space_id(token) == "sp-spent"
+    assert await env.repo.get_invite_token_space_id("no-such-token") is None
+
+
 # ── Invitations ────────────────────────────────────────────────────────────
 
 
