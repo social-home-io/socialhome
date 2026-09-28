@@ -18,6 +18,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { incoming } from '@/store/calls'
+import { acceptCall } from './callSession'
 import {
   householdDisplayName,
   loadHouseholdUsers,
@@ -141,13 +142,13 @@ export default function IncomingCallDialog() {
     if (accepting || declining) return
     setAccepting(true)
     try {
-      await api.post(`/api/calls/${call.call_id}/answer`, {
-        sdp_answer: 'v=0\r\n',
-      })
+      // Acquires the mic/camera, answers the caller's SDP offer and posts
+      // the answer; ICE trickles from there.
+      await acceptCall(call)
       incoming.value = null
       loc.route(`/calls/${call.call_id}`)
     } catch (err) {
-      showToast(`Accept failed: ${(err as Error).message ?? err}`, 'error')
+      showToast(`Couldn't answer the call: ${(err as Error).message ?? err}`, 'error')
       setAccepting(false)
     }
   }

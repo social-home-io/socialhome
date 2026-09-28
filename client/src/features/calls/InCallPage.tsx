@@ -1,14 +1,17 @@
 /**
  * InCallPage — the full-screen audio/video UX during an active call (§26).
  *
- * Manages the browser-side WebRTC peer connection, renders the self-view +
- * remote-view, surfaces mic/camera/speaker controls + a duration HUD, and
- * pushes a ``getStats()`` quality sample every 10 s to the backend.
+ * Renders the live session owned by :mod:`./callSession` (which creates
+ * the ``RTCPeerConnection`` and runs the SDP offer/answer + trickle-ICE
+ * exchange over ``/api/calls/*`` and the ``call.*`` WS frames): self-view
+ * + remote-view, mic/camera/speaker controls, a status line while the
+ * call is ringing / connecting, a duration HUD once media flows, and a
+ * ``getStats()`` quality sample pushed every 10 s.
  *
- * The media stack is intentionally single-peer for v1 — group calls fan
- * out at the signalling layer; each pair of participants has its own
- * ``RTCPeerConnection``, signalled over the ``/api/calls/*`` REST routes
- * and the ``call.*`` WS frames.
+ * The session starts before this page mounts (in the call picker or the
+ * ringing dialog). Landing here without one — a reload, a stale link —
+ * shows an honest "not connected on this device" state instead of an
+ * empty black screen. Leaving the page hangs up.
  */
 import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -16,12 +19,11 @@ import { useRoute, useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
-
-interface IceServersResponse { ice_servers: RTCIceServer[] }
-interface ActiveCallSummary {
-  call_id: string
-  call_type: 'audio' | 'video'
-}
+import {
+  callConversation, callEndReason, callId as sessionCallId, callPhase,
+  getPeerConnection, hangupCall, hasCamera, isCallLive, localStream,
+  remoteStream, resetCall, type CallPhase,
+} from './callSession'
 
 const durationSeconds  = signal<number>(0)
 const micMuted         = signal<boolean>(false)
@@ -29,10 +31,21 @@ const cameraOff        = signal<boolean>(false)
 const speakerMuted     = signal<boolean>(false)
 const quality          = signal<'good' | 'fair' | 'poor'>('good')
 
+const STATUS_COPY: Partial<Record<CallPhase, string>> = {
+  starting:     'Starting call…',
+  ringing:      'Calling…',
+  connecting:   'Connecting…',
+  reconnecting: 'Reconnecting…',
+}
+
 function formatDuration(sec: number): string {
   const m = Math.floor(sec / 60).toString().padStart(2, '0')
   const s = (sec % 60).toString().padStart(2, '0')
   return `${m}:${s}`
+}
+
+function videoOn(stream: MediaStream | null): boolean {
+  return stream?.getVideoTracks().some(t => t.enabled) ?? false
 }
 
 export default function InCallPage() {
@@ -41,130 +54,95 @@ export default function InCallPage() {
   const callId = params.callId
   const remoteRef = useRef<HTMLVideoElement>(null)
   const selfRef   = useRef<HTMLVideoElement>(null)
-  const pcRef     = useRef<RTCPeerConnection | null>(null)
-  const localStreamRef = useRef<MediaStream | null>(null)
-  const qualityIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const convRef   = useRef<string | null>(null)
 
+  const ours = sessionCallId.value === callId
+  const phase: CallPhase = ours ? callPhase.value : 'idle'
+  if (ours && callConversation.value) convRef.current = callConversation.value
+  const local  = ours ? localStream.value : null
+  const remote = ours ? remoteStream.value : null
+
+  const leave = () => {
+    const conv = convRef.current
+    resetCall()
+    loc.route(conv ? `/dms/${conv}` : '/dms')
+  }
+
+  // Reset the per-call controls on every entry; hang up when the user
+  // navigates away mid-call so the other side isn't left talking to no one.
   useEffect(() => {
-    let stopped = false
-    const started = Date.now()
-
-    // Reset the module-level signals so a previous call's state doesn't
-    // bleed into this mount (this page can be entered multiple times in
-    // a session).
     micMuted.value = false
-    cameraOff.value = false
     speakerMuted.value = false
-
-    durationIntervalRef.current = setInterval(() => {
-      durationSeconds.value = Math.floor((Date.now() - started) / 1000)
-    }, 1000)
-
-    // 1. Discover the call's type so we can default the camera state
-    //    correctly. ``call_type`` is fixed at offer time on the backend
-    //    (spec §26.5); the user's mid-call camera button still flips the
-    //    local video track via :func:`toggleCamera`.
-    const callTypePromise = (
-      api.get('/api/calls/active') as Promise<ActiveCallSummary[]>
-    ).then(rows => {
-      const me = rows.find(r => r.call_id === callId)
-      return me?.call_type ?? 'video'
-    }).catch(() => 'video' as const)
-
-    // 2. Pull ICE servers from the backend so STUN/TURN is configured.
-    Promise.all([
-      api.get('/api/calls/ice-servers') as Promise<IceServersResponse>,
-      callTypePromise,
-    ]).then(async ([r, callType]) => {
-      if (stopped) return
-      const pc = new RTCPeerConnection({ iceServers: r.ice_servers ?? [] })
-      pcRef.current = pc
-
-      // 3. Acquire local media. We always request audio + video so the
-      //    user's mid-call "Enable video" button flips the existing
-      //    track instead of needing a fresh permission prompt + a re-
-      //    negotiation. Audio calls disable the video track at start
-      //    so nothing is transmitted until the user opts in.
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: true,
-      })
-      if (stopped) { stream.getTracks().forEach(t => t.stop()); return }
-      localStreamRef.current = stream
-      if (callType === 'audio') {
-        stream.getVideoTracks().forEach(t => { t.enabled = false })
-        cameraOff.value = true
-      }
-      stream.getTracks().forEach(t => pc.addTrack(t, stream))
-      if (selfRef.current) selfRef.current.srcObject = stream
-
-      // 3. Render the remote stream as tracks arrive.
-      pc.ontrack = (evt) => {
-        if (!remoteRef.current) return
-        const existing = remoteRef.current.srcObject as MediaStream | null
-        const ms = existing ?? new MediaStream()
-        ms.addTrack(evt.track)
-        remoteRef.current.srcObject = ms
-      }
-
-      // 4. Trickle ICE candidates to the backend.
-      pc.onicecandidate = (evt) => {
-        if (!evt.candidate) return
-        api.post(`/api/calls/${callId}/ice`, {
-          candidate: evt.candidate.toJSON(),
-        }).catch(() => { /* best-effort */ })
-      }
-
-      // 5. Quality sampler — getStats() every 10 s.
-      qualityIntervalRef.current = setInterval(async () => {
-        try {
-          const stats = await pc.getStats()
-          const sample = extractQualitySample(stats)
-          await api.post(`/api/calls/${callId}/quality`, sample)
-          quality.value = classify(sample)
-        } catch { /* swallow */ }
-      }, 10_000)
-    }).catch((err) => {
-      showToast(`Call setup failed: ${(err as Error).message}`, 'error')
-    })
-
+    quality.value = 'good'
+    durationSeconds.value = 0
     return () => {
-      stopped = true
-      if (qualityIntervalRef.current) clearInterval(qualityIntervalRef.current)
-      if (durationIntervalRef.current) clearInterval(durationIntervalRef.current)
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(t => t.stop())
-      }
-      pcRef.current?.close()
+      if (sessionCallId.value === callId && isCallLive()) void hangupCall()
     }
   }, [callId])
 
+  // Attach the streams to the <video> elements as the session produces them.
+  useEffect(() => {
+    if (selfRef.current) selfRef.current.srcObject = local
+    cameraOff.value = !videoOn(local)
+  }, [local])
+  useEffect(() => {
+    if (remoteRef.current) remoteRef.current.srcObject = remote
+  }, [remote])
+
+  // Duration + quality sampler run only while media is flowing.
+  const live = phase === 'connected' || phase === 'reconnecting'
+  useEffect(() => {
+    if (!live) return
+    const started = Date.now() - durationSeconds.value * 1000
+    const tick = setInterval(() => {
+      durationSeconds.value = Math.floor((Date.now() - started) / 1000)
+    }, 1000)
+    const sampler = setInterval(async () => {
+      const pc = getPeerConnection()
+      if (!pc) return
+      try {
+        const sample = extractQualitySample(await pc.getStats())
+        await api.post(`/api/calls/${callId}/quality`, sample)
+        quality.value = classify(sample)
+      } catch { /* swallow */ }
+    }, 10_000)
+    return () => { clearInterval(tick); clearInterval(sampler) }
+  }, [live, callId])
+
+  // The call ended (either side hung up / declined): say why, if the
+  // other side ended it, and go back to the thread.
+  useEffect(() => {
+    if (phase !== 'ended') return
+    if (callEndReason.value) showToast(callEndReason.value, 'info')
+    leave()
+  }, [phase])
+
   const toggleMic = () => {
-    const s = localStreamRef.current
+    const s = localStream.value
     if (!s) return
     s.getAudioTracks().forEach(t => t.enabled = !t.enabled)
     micMuted.value = !micMuted.value
   }
   const toggleCamera = () => {
-    const s = localStreamRef.current
-    if (!s) return
+    const s = localStream.value
+    if (!s || !hasCamera.value) return
     s.getVideoTracks().forEach(t => t.enabled = !t.enabled)
-    cameraOff.value = !cameraOff.value
+    cameraOff.value = !videoOn(s)
   }
   const toggleSpeaker = () => {
     if (!remoteRef.current) return
     remoteRef.current.muted = !remoteRef.current.muted
     speakerMuted.value = remoteRef.current.muted
   }
-  const hangup = async () => {
-    try { await api.post(`/api/calls/${callId}/hangup`, {}) } catch { /* noop */ }
-    loc.route('/dms')
-  }
+  // Tearing the session down flips the phase to ``ended``; the effect
+  // above routes back to the thread.
+  const hangup = () => { void hangupCall() }
 
-  // Keyboard shortcuts (§26 UX).
+  // Keyboard shortcuts (§26 UX). Skipped while a control has focus so
+  // Space / Enter keep meaning "press the focused button".
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement && e.target.closest('button, input, textarea')) return
       if (e.key.toLowerCase() === 'm') toggleMic()
       if (e.key.toLowerCase() === 'v') toggleCamera()
       if (e.key === ' ')               { e.preventDefault(); hangup() }
@@ -173,32 +151,59 @@ export default function InCallPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  if (phase === 'idle' || phase === 'failed') {
+    const message = phase === 'failed'
+      ? (callEndReason.value ?? "The call couldn't be connected.")
+      : "This call isn't connected on this device. It may have ended, or it "
+        + 'was started in another tab or before the page reloaded.'
+    return (
+      <div class="sh-incall sh-incall--closed" role="alert">
+        <div class="sh-incall-closed-card">
+          <strong>{phase === 'failed' ? 'Call failed' : 'Call not connected'}</strong>
+          <p>{message}</p>
+          <Button onClick={leave}>Back to chats</Button>
+        </div>
+      </div>
+    )
+  }
+
+  const status = STATUS_COPY[phase]
   return (
     <div class="sh-incall">
       <header class="sh-incall-header">
         <span class="sh-incall-duration" aria-label="Call duration">
-          {formatDuration(durationSeconds.value)}
+          {live ? formatDuration(durationSeconds.value) : ''}
         </span>
-        <span class={`sh-incall-quality sh-q-${quality.value}`}
-              aria-label="Connection quality">{quality.value}</span>
+        {live && (
+          <span class={`sh-incall-quality sh-q-${quality.value}`}
+                aria-label="Connection quality">{quality.value}</span>
+        )}
       </header>
 
       <video ref={remoteRef} class="sh-incall-remote" autoplay playsinline />
+      {status && (
+        <p class="sh-incall-status" role="status" aria-live="polite">{status}</p>
+      )}
       <video ref={selfRef}   class="sh-incall-self"   autoplay playsinline muted />
 
       <footer class="sh-incall-controls">
         <Button class={micMuted.value ? 'sh-ctrl-off' : ''}
                 onClick={toggleMic}
+                aria-pressed={micMuted.value}
                 aria-label={micMuted.value ? 'Unmute mic' : 'Mute mic'}>
           {micMuted.value ? '🎤🚫' : '🎤'}
         </Button>
         <Button class={cameraOff.value ? 'sh-ctrl-off' : ''}
                 onClick={toggleCamera}
-                aria-label={cameraOff.value ? 'Turn camera on' : 'Turn camera off'}>
+                disabled={!hasCamera.value}
+                aria-pressed={cameraOff.value}
+                aria-label={!hasCamera.value ? 'No camera available'
+                  : cameraOff.value ? 'Turn camera on' : 'Turn camera off'}>
           {cameraOff.value ? '🎥🚫' : '🎥'}
         </Button>
         <Button class={speakerMuted.value ? 'sh-ctrl-off' : ''}
                 onClick={toggleSpeaker}
+                aria-pressed={speakerMuted.value}
                 aria-label={speakerMuted.value ? 'Unmute speaker' : 'Mute speaker'}>
           {speakerMuted.value ? '🔊🚫' : '🔊'}
         </Button>

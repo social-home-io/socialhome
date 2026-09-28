@@ -76,6 +76,11 @@ class CallConversationError(ValueError):
     """Raised when the conversation is missing / unknown / unsupported."""
 
 
+class CallAlreadyAnsweredError(RuntimeError):
+    """Raised when a call that is no longer ringing is answered again
+    (another device of the callee, or another member of a group call)."""
+
+
 @dataclass(slots=True)
 class CallRecord:
     """Hot-path server-side bookkeeping for a single call.
@@ -322,6 +327,8 @@ class CallSignalingService:
             or answerer_user_id == record.caller_user_id
         ):
             raise PermissionError("Only a callee may answer this call")
+        if record.status != "ringing":
+            raise CallAlreadyAnsweredError(call_id)
         record.status = "in_progress"
         record.last_activity = time.time()
 
@@ -355,6 +362,12 @@ class CallSignalingService:
                 "call_id": call_id,
                 "signed_sdp": signed_dict,
             },
+        )
+        # Stop the ring on the answerer's other devices (the frame carries
+        # no SDP — only the caller applies an answer).
+        await self._fanout_to_user(
+            answerer_user_id,
+            {"type": "call.answered", "call_id": call_id},
         )
         return {"call_id": call_id, "status": record.status}
 
@@ -455,17 +468,8 @@ class CallSignalingService:
             raise PermissionError("Not a participant in this call")
         record.status = "ended"
 
-        # Duration = now − connected_at if we have it, else 0.
         persisted = await self._call_repo.get_call(call_id)
-        duration = None
-        if persisted is not None and persisted.connected_at:
-            try:
-                start = datetime.fromisoformat(persisted.connected_at)
-                duration = int(
-                    (datetime.now(timezone.utc) - start).total_seconds(),
-                )
-            except ValueError:  # pragma: no cover
-                duration = 0
+        duration = _duration_since(persisted.connected_at if persisted else None)
         session = await self._call_repo.transition(
             call_id,
             status="ended",
@@ -620,82 +624,59 @@ class CallSignalingService:
 
         match et:
             case FederationEventType.CALL_OFFER:
-                callee_user = payload.get("to_user") or ""
-                caller = payload.get("from_user") or ""
-                conversation_id = payload.get("conversation_id") or ""
-                new_record = CallRecord(
-                    call_id=call_id,
-                    conversation_id=conversation_id,
-                    caller_user_id=caller,
-                    callee_user_id=callee_user,
-                    callee_instance_id=event.from_instance,
-                    call_type=str(payload.get("call_type", "audio")),
-                    participants={caller, callee_user},
+                await self._on_federated_offer(event, call_id, payload, signed_dict)
+            case FederationEventType.CALL_ANSWER:
+                record = self._calls.get(call_id)
+                if record is None or not await self._hosts_participant(
+                    event.from_instance, record.participants
+                ):
+                    return
+                if record.status != "ringing":
+                    return  # a second answer (other device / group member)
+                record.status = "in_progress"
+                record.last_activity = time.time()
+                # Caller-side row: without this it stays ``ringing`` and
+                # the stale-call sweep marks the live call missed at 90 s.
+                await self._call_repo.transition(
+                    call_id,
+                    status="active",
+                    connected_at=_now_iso(),
                 )
-                self._calls[call_id] = new_record
-                self._per_user.setdefault(callee_user, set()).add(call_id)
                 await self._fanout_to_user(
-                    callee_user,
+                    record.caller_user_id,
                     {
-                        "type": "call.ringing",
+                        "type": "call.answered",
                         "call_id": call_id,
-                        "conversation_id": conversation_id,
-                        "from_user": caller,
-                        "call_type": payload.get("call_type"),
                         "signed_sdp": signed_dict,
                     },
                 )
-            case FederationEventType.CALL_ANSWER:
-                record = self._calls.get(call_id)
-                if record is not None:
-                    record.status = "in_progress"
-                    record.last_activity = time.time()
-                    await self._fanout_to_user(
-                        record.caller_user_id,
-                        {
-                            "type": "call.answered",
-                            "call_id": call_id,
-                            "signed_sdp": signed_dict,
-                        },
-                    )
             case FederationEventType.CALL_ICE_CANDIDATE | FederationEventType.CALL_ICE:
                 record = self._calls.get(call_id)
-                if record is not None:
-                    record.last_activity = time.time()
-                    target = (
-                        record.callee_user_id
-                        if payload.get("from_user") == record.caller_user_id
-                        else record.caller_user_id
-                    )
-                    await self._fanout_to_user(
-                        target or "",
-                        {
-                            "type": "call.ice_candidate",
-                            "call_id": call_id,
-                            "candidate": payload.get("candidate"),
-                        },
-                    )
+                if record is None or not await self._hosts_participant(
+                    event.from_instance, record.participants
+                ):
+                    return
+                record.last_activity = time.time()
+                target = (
+                    record.callee_user_id
+                    if payload.get("from_user") == record.caller_user_id
+                    else record.caller_user_id
+                )
+                await self._fanout_to_user(
+                    target or "",
+                    {
+                        "type": "call.ice_candidate",
+                        "call_id": call_id,
+                        "candidate": payload.get("candidate"),
+                    },
+                )
             case (
                 FederationEventType.CALL_HANGUP
                 | FederationEventType.CALL_END
                 | FederationEventType.CALL_DECLINE
                 | FederationEventType.CALL_BUSY
             ):
-                record = self._calls.get(call_id)
-                if record is not None:
-                    target = (
-                        record.callee_user_id
-                        if payload.get("hanger_user") == record.caller_user_id
-                        else record.caller_user_id
-                    )
-                    await self._fanout_to_user(
-                        target or "",
-                        {
-                            "type": "call.ended",
-                            "call_id": call_id,
-                        },
-                    )
-                    self._cleanup_call(call_id)
+                await self._on_federated_end(event, call_id, payload)
             case FederationEventType.CALL_QUALITY:
                 # Phase CF — persist remote-reported WebRTC quality sample.
                 try:
@@ -862,6 +843,206 @@ class CallSignalingService:
                 remote_callees.append((r.instance_id, remote_user.user_id))
         return local_callees, remote_callees
 
+    async def _on_federated_offer(
+        self,
+        event,
+        call_id: str,
+        payload: dict,
+        signed_dict: dict | None,
+    ) -> None:
+        """Ring a local callee for an inbound ``CALL_OFFER``.
+
+        Persists the callee-side ``call_sessions`` row: every per-call
+        route (answer / ice / decline / hangup) authorises against it and
+        the stale-call sweep marks it missed. A repeat ``call_id`` (a
+        second local callee of a group call, or a late joiner) is merged
+        into the existing call — never allowed to reset it.
+        """
+        callee_user = payload.get("to_user") or ""
+        caller = payload.get("from_user") or ""
+        conversation_id = payload.get("conversation_id") or ""
+        call_type = str(payload.get("call_type") or "audio")
+        reject = await self._reject_inbound_offer(
+            from_instance=event.from_instance,
+            caller_user_id=caller,
+            callee_user_id=callee_user,
+            conversation_id=conversation_id,
+            call_type=call_type,
+        )
+        if reject is None:
+            existing = await self._call_repo.get_call(call_id)
+            if existing is not None and existing.conversation_id != conversation_id:
+                reject = "call_id already used by another conversation"
+        if reject is None and existing is None:
+            if len(self._per_user.get(callee_user, set())) >= MAX_CALLS_PER_USER:
+                reject = "callee has too many concurrent calls"
+        if reject is not None:
+            log.warning(
+                "CALL_OFFER %s from %s dropped: %s",
+                call_id,
+                event.from_instance,
+                reject,
+            )
+            return
+
+        if existing is not None:
+            participants = set(existing.participant_user_ids) | {caller, callee_user}
+            await self._call_repo.transition(
+                call_id,
+                status=existing.status,
+                participant_user_ids=tuple(sorted(participants)),
+            )
+            record = self._calls.get(call_id)
+            if record is not None:
+                record.participants |= {caller, callee_user}
+                record.last_activity = time.time()
+        else:
+            await self._call_repo.save_call(
+                CallSession(
+                    id=call_id,
+                    conversation_id=conversation_id,
+                    initiator_user_id=caller,
+                    callee_user_id=callee_user,
+                    call_type=call_type,
+                    status="ringing",
+                    participant_user_ids=tuple(sorted({caller, callee_user})),
+                )
+            )
+            self._calls[call_id] = CallRecord(
+                call_id=call_id,
+                conversation_id=conversation_id,
+                caller_user_id=caller,
+                callee_user_id=callee_user,
+                callee_instance_id=event.from_instance,
+                call_type=call_type,
+                participants={caller, callee_user},
+            )
+        self._per_user.setdefault(callee_user, set()).add(call_id)
+
+        if payload.get("late_join") and existing is not None:
+            # Mirrors the local ``join_call`` fan-out.
+            await self._fanout_to_user(
+                callee_user,
+                {
+                    "type": "call.peer_join",
+                    "call_id": call_id,
+                    "joiner_user_id": caller,
+                    "signed_sdp": signed_dict,
+                },
+            )
+            return
+        await self._fanout_to_user(
+            callee_user,
+            {
+                "type": "call.ringing",
+                "call_id": call_id,
+                "conversation_id": conversation_id,
+                "from_user": caller,
+                "call_type": call_type,
+                "signed_sdp": signed_dict,
+            },
+        )
+
+    async def _on_federated_end(self, event, call_id: str, payload: dict) -> None:
+        """Inbound ``CALL_HANGUP`` / ``CALL_END`` / ``CALL_DECLINE`` /
+        ``CALL_BUSY``: release the local user and close the persisted row
+        (otherwise it stays ``active`` forever, or ``ringing`` until the
+        sweep reports a declined call as missed)."""
+        record = self._calls.get(call_id)
+        persisted = await self._call_repo.get_call(call_id)
+        participants = (
+            record.participants
+            if record is not None
+            else set(persisted.participant_user_ids)
+            if persisted is not None
+            else set()
+        )
+        if not await self._hosts_participant(event.from_instance, participants):
+            return
+        if persisted is not None and persisted.status in ("ringing", "active"):
+            declined = event.event_type in (
+                FederationEventType.CALL_DECLINE,
+                FederationEventType.CALL_BUSY,
+            )
+            await self._call_repo.transition(
+                call_id,
+                status="declined" if declined else "ended",
+                ended_at=_now_iso(),
+                duration_seconds=_duration_since(persisted.connected_at),
+            )
+        if record is None:
+            return
+        ender = payload.get("hanger_user") or payload.get("decliner_user")
+        target = (
+            record.callee_user_id
+            if ender == record.caller_user_id
+            else record.caller_user_id
+        )
+        await self._fanout_to_user(
+            target or "",
+            {
+                "type": "call.ended",
+                "call_id": call_id,
+            },
+        )
+        self._cleanup_call(call_id)
+
+    async def _hosts_participant(
+        self,
+        instance_id: str,
+        participants: set[str],
+    ) -> bool:
+        """``True`` when *instance_id* hosts one of the call's participants
+        — only those households may signal into the call."""
+        for user_id in participants:
+            if await self._instance_of(user_id) == instance_id:
+                return True
+        return False
+
+    async def _reject_inbound_offer(
+        self,
+        *,
+        from_instance: str,
+        caller_user_id: str,
+        callee_user_id: str,
+        conversation_id: str,
+        call_type: str,
+    ) -> str | None:
+        """Why an inbound ``CALL_OFFER`` must not ring, or ``None`` if it may.
+
+        The offer is persisted as a ``call_sessions`` row, so it has to be
+        a call this household would accept from its own members: a known
+        call type, from a user the sending household hosts, for a user
+        this household hosts, inside a conversation both of them are in.
+        """
+        if call_type not in ("audio", "video"):
+            return f"invalid call_type {call_type!r}"
+        callee = await self._user_repo.get_by_user_id(callee_user_id)
+        if callee is None:
+            return "callee is not a local user"
+        caller = None
+        for ru in await self._user_repo.list_remote_for_instance(from_instance):
+            if ru.user_id == caller_user_id:
+                caller = ru
+                break
+        if caller is None:
+            return "caller is not a user of the sending household"
+        if not conversation_id:
+            return "missing conversation_id"
+        members = await self._conv_repo.list_members(conversation_id)
+        if not any(
+            m.username == callee.username and m.deleted_at is None for m in members
+        ):
+            return "callee is not in the conversation"
+        remotes = await self._conv_repo.list_remote_members(conversation_id)
+        if not any(
+            r.instance_id == from_instance
+            and r.remote_username == caller.remote_username
+            for r in remotes
+        ):
+            return "caller is not in the conversation"
+        return None
+
     async def _find_remote_user(self, instance_id: str, username: str):
         """Look up a ``RemoteUser`` in the ``remote_users`` table.
 
@@ -958,6 +1139,18 @@ class CallSignalingService:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _duration_since(connected_at: str | None) -> int | None:
+    """Whole seconds since *connected_at* (ISO-8601), ``None`` if never
+    connected."""
+    if not connected_at:
+        return None
+    try:
+        start = datetime.fromisoformat(connected_at)
+    except ValueError:
+        return 0
+    return int((datetime.now(timezone.utc) - start).total_seconds())
 
 
 # ─── Stale-call cleanup scheduler ────────────────────────────────────────

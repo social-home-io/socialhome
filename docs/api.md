@@ -515,7 +515,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | GET | `/api/webrtc/ice_servers` | STUN/TURN config (alias: `/api/calls/ice-servers`). |
 | GET / POST | `/api/calls` | List / initiate. |
 | GET | `/api/calls/active` | Current active call. |
-| POST | `/api/calls/{id}/{answer\|join\|decline\|hangup}` | Lifecycle. |
+| POST | `/api/calls/{id}/{answer\|join\|decline\|hangup}` | Lifecycle. `answer` returns 409 `already_answered` once the call is no longer ringing (another device or group member answered first). |
 | POST | `/api/calls/{id}/ice` | Trickle ICE candidate. |
 | POST | `/api/calls/{id}/quality` | Report RTT / jitter / loss. |
 

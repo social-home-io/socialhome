@@ -23,7 +23,8 @@ export interface IncomingCall {
   call_id:    string
   from_user:  string
   call_type:  'audio' | 'video'
-  signed_sdp?: unknown
+  /** The caller's SDP offer, signed by the relaying household (§26.8). */
+  signed_sdp?: { sdp: string, sdp_type: string, signature: string } | null
   conversation_id?: string
 }
 
@@ -44,6 +45,11 @@ function upsert(call: ActiveCall): void {
 function drop(callId: string): void {
   active.value = active.value.filter((c) => c.call_id !== callId)
   if (incoming.value?.call_id === callId) incoming.value = null
+  // Candidates for a finished call can never be applied — don't let
+  // them pile up on a device that never picked up.
+  if (pendingIce.value.some((c) => c.call_id === callId)) {
+    pendingIce.value = pendingIce.value.filter((c) => c.call_id !== callId)
+  }
 }
 
 export function wireCallsWs(): void {
@@ -52,7 +58,7 @@ export function wireCallsWs(): void {
       call_id: string
       from_user: string
       call_type?: 'audio' | 'video'
-      signed_sdp?: unknown
+      signed_sdp?: IncomingCall['signed_sdp']
       conversation_id?: string
     }
     if (!d?.call_id || !d?.from_user) return
@@ -99,6 +105,11 @@ export function wireCallsWs(): void {
 
 export function consumeIce(callId: string): IceCandidate[] {
   const taken = pendingIce.value.filter((c) => c.call_id === callId)
-  pendingIce.value = pendingIce.value.filter((c) => c.call_id !== callId)
+  // Only write when something was taken: callers drain from an effect
+  // that watches ``pendingIce``, and an unconditional write would
+  // re-trigger that effect forever.
+  if (taken.length > 0) {
+    pendingIce.value = pendingIce.value.filter((c) => c.call_id !== callId)
+  }
   return taken
 }

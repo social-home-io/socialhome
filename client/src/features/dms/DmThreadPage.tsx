@@ -12,6 +12,7 @@ import { AudioBubble } from '@/components/AudioBubble'
 import { VideoMedia } from '@/components/VideoMedia'
 import { openLightbox } from '@/components/ImageLightbox'
 import { showToast } from '@/components/Toast'
+import { startCall } from '@/features/calls/callSession'
 import { ReadReceipt, readReceiptsEnabled } from '@/components/ReadReceipts'
 import { TypingIndicator, sendTyping } from '@/components/TypingIndicator'
 import { UnreadDivider } from '@/components/UnreadDivider'
@@ -1629,15 +1630,15 @@ export default function DmThreadPage() {
     window.addEventListener('pointercancel', onCancel)
   }
 
-  const startCall = async (callType: 'audio' | 'video') => {
-    // For v1 the backend expects a placeholder SDP here; ``InCallPage``
-    // owns the ``RTCPeerConnection`` once the call page mounts.
-    const r = await api.post('/api/calls', {
-      conversation_id: convId,
-      call_type: callType,
-      sdp_offer: 'v=0\r\n',
-    }) as { call_id: string }
-    location.route(`/calls/${r.call_id}`)
+  const callBack = async (callType: 'audio' | 'video') => {
+    // ``startCall`` owns the peer connection + SDP offer; the call page
+    // renders the session once it's ringing.
+    try {
+      const callId = await startCall(convId, callType)
+      location.route(`/calls/${callId}`)
+    } catch (err) {
+      showToast(`Couldn't start the call: ${(err as Error)?.message ?? err}`, 'error')
+    }
   }
 
   // Page title: show the peer's display name in the TopBar (above
@@ -1901,7 +1902,7 @@ export default function DmThreadPage() {
             // still index-based without the Fragment key).
             return (
               <Fragment key={m.id}>
-                <CallEventRow m={m} onCallBack={startCall} />
+                <CallEventRow m={m} onCallBack={callBack} />
                 {isUnreadAnchor && <UnreadDivider />}
               </Fragment>
             )

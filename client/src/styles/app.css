@@ -10153,6 +10153,36 @@ hr {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+/* "Calling… / Connecting…" line, centred over the (still empty) remote view. */
+.sh-incall-status {
+  position: absolute;
+  top: 40%;
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0 var(--sh-space-lg);
+  text-align: center;
+  font-size: var(--sh-font-size-lg);
+  font-weight: 600;
+  pointer-events: none;
+}
+.sh-incall-controls button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.sh-incall-controls button:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+/* Call failed / not connected on this device. */
+.sh-incall--closed { align-items: center; justify-content: center; padding: var(--sh-space-lg); }
+.sh-incall-closed-card {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sh-space-md);
+  text-align: center;
+}
+.sh-incall-closed-card p { margin: 0; color: rgba(255,255,255,0.8); line-height: 1.5; }
+@media (max-width: 540px) {
+  .sh-incall-self { width: 112px; bottom: 112px; right: 12px; }
+  .sh-incall-controls { gap: var(--sh-space-sm); padding: var(--sh-space-md) var(--sh-space-sm) calc(var(--sh-space-md) + env(safe-area-inset-bottom)); }
+}
 .sh-q-good, .sh-incall-quality.sh-q-good { background: color-mix(in srgb, var(--sh-success) 22%, transparent); color: var(--sh-success); }
 .sh-q-fair, .sh-incall-quality.sh-q-fair { background: color-mix(in srgb, var(--sh-warning) 22%, transparent); color: var(--sh-warning); }
 .sh-q-poor, .sh-incall-quality.sh-q-poor { background: color-mix(in srgb, var(--sh-danger) 22%, transparent); color: var(--sh-danger); }
@@ -10185,19 +10215,24 @@ hr {
   to   { box-shadow: 0 0 0 16px color-mix(in srgb, var(--sh-primary) 0%, transparent), var(--sh-shadow-xl); }
 }
 .sh-incoming-avatar { margin-bottom: var(--sh-space-md); }
-.sh-incoming-name { font-size: var(--sh-font-size-xl); font-weight: 700; }
+.sh-incoming-name { display: block; font-size: var(--sh-font-size-xl); font-weight: 700; overflow-wrap: anywhere; }
 .sh-incoming-type {
+  display: block;
   color: var(--sh-text-muted);
   font-size: var(--sh-font-size-sm);
   margin-bottom: var(--sh-space-lg);
 }
 .sh-incoming-actions { display: flex; gap: var(--sh-space-md); justify-content: center; }
+/* Text-labelled pills ("Accept" / "Decline"), not icon circles — a fixed
+ * 64 px circle clipped the labels. */
 .sh-accept, .sh-decline {
-  width: 64px;
-  height: 64px;
+  min-width: 120px;
+  min-height: 48px;
+  padding: 0 var(--sh-space-lg);
   border-radius: var(--sh-radius-full);
   border: none;
-  font-size: 1.5rem;
+  font-size: var(--sh-font-size-md);
+  font-weight: 600;
   color: #fff;
   cursor: pointer;
   transition: transform var(--sh-transition-fast);

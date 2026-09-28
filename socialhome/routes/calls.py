@@ -27,6 +27,7 @@ from aiohttp import web
 from .. import app_keys as K
 from ..domain.call import CallQualitySample
 from ..services.call_service import (
+    CallAlreadyAnsweredError,
     CallConversationError,
     CallNotFoundError,
 )
@@ -129,6 +130,8 @@ class CallAnswerView(BaseView):
             )
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
+        except CallAlreadyAnsweredError:
+            return web.json_response({"error": "already_answered"}, status=409)
         except PermissionError as exc:
             return web.json_response(
                 {"error": "forbidden", "detail": str(exc)}, status=403

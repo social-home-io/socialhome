@@ -799,7 +799,23 @@ class _Event:
         self.payload = payload
 
 
+def _remote_alice_dm(env) -> None:
+    """Re-shape ``conv-ab`` as a cross-household DM: bob local, alice on
+    ``remote-inst`` — the only shape an inbound ``CALL_OFFER`` rings for."""
+    env.users.add_remote(
+        user_id="uid-alice",
+        instance_id="remote-inst",
+        remote_username="alice",
+    )
+    env.convos.add_conversation(
+        "conv-ab",
+        ["bob"],
+        remotes=[("remote-inst", "alice", "uid-alice")],
+    )
+
+
 async def test_handle_federated_call_offer_creates_record_and_rings(env):
+    _remote_alice_dm(env)
     await env.svc.handle_federated_signal(
         _Event(
             FederationEventType.CALL_OFFER,
@@ -823,6 +839,7 @@ async def test_handle_federated_call_offer_creates_record_and_rings(env):
 
 
 async def test_handle_federated_hangup_cleans_record(env):
+    _remote_alice_dm(env)
     await env.svc.handle_federated_signal(
         _Event(
             FederationEventType.CALL_OFFER,
@@ -844,6 +861,7 @@ async def test_handle_federated_hangup_cleans_record(env):
         )
     )
     assert env.svc.get_call("c1") is None
+    assert any(c[1].get("type") == "call.ended" for c in env.ws.calls)
 
 
 async def test_handle_federated_signal_ignores_missing_call_id(env):
