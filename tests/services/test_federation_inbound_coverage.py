@@ -98,6 +98,20 @@ def svc():
 # ── DM ──────────────────────────────────────────────────────────────
 
 
+def _seat_dm_sender(svc) -> None:
+    """``u`` is user ``u`` of ``peer-1``, seated in conversation ``c``."""
+    svc.user_repo.get_instance_for_user.return_value = "peer-1"
+    svc.user_repo.get_remote.return_value = SimpleNamespace(
+        instance_id="peer-1", remote_username="u"
+    )
+    svc.convo.list_remote_members.return_value = [
+        SimpleNamespace(instance_id="peer-1", remote_username="u")
+    ]
+    svc.convo.get_message.return_value = SimpleNamespace(
+        conversation_id="c", sender_user_id="u"
+    )
+
+
 async def test_dm_message_missing_fields_noops(svc):
     await svc.svc._on_dm_message(_evt("DM_MESSAGE", {}))
     svc.convo.save_message_returning_created.assert_not_awaited()
@@ -105,6 +119,8 @@ async def test_dm_message_missing_fields_noops(svc):
 
 
 async def test_dm_message_bad_type_falls_back_to_text(svc):
+    _seat_dm_sender(svc)
+    svc.convo.get_message.return_value = None
     await svc.svc._on_dm_message(
         _evt(
             "DM_MESSAGE",
@@ -127,6 +143,7 @@ async def test_dm_deleted_missing_id_noops(svc):
 
 
 async def test_dm_deleted_happy_path(svc):
+    _seat_dm_sender(svc)
     await svc.svc._on_dm_deleted(
         _evt("DM_MESSAGE_DELETED", {"message_id": "m"}),
     )
@@ -139,6 +156,7 @@ async def test_dm_reaction_missing_fields(svc):
 
 
 async def test_dm_reaction_add_and_remove(svc):
+    _seat_dm_sender(svc)
     await svc.svc._on_dm_reaction(
         _evt(
             "DM_MESSAGE_REACTION",

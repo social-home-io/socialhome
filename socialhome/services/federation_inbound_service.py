@@ -76,6 +76,7 @@ from ..crypto import (
     verify_user_identity_assertion,
 )
 from ..domain.user import RemoteUser, UserIdentityAssertion, UserStatus
+from ..federation.dm_scope import DmScope, refuse
 from ..federation.space_authorship import SpaceAuthorship
 from ..federation.space_scope import (
     log_cross_space_refusal,
@@ -276,6 +277,7 @@ class FederationInboundService:
         "_gallery_repo",
         "_bazaar_repo",
         "_authorship",
+        "_dm_scope",
         "_federation_service",
         "_space_cover_repo",
         "_space_icon_repo",
@@ -347,6 +349,12 @@ class FederationInboundService:
             )
             if space_remote_member_repo is not None
             else None
+        )
+        #: §24.11 DM binding — ties the conversation, message and person a
+        #: DM payload names to the household that signed it.
+        self._dm_scope = DmScope(
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
         )
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
@@ -459,6 +467,11 @@ class FederationInboundService:
             return
         if msg_type not in MESSAGE_TYPES:
             msg_type = "text"
+        recipients = tuple(p.get("recipient_user_ids") or ())
+        if not await self._dm_message_in_scope(
+            event, conv_id, message_id, sender_user_id, recipients
+        ):
+            return
 
         # Cross-household DMs arrive without the conversation ever
         # being created on this instance — the *sender's* household
@@ -470,7 +483,6 @@ class FederationInboundService:
         # doesn't trip a FOREIGN KEY constraint failure on the receiver
         # the very first time a sender ships a DM. Idempotent —
         # ``conversation_repo`` upserts.
-        recipients = tuple(p.get("recipient_user_ids") or ())
         await self._ensure_remote_dm_conversation(
             conv_id=conv_id,
             sender_instance_id=event.from_instance,
@@ -657,30 +669,32 @@ class FederationInboundService:
         ``GET /api/conversations/{id}/messages`` returns 403
         ("not a member").
 
-        Idempotent: ``conversation_repo.create`` upserts on the
-        primary key, ``add_member`` / ``add_remote_member`` upsert on
+        Runs only for a conversation that is not here yet: the seats of an
+        existing conversation are never rewritten by an inbound message
+        (:meth:`_dm_message_in_scope` already required the sender to hold
+        one). Idempotent: ``add_member`` / ``add_remote_member`` upsert on
         the natural keys.
         """
-        existing = await self._conversation_repo.get(conv_id)
-        if existing is None:
-            now_iso = (
-                occurred_at
-                if isinstance(occurred_at, str) and occurred_at
-                else datetime.now(timezone.utc).isoformat()
+        if await self._conversation_repo.get(conv_id) is not None:
+            return
+        now_iso = (
+            occurred_at
+            if isinstance(occurred_at, str) and occurred_at
+            else datetime.now(timezone.utc).isoformat()
+        )
+        try:
+            await self._conversation_repo.create(
+                Conversation(
+                    id=conv_id,
+                    type=ConversationType.DM,
+                    created_at=parse_iso8601_lenient(now_iso),
+                ),
             )
-            try:
-                await self._conversation_repo.create(
-                    Conversation(
-                        id=conv_id,
-                        type=ConversationType.DM,
-                        created_at=parse_iso8601_lenient(now_iso),
-                    ),
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                log.debug(
-                    "_ensure_remote_dm_conversation: create skipped (%s)",
-                    exc,
-                )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug(
+                "_ensure_remote_dm_conversation: create skipped (%s)",
+                exc,
+            )
 
         joined_at = datetime.now(timezone.utc).isoformat()
 
@@ -731,6 +745,56 @@ class FederationInboundService:
                         remote.remote_username,
                         exc,
                     )
+
+    async def _dm_message_in_scope(
+        self,
+        event: "FederationEvent",
+        conv_id: str,
+        message_id: str,
+        sender_user_id: str,
+        recipients: tuple,
+    ) -> bool:
+        """Whether ``from_instance`` may write this ``DM_MESSAGE``.
+
+        * the sender is a user of the sending household (never a local
+          member, never a third household's user);
+        * an existing message id is only ever re-sent (edit, transcript) by
+          its own sender, in its own conversation;
+        * an existing conversation takes messages only from a sender seated
+          in it;
+        * a conversation not here yet is opened only for a local recipient.
+        """
+        scope = self._dm_scope
+        reason: str | None = None
+        existing = await self._conversation_repo.get_message(message_id)
+        if not await scope.sent_from(event, sender_user_id):
+            reason = "sender is not a user of the sending household"
+        elif existing is not None and (
+            existing.conversation_id != conv_id
+            or existing.sender_user_id != sender_user_id
+        ):
+            reason = "message id belongs to another message"
+        elif await self._conversation_repo.get(conv_id) is not None:
+            if not await scope.speaks_for(event, conv_id, sender_user_id):
+                reason = "sender is not seated in the conversation"
+        elif not await self._has_local_recipient(recipients):
+            reason = "no local recipient for a new conversation"
+        if reason is None:
+            return True
+        refuse(
+            event,
+            reason,
+            conversation=conv_id,
+            message=message_id,
+            sender=sender_user_id,
+        )
+        return False
+
+    async def _has_local_recipient(self, recipients: tuple) -> bool:
+        for rid in recipients:
+            if await self._user_repo.get_by_user_id(str(rid)) is not None:
+                return True
+        return False
 
     # ── DM media ─────────────────────────────────────────────────────
 
@@ -1126,8 +1190,21 @@ class FederationInboundService:
                     )
 
     async def _on_dm_deleted(self, event: "FederationEvent") -> None:
+        """Soft-delete a message — only its own sender's household may."""
         message_id = str(event.payload.get("message_id") or "")
+        conv_id = str(event.payload.get("conversation_id") or "")
         if not message_id:
+            return
+        msg = await self._conversation_repo.get_message(message_id)
+        if msg is None:
+            return
+        reason: str | None = None
+        if not await self._dm_scope.sent_from(event, msg.sender_user_id):
+            reason = "message was not sent from this household"
+        elif conv_id and conv_id != msg.conversation_id:
+            reason = "message is not in the named conversation"
+        if reason is not None:
+            refuse(event, reason, conversation=conv_id, message=message_id)
             return
         await self._conversation_repo.soft_delete_message(message_id)
 
@@ -1137,7 +1214,21 @@ class FederationInboundService:
         user_id = str(p.get("user_id") or "")
         emoji = str(p.get("emoji") or "")
         action = str(p.get("action") or "add")
+        conv_id = str(p.get("conversation_id") or "")
         if not message_id or not user_id or not emoji:
+            return
+        # A reaction is its reactor's own: only a user of the sending
+        # household, seated in the message's conversation.
+        msg = await self._conversation_repo.get_message(message_id)
+        if msg is None:
+            return
+        reason: str | None = None
+        if conv_id and conv_id != msg.conversation_id:
+            reason = "message is not in the named conversation"
+        elif not await self._dm_scope.speaks_for(event, msg.conversation_id, user_id):
+            reason = "reactor is not a seated user of the sending household"
+        if reason is not None:
+            refuse(event, reason, message=message_id, user=user_id)
             return
         if action == "remove":
             await self._conversation_repo.remove_reaction(message_id, user_id, emoji)
@@ -1145,9 +1236,6 @@ class FederationInboundService:
             await self._conversation_repo.add_reaction(message_id, user_id, emoji)
         # Fan to local WS sessions so every open thread tab on this
         # household updates the reaction strip without a refetch.
-        msg = await self._conversation_repo.get_message(message_id)
-        if msg is None:
-            return
         members = await self._conversation_repo.list_members(msg.conversation_id)
         recipient_ids: list[str] = []
         for m in members:

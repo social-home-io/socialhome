@@ -29,9 +29,11 @@ class _FakeFederation:
 
 
 class _FakeConvRepo:
-    def __init__(self, messages, members: list | None = None):
+    def __init__(self, messages, members: list | None = None, seats=("peer-a",)):
         self._messages = messages
         self._members: list = members or []
+        #: Households holding a remote seat in the conversation.
+        self._seats = seats
         self.last_since: str | None = None
         self.last_limit: int | None = None
 
@@ -44,6 +46,11 @@ class _FakeConvRepo:
 
     async def list_members(self, conversation_id: str) -> list:
         return list(self._members)
+
+    async def list_remote_members(self, conversation_id: str) -> list:
+        return [
+            SimpleNamespace(instance_id=i, remote_username="x") for i in self._seats
+        ]
 
 
 class _FakeUserRepo:
@@ -88,6 +95,7 @@ async def test_streams_messages_in_order_and_emits_complete():
     provider = DmHistoryProvider(
         conversation_repo=_FakeConvRepo(messages),
         federation_service=fed,
+        user_repo=_FakeUserRepo({}),
     )
     count = await provider.handle_request(
         _event(
@@ -115,6 +123,7 @@ async def test_respects_since_cursor():
     provider = DmHistoryProvider(
         conversation_repo=repo,
         federation_service=fed,
+        user_repo=_FakeUserRepo({}),
     )
     since = (now + timedelta(minutes=1)).isoformat()
     await provider.handle_request(
@@ -135,6 +144,7 @@ async def test_large_history_is_split_into_multiple_chunks():
     provider = DmHistoryProvider(
         conversation_repo=_FakeConvRepo(messages),
         federation_service=fed,
+        user_repo=_FakeUserRepo({}),
     )
     await provider.handle_request(
         _event(
@@ -154,6 +164,7 @@ async def test_empty_history_still_sends_complete():
     provider = DmHistoryProvider(
         conversation_repo=_FakeConvRepo([]),
         federation_service=fed,
+        user_repo=_FakeUserRepo({}),
     )
     await provider.handle_request(
         _event(
@@ -172,6 +183,7 @@ async def test_missing_conversation_id_drops():
     provider = DmHistoryProvider(
         conversation_repo=_FakeConvRepo([]),
         federation_service=fed,
+        user_repo=_FakeUserRepo({}),
     )
     count = await provider.handle_request(
         _event(
@@ -223,7 +235,7 @@ async def test_history_chunks_suppressed_when_local_participant_hidden_from_peer
 
 
 async def test_history_streams_when_no_visibility_repo_back_compat():
-    """With visibility_repo=None and user_repo=None the original streaming
+    """With visibility_repo=None the original streaming
     behaviour is preserved — no regressions for existing wiring."""
     now = datetime(2026, 4, 1, tzinfo=timezone.utc)
     messages = [_msg(i, now + timedelta(minutes=i)) for i in range(2)]
@@ -231,7 +243,7 @@ async def test_history_streams_when_no_visibility_repo_back_compat():
     provider = DmHistoryProvider(
         conversation_repo=_FakeConvRepo(messages),
         federation_service=fed,
-        user_repo=None,
+        user_repo=_FakeUserRepo({}),
         visibility_repo=None,
     )
     count = await provider.handle_request(
@@ -240,3 +252,19 @@ async def test_history_streams_when_no_visibility_repo_back_compat():
     chunks = [s for s in fed.sent if s["type"] == FederationEventType.DM_HISTORY_CHUNK]
     assert count == 1
     assert len(chunks) == 1
+
+
+async def test_no_history_for_a_household_without_a_seat():
+    """A peer that holds no seat in the conversation gets nothing back."""
+    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    fed = _FakeFederation()
+    provider = DmHistoryProvider(
+        conversation_repo=_FakeConvRepo([_msg(0, now)], seats=("peer-b",)),
+        federation_service=fed,
+        user_repo=_FakeUserRepo({}),
+    )
+    count = await provider.handle_request(
+        _event("peer-a", {"conversation_id": "c-1", "since": ""})
+    )
+    assert count == 0
+    assert fed.sent == []

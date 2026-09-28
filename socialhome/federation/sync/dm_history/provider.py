@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
 from ....services.visibility import VisibilityMixin
+from ...dm_scope import DmScope, refuse
 
 if TYPE_CHECKING:
     from ....domain.federation import FederationEvent
@@ -51,6 +52,7 @@ class DmHistoryProvider(VisibilityMixin):
         "_federation",
         "_acks",
         "_user_repo",
+        "_dm_scope",
     )
 
     def __init__(
@@ -58,12 +60,16 @@ class DmHistoryProvider(VisibilityMixin):
         *,
         conversation_repo: "AbstractConversationRepo",
         federation_service: "FederationService",
-        user_repo: "AbstractUserRepo | None" = None,
+        user_repo: "AbstractUserRepo",
         visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
     ) -> None:
         self._conversation_repo = conversation_repo
         self._federation = federation_service
         self._user_repo = user_repo
+        self._dm_scope = DmScope(
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+        )
         self._visibility_repo = visibility_repo
         # (from_instance, conversation_id) → highest chunk_index ack'd.
         self._acks: dict[tuple[str, str], int] = {}
@@ -104,10 +110,20 @@ class DmHistoryProvider(VisibilityMixin):
         if not conversation_id:
             log.debug("DM_HISTORY_REQUEST missing conversation_id")
             return 0
+        # History goes only to a household seated in the conversation.
+        # Nothing is sent otherwise — not even DM_HISTORY_COMPLETE, which
+        # would confirm the conversation exists.
+        if not await self._dm_scope.seated(event, conversation_id):
+            refuse(
+                event,
+                "requester holds no seat in the conversation",
+                conversation=conversation_id,
+            )
+            return 0
 
         # Visibility gate: if any local participant is hidden from the peer,
         # suppress the chunk stream entirely.
-        if self._visibility_repo is not None and self._user_repo is not None:
+        if self._visibility_repo is not None:
             hidden = await self.hidden_for_peer(event.from_instance)
             if hidden:
                 members = await self._conversation_repo.list_members(conversation_id)

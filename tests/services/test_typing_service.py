@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.services.typing_service import (
@@ -19,8 +21,9 @@ class _FakeMember:
 
 
 class _FakeRemoteMember:
-    def __init__(self, instance_id: str):
+    def __init__(self, instance_id: str, remote_username: str = ""):
         self.instance_id = instance_id
+        self.remote_username = remote_username
 
 
 class _FakeConvoRepo:
@@ -36,7 +39,15 @@ class _FakeConvoRepo:
 
 
 class _FakeUserRepo:
-    pass
+    """Knows one remote user: ``remote-eve`` (``eve``) of ``remote-1``."""
+
+    async def get_instance_for_user(self, user_id):
+        return "remote-1" if user_id == "remote-eve" else None
+
+    async def get_remote(self, user_id):
+        if user_id != "remote-eve":
+            return None
+        return SimpleNamespace(instance_id="remote-1", remote_username="eve")
 
 
 class _FakeWS:
@@ -261,7 +272,8 @@ async def test_handle_remote_typing_fans_to_local_members():
         members=[
             _FakeMember("alice"),
             _FakeMember("bob"),
-        ]
+        ],
+        remote=[_FakeRemoteMember("remote-1", "eve")],
     )
     ws = _FakeWS()
     svc = TypingService(
@@ -292,7 +304,8 @@ async def test_handle_remote_typing_drops_self_target():
         members=[
             _FakeMember("alice"),
             _FakeMember("remote-eve"),
-        ]
+        ],
+        remote=[_FakeRemoteMember("remote-1", "eve")],
     )
     ws = _FakeWS()
     svc = TypingService(
@@ -313,6 +326,25 @@ async def test_handle_remote_typing_drops_self_target():
     )
     targets, _ = ws.calls[0]
     assert "remote-eve" not in targets
+
+
+async def test_handle_remote_typing_refuses_an_unseated_typist():
+    """Nobody is shown typing unless the sender's own user holds a seat."""
+    ws = _FakeWS()
+    svc = TypingService(
+        conversation_repo=_FakeConvoRepo(members=[_FakeMember("alice")]),
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
+    )
+    n = await svc.handle_remote_typing(
+        _Event(
+            FederationEventType.DM_USER_TYPING,
+            "remote-1",
+            {"conversation_id": "c1", "sender_user_id": "remote-eve"},
+        )
+    )
+    assert n == 0
+    assert ws.calls == []
 
 
 async def test_handle_remote_typing_missing_fields_returns_zero():

@@ -77,15 +77,51 @@ def _event(
     )
 
 
+async def _seed_dm_people(db) -> None:
+    """``user-local`` lives here; ``user-remote`` (``remote``) on ``peer-a``."""
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("local", "user-local", "Local"),
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO remote_instances(id, display_name,"
+        " remote_identity_pk, key_self_to_remote, key_remote_to_self,"
+        " remote_inbox_url, local_inbox_id, status, source)"
+        " VALUES('peer-a', 'peer-a', ?, 'k1', 'k2', 'https://peer-a/wh',"
+        " 'wh-peer-a', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        ("user-remote", "peer-a", "remote", "Remote"),
+    )
+
+
+async def _seed_dm(db, conv_id: str) -> None:
+    """A DM between ``user-local`` and ``peer-a``'s ``user-remote``."""
+    await _seed_dm_people(db)
+    await db.enqueue(
+        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
+        (conv_id, "dm"),
+    )
+    await db.enqueue(
+        "INSERT INTO conversation_members(conversation_id, username) VALUES(?,?)",
+        (conv_id, "local"),
+    )
+    await db.enqueue(
+        "INSERT INTO conversation_remote_members(conversation_id, instance_id,"
+        " remote_username) VALUES(?,?,?)",
+        (conv_id, "peer-a", "remote"),
+    )
+
+
 # ─── DM ──────────────────────────────────────────────────────────────────
 
 
 async def test_dm_message_persists_and_publishes_event(db, bus, inbound):
     # Seed conversation row so FK is satisfied
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-1", "dm"),
-    )
+    await _seed_dm(db, "conv-1")
     captured: list[DmMessageCreated] = []
     bus.subscribe(DmMessageCreated, captured.append)
 
@@ -126,10 +162,7 @@ async def test_dm_message_duplicate_transport_does_not_publish_created_twice(
     end-to-end contract that the inbound handler honours it."""
     from socialhome.domain.events import DmMessageUpdated
 
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-dup", "dm"),
-    )
+    await _seed_dm(db, "conv-dup")
     created: list[DmMessageCreated] = []
     updated: list[DmMessageUpdated] = []
     bus.subscribe(DmMessageCreated, created.append)
@@ -160,10 +193,7 @@ async def test_dm_message_edit_replay_publishes_updated(db, bus, inbound):
     suppress legitimate edits."""
     from socialhome.domain.events import DmMessageUpdated
 
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-edit", "dm"),
-    )
+    await _seed_dm(db, "conv-edit")
     created: list[DmMessageCreated] = []
     updated: list[DmMessageUpdated] = []
     bus.subscribe(DmMessageCreated, created.append)
@@ -249,6 +279,7 @@ async def test_dm_message_lazy_creates_conversation_before_seq_record(db, bus):
 
     # Deliberately do NOT pre-seed the conversation row. The handler
     # must lazy-create it.
+    await _seed_dm_people(db)
     await inbound._on_dm_message(
         _event(
             FederationEventType.DM_MESSAGE,
@@ -308,10 +339,7 @@ async def test_dm_message_first_inbound_sweeps_bogus_gaps(db, bus):
         user_repo=SqliteUserRepo(db),
         dm_routing_repo=routing_repo,
     )
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-1", "dm"),
-    )
+    await _seed_dm(db, "conv-1")
     # Pre-seed the bogus rows the pre-fix detector would have inserted.
     await routing_repo.insert_gaps(
         conversation_id="conv-1",
@@ -379,14 +407,11 @@ async def test_dm_message_first_inbound_does_not_disturb_other_senders_gaps(db, 
         user_repo=SqliteUserRepo(db),
         dm_routing_repo=routing_repo,
     )
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-1", "dm"),
-    )
+    await _seed_dm(db, "conv-1")
     # Two senders, both with rows in conversation_message_gaps.
     await routing_repo.insert_gaps(
         conversation_id="conv-1",
-        sender_user_id="user-alice",
+        sender_user_id="user-remote",
         expected_seqs=[1, 2],
     )
     await routing_repo.insert_gaps(
@@ -402,7 +427,7 @@ async def test_dm_message_first_inbound_does_not_disturb_other_senders_gaps(db, 
             {
                 "conversation_id": "conv-1",
                 "message_id": "m-3",
-                "sender_user_id": "user-alice",
+                "sender_user_id": "user-remote",
                 "content": "hi",
                 "sender_seq": 3,
             },
@@ -415,10 +440,7 @@ async def test_dm_message_first_inbound_does_not_disturb_other_senders_gaps(db, 
 
 
 async def test_dm_message_deleted_soft_deletes(db, bus, inbound):
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-1", "dm"),
-    )
+    await _seed_dm(db, "conv-1")
     await inbound._on_dm_message(
         _event(
             FederationEventType.DM_MESSAGE,
@@ -762,10 +784,7 @@ async def test_user_status_cleared_publishes_none(bus, inbound):
 
 async def test_dm_reaction_add_and_remove(db, bus, inbound):
     """DM_MESSAGE_REACTION handles both action=add and action=remove."""
-    await db.enqueue(
-        "INSERT INTO conversations(id, type, created_at) VALUES(?,?, datetime('now'))",
-        ("conv-1", "dm"),
-    )
+    await _seed_dm(db, "conv-1")
     await inbound._on_dm_message(
         _event(
             FederationEventType.DM_MESSAGE,
@@ -780,7 +799,12 @@ async def test_dm_reaction_add_and_remove(db, bus, inbound):
     await inbound._on_dm_reaction(
         _event(
             FederationEventType.DM_MESSAGE_REACTION,
-            {"message_id": "m-1", "user_id": "user-x", "emoji": "👍", "action": "add"},
+            {
+                "message_id": "m-1",
+                "user_id": "user-remote",
+                "emoji": "👍",
+                "action": "add",
+            },
         )
     )
     rows = await db.fetchall(
@@ -794,7 +818,7 @@ async def test_dm_reaction_add_and_remove(db, bus, inbound):
             FederationEventType.DM_MESSAGE_REACTION,
             {
                 "message_id": "m-1",
-                "user_id": "user-x",
+                "user_id": "user-remote",
                 "emoji": "👍",
                 "action": "remove",
             },

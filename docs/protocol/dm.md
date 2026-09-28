@@ -44,6 +44,39 @@ picture / video / file / **voice-note** attachments — see
 `DM_HISTORY_REQUEST`, `DM_HISTORY_CHUNK`, `DM_HISTORY_CHUNK_ACK`,
 `DM_HISTORY_COMPLETE`.
 
+## Receiver rules
+
+Every DM event names a conversation, a message and a person; the
+receiver binds each to the household that signed the envelope
+(`from_instance`), using only what it already stores — the user's home
+household and the conversation's remote seats
+(`conversation_remote_members`). It drops the event with a WARNING when:
+
+- **`DM_MESSAGE`** — the sender is not a user of `from_instance` (a
+  local member, a third household's user, or unknown); the message id
+  already exists in another conversation or from another sender (an edit
+  or transcript re-send is honoured only for the sender's own message);
+  the conversation exists here but the sender holds no seat in it; or the
+  conversation is new and no recipient is a local user. An existing
+  conversation's seats are never changed by an inbound message.
+- **`DM_MESSAGE_DELETED`** — the message was not sent by a user of
+  `from_instance`, or it is not in the named conversation.
+- **`DM_MESSAGE_REACTION`** — the reactor is not a seated user of
+  `from_instance` in the message's conversation.
+- **`DM_USER_TYPING`** — the typist is not a seated user of
+  `from_instance`; the frame carries the username this household holds
+  for them, not the payload's.
+- **`DM_HISTORY_REQUEST`** — `from_instance` holds no seat in the
+  conversation (nothing is sent back, not even `DM_HISTORY_COMPLETE`).
+- **`DM_HISTORY_CHUNK` / `_COMPLETE`** — `from_instance` holds no seat;
+  per message, the sender is not a seated user of `from_instance`.
+  History only fills gaps: a message is inserted when absent and an
+  existing one is never rewritten (edits and deletes travel on their own
+  sender-bound events).
+
+Implementation: `socialhome/federation/dm_scope.py` (`DmScope`);
+`tests/protocol/test_dm_scope.py`.
+
 ## Flow — 1:1 DM
 
 ```mermaid

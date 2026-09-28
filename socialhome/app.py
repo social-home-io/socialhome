@@ -1321,6 +1321,7 @@ def _wire_federation_stack(
     )
     dm_history_receiver = DmHistoryReceiver(
         conversation_repo=conversation_repo,
+        user_repo=user_repo,
         bus=bus,
         federation_service=federation_service,
     )
