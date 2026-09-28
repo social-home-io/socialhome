@@ -62,6 +62,8 @@ class AbstractDmRoutingRepo(Protocol):
         sender_user_id: str | None = None,
     ) -> None: ...
 
+    async def forget_discovered_via(self, source_instance_id: str) -> None: ...
+
     async def mark_seen(self, message_id: str) -> None: ...
     async def has_seen(self, message_id: str) -> bool: ...
     async def prune_seen(self, *, cutoff_iso: str) -> int: ...
@@ -167,6 +169,18 @@ class SqliteDmRoutingRepo:
                 hop_count=excluded.hop_count
             """,
             (peer_instance_id, discovered_via, seen_at, hop_count),
+        )
+
+    async def forget_discovered_via(self, source_instance_id: str) -> None:
+        """Drop every peer ``source_instance_id`` announced to us.
+
+        Called on unpair: a household we are no longer paired with is no
+        longer a trusted source of mesh topology, so its ``NETWORK_SYNC``
+        announcements must stop feeding path selection.
+        """
+        await self._db.enqueue(
+            "DELETE FROM network_discovery WHERE discovered_via=?",
+            (source_instance_id,),
         )
 
     # ── conversation_relay_paths ───────────────────────────────────────

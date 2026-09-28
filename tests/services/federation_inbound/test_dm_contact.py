@@ -77,6 +77,10 @@ def bus():
     return EventBus()
 
 
+#: The contact-request tests never exercise UNPAIR.
+_UNUSED_UNPAIR = object()
+
+
 @pytest.fixture
 def repo():
     return _FakeDmContactRepo()
@@ -87,6 +91,7 @@ def handlers(bus, repo):
     h = PairingInboundHandlers(
         bus=bus,
         federation_repo=_FakeFederationRepo(),
+        peer_unpair=_UNUSED_UNPAIR,
         dm_contact_repo=repo,
     )
     fed = _FakeFederationService()
@@ -101,6 +106,7 @@ def test_attach_registers_dm_contact_request_only_when_repo_given(bus):
     h_without = PairingInboundHandlers(
         bus=bus,
         federation_repo=_FakeFederationRepo(),
+        peer_unpair=_UNUSED_UNPAIR,
     )
     fed = _FakeFederationService()
     h_without.attach_to(fed)

@@ -621,3 +621,28 @@ async def test_count_failed_for_ignores_delivered_rows(env):
     )
     await env.outbox_repo.mark_delivered(eid)
     assert await env.outbox_repo.count_failed_for("peer") == 0
+
+
+async def test_delete_for_instance_purges_every_row_for_that_peer(env):
+    """Unpair: rows for the peer can never be redelivered (the outbox needs
+    its ``remote_instances`` row), NEVER_DROP included — and other peers'
+    rows are untouched."""
+    await env.outbox_repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    failed = await env.outbox_repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.UNPAIR,
+        payload_json="{}",
+    )
+    await env.outbox_repo.mark_failed(failed)
+    kept = await env.outbox_repo.enqueue(
+        instance_id="kept",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    await env.outbox_repo.delete_for_instance("gone")
+    rows = await env.db.fetchall("SELECT id FROM federation_outbox")
+    assert [r["id"] for r in rows] == [kept]

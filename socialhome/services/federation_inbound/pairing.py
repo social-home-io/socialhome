@@ -29,7 +29,6 @@ from ...domain.events import (
     PairingConfirmed,
     PairingIntroReceived,
     PeerProtoVersionRaised,
-    PeerUnpaired,
 )
 from ...domain.federation import FederationEventType, PairingStatus, RemoteInstance
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
@@ -40,6 +39,7 @@ if TYPE_CHECKING:
     from ...federation.federation_service import FederationService
     from ...repositories.dm_contact_repo import AbstractDmContactRepo
     from ...repositories.federation_repo import AbstractFederationRepo
+    from ..peer_unpair_service import PeerUnpairService
 
 log = logging.getLogger(__name__)
 
@@ -50,17 +50,19 @@ class PairingInboundHandlers:
     handshake, which lives in the same family.)
     """
 
-    __slots__ = ("_bus", "_repo", "_dm_contact_repo")
+    __slots__ = ("_bus", "_repo", "_dm_contact_repo", "_peer_unpair")
 
     def __init__(
         self,
         *,
         bus: EventBus,
         federation_repo: "AbstractFederationRepo",
+        peer_unpair: "PeerUnpairService",
         dm_contact_repo: "AbstractDmContactRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._repo = federation_repo
+        self._peer_unpair = peer_unpair
         self._dm_contact_repo = dm_contact_repo
 
     def attach_to(self, federation_service: "FederationService") -> None:
@@ -181,12 +183,17 @@ class PairingInboundHandlers:
         )
 
     async def _on_unpair(self, event: "FederationEvent") -> None:
-        """Peer tore down a confirmed pairing. Purge the row."""
+        """Peer tore down the pairing — forget it exactly as a local unpair
+        does (:meth:`PeerUnpairService.forget`).
+
+        Only the *signer* is ever unpaired: ``from_instance`` is bound to
+        the verified signature by the §24.11 pipeline, and the payload is
+        ignored, so a peer can never tear down somebody else's pairing.
+        """
         instance = await self._repo.get_instance(event.from_instance)
         if instance is None:
             return
-        await self._repo.delete_instance(instance.id)
-        await self._bus.publish(PeerUnpaired(instance_id=event.from_instance))
+        await self._peer_unpair.forget(instance.id)
 
     async def _on_url_updated(self, event: "FederationEvent") -> None:
         """Peer advertised a new inbox URL — update ``remote_inbox_url``.

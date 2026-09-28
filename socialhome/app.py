@@ -240,6 +240,7 @@ from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_zone_outbound import SpaceZoneOutbound
 from .services.space_zone_service import SpaceZoneService
 from .services.page_federation_outbound import PageFederationOutbound
+from .services.peer_unpair_service import PeerUnpairService
 from .services.task_federation_outbound import TaskFederationOutbound
 from .services.federation_inbound import (
     PairingInboundHandlers,
@@ -974,9 +975,20 @@ def _wire_federation_stack(
     # Family-of-handler modules for pairing, space membership, invites,
     # and content mirroring (§13). Each registers its own slice of the
     # event-dispatch registry so federation_inbound_service stays thin.
+    # One teardown path for both directions of an unpair: the local
+    # ``DELETE /api/pairing/connections/{id}`` (notify, then forget) and
+    # the peer's inbound ``UNPAIR`` (forget).
+    peer_unpair_service = PeerUnpairService(
+        bus=bus,
+        federation=federation_service,
+        federation_repo=federation_repo,
+        outbox_repo=outbox_repo,
+        routing_repo=dm_routing_repo,
+    )
     PairingInboundHandlers(
         bus=bus,
         federation_repo=federation_repo,
+        peer_unpair=peer_unpair_service,
         dm_contact_repo=dm_contact_repo,
     ).attach_to(federation_service)
 
@@ -1384,6 +1396,7 @@ def _wire_federation_stack(
     app[K.dm_routing_service_key] = dm_routing_service
     app[K.federation_inbound_service_key] = inbound_service
     app[K.pairing_relay_queue_key] = pairing_relay_queue
+    app[K.peer_unpair_service_key] = peer_unpair_service
     app[K.household_instance_ban_repo_key] = household_instance_ban_repo
     app[K.relay_policy_key] = relay_policy
 

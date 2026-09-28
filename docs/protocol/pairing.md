@@ -435,10 +435,55 @@ rather than actual).
 
 ## Unpairing
 
-`UNPAIR` is a polite notice that the session keys are about to be
-forgotten. The receiver marks the peer as unpaired and drops any
-pending outbound envelopes. `UNPAIR` is the only federation event that
-the receiver still decrypts with a key it's about to delete.
+Either admin can end a pairing (`DELETE /api/pairing/connections/{instance_id}`),
+and both households forget each other — not just the one that clicked.
+
+The household that unpairs sends a signed, encrypted `UNPAIR` to the peer
+**before** forgetting it. The order matters: the envelope is encrypted with
+the pairwise session key and delivered to the inbox URL stored on the
+peer's `remote_instances` row, so it can only go out while that row still
+exists. The payload is empty — the receiver unpairs the **signer**
+(`from_instance`, bound to the verified signature by the §24.11 pipeline),
+never a household named in the body, so one peer can never tear down
+another's pairing.
+
+Delivery is best-effort and bounded (5 s, `UNPAIR_NOTIFY_TIMEOUT_S`): an
+unreachable peer never blocks the admin's unpair. It is not queued for
+retry, because outbox redelivery needs the very row the unpair deletes.
+The route reports `peer_notified: false` when the peer could not be told;
+that household keeps its row until its own admin removes it, and its
+envelopes to us are refused — we no longer hold a key to verify them.
+
+Both directions run the same cleanup (`PeerUnpairService.forget`):
+
+- drop every queued outbox envelope for the peer (it can never be
+  delivered without the row),
+- drop the mesh topology the peer announced (`network_discovery` rows it
+  is the source of — it is no longer a trusted neighbour),
+- delete the `remote_instances` row (`remote_users` and
+  `peer_user_visibility` cascade),
+- publish `PeerUnpaired`, which pushes `connection.removed` to every
+  household member.
+
+Space membership is **not** touched. A space is shared by its members, not
+by the pairing: two households that stop being direct connections stay
+co-members of any space they share, and its content keeps arriving over the
+mesh.
+
+```mermaid
+sequenceDiagram
+    participant AdminA as Admin (household A)
+    participant A as Household A
+    participant B as Household B
+    AdminA->>A: DELETE /api/pairing/connections/B
+    A->>A: look up B's row (session key, inbox URL)
+    A->>B: UNPAIR (encrypted, Ed25519-signed; ≤ 5 s)
+    B->>B: §24.11 pipeline — verify A's signature
+    B->>B: forget(A): outbox, mesh hints, row, PeerUnpaired
+    Note over A: sent, timed out or refused — A goes on
+    A->>A: forget(B): outbox, mesh hints, row, PeerUnpaired
+    A-->>AdminA: 200 {ok, peer_notified}
+```
 
 ## Implementation
 
@@ -467,6 +512,8 @@ the receiver still decrypts with a key it's about to delete.
 - `socialhome/services/federation_inbound/pairing.py` — §24.11
   inbound handlers for already-paired peers (covers
   `PAIRING_INTRO_RELAY`, `URL_UPDATED`, `UNPAIR`).
+- `socialhome/services/peer_unpair_service.py` — `unpair` (send
+  `UNPAIR`, then forget) and the shared `forget` step both directions use.
 - `socialhome/services/url_update_outbound.py` — outbound fan-out of
   `URL_UPDATED` when this instance's base URL changes.
 - `socialhome/crypto.py` — key derivation primitives.

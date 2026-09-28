@@ -338,6 +338,15 @@ That single command runs the full sequence:
    slot (~35 s), and asserts the queued highlight lands. Validates
    the §24 ``ResilientFederationOutbox`` flush-on-reachable path.
 
+11. ``unpair`` — **a** removes **c** (``DELETE /api/pairing/connections/{c}``)
+   and must report ``peer_notified: true``; **c** then drops **a** from its
+   own connections list on the inbound signed ``UNPAIR`` (pre-fix, **c**
+   kept **a** forever). Asserts neither side still queues outbox envelopes
+   for the other and every shared ``space_instances`` row survives (a
+   pairing and a space membership are separate relationships), then
+   re-pairs **a**↔**c**. Runs last in ``all`` because it churns a pairing
+   the earlier steps rely on.
+
 8. The harness exits non-zero if any assertion fails or any process
    crashed during the run.
 
@@ -346,7 +355,7 @@ calendar → verify → relay-pair → visibility → invite-redeem →
 invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
-app-session → remote-invite-decline → replay`` in that order.
+app-session → remote-invite-decline → replay → unpair`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-space-no-subscribers`` / ``gfs-down``)
