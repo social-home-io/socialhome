@@ -5,6 +5,11 @@ from __future__ import annotations
 import base64
 
 from socialhome.domain.media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    SPACE_IMAGE_FIT_MIN_DIMENSION,
     SPACE_IMAGE_DATA_URI_MAX_CHARS,
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
@@ -75,3 +80,19 @@ def test_space_image_embed_bound():
     assert len(uri) == SPACE_IMAGE_DATA_URI_MAX_CHARS
     # Far above a real dimension-capped cover, yet bounded.
     assert 512 * 1024 < SPACE_IMAGE_EMBED_MAX_BYTES <= 2 * 1024 * 1024
+
+
+def test_space_snapshot_image_bounds():
+    """Invite-link (relay) bounds are tighter than the peer-envelope ones,
+    which are tighter than the GFS publish bound; each icon bound is under
+    its cover bound. Both §D2b images base64 to well under half the 256 KiB
+    sealed-blob cap, leaving the rest for config + roster."""
+    assert SPACE_ICON_BOOTSTRAP_MAX_BYTES < SPACE_COVER_BOOTSTRAP_MAX_BYTES
+    assert SPACE_ICON_SNAPSHOT_MAX_BYTES < SPACE_COVER_SNAPSHOT_MAX_BYTES
+    assert SPACE_COVER_BOOTSTRAP_MAX_BYTES < SPACE_COVER_SNAPSHOT_MAX_BYTES
+    assert SPACE_COVER_SNAPSHOT_MAX_BYTES < SPACE_IMAGE_EMBED_MAX_BYTES
+    both_b64 = 4 * -(
+        -(SPACE_COVER_BOOTSTRAP_MAX_BYTES + SPACE_ICON_BOOTSTRAP_MAX_BYTES) // 3
+    )
+    assert both_b64 < 128 * 1024
+    assert 16 <= SPACE_IMAGE_FIT_MIN_DIMENSION <= 256

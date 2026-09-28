@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
 import uuid
 
 import pillow_heif
@@ -20,6 +21,7 @@ from ..domain.media_constraints import (
     IMAGE_ACCEPTED_MIMES,
     IMAGE_MAX_DIMENSION,
     IMAGE_WEBP_QUALITY,
+    SPACE_IMAGE_FIT_MIN_DIMENSION,
     THUMBNAIL_PX,
     THUMBNAIL_WEBP_QUALITY,
 )
@@ -169,6 +171,70 @@ class ImageProcessor:
         out = io.BytesIO()
         img.save(out, format="WEBP", quality=THUMBNAIL_WEBP_QUALITY)
         return out.getvalue()
+
+    async def fit_within(
+        self,
+        data: bytes,
+        max_bytes: int,
+        *,
+        min_dimension: int = SPACE_IMAGE_FIT_MIN_DIMENSION,
+    ) -> bytes | None:
+        """Return *data* when it is at most *max_bytes*, else a smaller WebP
+        rendition of it that is — or ``None`` when even a *min_dimension*
+        rendition does not fit.
+
+        For images that must travel inside a size-capped envelope (a space
+        cover / icon in an invite snapshot). The image is shrunk, never
+        cropped, at :data:`THUMBNAIL_WEBP_QUALITY`; each step scales the
+        longest side by the square root of the overshoot (encoded size is
+        roughly proportional to area), so a 4x-too-big image typically fits
+        on the first re-encode.
+
+        Raises
+        ------
+        ValueError
+            If *data* is over the bound and Pillow cannot open it.
+        """
+        if len(data) <= max_bytes:
+            return data
+        return await asyncio.to_thread(
+            self._fit_within_sync,
+            data,
+            max_bytes,
+            min_dimension,
+        )
+
+    def _fit_within_sync(
+        self,
+        data: bytes,
+        max_bytes: int,
+        min_dimension: int,
+    ) -> bytes | None:
+        img: Image.Image
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        except Exception as exc:
+            raise ValueError(f"Cannot open image to fit it: {exc}") from exc
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA" if "transparency" in img.info else "RGB")
+        size = len(data)
+        dim = max(img.size)
+        while True:
+            # 0.9 of the area-proportional guess, and always at least a
+            # 15% step, so the loop converges in a handful of encodes.
+            dim = int(dim * min(0.85, 0.9 * math.sqrt(max_bytes / size)))
+            if dim < min_dimension:
+                return None
+            out = io.BytesIO()
+            self._resize(img, dim).save(
+                out,
+                format="WEBP",
+                quality=THUMBNAIL_WEBP_QUALITY,
+            )
+            size = len(out.getvalue())
+            if size <= max_bytes:
+                return out.getvalue()
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

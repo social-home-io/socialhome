@@ -98,8 +98,10 @@ ENVELOPE_INSTANCE_ID_RE = re.compile(rf"[a-z2-7]{{{ENVELOPE_INSTANCE_ID_CHARS}}}
 #: ``invite_bootstrap.MAX_SEALED_BLOB_BYTES`` caps the sealed ``ciphertext``
 #: string at 256 KiB, and that cap is itself sized from the ACK, which
 #: carries ``space_meta`` from ``build_space_snapshot_for_federation``: the
-#: base64'd space cover WebP (bounded by ``SPACE_COVER_MAX_DIMENSION`` =
-#: 1200 px), the base64'd icon WebP (256 px) and the member roster. On top of
+#: base64'd space cover and icon WebP (bounded for this leg by
+#: ``SPACE_COVER_BOOTSTRAP_MAX_BYTES`` / ``SPACE_ICON_BOOTSTRAP_MAX_BYTES`` —
+#: a 1200 px cover alone is not byte-bounded) and the member roster; the
+#: household's ``seal_bootstrap_envelope`` refuses to exceed the cap. On top of
 #: the ciphertext the body carries a 44-char ``eph_pk``, a 32-char
 #: ``to_instance``, the suite tag and ~100 bytes of JSON framing. 320 KiB
 #: therefore accepts every envelope the household side will ever send (a

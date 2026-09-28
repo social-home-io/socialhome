@@ -1,6 +1,11 @@
 """Tests for socialhome.media.image_processor."""
 
+import io as _io
+import random
+
 import pytest
+from PIL import Image as _Image
+
 from socialhome.media.image_processor import ImageProcessor, MAGIC_BYTES
 
 
@@ -138,3 +143,57 @@ async def test_heic_image_processes_to_webp():
     assert webp_bytes.startswith(b"RIFF")
     assert b"WEBP" in webp_bytes[:16]
     assert new_name.endswith(".webp")
+
+
+def _noise_webp(width: int, height: int) -> bytes:
+    """Pure noise — WebP's worst case, so the bytes scale with the area."""
+    img = _Image.frombytes(
+        "RGB",
+        (width, height),
+        random.Random(7).randbytes(width * height * 3),
+    )
+    buf = _io.BytesIO()
+    img.save(buf, format="WEBP", quality=75)
+    return buf.getvalue()
+
+
+async def test_fit_within_returns_an_image_already_under_the_bound():
+    data = _noise_webp(64, 64)
+    assert await ImageProcessor().fit_within(data, len(data)) is data
+
+
+async def test_fit_within_shrinks_an_image_over_the_bound():
+    """A ~300 KiB cover comes back as a smaller WebP under the bound."""
+    data = _noise_webp(800, 600)
+    bound = 48 * 1024
+    assert len(data) > 4 * bound
+    fitted = await ImageProcessor().fit_within(data, bound)
+    assert fitted is not None
+    assert len(fitted) <= bound
+    img = _Image.open(_io.BytesIO(fitted))
+    assert img.format == "WEBP"
+    # Shrunk, not cropped: the aspect ratio survives.
+    assert abs(img.size[0] / img.size[1] - 800 / 600) < 0.02
+
+
+async def test_fit_within_gives_up_below_the_minimum_dimension():
+    data = _noise_webp(400, 400)
+    assert await ImageProcessor().fit_within(data, 100, min_dimension=64) is None
+
+
+async def test_fit_within_rejects_undecodable_bytes_over_the_bound():
+    with pytest.raises(ValueError, match="Cannot open image to fit it"):
+        await ImageProcessor().fit_within(b"not an image" * 10, 16)
+
+
+async def test_fit_within_converts_palette_images():
+    """A palette-mode source is converted before it is re-encoded."""
+    img = _Image.frombytes(
+        "RGB", (300, 300), random.Random(3).randbytes(270000)
+    ).convert("P")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+    fitted = await ImageProcessor().fit_within(data, 8 * 1024)
+    assert fitted is not None
+    assert len(fitted) <= 8 * 1024

@@ -55,6 +55,10 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
+from ..domain.media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+)
 from ..domain.space import (
     SpaceMember,
     SpacePermissionError,
@@ -76,6 +80,7 @@ from .invite_bootstrap import (
     KIND_REDEEM,
     KIND_REDEEM_ACK,
     KIND_REDEEM_DENY,
+    BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
     derive_space_session_keys,
     seal_bootstrap_envelope,
@@ -140,6 +145,22 @@ REDEEM_DENY_REASON: str = "invite redeem denied"
 #: SPA hands an unknown party a string in our UI.
 BOOTSTRAP_DENY_CLIENT_MESSAGE: str = (
     "that invite link didn't work — ask whoever shared it for a fresh one"
+)
+
+#: The one DENY reason besides :data:`REDEEM_DENY_REASON` a §D2b issuer
+#: ships: the token was good, but the space snapshot the ACK has to carry
+#: does not fit the connection server's relay even with the cover and icon
+#: left out (a very large member roster). It says nothing about the
+#: issuer's private state that the blob size would not already show the
+#: relay, and the redeemer maps this exact string to its OWN wording
+#: (:data:`BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE`) — the issuer's text is
+#: still never rendered.
+REDEEM_DENY_REASON_TOO_LARGE: str = "space snapshot too large for the relay"
+
+#: What the redeemer shows for :data:`REDEEM_DENY_REASON_TOO_LARGE`.
+BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE: str = (
+    "this space is too big to join through an invite link — pair with one "
+    "of its members' households and ask them to invite you directly"
 )
 
 #: §D2b inbound throttles. This surface is unauthenticated by
@@ -807,8 +828,14 @@ class SpaceInviteTokenRedeemCoordinator:
         redeemer_user_id: str,
         redeemer_pk: str | None,
         redeemer_display: str | None,
+        bootstrap: bool = False,
     ) -> tuple[dict | None, str | None]:
         """Issuer-side authorization + seating for one redeem.
+
+        ``bootstrap`` marks the §D2b invite-link leg, whose ACK rides the
+        connection server's size-capped relay: the snapshot's cover and
+        icon are bounded to ``SPACE_*_BOOTSTRAP_MAX_BYTES`` instead of the
+        peer-envelope defaults.
 
         Returns ``(ack_body, None)`` on success or ``(None, reason)`` on
         every denial. Shared verbatim by the §D2 event path
@@ -1020,6 +1047,14 @@ class SpaceInviteTokenRedeemCoordinator:
                 cover_repo=self._cover_repo,
                 icon_repo=self._icon_repo,
                 space_crypto_service=self._space_crypto,
+                **(
+                    {
+                        "cover_max_bytes": SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+                        "icon_max_bytes": SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+                    }
+                    if bootstrap
+                    else {}
+                ),
             )
         return ack_body, None
 
@@ -1428,6 +1463,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 if body.get("redeemer_display_name")
                 else None
             ),
+            bootstrap=True,
         )
         if ack_body is None:
             await self._send_bootstrap_deny(
@@ -1451,11 +1487,13 @@ class SpaceInviteTokenRedeemCoordinator:
             # reaches this redeemer, and the one they are listening on.
             gfs_url=gfs_url,
         )
-        await self._send_bootstrap_reply(
+        if not await self._send_bootstrap_ack(
             body,
-            {"kind": KIND_REDEEM_ACK, "redeem_nonce": nonce, **ack_body},
+            nonce,
+            ack_body,
             gfs_url=gfs_url,
-        )
+        ):
+            return {"ok": True, "denied": True}
         # The ONE operator-visible record that a stranger joined through a
         # public link. Every other outcome on this path is already
         # observable (a DENY, a rejected relay envelope, a failed seal),
@@ -1471,6 +1509,64 @@ class SpaceInviteTokenRedeemCoordinator:
             ack_body.get("role") or SpaceRole.MEMBER.value,
         )
         return {"ok": True, "space_id": ack_body["space_id"]}
+
+    async def _send_bootstrap_ack(
+        self,
+        request_body: dict,
+        nonce: str,
+        ack_body: dict,
+        *,
+        gfs_url: str = "",
+    ) -> bool:
+        """Seal + relay the ACK, degrading rather than overflowing the relay.
+
+        The images are already bounded for this leg, so the full ACK fits
+        in practice. If it still does not (a roster big enough to fill the
+        blob on its own), the ACK goes out again without the cover and icon
+        — the join matters more than the art. Only when even that does not
+        fit is the redeem answered with :data:`REDEEM_DENY_REASON_TOO_LARGE`
+        so the joiner is told why instead of timing out. Returns ``True``
+        when an ACK was handed to the relay.
+        """
+        reply = {"kind": KIND_REDEEM_ACK, "redeem_nonce": nonce, **ack_body}
+        try:
+            await self._send_bootstrap_reply(request_body, reply, gfs_url=gfs_url)
+            return True
+        except BootstrapEnvelopeTooLarge as exc:
+            log.warning(
+                "invite bootstrap: ACK for space %s does not fit the relay "
+                "(%s) — resending without the cover and icon",
+                ack_body.get("space_id"),
+                exc,
+            )
+        meta = reply.get("space_meta")
+        if isinstance(meta, dict):
+            reply["space_meta"] = {
+                k: v
+                for k, v in meta.items()
+                if k not in ("cover_webp_base64", "icon_webp_base64")
+            }
+        try:
+            await self._send_bootstrap_reply(request_body, reply, gfs_url=gfs_url)
+            return True
+        except BootstrapEnvelopeTooLarge as exc:
+            # The seat is already durable on this side; the member list shows
+            # it and an admin can remove it. Logged at ERROR because this is
+            # a space the invite-link path cannot serve at all.
+            log.error(
+                "invite bootstrap: ACK for space %s does not fit the relay even "
+                "without images (%s) — the joiner is told the space is too "
+                "large; their seat here stays until removed",
+                ack_body.get("space_id"),
+                exc,
+            )
+        await self._send_bootstrap_deny(
+            request_body,
+            nonce,
+            REDEEM_DENY_REASON_TOO_LARGE,
+            gfs_url=gfs_url,
+        )
+        return False
 
     async def _handle_bootstrap_reply(self, body: dict) -> dict:
         """Redeemer-side: resolve the in-flight redeem on a sealed reply.
@@ -1502,7 +1598,17 @@ class SpaceInviteTokenRedeemCoordinator:
                 hint.instance_id,
                 str(body.get("reason") or "")[:200],
             )
-            fut.set_exception(SpacePermissionError(BOOTSTRAP_DENY_CLIENT_MESSAGE))
+            # One reason gets its own (locally-authored) wording: the
+            # issuer could not fit the space into the relay at all, which
+            # a fresh link would not fix either.
+            too_large = str(body.get("reason") or "") == REDEEM_DENY_REASON_TOO_LARGE
+            fut.set_exception(
+                SpacePermissionError(
+                    BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
+                    if too_large
+                    else BOOTSTRAP_DENY_CLIENT_MESSAGE,
+                ),
+            )
             return {"ok": True, "denied": True}
         space_id = str(body.get("space_id") or "")
         role = str(body.get("role") or SpaceRole.MEMBER.value)
@@ -1582,11 +1688,19 @@ class SpaceInviteTokenRedeemCoordinator:
             recipient_keywrap_pk=str(request_body["keywrap_pk"]),
             recipient_keywrap_sig=str(request_body["keywrap_sig"]),
         )
-        await self._relay_sender.send_sealed_envelope(
+        delivered = await self._relay_sender.send_sealed_envelope(
             to_instance_id=str(request_body["instance_id"]),
             envelope=envelope,
             gfs_url=gfs_url,
         )
+        if not delivered:
+            # The redeemer will only see its own timeout, so this line is
+            # the one place the refusal is visible at all.
+            log.warning(
+                "invite bootstrap: the connection server refused our %s to %s",
+                reply.get("kind"),
+                request_body["instance_id"],
+            )
 
     async def _seat_space_session_instance(
         self,

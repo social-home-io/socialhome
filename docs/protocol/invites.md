@@ -51,7 +51,8 @@ seats the receiver as a ``SpaceRemoteMember`` + records the
 ``(space, instance)`` mapping, then sends ``SPACE_INVITE_TOKEN_REDEEM_ACK``
 back with ``{space_id, role, space_meta}`` — where ``space_meta`` is the
 full ``build_space_snapshot_for_federation`` blob (config + cover/icon
-bytes + content key + member roster). Any failure (token unknown, expired,
+bytes, each bounded to ``SPACE_*_SNAPSHOT_MAX_BYTES`` + content key + member
+roster). Any failure (token unknown, expired,
 exhausted, banned, persistence error) → ``SPACE_INVITE_TOKEN_REDEEM_DENY``
 with a string ``reason``.
 
@@ -207,6 +208,38 @@ The reply mirrors it with the issuer's identity + key-wrap material and
 either `{space_id, role, space_meta}` (ACK — the same
 `build_space_snapshot_for_federation` blob the §D2 path returns,
 content key and roster included) or `{reason}` (DENY).
+
+**The ACK always fits the relay.** A 1200 px space cover is dimension-capped,
+not byte-capped — a detailed photo is several hundred KiB of WebP — and the
+snapshot used to embed it verbatim. Base64'd twice (in `space_meta`, then in
+the sealed ciphertext) a ~200 KiB cover alone overran the 256 KiB
+`MAX_SEALED_BLOB_BYTES`, so the relay answered 413 (or the redeemer dropped
+the blob before unsealing it): the issuer had spent the token and seated the
+joiner, and the joiner waited out its 10 s timeout for a 504. The snapshot now
+bounds each image (`domain/media_constraints`):
+
+| Snapshot carried by | Cover | Icon |
+|---|---|---|
+| §D2b bootstrap ACK over `/gfs/envelope` | `SPACE_COVER_BOOTSTRAP_MAX_BYTES` 64 KiB | `SPACE_ICON_BOOTSTRAP_MAX_BYTES` 16 KiB |
+| §D1b private invite, §D2 redeem ACK (paired / mesh-routed peer, ~1 MiB envelope) | `SPACE_COVER_SNAPSHOT_MAX_BYTES` 256 KiB | `SPACE_ICON_SNAPSHOT_MAX_BYTES` 64 KiB |
+
+An image under its bound ships byte-for-byte; one over it ships as a smaller
+WebP rendition (`ImageProcessor.fit_within`, shrunk not cropped, logged at
+INFO on the host) under the host's own `cover_hash` / `icon_hash`; one that
+cannot be shrunk under the bound is left out (WARNING). The wire shape is
+unchanged — `cover_webp_base64` / `icon_webp_base64` were always optional —
+so no protocol version is involved. `seal_bootstrap_envelope` itself refuses
+to produce a blob over either cap (`BootstrapEnvelopeTooLarge`); if the ACK
+still does not fit (a roster big enough to fill it on its own), the issuer
+resends it without the images, and only when even that fails answers DENY
+with `REDEEM_DENY_REASON_TOO_LARGE`, which the redeemer maps to its own
+"this space is too big to join through an invite link" wording (the issuer's
+text is still never rendered). A relay that refuses a reply is logged at
+WARNING on the issuer — the redeemer can only see its own timeout.
+
+A joiner keeps the rendition it was handed: a cover change later rides
+`SPACE_CONFIG_CHANGED` as a `cover_hash` only, and space media does not flow
+to a link-joined member (see "Media does NOT flow" below).
 
 The routing envelope is **identity-free** — the #677 lesson. The
 sender's identity, the token, the space, the users, the nonce and the
@@ -390,7 +423,8 @@ and which are awake. An envelope for an unknown, pending or banned
 recipient is dropped server-side, logged at DEBUG, and stored nowhere.
 Malformed bodies are a 400 and anything over
 `ENVELOPE_MAX_BODY_BYTES` (320 KiB, sized from the ACK's `space_meta`
-under the household's own 256 KiB sealed-blob cap) a 413 — both are
+under the household's own 256 KiB sealed-blob cap, which the household
+never exceeds — see "The ACK always fits the relay") a 413 — both are
 about the bytes the caller sent, so neither says anything about the
 recipient.
 

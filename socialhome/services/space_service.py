@@ -125,7 +125,9 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from ..domain.media_constraints import (
     SPACE_COVER_MAX_DIMENSION,
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
+    SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
 from .space_crypto_service import (
@@ -5313,6 +5315,51 @@ class SpaceService(SpaceMemberGuardMixin):
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 
+async def _bounded_space_image(
+    webp: bytes,
+    *,
+    max_bytes: int,
+    what: str,
+    space_id: str,
+) -> bytes | None:
+    """``webp`` when it is within ``max_bytes``, else a smaller rendition
+    that is, else ``None`` (the image is left out of the snapshot).
+
+    Shrinking is logged at INFO (the joiner gets a lower-resolution copy)
+    and omission at WARNING, so an operator asking "why does the new
+    member see a smaller / no cover" has the answer in the host's log.
+    """
+    try:
+        fitted = await ImageProcessor().fit_within(webp, max_bytes)
+    except ValueError:
+        log.warning(
+            "space snapshot: stored %s for space %s does not decode — leaving it out",
+            what,
+            space_id,
+        )
+        return None
+    if fitted is None:
+        log.warning(
+            "space snapshot: %s for space %s (%d bytes) cannot be shrunk "
+            "under %d bytes — leaving it out",
+            what,
+            space_id,
+            len(webp),
+            max_bytes,
+        )
+    elif fitted is not webp:
+        log.info(
+            "space snapshot: %s for space %s is %d bytes (> %d) — shipping "
+            "a %d-byte rendition",
+            what,
+            space_id,
+            len(webp),
+            max_bytes,
+            len(fitted),
+        )
+    return fitted
+
+
 async def build_space_snapshot_for_federation(
     space: Space,
     *,
@@ -5323,9 +5370,18 @@ async def build_space_snapshot_for_federation(
     cover_repo=None,
     icon_repo=None,
     space_crypto_service=None,
+    cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
 ) -> dict:
     """:func:`_space_metadata_for_federation` + a roster of every
     member of this space.
+
+    The cover and icon ship inline, each bounded by ``cover_max_bytes`` /
+    ``icon_max_bytes`` (raw WebP): the whole snapshot rides one
+    size-capped envelope, so an image over its bound ships as a smaller
+    rendition (:func:`_bounded_space_image`) instead of sinking the
+    invite. The defaults suit a paired / mesh-routed peer; the §D2b
+    invite-link ACK passes the tighter ``SPACE_*_BOOTSTRAP_MAX_BYTES``.
 
     The roster lets a §D1b joiner mirror the full member list
     locally — without it the joiner's Members tab on a stub of
@@ -5391,22 +5447,37 @@ async def build_space_snapshot_for_federation(
     # §D1b cover federation (#116) — ship the actual WebP bytes
     # alongside ``cover_hash``. Without them, the joiner's stub
     # renders the gradient fallback even when the host has a
-    # custom cover. Capped at SPACE_COVER_MAX_DIMENSION on the
-    # host side, so the payload stays under ~150 kB even at the
-    # densest end. Base64 because the envelope is JSON.
+    # custom cover. A dimension-capped (1200 px) WebP is NOT
+    # byte-capped — a detailed photo is several hundred KiB — so it
+    # is bounded to ``cover_max_bytes`` here. Base64 because the
+    # envelope is JSON.
     if cover_repo is not None and space.cover_hash:
         cover = await cover_repo.get(space.id)
         if cover is not None:
             bytes_webp, _hash = cover
-            meta["cover_webp_base64"] = base64.b64encode(bytes_webp).decode("ascii")
+            fitted = await _bounded_space_image(
+                bytes_webp,
+                max_bytes=cover_max_bytes,
+                what="cover",
+                space_id=space.id,
+            )
+            if fitted is not None:
+                meta["cover_webp_base64"] = base64.b64encode(fitted).decode("ascii")
     # §D1b icon federation — ship the space icon (avatar) WebP bytes the
     # same way as the cover, so a joiner's stub shows the real icon rather
-    # than falling back to the emoji. Small (≤256 px), so cheap to inline.
+    # than falling back to the emoji. Small (≤256 px), bounded the same way.
     if icon_repo is not None and space.icon_hash:
         icon = await icon_repo.get(space.id)
         if icon is not None:
             icon_webp, _ih = icon
-            meta["icon_webp_base64"] = base64.b64encode(icon_webp).decode("ascii")
+            fitted = await _bounded_space_image(
+                icon_webp,
+                max_bytes=icon_max_bytes,
+                what="icon",
+                space_id=space.id,
+            )
+            if fitted is not None:
+                meta["icon_webp_base64"] = base64.b64encode(fitted).decode("ascii")
     # §D1b content-key handoff (#117) — the space content key is the
     # symmetric AES-256 secret that decrypts every event in this
     # space. Ship it inside the (already-encrypted to the invitee
