@@ -575,10 +575,9 @@ from __future__ import annotations
 #:   group message never seats anyone. Messages, edits, deletes, reactions
 #:   and typing fan out from the sending household to every member
 #:   household — direct when paired, otherwise E2E-sealed over the mesh
-#:   (``SPACE_ROUTED``). ``DM_MESSAGE`` carries ``conversation_type`` and
-#:   ``CALL_OFFER`` / ``CALL_ANSWER`` / ``CALL_ICE_CANDIDATE`` carry
-#:   ``participants`` / ``to_user`` so group-call mesh legs reach callees on
-#:   other households. **No fallback**: a household below v_37 cannot sit
+#:   (``SPACE_ROUTED``). ``CALL_OFFER`` carries ``participants`` and
+#:   ``CALL_ANSWER`` / ``CALL_ICE_CANDIDATE`` carry ``to_user`` so group-call
+#:   mesh legs reach callees on other households. **No fallback**: a household below v_37 cannot sit
 #:   in a cross-household group — the authority refuses to add its people
 #:   (the SPA says so in the picker) and never sends it a roster.
 OURS: int = 37
