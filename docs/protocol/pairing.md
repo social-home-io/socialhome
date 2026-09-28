@@ -28,6 +28,16 @@ true of pairing itself.
 `PAIRING_ACCEPT`, `PAIRING_CONFIRM`, `PAIRING_PEER_ACCEPT`,
 `PAIRING_PEER_CONFIRM`, `PAIRING_ABORT`, `UNPAIR`, `URL_UPDATED`.
 
+## Receiver rules
+
+- An inbox `PAIRING_CONFIRM` never confirms a pairing. A pairing becomes
+  `CONFIRMED` only through this household's own verification step (the
+  admin entering the code, the token-bound peer-confirm, or the vouched
+  auto-pair finalisation); the event is logged at WARNING and ignored.
+- `PAIRING_ABORT` cancels a pending session only when the peer identity
+  stored on it derives to the envelope's `from_instance` — a household
+  can cancel its own handshake, never another's.
+
 ## Flow — direct QR handshake
 
 The bootstrap handshake rides the **federation inbox URL** as two
