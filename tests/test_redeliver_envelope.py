@@ -34,7 +34,11 @@ from socialhome.repositories import (
     SqliteFederationRepo,
     SqliteOutboxRepo,
 )
+from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.space_media_outbox_repo import (
+    SqliteSpaceMediaOutboxRepo,
+)
 from socialhome.services.peer_unpair_service import PeerUnpairService
 
 
@@ -1010,6 +1014,8 @@ async def unpair_env(env):
         federation_repo=fed_repo,
         outbox_repo=svc._outbox_repo,
         routing_repo=SqliteDmRoutingRepo(svc._db),
+        dm_media_outbox_repo=SqliteDmMediaOutboxRepo(svc._db),
+        space_media_outbox_repo=SqliteSpaceMediaOutboxRepo(svc._db),
         notify_timeout_s=0.5,
     )
     return svc, fed_repo, kek, unpair

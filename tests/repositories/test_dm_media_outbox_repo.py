@@ -175,3 +175,25 @@ async def test_delete_removes_row(media_outbox):
     await repo.delete(blob_id="m-1", target_instance_id="inst-bob")
     assert await repo.list_due() == []
     assert await repo.list_for_message("m-1") == []
+
+
+async def test_delete_for_instance_drops_every_row_for_that_household(media_outbox):
+    """An unpair tombstone gets nothing but our UNPAIR: every media row
+    addressed to it goes, whatever its status; other households keep
+    theirs."""
+    repo, _db = media_outbox
+    for target in ("inst-gone", "inst-kept"):
+        await repo.enqueue(
+            blob_id="m-1",
+            message_id="m-1",
+            target_instance_id=target,
+            bytes_path="/tmp/foo.bin",
+        )
+    await repo.mark_failed(
+        blob_id="m-1", target_instance_id="inst-gone", last_error="x"
+    )
+
+    await repo.delete_for_instance("inst-gone")
+
+    rows = await repo.list_for_message("m-1")
+    assert [r.target_instance_id for r in rows] == ["inst-kept"]

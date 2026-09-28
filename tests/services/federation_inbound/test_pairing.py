@@ -181,6 +181,8 @@ def peer_unpair(bus, repo, outbox, routing):
         federation_repo=repo,
         outbox_repo=outbox,
         routing_repo=routing,
+        dm_media_outbox_repo=_FakeOutboxRepo(),
+        space_media_outbox_repo=_FakeOutboxRepo(),
     )
 
 

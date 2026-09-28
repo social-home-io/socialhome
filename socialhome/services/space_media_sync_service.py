@@ -42,8 +42,10 @@ from ..repositories.space_media_outbox_repo import (
     SpaceMediaOutboxEntry,
 )
 from .backoff import jittered_backoff_seconds
+from .peer_unpair_service import is_unpair_tombstone
 
 if TYPE_CHECKING:
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..federation.federation_service import FederationService
 
 log = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ class SpaceMediaSyncService:
     __slots__ = (
         "_outbox",
         "_federation",
+        "_federation_repo",
         "_media_dir",
         "_interval",
         "_task",
@@ -89,9 +92,12 @@ class SpaceMediaSyncService:
         federation: "FederationService | None",
         media_dir: pathlib.Path,
         interval_seconds: float = 5.0,
+        federation_repo: "AbstractFederationRepo | None" = None,
     ) -> None:
         self._outbox = outbox
         self._federation = federation
+        #: Only to recognise an unpair tombstone (see :func:`is_unpair_tombstone`).
+        self._federation_repo = federation_repo
         self._media_dir = media_dir
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
@@ -239,6 +245,16 @@ class SpaceMediaSyncService:
         due = await self._outbox.list_due(limit=limit)
         shipped = 0
         for entry in due:
+            if await is_unpair_tombstone(
+                self._federation_repo, entry.target_instance_id
+            ):
+                # Not even over the mesh fallback: it gets our UNPAIR and
+                # nothing else (unpairing already purged the rest).
+                await self._outbox.delete(
+                    blob_id=entry.blob_id,
+                    target_instance_id=entry.target_instance_id,
+                )
+                continue
             await self._outbox.mark_in_flight(
                 blob_id=entry.blob_id,
                 target_instance_id=entry.target_instance_id,

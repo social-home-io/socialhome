@@ -66,9 +66,11 @@ from ..infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..repositories.dm_media_outbox_repo import AbstractDmMediaOutboxRepo
     from ..repositories.dm_routing_repo import AbstractDmRoutingRepo
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.outbox_repo import AbstractOutboxRepo
+    from ..repositories.space_media_outbox_repo import AbstractSpaceMediaOutboxRepo
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +84,22 @@ UNPAIR_NOTIFY_TIMEOUT_S: float = 5.0
 UNPAIR_RETRY_MAX_AGE: timedelta = timedelta(days=30)
 
 
+async def is_unpair_tombstone(
+    federation_repo: "AbstractFederationRepo | None",
+    instance_id: str,
+) -> bool:
+    """Whether *instance_id* is an unpair tombstone.
+
+    For the side outboxes (DM / space media) whose senders do not go
+    through the federation outbox's tombstone gate: a tombstone gets our
+    ``UNPAIR`` and nothing else. ``None`` repo (not wired) → ``False``.
+    """
+    if federation_repo is None:
+        return False
+    inst = await federation_repo.get_instance(instance_id, include_unpairing=True)
+    return inst is not None and inst.status is PairingStatus.UNPAIRING
+
+
 class PeerUnpairService:
     """Local unpair (notify, then forget or tombstone) and the shared
     forget step."""
@@ -92,6 +110,8 @@ class PeerUnpairService:
         "_federation_repo",
         "_outbox_repo",
         "_routing_repo",
+        "_dm_media_outbox_repo",
+        "_space_media_outbox_repo",
         "_notify_timeout_s",
         "_in_progress",
     )
@@ -104,6 +124,8 @@ class PeerUnpairService:
         federation_repo: "AbstractFederationRepo",
         outbox_repo: "AbstractOutboxRepo",
         routing_repo: "AbstractDmRoutingRepo",
+        dm_media_outbox_repo: "AbstractDmMediaOutboxRepo",
+        space_media_outbox_repo: "AbstractSpaceMediaOutboxRepo",
         notify_timeout_s: float = UNPAIR_NOTIFY_TIMEOUT_S,
     ) -> None:
         self._bus = bus
@@ -111,6 +133,8 @@ class PeerUnpairService:
         self._federation_repo = federation_repo
         self._outbox_repo = outbox_repo
         self._routing_repo = routing_repo
+        self._dm_media_outbox_repo = dm_media_outbox_repo
+        self._space_media_outbox_repo = space_media_outbox_repo
         self._notify_timeout_s = notify_timeout_s
         #: Tombstones :meth:`_tombstone` is still building (status flipped,
         #: UNPAIR not queued yet) — :meth:`sweep_tombstones` must not take
@@ -204,7 +228,11 @@ class PeerUnpairService:
         await self._federation_repo.mark_unpairing(instance_id)
         # Nothing but the UNPAIR may go out any more (send_event may just
         # have queued a copy of it, too — it is replaced by the one below).
+        # Media bytes ride their own outboxes; the pipeline would refuse
+        # them too, so they go now as well.
         await self._outbox_repo.delete_for_instance(instance_id)
+        await self._dm_media_outbox_repo.delete_for_instance(instance_id)
+        await self._space_media_outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
         expires_at = (datetime.now(timezone.utc) + UNPAIR_RETRY_MAX_AGE).isoformat()
         queued = await self._federation.queue_event(

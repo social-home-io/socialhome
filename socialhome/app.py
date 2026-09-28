@@ -828,6 +828,8 @@ def _wire_federation_stack(
     space_media_sync_service,
     dm_routing_service,
     dm_routing_repo,
+    dm_media_outbox_repo,
+    space_media_outbox_repo,
     presence_service,
     online_status_service,
     report_service,
@@ -1047,6 +1049,8 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         outbox_repo=outbox_repo,
         routing_repo=dm_routing_repo,
+        dm_media_outbox_repo=dm_media_outbox_repo,
+        space_media_outbox_repo=space_media_outbox_repo,
     )
     PairingInboundHandlers(
         bus=bus,
@@ -1681,6 +1685,7 @@ def create_app(config: Config | None = None) -> web.Application:
         federation=None,  # set by attach_federation below
         media_dir=pathlib.Path(config.media_path),
         visibility_repo=repos.peer_user_visibility,
+        federation_repo=federation_repo,
     )
     # Space media sync — same shape as DmMediaSyncService but tied
     # to space_media_outbox so the two streams backoff
@@ -1689,6 +1694,7 @@ def create_app(config: Config | None = None) -> web.Application:
         outbox=repos.space_media_outbox,
         federation=None,
         media_dir=pathlib.Path(config.media_path),
+        federation_repo=federation_repo,
     )
     # DmService starts without ``audio_transcription`` — the platform
     # adapter is built much later in ``create_app``, so the service is
@@ -2633,6 +2639,8 @@ def create_app(config: Config | None = None) -> web.Application:
             space_media_sync_service=space_media_sync_service,
             dm_routing_service=dm_routing_service,
             dm_routing_repo=repos.dm_routing,
+            dm_media_outbox_repo=repos.dm_media_outbox,
+            space_media_outbox_repo=repos.space_media_outbox,
             presence_service=presence_service,
             online_status_service=online_status_service,
             report_service=report_service,

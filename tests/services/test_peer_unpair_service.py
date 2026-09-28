@@ -82,6 +82,17 @@ class _FakeOutboxRepo:
         return len(self.rows.get(iid, []))
 
 
+class _FakeMediaOutboxRepo:
+    def __init__(self, log: _Log, name: str) -> None:
+        self.targets: set[str] = set()
+        self._log = log
+        self._name = name
+
+    async def delete_for_instance(self, iid):
+        self._log.append((self._name, iid))
+        self.targets.discard(iid)
+
+
 class _FakeRoutingRepo:
     def __init__(self, log: _Log) -> None:
         self.discovered_via: dict[str, list[str]] = {}
@@ -158,12 +169,16 @@ def env():
     routing = _FakeRoutingRepo(log)
     fed = _FakeFederation(repo, log)
     fed._outbox = outbox
+    dm_media = _FakeMediaOutboxRepo(log, "dm_media_purge")
+    space_media = _FakeMediaOutboxRepo(log, "space_media_purge")
     svc = PeerUnpairService(
         bus=bus,
         federation=fed,  # type: ignore[arg-type]
         federation_repo=repo,  # type: ignore[arg-type]
         outbox_repo=outbox,  # type: ignore[arg-type]
         routing_repo=routing,  # type: ignore[arg-type]
+        dm_media_outbox_repo=dm_media,  # type: ignore[arg-type]
+        space_media_outbox_repo=space_media,  # type: ignore[arg-type]
         notify_timeout_s=0.05,
     )
     published: list[PeerUnpaired] = []
@@ -176,6 +191,8 @@ def env():
         "fed": fed,
         "log": log,
         "published": published,
+        "dm_media": dm_media,
+        "space_media": space_media,
     }
 
 
@@ -334,6 +351,21 @@ async def test_sweep_never_purges_a_tombstone_still_being_made(env):
     assert await env["svc"].sweep_tombstones() == 0
     env["outbox"].rows.clear()
     assert await env["svc"].sweep_tombstones() == 1
+
+
+async def test_tombstoning_drops_queued_media_for_the_peer(env):
+    """Media bytes to a tombstone would never be accepted (the pipeline
+    refuses everything but UNPAIR): its DM and space media rows go when the
+    tombstone is made, like its ordinary outbox rows."""
+    env["repo"].instances["peer-a"] = _inst("peer-a")
+    env["fed"].result = "fail"
+    env["dm_media"].targets = {"peer-a", "peer-b"}
+    env["space_media"].targets = {"peer-a", "peer-b"}
+
+    assert await env["svc"].unpair("peer-a") is False
+
+    assert env["dm_media"].targets == {"peer-b"}
+    assert env["space_media"].targets == {"peer-b"}
 
 
 def test_retry_max_age_is_thirty_days():

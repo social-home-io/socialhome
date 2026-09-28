@@ -482,20 +482,28 @@ The tombstone grants **no trust**:
   with the same `404 No instance found` a household we never knew gets
   (step 4b, after the signature check);
 - the outbox sends it nothing but the `UNPAIR` — and an `UNPAIR` goes only to
-  a tombstone, so a stale one can never hit a pairing made later.
+  a tombstone, so a stale one can never hit a pairing made later. Queued DM
+  and space media for it (`dm_media_outbox`, `space_media_outbox`) is
+  dropped when the tombstone is made, and those senders skip tombstones —
+  not even the space mesh fallback reaches it.
 
 Exactly one `UNPAIR` is queued, with a 30-day `expires_at`
 (`UNPAIR_RETRY_MAX_AGE`) and the outbox's normal backoff. A signed envelope
 from the tombstoned peer proves it is back online and pulls that retry
-forward to the next outbox tick. The tombstone ends when:
+forward to the next outbox tick (only when the retry is parked in the
+future, so a peer that keeps sending costs one read per envelope, not a
+write). A `404` that does not carry our own `unknown_inbox` marker came
+from something in front of the peer (e.g. its Home Assistant integration
+not loaded yet), so for the `UNPAIR` it stays a retry until the 30-day
+expiry instead of ending the tombstone. The tombstone ends when:
 
 - the `UNPAIR` is delivered, or refused for good (the peer already forgot
-  us — a 4xx) — the row is purged;
+  us — a 4xx from its Social Home) — the row is purged;
 - the peer's own `UNPAIR` reaches us;
 - the `UNPAIR` expires — the retention sweep fails it and the tombstone is
   purged; a peer returning after that is refused as a stranger;
 - we pair with that household again — the new row (fresh keys, fresh inbox
-  id) replaces the tombstone.
+  id) replaces the tombstone in one transaction.
 
 The retry state lives in that one outbox row, so the tombstone needs no
 column of its own.

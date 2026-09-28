@@ -27,7 +27,11 @@ import pytest
 from PIL import Image
 
 from socialhome.domain.conversation import ConversationMessage
-from socialhome.domain.federation import DeliveryResult, FederationEventType
+from socialhome.domain.federation import (
+    DeliveryResult,
+    FederationEventType,
+    PairingStatus,
+)
 from socialhome.repositories.dm_media_outbox_repo import DmMediaOutboxEntry
 from socialhome.services.dm_media_sync_service import DmMediaSyncService
 
@@ -860,3 +864,43 @@ async def test_loop_ships_promptly_via_wake_not_poll(stack):
     finally:
         await stack["svc"].stop()
     assert len(stack["fed"].sent) >= 1
+
+
+# ── Unpair tombstone ───────────────────────────────────────────────────
+
+
+class _TombstoneFedRepo:
+    """``get_instance`` stand-in: every id in ``tombstones`` is an unpair
+    tombstone (visible only with ``include_unpairing=True``)."""
+
+    def __init__(self, tombstones: set[str]) -> None:
+        self.tombstones = tombstones
+
+    async def get_instance(self, iid, *, include_unpairing=False):
+        if iid in self.tombstones:
+            if not include_unpairing:
+                return None
+            return type("_Inst", (), {"status": PairingStatus.UNPAIRING})()
+        return type("_Inst", (), {"status": PairingStatus.CONFIRMED})()
+
+
+async def test_dm_media_blob_to_an_unpair_tombstone_is_dropped(stack):
+    """A household we unpaired while it was offline gets our UNPAIR and
+    nothing else — a media row for it is dropped, not sent or retried.
+    Other recipients still get theirs."""
+    _make_test_image(stack["media_dir"])
+    await stack["svc"].enqueue_for_message(
+        message_id="m1",
+        media_url="api/media/cat.webp",
+        target_instance_ids=["inst-tomb", "inst-bob"],
+    )
+    svc = DmMediaSyncService(
+        convos=stack["convos"],
+        outbox=stack["outbox"],
+        federation=stack["fed"],
+        media_dir=stack["media_dir"],
+        federation_repo=_TombstoneFedRepo({"inst-tomb"}),
+    )
+    assert await svc.flush_once() == 1
+    assert {m["to"] for m in stack["fed"].sent} == {"inst-bob"}
+    assert await stack["outbox"].list_for_message("m1") == []

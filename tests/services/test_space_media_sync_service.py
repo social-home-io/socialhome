@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.federation import DeliveryResult, FederationEventType
+from socialhome.domain.federation import (
+    DeliveryResult,
+    FederationEventType,
+    PairingStatus,
+)
 from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
@@ -291,3 +295,44 @@ async def test_enqueue_for_post_back_compat_signature(db, outbox, tmp_path):
     assert len(rows) == 1
     assert rows[0].correlation_id == "p-back-compat"
     assert rows[0].space_id == "sp-1"
+
+
+class _TombstoneFedRepo:
+    """``get_instance`` stand-in: every id in ``tombstones`` is an unpair
+    tombstone (visible only with ``include_unpairing=True``)."""
+
+    def __init__(self, tombstones: set[str]) -> None:
+        self.tombstones = tombstones
+
+    async def get_instance(self, iid, *, include_unpairing=False):
+        if iid in self.tombstones:
+            if not include_unpairing:
+                return None
+            return type("_Inst", (), {"status": PairingStatus.UNPAIRING})()
+        return None  # a mesh-only member: no row, still gets the bytes
+
+
+async def test_flush_once_drops_rows_for_an_unpair_tombstone(db, outbox, tmp_path):
+    """A household we unpaired while it was offline gets our UNPAIR and
+    nothing else — not even over the mesh fallback. Its row is dropped;
+    other members (paired or mesh-only) still get theirs."""
+    await _seed_space(db)
+    (tmp_path / "small.webp").write_bytes(b"WEBP" * 8)
+    fed = AsyncMock()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(
+        outbox=outbox,
+        federation=fed,
+        media_dir=tmp_path,
+        federation_repo=_TombstoneFedRepo({"peer-tomb"}),
+    )
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-tomb", "peer-mesh"],
+        media_urls=["api/media/small.webp"],
+    )
+    assert await svc.flush_once() == 1
+    sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
+    assert sent_to == {"peer-mesh"}
+    assert await outbox.list_for_correlation("p-1") == []
