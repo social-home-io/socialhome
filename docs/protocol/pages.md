@@ -73,6 +73,18 @@ preserved in history — it's not lost, just not current.
 `POST /api/spaces/{id}/pages/{pid}/resolve-conflict` lets an admin
 force-pick a winner on their local HFS and re-broadcast.
 
+## Creator-bound ids (v_36)
+
+A new space page's id is owner-bound to its `created_by` and space
+(`federation/owner_bound_id.py`, kind `space-page`): the live create
+handler (for a page not held yet) and the §25.6 sync receiver refuse
+a bound id claimed for anybody else, so only the creator's household
+can announce it. Pages are collaborative, so only the
+attribution was at stake; edits keep it. Space stickies bind their
+`author` the same way (kind `space-sticky`). Legacy (uuid4) ids keep
+the first-come rule. See [`spaces.md`](./spaces.md) and the v_36 row
+in [`capabilities.md`](./capabilities.md).
+
 ## Implementation
 
 - `socialhome/services/page_service.py` — CRUD + lock + versions.

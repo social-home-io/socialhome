@@ -143,6 +143,15 @@ pair), B receives the same ``moment_id`` twice — once via federation,
 once via GFS. The recipient dedupes on the row's PRIMARY KEY; the
 second save is a no-op.
 
+## Creator-bound moment ids (v_36)
+
+A moment's id commits to its author (`federation/owner_bound_id.py`,
+unscoped `moment` kind). The public inbound refuses an
+`incoming_public_moment` or `incoming_public_moment_delete` naming a
+bound id for any other author — validly signed or not — before it is
+stored or tombstoned, so nobody can pre-empt another author's moment
+id. Legacy (uuid4) ids are unchanged. See [`momentum.md`](./momentum.md).
+
 ## Signature canonicalisation
 
 Every signed wire body — register, follow, unfollow, publish, delete

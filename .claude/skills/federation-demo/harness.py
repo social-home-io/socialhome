@@ -5526,6 +5526,61 @@ def cmd_verify() -> None:
             else:
                 print("  d still holds dave's admin role ✓")
 
+    # 13c. v_36: new posts, events and moments can only be announced by
+    #     the household that created them — their ids commit to their
+    #     creator. The ids traffic / calendar minted must verify for the
+    #     creating user (and the other households accepted them on that
+    #     basis: the arrival checks above ran against these same ids).
+    from socialhome.federation.owner_bound_id import (
+        MOMENT_KIND as _MOMENT_KIND,
+        SPACE_CALENDAR_EVENT_KIND as _EVENT_KIND,
+        SPACE_POST_KIND as _POST_KIND,
+        OwnerBinding as _OwnerBinding,
+        check_owner_bound_id as _check_bound,
+    )
+
+    _bound_cases: list[tuple[str, str, str, str, str]] = [
+        (
+            f"{label}'s moment",
+            _MOMENT_KIND,
+            str(m.get("id") or ""),
+            "",
+            state["instances"][label]["user_id"],
+        )
+        for label, m in (state.get("moments") or {}).items()
+    ]
+    if state.get("space_id"):
+        _b_uid = state["instances"]["b"]["user_id"]
+        if state.get("bazaar_listing_id"):
+            _bound_cases.append(
+                (
+                    "b's bazaar wrapper post",
+                    _POST_KIND,
+                    state["bazaar_listing_id"],
+                    state["space_id"],
+                    _b_uid,
+                )
+            )
+        if state.get("calendar_event_id"):
+            _bound_cases.append(
+                (
+                    "b's space calendar event",
+                    _EVENT_KIND,
+                    state["calendar_event_id"],
+                    state["space_id"],
+                    _b_uid,
+                )
+            )
+    for _what, _kind, _rid, _sp, _owner in _bound_cases:
+        _binding = _check_bound(_kind, _rid, space_id=_sp, owner_user_id=_owner)
+        if _binding is not _OwnerBinding.VALID:
+            failures.append(
+                f"{_what} id {_rid} is {_binding.value}, not bound to its "
+                f"creator {_owner!r} (v_36)"
+            )
+        else:
+            print(f"  {_what} id is bound to its creator (v_36) ✓")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -7511,6 +7566,22 @@ def cmd_space_gallery_media_blob() -> None:
             f"{d_album.get('owner_user_id')!r}, expected {c_me['user_id']!r}"
         )
     print("  album id is bound to its creator (v_34) ✓")
+    # v_36: the upload's id commits to its uploader the same way.
+    from socialhome.federation.owner_bound_id import GALLERY_ITEM_KIND
+
+    item_binding = check_owner_bound_id(
+        GALLERY_ITEM_KIND,
+        item_id,
+        space_id=space_id,
+        owner_user_id=c_me["user_id"],
+    )
+    if item_binding is not OwnerBinding.VALID:
+        raise SystemExit(
+            f"space-gallery-media-blob: item id {item_id} is "
+            f"{item_binding.value}, not bound to its uploader "
+            f"{c_me['user_id']!r} (v_36)"
+        )
+    print("  upload id is bound to its uploader (v_36) ✓")
     d_items = {i["id"]: i for i in _gallery_items_on("d", d)}
     if item_id not in d_items:
         raise SystemExit(

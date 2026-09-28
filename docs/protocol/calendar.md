@@ -45,6 +45,18 @@ sequenceDiagram
     A->>A: upsert RSVP and broadcast counts
 ```
 
+## Creator-bound event ids (v_36)
+
+A new space event's id is **owner-bound** to its `created_by` and space
+(`federation/owner_bound_id.py`, kind `space-calendar-event`), so only the
+creator's household can announce it: `SPACE_CALENDAR_EVENT_CREATED` /
+`_UPDATED` for an event not held yet, and the §25.6 sync receiver, refuse
+(WARNING) a bound id claimed for anybody else or for another space. A host
+relay or resume replay stays valid; an edit keeps the stored attribution;
+a legacy (uuid4) id keeps the first-come rule. See
+[`spaces.md`](./spaces.md) and the v_36 row in
+[`capabilities.md`](./capabilities.md).
+
 ## RSVP propagation
 
 `SPACE_RSVP_UPDATED` carries `{event_id, user_id, occurrence_at,

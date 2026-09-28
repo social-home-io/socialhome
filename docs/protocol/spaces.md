@@ -147,7 +147,9 @@ An item carries its full `url` as well as the thumbnail
 outbox, and the `SPACE_MEDIA_BLOB` scope check accepts only files the
 receiver's row names — without the `url` it refused the full-size picture
 of every federated item.
-Sent ungated — see the v_33 and v_34 rows in [`capabilities.md`](./capabilities.md).
+A new upload's id is owner-bound to its uploader and space (v_36, below):
+an item claimed for anybody else is refused, like an album (v_34).
+Sent ungated — see the v_33, v_34 and v_36 rows in [`capabilities.md`](./capabilities.md).
 
 ```mermaid
 sequenceDiagram
@@ -318,15 +320,40 @@ act as one — only moderation (below) reaches a local user's rows.
 
 | Family | Create | Edit / state change | Delete |
 |---|---|---|---|
-| Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay) | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
+| Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay); from v_36 an owner-bound id must commit to that author and space | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
 | Gallery albums (v_33) | owner seated on the sender (or the host's relay); from v_34 an owner-bound id must commit to that owner and space | the stored owner's household or a moderator (the payload's owner is ignored) | same as edit |
-| Gallery items | uploader seated on the sender (or the host's relay) | — | uploader's household or a moderator |
-| Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
+| Gallery items | uploader seated on the sender (or the host's relay); from v_36 an owner-bound id must commit to that uploader and space | — | uploader's household or a moderator |
+| Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household; from v_36 a new row's owner-bound id must commit to that creator and space | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
 | RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
 | Poll close, schedule create / finalise | the wrapper post's author's household | | |
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
 | Zones | moderators only (the local service is admin-only); a new zone's `created_by` bound like a create | moderators | moderators |
+
+**Creator-bound ids (v_34 albums, v_36 everything else).** The rules
+above bind the user a payload names to the signing household, but a new
+row's *id* is picked by its creator and seen by every member household: a
+household that has seen another household's new id could announce it
+first for its own user, and the creator's real announcement would then
+meet an id already held. So every new federated row with an owner carries
+an **owner-bound id** (`federation/owner_bound_id.py`; wire shape in
+[`crypto.md`](../crypto.md)) — a UUIDv8-shaped 32-hex id with a random
+nonce, a suite nibble and a commitment over `(kind, space_id,
+owner_user_id, nonce)`. Posts (and so the bazaar listing, poll and
+schedule rows that follow their wrapper post) bind their `author`,
+comments their `author`, gallery items their `uploaded_by`, calendar
+events, tasks and pages their `created_by`, stickies their `author`.
+Every path that files a new row recomputes the commitment and refuses
+(WARNING) a claim of the id for anybody else, for another space, or under
+an unknown suite nibble: the live create handlers, the §25.6 sync receiver
+(the host's stream included), the host relay and `SPACE_SYNC_RESUME`
+replay (which arrive as live events, and stay valid — the id binds the
+owner, not the sender) and the public-space GFS relay (checked by the
+relaying seed-holder and every subscriber). Collaborative rows are checked
+only while not held yet; an edit keeps the stored attribution. An id of any
+other shape — every earlier row's uuid4, a row from a household that does
+not bind yet, a bot post — keeps the rules above (the legacy window; see
+the v_34 and v_36 rows in [`capabilities.md`](./capabilities.md)).
 
 A **read-only (`subscriber`) seat authors nothing**, with the one opt-in
 the Follower gate already has: a comment, when the space turned
