@@ -765,7 +765,9 @@ async def test_record_quality_sample_persists_and_federates(env):
     assert len(quality_events) == 1
 
 
-async def test_handle_federated_call_quality_persists_sample(env):
+async def test_handle_federated_call_quality_for_an_unknown_call_is_dropped(env):
+    """A sample is bound to a call held here; an unknown call id stores nothing."""
+
     class _Event:
         def __init__(self, et, from_inst, payload):
             self.event_type = et
@@ -785,8 +787,7 @@ async def test_handle_federated_call_quality_persists_sample(env):
             },
         )
     )
-    samples = await env.call_repo.list_quality_samples("c-remote")
-    assert samples and samples[0].rtt_ms == 55
+    assert await env.call_repo.list_quality_samples("c-remote") == []
 
 
 # ─── handle_federated_signal ──────────────────────────────────────────────
