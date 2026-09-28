@@ -351,9 +351,15 @@ sys.modules["aiolibdatachannel"] = _fake_rtc
 # Imports below MUST come after the sys.modules injection above so the
 # fake aiolibdatachannel is resolved when production modules load.
 
+import dataclasses  # noqa: E402
+import functools  # noqa: E402
+import inspect  # noqa: E402
+
 import pytest  # noqa: E402
 
+from socialhome.config import Config  # noqa: E402
 from socialhome.crypto import generate_identity_keypair, derive_instance_id  # noqa: E402
+from socialhome.db import database as _db_module  # noqa: E402
 from socialhome.db.database import AsyncDatabase  # noqa: E402
 from socialhome.infrastructure.event_bus import EventBus  # noqa: E402
 from socialhome.repositories.conversation_repo import SqliteConversationRepo  # noqa: E402
@@ -366,6 +372,82 @@ from socialhome.infrastructure.key_manager import KeyManager  # noqa: E402
 from socialhome.services.feed_service import FeedService  # noqa: E402
 from socialhome.services.space_service import SpaceService  # noqa: E402
 from socialhome.services.user_service import UserService  # noqa: E402
+
+from tests.migration_template import MigrationTemplateCache  # noqa: E402
+
+
+#: Write-coalescing window every test database runs with; see
+#: ``_fast_test_databases``.
+TEST_WRITE_WINDOW_MS = 1
+
+#: Windows at or below this are the suite's "don't make me wait" value (the
+#: ~220 ``batch_timeout_ms=10`` / ``db_write_batch_timeout_ms=10`` call
+#: sites) and are collapsed to :data:`TEST_WRITE_WINDOW_MS`.
+_FAST_WINDOW_CEILING_MS = 10
+
+#: The production default window (500 ms), as ``Config`` and
+#: ``AsyncDatabase`` each declare it. A test that never chose a window runs
+#: with this one, so it is collapsed too. Any OTHER explicit window is a test
+#: choosing one on purpose (the batching tests use 200 ms) and is kept.
+_PRODUCTION_WINDOWS_MS = frozenset(
+    {
+        next(
+            f.default
+            for f in dataclasses.fields(Config)
+            if f.name == "db_write_batch_timeout_ms"
+        ),
+        inspect.signature(AsyncDatabase.__init__)
+        .parameters["batch_timeout_ms"]
+        .default,
+    }
+)
+
+
+def _test_write_window_ms(requested: int) -> int:
+    """The window a test database actually runs with."""
+    if requested <= _FAST_WINDOW_CEILING_MS or requested in _PRODUCTION_WINDOWS_MS:
+        return TEST_WRITE_WINDOW_MS
+    return requested
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _fast_test_databases():
+    """Two test-boundary speed-ups for every ``AsyncDatabase`` in the suite.
+
+    * **Migrated-schema template.** ``AsyncDatabase.startup`` replays the
+      full migration chain on every fresh file. Wrap the runner it calls so
+      the first empty DB per process pays for the real chain and every later
+      one is a page copy of that result — see ``tests/migration_template.py``.
+    * **Write-batch window.** The writer holds every batch open for the full
+      window waiting for companions, so each *sequential* ``enqueue`` costs
+      at least one window. Tests pass 10 ms to mean "fast", yet 10 ms per
+      write was the single largest cost of the suite (a fixture seeding 40
+      rows spent 0.4 s just waiting), and every test that never chose a
+      window — ``GfsApp`` has no knob at all, nor does a bare ``Config(...)``
+      — paid the production 500 ms per write. Collapse those to
+      :data:`TEST_WRITE_WINDOW_MS`. Writes queued in the same tick still
+      coalesce (the drain takes whatever is already queued), and a window a
+      test set on purpose is kept, so the database's own batching tests are
+      unaffected.
+    """
+    cache = MigrationTemplateCache(_db_module.run_migrations)
+    real_init = AsyncDatabase.__init__
+    default_window = inspect.signature(real_init).parameters["batch_timeout_ms"].default
+
+    @functools.wraps(real_init)
+    def _init(self, path, *, batch_timeout_ms=default_window, **kwargs):
+        real_init(
+            self,
+            path,
+            batch_timeout_ms=_test_write_window_ms(batch_timeout_ms),
+            **kwargs,
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_db_module, "run_migrations", cache)
+        mp.setattr(AsyncDatabase, "__init__", _init)
+        yield cache
+    cache.close()
 
 
 @pytest.fixture
