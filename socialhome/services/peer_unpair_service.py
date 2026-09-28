@@ -93,6 +93,7 @@ class PeerUnpairService:
         "_outbox_repo",
         "_routing_repo",
         "_notify_timeout_s",
+        "_in_progress",
     )
 
     def __init__(
@@ -111,6 +112,12 @@ class PeerUnpairService:
         self._outbox_repo = outbox_repo
         self._routing_repo = routing_repo
         self._notify_timeout_s = notify_timeout_s
+        #: Tombstones :meth:`_tombstone` is still building (status flipped,
+        #: UNPAIR not queued yet) — :meth:`sweep_tombstones` must not take
+        #: one for an abandoned tombstone. In memory is enough: the sweep
+        #: and the unpair run in this one process, and a crash mid-build
+        #: leaves exactly the orphan the sweep exists to collect.
+        self._in_progress: set[str] = set()
 
     async def unpair(self, instance_id: str) -> bool | None:
         """Tell the peer, then forget it.
@@ -169,6 +176,8 @@ class PeerUnpairService:
         for inst in await self._federation_repo.list_instances(
             status=PairingStatus.UNPAIRING.value,
         ):
+            if inst.id in self._in_progress:
+                continue
             if await self._outbox_repo.count_pending_for(inst.id):
                 continue
             log.warning(
@@ -180,8 +189,18 @@ class PeerUnpairService:
         return purged
 
     async def _tombstone(self, instance_id: str) -> None:
+        self._in_progress.add(instance_id)
+        try:
+            await self._build_tombstone(instance_id)
+        finally:
+            self._in_progress.discard(instance_id)
+
+    async def _build_tombstone(self, instance_id: str) -> None:
         # Trust closes first: from the status flip on, no read treats the
         # household as a peer and the pipeline refuses what it sends.
+        # (Queueing the UNPAIR before the flip instead would race the outbox
+        # processor: redelivery drops an UNPAIR to a live pairing as
+        # superseded. The sweep race is closed by ``_in_progress``.)
         await self._federation_repo.mark_unpairing(instance_id)
         # Nothing but the UNPAIR may go out any more (send_event may just
         # have queued a copy of it, too — it is replaced by the one below).

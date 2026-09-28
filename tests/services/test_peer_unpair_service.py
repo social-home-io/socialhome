@@ -104,10 +104,15 @@ class _FakeFederation:
         self.result = "ok"  # "ok" | "fail" | "hang" | "raise"
         self.queue_ok = True
         self._outbox: _FakeOutboxRepo | None = None
+        #: Awaited inside ``queue_event`` before the row lands — lets a test
+        #: interleave another coroutine at the worst possible point.
+        self.before_queue = None
 
     async def queue_event(self, *, to_instance_id, event_type, payload, expires_at):
         inst = await self._repo.get_instance(to_instance_id, include_unpairing=True)
         self._log.append(("queue_event", to_instance_id))
+        if self.before_queue is not None:
+            await self.before_queue()
         self.queued.append(
             {
                 "to": to_instance_id,
@@ -304,6 +309,31 @@ async def test_sweep_purges_tombstones_whose_unpair_is_gone(env):
     assert await env["svc"].sweep_tombstones() == 1
 
     assert set(env["repo"].instances) == {"peer-waiting", "peer-live"}
+
+
+async def test_sweep_never_purges_a_tombstone_still_being_made(env):
+    """Race: the hourly sweep can run between the status flip and the
+    UNPAIR landing in the outbox. At that instant the tombstone has
+    nothing queued, and purging it would mean the peer is never told."""
+    env["repo"].instances["peer-a"] = _inst("peer-a")
+    env["fed"].result = "fail"
+    swept: list[int] = []
+
+    async def _sweep_now():
+        swept.append(await env["svc"].sweep_tombstones())
+
+    env["fed"].before_queue = _sweep_now
+
+    assert await env["svc"].unpair("peer-a") is False
+
+    assert swept == [0]
+    tomb = env["repo"].instances["peer-a"]
+    assert tomb.status is PairingStatus.UNPAIRING
+    assert env["outbox"].rows == {"peer-a": ["queued-unpair"]}
+    # Once it is made, the sweep treats it like any other tombstone.
+    assert await env["svc"].sweep_tombstones() == 0
+    env["outbox"].rows.clear()
+    assert await env["svc"].sweep_tombstones() == 1
 
 
 def test_retry_max_age_is_thirty_days():
