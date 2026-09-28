@@ -104,6 +104,20 @@ def _create_payload(**over):
     return base
 
 
+async def _seed_local_highlight(inbound) -> None:
+    """``s-fed-1`` / ``f-fed-1`` authored by our own ``uid-local``.
+
+    Views and reactions are unicast to the author's home, so a reply is
+    only ever about a highlight authored on this household.
+    """
+    payload = _create_payload(author_user_id="uid-local")
+    highlight = inbound._highlight_from_payload(payload)
+    await inbound._highlight_repo.save_highlight(highlight)
+    await inbound._highlight_repo.save_frame(
+        inbound._frame_from_payload(highlight.id, payload)
+    )
+
+
 # ─── HIGHLIGHT_CREATED ────────────────────────────────────────────────────────
 
 
@@ -250,9 +264,7 @@ async def test_highlight_frame_viewed_persists_and_publishes(db, bus, inbound):
     """A remote viewer's view receipt lands in highlight_frame_views and
     fires HighlightFrameViewed so realtime can ping the author."""
     # Seed the parent highlight + frame via the CREATED handler.
-    await inbound._on_highlight_created(
-        _event(FederationEventType.HIGHLIGHT_CREATED, _create_payload()),
-    )
+    await _seed_local_highlight(inbound)
     captured: list[HighlightFrameViewed] = []
     bus.subscribe(HighlightFrameViewed, captured.append)
 
@@ -300,9 +312,7 @@ async def test_highlight_frame_viewed_authority_mismatch_dropped(db, bus, inboun
 
 
 async def test_highlight_frame_reacted_persists_and_publishes(db, bus, inbound):
-    await inbound._on_highlight_created(
-        _event(FederationEventType.HIGHLIGHT_CREATED, _create_payload()),
-    )
+    await _seed_local_highlight(inbound)
     captured: list[HighlightFrameReactionChanged] = []
     bus.subscribe(HighlightFrameReactionChanged, captured.append)
 
@@ -325,9 +335,7 @@ async def test_highlight_frame_reacted_persists_and_publishes(db, bus, inbound):
 
 async def test_highlight_frame_reaction_removed_clears(db, bus, inbound):
     """REACTION_REMOVED clears the row and publishes ``emoji=None``."""
-    await inbound._on_highlight_created(
-        _event(FederationEventType.HIGHLIGHT_CREATED, _create_payload()),
-    )
+    await _seed_local_highlight(inbound)
     # Seed a reaction first.
     await inbound._on_highlight_frame_reacted(
         _event(

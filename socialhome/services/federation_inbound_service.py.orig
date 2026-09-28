@@ -2511,9 +2511,7 @@ class FederationInboundService:
         Authority check: the envelope's signed sender (``from_instance``)
         must equal the home instance of the payload's
         ``author_user_id`` — peers can't impersonate highlights from
-        someone else's instance. The upsert is by id, so an id we already
-        store must belong to that same author, and the frame id must not
-        belong to another highlight (see :meth:`_highlight_write_binds`).
+        someone else's instance.
         """
         if self._highlight_repo is None:
             return
@@ -2532,54 +2530,11 @@ class FederationInboundService:
                 highlight.author_user_id,
             )
             return
-        frame = self._frame_from_payload(highlight.id, p)
-        if not await self._highlight_write_binds(event, highlight, frame):
-            return
         await self._highlight_repo.save_highlight(highlight)
+        frame = self._frame_from_payload(highlight.id, p)
         if frame is not None:
             await self._highlight_repo.save_frame(frame)
             await self._publish_frame_added(highlight, frame, is_first=True, p=p)
-
-    async def _highlight_write_binds(
-        self,
-        event: "FederationEvent",
-        highlight: Highlight | None,
-        frame: HighlightFrame | None,
-    ) -> bool:
-        """The by-id upserts may only touch rows that are already the sender's.
-
-        ``save_highlight`` / ``save_frame`` upsert on the bare id the payload
-        names, so the id alone must not reach a row that belongs to someone
-        else: a stored highlight with that id must have the same author, and
-        a stored frame with that id must already hang off the same highlight.
-        Refusals are logged at WARNING and change nothing.
-        """
-        if self._highlight_repo is None:  # pragma: no cover — callers gate
-            return False
-        reason: str | None = None
-        if highlight is not None:
-            stored = await self._highlight_repo.get_highlight(highlight.id)
-            if stored is not None and stored.author_user_id != (
-                highlight.author_user_id
-            ):
-                reason = "highlight id belongs to another author"
-        if reason is None and frame is not None:
-            stored_frame = await self._highlight_repo.get_frame(frame.id)
-            if stored_frame is not None and stored_frame.highlight_id != (
-                frame.highlight_id
-            ):
-                reason = "frame id belongs to another highlight"
-        if reason is None:
-            return True
-        log.warning(
-            "%s from %s: %s (highlight=%s frame=%s) — refusing",
-            event.event_type,
-            event.from_instance,
-            reason,
-            highlight.id if highlight is not None else None,
-            frame.id if frame is not None else None,
-        )
-        return False
 
     async def _on_highlight_frame_appended(self, event: "FederationEvent") -> None:
         """Append a frame to an existing remote highlight.
@@ -2598,7 +2553,6 @@ class FederationInboundService:
             log.debug("HIGHLIGHT_FRAME_APPENDED missing highlight_id: %s", p)
             return
         highlight = await self._highlight_repo.get_highlight(highlight_id)
-        lazy_parent = highlight is None
         if highlight is None:
             highlight = self._highlight_from_payload(p)
             if highlight is None:
@@ -2618,6 +2572,7 @@ class FederationInboundService:
                     highlight.author_user_id,
                 )
                 return
+            await self._highlight_repo.save_highlight(highlight)
         else:
             if not await self._authority_matches(
                 event.from_instance, highlight.author_user_id
@@ -2633,12 +2588,6 @@ class FederationInboundService:
         if frame is None:
             log.debug("HIGHLIGHT_FRAME_APPENDED missing frame fields: %s", p)
             return
-        # Bind before any write: a lazily-created parent must not land when
-        # the frame id it carries belongs to another highlight.
-        if not await self._highlight_write_binds(event, None, frame):
-            return
-        if lazy_parent:
-            await self._highlight_repo.save_highlight(highlight)
         await self._highlight_repo.save_frame(frame)
         await self._publish_frame_added(highlight, frame, is_first=False, p=p)
 
@@ -2649,32 +2598,35 @@ class FederationInboundService:
         frame_id = str(p.get("frame_id") or "")
         if not frame_id:
             return
-        # Bind to the stored frame: its own parent highlight's author must
-        # live on the sender. A frame we don't hold is nothing to delete.
         frame = await self._highlight_repo.get_frame(frame_id)
-        if frame is None:
-            return
-        highlight = await self._highlight_repo.get_highlight(frame.highlight_id)
-        if highlight is None or not await self._authority_matches(
+        highlight_id = (
+            frame.highlight_id
+            if frame is not None
+            else str(p.get("highlight_id") or "")
+        )
+        highlight = (
+            await self._highlight_repo.get_highlight(highlight_id)
+            if highlight_id
+            else None
+        )
+        if highlight is not None and not await self._authority_matches(
             event.from_instance, highlight.author_user_id
         ):
             log.warning(
-                "HIGHLIGHT_FRAME_DELETED from %s: frame %s is not the "
-                "sender's — refusing",
-                event.from_instance,
-                frame_id,
+                "HIGHLIGHT_FRAME_DELETED authority mismatch: dropped",
             )
             return
         await self._highlight_repo.delete_frame(frame_id)
-        await self._bus.publish(
-            HighlightFrameRemoved(
-                highlight_id=highlight.id,
-                frame_id=frame_id,
-                author_user_id=highlight.author_user_id,
-                audience_kind=highlight.audience_kind.value,
-                audience=highlight.audience,
+        if highlight is not None:
+            await self._bus.publish(
+                HighlightFrameRemoved(
+                    highlight_id=highlight.id,
+                    frame_id=frame_id,
+                    author_user_id=highlight.author_user_id,
+                    audience_kind=highlight.audience_kind.value,
+                    audience=highlight.audience,
+                )
             )
-        )
 
     async def _on_highlight_deleted(self, event: "FederationEvent") -> None:
         if self._highlight_repo is None:
@@ -2716,75 +2668,26 @@ class FederationInboundService:
         highlight_id = str(p.get("highlight_id") or "")
         frame_id = str(p.get("frame_id") or "")
         viewer_user_id = str(p.get("viewer_user_id") or "")
-        if not (highlight_id and frame_id and viewer_user_id):
+        author_user_id = str(p.get("author_user_id") or "")
+        if not (highlight_id and frame_id and viewer_user_id and author_user_id):
             return
-        highlight = await self._local_frame_reply_target(
-            event, highlight_id, frame_id, viewer_user_id
-        )
-        if highlight is None:
+        # Authority check: the envelope's signed sender must be the
+        # viewer's home instance — peers can't fabricate views from a
+        # user that doesn't live on their household.
+        if not await self._authority_matches(event.from_instance, viewer_user_id):
+            log.warning(
+                "HIGHLIGHT_FRAME_VIEWED authority mismatch — dropped",
+            )
             return
         await self._highlight_repo.mark_viewed(frame_id, viewer_user_id)
         await self._bus.publish(
             HighlightFrameViewed(
-                highlight_id=highlight.id,
+                highlight_id=highlight_id,
                 frame_id=frame_id,
                 viewer_user_id=viewer_user_id,
-                author_user_id=highlight.author_user_id,
+                author_user_id=author_user_id,
             )
         )
-
-    async def _local_frame_reply_target(
-        self,
-        event: "FederationEvent",
-        highlight_id: str,
-        frame_id: str,
-        actor_user_id: str,
-    ) -> Highlight | None:
-        """Return our author's highlight iff the sender may reply on ``frame_id``.
-
-        Views and reactions are unicast to the author's home
-        (``HighlightFederationOutbound._on_frame_viewed`` /
-        ``_on_reaction_changed``), so a reply is honoured only when all of
-        these hold — otherwise it is dropped with a WARNING:
-
-        * ``actor_user_id``'s home household is the sending household. An
-          unknown user, a local member and another household's user are
-          all refused;
-        * the frame exists here and hangs off ``highlight_id``;
-        * that highlight is authored by one of *our* users.
-
-        The caller publishes the stored author, never the payload's.
-        """
-        if self._highlight_repo is None:  # pragma: no cover — callers gate
-            return None
-        reason: str | None = None
-        highlight: Highlight | None = None
-        home = await self._user_repo.get_instance_for_user(actor_user_id)
-        if home is None or home != event.from_instance:
-            reason = "user does not belong to the sending household"
-        else:
-            frame = await self._highlight_repo.get_frame(frame_id)
-            if frame is None or frame.highlight_id != highlight_id:
-                reason = "frame is not part of that highlight here"
-            else:
-                highlight = await self._highlight_repo.get_highlight(highlight_id)
-                if highlight is None or (
-                    await self._user_repo.get_by_user_id(highlight.author_user_id)
-                    is None
-                ):
-                    reason = "frame is not authored here"
-        if reason is None:
-            return highlight
-        log.warning(
-            "%s from %s: %s (highlight=%s frame=%s user=%s) — refusing",
-            event.event_type,
-            event.from_instance,
-            reason,
-            highlight_id,
-            frame_id,
-            actor_user_id,
-        )
-        return None
 
     async def _on_highlight_frame_reacted(self, event: "FederationEvent") -> None:
         await self._handle_reaction_envelope(event, removed=False)
@@ -2807,13 +2710,14 @@ class FederationInboundService:
         highlight_id = str(p.get("highlight_id") or "")
         frame_id = str(p.get("frame_id") or "")
         reactor_user_id = str(p.get("reactor_user_id") or "")
+        author_user_id = str(p.get("author_user_id") or "")
         emoji = None if removed else (p.get("emoji") or None)
-        if not (highlight_id and frame_id and reactor_user_id):
+        if not (highlight_id and frame_id and reactor_user_id and author_user_id):
             return
-        highlight = await self._local_frame_reply_target(
-            event, highlight_id, frame_id, reactor_user_id
-        )
-        if highlight is None:
+        if not await self._authority_matches(event.from_instance, reactor_user_id):
+            log.warning(
+                "HIGHLIGHT_FRAME_REACT* authority mismatch — dropped",
+            )
             return
         if removed or emoji is None:
             await self._highlight_repo.clear_reaction(frame_id, reactor_user_id)
@@ -2823,10 +2727,10 @@ class FederationInboundService:
             published_emoji = emoji
         await self._bus.publish(
             HighlightFrameReactionChanged(
-                highlight_id=highlight.id,
+                highlight_id=highlight_id,
                 frame_id=frame_id,
                 reactor_user_id=reactor_user_id,
-                author_user_id=highlight.author_user_id,
+                author_user_id=author_user_id,
                 emoji=published_emoji,
             )
         )
@@ -2860,10 +2764,6 @@ class FederationInboundService:
             author_user_id,
         ):
             log.warning("MOMENT_CREATED authority mismatch — dropped")
-            return
-        if not await self._moment_row_binds(
-            event, moment_id, author_user_id, origin_instance_id
-        ):
             return
         # §Momentum-relay-policy: drop banned-source / open-report
         # envelopes before either persist or relay.
@@ -2962,22 +2862,14 @@ class FederationInboundService:
         ):
             log.warning("MOMENT_DELETED authority mismatch — dropped")
             return
-        if not await self._moment_row_binds(
-            event, moment_id, author_user_id, origin_instance_id
-        ):
-            return
-        # A moment we never stored is nothing to delete here; the delete
-        # still travels on so a household that does hold it can apply it
-        # (and runs these same checks against its own row).
-        if await self._moment_repo.get(moment_id) is not None:
-            await self._moment_repo.delete(moment_id)
-            await self._bus.publish(
-                MomentDeleted(
-                    moment_id=moment_id,
-                    author_user_id=author_user_id,
-                    origin_instance_id=origin_instance_id,
-                )
+        await self._moment_repo.delete(moment_id)
+        await self._bus.publish(
+            MomentDeleted(
+                moment_id=moment_id,
+                author_user_id=author_user_id,
+                origin_instance_id=origin_instance_id,
             )
+        )
         await self._maybe_relay(
             event_type=event.event_type,
             payload=p,
@@ -3004,34 +2896,13 @@ class FederationInboundService:
         p = event.payload
         moment_id = str(p.get("moment_id") or "")
         reactor_user_id = str(p.get("reactor_user_id") or "")
-        if not (moment_id and reactor_user_id):
+        author_user_id = str(p.get("author_user_id") or "")
+        if not (moment_id and reactor_user_id and author_user_id):
             return
-        # Reactions are unicast to the author's home: the reactor must be a
-        # user of the sending household, and the moment one authored here.
-        # The published author is the stored one, never the payload's.
-        reason: str | None = None
-        moment = None
-        if await self._user_repo.get_instance_for_user(reactor_user_id) != (
-            event.from_instance
-        ):
-            reason = "reactor does not belong to the sending household"
-        else:
-            moment = await self._moment_repo.get(moment_id)
-            if moment is None or (
-                await self._user_repo.get_by_user_id(moment.author_user_id) is None
-            ):
-                reason = "moment is not authored here"
-        if reason is not None or moment is None:
-            log.warning(
-                "%s from %s: %s (moment=%s user=%s) — refusing",
-                event.event_type,
-                event.from_instance,
-                reason,
-                moment_id,
-                reactor_user_id,
-            )
+        # Authority: envelope sender == reactor's home instance.
+        if not await self._authority_matches(event.from_instance, reactor_user_id):
+            log.warning("MOMENT_REACT* authority mismatch — dropped")
             return
-        author_user_id = moment.author_user_id
         emoji = None if removed else (p.get("emoji") or None)
         if removed or emoji is None:
             await self._moment_repo.clear_reaction(moment_id, reactor_user_id)
@@ -3067,20 +2938,7 @@ class FederationInboundService:
         author's home instance lookup matches. Unknown authors (the
         ``USER_UPDATED`` envelope hasn't landed yet) fall through and
         accept the row.
-
-        Never accepted, whichever path: a moment whose claimed origin is
-        this household, or whose author is one of our own users — those
-        only ever originate here.
         """
-        own = (
-            self._federation_service.own_instance_id
-            if self._federation_service is not None
-            else ""
-        )
-        if (own and origin_instance_id == own) or (
-            await self._user_repo.get_by_user_id(author_user_id) is not None
-        ):
-            return False
         if from_instance == origin_instance_id:
             # Direct delivery — also check the author lives there.
             try:
@@ -3094,35 +2952,6 @@ class FederationInboundService:
         except Exception:  # pragma: no cover — defensive
             return True
         return home is None or home == origin_instance_id
-
-    async def _moment_row_binds(
-        self,
-        event: "FederationEvent",
-        moment_id: str,
-        author_user_id: str,
-        origin_instance_id: str,
-    ) -> bool:
-        """A moment id we already store must carry the same author + origin.
-
-        ``moment_repo.save`` upserts on the bare id, and a delete names only
-        the id: the stored row, not the payload, says whose moment it is.
-        Refused writes are neither applied nor relayed.
-        """
-        if self._moment_repo is None:  # pragma: no cover — callers gate
-            return False
-        stored = await self._moment_repo.get(moment_id)
-        if stored is None or (
-            stored.author_user_id == author_user_id
-            and stored.origin_instance_id == origin_instance_id
-        ):
-            return True
-        log.warning(
-            "%s from %s: moment %s belongs to another author — refusing",
-            event.event_type,
-            event.from_instance,
-            moment_id,
-        )
-        return False
 
     async def _maybe_relay(
         self,
