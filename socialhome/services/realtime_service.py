@@ -60,6 +60,7 @@ from ..domain.events import (
     CpProtectionEnabled,
     CpSpaceAgeGateChanged,
     DmConversationCreated,
+    DmGroupRosterChanged,
     DmMessageCreated,
     DmMessageReactionChanged,
     DmMessageUpdated,
@@ -383,6 +384,7 @@ class RealtimeService:
             DmConversationCreated,
             self._on_dm_conversation_created,
         )
+        self._bus.subscribe(DmGroupRosterChanged, self._on_dm_group_roster_changed)
         self._bus.subscribe(
             HouseholdConfigChanged,
             self._on_household_config_changed,
@@ -2155,6 +2157,24 @@ class RealtimeService:
             "name": event.name,
         }
         for user_id in event.member_user_ids:
+            await self._ws.broadcast_to_user(user_id, payload)
+
+    async def _on_dm_group_roster_changed(
+        self,
+        event: DmGroupRosterChanged,
+    ) -> None:
+        """Tell every local member (before and after the change) to refetch.
+
+        Minimal like ``dm.conversation.created``: the thread / inbox pull
+        the roster from ``GET /api/conversations/{id}/members`` — a member
+        who was just removed gets a 403 there and leaves the thread.
+        """
+        payload = {
+            "type": "dm.group.updated",
+            "conversation_id": event.conversation_id,
+            "name": event.name,
+        }
+        for user_id in event.notify_user_ids:
             await self._ws.broadcast_to_user(user_id, payload)
 
 

@@ -1467,6 +1467,10 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
     )
     dm_history_scheduler.wire()
+    # v_37 cross-household groups: the membership authority's roster /
+    # leave handlers, and a catch-up pull when a roster seats us.
+    dm_service.groups.attach_to(federation_service)
+    dm_service.groups.attach_history(dm_history_scheduler)
     app[K.dm_history_provider_key] = dm_history_provider
     app[K.dm_history_receiver_key] = dm_history_receiver
     app[K.dm_history_scheduler_key] = dm_history_scheduler

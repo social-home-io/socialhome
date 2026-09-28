@@ -278,10 +278,8 @@ class TypingService(VisibilityMixin, SingleTargetSender):
         sender_uid = str(payload.get("sender_user_id") or "")
         if not cid or not sender_uid:
             return 0
-        remote = await self._user_repo.get_remote(sender_uid)
-        if remote is None or not await self._dm_scope.speaks_for(
-            event, cid, sender_uid
-        ):
+        seat = await self._dm_scope.seat_of(event, cid, sender_uid)
+        if seat is None:
             refuse(
                 event,
                 "typist is not a seated user of the sending household",
@@ -289,7 +287,7 @@ class TypingService(VisibilityMixin, SingleTargetSender):
                 user=sender_uid,
             )
             return 0
-        sender_username = remote.remote_username
+        sender_username = seat.remote_username
         members = await self._convo_repo.list_members(cid)
         local_targets: list[str] = []
         for m in members:

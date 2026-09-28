@@ -46,6 +46,7 @@ from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .dm_group_service import DmGroupService, clean_group_name
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -110,6 +111,7 @@ class DmService(VisibilityMixin):
         "_media_refs",
         "_pending_transcribe_tasks",
         "_own_instance_id",
+        "_groups",
     )
 
     def __init__(
@@ -156,6 +158,18 @@ class DmService(VisibilityMixin):
         self._pending_transcribe_tasks: set[asyncio.Task[None]] = set()
         self._own_instance_id = own_instance_id
         self._visibility_repo = visibility_repo
+        #: Group-conversation membership authority (v_37). Always present —
+        #: a local-only group needs it too; federation is attached later.
+        self._groups = DmGroupService(
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+            bus=bus,
+            own_instance_id=own_instance_id,
+        )
+        if federation_service is not None and federation_repo is not None:
+            self._groups.attach_federation(
+                federation_service, federation_repo, own_instance_id
+            )
 
     def attach_audio_transcription(
         self,
@@ -180,6 +194,9 @@ class DmService(VisibilityMixin):
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._own_instance_id = own_instance_id
+        self._groups.attach_federation(
+            federation_service, federation_repo, own_instance_id
+        )
 
     # ── Conversations ──────────────────────────────────────────────────
 
@@ -312,37 +329,190 @@ class DmService(VisibilityMixin):
         self,
         *,
         creator_username: str,
-        member_usernames: list[str],
+        member_usernames: list[str] | None = None,
+        member_user_ids: list[str] | None = None,
         name: str | None = None,
     ) -> Conversation:
-        """Start a group DM (3+ participants)."""
-        creator = await self._require_user(creator_username)
-        all_names = {creator.username} | set(member_usernames)
-        if len(all_names) < 3:
-            raise ValueError("group DM requires at least 3 participants")
-        for uname in member_usernames:
-            await self._require_user(uname)
+        """Start a group DM (3+ participants), possibly spanning households.
 
-        conv = Conversation(
-            id=uuid.uuid4().hex,
-            type=ConversationType.GROUP_DM,
-            name=name.strip() if name else None,
-            created_at=datetime.now(timezone.utc),
+        ``member_usernames`` names local users; ``member_user_ids`` names
+        anyone by ``user_id`` — a local user, or a person mirrored from a
+        directly paired household that takes part in group chats (v_37+,
+        see :meth:`DmGroupService.remote_seat_for`). This household becomes
+        the group's authority: the id is bound to it, and it ships the
+        member list to every other member household.
+        """
+        creator = await self._require_user(creator_username)
+        requested = {creator.username, *(member_usernames or [])}
+        if len(requested) + len(set(member_user_ids or [])) < 3:
+            raise ValueError("group DM requires at least 3 participants")
+        conv_id = self._groups.mint_conversation_id()
+        local_names, remote_seats = await self._resolve_new_members(
+            conv_id,
+            usernames=member_usernames or [],
+            user_ids=member_user_ids or [],
         )
-        await self._convos.create(conv)
-        now = datetime.now(timezone.utc).isoformat()
-        for uname in sorted(all_names):
-            await self._convos.add_member(
-                ConversationMember(
-                    conversation_id=conv.id, username=uname, joined_at=now
-                )
-            )
-        await self._publish_conversation_created(
+        local_names = list(dict.fromkeys([creator.username, *local_names]))
+        if len(local_names) + len(remote_seats) < 3:
+            raise ValueError("group DM requires at least 3 participants")
+        conv = Conversation(
+            id=conv_id,
+            type=ConversationType.GROUP_DM,
+            name=clean_group_name(name),
+            created_at=datetime.now(timezone.utc),
+            membership_version=1,
+        )
+        await self._groups.commit(
             conv,
+            local_usernames=sorted(local_names),
+            remote_members=remote_seats,
             creator_user_id=creator.user_id,
-            member_usernames=tuple(sorted(all_names)),
         )
         return conv
+
+    async def _resolve_new_members(
+        self,
+        conversation_id: str,
+        *,
+        usernames: list[str],
+        user_ids: list[str],
+    ) -> tuple[list[str], list[RemoteConversationMember]]:
+        """Split requested members into local usernames and remote seats."""
+        local_names: list[str] = []
+        for uname in usernames:
+            local_names.append((await self._require_user(uname)).username)
+        remote_seats: dict[str, RemoteConversationMember] = {}
+        for uid in user_ids:
+            local = await self._users.get_by_user_id(uid)
+            if local is not None:
+                local_names.append(local.username)
+                continue
+            seat = await self._groups.remote_seat_for(conversation_id, uid)
+            remote_seats[uid] = seat
+        return list(dict.fromkeys(local_names)), list(remote_seats.values())
+
+    async def _group_for_change(
+        self,
+        conversation_id: str,
+        actor_username: str,
+    ) -> Conversation:
+        """A group this household manages, changed by one of its members."""
+        conv = await self._require_conversation(conversation_id)
+        if conv.type is not ConversationType.GROUP_DM:
+            raise ValueError("cannot change the members of a 1:1 DM")
+        await self._require_membership(conversation_id, actor_username)
+        self._groups.require_authority_here(conversation_id)
+        return conv
+
+    async def _commit_group(
+        self,
+        conv: Conversation,
+        *,
+        local_usernames: list[str],
+        remote_members: list[RemoteConversationMember],
+        name: str | None,
+    ) -> None:
+        await self._groups.commit(
+            Conversation(
+                id=conv.id,
+                type=conv.type,
+                name=name,
+                created_at=conv.created_at,
+                membership_version=conv.membership_version + 1,
+            ),
+            local_usernames=local_usernames,
+            remote_members=remote_members,
+        )
+
+    async def _active_local_usernames(self, conversation_id: str) -> list[str]:
+        return [
+            m.username
+            for m in await self._convos.list_members(conversation_id)
+            if m.deleted_at is None
+        ]
+
+    async def add_group_members(
+        self,
+        conversation_id: str,
+        *,
+        actor_username: str,
+        usernames: list[str] | None = None,
+        user_ids: list[str] | None = None,
+    ) -> None:
+        """A member of the authority household adds people to the group."""
+        conv = await self._group_for_change(conversation_id, actor_username)
+        new_local, new_remote = await self._resolve_new_members(
+            conversation_id,
+            usernames=usernames or [],
+            user_ids=user_ids or [],
+        )
+        if not new_local and not new_remote:
+            raise ValueError("nobody to add")
+        seats = {
+            (s.instance_id, s.remote_username): s
+            for s in await self._convos.list_remote_members(conversation_id)
+        }
+        for s in new_remote:
+            seats[(s.instance_id, s.remote_username)] = s
+        local = await self._active_local_usernames(conversation_id)
+        await self._commit_group(
+            conv,
+            local_usernames=list(dict.fromkeys([*local, *new_local])),
+            remote_members=list(seats.values()),
+            name=conv.name,
+        )
+
+    async def remove_group_member(
+        self,
+        conversation_id: str,
+        *,
+        actor_username: str,
+        user_id: str,
+    ) -> None:
+        """A member of the authority household removes someone from the group."""
+        conv = await self._group_for_change(conversation_id, actor_username)
+        local = await self._active_local_usernames(conversation_id)
+        target_local = await self._users.get_by_user_id(user_id)
+        seats = await self._convos.list_remote_members(conversation_id)
+        if target_local is not None and target_local.username in local:
+            local = [u for u in local if u != target_local.username]
+        else:
+            kept = [s for s in seats if not await self._seat_is_user(s, user_id)]
+            if len(kept) == len(seats):
+                raise KeyError(f"user {user_id!r} is not in this group")
+            seats = kept
+        await self._commit_group(
+            conv, local_usernames=local, remote_members=seats, name=conv.name
+        )
+
+    async def rename_group(
+        self,
+        conversation_id: str,
+        *,
+        actor_username: str,
+        name: str | None,
+    ) -> None:
+        """A member of the authority household renames the group."""
+        conv = await self._group_for_change(conversation_id, actor_username)
+        await self._commit_group(
+            conv,
+            local_usernames=await self._active_local_usernames(conversation_id),
+            remote_members=await self._convos.list_remote_members(conversation_id),
+            name=clean_group_name(name),
+        )
+
+    async def _seat_is_user(self, seat: RemoteConversationMember, user_id: str) -> bool:
+        if seat.user_id is not None:
+            return seat.user_id == user_id
+        ru = await self._users.get_remote_by_member(
+            seat.instance_id, seat.remote_username
+        )
+        return ru is not None and ru.user_id == user_id
+
+    @property
+    def groups(self) -> DmGroupService:
+        """The group-membership authority (wired into federation at startup)."""
+        return self._groups
 
     async def _publish_conversation_created(
         self,
@@ -384,18 +554,11 @@ class DmService(VisibilityMixin):
         actor_username: str,
         new_username: str,
     ) -> None:
-        """Any member of a group DM can add a new participant."""
-        conv = await self._require_conversation(conversation_id)
-        if conv.type is not ConversationType.GROUP_DM:
-            raise ValueError("cannot add members to a 1:1 DM")
-        await self._require_membership(conversation_id, actor_username)
-        await self._require_user(new_username)
-        await self._convos.add_member(
-            ConversationMember(
-                conversation_id=conversation_id,
-                username=new_username,
-                joined_at=datetime.now(timezone.utc).isoformat(),
-            )
+        """Add one local user — see :meth:`add_group_members`."""
+        await self.add_group_members(
+            conversation_id,
+            actor_username=actor_username,
+            usernames=[new_username],
         )
 
     async def list_conversations(self, username: str) -> list[Conversation]:
@@ -502,6 +665,12 @@ class DmService(VisibilityMixin):
         # handler can ensure conversation membership for the right
         # local user.
         for rm in await self._convos.list_remote_members(conversation_id):
+            if rm.user_id is not None:
+                # A group seat names its user (they may be on a household
+                # we never paired with, so ``remote_users`` can't).
+                if rm.user_id not in recipients:
+                    recipients.append(rm.user_id)
+                continue
             list_remote = getattr(self._users, "list_remote_for_instance", None)
             if list_remote is None:
                 continue
@@ -1021,8 +1190,29 @@ class DmService(VisibilityMixin):
         has left.
         """
         await self._require_membership(conversation_id, username)
-        await self._require_conversation(conversation_id)
+        conv = await self._require_conversation(conversation_id)
+        if conv.type is not ConversationType.GROUP_DM:
+            await self._convos.soft_leave(conversation_id, username)
+            return
+        # Group: the member list is the authority's. Here, leaving is a new
+        # snapshot without the user; elsewhere the user steps out locally
+        # and the authority is told, answering with the new roster.
+        if self._groups.is_authority_here(conversation_id):
+            local = [
+                u
+                for u in await self._active_local_usernames(conversation_id)
+                if u != username
+            ]
+            await self._commit_group(
+                conv,
+                local_usernames=local,
+                remote_members=await self._convos.list_remote_members(conversation_id),
+                name=conv.name,
+            )
+            return
+        user = await self._require_user(username)
         await self._convos.soft_leave(conversation_id, username)
+        await self._groups.send_leave(conversation_id, user.user_id)
 
     # ── Internal helpers ───────────────────────────────────────────────
 
@@ -1110,18 +1300,28 @@ class DmService(VisibilityMixin):
             )
         except Exception:  # pragma: no cover
             return
+        conv = await self._convos.get(conversation_id)
+        is_group = conv is not None and conv.type is ConversationType.GROUP_DM
         seen: set[str] = set()
         for rm in remote_members:
             inst = getattr(rm, "instance_id", None)
             if not inst or inst == self._own_instance_id or inst in seen:
                 continue
             seen.add(inst)
+            # A group member household we never paired with is still a
+            # member: reach it over the mesh, E2E-sealed to it and
+            # origin-signed (``SPACE_ROUTED``) so the relays in between —
+            # never members — see only ciphertext. A 1:1 keeps the
+            # direct-pairing-only rule.
+            via_mesh = False
             if not await self._peer_is_confirmed(inst):
-                log.debug(
-                    "dm fan-out skipped: peer %s not confirmed",
-                    inst,
-                )
-                continue
+                if not is_group:
+                    log.debug(
+                        "dm fan-out skipped: peer %s not confirmed",
+                        inst,
+                    )
+                    continue
+                via_mesh = True
             # Per-pair user-visibility filter (peer_user_visibility).
             # When the sender is hidden from this peer, drop the envelope
             # silently — the sender's local conversation row still records
@@ -1150,6 +1350,22 @@ class DmService(VisibilityMixin):
             if peer_payload is None:
                 continue
             try:
+                if via_mesh:
+                    result = await self._federation.send_with_mesh_fallback(
+                        to_instance_id=inst,
+                        event_type=event_type,
+                        payload=peer_payload,
+                    )
+                    if not result.ok:
+                        log.warning(
+                            "group %s: %s to member household %s not "
+                            "delivered over the mesh (%s)",
+                            conversation_id,
+                            event_type.value,
+                            inst,
+                            result.error,
+                        )
+                    continue
                 await self._federation.send_event(
                     to_instance_id=inst,
                     event_type=event_type,

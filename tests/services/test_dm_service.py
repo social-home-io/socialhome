@@ -31,7 +31,7 @@ async def stack(tmp_dir):
     user_repo = SqliteUserRepo(db)
     conv_repo = SqliteConversationRepo(db)
     user_svc = UserService(user_repo, bus, own_instance_public_key=kp.public_key)
-    dm_svc = DmService(conv_repo, user_repo, bus)
+    dm_svc = DmService(conv_repo, user_repo, bus, own_instance_id=iid)
 
     class Stack:
         pass

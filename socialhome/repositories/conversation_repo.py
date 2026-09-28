@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -24,6 +25,7 @@ from ..domain.conversation import (
     ConversationMember,
     ConversationMessage,
     ConversationType,
+    GroupRosterChange,
     MessageReaction,
     RemoteConversationMember,
 )
@@ -51,6 +53,14 @@ class AbstractConversationRepo(Protocol):
         self,
         conversation_id: str,
     ) -> list[RemoteConversationMember]: ...
+    async def apply_group_roster(
+        self,
+        conversation: Conversation,
+        *,
+        local_usernames: Sequence[str],
+        remote_members: Sequence[RemoteConversationMember],
+        at: str,
+    ) -> GroupRosterChange | None: ...
     async def set_last_read(
         self,
         conversation_id: str,
@@ -167,8 +177,9 @@ class SqliteConversationRepo:
         await self._db.enqueue(
             """
             INSERT INTO conversations(
-                id, type, name, created_at, last_message_at, bot_enabled
-            ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?)
+                id, type, name, created_at, last_message_at, bot_enabled,
+                membership_version
+            ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?, ?)
             """,
             (
                 conv.id,
@@ -177,6 +188,7 @@ class SqliteConversationRepo:
                 _iso(conv.created_at),
                 _iso(conv.last_message_at),
                 int(conv.bot_enabled),
+                int(conv.membership_version),
             ),
         )
         return conv
@@ -274,10 +286,13 @@ class SqliteConversationRepo:
             """
             INSERT INTO conversation_remote_members(
                 conversation_id, instance_id, remote_username,
-                joined_at, history_visible_from
-            ) VALUES(?, ?, ?, COALESCE(?, datetime('now')), ?)
+                joined_at, history_visible_from, user_id, display_name
+            ) VALUES(?, ?, ?, COALESCE(?, datetime('now')), ?, ?, ?)
             ON CONFLICT(conversation_id, instance_id, remote_username)
-            DO UPDATE SET history_visible_from=excluded.history_visible_from
+            DO UPDATE SET
+                history_visible_from=excluded.history_visible_from,
+                user_id=COALESCE(excluded.user_id, user_id),
+                display_name=COALESCE(excluded.display_name, display_name)
             """,
             (
                 member.conversation_id,
@@ -285,6 +300,8 @@ class SqliteConversationRepo:
                 member.remote_username,
                 member.joined_at,
                 member.history_visible_from,
+                member.user_id,
+                member.display_name,
             ),
         )
 
@@ -325,9 +342,143 @@ class SqliteConversationRepo:
                 remote_username=r["remote_username"],
                 joined_at=r["joined_at"],
                 history_visible_from=r["history_visible_from"],
+                user_id=r["user_id"],
+                display_name=r["display_name"],
             )
             for r in rows
         ]
+
+    async def apply_group_roster(
+        self,
+        conversation: Conversation,
+        *,
+        local_usernames: Sequence[str],
+        remote_members: Sequence[RemoteConversationMember],
+        at: str,
+    ) -> GroupRosterChange | None:
+        """Make a group's seats exactly one member-list snapshot, atomically.
+
+        ``conversation.membership_version`` is the snapshot's version. It is
+        applied only when newer than the version stored here (a missing row
+        counts as version 0), inside one ``BEGIN IMMEDIATE`` transaction, so
+        two snapshots racing each other can never interleave and an older
+        one never rolls a newer one back. Returns ``None`` for a stale
+        snapshot.
+
+        Local members not in ``local_usernames`` are soft-left
+        (``deleted_at``); listed ones are seated, or brought back, with
+        their read watermark kept. Remote seats not in ``remote_members``
+        are deleted; listed ones are upserted with the roster's ``user_id``
+        / ``display_name``. The name is taken from the snapshot.
+        """
+        conv = conversation
+        wanted_local = list(dict.fromkeys(local_usernames))
+        wanted_remote = {(m.instance_id, m.remote_username): m for m in remote_members}
+
+        def _run(conn) -> GroupRosterChange | None:
+            row = conn.execute(
+                "SELECT membership_version FROM conversations WHERE id=?",
+                (conv.id,),
+            ).fetchone()
+            created = row is None
+            if not created and int(row[0] or 0) >= conv.membership_version:
+                return None
+            if created:
+                conn.execute(
+                    "INSERT INTO conversations(id, type, name, created_at,"
+                    " membership_version) VALUES(?,?,?,?,?)",
+                    (
+                        conv.id,
+                        conv.type.value,
+                        conv.name,
+                        _iso(conv.created_at) or at,
+                        conv.membership_version,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE conversations SET name=?, membership_version=? WHERE id=?",
+                    (conv.name, conv.membership_version, conv.id),
+                )
+            current = {
+                r[0]: r[1]
+                for r in conn.execute(
+                    "SELECT username, deleted_at FROM conversation_members"
+                    " WHERE conversation_id=?",
+                    (conv.id,),
+                ).fetchall()
+            }
+            added: list[str] = []
+            for username in wanted_local:
+                if username not in current:
+                    conn.execute(
+                        "INSERT INTO conversation_members(conversation_id,"
+                        " username, joined_at) VALUES(?,?,?)",
+                        (conv.id, username, at),
+                    )
+                    added.append(username)
+                elif current[username] is not None:
+                    conn.execute(
+                        "UPDATE conversation_members SET deleted_at=NULL,"
+                        " joined_at=? WHERE conversation_id=? AND username=?",
+                        (at, conv.id, username),
+                    )
+                    added.append(username)
+            removed: list[str] = []
+            for username, deleted_at in current.items():
+                if username in wanted_local or deleted_at is not None:
+                    continue
+                conn.execute(
+                    "UPDATE conversation_members SET deleted_at=?"
+                    " WHERE conversation_id=? AND username=?",
+                    (at, conv.id, username),
+                )
+                removed.append(username)
+            seats = [
+                (r[0], r[1])
+                for r in conn.execute(
+                    "SELECT instance_id, remote_username"
+                    " FROM conversation_remote_members WHERE conversation_id=?",
+                    (conv.id,),
+                ).fetchall()
+            ]
+            removed_remote: list[tuple[str, str]] = []
+            for key in seats:
+                if key in wanted_remote:
+                    continue
+                conn.execute(
+                    "DELETE FROM conversation_remote_members WHERE"
+                    " conversation_id=? AND instance_id=? AND remote_username=?",
+                    (conv.id, key[0], key[1]),
+                )
+                removed_remote.append(key)
+            for (instance_id, username), m in wanted_remote.items():
+                conn.execute(
+                    "INSERT INTO conversation_remote_members(conversation_id,"
+                    " instance_id, remote_username, joined_at, user_id,"
+                    " display_name) VALUES(?,?,?,?,?,?)"
+                    " ON CONFLICT(conversation_id, instance_id, remote_username)"
+                    " DO UPDATE SET user_id=excluded.user_id,"
+                    " display_name=excluded.display_name",
+                    (
+                        conv.id,
+                        instance_id,
+                        username,
+                        m.joined_at or at,
+                        m.user_id,
+                        m.display_name,
+                    ),
+                )
+            return GroupRosterChange(
+                conversation_id=conv.id,
+                version=conv.membership_version,
+                created=created,
+                added_local=tuple(added),
+                removed_local=tuple(removed),
+                removed_remote=tuple(removed_remote),
+            )
+
+        return await self._db.transact(_run)
 
     async def set_last_read(
         self,
@@ -976,6 +1127,7 @@ def _row_to_conv(row: dict | None) -> Conversation | None:
         name=row.get("name"),
         last_message_at=_parse(row.get("last_message_at")),
         bot_enabled=bool_col(row.get("bot_enabled", 0)),
+        membership_version=int(row.get("membership_version") or 0),
     )
 
 

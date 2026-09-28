@@ -26,8 +26,10 @@ class DmHistoryReceiver:
     """Persists inbound DM history chunks and emits the sync-complete event.
 
     History only fills gaps: a chunk is taken from a household seated in
-    the conversation, each message must be its own seated user's, and it
-    is inserted when absent (:meth:`insert_message_if_absent`). A message
+    the conversation, each message must be its own seated user's — or, for
+    a group, any member's on another household when the chunk comes from
+    the group's authority (a newly added household catches up from it) —
+    and it is inserted when absent (:meth:`insert_message_if_absent`). A message
     already here is updated from the chunk (its sender's later edit or
     delete) only when the stored row has that same sender in that same
     conversation — never anyone else's message.
@@ -86,6 +88,8 @@ class DmHistoryReceiver:
             if msg is None:
                 continue
             if not await self._dm_scope.speaks_for(
+                event, conversation_id, msg.sender_user_id
+            ) and not await self._dm_scope.relayed_by_authority(
                 event, conversation_id, msg.sender_user_id
             ):
                 refuse(

@@ -59,6 +59,11 @@ class Conversation:
     name: str | None = None  # set for group DMs, None for 1:1
     last_message_at: datetime | None = None
     bot_enabled: bool = False  # True → HA bot-bridge may post to this DM
+    #: Group conversations only: the version of the member list this
+    #: household holds. Bumped by the authority household (the one the
+    #: conversation id is bound to) on every membership change; a
+    #: receiver applies a ``DM_GROUP_ROSTER`` only when it is newer.
+    membership_version: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -158,3 +163,55 @@ class RemoteConversationMember:
     remote_username: str
     joined_at: str
     history_visible_from: str | None = None
+    #: Set when the seat came from a group roster: the member's global
+    #: ``user_id`` and the name the authority household ships for them.
+    #: A household that never paired with this member's household has no
+    #: ``remote_users`` row for them, so the seat is what binds their
+    #: messages to them. ``None`` on 1:1 seats (``remote_users`` answers).
+    user_id: str | None = None
+    display_name: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class GroupRosterChange:
+    """What applying one group member-list snapshot changed here.
+
+    Returned by ``AbstractConversationRepo.apply_group_roster``. ``None``
+    is returned instead when the snapshot was not newer than the version
+    already held (a reordered or replayed roster), so a caller never
+    mistakes a stale snapshot for "nothing changed".
+    """
+
+    conversation_id: str
+    version: int
+    #: The conversation row did not exist before this snapshot.
+    created: bool
+    #: Local usernames seated (new, or back after leaving) by it.
+    added_local: tuple[str, ...]
+    #: Local usernames it took out of the conversation.
+    removed_local: tuple[str, ...]
+    #: ``(instance_id, remote_username)`` seats it removed.
+    removed_remote: tuple[tuple[str, str], ...]
+
+
+@dataclass(slots=True, frozen=True)
+class GroupRosterMember:
+    """One person on a group conversation's member list, as the wire names them.
+
+    The shape of a ``DM_GROUP_ROSTER`` ``members`` entry (v_37): the
+    member's global ``user_id``, their home household's ``instance_id``,
+    their username there and the display name the authority ships.
+    """
+
+    user_id: str
+    instance_id: str
+    username: str
+    display_name: str
+
+    def to_wire(self) -> dict[str, str]:
+        return {
+            "user_id": self.user_id,
+            "instance_id": self.instance_id,
+            "username": self.username,
+            "display_name": self.display_name,
+        }

@@ -91,6 +91,7 @@ from ..federation.owner_bound_id import (
     MOMENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
+    is_owner_bound,
     owner_bound_id_refused,
 )
 from ..federation.space_authorship import SpaceAuthorship
@@ -647,6 +648,10 @@ class FederationInboundService:
         # wrote — and the user got two bell rows + two pushes for one
         # message.
         _, created = await self._conversation_repo.save_message_returning_created(msg)
+        # Who hears about it here: the conversation's own seated local
+        # members — never whoever the sender listed in
+        # ``recipient_user_ids`` (a sender could name any local user).
+        local_recipients = await self._local_member_ids(conv_id)
 
         if not created:
             # Two cases land here:
@@ -669,7 +674,7 @@ class FederationInboundService:
                     conversation_id=conv_id,
                     message_id=message_id,
                     sender_user_id=sender_user_id,
-                    recipient_user_ids=tuple(str(r) for r in recipients),
+                    recipient_user_ids=local_recipients,
                     content=content,
                     edited_at=parse_iso8601_lenient(edited_at_iso),
                 )
@@ -682,7 +687,7 @@ class FederationInboundService:
                 message_id=message_id,
                 sender_user_id=sender_user_id,
                 sender_display_name=str(p.get("sender_display_name") or sender_user_id),
-                recipient_user_ids=tuple(str(r) for r in recipients),
+                recipient_user_ids=local_recipients,
                 content=content,
                 message_type=msg_type,
                 media_url=media_url,
@@ -804,11 +809,27 @@ class FederationInboundService:
           its own sender, in its own conversation;
         * an existing conversation takes messages only from a sender seated
           in it;
-        * a conversation not here yet is opened only for a local recipient.
+        * a conversation not here yet is opened only for a local recipient,
+          and never for a group: a group's seats come only from its
+          authority's ``DM_GROUP_ROSTER``, whose arrival also pulls the
+          backlog — so a message that overtook the roster is caught up then.
+
+        A group member on a household we never paired with has no user row
+        here, only the seat the roster wrote (``seat_of``); that seat is what
+        binds them to the signing household.
         """
         scope = self._dm_scope
         reason: str | None = None
-        if await self._user_repo.get_instance_for_user(sender_user_id) is None:
+        conv = await self._conversation_repo.get(conv_id)
+        seat = (
+            await scope.seat_of(event, conv_id, sender_user_id)
+            if conv is not None
+            else None
+        )
+        if (
+            seat is None
+            and await self._user_repo.get_instance_for_user(sender_user_id) is None
+        ):
             # Not a refusal yet: the sender's user row can trail their first
             # DM. Hold it until that user syncs (bounded; see
             # :meth:`_release_held_dms`), refuse only when it can't be held.
@@ -822,18 +843,20 @@ class FederationInboundService:
                 )
                 return False
         existing = await self._conversation_repo.get_message(message_id)
-        if not await scope.sent_from(event, sender_user_id):
+        if seat is None and not await scope.sent_from(event, sender_user_id):
             reason = "sender is not a user of the sending household"
         elif existing is not None and (
             existing.conversation_id != conv_id
             or existing.sender_user_id != sender_user_id
         ):
             reason = "message id belongs to another message"
-        elif (conv := await self._conversation_repo.get(conv_id)) is not None:
-            if not await scope.speaks_for(
-                event, conv_id, sender_user_id
-            ) and not await self._heal_legacy_seat(event, conv, sender_user_id):
+        elif conv is not None:
+            if seat is None and not await self._heal_legacy_seat(
+                event, conv, sender_user_id
+            ):
                 reason = "sender is not seated in the conversation"
+        elif is_owner_bound(conv_id):
+            reason = "group conversation not seated here (no roster yet)"
         elif not await self._has_local_recipient(recipients):
             reason = "no local recipient for a new conversation"
         if reason is None:
@@ -888,6 +911,17 @@ class FederationInboundService:
             conv.id,
         )
         return True
+
+    async def _local_member_ids(self, conv_id: str) -> tuple[str, ...]:
+        """``user_id`` of every local member still seated in ``conv_id``."""
+        ids: list[str] = []
+        for m in await self._conversation_repo.list_members(conv_id):
+            if m.deleted_at is not None:
+                continue
+            user = await self._user_repo.get(m.username)
+            if user is not None:
+                ids.append(user.user_id)
+        return tuple(ids)
 
     async def _has_local_recipient(self, recipients: tuple) -> bool:
         for rid in recipients:
@@ -1298,7 +1332,9 @@ class FederationInboundService:
         if msg is None:
             return
         reason: str | None = None
-        if not await self._dm_scope.sent_from(event, msg.sender_user_id):
+        if not await self._dm_scope.authored_by_sender(
+            event, msg.conversation_id, msg.sender_user_id
+        ):
             reason = "message was not sent from this household"
         elif conv_id and conv_id != msg.conversation_id:
             reason = "message is not in the named conversation"
