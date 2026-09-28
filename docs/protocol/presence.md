@@ -141,8 +141,10 @@ bare `identity_anchor` on every user publication (inside the identity
 binding when the peer supports it, on its own otherwise). Legacy window: a
 peer still on an older build sends no anchor before capabilities are
 exchanged, so its anchor-derived users land on the first later publication
-that carries the anchor (a profile update or re-pair); their DMs and
-invites in that window are refused. `tests/protocol/test_user_sync_scope.py`.
+that carries the anchor (a profile update or re-pair). User-visible
+effect in that window (and for a user the sender hides from this
+household): their DMs are held for a while and then dropped, and their
+calendar and app invites are not shown. `tests/protocol/test_user_sync_scope.py`.
 
 ## Implementation
 

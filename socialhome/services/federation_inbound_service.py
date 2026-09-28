@@ -129,6 +129,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Hold-buffer scope for DMs waiting on their sender's user sync. Not a
+#: space id (those are 32-char key fingerprints), so the keys never mix.
+_DM_HOLD_SCOPE = "dm"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -279,6 +283,7 @@ class FederationInboundService:
         "_bazaar_repo",
         "_authorship",
         "_dm_scope",
+        "_pending",
         "_federation_service",
         "_space_cover_repo",
         "_space_icon_repo",
@@ -357,6 +362,10 @@ class FederationInboundService:
             conversation_repo=conversation_repo,
             user_repo=user_repo,
         )
+        #: Holds a DM whose sender this household has no user row for yet
+        #: (the sender's profile sync trails their first message); released
+        #: when that user syncs. ``None`` refuses instead.
+        self._pending = pending_seat_buffer
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
         #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
@@ -767,6 +776,19 @@ class FederationInboundService:
         """
         scope = self._dm_scope
         reason: str | None = None
+        if await self._user_repo.get_instance_for_user(sender_user_id) is None:
+            # Not a refusal yet: the sender's user row can trail their first
+            # DM. Hold it until that user syncs (bounded; see
+            # :meth:`_release_held_dms`), refuse only when it can't be held.
+            if self._pending is not None and self._pending.hold(
+                event, space_id=_DM_HOLD_SCOPE, user_id=sender_user_id
+            ):
+                log.info(
+                    "DM_MESSAGE from %s: sender %s not synced yet — holding",
+                    event.from_instance,
+                    sender_user_id,
+                )
+                return False
         existing = await self._conversation_repo.get_message(message_id)
         if not await scope.sent_from(event, sender_user_id):
             reason = "sender is not a user of the sending household"
@@ -775,8 +797,10 @@ class FederationInboundService:
             or existing.sender_user_id != sender_user_id
         ):
             reason = "message id belongs to another message"
-        elif await self._conversation_repo.get(conv_id) is not None:
-            if not await scope.speaks_for(event, conv_id, sender_user_id):
+        elif (conv := await self._conversation_repo.get(conv_id)) is not None:
+            if not await scope.speaks_for(
+                event, conv_id, sender_user_id
+            ) and not await self._heal_legacy_seat(event, conv, sender_user_id):
                 reason = "sender is not seated in the conversation"
         elif not await self._has_local_recipient(recipients):
             reason = "no local recipient for a new conversation"
@@ -790,6 +814,48 @@ class FederationInboundService:
             sender=sender_user_id,
         )
         return False
+
+    async def _heal_legacy_seat(
+        self,
+        event: "FederationEvent",
+        conv: Conversation,
+        sender_user_id: str,
+    ) -> bool:
+        """Seat the sender in an older 1:1 whose remote seat was never written.
+
+        Only for a 1:1 with exactly one local member, no remote seat at all,
+        and earlier messages from this very sender — proof they were the other
+        party. The sender is already bound to ``from_instance`` by the caller.
+        Anything else (a group, a thread with another remote party, a 1:1 the
+        sender never wrote in) stays refused.
+        """
+        if conv.type is not ConversationType.DM:
+            return False
+        if await self._conversation_repo.list_remote_members(conv.id):
+            return False
+        if len(await self._conversation_repo.list_members(conv.id)) != 1:
+            return False
+        if conv.id not in await self._conversation_repo.list_conversations_with_sender(
+            sender_user_id
+        ):
+            return False
+        remote = await self._user_repo.get_remote(sender_user_id)
+        if remote is None:
+            return False
+        await self._conversation_repo.add_remote_member(
+            RemoteConversationMember(
+                conversation_id=conv.id,
+                instance_id=event.from_instance,
+                remote_username=remote.remote_username,
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        log.info(
+            "DM: restored %s's seat in older conversation %s",
+            sender_user_id,
+            conv.id,
+        )
+        return True
 
     async def _has_local_recipient(self, recipients: tuple) -> bool:
         for rid in recipients:
@@ -3317,6 +3383,7 @@ class FederationInboundService:
             synced_at=_now_iso(),
         )
         await self._user_repo.upsert_remote(remote)
+        await self._release_held_dms(instance_id, user_id)
 
         # Per-user identity binding (independent user identity, proto v_25).
         # When the entry carries the self-verifying assertion fields, verify
@@ -3326,6 +3393,21 @@ class FederationInboundService:
         # re-verified outside the original §24.11 envelope (Phase 3/4), so we
         # check the instance signature here too — not just the user self-sig.
         await self._store_user_identity_binding(instance_id, user_id, payload)
+
+    async def _release_held_dms(self, instance_id: str, user_id: str) -> None:
+        """Replay DMs held for ``user_id`` now that their user row exists.
+
+        Each replay runs the full DM rules again, so a DM some other
+        household sent in that user's name is refused at this point.
+        """
+        if self._pending is None or self._federation_service is None:
+            return
+        for held in self._pending.release(
+            space_id=_DM_HOLD_SCOPE, instance_id=instance_id, user_id=user_id
+        ):
+            await self._federation_service.replay_held(
+                held, reason=f"user {user_id} synced"
+            )
 
     async def _derives_from_sender(
         self,

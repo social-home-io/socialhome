@@ -26,6 +26,14 @@ class _FakeConvRepo:
         self.ids.add(message.id)
         return True
 
+    async def get_message(self, message_id):
+        return next((m for m in self.saved if m.id == message_id), None)
+
+    async def save_message(self, message):
+        """Upsert: a re-sent row replaces the stored one (edits / deletes)."""
+        self.saved = [m for m in self.saved if m.id != message.id] + [message]
+        return message
+
     async def list_remote_members(self, conversation_id):
         if conversation_id != "c-1":
             return []

@@ -1,5 +1,9 @@
 """Space writes held until the seat they need reaches the roster mirror.
 
+The same bounded buffer also holds a direct message whose sender this
+household has no user row for yet (keyed under the ``"dm"`` scope, which
+never collides with a space id); it is handed back when that user syncs.
+
 The §24.11 authorship rule (``federation/space_authorship.py``) and the
 follower write gate both judge a space write against this household's
 roster mirror, ``space_remote_members``. The mirror converges by

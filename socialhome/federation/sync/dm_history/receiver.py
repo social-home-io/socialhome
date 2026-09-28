@@ -27,9 +27,10 @@ class DmHistoryReceiver:
 
     History only fills gaps: a chunk is taken from a household seated in
     the conversation, each message must be its own seated user's, and it
-    is inserted only when absent (:meth:`insert_message_if_absent`) — an
-    existing message is never rewritten, so replayed or overlapping chunks
-    are harmless and edits / deletes stay on their own sender-bound events.
+    is inserted when absent (:meth:`insert_message_if_absent`). A message
+    already here is updated from the chunk (its sender's later edit or
+    delete) only when the stored row has that same sender in that same
+    conversation — never anyone else's message.
     """
 
     __slots__ = (
@@ -95,6 +96,18 @@ class DmHistoryReceiver:
                 )
                 continue
             if await self._conversation_repo.insert_message_if_absent(msg):
+                saved += 1
+                continue
+            # Already here: the catch-up copy may carry the sender's own later
+            # edit or delete — applied only onto that same sender's row in
+            # that same conversation, never onto anyone else's message.
+            stored = await self._conversation_repo.get_message(msg.id)
+            if (
+                stored is not None
+                and stored.sender_user_id == msg.sender_user_id
+                and stored.conversation_id == conversation_id
+            ):
+                await self._conversation_repo.save_message(msg)
                 saved += 1
 
         key = (event.from_instance, conversation_id)

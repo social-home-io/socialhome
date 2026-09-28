@@ -58,7 +58,12 @@ household and the conversation's remote seats
   or transcript re-send is honoured only for the sender's own message);
   the conversation exists here but the sender holds no seat in it; or the
   conversation is new and no recipient is a local user. An existing
-  conversation's seats are never changed by an inbound message.
+  conversation's seats are never changed by an inbound message — except
+  an older 1:1 whose remote seat was never written: it is restored for a
+  sender homed on `from_instance` who already wrote in it (exactly one
+  local member, no remote seat). A DM whose sender this household has no
+  user row for yet is not dropped: it is held (bounded, expiring, in
+  memory) and replayed through these same rules once that user syncs.
 - **`DM_MESSAGE_DELETED`** — the message was not sent by a user of
   `from_instance`, or it is not in the named conversation.
 - **`DM_MESSAGE_REACTION`** — the reactor is not a seated user of
@@ -70,9 +75,12 @@ household and the conversation's remote seats
   conversation (nothing is sent back, not even `DM_HISTORY_COMPLETE`).
 - **`DM_HISTORY_CHUNK` / `_COMPLETE`** — `from_instance` holds no seat;
   per message, the sender is not a seated user of `from_instance`.
-  History only fills gaps: a message is inserted when absent and an
-  existing one is never rewritten (edits and deletes travel on their own
-  sender-bound events).
+  A message is inserted when absent; one already here is updated from the
+  chunk (the sender's later edit or delete) only when the stored row has
+  the same sender in the same conversation.
+- Known limitation: after a `USER_MOVED`, conversations seated under the
+  user's old household keep that seat, so messages from the new home are
+  refused there until the conversation is re-seated.
 
 Implementation: `socialhome/federation/dm_scope.py` (`DmScope`);
 `tests/protocol/test_dm_scope.py`.

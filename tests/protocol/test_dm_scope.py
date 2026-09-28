@@ -24,6 +24,7 @@ import pytest
 from socialhome.app import create_app
 from socialhome.app_keys import db_key, federation_service_key
 from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.federation.federation_service import FederationService
 
@@ -112,10 +113,16 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
     await _seed_conversation(db, "c-bob", local=("anna",), remote=((PEER, "bob"),))
     await _seed_conversation(db, "c-dora", local=("anna",), remote=((OTHER, "dora"),))
     await _seed_conversation(db, "c-local", local=("anna", "carl"))
+    # Older rows: a 1:1 with Bob whose remote seat was never written (Bob
+    # already wrote in it), and a 1:1 nobody remote ever wrote in.
+    await _seed_conversation(db, "c-legacy", local=("anna",))
+    await _seed_conversation(db, "c-orphan", local=("anna",))
     await _seed_message(db, "m-anna", "c-bob", "u-anna", "anna to bob")
     await _seed_message(db, "m-bob", "c-bob", "u-bob", "bob to anna")
     await _seed_message(db, "m-dora", "c-dora", "u-dora", "dora to anna")
     await _seed_message(db, "m-local", "c-local", "u-anna", "anna to carl")
+    await _seed_message(db, "m-legacy", "c-legacy", "u-bob", "old bob to anna")
+    await _seed_message(db, "m-orphan", "c-orphan", "u-anna", "note to self")
     await db.enqueue(
         "INSERT INTO message_reactions(message_id, user_id, emoji) VALUES(?,?,?)",
         ("m-dora", "u-anna", "👍"),
@@ -183,6 +190,10 @@ _MESSAGE_ATTACKS = [
     pytest.param(_dm("c-local", "m-new", "u-bob"), PEER, id="posts into a local DM"),
     pytest.param(_dm("c-dora", "m-new", "u-bob"), PEER, id="posts into another DM"),
     pytest.param(_dm("c-bob", "m-bob", "u-dora"), OTHER, id="unseated household"),
+    pytest.param(_dm("c-orphan", "m-new", "u-bob"), PEER, id="claims an unseated 1:1"),
+    pytest.param(
+        _dm("c-legacy", "m-new", "u-dora"), OTHER, id="claims another's old 1:1"
+    ),
     pytest.param(
         _dm("c-bob", "m-anna", "u-bob", edited_at="2026-05-02T11:00:00+00:00"),
         PEER,
@@ -435,7 +446,9 @@ def _row(msg_id, sender, content="forged") -> dict:
         pytest.param(_chunk("c-local", _row("m-x", "u-bob")), PEER, id="local DM"),
         pytest.param(_chunk("c-dora", _row("m-x", "u-bob")), PEER, id="other DM"),
         pytest.param(_chunk("c-bob", _row("m-anna", "u-anna")), PEER, id="overwrite"),
-        pytest.param(_chunk("c-bob", _row("m-bob", "u-bob")), PEER, id="rewrite"),
+        pytest.param(
+            _chunk("c-dora", _row("m-dora", "u-dora")), PEER, id="rewrite foreign"
+        ),
         pytest.param(_chunk("c-bob", _row("m-x", "u-anna")), PEER, id="as local"),
         pytest.param(_chunk("c-bob", _row("m-x", "u-dora")), PEER, id="as third"),
         pytest.param(_chunk("c-bob", _row("m-dora", "u-bob")), PEER, id="foreign id"),
@@ -455,3 +468,62 @@ async def test_history_chunk_fills_in_the_seated_users_missing_message(env):
         app, FET.DM_HISTORY_CHUNK, _chunk("c-bob", _row("m-missed", "u-bob", "late"))
     )
     assert ("m-missed", "c-bob", "u-bob", "late", 0) in (await _state(db))["messages"]
+
+
+# ─── A DM that beat its sender's profile sync ────────────────────────────
+
+
+async def test_a_dm_from_a_not_yet_synced_sender_lands_once_they_sync(env):
+    """The sender's user row can trail their first DM. The message is held,
+    not lost, and lands once the sender's own household syncs them."""
+    app, db, _ = env
+    new_id = derive_user_id(bytes(32), "erin")  # the peers' pinned key is all-zero
+    await _send(app, FET.DM_MESSAGE, _dm("c-new", "m-erin", new_id, "hi anna"))
+    assert "m-erin" not in {r[0] for r in (await _state(db))["messages"]}
+    await _send(
+        app, FET.USERS_SYNC, {"users": [{"user_id": new_id, "username": "erin"}]}
+    )
+    messages = (await _state(db))["messages"]
+    assert ("m-erin", "c-new", new_id, "hi anna", 0) in messages
+
+
+async def test_a_held_dm_is_dropped_when_another_household_syncs_the_id(env):
+    app, db, _ = env
+    new_id = derive_user_id(bytes(32), "erin")
+    await _send(
+        app, FET.DM_MESSAGE, _dm("c-new", "m-erin", new_id), from_instance=OTHER
+    )
+    await _send(
+        app, FET.USERS_SYNC, {"users": [{"user_id": new_id, "username": "erin"}]}
+    )
+    assert "m-erin" not in {r[0] for r in (await _state(db))["messages"]}
+
+
+async def test_an_old_1_1_missing_its_remote_seat_heals_for_its_writer(env):
+    """A 1:1 written before seats were recorded heals for the remote user who
+    already wrote in it — and only for them."""
+    app, db, _ = env
+    await _send(app, FET.DM_MESSAGE, _dm("c-legacy", "m-new", "u-bob", "again"))
+    state = await _state(db)
+    assert ("c-legacy", PEER, "bob") in state["remote_members"]
+    assert ("m-new", "c-legacy", "u-bob", "again", 0) in state["messages"]
+
+
+async def test_history_chunk_carries_the_senders_own_edits_and_deletes(env):
+    """A catch-up copy of the sender's own message may carry its later edit
+    or delete — the stored row's sender and conversation match the chunk."""
+    app, db, _ = env
+    edited = {
+        **_row("m-bob", "u-bob", "bob, edited"),
+        "edited_at": "2026-05-03T09:00:00+00:00",
+    }
+    await _send(app, FET.DM_HISTORY_CHUNK, _chunk("c-bob", edited))
+    rows = {r[0]: r for r in (await _state(db))["messages"]}
+    assert rows["m-bob"][3] == "bob, edited"
+    await _send(
+        app,
+        FET.DM_HISTORY_CHUNK,
+        _chunk("c-bob", {**_row("m-bob", "u-bob", ""), "deleted": True}),
+    )
+    rows = {r[0]: r for r in (await _state(db))["messages"]}
+    assert rows["m-bob"][4] == 1
