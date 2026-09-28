@@ -33,6 +33,7 @@ from socialhome.global_server.cluster import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import (
     ClientInstance,
+    ClusterNode,
     GfsFraudReport,
     GlobalSpace,
 )
@@ -64,7 +65,20 @@ async def _stop_node(server: TestServer) -> None:
     await server.close()
 
 
-async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory):
+@pytest.fixture
+def fast_sync_retry(monkeypatch):
+    """Shrink the production 5 s ``_broadcast`` retry back-off.
+
+    Both nodes advertise the same unreachable ``base_url`` in their HELLO,
+    so each also learns a peer row it can never reach, and every fan-out to
+    it fails, sleeps ``SYNC_RETRY_DELAY_S``, retries and drops — the
+    retry-then-drop path still runs, it just no longer costs 5 s a time
+    (the end-to-end test spent 20 of its 20.5 s asleep here).
+    """
+    monkeypatch.setattr(cluster_mod, "SYNC_RETRY_DELAY_S", 0.01)
+
+
+async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_retry):
     """Full NODE_* fan-out between two live GFS nodes.
 
     Covers ``add_peer`` → NODE_HELLO POST → ``_post_to_peer`` →
@@ -190,7 +204,9 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory):
         await _stop_node(b)
 
 
-async def test_post_to_peer_raises_on_non_2xx(tmp_dir, tmp_path_factory):
+async def test_post_to_peer_raises_on_non_2xx(
+    tmp_dir, tmp_path_factory, fast_sync_retry
+):
     """``_broadcast`` retries once on error then logs + drops (ignore_errors
     path via ``relay_to_peers`` + NODE_RELAY to an offline peer)."""
     dir_a = tmp_path_factory.mktemp("gfs-solo")
@@ -225,6 +241,90 @@ async def test_post_to_peer_raises_on_non_2xx(tmp_dir, tmp_path_factory):
         )
     finally:
         await _stop_node(a)
+
+
+async def _wait_for(predicate, *, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if await predicate():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_heartbeat_loop_tracks_peer_liveness(
+    tmp_path_factory, monkeypatch, fast_sync_retry
+):
+    """One heartbeat tick per ``HEARTBEAT_INTERVAL_S`` (30 s in production,
+    shrunk here) must: ping every peer, mark a reachable one online and send
+    it a NODE_HEARTBEAT; mark an unreachable one offline after
+    ``HEARTBEAT_FAIL_THRESHOLD`` misses; and bring a reachable offline peer
+    back online. The loop used to be covered only by accident — by a test
+    slow enough to outlive the 30 s interval."""
+    monkeypatch.setattr(cluster_mod, "HEARTBEAT_INTERVAL_S", 0.05)
+    heartbeats: list[str] = []
+    real_handle = ClusterService.handle_heartbeat
+
+    async def _recording_handle(self, from_node_id, payload=None):
+        heartbeats.append(from_node_id)
+        await real_handle(self, from_node_id, payload)
+
+    monkeypatch.setattr(ClusterService, "handle_heartbeat", _recording_handle)
+
+    a = await _start_node(tmp_path_factory.mktemp("hb-a"), "A")
+    b = await _start_node(tmp_path_factory.mktemp("hb-b"), "B")
+    try:
+        url_b = str(b.make_url("")).rstrip("/")
+        cluster_a: ClusterService = a.app[gfs_cluster_key]
+        cluster_b: ClusterService = b.app[gfs_cluster_key]
+        await cluster_a.add_peer(url_b)
+        await cluster_b.add_peer(str(a.make_url("")).rstrip("/"))
+        repo_a = a.app[gfs_cluster_repo_key]
+        await repo_a.upsert_node(
+            ClusterNode(
+                node_id="ghost",
+                url="http://127.0.0.1:1",
+                public_key="",
+                status="online",
+            )
+        )
+
+        async def _status(node_id: str) -> str | None:
+            for n in await repo_a.list_nodes():
+                if n.node_id == node_id:
+                    return n.status
+            return None
+
+        # Reachable peer: online, and it receives our NODE_HEARTBEAT.
+        assert await _wait_for(lambda: _async_true("A" in heartbeats))
+        assert await _status("B") == "online"
+        # Unreachable peer: offline once the miss threshold is crossed.
+        assert await _wait_for(
+            lambda: _async_eq(_status("ghost"), "offline"),
+        )
+        # A reachable peer recorded offline is probed and comes back. Its own
+        # row id ("B-alias") is one B never heartbeats as, so only the probe
+        # can flip it back.
+        await repo_a.upsert_node(
+            ClusterNode(
+                node_id="B-alias",
+                url=url_b,
+                public_key="",
+                status="offline",
+            )
+        )
+        assert await _wait_for(lambda: _async_eq(_status("B-alias"), "online"))
+    finally:
+        await _stop_node(a)
+        await _stop_node(b)
+
+
+async def _async_true(value: bool) -> bool:
+    return value
+
+
+async def _async_eq(awaitable, expected) -> bool:
+    return (await awaitable) == expected
 
 
 # ─── Cheap pure-Python coverage ────────────────────────────────────────

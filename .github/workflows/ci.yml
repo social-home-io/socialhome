@@ -20,6 +20,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e .[dev]
@@ -45,8 +47,13 @@ jobs:
         # ``parallel = true`` in ``[tool.coverage.run]`` so the
         # per-worker ``.coverage.*`` files merge cleanly when
         # ``pytest-cov`` finalises.
+        #
+        # ``--durations=25`` prints the slowest tests every run, so a new
+        # test that waits out a real timeout shows up in review instead of
+        # quietly adding minutes (see docs/testing.md, "Keeping the suite
+        # fast").
         run: |
-          pytest --cov=socialhome --cov-branch --cov-fail-under=90 --tb=short -q
+          pytest --cov=socialhome --cov-branch --cov-fail-under=90 --tb=short -q --durations=25
 
       - name: Run protocol/security tests (release blocker)
         run: |
@@ -79,6 +86,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e .[dev]
       - name: mypy

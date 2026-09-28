@@ -2687,6 +2687,9 @@ async def test_confirmed_peer_with_an_address_is_unchanged_by_the_relay_tier():
         gfs_relay=relay,
         signaling_send=_FakeSignaler(),
     )
+    # Release the ICE-prime gate like the other RTC-path tests do; otherwise
+    # the first handshake waits out the 15 s ``ICE_PRIME_TIMEOUT_S``.
+    t.mark_ice_primed()
 
     result = await t.send(
         instance=_fake_instance("peer-1"),
