@@ -356,3 +356,34 @@ async def test_loop_skips_prune_within_interval():
     await asyncio.sleep(0.1)
     await proc.stop()
     repo.expire_past_retention.assert_not_called()
+
+
+async def test_prune_once_runs_after_prune_hook_after_the_sweep():
+    """The hook sees the post-sweep outbox: expired rows are already failed
+    (the unpair tombstone sweep relies on this ordering)."""
+    order: list[str] = []
+    repo = MagicMock()
+
+    async def _expire(now_iso):
+        order.append("expire")
+        return 0
+
+    async def _hook():
+        order.append("hook")
+        return 0
+
+    repo.expire_past_retention = AsyncMock(side_effect=_expire)
+    repo.purge_terminal = AsyncMock(return_value=0)
+    proc = OutboxProcessor(repo, AsyncMock(), after_prune=_hook)
+    await proc.prune_once()
+    assert order == ["expire", "hook"]
+
+
+async def test_prune_once_survives_a_failing_after_prune_hook():
+    repo = MagicMock()
+    repo.expire_past_retention = AsyncMock(return_value=1)
+    repo.purge_terminal = AsyncMock(return_value=0)
+    hook = AsyncMock(side_effect=RuntimeError("boom"))
+    proc = OutboxProcessor(repo, AsyncMock(), after_prune=hook)
+    assert await proc.prune_once() == 1
+    hook.assert_awaited_once()

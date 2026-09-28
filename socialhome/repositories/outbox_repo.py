@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -76,6 +77,11 @@ class AbstractOutboxRepo(Protocol):
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
     async def delete_for_instance(self, instance_id: str) -> None: ...
+    async def expedite(
+        self,
+        instance_id: str,
+        event_type: FederationEventType,
+    ) -> None: ...
 
 
 class SqliteOutboxRepo:
@@ -330,6 +336,24 @@ class SqliteOutboxRepo:
         await self._db.enqueue(
             "DELETE FROM federation_outbox WHERE instance_id=?",
             (instance_id,),
+        )
+
+    async def expedite(
+        self,
+        instance_id: str,
+        event_type: FederationEventType,
+    ) -> None:
+        """Make ``instance_id``'s pending ``event_type`` rows due now.
+
+        Used when the peer has just proven it is back (it sent us an
+        envelope) so a row parked on a long backoff goes out on the next
+        drain tick instead of hours later. Attempt counts are untouched —
+        a failure still backs off from where it was.
+        """
+        await self._db.enqueue(
+            "UPDATE federation_outbox SET next_attempt_at=? "
+            "WHERE instance_id=? AND event_type=? AND status='pending'",
+            (datetime.now(timezone.utc).isoformat(), instance_id, event_type.value),
         )
 
 

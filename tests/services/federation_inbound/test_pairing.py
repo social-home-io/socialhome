@@ -51,7 +51,7 @@ class _FakeFederationRepo:
         self.instances[inst.id] = inst
         return inst
 
-    async def get_instance(self, iid):
+    async def get_instance(self, iid, *, include_unpairing=False):
         return self.instances.get(iid)
 
     async def delete_instance(self, iid):

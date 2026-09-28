@@ -14,6 +14,8 @@ Steps (in order):
 3. **Timestamp skew** — ``abs(now - envelope.timestamp) ≤ 300s`` (wider
    for a relay-carried envelope, see ``RELAY_TIMESTAMP_SKEW_SECONDS``).
 4. **Signature verify** — Ed25519 with the remote's identity_pk.
+4b. **Unpair tombstone** — an ``unpairing`` sender may send ``UNPAIR``
+    only; anything else is refused as an unknown instance.
 5. **Replay check** — ``msg_id`` already seen → reject.
 6. **Decrypt payload** — AES-256-GCM using ``key_remote_to_self``.
 7. **Parse inner** — decrypted bytes → ``FederationEvent``.
@@ -53,6 +55,7 @@ from ..domain.federation import (
     FederationEvent,
     FederationEventType,
     InstanceSource,
+    PairingStatus,
     RemoteInstance,
 )
 from ..domain.space import SpaceRole
@@ -179,6 +182,11 @@ class _InboxInstance:
         """How the row came to exist — read by the peer-class gate."""
         return self._inst.source
 
+    @property
+    def status(self) -> PairingStatus:
+        """Pairing status — read by the unpair-tombstone gate."""
+        return self._inst.status
+
 
 # ─── Individual steps ────────────────────────────────────────────────────
 
@@ -270,7 +278,8 @@ def make_lookup_instance_by_id(*, repo) -> InboundStep:
     """
 
     async def lookup_instance_by_id(ctx: InboundContext) -> None:
-        instance = await repo.get_instance(ctx.instance_id)
+        # Tombstones included: :func:`make_check_unpairing` refuses them.
+        instance = await repo.get_instance(ctx.instance_id, include_unpairing=True)
         if instance is None:
             raise ValueError(f"No instance found for instance_id={ctx.instance_id!r}")
         # See :func:`make_lookup_instance` — a provisional row (created
@@ -361,6 +370,51 @@ def make_check_peer_class() -> InboundStep:
         )
 
     return check_peer_class
+
+
+def make_check_unpairing(
+    *,
+    on_refused: Callable[[str], Awaitable[None]] | None = None,
+) -> InboundStep:
+    """Step 4b: an unpair tombstone may send us ``UNPAIR`` and nothing else.
+
+    A :data:`~socialhome.domain.federation.PairingStatus.UNPAIRING` row is a
+    household we unpaired while it was offline. The row survives only so the
+    outbox can still deliver our ``UNPAIR``; the peer does not know yet and
+    keeps talking to us as if paired. None of that may land: every envelope
+    except its own ``UNPAIR`` (which ends the tombstone) is refused with the
+    exact error a household we never knew gets — ``No instance found`` →
+    404 — so the peer's outbox treats us the same as after the purge.
+
+    Runs after :func:`make_verify_signature`, so ``on_refused`` (pull our
+    queued ``UNPAIR`` forward: the peer has just proven it is online) fires
+    only for the genuine peer, never for a stranger replaying the inbox id.
+    """
+
+    async def check_unpairing(ctx: InboundContext) -> None:
+        if getattr(ctx.instance, "status", None) is not PairingStatus.UNPAIRING:
+            return
+        if ctx.envelope["event_type"] == FederationEventType.UNPAIR.value:
+            return
+        sender = getattr(ctx.instance, "from_instance", "")
+        log.info(
+            "inbound: refusing %r from %s — unpaired, UNPAIR still pending",
+            ctx.envelope["event_type"],
+            sender,
+        )
+        if on_refused is not None and sender:
+            try:
+                await on_refused(sender)
+            except Exception:  # noqa: BLE001 — a nudge must never change the verdict
+                log.warning(
+                    "inbound: could not expedite the UNPAIR to %s",
+                    sender,
+                    exc_info=True,
+                )
+        ref = ctx.inbox_id or ctx.instance_id
+        raise ValueError(f"No instance found for {ref!r}")
+
+    return check_unpairing
 
 
 def make_verify_signature(*, encoder) -> InboundStep:

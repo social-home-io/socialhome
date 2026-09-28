@@ -347,6 +347,13 @@ That single command runs the full sequence:
    re-pairs **a**↔**c**. Runs last in ``all`` because it churns a pairing
    the earlier steps rely on.
 
+12. ``unpair-offline`` — the same with **c** stopped first: **a**'s unpair
+   reports ``peer_notified: false``, drops **c** from its list at once and
+   keeps an ``unpairing`` tombstone with exactly one queued ``UNPAIR``;
+   **c** is restarted (still believing it is paired), its first envelope is
+   refused and pulls the ``UNPAIR`` forward, **c** drops **a**, **a**
+   purges the tombstone, and **a**↔**c** re-pair.
+
 8. The harness exits non-zero if any assertion fails or any process
    crashed during the run.
 
@@ -355,7 +362,7 @@ calendar → verify → relay-pair → visibility → invite-redeem →
 invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
-app-session → remote-invite-decline → replay → unpair`` in that order.
+app-session → remote-invite-decline → replay → unpair → unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-space-no-subscribers`` / ``gfs-down``)

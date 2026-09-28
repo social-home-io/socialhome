@@ -21,6 +21,7 @@ Usage::
     python .claude/skills/federation-demo/harness.py traffic # generate posts/moments/...
     python .claude/skills/federation-demo/harness.py verify  # assertions across all 3
     python .claude/skills/federation-demo/harness.py unpair  # a unpairs c; both drop it; re-pair
+    python .claude/skills/federation-demo/harness.py unpair-offline  # same with c down; c drops a on restart
     python .claude/skills/federation-demo/harness.py down    # stop + wipe data dirs
     python .claude/skills/federation-demo/harness.py all     # everything in order
 
@@ -651,7 +652,7 @@ def _gfs_landing_token(base_url: str) -> str:
         j = html.find(needle)
         if j >= 0:
             start = j + len(needle)
-            return html[start:html.find("<", start)].strip()
+            return html[start : html.find("<", start)].strip()
     raise SystemExit(f"could not extract a pair token from {base_url}")
 
 
@@ -740,7 +741,7 @@ def _gfs_cluster_down(*, preserve_logs: bool = False) -> None:
     for pid in (state.get("gfs_cluster") or {}).get("pids", []):
         try:
             os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             pass
     for port in GFS_CLUSTER_PORTS:
         try:
@@ -847,8 +848,7 @@ def cmd_gfs_cluster() -> None:
         raise SystemExit(
             f"gfs-cluster: the {len(ports)} nodes never converged on "
             "/cluster/health — each must list every OTHER node and not "
-            "itself (cluster gossip / self-guard). Last snapshot: "
-            + " | ".join(snap),
+            "itself (cluster gossip / self-guard). Last snapshot: " + " | ".join(snap),
         )
     print(
         f"  {len(ports)}-node GFS cluster up, sharing one SQLite DB, "
@@ -937,9 +937,9 @@ def cmd_gfs_cluster() -> None:
             "identity_public_key": authority_pk,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        canonical = json.dumps(
-            body, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
         body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
         code, _b = _request(
             f"{targets[i]}/gfs/spaces/{space_id}/publish",
@@ -2209,9 +2209,7 @@ def cmd_gfs_space_no_subscribers() -> None:
         s, payload = _request(f"{gfs_url}/gfs/spaces")
         if s == 200:
             listing = payload.get("spaces", []) if isinstance(payload, dict) else []
-            row = next(
-                (sp for sp in listing if sp["space_id"] == space_id), None
-            )
+            row = next((sp for sp in listing if sp["space_id"] == space_id), None)
             if row is not None:
                 break
         time.sleep(1.0)
@@ -2354,10 +2352,7 @@ def cmd_gfs_space_no_subscribers() -> None:
     state["gfs_no_subscribers_space_id"] = space_id
     state["gfs_no_subscribers_post_id"] = post_id
     _save(state)
-    print(
-        "gfs-space-no-subscribers: ok (listed for discovery, content never "
-        "relayed)"
-    )
+    print("gfs-space-no-subscribers: ok (listed for discovery, content never relayed)")
 
 
 # ─── Step: gfs-invite-link ─────────────────────────────────────────────────
@@ -2582,8 +2577,8 @@ def cmd_gfs_invite_link() -> None:
     space_id = (state.get("gfs") or {}).get("global_space_id")
     if not space_id:
         raise SystemExit("run 'gfs-traffic' first (no published global space)")
-    gfs_conn_id = ((state.get("gfs") or {}).get("pairings") or {}).get("a", {}).get(
-        "id"
+    gfs_conn_id = (
+        ((state.get("gfs") or {}).get("pairings") or {}).get("a", {}).get("id")
     )
     if not gfs_conn_id:
         raise SystemExit("run 'gfs-pair' first (a is not a client of the GFS)")
@@ -2827,8 +2822,7 @@ def cmd_gfs_invite_link() -> None:
             f"exists to withhold. Lines: {both!r}",
         )
     leaked = [
-        line
-        for line in _gfs_log_lines_matching(invite_token, offset=gfs_off)
+        line for line in _gfs_log_lines_matching(invite_token, offset=gfs_off)
     ] + [
         line
         for line in _gfs_log_lines_matching(space_name, offset=gfs_off)
@@ -3007,9 +3001,7 @@ def cmd_gfs_invite_link() -> None:
         token=a["token"],
     )
     pending = _must("a lists pending join-requests", s, pending, ok=(200,))
-    elevations = [
-        r for r in pending if r.get("requested_role") == "admin"
-    ]
+    elevations = [r for r in pending if r.get("requested_role") == "admin"]
     if len(elevations) != 1:
         raise SystemExit(
             f"gfs-invite-link: a expected exactly one pending admin elevation, "
@@ -3345,9 +3337,7 @@ def cmd_gfs_invite_link_content() -> None:
     # 5. The operator-facing label.
     s, conns = _request(f"{e_base}/api/connections", token=e["token"])
     _must("e: GET /api/connections", s, conns)
-    row = next(
-        (c for c in conns if c.get("instance_id") == a["instance_id"]), None
-    )
+    row = next((c for c in conns if c.get("instance_id") == a["instance_id"]), None)
     if row is None:
         raise SystemExit(
             f"gfs-invite-link-content: e's /api/connections does not list a — "
@@ -3599,9 +3589,7 @@ def cmd_relay_pair() -> None:
                 token=d["token"],
             )
             if s == 200:
-                items = (
-                    inbox if isinstance(inbox, list) else (inbox.get("items") or [])
-                )
+                items = inbox if isinstance(inbox, list) else (inbox.get("items") or [])
                 if items:
                     request_id = items[0]["request_id"]
                     break
@@ -4187,9 +4175,7 @@ def cmd_verify() -> None:
         _min_bootstrap = int(_Cap.MIN_FOR_INVITE_BOOTSTRAP_REDEEM)
         for holder, peer in (("a", "e"), ("e", "a")):
             try:
-                _seat = _instance_row(
-                    holder, state["instances"][peer]["instance_id"]
-                )
+                _seat = _instance_row(holder, state["instances"][peer]["instance_id"])
             except Exception as exc:
                 failures.append(f"{holder}: space_session row read failed: {exc!r}")
                 continue
@@ -4332,10 +4318,7 @@ def cmd_verify() -> None:
             body={"instance_id": resync_target, "scope": "capabilities"},
         )
         if s == 200:
-            print(
-                f"  a → resync(capabilities) accepted for "
-                f"{resync_target[:8]} ✓"
-            )
+            print(f"  a → resync(capabilities) accepted for {resync_target[:8]} ✓")
         else:
             failures.append(
                 f"a: INSTANCE_RESYNC_REQUEST(capabilities) to "
@@ -5278,9 +5261,7 @@ def cmd_verify() -> None:
             failures.append(f"GFS: GET /gfs/spaces failed: HTTP {s}")
         else:
             rows = payload.get("spaces", []) if isinstance(payload, dict) else []
-            row = next(
-                (sp for sp in rows if sp.get("space_id") == io_space_id), None
-            )
+            row = next((sp for sp in rows if sp.get("space_id") == io_space_id), None)
             if row is None:
                 failures.append(
                     f"GFS: space {io_space_id} dropped out of the directory — "
@@ -5381,7 +5362,8 @@ def cmd_verify() -> None:
         il_admin = state.get("gfs_invite_admin_space_id")
         if il_admin:
             seed = _rows(
-                "e", "SELECT identity_private_key FROM spaces WHERE id = ?",
+                "e",
+                "SELECT identity_private_key FROM spaces WHERE id = ?",
                 (il_admin,),
             )
             if seed and seed[0][0]:
@@ -7716,16 +7698,22 @@ def cmd_space_sync_catchup_media() -> None:
 
     # The system ("Posts") album MUST arrive — it carries the host's own id
     # and is what mirrored post images live in on the joiner's side.
-    d_albums = {r[0] for r in _rows(
-        "d",
-        "SELECT id FROM gallery_albums WHERE space_id = ?",
-        (space_id,),
-    )}
-    c_system = {r[0] for r in _rows(
-        "c",
-        "SELECT id FROM gallery_albums WHERE space_id = ? AND is_system = 1",
-        (space_id,),
-    )}
+    d_albums = {
+        r[0]
+        for r in _rows(
+            "d",
+            "SELECT id FROM gallery_albums WHERE space_id = ?",
+            (space_id,),
+        )
+    }
+    c_system = {
+        r[0]
+        for r in _rows(
+            "c",
+            "SELECT id FROM gallery_albums WHERE space_id = ? AND is_system = 1",
+            (space_id,),
+        )
+    }
     if not c_system <= d_albums:
         raise SystemExit(
             f"space-sync-catchup-media: d is missing the host's system gallery "
@@ -8271,7 +8259,8 @@ def cmd_app_session() -> None:
 
         # 5. v_18: person-routed session — pick a remote contact on b if available.
         b_contacts = [
-            c for c in contacts
+            c
+            for c in contacts
             if not c.get("is_local") and c.get("instance_id") == b.get("instance_id")
         ]
         if b_contacts:
@@ -8287,7 +8276,12 @@ def cmd_app_session() -> None:
                 method="POST",
                 body={"target": target},
             )
-            _must("open person-routed session (a→b user, v_18)", s_pr, pr_res, ok=(200, 201))
+            _must(
+                "open person-routed session (a→b user, v_18)",
+                s_pr,
+                pr_res,
+                ok=(200, 201),
+            )
             pr_session_id = (pr_res or {}).get("session_id")
             if not pr_session_id:
                 raise SystemExit(
@@ -8393,9 +8387,7 @@ def _space_col(label: str, space_id: str, col: str):
 
     conn = sqlite3.connect(_instance_dir(label) / "socialhome.db")
     try:
-        rows = list(
-            conn.execute(f"SELECT {col} FROM spaces WHERE id=?", (space_id,))
-        )
+        rows = list(conn.execute(f"SELECT {col} FROM spaces WHERE id=?", (space_id,)))
     finally:
         conn.close()
     return rows[0][0] if rows else None
@@ -8416,8 +8408,7 @@ def _remote_member_row(label: str, space_id: str, user_id: str) -> dict | None:
         conn.row_factory = sqlite3.Row
         rows = list(
             conn.execute(
-                "SELECT * FROM space_remote_members "
-                "WHERE space_id=? AND user_id=?",
+                "SELECT * FROM space_remote_members WHERE space_id=? AND user_id=?",
                 (space_id, user_id),
             )
         )
@@ -8788,7 +8779,9 @@ def cmd_owner_offline_ban() -> None:
         time.sleep(2.0)
     missing = [who for who, r in rows.items() if r is None]
     tombstoned_pre = [
-        who for who, r in rows.items() if r is not None and int(r.get("tombstoned") or 0)
+        who
+        for who, r in rows.items()
+        if r is not None and int(r.get("tombstoned") or 0)
     ]
     if missing or tombstoned_pre:
         raise SystemExit(
@@ -8926,6 +8919,152 @@ def _peer_ids(info: dict, *, confirmed_only: bool = False) -> set[str]:
     }
 
 
+def _repair_a_c(a: dict, c: dict) -> None:
+    """Re-pair a↔c (QR flow) so the topology later steps assume is back."""
+    time.sleep(2)
+    s, qr = _pairing_call(
+        "a",
+        f"http://127.0.0.1:{a['port']}/api/pairing/initiate",
+        token=a["token"],
+        method="POST",
+    )
+    _must("re-pair initiate(a)", s, qr, ok=(201,))
+    s, ack = _pairing_call(
+        "c",
+        f"http://127.0.0.1:{c['port']}/api/pairing/accept",
+        token=c["token"],
+        method="POST",
+        body=qr,
+    )
+    _must("re-pair accept(c)", s, ack)
+    s, conf = _pairing_call(
+        "a",
+        f"http://127.0.0.1:{a['port']}/api/pairing/confirm",
+        token=a["token"],
+        method="POST",
+        body={"token": ack["token"], "verification_code": ack["verification_code"]},
+    )
+    _must("re-pair confirm(a)", s, conf)
+    deadline = time.monotonic() + 20.0
+
+    def _repaired() -> bool:
+        return c["instance_id"] in _peer_ids(a, confirmed_only=True) and (
+            a["instance_id"] in _peer_ids(c, confirmed_only=True)
+        )
+
+    while time.monotonic() < deadline and not _repaired():
+        time.sleep(1.0)
+    if not _repaired():
+        raise SystemExit("unpair: re-pairing a↔c did not land on both sides")
+    print("  a↔c re-paired ✓")
+
+
+def _kill_household(label: str, info: dict) -> None:
+    """SIGTERM (then SIGKILL) one household's process group."""
+    print(f"  killing {label} (pid={info['pid']}) to simulate an offline peer")
+    try:
+        os.killpg(info["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        print(f"  {label} was already gone")
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _alive(info["pid"]):
+        time.sleep(0.2)
+    if _alive(info["pid"]):
+        try:
+            os.killpg(info["pid"], signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        time.sleep(0.5)
+
+
+def cmd_unpair_offline() -> None:
+    """Unpair c while it is OFFLINE; c still drops a once it is back.
+
+    Pre-fix a sent one UNPAIR (5 s budget), then deleted c's row — so a c
+    that was down at that moment never learned and kept a forever. Now a
+    keeps c as an ``unpairing`` tombstone (hidden from its connections,
+    refusing everything c sends) with one UNPAIR queued in the outbox:
+
+    1. stop c; a unpairs c → ``peer_notified: false``, c gone from a's
+       list at once, a holds a tombstone + exactly one pending UNPAIR;
+    2. restart c (it still thinks it is paired) → c's first envelope is
+       refused and pulls a's UNPAIR forward; c drops a;
+    3. a purges the tombstone and queues nothing for c;
+    4. re-pair a↔c (a tombstone never blocks a fresh pairing).
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    a, c = state["instances"]["a"], state["instances"]["c"]
+    if c["instance_id"] not in _peer_ids(a) or a["instance_id"] not in _peer_ids(c):
+        raise SystemExit("unpair-offline: a↔c must be paired first (run 'pair')")
+
+    _kill_household("c", c)
+    started = time.monotonic()
+    s, resp = _pairing_call(
+        "a",
+        f"http://127.0.0.1:{a['port']}/api/pairing/connections/{c['instance_id']}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("a unpairs offline c", s, resp, ok=(200,))
+    if resp.get("peer_notified") is not False:
+        raise SystemExit(f"unpair-offline: c was down yet notified? {resp!r}")
+    print(f"  a unpaired offline c in {time.monotonic() - started:.1f}s ✓")
+    if c["instance_id"] in _peer_ids(a):
+        raise SystemExit("unpair-offline: a still lists c after unpairing it")
+    status = _rows(
+        "a", "SELECT status FROM remote_instances WHERE id=?", (c["instance_id"],)
+    )
+    if [r[0] for r in status] != ["unpairing"]:
+        raise SystemExit(f"unpair-offline: expected a tombstone on a, got {status!r}")
+    queued = _rows(
+        "a",
+        "SELECT event_type FROM federation_outbox"
+        " WHERE instance_id=? AND status='pending'",
+        (c["instance_id"],),
+    )
+    if [r[0] for r in queued] != ["unpair"]:
+        raise SystemExit(f"unpair-offline: a should queue one UNPAIR, has {queued!r}")
+    print("  a holds an 'unpairing' tombstone + one queued UNPAIR ✓")
+
+    # Let a's outbox fail an attempt or two against the dead c.
+    time.sleep(8)
+    new_pid = _spawn("c", c["port"])
+    state["instances"]["c"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(c["port"])
+    print(f"  c respawned: pid={new_pid}")
+
+    deadline = time.monotonic() + 180.0
+    while time.monotonic() < deadline and a["instance_id"] in _peer_ids(c):
+        time.sleep(2.0)
+    if a["instance_id"] in _peer_ids(c):
+        raise SystemExit("unpair-offline: c still lists a 180s after coming back")
+    print(f"  c dropped a after reconnect ({time.monotonic() - started:.0f}s total) ✓")
+
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and _rows(
+        "a", "SELECT 1 FROM remote_instances WHERE id=?", (c["instance_id"],)
+    ):
+        time.sleep(1.0)
+    if _rows("a", "SELECT 1 FROM remote_instances WHERE id=?", (c["instance_id"],)):
+        raise SystemExit("unpair-offline: a kept its tombstone after delivery")
+    for label, peer_iid in (("a", c["instance_id"]), ("c", a["instance_id"])):
+        n = _rows(
+            label,
+            "SELECT COUNT(*) FROM federation_outbox"
+            " WHERE instance_id=? AND status='pending'",
+            (peer_iid,),
+        )[0][0]
+        if n:
+            raise SystemExit(f"unpair-offline: {label} still queues {n} envelope(s)")
+    print("  a purged its tombstone; nothing queued either way ✓")
+
+    _repair_a_c(a, c)
+    print("unpair-offline: ok")
+
+
 def cmd_unpair() -> None:
     """Unpair a↔c from a's side; BOTH households drop the pairing.
 
@@ -8998,46 +9137,9 @@ def cmd_unpair() -> None:
             "unpair: shared space membership changed — the pairing and the "
             "space are separate relationships"
         )
-    print(
-        f"  shared spaces kept (a: {len(spaces_on_a)}, c: {len(spaces_on_c)}) ✓"
-    )
+    print(f"  shared spaces kept (a: {len(spaces_on_a)}, c: {len(spaces_on_c)}) ✓")
 
-    # Restore the topology later steps assume.
-    time.sleep(2)
-    s, qr = _pairing_call(
-        "a",
-        f"http://127.0.0.1:{a['port']}/api/pairing/initiate",
-        token=a["token"],
-        method="POST",
-    )
-    _must("re-pair initiate(a)", s, qr, ok=(201,))
-    s, ack = _pairing_call(
-        "c",
-        f"http://127.0.0.1:{c['port']}/api/pairing/accept",
-        token=c["token"],
-        method="POST",
-        body=qr,
-    )
-    _must("re-pair accept(c)", s, ack)
-    s, conf = _pairing_call(
-        "a",
-        f"http://127.0.0.1:{a['port']}/api/pairing/confirm",
-        token=a["token"],
-        method="POST",
-        body={"token": ack["token"], "verification_code": ack["verification_code"]},
-    )
-    _must("re-pair confirm(a)", s, conf)
-    deadline = time.monotonic() + 20.0
-    def _repaired() -> bool:
-        return c["instance_id"] in _peer_ids(a, confirmed_only=True) and (
-            a["instance_id"] in _peer_ids(c, confirmed_only=True)
-        )
-
-    while time.monotonic() < deadline and not _repaired():
-        time.sleep(1.0)
-    if not _repaired():
-        raise SystemExit("unpair: re-pairing a↔c did not land on both sides")
-    print("  a↔c re-paired ✓")
+    _repair_a_c(a, c)
     print("unpair: ok")
 
 
@@ -9166,6 +9268,10 @@ def main() -> None:
         # membership is untouched — then re-pairs a↔c. Runs last: it
         # churns a pairing every earlier step relies on.
         cmd_unpair()
+        # ``unpair-offline`` does the same with c DOWN: a keeps an
+        # ``unpairing`` tombstone + queued UNPAIR, and c still drops a once
+        # it restarts. Then re-pairs a↔c.
+        cmd_unpair_offline()
         return
     fn = globals().get(f"cmd_{cmd.replace('-', '_')}")
     if fn is None:

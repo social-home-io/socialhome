@@ -448,7 +448,8 @@ rather than actual).
 ## Unpairing
 
 Either admin can end a pairing (`DELETE /api/pairing/connections/{instance_id}`),
-and both households forget each other — not just the one that clicked.
+and both households forget each other — not just the one that clicked, and
+not just when the other household happens to be online.
 
 The household that unpairs sends a signed, encrypted `UNPAIR` to the peer
 **before** forgetting it. The order matters: the envelope is encrypted with
@@ -459,12 +460,47 @@ exists. The payload is empty — the receiver unpairs the **signer**
 never a household named in the body, so one peer can never tear down
 another's pairing.
 
-Delivery is best-effort and bounded (5 s, `UNPAIR_NOTIFY_TIMEOUT_S`): an
-unreachable peer never blocks the admin's unpair. It is not queued for
-retry, because outbox redelivery needs the very row the unpair deletes.
-The route reports `peer_notified: false` when the peer could not be told;
-that household keeps its row until its own admin removes it, and its
-envelopes to us are refused — we no longer hold a key to verify them.
+The first attempt is bounded (5 s, `UNPAIR_NOTIFY_TIMEOUT_S`) so an
+unreachable peer never blocks the admin's unpair. When it lands, both sides
+run the cleanup below and the route reports `peer_notified: true`.
+
+### A peer that is offline at unpair time
+
+When the first attempt does not land, the route reports
+`peer_notified: false` and the pairing becomes an **unpair tombstone**
+rather than being deleted: the `remote_instances` row stays with
+`status = 'unpairing'` (a value the schema has always allowed — no
+migration), because outbox redelivery needs its session key and inbox URL.
+The tombstone grants **no trust**:
+
+- every ordinary read hides it (`get_instance`, `list_instances`, social /
+  space fan-outs), so it is gone from the connections list, rosters, DMs and
+  every send path at once (`PeerUnpaired` fires immediately);
+- the peer's people (`remote_users`) and our per-peer visibility rows are
+  dropped right away, exactly as the row delete would cascade them;
+- the §24.11 pipeline refuses everything it sends except its own `UNPAIR`,
+  with the same `404 No instance found` a household we never knew gets
+  (step 4b, after the signature check);
+- the outbox sends it nothing but the `UNPAIR` — and an `UNPAIR` goes only to
+  a tombstone, so a stale one can never hit a pairing made later.
+
+Exactly one `UNPAIR` is queued, with a 30-day `expires_at`
+(`UNPAIR_RETRY_MAX_AGE`) and the outbox's normal backoff. A signed envelope
+from the tombstoned peer proves it is back online and pulls that retry
+forward to the next outbox tick. The tombstone ends when:
+
+- the `UNPAIR` is delivered, or refused for good (the peer already forgot
+  us — a 4xx) — the row is purged;
+- the peer's own `UNPAIR` reaches us;
+- the `UNPAIR` expires — the retention sweep fails it and the tombstone is
+  purged; a peer returning after that is refused as a stranger;
+- we pair with that household again — the new row (fresh keys, fresh inbox
+  id) replaces the tombstone.
+
+The retry state lives in that one outbox row, so the tombstone needs no
+column of its own.
+
+### Cleanup
 
 Both directions run the same cleanup (`PeerUnpairService.forget`):
 
@@ -488,13 +524,23 @@ sequenceDiagram
     participant A as Household A
     participant B as Household B
     AdminA->>A: DELETE /api/pairing/connections/B
-    A->>A: look up B's row (session key, inbox URL)
     A->>B: UNPAIR (encrypted, Ed25519-signed; ≤ 5 s)
-    B->>B: §24.11 pipeline — verify A's signature
-    B->>B: forget(A): outbox, mesh hints, row, PeerUnpaired
-    Note over A: sent, timed out or refused — A goes on
-    A->>A: forget(B): outbox, mesh hints, row, PeerUnpaired
-    A-->>AdminA: 200 {ok, peer_notified}
+    alt B online
+        B->>B: §24.11 pipeline — verify A's signature
+        B->>B: forget(A): outbox, mesh hints, row, PeerUnpaired
+        A->>A: forget(B)
+        A-->>AdminA: 200 {ok, peer_notified: true}
+    else B offline
+        A->>A: tombstone B (status 'unpairing'), queue one UNPAIR (30 d)
+        A-->>AdminA: 200 {ok, peer_notified: false}
+        Note over B: B comes back, still thinks it is paired
+        B->>A: any envelope (e.g. INSTANCE_CAPABILITIES_UPDATED)
+        A-->>B: 404 No instance found (signature checked, UNPAIR pulled forward)
+        A->>B: UNPAIR (outbox retry)
+        B->>B: forget(A)
+        B-->>A: 2xx
+        A->>A: purge tombstone
+    end
 ```
 
 ## Implementation

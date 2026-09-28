@@ -209,8 +209,15 @@ class PairingInboundHandlers:
         Only the *signer* is ever unpaired: ``from_instance`` is bound to
         the verified signature by the §24.11 pipeline, and the payload is
         ignored, so a peer can never tear down somebody else's pairing.
+
+        Also the one envelope an unpair tombstone (we unpaired it while it
+        was offline) may still send: it unpaired us too, so our queued
+        ``UNPAIR`` is moot and the tombstone goes now.
         """
-        instance = await self._repo.get_instance(event.from_instance)
+        instance = await self._repo.get_instance(
+            event.from_instance,
+            include_unpairing=True,
+        )
         if instance is None:
             return
         await self._peer_unpair.forget(instance.id)

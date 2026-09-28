@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from socialhome.app import _redeliver_envelope, _aiohttp_timeout
+from socialhome.app import (
+    _aiohttp_timeout,
+    _deliver_outbox_entry,
+    _redeliver_envelope,
+)
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
@@ -13,6 +17,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
+    FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
@@ -24,6 +29,8 @@ from socialhome.repositories import (
     SqliteFederationRepo,
     SqliteOutboxRepo,
 )
+from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.services.peer_unpair_service import PeerUnpairService
 
 
 # ─── _aiohttp_timeout ────────────────────────────────────────────────────
@@ -39,10 +46,19 @@ def test_aiohttp_timeout_returns_object():
 
 
 class _OutboxEntry:
-    def __init__(self, *, id, instance_id, payload_json, attempts=0):
+    def __init__(
+        self,
+        *,
+        id,
+        instance_id,
+        payload_json,
+        attempts=0,
+        event_type=FederationEventType.SPACE_DISSOLVED,
+    ):
         self.id = id
         self.instance_id = instance_id
         self.payload_json = payload_json
+        self.event_type = event_type
         #: Mirrors ``OutboxEntry.attempts``. The 404 path is only
         #: transient for the first few attempts (see
         #: ``PAIR_WINDOW_404_ATTEMPTS``), so tests must be able to set it.
@@ -882,3 +898,154 @@ async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
     assert outcome is DeliveryOutcome.TRANSIENT
     assert [u for u, _ in calls] == ["https://x/wh"]
     assert calls[0][1]["allow_redirects"] is False
+
+
+# ─── Unpair tombstone ────────────────────────────────────────────────────
+
+
+class _StatusResp:
+    def __init__(self, status):
+        self.status = status
+
+    async def text(self):
+        return '{"error": "unknown_inbox"}'
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _CountingClient:
+    def __init__(self, status=204):
+        self.status = status
+        self.posts: list[str] = []
+
+    def post(self, url, **kw):
+        self.posts.append(url)
+        return _StatusResp(self.status)
+
+
+async def _peer(fed_repo, kek, *, tombstone=True):
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x05" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh-tomb",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    await fed_repo.save_instance(peer)
+    if tombstone:
+        await fed_repo.mark_unpairing(peer.id)
+    return peer
+
+
+async def test_redeliver_sends_unpair_to_a_tombstone(env):
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek)
+    client = _CountingClient(204)
+    svc._http_client = client
+    entry = _OutboxEntry(
+        id="u1",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+        event_type=FederationEventType.UNPAIR,
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.SUCCESS
+    assert client.posts == ["https://x/wh"]
+
+
+async def test_redeliver_sends_nothing_else_to_a_tombstone(env):
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek)
+    client = _CountingClient(204)
+    svc._http_client = client
+    entry = _OutboxEntry(
+        id="p1",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+        event_type=FederationEventType.SPACE_POST_CREATED,
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.PERMANENT
+    assert client.posts == []
+
+
+async def test_redeliver_drops_a_stale_unpair_after_a_re_pair(env):
+    """The household was paired again before the old UNPAIR landed: that
+    UNPAIR is superseded and must never tear the new pairing down."""
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    client = _CountingClient(204)
+    svc._http_client = client
+    entry = _OutboxEntry(
+        id="u-stale",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+        event_type=FederationEventType.UNPAIR,
+    )
+    assert await _redeliver_envelope(svc, fed_repo, entry) is DeliveryOutcome.PERMANENT
+    assert client.posts == []
+
+
+@pytest.fixture
+async def unpair_env(env):
+    svc, fed_repo, kek = env
+    unpair = PeerUnpairService(
+        bus=svc._bus,
+        federation=svc,
+        federation_repo=fed_repo,
+        outbox_repo=svc._outbox_repo,
+        routing_repo=SqliteDmRoutingRepo(svc._db),
+        notify_timeout_s=0.5,
+    )
+    return svc, fed_repo, kek, unpair
+
+
+async def test_unpair_is_retried_until_delivered_then_the_row_goes(unpair_env):
+    """End to end over real repos: the peer is offline at unpair time, stays
+    offline for a retry, comes back — UNPAIR lands and the tombstone is
+    purged."""
+    svc, fed_repo, kek, unpair = unpair_env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    client = _CountingClient(503)
+    svc._http_client = client
+
+    assert await unpair.unpair(peer.id) is False
+    tomb = await fed_repo.get_instance(peer.id, include_unpairing=True)
+    assert tomb is not None and tomb.status is PairingStatus.UNPAIRING
+
+    outbox = svc._outbox_repo
+    (entry,) = await outbox.list_due(10)
+    assert entry.event_type is FederationEventType.UNPAIR
+
+    # Still offline: transient, tombstone kept.
+    outcome = await _deliver_outbox_entry(svc, fed_repo, unpair, entry)
+    assert outcome is DeliveryOutcome.TRANSIENT
+    assert await fed_repo.get_instance(peer.id, include_unpairing=True) is not None
+
+    # Back online: delivered, tombstone gone, queue empty.
+    client.status = 204
+    outcome = await _deliver_outbox_entry(svc, fed_repo, unpair, entry)
+    assert outcome is DeliveryOutcome.SUCCESS
+    assert await fed_repo.get_instance(peer.id, include_unpairing=True) is None
+    assert await outbox.count_pending_for(peer.id) == 0
+
+
+async def test_unpair_refused_by_a_peer_that_already_forgot_us_ends_it(unpair_env):
+    svc, fed_repo, kek, unpair = unpair_env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    svc._http_client = _CountingClient(503)
+    assert await unpair.unpair(peer.id) is False
+    (entry,) = await svc._outbox_repo.list_due(10)
+
+    svc._http_client = _CountingClient(410)
+    outcome = await _deliver_outbox_entry(svc, fed_repo, unpair, entry)
+    assert outcome is DeliveryOutcome.PERMANENT
+    assert await fed_repo.get_instance(peer.id, include_unpairing=True) is None

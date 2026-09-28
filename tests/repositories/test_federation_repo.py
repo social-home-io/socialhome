@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -748,3 +749,75 @@ async def test_list_social_instances_excludes_space_session_rows(env):
     assert (await env.fed_repo.get_instance("peer-space")).source is (
         InstanceSource.SPACE_SESSION
     )
+
+
+# ── Unpair tombstone (status='unpairing') ────────────────────────────────
+
+
+def _tomb_inst(iid: str, inbox: str) -> RemoteInstance:
+    return RemoteInstance(
+        id=iid,
+        display_name=iid,
+        remote_identity_pk="ab" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url=f"https://{iid}/wh",
+        local_inbox_id=inbox,
+        status=PairingStatus.CONFIRMED,
+    )
+
+
+async def test_mark_unpairing_hides_row_and_drops_its_people(env):
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-t"))
+    await env.db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        ("u-t", "peer-t", "anna", "Anna"),
+    )
+
+    await env.fed_repo.mark_unpairing("peer-t")
+
+    assert await env.fed_repo.get_instance("peer-t") is None
+    assert await env.fed_repo.get_instance_by_local_inbox_id("wh-t") is None
+    assert await env.fed_repo.list_instances() == []
+    tomb = await env.fed_repo.get_instance("peer-t", include_unpairing=True)
+    assert tomb is not None and tomb.status is PairingStatus.UNPAIRING
+    by_inbox = await env.fed_repo.get_instance_by_local_inbox_id(
+        "wh-t", include_unpairing=True
+    )
+    assert by_inbox is not None and by_inbox.id == "peer-t"
+    # Transport columns survive (the outbox needs them) — the people don't.
+    assert tomb.key_self_to_remote == "k1"
+    assert tomb.remote_inbox_url == "https://peer-t/wh"
+    assert (
+        await env.db.fetchval(
+            "SELECT COUNT(*) FROM remote_users WHERE instance_id='peer-t'"
+        )
+        == 0
+    )
+
+
+async def test_save_instance_replaces_a_tombstone(env):
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-old"))
+    await env.fed_repo.mark_unpairing("peer-t")
+
+    await env.fed_repo.save_instance(
+        replace_status(_tomb_inst("peer-t", "wh-new"), PairingStatus.PENDING_RECEIVED)
+    )
+
+    got = await env.fed_repo.get_instance("peer-t")
+    assert got is not None
+    assert got.status is PairingStatus.PENDING_RECEIVED
+    assert got.local_inbox_id == "wh-new"
+
+
+async def test_save_instance_keeps_local_inbox_id_of_a_live_row(env):
+    """Only a tombstone is replaced wholesale; a live row keeps its upsert."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-l", "wh-1"))
+    await env.fed_repo.save_instance(_tomb_inst("peer-l", "wh-2"))
+    got = await env.fed_repo.get_instance("peer-l")
+    assert got is not None and got.local_inbox_id == "wh-1"
+
+
+def replace_status(inst: RemoteInstance, status: PairingStatus) -> RemoteInstance:
+    return replace(inst, status=status)

@@ -45,6 +45,7 @@ from .domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     FederationEventType,
     InstanceSource,
+    PairingStatus,
 )
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
@@ -354,6 +355,27 @@ async def _download_bytes(url: str) -> bytes:
             return await resp.read()
 
 
+async def _deliver_outbox_entry(
+    federation_service: FederationService,
+    federation_repo,
+    peer_unpair: PeerUnpairService,
+    entry,
+) -> DeliveryOutcome:
+    """The :class:`OutboxProcessor` delivery callback.
+
+    :func:`_redeliver_envelope` does the work; an ``UNPAIR`` that reached a
+    verdict (delivered, or refused for good — the peer already forgot us)
+    also ends the peer's unpair tombstone.
+    """
+    outcome = await _redeliver_envelope(federation_service, federation_repo, entry)
+    if (
+        entry.event_type is FederationEventType.UNPAIR
+        and outcome is not DeliveryOutcome.TRANSIENT
+    ):
+        await peer_unpair.finish_unpair(entry.instance_id)
+    return outcome
+
+
 async def _redeliver_envelope(
     federation_service: FederationService,
     federation_repo,
@@ -397,7 +419,10 @@ async def _redeliver_envelope(
     * 5xx, timeout, network error → :attr:`DeliveryOutcome.TRANSIENT`
       (reschedule with backoff).
     """
-    instance = await federation_repo.get_instance(entry.instance_id)
+    instance = await federation_repo.get_instance(
+        entry.instance_id,
+        include_unpairing=True,
+    )
     if instance is None:
         # Peer was unpaired (the row in ``remote_instances`` is gone)
         # between the original ``send_event`` enqueue and this retry —
@@ -407,6 +432,24 @@ async def _redeliver_envelope(
         # mark reachable, no URL to POST to, and the operator already
         # decided to drop the peer.
         log.warning("outbox: unknown instance %s — dropping", entry.instance_id)
+        return DeliveryOutcome.PERMANENT
+
+    # Unpair tombstone (§11): a peer we unpaired while it was offline gets
+    # our queued UNPAIR and nothing else — and an UNPAIR goes to nobody
+    # BUT a tombstone. The second half matters after a re-pair: the old
+    # UNPAIR still queued for that household is superseded by the new
+    # pairing and must never reach it.
+    tombstoned = instance.status is PairingStatus.UNPAIRING
+    if (entry.event_type is FederationEventType.UNPAIR) is not tombstoned:
+        log.info(
+            "outbox: dropping %s %s for %s — %s",
+            entry.event_type.value,
+            entry.id,
+            entry.instance_id,
+            "the peer is being unpaired"
+            if tombstoned
+            else "superseded, the peer is paired again",
+        )
         return DeliveryOutcome.PERMANENT
 
     # Re-stamp + re-sign BEFORE the delivery try: a malformed / legacy /
@@ -2975,6 +3018,8 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
 
         # 6. OutboxProcessor — drains federation_outbox in the background.
+        peer_unpair_service = app[K.peer_unpair_service_key]
+
         async def _deliver(entry):
             """Re-deliver an outbox entry via FederationService.
 
@@ -2982,13 +3027,20 @@ def create_app(config: Config | None = None) -> web.Application:
             from the original send_event() call. On retry we POST the same
             bytes verbatim — no re-encryption.
             """
-            return await _redeliver_envelope(
+            return await _deliver_outbox_entry(
                 federation_service,
                 federation_repo,
+                peer_unpair_service,
                 entry,
             )
 
-        outbox_processor = OutboxProcessor(outbox_repo, _deliver)
+        # ``after_prune``: once the retention sweep has failed an UNPAIR
+        # past its max age, purge that peer's unpair tombstone.
+        outbox_processor = OutboxProcessor(
+            outbox_repo,
+            _deliver,
+            after_prune=peer_unpair_service.sweep_tombstones,
+        )
         await outbox_processor.start()
         app[K.outbox_processor_key] = outbox_processor
 
