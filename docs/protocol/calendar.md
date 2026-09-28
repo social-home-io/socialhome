@@ -287,6 +287,37 @@ Row id is deterministic — `_mint_event_id(remote_instance,
 remote_event, recipient_user_id)` — so a redelivered envelope
 collapses onto the same row.
 
+#### Receiver rules
+
+`PERSONAL_CALENDAR_EVENT_CREATED` / `_UPDATED` / `_DELETED` may touch
+only the sending household's own mirror of its own event. The row id is
+a truncated derivation, so it is a lookup key, never proof of
+ownership — the stored row's provenance is. The receiver drops the
+event (or that recipient's part of it) with a WARNING when:
+
+- `organizer_user_id`'s home household is not the envelope's
+  `from_instance` — a local member, a third household's user, or an id
+  this household doesn't know. Honest senders always publish their own
+  local author (`event.created_by`), known here via `USERS_SYNC` /
+  `USER_UPDATED`; an author hidden from this household by the sender's
+  per-peer visibility list is therefore unknown and their invite is
+  dropped (fail closed);
+- a row already exists at the derived id but is not a
+  `origin='remote_invite'` mirror with `remote_instance_id =
+  from_instance` and `remote_event_id` = the payload's `event_id`
+  (a local event, another household's mirror, or a mirror of a
+  different remote event) — for create, update and delete alike;
+- on create/update, that existing mirror is not on one of the
+  recipient's own personal calendars.
+
+Only local users get a mirror (and the default `tentative` RSVP): an
+attendee id that isn't in this household's `users` table — the
+sender's own users, a third household's users, unknown ids — produces
+no row. The attendee-less delete fallback looks the mirror up by
+`(from_instance, remote_event_id)`, so it is bound by construction
+(`PersonalCalendarInboundHandlers._foreign_row_reason`;
+`tests/protocol/test_personal_calendar_event_scope.py`).
+
 A shared household event is fanned out as one `POST` per picked
 calendar, every row carrying the same client-minted
 `client_event_uuid`. Since migration `0047` that pair is unique per

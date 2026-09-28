@@ -18,6 +18,9 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import (
     PersonalCalendarInboundHandlers,
 )
+from socialhome.services.federation_inbound.personal_calendar import (
+    _mint_event_id,
+)
 
 
 class _Registry:
@@ -402,8 +405,6 @@ async def test_inbound_invite_dropped_when_user_has_no_calendar(env):
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
     # Seed a recipient user that has no calendar.
-    from socialhome.domain.user import User
-
     user_repo.by_uid["u-ben"] = User(
         username="ben",
         user_id="u-ben",
@@ -418,7 +419,7 @@ async def test_inbound_invite_dropped_when_user_has_no_calendar(env):
                 "summary": "BBQ",
                 "start": now.isoformat(),
                 "end": (now + timedelta(hours=1)).isoformat(),
-                "organizer_user_id": "u-org",
+                "organizer_user_id": "u-bob",
                 "attendee_user_ids": ["u-ben"],
             },
         )
@@ -444,7 +445,7 @@ async def test_inbound_invite_dropped_when_user_unknown(env):
                 "summary": "BBQ",
                 "start": now.isoformat(),
                 "end": (now + timedelta(hours=1)).isoformat(),
-                "organizer_user_id": "u-org",
+                "organizer_user_id": "u-bob",
                 "attendee_user_ids": ["u-totally-unknown"],
             },
         )
@@ -855,4 +856,166 @@ async def test_inbound_rsvp_deleted_by_invited_user_clears_row(env):
             {"event_id": "org-evt", "user_id": "u-bob"},
         )
     )
+    assert cal_repo.rsvps == {}
+
+
+# ── Invite scope: a household edits only its own mirror ───────────────
+
+
+def _invite_payload(remote_id="remote-evt-1", organiser="u-bob"):
+    now = datetime.now(timezone.utc)
+    return {
+        "event_id": remote_id,
+        "summary": "BBQ",
+        "start": now.isoformat(),
+        "end": (now + timedelta(hours=1)).isoformat(),
+        "organizer_user_id": organiser,
+        "attendee_user_ids": ["u-anna"],
+        "rsvp_enabled": True,
+    }
+
+
+def _seed_row(cal_repo, row_id, **overrides):
+    now = datetime.now(timezone.utc)
+    fields = {
+        "id": row_id,
+        "calendar_id": "cal-anna",
+        "summary": "Seeded",
+        "start": now,
+        "end": now + timedelta(hours=1),
+        "created_by": "u-anna",
+        **overrides,
+    }
+    cal_repo.events[row_id] = CalendarEvent(**fields)
+    return cal_repo.events[row_id]
+
+
+@pytest.mark.parametrize(
+    ("organiser", "home"),
+    [
+        ("u-anna", None),  # local member (home = "self" from the fixture)
+        ("u-dora", "i_third"),  # a third household's user
+        ("u-ghost", None),  # unknown
+    ],
+)
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
+        FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED,
+    ],
+)
+async def test_inbound_invite_refused_when_organiser_not_senders(
+    env, caplog, organiser, home, event_type
+):
+    fed, cal_repo, user_repo = env
+    if home is not None:
+        user_repo.home[organiser] = home
+    handler = fed._event_registry.handlers[event_type]
+    with caplog.at_level("WARNING"):
+        await handler(_envelope(event_type, _invite_payload(organiser=organiser)))
+    assert cal_repo.events == {}
+    assert cal_repo.rsvps == {}
+    assert "organiser is not a user of the sending household" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({}, "row is not an inbound invite"),
+        (
+            {
+                "origin": "remote_invite",
+                "remote_instance_id": "i_other",
+                "remote_event_id": "remote-evt-1",
+            },
+            "row mirrors another household's invite",
+        ),
+        (
+            {
+                "origin": "remote_invite",
+                "remote_instance_id": "i_remote",
+                "remote_event_id": "remote-evt-1-twin",
+            },
+            "row mirrors a different remote event",
+        ),
+        (
+            {
+                "origin": "remote_invite",
+                "remote_instance_id": "i_remote",
+                "remote_event_id": "remote-evt-1",
+                "calendar_id": "cal-someone-else",
+            },
+            "row is not on the recipient's calendar",
+        ),
+    ],
+)
+async def test_inbound_invite_update_refused_on_foreign_row(
+    env, caplog, overrides, reason
+):
+    """The derived row id is truncated; a row found there that is not this
+    household's mirror of this event for this recipient stays untouched."""
+    fed, cal_repo, _ = env
+    row_id = _mint_event_id("i_remote", "remote-evt-1", "u-anna")
+    seeded = _seed_row(cal_repo, row_id, **overrides)
+    handler = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED
+    ]
+    with caplog.at_level("WARNING"):
+        await handler(
+            _envelope(
+                FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED,
+                _invite_payload(),
+            )
+        )
+    assert cal_repo.events == {row_id: seeded}
+    assert cal_repo.rsvps == {}
+    assert reason in caplog.text
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {
+            "origin": "remote_invite",
+            "remote_instance_id": "i_other",
+            "remote_event_id": "remote-evt-1",
+        },
+        {
+            "origin": "remote_invite",
+            "remote_instance_id": "i_remote",
+            "remote_event_id": "remote-evt-1-twin",
+        },
+    ],
+)
+async def test_inbound_delete_refused_on_foreign_row(env, caplog, overrides):
+    fed, cal_repo, _ = env
+    row_id = _mint_event_id("i_remote", "remote-evt-1", "u-anna")
+    seeded = _seed_row(cal_repo, row_id, **overrides)
+    delete = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_EVENT_DELETED
+    ]
+    with caplog.at_level("WARNING"):
+        await delete(
+            _envelope(
+                FederationEventType.PERSONAL_CALENDAR_EVENT_DELETED,
+                {"event_id": "remote-evt-1", "attendee_user_ids": ["u-anna"]},
+            )
+        )
+    assert cal_repo.events == {row_id: seeded}
+    assert "refusing" in caplog.text
+
+
+async def test_inbound_invite_for_remote_attendee_creates_nothing(env):
+    """Only local users get a mirror (and the default tentative RSVP)."""
+    fed, cal_repo, _ = env
+    handler = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
+    ]
+    payload = {**_invite_payload(), "attendee_user_ids": ["u-bob"]}
+    await handler(
+        _envelope(FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED, payload)
+    )
+    assert cal_repo.events == {}
     assert cal_repo.rsvps == {}
