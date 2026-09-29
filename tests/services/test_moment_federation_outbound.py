@@ -13,7 +13,7 @@ from socialhome.domain.events import (
     MomentReactionChanged,
 )
 from socialhome.domain.federation import FederationEventType, RemoteInstance
-from socialhome.federation.moment_origin import verify_moment_origin
+from socialhome.federation.moment_origin import NO_RELAY_FIELD, verify_moment_origin
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
 )
@@ -460,6 +460,9 @@ class _HouseholdBlockCp:
     async def guardian_blocks_household(self, user_id, instance_id):
         return user_id == "uid-kid" and instance_id == "peer-blocked"
 
+    async def is_protected(self, user_id):
+        return False
+
 
 async def test_protected_authors_content_skips_a_blocked_persons_household(stack):
     out, fed, fed_repo, user_repo = stack
@@ -483,3 +486,71 @@ async def test_protected_authors_content_skips_a_blocked_persons_household(stack
 
 async def _FIRE(out, author):
     await out._on_created(_create_event(author=author))
+
+
+# ─── §CP.R: a protected account's moments stay one hop (v_38) ────────────
+
+
+class _ProtectedAuthorCp:
+    """``uid-kid`` is a protected account."""
+
+    def register_gate(self, gate):
+        pass
+
+    async def is_protected(self, user_id):
+        return user_id == "uid-kid"
+
+    async def guardian_blocks_household(self, user_id, instance_id):
+        return False
+
+
+async def test_protected_authors_moment_is_no_relay_and_skips_older_peers(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_ProtectedAuthorCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-new"), _peer("peer-old")],
+    )
+
+    async def _supports(instance_id, *, min_version):
+        return instance_id == "peer-new"
+
+    fed.peer_supports = _supports
+    await out._on_created(_create_event(author="uid-kid"))
+    sent = [c.kwargs for c in fed.send_event.call_args_list]
+    # An older household may relay it onward, so it gets nothing at all.
+    assert {c["to_instance_id"] for c in sent} == {"peer-new"}
+    assert sent[0]["payload"][NO_RELAY_FIELD] is True
+    assert verify_moment_origin(
+        identity_pk=_KEY.public_key,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=sent[0]["payload"],
+    )
+
+
+async def test_other_authors_moments_carry_no_mark(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_ProtectedAuthorCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-old")])
+    await out._on_created(_create_event(author="uid-author"))
+    sent = [c.kwargs for c in fed.send_event.call_args_list]
+    assert [c["to_instance_id"] for c in sent] == ["peer-old"]
+    assert NO_RELAY_FIELD not in sent[0]["payload"]
+
+
+async def test_relay_inbound_never_forwards_a_no_relay_moment(stack):
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload={
+            "moment_id": "m-1",
+            "author_user_id": "uid-kid",
+            "origin_instance_id": "peer-origin",
+            "hop_count": 1,
+            NO_RELAY_FIELD: True,
+        },
+        from_instance="peer-origin",
+    )
+    fed.send_event.assert_not_called()

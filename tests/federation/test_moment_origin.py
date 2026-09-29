@@ -8,6 +8,7 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.moment_origin import (
     MOMENT_ORIGIN_SIG_SUITE_ED25519,
+    NO_RELAY_FIELD,
     SIGNED_MOMENT_EVENT_TYPES,
     SUPPORTED_MOMENT_ORIGIN_SIG_SUITES,
     UnsupportedMomentOriginSuite,
@@ -193,3 +194,53 @@ def test_check_pinned_key_without_shipped_key_verifies():
 
 def test_check_refuses_event_types_without_origin_signature():
     assert not _check(_sign(), pinned=KEY.public_key, et=FET.MOMENT_REACTED).accepted
+
+
+# ─── v_38 ``no_relay`` ───────────────────────────────────────────────────
+
+
+def test_no_relay_is_signed_and_cannot_be_stripped():
+    signed = sign_moment_origin(
+        seed=KEY.private_key,
+        identity_pk=KEY.public_key,
+        event_type=FET.MOMENT_CREATED,
+        payload=_create(**{NO_RELAY_FIELD: True}),
+    )
+    assert verify_moment_origin(
+        identity_pk=KEY.public_key, event_type=FET.MOMENT_CREATED, payload=signed
+    )
+    stripped = {k: v for k, v in signed.items() if k != NO_RELAY_FIELD}
+    assert not verify_moment_origin(
+        identity_pk=KEY.public_key, event_type=FET.MOMENT_CREATED, payload=stripped
+    )
+
+
+def test_a_moment_without_no_relay_signs_the_v1_bytes_unchanged():
+    """Older receivers verify the v1 bytes — a moment that isn't
+    ``no_relay`` must still sign exactly those."""
+    bytes_ = moment_origin_signing_bytes(
+        FET.MOMENT_CREATED, _create(), sig_suite=MOMENT_ORIGIN_SIG_SUITE_ED25519
+    )
+    assert bytes_.startswith(b"moment-origin:v1:")
+    assert b"no_relay" not in bytes_
+    marked = moment_origin_signing_bytes(
+        FET.MOMENT_CREATED,
+        _create(**{NO_RELAY_FIELD: True}),
+        sig_suite=MOMENT_ORIGIN_SIG_SUITE_ED25519,
+    )
+    assert marked.startswith(b"moment-origin:v2:")
+    assert b'"no_relay":true' in marked
+
+
+def test_a_forged_no_relay_mark_does_not_verify():
+    signed = sign_moment_origin(
+        seed=KEY.private_key,
+        identity_pk=KEY.public_key,
+        event_type=FET.MOMENT_CREATED,
+        payload=_create(),
+    )
+    assert not verify_moment_origin(
+        identity_pk=KEY.public_key,
+        event_type=FET.MOMENT_CREATED,
+        payload={**signed, NO_RELAY_FIELD: True},
+    )

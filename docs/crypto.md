@@ -321,6 +321,12 @@ b"moment-origin:v1:" + canonical_json({
 })   # sort_keys, separators=(",", ":"), UTF-8
 ```
 
+A `no_relay` moment (v_38 — a protected account's, delivered to the
+origin's paired households only) signs the same object plus
+`"no_relay": true` under the disjoint domain `b"moment-origin:v2:"`, so a
+relay can neither strip the mark (the v1 bytes then don't verify) nor add
+it. A moment without the mark signs exactly the v1 bytes.
+
 `hop_count` is outside the signature (each relay bumps it) and relays
 forward the three fields verbatim. The event type is inside the signed
 object, so a signed create cannot be replayed as a delete. A receiver

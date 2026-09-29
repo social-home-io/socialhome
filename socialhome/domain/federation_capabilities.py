@@ -580,7 +580,16 @@ from __future__ import annotations
 #:   mesh legs reach callees on other households. **No fallback**: a household below v_37 cannot sit
 #:   in a cross-household group — the authority refuses to add its people
 #:   (the SPA says so in the picker) and never sends it a roster.
-OURS: int = 37
+#: * **v_38** (2026-09-29) — ``no_relay`` moments. A protected account's
+#:   moments (§CP.R) reach its household's directly paired households only:
+#:   the origin marks them ``no_relay: true`` inside the v_35 origin
+#:   signature (a separate ``moment-origin:v2:`` signing domain, so a relay
+#:   can neither strip nor forge the mark); no household relays a marked
+#:   moment, and a receiver refuses one that arrives from anyone but its
+#:   origin. **Gated, no fallback**: a household below v_38 would relay it,
+#:   so it is not sent the protected account's moments at all. Unmarked
+#:   moments sign the unchanged v1 bytes.
+OURS: int = 38
 
 
 class FederationCapability:
@@ -922,6 +931,11 @@ class FederationCapability:
     #: household at or above it (an older one would hand it to the caller).
     MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM = 37
 
+    #: Minimum proto_version that honours a ``no_relay`` moment (v_38): it
+    #: never relays one and refuses one that arrives through a relay. A
+    #: protected account's moments go only to households at or above it.
+    MIN_FOR_MOMENT_NO_RELAY = 38
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1026,6 +1040,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM,
         "Cross-household group chats",
     ),
+    (
+        FederationCapability.MIN_FOR_MOMENT_NO_RELAY,
+        "Direct-only moments",
+    ),
 ]
 
 
@@ -1062,6 +1080,8 @@ def features_missing_below(version: int) -> list[str]:
 #:   posts, not space content.
 #: * ``MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM`` — group conversations are not
 #:   spaces; a behind household only keeps its own people out of groups.
+#: * ``MIN_FOR_MOMENT_NO_RELAY`` — moments are household-broadcast posts;
+#:   a behind household only misses a protected account's moments.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,
