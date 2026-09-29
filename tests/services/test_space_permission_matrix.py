@@ -111,6 +111,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_feed",
         "get_space",  # plain row read; callers (routes / sibling services) gate
         "list_comments",  # route layer applies the membership gate
+        "mention_tokens",  # read-only; members route applies the gate
         "list_links",
         "list_pending_moderation",
         "list_subscriptions",
