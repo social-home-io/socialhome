@@ -4508,3 +4508,40 @@ async def test_inbound_dm_resolves_mentions_and_edit_diffs(db, bus, inbound):
         )
     )
     assert [m.user_id for m in created[-1].mentions] == ["user-local"]
+
+
+async def test_inbound_moderator_edit_mentions_nobody(db, bus, inbound):
+    """The host (a moderator) may edit a post by a member seated on another
+    household, but that edit must not read as the author mentioning bob."""
+    await _seed_mention_space(db, "sp-mod")
+    await db.enqueue(
+        "INSERT OR IGNORE INTO remote_instances(id, display_name,"
+        " remote_identity_pk, key_self_to_remote, key_remote_to_self,"
+        " remote_inbox_url, local_inbox_id, status, source)"
+        " VALUES('peer-c', 'peer-c', ?, 'k1', 'k2', 'https://peer-c/wh',"
+        " 'wh-peer-c', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await _seat(db, "sp-mod", "user-carol", instance_id="peer-c")
+    await SqliteSpacePostRepo(db).save(
+        "sp-mod",
+        Post(
+            id="p-mod",
+            author="user-carol",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="hello",
+        ),
+    )
+    captured: list[PostEdited] = []
+    bus.subscribe(PostEdited, captured.append)
+    await inbound._on_space_post_updated(
+        _event(
+            FederationEventType.SPACE_POST_UPDATED,
+            {"id": "p-mod", "content": "hello @bob"},
+            space_id="sp-mod",
+        )
+    )
+    assert len(captured) == 1  # the edit itself applies
+    assert captured[0].post.content == "hello @bob"
+    assert captured[0].new_mentions == ()

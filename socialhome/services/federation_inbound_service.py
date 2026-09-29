@@ -107,6 +107,7 @@ from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
 from ..domain.link_preview import card_survives_edit
+from ..domain.mention import Mention
 from .link_preview_service import wire_link_preview
 from .inbound_media_store import (
     is_safe_media_name,
@@ -1685,7 +1686,8 @@ class FederationInboundService(ProtectionGateMixin):
                     post=post,
                     space_id=space_id,
                     origin_instance_id=event.from_instance,
-                    new_mentions=await self._mentions.added(
+                    new_mentions=await self._edit_mentions(
+                        event,
                         space_id,
                         existing[1].content,
                         post.content,
@@ -2008,7 +2010,8 @@ class FederationInboundService(ProtectionGateMixin):
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
                 new_mentions=(
-                    await self._mentions.added(
+                    await self._edit_mentions(
+                        event,
                         space_id,
                         current_post.content,
                         post.content,
@@ -2161,7 +2164,8 @@ class FederationInboundService(ProtectionGateMixin):
                 comment=refreshed,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
-                new_mentions=await self._mentions.added(
+                new_mentions=await self._edit_mentions(
+                    event,
                     space_id,
                     prior.content if prior is not None else None,
                     refreshed.content,
@@ -2225,6 +2229,26 @@ class FederationInboundService(ProtectionGateMixin):
                 event.from_instance,
             )
         return self._authorship
+
+    async def _edit_mentions(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        before: str | None,
+        after: str | None,
+        *,
+        author_id: str,
+    ) -> tuple[Mention, ...]:
+        """The mentions an inbound edit newly adds — only when the edit comes
+        from the author's own household. A moderator household (the host,
+        a remote admin) may edit someone's words, but its edit must not read
+        as the author mentioning you — the same rule as a local admin edit."""
+        authorship = self._space_authorship(event)
+        if authorship is None or not await authorship.acts_for(
+            event, space_id, author_id, any_role=True
+        ):
+            return ()
+        return await self._mentions.added(space_id, before, after, author_id=author_id)
 
     async def _owned_post_mutation_allowed(
         self,

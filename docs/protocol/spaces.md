@@ -795,7 +795,10 @@ text and are not parsed).
   comment edits by the author (a moderator editing someone else's words
   mentions nobody) and inbound `SPACE_POST_UPDATED`,
   `SPACE_COMMENT_UPDATED` and a `SPACE_POST_CREATED` re-send of an existing
-  post all diff the stored body against the new one. Nobody gets a generic
+  post all diff the stored body against the new one — an inbound edit only
+  when it comes from the author's own household (`acts_for`), so a
+  moderator household's edit never reads as the author mentioning you.
+  Nobody gets a generic
   "posted" bell for an edit; a mention bell follows the same level rules.
   `@here` counts only when the old body had none at all and the author may
   use it, and it is still under the per-author 10-min limit.
