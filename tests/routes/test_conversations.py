@@ -1239,3 +1239,116 @@ async def test_group_mention_rings_a_mentions_level_member_end_to_end(client):
     ]
     carol = [n["type"] for n in await _bell(client, "carol-tok")]
     assert "dm_mention" not in carol and "dm_message" in carol
+
+
+# ── Edit / delete a message ────────────────────────────────────────────────
+
+
+async def _send(client, token: str, conv_id: str, content: str) -> str:
+    r = await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"content": content},
+        headers=_auth(token),
+    )
+    assert r.status == 201
+    return (await r.json())["id"]
+
+
+async def _message(client, token: str, conv_id: str, mid: str) -> dict:
+    r = await client.get(f"/api/conversations/{conv_id}/messages", headers=_auth(token))
+    return next(m for m in await r.json() if m["id"] == mid)
+
+
+async def test_sender_edits_own_message(client):
+    conv_id = await _dm_with_bob(client)
+    mid = await _send(client, client._admin_token, conv_id, "helo")
+    r = await client.patch(
+        f"/api/conversations/{conv_id}/messages/{mid}",
+        json={"content": "hello"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["id"] == mid and body["content"] == "hello"
+    assert body["edited_at"]
+    row = await _message(client, client._bob_token, conv_id, mid)
+    assert row["content"] == "hello" and row["edited_at"]
+
+
+async def test_only_the_sender_may_edit_or_delete(client):
+    conv_id = await _dm_with_bob(client)
+    mid = await _send(client, client._admin_token, conv_id, "mine")
+    url = f"/api/conversations/{conv_id}/messages/{mid}"
+    r = await client.patch(
+        url, json={"content": "bob was here"}, headers=_auth(client._bob_token)
+    )
+    assert r.status == 403
+    r = await client.delete(url, headers=_auth(client._bob_token))
+    assert r.status == 403
+    assert (await _message(client, client._admin_token, conv_id, mid))[
+        "content"
+    ] == "mine"
+
+
+async def test_edit_rejects_empty_missing_and_wrong_conversation(client):
+    conv_id = await _dm_with_bob(client)
+    mid = await _send(client, client._admin_token, conv_id, "x")
+    url = f"/api/conversations/{conv_id}/messages/{mid}"
+    for body in ({"content": ""}, {}, {"content": 5}):
+        r = await client.patch(url, json=body, headers=_auth(client._admin_token))
+        assert r.status == 422, body
+    r = await client.patch(
+        f"/api/conversations/{conv_id}/messages/nope",
+        json={"content": "y"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 404
+    # A message id addressed under another conversation is not found there.
+    other = await _team_with_carol(client)
+    r = await client.patch(
+        f"/api/conversations/{other}/messages/{mid}",
+        json={"content": "y"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 404
+
+
+async def test_sender_deletes_own_message_and_it_cannot_be_edited_after(client):
+    conv_id = await _dm_with_bob(client)
+    mid = await _send(client, client._admin_token, conv_id, "oops")
+    url = f"/api/conversations/{conv_id}/messages/{mid}"
+    r = await client.delete(url, headers=_auth(client._admin_token))
+    assert r.status == 200
+    assert (await _message(client, client._bob_token, conv_id, mid))["deleted"]
+    r = await client.patch(
+        url, json={"content": "back"}, headers=_auth(client._admin_token)
+    )
+    assert r.status == 422
+
+
+async def test_edit_that_adds_a_mention_rings_only_that_member(client):
+    """End to end over HTTP: bob (level 'mentions') gets a dm_mention bell
+    when pascal edits a message to add @bob; editing again doesn't re-ring."""
+    conv_id = await _team_with_carol(client)
+    await client.put(
+        f"/api/conversations/{conv_id}/notif-prefs",
+        json={"level": "mentions"},
+        headers=_auth(client._bob_token),
+    )
+    mid = await _send(client, client._admin_token, conv_id, "who's in?")
+    assert await _bell(client, client._bob_token) == []
+    url = f"/api/conversations/{conv_id}/messages/{mid}"
+    await client.patch(
+        url, json={"content": "who's in? @bob"}, headers=_auth(client._admin_token)
+    )
+    assert [n["type"] for n in await _bell(client, client._bob_token)] == ["dm_mention"]
+    await client.post(
+        f"/api/conversations/{conv_id}/read", headers=_auth(client._bob_token)
+    )
+    await client.patch(
+        url, json={"content": "who's in, @bob?"}, headers=_auth(client._admin_token)
+    )
+    unread = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    assert (await unread.json())["unread"] == 0

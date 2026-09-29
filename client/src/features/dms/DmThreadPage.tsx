@@ -398,6 +398,18 @@ async function fetchThreadInfo(convId: string): Promise<void> {
  *  with the parent message preview and the next send carries
  *  ``reply_to_id``. Cleared after send or by the chip's "×" button. */
 const replyTo = signal<Message | null>(null)
+/** The own message being edited in place (its bubble shows a text box). */
+const editing = signal<{ id: string, draft: string } | null>(null)
+
+/** Own, sent, not deleted, and text the sender wrote: a text message or a
+ *  media caption. Voice notes (machine transcript) and location pins are
+ *  not edited from the thread. */
+export function canEditMessage(m: Message, myUserId: string | null | undefined): boolean {
+  if (!myUserId || m.sender_user_id !== myUserId) return false
+  if (m.deleted || m.send_failed || m.id.startsWith('tmp-')) return false
+  if (m.type === 'text') return true
+  return ['image', 'video', 'file'].includes(m.type) && Boolean(m.content)
+}
 /** Touch-only context sheet target. Set on long-press, cleared by
  *  the sheet itself or when an action runs. Hover/keyboard users
  *  trigger Reply through the inline ``.sh-message-reply-btn``
@@ -1720,6 +1732,33 @@ export default function DmThreadPage() {
     }
   }
 
+  /** Save an in-place edit of the viewer's own message. Unchanged text
+   *  just closes the box; a failed save keeps it open with the draft. */
+  const saveEdit = async (m: Message) => {
+    const cur = editing.value
+    if (!cur || cur.id !== m.id) return
+    const content = cur.draft.trim()
+    if (!content) {
+      showToast("A message can't be empty — delete it instead", 'error')
+      return
+    }
+    if (content === m.content) {
+      editing.value = null
+      return
+    }
+    try {
+      const body = await api.patch(
+        `/api/conversations/${convId}/messages/${m.id}`, { content },
+      ) as { content: string, edited_at: string }
+      messages.value = messages.value.map(x =>
+        x.id === m.id ? { ...x, content: body.content, edited_at: body.edited_at } : x,
+      )
+      editing.value = null
+    } catch {
+      showToast("Couldn't save your edit. Try again.", 'error')
+    }
+  }
+
   /** Copy a message body to the clipboard — surfaced from the
    *  context sheet's "Copy" action. */
   const copyMessageText = async (m: Message) => {
@@ -2274,7 +2313,45 @@ export default function DmThreadPage() {
                *  bubble). ``audio`` messages render their transcript
                *  inside :class:`AudioBubble` above, so we skip the
                *  caption render here to avoid doubling the text. */}
-              {(m.deleted
+              {editing.value?.id === m.id ? (
+                <form
+                  class="sh-message-edit"
+                  onSubmit={(e) => { e.preventDefault(); void saveEdit(m) }}
+                >
+                  <textarea
+                    class="sh-message-edit__input"
+                    aria-label="Edit message"
+                    value={editing.value.draft}
+                    rows={Math.min(6, Math.max(2, editing.value.draft.split('\n').length))}
+                    ref={(el) => { if (el && document.activeElement !== el) el.focus() }}
+                    onInput={(e) => {
+                      editing.value = {
+                        id: m.id,
+                        draft: (e.target as HTMLTextAreaElement).value,
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault()
+                        editing.value = null
+                      } else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                        e.preventDefault()
+                        void saveEdit(m)
+                      }
+                    }}
+                  />
+                  <div class="sh-message-edit__actions">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => { editing.value = null }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit">Save</Button>
+                  </div>
+                </form>
+              ) : (m.deleted
                 || (m.content && m.type !== 'audio' && m.type !== 'location')) && (
                 <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
                   {m.deleted
@@ -2286,6 +2363,11 @@ export default function DmThreadPage() {
                 <div class="sh-message-meta">
                   <time>{new Date(m.created_at).toLocaleTimeString([],
                     { hour: '2-digit', minute: '2-digit' })}</time>
+                  {/* Voice notes stamp ``edited_at`` when the transcript
+                   *  lands — that isn't the sender editing. */}
+                  {m.edited_at && !m.deleted && m.type !== 'audio' && (
+                    <span class="sh-message-edited">edited</span>
+                  )}
                   {/* Per-bubble send-failure glyph. The optimistic
                    *  bubble keeps the user's content visible so they
                    *  can recall what didn't go through; the ⚠ +
@@ -2369,6 +2451,17 @@ export default function DmThreadPage() {
                   >
                     😊
                   </button>
+                  {canEditMessage(m, myUserId) && (
+                    <button
+                      type="button"
+                      class="sh-message-react-btn sh-message-edit-btn"
+                      title="Edit"
+                      aria-label="Edit your message"
+                      onClick={() => { editing.value = { id: m.id, draft: m.content } }}
+                    >
+                      ✎
+                    </button>
+                  )}
                   <button
                     type="button"
                     class="sh-message-reply-btn"
@@ -2608,6 +2701,13 @@ export default function DmThreadPage() {
                 onClick: () => { void copyMessageText(target) },
               }]
             : []),
+          ...(canEditMessage(target, myUserId)
+            ? [{
+                label: 'Edit',
+                glyph: '✎',
+                onClick: () => { editing.value = { id: target.id, draft: target.content } },
+              }]
+            : []),
           ...(target.media_url
             ? [{
                 label: 'Open in new tab',
@@ -2618,8 +2718,8 @@ export default function DmThreadPage() {
               }]
             : []),
         ]
-        // `isMine` reserved for a future "Delete for everyone" action;
-        // wiring lives in the parent file but the action isn't shipped yet.
+        // `isMine` reserved for a future "Delete for everyone" action
+        // (the route exists; the UI isn't shipped yet).
         void isMine
         return (
           <MessageContextSheet

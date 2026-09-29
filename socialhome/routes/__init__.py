@@ -99,6 +99,7 @@ from .conversations import (
     ConversationMessageDeliveryView,
     ConversationMessageReactionListView,
     ConversationMessageReactionView,
+    ConversationMessageItemView,
     ConversationMessageView,
     ConversationReadView,
     ConversationUnreadView,
@@ -660,6 +661,9 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/conversations/dm", ConversationDmView)
     app.router.add_view("/api/conversations/group", ConversationGroupView)
     app.router.add_view("/api/conversations/{id}/messages", ConversationMessageView)
+    app.router.add_view(
+        "/api/conversations/{id}/messages/{mid}", ConversationMessageItemView
+    )
     app.router.add_view(
         "/api/conversations/{id}/messages/{mid}/delivered",
         ConversationMessageDeliveryView,

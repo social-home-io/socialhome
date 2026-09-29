@@ -31,16 +31,21 @@
   --sh-danger-hover:    #DC2626;     /* red-600 */
   --sh-success:         #1F4438;     /* moss — hearth-green secondary */
   --sh-warning:         #C8902F;     /* honey — replaces amber-500 */
-  /* Hearth used as TEXT on a hearth-tinted chip (--sh-primary-soft or a
-     primary colour-mix): the plain primary only reaches ~3:1 there. */
-  --sh-primary-on-soft: var(--sh-primary-hover);
+  /* Hearth used as TEXT (links, active tabs, icons): the fill hearth is
+     only ~3.2–3.6:1 on the cream surfaces, so text gets it deepened
+     ~22% toward ink — ≥ 4.7:1, same hue. Follows a space's own
+     --sh-primary override. Fills keep --sh-primary. */
+  --sh-primary-text: color-mix(in srgb, var(--sh-primary) 78%, #000);
+  /* …and one notch deeper where that text sits on a hearth-tinted chip
+     (--sh-primary-soft or a 12% primary mix): ≥ 4.8:1 there. */
+  --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary-text) 92%, #000);
 
   /* ── Surface ladder — cream parchment, never pure white ───────── */
   --sh-bg:              #F4ECE0;     /* paper — primary surface */
   --sh-bg-secondary:    #ECE0CE;     /* paper-deep — chrome / sidebar */
   --sh-bg-tertiary:     #EFE3D2;     /* paper-tinted — nested cards */
   --sh-text:            #1A1814;     /* ink — warm brown-tinted */
-  --sh-text-muted:      #807766;     /* ink-quiet — 5.4:1 on paper */
+  --sh-text-muted:      #685F4F;     /* ink-quiet — ≥ 4.8:1 on paper / chrome / cards, 4.6:1 on the hearth tint */
   --sh-border:          #D8CFC0;     /* warm-tinted hairline */
   --sh-border-strong:   #B5AC9C;     /* ink-faint — divider on hover */
 
@@ -181,6 +186,8 @@
  * with a small ``s/old/new/`` over there too. */
 .sh-theme-dark {
   color-scheme: dark;
+  /* The lifted dark hearth is already ≥ 5.6:1 on the ember surfaces. */
+  --sh-primary-text: var(--sh-primary);
   --sh-primary:        #E96A3F;  /* hearth lifted for dark surfaces */
   --sh-primary-hover:  #C04E22;  /* hearth-deep dark variant */
   --sh-primary-soft:   #4A2419;  /* hearth-on-dark — for tinted accents */

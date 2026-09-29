@@ -1038,3 +1038,36 @@ async def test_edit_location_rounds_and_rejects_malformed(stack):
         await stack.dm_svc.edit_message(
             m.id, editor_username="anna", new_content="plain text"
         )
+
+
+async def test_edit_message_guards(stack):
+    """Edits: wrong conversation → KeyError, deleted / voice note → ValueError,
+    and the new ``edited_at`` comes back."""
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    msg = await stack.dm_svc.send_message(dm.id, sender_username="anna", content="a")
+    at = await stack.dm_svc.edit_message(
+        msg.id, editor_username="anna", new_content="b", conversation_id=dm.id
+    )
+    assert at.tzinfo is not None
+    with pytest.raises(KeyError):
+        await stack.dm_svc.edit_message(
+            msg.id, editor_username="anna", new_content="c", conversation_id="other"
+        )
+    voice = await stack.dm_svc.send_message(
+        dm.id,
+        sender_username="anna",
+        content="",
+        type="audio",
+        media_url="/api/media/x.opus",
+    )
+    with pytest.raises(ValueError):
+        await stack.dm_svc.edit_message(
+            voice.id, editor_username="anna", new_content="fake transcript"
+        )
+    await stack.dm_svc.delete_message(
+        msg.id, actor_username="anna", conversation_id=dm.id
+    )
+    with pytest.raises(ValueError):
+        await stack.dm_svc.edit_message(msg.id, editor_username="anna", new_content="d")
