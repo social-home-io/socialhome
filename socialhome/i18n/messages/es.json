@@ -17,5 +17,6 @@
   "notification.bazaar.offer_accepted": "Tu oferta fue aceptada",
   "notification.space.mention": "{author} te mencionó en {space_name}",
   "notification.space.comment.mention": "{author} te mencionó en un comentario en {space_name}",
-  "notification.space.comment.added": "{author} comentó en {space_name}"
+  "notification.space.comment.added": "{author} comentó en {space_name}",
+  "notification.space.here": "{author} avisó a todos en {space_name}"
 }

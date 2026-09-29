@@ -17,5 +17,6 @@
   "notification.bazaar.offer_accepted": "Je bod is geaccepteerd",
   "notification.space.mention": "{author} noemde je in {space_name}",
   "notification.space.comment.mention": "{author} noemde je in een reactie in {space_name}",
-  "notification.space.comment.added": "{author} reageerde in {space_name}"
+  "notification.space.comment.added": "{author} reageerde in {space_name}",
+  "notification.space.here": "{author} heeft iedereen in {space_name} gewaarschuwd"
 }

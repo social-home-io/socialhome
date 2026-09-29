@@ -25,8 +25,10 @@ global, so every member household resolves the qualified token the same
 way against its own member view. A token is only ever resolved against the
 space's members, so a mention can never reach a non-member.
 
-``@here`` is recognised (:attr:`MentionType.HERE`) but is not notified yet
-— whether it should page every member is an open product decision.
+``@here`` is recognised (:attr:`MentionType.HERE`); whether it may page
+everyone is decided per space and per author by
+:meth:`~socialhome.services.space_mentions.SpaceMentionResolver.may_use_here`
+(space toggle ``allow_here_mention`` + owner/admin role).
 """
 
 from __future__ import annotations

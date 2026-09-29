@@ -56,6 +56,9 @@ from socialhome.services.space_service import (
 #: A drop here → the round-trip assertion below mismatches → CI fails.
 FEDERATED_ROUNDTRIP: frozenset[str] = frozenset(
     {
+        # Space @here policy: every member household enforces it locally on
+        # the posts it receives, so it must mirror the host's value.
+        "allow_here_mention",
         "name",
         "owner_username",
         "identity_public_key",
@@ -113,8 +116,6 @@ INTENTIONALLY_LOCAL: dict[str, str] = {
     # The reason string is host-bookkeeping; the receiver derives read-only
     # state from ``archived`` alone.
     "archived_reason": "host bookkeeping; receivers act on ``archived``",
-    # Host-local mention policy; runtime concern, not part of the snapshot.
-    "allow_here_mention": "host-local mention policy",
 }
 
 

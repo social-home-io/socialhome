@@ -134,7 +134,9 @@ class BotBridgeService:
             # is a fresh uuid4, so this only fires on real corruption.
             raise ValueError(f"post id {post.id!r} already exists in another space")
         mentions = (
-            await self._mentions.resolve(bot.space_id, saved.content)
+            await self._mentions.resolve(
+                bot.space_id, saved.content, author_id=saved.author
+            )
             if self._mentions is not None
             else ()
         )

@@ -29,6 +29,8 @@ location, UGC content) per §25.3.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 
 from ..domain.events import (
     AppChallengeReceived,
@@ -63,6 +65,7 @@ from ..domain.events import (
     TaskDeadlineDue,
     UserFollowed,
 )
+from ..domain.mention import MentionType
 from ..domain.space import SpaceRole
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
@@ -76,6 +79,11 @@ from .push_service import PushPayload
 
 
 log = logging.getLogger(__name__)
+
+#: One @here per author per space per this many seconds pages anyone.
+HERE_COOLDOWN_SECONDS = 600
+#: Cap on remembered (space, author) @here timestamps before pruning.
+_HERE_TRACK_MAX = 10_000
 
 
 class NotificationService:
@@ -102,6 +110,8 @@ class NotificationService:
         "_calendar_repo",
         "_personal_calendar_repo",
         "_ws_manager",
+        "_clock",
+        "_here_last",
     )
 
     def __init__(
@@ -118,6 +128,9 @@ class NotificationService:
         self._spaces = space_repo
         self._bus = bus
         self._i18n = i18n
+        #: Monotonic clock for the @here cooldown (tests swap it).
+        self._clock: Callable[[], float] = time.monotonic
+        self._here_last: dict[tuple[str, str], float] = {}
         self._push = None  # attach_push_service(PushService)
         self._adapter = None  # attach_platform_adapter(PlatformAdapter)
         self._calendar_repo = None  # attach_calendar_repo(...) Phase D
@@ -715,8 +728,16 @@ class NotificationService:
         * ``mentions`` level and not mentioned → nothing.
         * otherwise (``all``) → the generic bell.
 
-        ``@here`` (user_id ``None``) is deliberately not notified yet. The
-        member list is the local ``space_members`` roster, so a mention can
+        ``@here`` (a ``MentionType.HERE`` entry — the resolver keeps it only
+        when the space allows it and the author is owner/admin by this
+        household's roster): every member at ``all`` / ``mentions`` gets one
+        ``space_here`` bell ("{author} notified everyone in …") instead of the
+        generic one; a member also mentioned directly gets the mention bell
+        only. At most one @here per ``(space, author)`` per
+        :data:`HERE_COOLDOWN_SECONDS` pages anyone — a later one inside the
+        window notifies like a plain post (per-process, spam brake).
+
+        The member list is the local ``space_members`` roster, so a mention can
         only ever reach a member — the resolver never resolves outsiders.
         """
         space = await self._spaces.get(space_id)
@@ -735,6 +756,9 @@ class NotificationService:
             else "Someone"
         )
         mentioned = {m.user_id for m in mentions if m.user_id}
+        here = any(m.type is MentionType.HERE for m in mentions) and (
+            self._take_here_slot(space_id, author_id)
+        )
         members = await self._spaces.list_members(space_id)
         for member in members:
             if member.user_id == author_id:
@@ -746,23 +770,51 @@ class NotificationService:
             if level == "muted":
                 continue
             is_mentioned = member.user_id in mentioned
-            if level == "mentions" and not is_mentioned:
+            if level == "mentions" and not (is_mentioned or here):
                 continue
+            if is_mentioned:
+                ntype, key, fallback = "space_mention", mention_key, mention_fallback
+            elif here:
+                ntype, key, fallback = (
+                    "space_here",
+                    "notification.space.here",
+                    "{author} notified everyone in {space_name}",
+                )
+            else:
+                ntype, key, fallback = generic_type, generic_key, generic_fallback
             recipient = await self._users.get_by_user_id(member.user_id)
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
-                    type="space_mention" if is_mentioned else generic_type,
+                    type=ntype,
                     title=self._t(
-                        mention_key if is_mentioned else generic_key,
+                        key,
                         locale=self._locale(recipient),
-                        fallback=mention_fallback if is_mentioned else generic_fallback,
+                        fallback=fallback,
                         author=name,
                         space_name=space.name,
                     ),
                     link_url=f"/spaces/{space_id}",
                 )
             )
+
+    def _take_here_slot(self, space_id: str, author_id: str) -> bool:
+        """Claim this author's @here slot in *space_id*; ``False`` while the
+        previous @here is younger than :data:`HERE_COOLDOWN_SECONDS`."""
+        now = self._clock()
+        key = (space_id, author_id)
+        last = self._here_last.get(key)
+        if last is not None and now - last < HERE_COOLDOWN_SECONDS:
+            return False
+        self._here_last[key] = now
+        if len(self._here_last) > _HERE_TRACK_MAX:
+            # Bounded: drop entries whose window has passed.
+            self._here_last = {
+                k: t
+                for k, t in self._here_last.items()
+                if now - t < HERE_COOLDOWN_SECONDS
+            }
+        return True
 
     async def on_moderation_queued(self, event: SpaceModerationQueued) -> None:
         """Notify space admins/owners that content is pending review."""

@@ -1300,6 +1300,7 @@ async def test_update_config_remote_forwards_all_fields(stack):
         retention_exempt_types=["text"],
         about_markdown="hello",
         bot_enabled=True,
+        allow_here_mention=True,
     )
     params = stack.fed_svc.send_with_mesh_fallback.call_args.kwargs["payload"]["params"]
     assert params["name"] == "N"
@@ -1312,6 +1313,7 @@ async def test_update_config_remote_forwards_all_fields(stack):
     assert params["retention_exempt_types"] == ["text"]
     assert params["about_markdown"] == "hello"
     assert params["bot_enabled"] is True
+    assert params["allow_here_mention"] is True
 
 
 async def test_apply_remote_admin_action_unarchive(stack):

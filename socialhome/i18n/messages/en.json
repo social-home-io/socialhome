@@ -16,6 +16,7 @@
   "notification.post.created": "{author} posted a new update",
   "notification.space.comment.added": "{author} commented in {space_name}",
   "notification.space.comment.mention": "{author} mentioned you in a comment in {space_name}",
+  "notification.space.here": "{author} notified everyone in {space_name}",
   "notification.space.join.approved": "You're in: {space_name}",
   "notification.space.join.denied": "Your join request was declined.",
   "notification.space.join.requested": "{name} wants to join {space_name}",

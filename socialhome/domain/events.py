@@ -133,8 +133,9 @@ class SpacePostCreated(DomainEvent):
     #: @-mentions in ``post.content``, resolved against the space's members
     #: by each household on its own member view
     #: (:class:`~socialhome.services.space_mentions.SpaceMentionResolver`).
-    #: Never on the wire. May include one ``MentionType.HERE`` entry, which
-    #: is not notified yet.
+    #: Never on the wire. May include one ``MentionType.HERE`` entry — only
+    #: when the space allows @here and the author is owner/admin by this
+    #: household's roster (the resolver drops it otherwise).
     mentions: tuple["Mention", ...] = ()
     approved_by: str | None = None
     occurred_at: datetime = field(default_factory=_now)

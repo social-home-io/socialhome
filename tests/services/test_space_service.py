@@ -17,6 +17,7 @@ from PIL import Image
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import SpaceConfigChanged
 from socialhome.domain.post import PostType
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -7333,3 +7334,30 @@ async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog):
     assert snap["name"] == "Fam"
     assert "does not decode" in caplog.text
     assert "cannot be shrunk" in caplog.text
+
+
+async def test_update_config_toggles_allow_here_mention(stack):
+    """``allow_here_mention`` is an owner/admin config edit: it persists,
+    rides the SpaceConfigChanged payload (→ SPACE_CONFIG_CHANGED), and a
+    plain member may not flip it."""
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    assert space.allow_here_mention is False
+    seen: list[SpaceConfigChanged] = []
+    stack.bus.subscribe(SpaceConfigChanged, seen.append)
+    updated = await stack.space_svc.update_config(
+        space.id, actor_username="anna", allow_here_mention=True
+    )
+    assert updated.allow_here_mention is True
+    assert (await stack.space_repo.get(space.id)).allow_here_mention is True
+    assert seen[-1].payload == {"allow_here_mention": True}
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.update_config(
+            space.id, actor_username="bob", allow_here_mention=False
+        )
+    assert (await stack.space_repo.get(space.id)).allow_here_mention is True
+    assert "allow_here_mention" in SpaceService._REMOTE_CONFIG_FIELDS
