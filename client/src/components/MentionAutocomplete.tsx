@@ -20,7 +20,11 @@ import { signal } from '@preact/signals'
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import { Avatar } from './Avatar'
 import { currentUser } from '@/store/auth'
-import { loadSpaceMembers, spaceMembers } from '@/store/spaceMembers'
+import {
+  loadSpaceMembers,
+  spaceMembers,
+  viewerMayUseHere,
+} from '@/store/spaceMembers'
 import {
   findMentionTrigger,
   mentionCandidates,
@@ -57,7 +61,9 @@ const EDGE = 8
 function matchesFor(s: MentionState): MentionCandidate[] | null {
   const members = spaceMembers.value[s.spaceId]
   if (!members) return null
-  return mentionCandidates(members.values(), s.query, currentUser.value?.user_id)
+  return mentionCandidates(members.values(), s.query, currentUser.value?.user_id, {
+    includeHere: viewerMayUseHere(s.spaceId),
+  })
 }
 
 export function isMentionAutocompleteOpen(): boolean {
@@ -275,11 +281,14 @@ export function MentionAutocomplete() {
             }
           }}
         >
-          <Avatar name={c.name} src={c.pictureUrl} size={28} />
+          {c.here
+            ? <span class="sh-mention-autocomplete-here" aria-hidden="true">📣</span>
+            : <Avatar name={c.name} src={c.pictureUrl} size={28} />}
           <span class="sh-mention-autocomplete-text">
             <span class="sh-mention-autocomplete-name">{c.name}</span>
             <span class="sh-mention-autocomplete-meta">
               @{c.token}
+              {c.here && ' · notifies every member'}
               {c.household && (
                 <span class="sh-mention-autocomplete-household">
                   {' · '}{c.household}

@@ -7,7 +7,7 @@ import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
-import { loadSpaceMembers } from '@/store/spaceMembers'
+import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
 import {
@@ -49,6 +49,8 @@ interface SpacePage { id: string; title: string; updated_at: string }
 interface SpaceDetail {
   id: string
   name: string
+  /** §23.42 — gates the ``@here`` entry in the mention picker. */
+  allow_here_mention?: boolean
   emoji: string | null
   description: string | null
   about_markdown: string | null
@@ -154,6 +156,7 @@ async function loadSpaceHeader(spaceId: string) {
   await Promise.all([
     api.get(`/api/spaces/${spaceId}`).then((d) => {
       spaceDetail.value = d as SpaceDetail
+      setSpaceHereAllowed(spaceId, (d as SpaceDetail).allow_here_mention === true)
     }).catch(() => { /* non-fatal */ }),
     // Derive viewer's role from the member list so admin-only UI renders.
     me

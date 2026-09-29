@@ -210,6 +210,9 @@ export function SpaceSettings({
   // owner's behalf (moderate / invite / publish) while the owner is
   // offline. This flag is the persisted policy switch only; the
   // seed-share behaviour it gates ships in a later task.
+  // §23.42 — whether owners/admins may page every member with @here. Off by
+  // default; plain members' @here never notifies either way.
+  const allowHere = useSignal(Boolean(space.allow_here_mention))
   const delegatedAdminAuthority = useSignal(
     Boolean(space.features?.delegated_admin_authority),
   )
@@ -275,6 +278,7 @@ export function SpaceSettings({
         description: description.value || undefined,
         emoji: emoji.value || undefined,
         join_mode: joinMode.value,
+        allow_here_mention: allowHere.value,
         ...(retentionPayload !== undefined
           ? { retention_days: retentionPayload }
           : {}),
@@ -634,6 +638,26 @@ export function SpaceSettings({
             {allowSubscribers.value
               ? 'Posting (text, images, polls, etc.) always stays member-only.'
               : 'Turn on following above to let followers react or comment.'}
+          </p>
+        </fieldset>
+
+        {/* @here (§23.42). Admin config like the rest; federates to every
+         *  member household, each of which re-checks the author's role. */}
+        <fieldset class="sh-form-fieldset">
+          <legend>📣 @here</legend>
+          <label>
+            <input
+              type="checkbox"
+              checked={allowHere.value}
+              onChange={(e) => {
+                allowHere.value = (e.target as HTMLInputElement).checked
+              }}
+            />
+            Let owners and admins notify everyone with @here
+          </label>
+          <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+            Pings every member who hasn't muted this space, at most once every
+            10 minutes per person. Members' @here doesn't notify anyone.
           </p>
         </fieldset>
 

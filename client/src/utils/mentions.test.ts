@@ -81,6 +81,18 @@ describe('mentionCandidates', () => {
   })
 })
 
+describe('mentionCandidates — @here', () => {
+  test('offered first, only when includeHere, on a prefix of "here"', () => {
+    const withHere = mentionCandidates(MEMBERS, 'h', 'u-me', { includeHere: true })
+    expect(withHere[0]).toMatchObject({ token: 'here', here: true })
+    expect(mentionCandidates(MEMBERS, '', 'u-me', { includeHere: true })[0].token)
+      .toBe('here')
+    expect(mentionCandidates(MEMBERS, 'an', 'u-me', { includeHere: true })
+      .map(c => c.token)).toEqual(['anna', 'anna@k3f9x2'])
+    expect(mentionCandidates(MEMBERS, 'h', 'u-me').some(c => c.here)).toBe(false)
+  })
+})
+
 describe('splitMentions', () => {
   const tokens = mentionTokenSet(MEMBERS)
 
