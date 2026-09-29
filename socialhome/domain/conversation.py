@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
 
@@ -158,6 +158,55 @@ class ConversationMember:
     #: Groups kept by another household: the version held here when this
     #: user left — a roster not re-adding them after it can't seat them.
     left_version: int | None = None
+    #: The member muted this conversation until this UTC ISO 8601 time
+    #: (:data:`MUTED_FOREVER` for "until I turn it back on"). A past time
+    #: reads as unmuted — see :func:`mute_active`. Local only, never
+    #: federated.
+    muted_until: str | None = None
+
+
+#: ``muted_until`` for a mute with no end ("until I turn it back on").
+MUTED_FOREVER = "9999-12-31T23:59:59+00:00"
+
+#: The mute lengths a member can pick; ``None`` = until they unmute.
+MUTE_DURATIONS: dict[str, timedelta | None] = {
+    "1h": timedelta(hours=1),
+    "8h": timedelta(hours=8),
+    "1w": timedelta(weeks=1),
+    "forever": None,
+}
+
+
+def mute_until_for(duration: str, *, now: datetime) -> str:
+    """The ``muted_until`` value for a mute of ``duration`` starting ``now``.
+
+    Raises :class:`ValueError` for a length not in :data:`MUTE_DURATIONS`.
+    """
+    if duration not in MUTE_DURATIONS:
+        raise ValueError(f"duration must be one of {', '.join(MUTE_DURATIONS)}")
+    delta = MUTE_DURATIONS[duration]
+    if delta is None:
+        return MUTED_FOREVER
+    until = now.astimezone(timezone.utc) + delta
+    return until.replace(microsecond=0).isoformat()
+
+
+def mute_active(muted_until: str | None, *, now: datetime) -> bool:
+    """Is a mute stamped ``muted_until`` still on at ``now``?
+
+    ``None`` / unparseable / past → ``False``: an expired mute simply
+    reads as unmuted, so no scheduler has to clear it. A naive timestamp
+    is taken as UTC.
+    """
+    if not muted_until:
+        return False
+    try:
+        until = datetime.fromisoformat(muted_until)
+    except ValueError:
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > now
 
 
 @dataclass(slots=True, frozen=True)

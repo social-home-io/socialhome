@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from urllib.parse import unquote
 
 from aiohttp import web
@@ -16,7 +17,7 @@ from ..app_keys import (
     online_status_service_key,
     user_repo_key,
 )
-from ..domain.conversation import ConversationType
+from ..domain.conversation import ConversationType, mute_active
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response, sanitise_for_api
@@ -39,6 +40,7 @@ class ConversationCollectionView(BaseView):
         # without N+1 follow-up fetches. Self is filtered out so the
         # preview reads as "the others".
         rows: list[dict] = []
+        now = datetime.now(timezone.utc)
         for c in convos:
             members = await repo.list_members(c.id)
             # Cross-household DMs / group DMs may seat a federated peer
@@ -51,8 +53,13 @@ class ConversationCollectionView(BaseView):
             remote_members = await repo.list_remote_members(c.id)
             preview: list[dict] = []
             own_last_read_at: str | None = None
+            own_muted_until: str | None = None
             for m in members:
                 if m.username == ctx.username:
+                    # The caller's own mute, when still on (a past
+                    # ``muted_until`` reads as unmuted).
+                    if mute_active(m.muted_until, now=now):
+                        own_muted_until = m.muted_until
                     # Stash the caller's own read watermark so the SPA can
                     # render a "New messages since you last looked" divider
                     # without a second round-trip.
@@ -130,6 +137,10 @@ class ConversationCollectionView(BaseView):
                     # in the loaded window and scroll to the "New
                     # messages" divider on entry.
                     "last_read_at": own_last_read_at,
+                    # The caller muted this conversation until then (UTC
+                    # ISO 8601; ``9999-…`` = until they unmute). ``null``
+                    # when not muted. Unread still counts; no bell / push.
+                    "muted_until": own_muted_until,
                 }
             )
         return web.json_response(rows)
@@ -223,6 +234,34 @@ class ConversationLeaveView(BaseView):
         svc = self.svc(dm_service_key)
         await svc.leave(self.match("id"), username=ctx.username)
         return web.json_response({"ok": True})
+
+
+class ConversationMuteView(BaseView):
+    """PUT / DELETE /api/conversations/{id}/mute — the caller's own mute.
+
+    ``PUT`` body ``{"duration": "1h" | "8h" | "1w" | "forever"}``; returns
+    ``{"muted_until": iso}``. ``DELETE`` unmutes (``{"muted_until": null}``).
+    Members only (403). Local only — a mute is never federated.
+    """
+
+    async def put(self) -> web.Response:
+        body = await self.body()
+        duration = body.get("duration")
+        if not isinstance(duration, str):
+            return error_response(422, "UNPROCESSABLE", "duration is required")
+        until = await self.svc(dm_service_key).mute(
+            self.match("id"),
+            username=self.user.username,
+            duration=duration,
+        )
+        return web.json_response({"muted_until": until})
+
+    async def delete(self) -> web.Response:
+        await self.svc(dm_service_key).unmute(
+            self.match("id"),
+            username=self.user.username,
+        )
+        return web.json_response({"muted_until": None})
 
 
 class ConversationMemberView(BaseView):

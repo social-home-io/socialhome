@@ -91,6 +91,7 @@ from .conversations import (
     ConversationGroupView,
     ConversationItemView,
     ConversationLeaveView,
+    ConversationMuteView,
     ConversationMemberView,
     ConversationMembersView,
     ConversationMessageDeliveryView,
@@ -686,6 +687,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         ConversationMemberView,
     )
     app.router.add_view("/api/conversations/{id}/leave", ConversationLeaveView)
+    app.router.add_view("/api/conversations/{id}/mute", ConversationMuteView)
     app.router.add_view("/api/conversations/{id}", ConversationItemView)
 
     # ── Notifications ───────────────────────────────────────────────────

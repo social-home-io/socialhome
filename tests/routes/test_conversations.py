@@ -645,6 +645,135 @@ async def test_gaps_endpoint_non_member_forbidden(client):
     assert resp.status == 403
 
 
+# ── Mute ───────────────────────────────────────────────────────────────────
+
+
+async def _dm_with_bob(client) -> str:
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def _row(client, token: str, conv_id: str) -> dict:
+    r = await client.get("/api/conversations", headers=_auth(token))
+    return next(c for c in await r.json() if c["id"] == conv_id)
+
+
+async def test_mute_put_and_delete_round_trip(client):
+    """PUT mutes the caller only; the list shows it; DELETE unmutes."""
+    conv_id = await _dm_with_bob(client)
+    assert (await _row(client, client._bob_token, conv_id))["muted_until"] is None
+
+    r = await client.put(
+        f"/api/conversations/{conv_id}/mute",
+        json={"duration": "1h"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    until = (await r.json())["muted_until"]
+    assert until.endswith("+00:00")
+    assert (await _row(client, client._bob_token, conv_id))["muted_until"] == until
+    # The other member's own view is untouched — a mute is personal.
+    assert (await _row(client, client._admin_token, conv_id))["muted_until"] is None
+
+    r = await client.delete(
+        f"/api/conversations/{conv_id}/mute",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await r.json()) == {"muted_until": None}
+    assert (await _row(client, client._bob_token, conv_id))["muted_until"] is None
+
+
+async def test_mute_forever(client):
+    conv_id = await _dm_with_bob(client)
+    r = await client.put(
+        f"/api/conversations/{conv_id}/mute",
+        json={"duration": "forever"},
+        headers=_auth(client._bob_token),
+    )
+    assert (await r.json())["muted_until"].startswith("9999-")
+
+
+async def test_mute_rejects_a_bad_duration(client):
+    conv_id = await _dm_with_bob(client)
+    for body in ({"duration": "2d"}, {}, {"duration": 3600}):
+        r = await client.put(
+            f"/api/conversations/{conv_id}/mute",
+            json=body,
+            headers=_auth(client._bob_token),
+        )
+        assert r.status == 422, body
+
+
+async def test_mute_is_members_only(client):
+    conv_id = await _dm_with_bob(client)
+    db = client.server.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    uid = derive_user_id(bytes.fromhex(row["identity_public_key"]), "carl")
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("carl", uid, "Carl"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("tid-3", uid, "carl", sha256_token_hash("carl-tok")),
+    )
+    carl = {"Authorization": "Bearer carl-tok"}
+    r = await client.put(
+        f"/api/conversations/{conv_id}/mute", json={"duration": "1h"}, headers=carl
+    )
+    assert r.status == 403
+    r = await client.delete(f"/api/conversations/{conv_id}/mute", headers=carl)
+    assert r.status == 403
+    r = await client.put(
+        "/api/conversations/no-such-conv/mute",
+        json={"duration": "1h"},
+        headers=carl,
+    )
+    assert r.status in (403, 404)
+
+
+async def test_muted_conversation_counts_unread_but_rings_no_bell(client):
+    """A message into a muted conversation still counts unread for the
+    muted member, but adds no bell notification."""
+    conv_id = await _dm_with_bob(client)
+    await client.put(
+        f"/api/conversations/{conv_id}/mute",
+        json={"duration": "8h"},
+        headers=_auth(client._bob_token),
+    )
+    await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"content": "hi bob"},
+        headers=_auth(client._admin_token),
+    )
+    assert (await _row(client, client._bob_token, conv_id))["unread"] == 1
+    bell = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    assert (await bell.json())["unread"] == 0
+
+    # Unmuted again: the next message rings.
+    await client.delete(
+        f"/api/conversations/{conv_id}/mute", headers=_auth(client._bob_token)
+    )
+    await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"content": "still there?"},
+        headers=_auth(client._admin_token),
+    )
+    bell = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    assert (await bell.json())["unread"] == 1
+
+
 # ── Video message media_status ─────────────────────────────────────────────
 
 

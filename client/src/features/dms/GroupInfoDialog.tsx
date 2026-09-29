@@ -28,6 +28,7 @@ import {
   type FriendsResponse,
   type Pickable,
 } from '@/components/NewDmDialog'
+import { MuteSection } from './ConversationMute'
 
 /** The slice of a ``GET /api/conversations/{id}/members`` row this uses. */
 export interface GroupMember {
@@ -45,6 +46,9 @@ interface Props {
   convId: string
   name: string | null
   managedHere: boolean
+  /** The viewer's own mute (``null`` = not muted) and its setter. */
+  mutedUntil: string | null
+  onMuteChange: (mutedUntil: string | null) => void
   members: GroupMember[]
   onClose: () => void
   /** The roster / name changed — the thread refetches it. */
@@ -89,7 +93,8 @@ async function loadCandidates() {
 }
 
 export function GroupInfoDialog({
-  open, convId, name, managedHere, members, onClose, onChanged, onLeft,
+  open, convId, name, managedHere, mutedUntil, onMuteChange, members, onClose,
+  onChanged, onLeft,
 }: Props) {
   // Every opening starts clean — no half-picked list or pending confirm
   // left over from another group (the state is module-level).
@@ -306,6 +311,10 @@ export function GroupInfoDialog({
                 </Button>
               </div>
             </div>
+          )}
+
+          {!adding.value && (
+            <MuteSection convId={convId} mutedUntil={mutedUntil} onChange={onMuteChange} />
           )}
 
           {!adding.value && (

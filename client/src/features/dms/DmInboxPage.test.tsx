@@ -34,9 +34,9 @@ const FIXTURES = [
   { id: 'c-grp-1', type: 'group_dm', members: [{ user_id: 'p2', display_name: 'Bob',   picture_url: null }, { user_id: 'p3', display_name: 'Carol', picture_url: null }], last_message_at: null, name: 'Trip', member_count: 3 },
 ]
 
-function renderAt(path: string) {
+function renderAt(path: string, rows: unknown[] = FIXTURES) {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/conversations') return FIXTURES
+    if (url === '/api/conversations') return rows
     if (url === '/api/calls/active')  return []
     return []
   })
@@ -83,6 +83,37 @@ describe('DmInboxPage', () => {
     fireEvent.click(getByText('Groups'))
     await waitFor(() => expect(queryByText('Trip')).toBeTruthy())
     expect(queryByText('Anna')).toBeNull()
+  })
+
+  it('marks a muted conversation with a bell-slash and keeps it out of the Chats badge', async () => {
+    const soon = new Date(Date.now() + 3600_000).toISOString()
+    const rows = [
+      { ...FIXTURES[0], unread: 3, muted_until: soon },
+      { id: 'c-dm-2', type: 'dm', members: [{ user_id: 'p4', display_name: 'Dora', picture_url: null }],
+        last_message_at: null, name: null, member_count: 2, unread: 2, muted_until: null },
+    ]
+    const { findByText, container } = await renderAt('/dms', rows)
+    await findByText('Dora')
+    const marks = container.querySelectorAll('.sh-dm-muted')
+    expect(marks).toHaveLength(1)
+    expect(marks[0].getAttribute('aria-label')).toMatch(/^Muted until /)
+    // The muted row still shows its own count, greyed.
+    const badges = [...container.querySelectorAll('.sh-dm-unread')]
+    expect(badges.map(b => [b.textContent, b.classList.contains('sh-dm-unread--muted')]))
+      .toEqual([['3', true], ['2', false]])
+    const { dmUnreadTotal } = await import('@/store/dms')
+    expect(dmUnreadTotal.value).toBe(2)
+  })
+
+  it('an expired mute reads as unmuted', async () => {
+    const past = new Date(Date.now() - 60_000).toISOString()
+    const { findByText, container } = await renderAt('/dms', [
+      { ...FIXTURES[0], unread: 1, muted_until: past },
+    ])
+    await findByText('Anna')
+    expect(container.querySelector('.sh-dm-muted')).toBeNull()
+    const { dmUnreadTotal } = await import('@/store/dms')
+    expect(dmUnreadTotal.value).toBe(1)
   })
 
   it('selects the Calls tab when ?tab=calls is set', async () => {

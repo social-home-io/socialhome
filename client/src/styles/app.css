@@ -3571,6 +3571,16 @@ button.sh-friends-member-chip:not(:disabled):hover {
   white-space: nowrap;
 }
 .sh-dm-info .sh-badge { align-self: flex-start; }
+/* Bell-slash after a muted conversation's name. */
+.sh-dm-muted {
+  margin-inline-start: 6px;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+/* A muted conversation's unread count stays, greyed — it won't ping. */
+.sh-dm-unread--muted {
+  color: var(--sh-text-muted);
+}
 
 /* Avatar stack — overlapping circles, oldest-on-top so the
  * left-most avatar reads first like a name list. The "+N" overflow
@@ -3792,6 +3802,28 @@ button.sh-friends-member-chip:not(:disabled):hover {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-sm);
+}
+.sh-groupinfo-mute {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-groupinfo-mute__state { margin: 0; }
+.sh-groupinfo-mute__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-groupinfo-mute__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+}
+.sh-groupinfo-mute__options .sh-chip {
+  min-height: 36px;
+  font-size: var(--sh-font-size-sm);
 }
 .sh-groupinfo-leave {
   display: flex;
@@ -4530,6 +4562,60 @@ body.sh-dm-thread-open .sh-messages {
 .sh-thread-history:hover,
 .sh-thread-history:focus-visible {
   background: var(--sh-bg-secondary);
+}
+
+/* Thread-header mute bell (§23.47). Same square as the history link;
+ * the bell-slash state tints so a muted thread reads at a glance. The
+ * menu drops below, right-aligned so it never runs off a phone. */
+.sh-thread-mute { position: relative; }
+.sh-thread-header .sh-thread-mute-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--sh-radius-md);
+  font-size: 16px;
+  color: var(--sh-text);
+}
+.sh-thread-header .sh-thread-mute-btn--muted {
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+}
+.sh-thread-mute__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  max-width: calc(100vw - 2 * var(--sh-space-sm));
+  padding: 6px;
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 18px 36px -22px rgba(26, 24, 20, 0.55);
+  z-index: 20;
+}
+.sh-thread-mute__title {
+  padding: 6px 10px 4px;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  color: var(--sh-text-muted);
+}
+.sh-thread-mute__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--sh-radius-sm);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+  text-align: start;
+  cursor: pointer;
+}
+.sh-thread-mute__item:hover:not(:disabled),
+.sh-thread-mute__item:focus-visible {
+  background: var(--sh-surface-2, var(--sh-bg-secondary));
 }
 
 /* Online-status line in the DM thread header — WhatsApp-style. Sits

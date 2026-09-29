@@ -32,6 +32,7 @@ from ..domain.conversation import (
     ConversationType,
     MESSAGE_TYPES,
     RemoteConversationMember,
+    mute_until_for,
 )
 from ..domain.events import (
     DmConversationCreated,
@@ -1074,6 +1075,33 @@ class DmService(VisibilityMixin):
     ) -> int:
         await self._require_membership(conversation_id, username)
         return await self._convos.count_unread(conversation_id, username)
+
+    # ── Mute ───────────────────────────────────────────────────────────
+
+    async def mute(
+        self,
+        conversation_id: str,
+        *,
+        username: str,
+        duration: str,
+        now: datetime | None = None,
+    ) -> str:
+        """Mute the conversation for ``username`` only; returns ``muted_until``.
+
+        ``duration`` is a :data:`MUTE_DURATIONS` key (``ValueError`` → 422
+        otherwise). Members only. A muted conversation still delivers and
+        still counts unread — :class:`NotificationService` just skips the
+        bell row and the push. Local only: nothing is federated.
+        """
+        await self._require_membership(conversation_id, username)
+        until = mute_until_for(duration, now=now or datetime.now(timezone.utc))
+        await self._convos.set_muted_until(conversation_id, username, until)
+        return until
+
+    async def unmute(self, conversation_id: str, *, username: str) -> None:
+        """Clear ``username``'s own mute. Members only; a no-op when unmuted."""
+        await self._require_membership(conversation_id, username)
+        await self._convos.set_muted_until(conversation_id, username, None)
 
     # ── Reactions ──────────────────────────────────────────────────────
 

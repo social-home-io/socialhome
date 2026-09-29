@@ -206,6 +206,26 @@ async def test_set_last_read(env):
     assert alice.last_read_at is not None
 
 
+async def test_set_muted_until_is_per_member_and_clears(env):
+    """A mute lands on one member's row only, survives a 1:1 re-open
+    (``add_member`` upsert) and clears with ``None``."""
+    await env.repo.create(_conv("conv-mute"))
+    await env.repo.add_member(_member("conv-mute", "alice"))
+    await env.repo.add_member(_member("conv-mute", "bob"))
+    await env.repo.set_muted_until("conv-mute", "alice", "2026-09-29T11:00:00+00:00")
+    by_name = {m.username: m for m in await env.repo.list_members("conv-mute")}
+    assert by_name["alice"].muted_until == "2026-09-29T11:00:00+00:00"
+    assert by_name["bob"].muted_until is None
+
+    await env.repo.add_member(_member("conv-mute", "alice"))
+    by_name = {m.username: m for m in await env.repo.list_members("conv-mute")}
+    assert by_name["alice"].muted_until == "2026-09-29T11:00:00+00:00"
+
+    await env.repo.set_muted_until("conv-mute", "alice", None)
+    by_name = {m.username: m for m in await env.repo.list_members("conv-mute")}
+    assert by_name["alice"].muted_until is None
+
+
 # ── Messages ───────────────────────────────────────────────────────────────
 
 

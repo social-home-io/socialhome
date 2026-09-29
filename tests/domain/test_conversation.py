@@ -2,17 +2,63 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import pytest
 
 from socialhome.domain.conversation import (
+    MUTE_DURATIONS,
+    MUTED_FOREVER,
     Conversation,
     ConversationMember,
     ConversationMessage,
     ConversationType,
     MESSAGE_TYPES,
     RemoteConversationMember,
+    mute_active,
+    mute_until_for,
 )
+
+
+# ── Mute ─────────────────────────────────────────────────────────────────────
+
+
+def test_mute_until_for_presets():
+    now = datetime(2026, 9, 29, 10, 0, 0, 123456, tzinfo=timezone.utc)
+    assert mute_until_for("1h", now=now) == "2026-09-29T11:00:00+00:00"
+    assert mute_until_for("8h", now=now) == "2026-09-29T18:00:00+00:00"
+    assert mute_until_for("1w", now=now) == "2026-10-06T10:00:00+00:00"
+    assert mute_until_for("forever", now=now) == MUTED_FOREVER
+    assert set(MUTE_DURATIONS) == {"1h", "8h", "1w", "forever"}
+
+
+def test_mute_until_for_normalises_to_utc():
+    cest = timezone(timedelta(hours=2))
+    now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=cest)
+    assert mute_until_for("1h", now=now) == "2026-09-29T11:00:00+00:00"
+
+
+def test_mute_until_for_rejects_unknown_length():
+    with pytest.raises(ValueError):
+        mute_until_for("2d", now=datetime.now(timezone.utc))
+
+
+def test_mute_active_reads_past_as_unmuted():
+    now = datetime(2026, 9, 29, 10, 0, 0, tzinfo=timezone.utc)
+    assert mute_active("2026-09-29T11:00:00+00:00", now=now) is True
+    assert mute_active("2026-09-29T09:59:59+00:00", now=now) is False
+    assert mute_active("2026-09-29T10:00:00+00:00", now=now) is False
+    assert mute_active(MUTED_FOREVER, now=now) is True
+    assert mute_active(None, now=now) is False
+    assert mute_active("", now=now) is False
+    assert mute_active("not a time", now=now) is False
+    # A naive stamp is UTC.
+    assert mute_active("2026-09-29 11:00:00", now=now) is True
+
+
+def test_conversation_member_defaults_to_unmuted():
+    m = ConversationMember(conversation_id="c", username="u", joined_at="x")
+    assert m.muted_until is None
 
 
 def test_message_types_is_frozenset():

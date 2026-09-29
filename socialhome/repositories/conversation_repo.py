@@ -68,6 +68,12 @@ class AbstractConversationRepo(Protocol):
         *,
         at: str | None = None,
     ) -> None: ...
+    async def set_muted_until(
+        self,
+        conversation_id: str,
+        username: str,
+        muted_until: str | None,
+    ) -> None: ...
     async def soft_leave(
         self,
         conversation_id: str,
@@ -330,6 +336,7 @@ class SqliteConversationRepo:
                 deleted_at=r["deleted_at"],
                 joined_version=r["joined_version"],
                 left_version=r["left_version"],
+                muted_until=r["muted_until"],
             )
             for r in rows
         ]
@@ -508,6 +515,22 @@ class SqliteConversationRepo:
              WHERE conversation_id=? AND username=?
             """,
             (at, conversation_id, username),
+        )
+
+    async def set_muted_until(
+        self,
+        conversation_id: str,
+        username: str,
+        muted_until: str | None,
+    ) -> None:
+        """Stamp (or with ``None`` clear) the member's own mute."""
+        await self._db.enqueue(
+            """
+            UPDATE conversation_members
+               SET muted_until=?
+             WHERE conversation_id=? AND username=?
+            """,
+            (muted_until, conversation_id, username),
         )
 
     async def soft_leave(

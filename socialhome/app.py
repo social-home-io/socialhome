@@ -1708,6 +1708,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo,
         bus,
         i18n=i18n,
+        conversation_repo=conversation_repo,
     )
     # v_3 DM media sync — preview builder + DM_MEDIA_BLOB outbox
     # scheduler. Wired before DmService so it can be passed in;
